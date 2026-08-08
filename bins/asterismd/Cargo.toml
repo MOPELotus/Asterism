@@ -1,0 +1,22 @@
+[package]
+name = "asterismd"
+description = "Asterism orchestration service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+asterism-api = { path = "../../crates/api" }
+asterism-provider-api = { path = "../../crates/provider-api" }
+asterism-storage = { path = "../../crates/storage" }
+axum.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "asterism-provider-api"
+description = "Capability-based provider contracts and registry for Asterism"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+asterism-domain = { path = "../domain" }
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

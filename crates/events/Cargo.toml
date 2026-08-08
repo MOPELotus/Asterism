@@ -1,0 +1,19 @@
+[package]
+name = "asterism-events"
+description = "Domain events and in-process event bus for Asterism"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+asterism-domain = { path = "../domain" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
