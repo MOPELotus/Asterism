@@ -1,7 +1,11 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
 use asterism_api::{ApiState, build_router};
+use asterism_config::{
+    Config, ConfigFile, ConfigOverrides, DEFAULT_CONFIG_FILE, DatabaseOverrides, Environment,
+    ServerOverrides,
+};
 use asterism_provider_api::ProviderRegistry;
 use asterism_storage::Database;
 use clap::Parser;
@@ -10,25 +14,25 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Arguments {
+    /// TOML configuration file. A missing default file is allowed.
+    #[arg(long)]
+    config: Option<PathBuf>,
+
     /// Address on which the HTTP API listens.
-    #[arg(long, env = "ASTERISM_BIND", default_value = "127.0.0.1:8068")]
-    bind: SocketAddr,
+    #[arg(long)]
+    bind: Option<SocketAddr>,
 
     /// SQLx-compatible `SQLite` URL.
-    #[arg(
-        long,
-        env = "ASTERISM_DATABASE_URL",
-        default_value = "sqlite://asterism.db"
-    )]
-    database_url: String,
+    #[arg(long)]
+    database_url: Option<String>,
 
     /// Web session lifetime in seconds.
-    #[arg(long, env = "ASTERISM_SESSION_TTL_SECONDS", default_value_t = 43_200)]
-    session_ttl_seconds: u64,
+    #[arg(long)]
+    session_ttl_seconds: Option<u64>,
 
-    /// Mark session cookies Secure (required for non-loopback listeners).
-    #[arg(long, env = "ASTERISM_SECURE_COOKIES", default_value_t = false)]
-    secure_cookies: bool,
+    /// Mark session cookies Secure.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    secure_cookies: Option<bool>,
 }
 
 #[tokio::main]
@@ -40,15 +44,30 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let arguments = Arguments::parse();
-    if !arguments.bind.ip().is_loopback() {
-        anyhow::bail!(
-            "non-loopback listeners are unavailable during Phase 0; bind to loopback and place an HTTPS reverse proxy on the same host"
-        );
-    }
-    if arguments.session_ttl_seconds == 0 {
-        anyhow::bail!("--session-ttl-seconds must be greater than zero");
-    }
-    let database = Database::connect(&arguments.database_url)
+    let environment = Environment::from_process().context("failed to read Asterism environment")?;
+    let config_file = arguments
+        .config
+        .map(ConfigFile::required)
+        .or_else(|| {
+            environment
+                .config_file()
+                .map(|path| ConfigFile::required(path.to_owned()))
+        })
+        .unwrap_or_else(|| ConfigFile::optional(DEFAULT_CONFIG_FILE));
+    let overrides = ConfigOverrides {
+        server: ServerOverrides {
+            bind: arguments.bind,
+            session_ttl_seconds: arguments.session_ttl_seconds,
+            secure_cookies: arguments.secure_cookies,
+        },
+        database: DatabaseOverrides {
+            url: arguments.database_url,
+        },
+    };
+    let config = Config::load(&config_file, &environment, &overrides)
+        .context("failed to load Asterism configuration")?;
+
+    let database = Database::connect(&config.database.url)
         .await
         .context("failed to connect to the Asterism database")?;
     database
@@ -69,13 +88,13 @@ async fn main() -> anyhow::Result<()> {
     let app = build_router(ApiState::new(
         database.clone(),
         Arc::new(ProviderRegistry::default()),
-        arguments.session_ttl_seconds,
-        arguments.secure_cookies,
+        config.server.session_ttl_seconds,
+        config.server.secure_cookies,
     ));
-    let listener = tokio::net::TcpListener::bind(arguments.bind)
+    let listener = tokio::net::TcpListener::bind(config.server.bind)
         .await
         .context("failed to bind the Asterism HTTP listener")?;
-    tracing::info!(address = %arguments.bind, "asterismd started");
+    tracing::info!(address = %config.server.bind, "asterismd started");
 
     axum::serve(
         listener,

@@ -93,5 +93,12 @@ explicit trusted-proxy configuration. Process-level tests cover Master
 bootstrap, Cookie access, Bearer access, self-revocation, logout, and rejection
 after either credential is revoked.
 
-The next slice adds layered configuration and authenticated CLI management
-flows without bypassing the HTTP API.
+## Fifth Phase 0 slice
+
+The fifth checkpoint establishes typed TOML configuration with deterministic
+`CLI > environment > file > defaults` precedence. Local configuration is
+ignored by Git, unknown keys and unsafe merged values fail at startup, and
+credentials remain outside the ordinary configuration model.
+
+The next slice adds authenticated CLI management flows without bypassing the
+HTTP API.

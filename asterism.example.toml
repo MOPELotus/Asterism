@@ -1,0 +1,10 @@
+# Copy this file to asterism.toml and change only the values you need.
+# Credentials and other secret values do not belong in this file.
+
+[server]
+bind = "127.0.0.1:8068"
+session_ttl_seconds = 43200
+secure_cookies = false
+
+[database]
+url = "sqlite://asterism.db"
