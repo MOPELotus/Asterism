@@ -27,7 +27,7 @@ pub struct ChaoxingCourseRoute<'a> {
 }
 
 impl<'a> ChaoxingCourseRoute<'a> {
-    fn from_remote_course(course: &'a RemoteCourse) -> ProviderResult<Self> {
+    pub(crate) fn from_remote_course(course: &'a RemoteCourse) -> ProviderResult<Self> {
         let route = Self {
             remote_course_id: &course.remote_id,
             course_id: required_route_fact(course, COURSE_ID_ROUTE_KEY)?,

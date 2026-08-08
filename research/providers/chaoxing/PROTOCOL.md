@@ -117,3 +117,18 @@ parameters. Until a fixture proves timezone and format, keep the raw sanitized
 source value in Provider metadata and return no normalized timestamp instead of
 guessing. Parsed values must eventually preserve `opens_at`, `due_at` and
 `closes_at` separately.
+
+## Native transport checkpoint
+
+The current Asterism adapter deliberately disables automatic redirects and
+classifies Passport/login redirects as authentication failure. It builds Exam
+URLs directly from ephemeral course/class/`cpi` facts. For Work it first loads
+the current course page and accepts only a matching, allowlisted HTTPS iframe
+route with one fresh `enc`; that value is used for the request and never enters
+task identity or sanitized snapshots.
+
+Cookie material comes from an injected Core-side resolver and response bodies
+are streamed into a 4 MiB bounded, zeroizing owner. This is an offline-verified
+implementation checkpoint only. No claim is made yet that the current `uf`
+Cookie survives reqwest's TLS fingerprint or that the live course page exposes
+the Work iframe without browser interaction.

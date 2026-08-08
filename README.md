@@ -42,7 +42,7 @@ Phase 0 已建立并持续完善以下基础：
 - 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；
 - Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
-- Chaoxing 能力级上游审计、独立 Work / Exam 清单解析与类型化 TaskInventory 边界；
+- Chaoxing 能力级上游审计、独立 Work / Exam TaskInventory 与未实测 Native HTTP 边界；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
 正在进行的工作以 [Phase 0 架构检查点](docs/architecture/phase-0-foundation.md) 为准。内部 API 在第二批 Provider 完成前仍可能发生不兼容变更。
@@ -95,7 +95,7 @@ CLI / WebUI / Asterism-Plugin
 | 阶段 | Provider / 交付物 | 状态 |
 |---|---|---|
 | Phase 0 | Core、Storage、Scheduler、Auth、内部 API / CLI | 开发中 |
-| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中（Chaoxing 已完成静态审计、离线解析与 TaskInventory 边界） |
+| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中（Chaoxing 已完成静态审计、TaskInventory 与未实测 Native HTTP 边界） |
 | 第一批后交付 | OpenAPI Client Generation Readiness、Refine v5 + shadcn/ui WebUI、Asterism-Plugin | 第一批完成后立即开始 |
 | 第二批 | `zhihuishu`、`zjy`、`icve` | 计划中 |
 | 兼容性收口 | 稳定并冻结 API / OpenAPI 基线，完成 WebUI / Plugin 兼容性收口 | 第二批完成后开始 |

@@ -10,6 +10,7 @@ invariants only and are not evidence of current live-platform compatibility.
 ```text
 fixtures/providers/chaoxing/
   work/
+    course-page-with-work-iframe.html
     list-mixed.html
     list-mixed.expected.json
     detail-editor.html
@@ -21,6 +22,7 @@ fixtures/providers/chaoxing/
     list-mixed.expected.json
 ```
 
+The course-page fixture covers strict discovery of a fresh Work iframe route.
 The mixed expectation files cover normalized identity, source module and remote
 state. The detail fixtures cover the conservative Work redirect classification.
 

@@ -59,8 +59,11 @@ policy and remains independently guarded.
   fixtures and compose behind `TaskInventoryCapability`.
 - Course/class identity and `cpi` cross the course-to-task boundary only through
   the non-serialized ephemeral route context.
-- The runtime transport is an explicit adapter boundary; Native HTTP versus
-  BrowserBridge, fresh Work `enc` discovery, and real-account behavior remain
-  unverified.
+- The Native HTTP adapter uses the shared NetworkProfile, an injected session
+  resolver, strict redirect/error classification, and structural discovery of a
+  fresh Work `enc` route. Real-account behavior remains unverified.
+- Native HTTP versus BrowserBridge remains a per-capability live-test decision;
+  the presence of this adapter is not evidence that the `uf` session works in
+  reqwest.
 - Chaoxing stays at `Development` and is not registered as an available
   Provider.

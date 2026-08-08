@@ -825,3 +825,22 @@ therefore classify login and cross-origin redirects rather than inheriting an
 unsafe global policy. Rate-limit enforcement, concurrency semaphores, persistence,
 and API management remain separate follow-up slices; this checkpoint supplies
 the validated client foundation needed by the first native Provider transport.
+
+## Sixty-second Phase 0 slice
+
+Chaoxing now has a Native HTTP inventory adapter behind an injected session
+resolver. Cookie material must cross Core's secrets boundary for one operation,
+is marked sensitive in request headers, is redacted from diagnostics, and is
+zeroized by its owning session value. Responses use explicit status/error
+classification, structural login-page detection, streamed size bounds, UTF-8
+validation, and zeroizing page owners.
+
+Exam requests are built directly from the course/class/`cpi` route context. Work
+requests first load the current course page and accept only an HTTPS
+`mooc1.chaoxing.com/mooc2/work/list` iframe whose unique course/class values
+match and whose fresh `enc` is present; foreign hosts, userinfo, custom ports,
+duplicates, and mismatches fail closed.
+
+This adapter is not daemon-registered or live-verified. The Core credential
+resolver, CourseInventory producer, and same-account Native-versus-Browser test
+remain required before metadata can advance beyond `Development`.
