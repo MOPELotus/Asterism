@@ -29,6 +29,7 @@ async-trait = "0.1.89"
 axum = "0.8.8"
 base64 = "0.22.1"
 chrono = { version = "0.4.42", features = ["serde"] }
+chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 clap = { version = "4.5.54", features = ["derive", "env"] }
 http = "1.4.0"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }

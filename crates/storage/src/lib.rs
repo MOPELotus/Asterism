@@ -9,6 +9,7 @@ mod recovery;
 mod repository;
 mod scan;
 mod scheduler;
+mod secret;
 mod session;
 mod task;
 mod user;
@@ -29,6 +30,7 @@ pub use scan::{
     SqliteProviderScanRepository, TaskScanChange,
 };
 pub use scheduler::{JobFailureDisposition, SqliteSchedulerRepository};
+pub use secret::{SecretKeyring, SecretKeyringError, SqliteSecretStore};
 pub use session::SqliteSessionRepository;
 pub use task::SqliteTaskQueryRepository;
 pub use user::{InitialMaster, SqliteUserRepository};

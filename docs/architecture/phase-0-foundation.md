@@ -270,3 +270,17 @@ The nineteenth checkpoint adds `asterismctl provider-account schedule get` and
 `set` as the operational client for the same owner-scoped API. Operators supply
 the desired interval explicitly, may persist a disabled schedule, and receive
 the resolved Provider minimum and effective interval as structured JSON.
+
+## Twentieth Phase 0 slice
+
+The twentieth checkpoint implements the SQLite `SecretStore` boundary with
+XChaCha20-Poly1305 authenticated encryption. A fresh 192-bit nonce protects each
+version, while associated data binds ciphertext to its typed ID, owner,
+purpose, version, and key ID so persisted metadata cannot be swapped silently.
+
+The active 256-bit key and retained decryption keys live in an injected,
+zeroizing keyring rather than SQLite. Secret reads, writes, rotations, and
+deletions are owner-authorized, version-checked, size-bounded, and audited
+without plaintext. The database migration backfills version one for existing
+blobs; daemon key configuration and Provider-account credential attachment are
+separate following slices.

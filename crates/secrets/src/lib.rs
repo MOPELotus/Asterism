@@ -52,6 +52,27 @@ impl fmt::Debug for SecretString {
     }
 }
 
+/// A 256-bit key supplied by daemon configuration rather than persistence.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SecretKey([u8; 32]);
+
+impl SecretKey {
+    pub const fn new(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+
+    /// Exposes key material only to the authenticated-encryption adapter.
+    pub fn expose_secret(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretKey([REDACTED])")
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SecretRef {
     pub id: SecretId,
@@ -63,7 +84,7 @@ pub struct SecretRef {
     pub updated_at: Timestamp,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretPurpose {
     ProviderPassword,
@@ -129,6 +150,8 @@ pub enum SecretStoreError {
     Unauthorized,
     #[error("secret version has changed")]
     VersionConflict,
+    #[error("secret value is empty or exceeds the supported size")]
+    InvalidValue,
     #[error("secret encryption key is unavailable")]
     KeyUnavailable,
     #[error("secret storage operation failed")]
@@ -145,7 +168,9 @@ mod tests {
     fn debug_output_never_contains_plaintext() {
         let bytes = SecretValue::new(b"provider-token".to_vec());
         let text = SecretString::new("password");
+        let key = SecretKey::new([7; 32]);
         assert_eq!(format!("{bytes:?}"), "SecretValue([REDACTED])");
         assert_eq!(format!("{text:?}"), "SecretString([REDACTED])");
+        assert_eq!(format!("{key:?}"), "SecretKey([REDACTED])");
     }
 }

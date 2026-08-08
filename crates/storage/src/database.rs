@@ -131,7 +131,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 13);
+        assert_eq!(migration_count, 14);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -179,5 +179,32 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(desired, 90);
+    }
+
+    #[tokio::test]
+    async fn secret_version_migration_backfills_existing_blobs() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE secret_blobs (\
+                 id TEXT PRIMARY KEY NOT NULL,\
+                 encrypted_data BLOB NOT NULL\
+             ) STRICT;\
+             INSERT INTO secret_blobs (id, encrypted_data) VALUES ('secret-a', X'01');",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!("../../../migrations/014_secret_versions.sql"))
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        let version: i64 =
+            sqlx::query_scalar("SELECT version FROM secret_blobs WHERE id = 'secret-a'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(version, 1);
     }
 }
