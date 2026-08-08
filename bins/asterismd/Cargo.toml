@@ -11,7 +11,9 @@ repository.workspace = true
 anyhow.workspace = true
 asterism-api = { path = "../../crates/api" }
 asterism-config = { path = "../../crates/config" }
+asterism-engine = { path = "../../crates/engine" }
 asterism-provider-api = { path = "../../crates/provider-api" }
+asterism-scheduler = { path = "../../crates/scheduler" }
 asterism-storage = { path = "../../crates/storage" }
 axum.workspace = true
 chrono.workspace = true

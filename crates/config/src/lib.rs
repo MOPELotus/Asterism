@@ -15,12 +15,24 @@ pub const BIND_ENV: &str = "ASTERISM_BIND";
 pub const DATABASE_URL_ENV: &str = "ASTERISM_DATABASE_URL";
 pub const SESSION_TTL_SECONDS_ENV: &str = "ASTERISM_SESSION_TTL_SECONDS";
 pub const SECURE_COOKIES_ENV: &str = "ASTERISM_SECURE_COOKIES";
+pub const SCHEDULER_ENABLED_ENV: &str = "ASTERISM_SCHEDULER_ENABLED";
+pub const SCHEDULER_TICK_INTERVAL_SECONDS_ENV: &str = "ASTERISM_SCHEDULER_TICK_INTERVAL_SECONDS";
+pub const SCHEDULER_MATERIALIZE_LIMIT_ENV: &str = "ASTERISM_SCHEDULER_MATERIALIZE_LIMIT";
+pub const SCHEDULER_CLAIM_LIMIT_ENV: &str = "ASTERISM_SCHEDULER_CLAIM_LIMIT";
+pub const SCHEDULER_CLAIM_TTL_SECONDS_ENV: &str = "ASTERISM_SCHEDULER_CLAIM_TTL_SECONDS";
+pub const SCHEDULER_RETRY_MAX_ATTEMPTS_ENV: &str = "ASTERISM_SCHEDULER_RETRY_MAX_ATTEMPTS";
+pub const SCHEDULER_RETRY_INITIAL_DELAY_SECONDS_ENV: &str =
+    "ASTERISM_SCHEDULER_RETRY_INITIAL_DELAY_SECONDS";
+pub const SCHEDULER_RETRY_MULTIPLIER_ENV: &str = "ASTERISM_SCHEDULER_RETRY_MULTIPLIER";
+pub const SCHEDULER_RETRY_MAX_DELAY_SECONDS_ENV: &str =
+    "ASTERISM_SCHEDULER_RETRY_MAX_DELAY_SECONDS";
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
+    pub scheduler: SchedulerConfig,
 }
 
 impl Config {
@@ -79,6 +91,7 @@ impl Config {
                 "database.url must use the sqlite scheme".to_owned(),
             ));
         }
+        self.scheduler.validate()?;
         Ok(())
     }
 
@@ -95,6 +108,7 @@ impl Config {
         if let Some(url) = &overrides.database.url {
             self.database.url.clone_from(url);
         }
+        self.scheduler.apply(&overrides.scheduler);
     }
 }
 
@@ -120,6 +134,90 @@ impl Default for ServerConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct DatabaseConfig {
     pub url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerConfig {
+    pub enabled: bool,
+    pub tick_interval_seconds: u64,
+    pub materialize_limit: u32,
+    pub claim_limit: u32,
+    pub claim_ttl_seconds: u64,
+    pub retry_max_attempts: u32,
+    pub retry_initial_delay_seconds: u64,
+    pub retry_multiplier: u32,
+    pub retry_max_delay_seconds: u64,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tick_interval_seconds: 5,
+            materialize_limit: 100,
+            claim_limit: 1,
+            claim_ttl_seconds: 300,
+            retry_max_attempts: 5,
+            retry_initial_delay_seconds: 30,
+            retry_multiplier: 2,
+            retry_max_delay_seconds: 1_800,
+        }
+    }
+}
+
+impl SchedulerConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        let valid = self.tick_interval_seconds > 0
+            && self.tick_interval_seconds <= 3_600
+            && (1..=1_000).contains(&self.materialize_limit)
+            && (1..=1_000).contains(&self.claim_limit)
+            && self.claim_ttl_seconds >= self.tick_interval_seconds
+            && self.claim_ttl_seconds <= 86_400
+            && (1..=100).contains(&self.retry_max_attempts)
+            && self.retry_initial_delay_seconds > 0
+            && self.retry_multiplier > 0
+            && self.retry_max_delay_seconds >= self.retry_initial_delay_seconds
+            && self.retry_max_delay_seconds <= 86_400;
+        if valid {
+            Ok(())
+        } else {
+            Err(ConfigError::Validation(
+                "scheduler intervals, batches, lease, or retry policy are outside safe bounds"
+                    .to_owned(),
+            ))
+        }
+    }
+
+    fn apply(&mut self, overrides: &SchedulerOverrides) {
+        if let Some(value) = overrides.enabled {
+            self.enabled = value;
+        }
+        if let Some(value) = overrides.tick_interval_seconds {
+            self.tick_interval_seconds = value;
+        }
+        if let Some(value) = overrides.materialize_limit {
+            self.materialize_limit = value;
+        }
+        if let Some(value) = overrides.claim_limit {
+            self.claim_limit = value;
+        }
+        if let Some(value) = overrides.claim_ttl_seconds {
+            self.claim_ttl_seconds = value;
+        }
+        if let Some(value) = overrides.retry_max_attempts {
+            self.retry_max_attempts = value;
+        }
+        if let Some(value) = overrides.retry_initial_delay_seconds {
+            self.retry_initial_delay_seconds = value;
+        }
+        if let Some(value) = overrides.retry_multiplier {
+            self.retry_multiplier = value;
+        }
+        if let Some(value) = overrides.retry_max_delay_seconds {
+            self.retry_max_delay_seconds = value;
+        }
+    }
 }
 
 impl Default for DatabaseConfig {
@@ -156,6 +254,7 @@ impl ConfigFile {
 pub struct ConfigOverrides {
     pub server: ServerOverrides,
     pub database: DatabaseOverrides,
+    pub scheduler: SchedulerOverrides,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -168,6 +267,19 @@ pub struct ServerOverrides {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DatabaseOverrides {
     pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SchedulerOverrides {
+    pub enabled: Option<bool>,
+    pub tick_interval_seconds: Option<u64>,
+    pub materialize_limit: Option<u32>,
+    pub claim_limit: Option<u32>,
+    pub claim_ttl_seconds: Option<u64>,
+    pub retry_max_attempts: Option<u32>,
+    pub retry_initial_delay_seconds: Option<u64>,
+    pub retry_multiplier: Option<u32>,
+    pub retry_max_delay_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -230,6 +342,40 @@ impl Environment {
                 SECURE_COOKIES_ENV => {
                     environment.overrides.server.secure_cookies =
                         Some(parse_bool_env(&name, &value)?);
+                }
+                SCHEDULER_ENABLED_ENV => {
+                    environment.overrides.scheduler.enabled = Some(parse_bool_env(&name, &value)?);
+                }
+                SCHEDULER_TICK_INTERVAL_SECONDS_ENV => {
+                    environment.overrides.scheduler.tick_interval_seconds =
+                        Some(parse_env(&name, &value)?);
+                }
+                SCHEDULER_MATERIALIZE_LIMIT_ENV => {
+                    environment.overrides.scheduler.materialize_limit =
+                        Some(parse_env(&name, &value)?);
+                }
+                SCHEDULER_CLAIM_LIMIT_ENV => {
+                    environment.overrides.scheduler.claim_limit = Some(parse_env(&name, &value)?);
+                }
+                SCHEDULER_CLAIM_TTL_SECONDS_ENV => {
+                    environment.overrides.scheduler.claim_ttl_seconds =
+                        Some(parse_env(&name, &value)?);
+                }
+                SCHEDULER_RETRY_MAX_ATTEMPTS_ENV => {
+                    environment.overrides.scheduler.retry_max_attempts =
+                        Some(parse_env(&name, &value)?);
+                }
+                SCHEDULER_RETRY_INITIAL_DELAY_SECONDS_ENV => {
+                    environment.overrides.scheduler.retry_initial_delay_seconds =
+                        Some(parse_env(&name, &value)?);
+                }
+                SCHEDULER_RETRY_MULTIPLIER_ENV => {
+                    environment.overrides.scheduler.retry_multiplier =
+                        Some(parse_env(&name, &value)?);
+                }
+                SCHEDULER_RETRY_MAX_DELAY_SECONDS_ENV => {
+                    environment.overrides.scheduler.retry_max_delay_seconds =
+                        Some(parse_env(&name, &value)?);
                 }
                 _ => {}
             }
@@ -314,6 +460,15 @@ fn is_supported_environment_name(name: &str) -> bool {
             | DATABASE_URL_ENV
             | SESSION_TTL_SECONDS_ENV
             | SECURE_COOKIES_ENV
+            | SCHEDULER_ENABLED_ENV
+            | SCHEDULER_TICK_INTERVAL_SECONDS_ENV
+            | SCHEDULER_MATERIALIZE_LIMIT_ENV
+            | SCHEDULER_CLAIM_LIMIT_ENV
+            | SCHEDULER_CLAIM_TTL_SECONDS_ENV
+            | SCHEDULER_RETRY_MAX_ATTEMPTS_ENV
+            | SCHEDULER_RETRY_INITIAL_DELAY_SECONDS_ENV
+            | SCHEDULER_RETRY_MULTIPLIER_ENV
+            | SCHEDULER_RETRY_MAX_DELAY_SECONDS_ENV
     )
 }
 
@@ -343,6 +498,10 @@ secure_cookies = false
 
 [database]
 url = "sqlite://from-file.db"
+
+[scheduler]
+tick_interval_seconds = 11
+claim_limit = 2
 "#,
         )
         .unwrap();
@@ -350,6 +509,10 @@ url = "sqlite://from-file.db"
             (BIND_ENV.to_owned(), "127.0.0.1:9002".to_owned()),
             (SESSION_TTL_SECONDS_ENV.to_owned(), "202".to_owned()),
             (SECURE_COOKIES_ENV.to_owned(), "true".to_owned()),
+            (
+                SCHEDULER_TICK_INTERVAL_SECONDS_ENV.to_owned(),
+                "12".to_owned(),
+            ),
         ])
         .unwrap();
         let cli = ConfigOverrides {
@@ -361,6 +524,10 @@ url = "sqlite://from-file.db"
             database: DatabaseOverrides {
                 url: Some("sqlite://from-cli.db".to_owned()),
             },
+            scheduler: SchedulerOverrides {
+                claim_limit: Some(3),
+                ..SchedulerOverrides::default()
+            },
         };
 
         let config = Config::load(&ConfigFile::required(&path), &environment, &cli).unwrap();
@@ -369,6 +536,8 @@ url = "sqlite://from-file.db"
         assert_eq!(config.server.session_ttl_seconds, 202);
         assert!(!config.server.secure_cookies);
         assert_eq!(config.database.url, "sqlite://from-cli.db");
+        assert_eq!(config.scheduler.tick_interval_seconds, 12);
+        assert_eq!(config.scheduler.claim_limit, 3);
         fs::remove_file(path).unwrap();
     }
 
@@ -443,6 +612,19 @@ url = "sqlite://from-file.db"
         };
         assert!(matches!(
             unsupported_database.validate(),
+            Err(ConfigError::Validation(_))
+        ));
+
+        let unsafe_scheduler = Config {
+            scheduler: SchedulerConfig {
+                claim_ttl_seconds: 1,
+                tick_interval_seconds: 5,
+                ..SchedulerConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(matches!(
+            unsafe_scheduler.validate(),
             Err(ConfigError::Validation(_))
         ));
     }

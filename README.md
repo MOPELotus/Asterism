@@ -115,7 +115,9 @@ cargo build --workspace
 cargo run -p asterismd
 ```
 
-`asterismd` 默认监听 `127.0.0.1:8068`，并在当前目录使用 `asterism.db`。配置按 `CLI > 环境变量 > 配置文件 > 默认值` 合并；可复制 `asterism.example.toml` 为本地 `asterism.toml`，也可通过 `--config` 或 `ASTERISM_CONFIG` 指定文件。当前支持的环境变量包括 `ASTERISM_BIND`、`ASTERISM_DATABASE_URL`、`ASTERISM_SESSION_TTL_SECONDS` 和 `ASTERISM_SECURE_COOKIES`。普通配置文件不得保存凭据或其他 Secret。
+`asterismd` 默认监听 `127.0.0.1:8068`，并在当前目录使用 `asterism.db`。配置按 `CLI > 环境变量 > 配置文件 > 默认值` 合并；可复制 `asterism.example.toml` 为本地 `asterism.toml`，也可通过 `--config` 或 `ASTERISM_CONFIG` 指定文件。服务端变量包括 `ASTERISM_BIND`、`ASTERISM_DATABASE_URL`、`ASTERISM_SESSION_TTL_SECONDS` 和 `ASTERISM_SECURE_COOKIES`；统一扫描调度器使用 `ASTERISM_SCHEDULER_*` 对应 `[scheduler]` 字段，并可由 `--scheduler-*` 参数覆盖。普通配置文件不得保存凭据或其他 Secret。
+
+扫描调度器默认启用，每 5 秒执行一次有界 tick、每次只领取一个 Scan Job，claim TTL 为 300 秒。停止 `asterismd` 时会先停止新 tick，等待当前 tick 返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
 
 另开一个终端检查服务：
 

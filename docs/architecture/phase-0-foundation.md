@@ -217,3 +217,15 @@ claim, and scan workers never consume execution or notification jobs.
 Worker identifiers, claim TTLs, materialization batches, claim batches, and
 retry policies are validated before use. The tick produces aggregate operational
 counts and remains a lifecycle-neutral primitive for the daemon loop.
+
+## Fifteenth Phase 0 slice
+
+The fifteenth checkpoint starts the unified scan worker inside `asterismd` with
+typed layered configuration. Scheduler enablement, tick interval, bounded
+materialization/claim batches, claim TTL, and retry policy follow the same
+`CLI > environment > file > defaults` precedence as the server and database.
+
+HTTP graceful shutdown and the scheduler share one signal. Shutdown stops new
+ticks, waits for an in-flight tick to return, joins the scheduler task, and only
+then closes SQLite. Missed timer ticks are skipped rather than replayed, and an
+individual tick failure is logged without terminating the long-running daemon.

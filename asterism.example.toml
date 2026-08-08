@@ -8,3 +8,14 @@ secure_cookies = false
 
 [database]
 url = "sqlite://asterism.db"
+
+[scheduler]
+enabled = true
+tick_interval_seconds = 5
+materialize_limit = 100
+claim_limit = 1
+claim_ttl_seconds = 300
+retry_max_attempts = 5
+retry_initial_delay_seconds = 30
+retry_multiplier = 2
+retry_max_delay_seconds = 1800
