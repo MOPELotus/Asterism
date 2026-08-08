@@ -179,7 +179,7 @@ mod tests {
     fn metadata() -> ProviderMetadata {
         ProviderMetadata {
             id: ProviderId::new("chaoxing").unwrap(),
-            display_name: "Chaoxing".into(),
+            display_name: "chaoxing".into(),
             implementation_version: "0.0.0".into(),
             verification: VerificationLevel::Development,
             capabilities: BTreeSet::new(),
@@ -205,7 +205,7 @@ mod tests {
                 .unwrap()
                 .metadata
                 .display_name,
-            "Chaoxing"
+            "chaoxing"
         );
     }
 
