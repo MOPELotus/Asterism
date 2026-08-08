@@ -165,3 +165,17 @@ never create a partial local observation.
 `RemoteTask` now carries `assessment_class` and a normalized payload explicitly;
 an `Exam` source still does not imply a formal assessment. This checkpoint adds
 no concrete Provider and makes no availability claim.
+
+## Eleventh Phase 0 slice
+
+The eleventh checkpoint exposes owner-scoped manual scans at
+`POST /api/v1/provider-accounts/{account_id}/scan` and through
+`asterismctl provider-account scan`. The endpoint requires account-management
+authority and an authenticated remote account, preserves sanitized Provider
+error classes as bounded HTTP outcomes, and returns only aggregate scan results
+plus changed local Task IDs.
+
+Successful scan audits share the inventory transaction and retain the request
+correlation ID, actor, Provider version, and aggregate counts. A failed Provider
+call or rejected inventory writes neither partial Task data nor a successful
+scan audit.

@@ -68,6 +68,10 @@ pub fn build_router(state: ApiState) -> Router {
                 .put(account::update_provider_account)
                 .delete(account::delete_provider_account),
         )
+        .route(
+            "/api/v1/provider-accounts/{account_id}/scan",
+            post(account::scan_provider_account),
+        )
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
         .route("/api/v1/service-tokens", post(auth::create_service_token))
@@ -203,6 +207,19 @@ async fn openapi() -> Json<Value> {
                     "responses": {"204": {"description": "Provider account deleted"}, "404": {"description": "Provider account not found"}}
                 }
             },
+            "/api/v1/provider-accounts/{account_id}/scan": {"post": {
+                "operationId": "scanProviderAccount",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "responses": {
+                    "200": {"description": "Provider inventory collected and committed"},
+                    "404": {"description": "Provider account not found"},
+                    "409": {"description": "Account or Provider is not ready for scanning"},
+                    "429": {"description": "Provider rate limit reached"},
+                    "502": {"description": "Provider returned inconsistent inventory"},
+                    "503": {"description": "Provider is temporarily unavailable"}
+                }
+            }},
             "/api/v1/tasks": {"get": {
                 "operationId": "listTasks",
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
@@ -389,6 +406,33 @@ impl ApiError {
         }
     }
 
+    fn provider_rate_limited(retry_after_seconds: u64) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "provider_rate_limited",
+            message: "the Provider rate limit was reached; retry later".to_owned(),
+            retry_after_seconds: Some(retry_after_seconds),
+        }
+    }
+
+    fn bad_gateway(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code,
+            message: message.into(),
+            retry_after_seconds: None,
+        }
+    }
+
+    fn service_unavailable(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            message: message.into(),
+            retry_after_seconds: None,
+        }
+    }
+
     fn internal(error: impl std::fmt::Display) -> Self {
         tracing::error!(%error, "API request failed");
         Self {
@@ -443,8 +487,15 @@ pub struct ErrorBody {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, time::Duration};
+    use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
 
+    use asterism_domain::{AssessmentClass, AuthState, RemoteState, SourceType};
+    use asterism_provider_api::{
+        CourseInventoryCapability, ProviderCapability, ProviderContext, ProviderEntry,
+        ProviderIdentity, ProviderMetadata, ProviderResult, RemoteCourse, RemoteTask,
+        TaskInventoryCapability, VerificationLevel,
+    };
+    use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
         extract::ConnectInfo,
@@ -454,6 +505,91 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct ApiScanInventory {
+        metadata: ProviderMetadata,
+    }
+
+    impl ProviderIdentity for ApiScanInventory {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl CourseInventoryCapability for ApiScanInventory {
+        async fn list_courses(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<Vec<RemoteCourse>> {
+            Ok(vec![RemoteCourse {
+                remote_id: "course-a".to_owned(),
+                title: "course".to_owned(),
+                term: None,
+                teacher: None,
+                remote_status: None,
+                metadata_sanitized: json!({"revision": 1}),
+            }])
+        }
+    }
+
+    #[async_trait]
+    impl TaskInventoryCapability for ApiScanInventory {
+        async fn list_tasks(
+            &self,
+            _context: &ProviderContext,
+            course: Option<&RemoteCourse>,
+        ) -> ProviderResult<Vec<RemoteTask>> {
+            Ok(vec![RemoteTask {
+                remote_id: "task-a".to_owned(),
+                course_remote_id: course.map(|course| course.remote_id.clone()),
+                title: "task".to_owned(),
+                source_type: SourceType::Work,
+                assessment_class: AssessmentClass::Unknown,
+                remote_state: RemoteState::Pending,
+                opens_at: None,
+                due_at: None,
+                closes_at: None,
+                capabilities: Vec::new(),
+                fingerprint: "v1:fingerprint-a".to_owned(),
+                normalized: json!({"revision": 1}),
+                raw_sanitized: json!({"task": "safe"}),
+            }])
+        }
+    }
+
+    fn scan_registry() -> ProviderRegistry {
+        let metadata = ProviderMetadata {
+            id: asterism_domain::ProviderId::new("provider-alpha").unwrap(),
+            display_name: "provider-alpha".to_owned(),
+            implementation_version: "0.1.0".to_owned(),
+            verification: VerificationLevel::Development,
+            capabilities: BTreeSet::from([
+                ProviderCapability::CourseInventory,
+                ProviderCapability::TaskInventory,
+            ]),
+            auth_methods: BTreeSet::new(),
+            session_kinds: BTreeSet::new(),
+        };
+        let inventory = Arc::new(ApiScanInventory {
+            metadata: metadata.clone(),
+        });
+        let mut registry = ProviderRegistry::default();
+        registry
+            .register(ProviderEntry {
+                metadata,
+                authentication: None,
+                course_inventory: Some(inventory.clone()),
+                task_inventory: Some(inventory),
+                task_detail: None,
+                task_progress: None,
+                task_execution: None,
+                browser_bridge: None,
+            })
+            .unwrap();
+        registry
+    }
 
     async fn test_app(
         secure_cookies: bool,
@@ -693,6 +829,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_account_scan_requires_remote_auth_and_commits_inventory() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let app = build_router(ApiState::new(
+            database.clone(),
+            Arc::new(scan_registry()),
+            3600,
+            false,
+        ));
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/provider-accounts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"provider_id":"provider-alpha","display_name":"primary"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created = to_bytes(created.into_body(), 16 * 1024).await.unwrap();
+        let created: Value = serde_json::from_slice(&created).unwrap();
+        let account_id = created["id"].as_str().unwrap();
+        let scan_path = format!("/api/v1/provider-accounts/{account_id}/scan");
+
+        let idle = app
+            .clone()
+            .oneshot(
+                Request::post(&scan_path)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(idle.status(), StatusCode::CONFLICT);
+
+        sqlx::query("UPDATE provider_accounts SET auth_state_json = ? WHERE id = ?")
+            .bind(serde_json::to_string(&AuthState::Authenticated).unwrap())
+            .bind(account_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let scanned = app
+            .oneshot(
+                Request::post(scan_path)
+                    .header(header::COOKIE, cookie)
+                    .header("x-request-id", "scan-api-test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scanned.status(), StatusCode::OK);
+        assert_eq!(scanned.headers()[header::CACHE_CONTROL], "no-store");
+        let report: Value =
+            serde_json::from_slice(&to_bytes(scanned.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(report["courses_seen"], 1);
+        assert_eq!(report["tasks_created"], 1);
+
+        for table in ["tasks", "task_snapshots", "task_diffs", "event_outbox"] {
+            let query = format!("SELECT COUNT(*) FROM {table}");
+            let count: i64 = sqlx::query_scalar(&query)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+            assert_eq!(count, 1, "unexpected row count for {table}");
+        }
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? \
+             AND action = 'provider_account_scanned' AND correlation_id = 'scan-api-test'",
+        )
+        .bind(account_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 1);
+    }
+
+    #[tokio::test]
     async fn task_api_is_owner_scoped_paginated_and_keeps_state_dimensions_separate() {
         let (app, database) = test_app(false, None).await;
         let bootstrap = bootstrap(&app).await;
@@ -855,6 +1082,7 @@ mod tests {
             "/api/v1/service-tokens/{token_id}",
             "/api/v1/provider-accounts",
             "/api/v1/provider-accounts/{account_id}",
+            "/api/v1/provider-accounts/{account_id}/scan",
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
         ] {

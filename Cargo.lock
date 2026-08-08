@@ -101,9 +101,11 @@ version = "0.1.0"
 dependencies = [
  "asterism-auth",
  "asterism-domain",
+ "asterism-engine",
  "asterism-provider-api",
  "asterism-secrets",
  "asterism-storage",
+ "async-trait",
  "axum",
  "chrono",
  "http",

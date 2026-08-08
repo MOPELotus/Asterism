@@ -109,6 +109,8 @@ enum ProviderAccountCommand {
     },
     /// Delete an owned account and its dependent local data.
     Delete { account_id: String },
+    /// Collect and commit the account's current Provider inventory.
+    Scan { account_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -326,6 +328,11 @@ async fn handle_provider_account(
             client.delete_authorized(&path, &token).await?;
             write_json(&json!({ "deleted": account_id }))
         }
+        ProviderAccountCommand::Scan { account_id } => {
+            let path = format!("/api/v1/provider-accounts/{account_id}/scan");
+            let value = client.post_authorized_empty(&path, &token).await?;
+            write_json(&value)
+        }
     }
 }
 
@@ -441,5 +448,18 @@ mod tests {
         }
         .into_request();
         assert_eq!(request.scopes, [ServiceScope::ProviderRead].into());
+    }
+
+    #[test]
+    fn provider_account_scan_command_is_account_scoped() {
+        let arguments =
+            Arguments::try_parse_from(["asterismctl", "provider-account", "scan", "account-id"])
+                .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::ProviderAccount {
+                command: ProviderAccountCommand::Scan { account_id }
+            } if account_id == "account-id"
+        ));
     }
 }

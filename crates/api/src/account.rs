@@ -3,11 +3,16 @@ use std::str::FromStr;
 use asterism_domain::{
     AuthState, ProviderAccount, ProviderAccountId, ProviderId, Timestamp, UserId,
 };
-use asterism_storage::{ProviderAccountRepository, SqliteProviderAccountRepository, StorageError};
+use asterism_engine::{ProviderScanError, ProviderScanService};
+use asterism_provider_api::ProviderErrorKind;
+use asterism_storage::{
+    ProviderAccountRepository, SqliteProviderAccountRepository, SqliteProviderScanRepository,
+    StorageError,
+};
 use axum::{
     Extension, Json,
     extract::{Path, State, rejection::JsonRejection},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
@@ -136,6 +141,38 @@ pub(super) async fn delete_provider_account(
     }
 }
 
+pub(super) async fn scan_provider_account(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let account = SqliteProviderAccountRepository::new(state.database.clone())
+        .find_provider_account(owner_id, account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    let correlation_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::internal("request ID middleware did not provide an ID"))?;
+    let report = ProviderScanService::new(
+        state.providers,
+        SqliteProviderScanRepository::new(state.database),
+    )
+    .scan_account(
+        &account,
+        correlation_id,
+        Some(auth.audit_actor()),
+        Utc::now(),
+    )
+    .await
+    .map_err(map_scan_error)?;
+    Ok(crate::auth::no_store(Json(report).into_response()))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateProviderAccountRequest {
@@ -235,5 +272,64 @@ fn map_storage_error(error: StorageError) -> ApiError {
             ApiError::bad_request("invalid_provider_account", message)
         }
         error => ApiError::internal(error),
+    }
+}
+
+fn map_scan_error(error: ProviderScanError) -> ApiError {
+    match error {
+        ProviderScanError::ProviderNotRegistered(_) => ApiError::conflict(
+            "provider_not_registered",
+            "the account Provider is not registered",
+        ),
+        ProviderScanError::NoInventoryCapabilities(_) => ApiError::conflict(
+            "provider_inventory_unavailable",
+            "the Provider exposes no inventory capability",
+        ),
+        ProviderScanError::AccountNotAuthenticated(_) => ApiError::conflict(
+            "provider_account_not_authenticated",
+            "the Provider account must be authenticated before scanning",
+        ),
+        ProviderScanError::Provider(provider_error) => match provider_error.kind {
+            ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+                provider_error
+                    .retry_after_seconds
+                    .unwrap_or(60)
+                    .clamp(1, 86_400),
+            ),
+            ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+                tracing::warn!(error = %provider_error, "Provider scan is temporarily unavailable");
+                ApiError::service_unavailable(
+                    "provider_unavailable",
+                    "the Provider is temporarily unavailable",
+                )
+            }
+            ProviderErrorKind::Authentication
+            | ProviderErrorKind::Authorization
+            | ProviderErrorKind::RemoteChanged
+            | ProviderErrorKind::UnsupportedTask
+            | ProviderErrorKind::HumanRequired => ApiError::conflict(
+                "provider_action_required",
+                "the Provider requires authentication or user action",
+            ),
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+                tracing::warn!(error = %provider_error, "Provider returned invalid scan inventory");
+                ApiError::bad_gateway(
+                    "provider_inventory_invalid",
+                    "the Provider returned inconsistent inventory",
+                )
+            }
+            ProviderErrorKind::Internal => ApiError::internal(provider_error),
+        },
+        ProviderScanError::CourseScopeMismatch { .. }
+        | ProviderScanError::UnadvertisedTaskCapability { .. } => {
+            tracing::warn!(%error, "Provider returned inconsistent scan inventory");
+            ApiError::bad_gateway(
+                "provider_inventory_invalid",
+                "the Provider returned inconsistent inventory",
+            )
+        }
+        ProviderScanError::InvalidCorrelationId | ProviderScanError::Storage(_) => {
+            ApiError::internal(error)
+        }
     }
 }

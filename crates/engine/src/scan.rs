@@ -41,6 +41,7 @@ where
         &self,
         account: &ProviderAccount,
         correlation_id: impl Into<String>,
+        initiated_by: Option<asterism_domain::AuditActor>,
         observed_at: Timestamp,
     ) -> Result<ProviderScanReport, ProviderScanError> {
         let correlation_id = correlation_id.into();
@@ -83,6 +84,7 @@ where
             provider_version: entry.metadata.implementation_version.clone(),
             observed_at,
             correlation_id,
+            initiated_by,
             courses: remote_courses.into_iter().map(scanned_course).collect(),
             tasks: remote_tasks.into_iter().map(scanned_task).collect(),
         };
@@ -346,7 +348,7 @@ mod tests {
         let repository = RecordingRepository::default();
         let service = ProviderScanService::new(Arc::new(registry), repository.clone());
         let report = service
-            .scan_account(&account(), "scan-1", Utc::now())
+            .scan_account(&account(), "scan-1", None, Utc::now())
             .await
             .unwrap();
 
@@ -378,7 +380,9 @@ mod tests {
         let service = ProviderScanService::new(Arc::new(registry), repository.clone());
 
         assert!(matches!(
-            service.scan_account(&account(), "scan-1", Utc::now()).await,
+            service
+                .scan_account(&account(), "scan-1", None, Utc::now())
+                .await,
             Err(ProviderScanError::NoInventoryCapabilities(_))
         ));
         assert!(repository.batches.lock().unwrap().is_empty());
@@ -413,7 +417,9 @@ mod tests {
         let service = ProviderScanService::new(Arc::new(registry), repository.clone());
 
         assert!(matches!(
-            service.scan_account(&account(), "scan-1", Utc::now()).await,
+            service
+                .scan_account(&account(), "scan-1", None, Utc::now())
+                .await,
             Err(ProviderScanError::Provider(error)) if error.is_retryable()
         ));
         assert!(repository.batches.lock().unwrap().is_empty());
@@ -448,7 +454,9 @@ mod tests {
         let service = ProviderScanService::new(Arc::new(registry), repository.clone());
 
         assert!(matches!(
-            service.scan_account(&account(), "scan-1", Utc::now()).await,
+            service
+                .scan_account(&account(), "scan-1", None, Utc::now())
+                .await,
             Err(ProviderScanError::UnadvertisedTaskCapability {
                 capability: TaskCapability::ProgressRead,
                 ..
@@ -466,7 +474,9 @@ mod tests {
         account.auth_state = AuthState::Idle;
 
         assert!(matches!(
-            service.scan_account(&account, "scan-1", Utc::now()).await,
+            service
+                .scan_account(&account, "scan-1", None, Utc::now())
+                .await,
             Err(ProviderScanError::AccountNotAuthenticated(_))
         ));
         assert!(repository.batches.lock().unwrap().is_empty());

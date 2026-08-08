@@ -4,14 +4,14 @@ use std::{
 };
 
 use asterism_domain::{
-    AssessmentClass, CourseId, OrchestrationState, ProviderAccountId, ProviderId, RemoteState,
-    SourceType, Task, TaskCapability, TaskDiffId, TaskDiffKind, TaskId, TaskSnapshotId, Timestamp,
-    classify_task_changes,
+    AssessmentClass, AuditActor, AuditRecordId, CourseId, OrchestrationState, ProviderAccountId,
+    ProviderId, RemoteState, SourceType, Task, TaskCapability, TaskDiffId, TaskDiffKind, TaskId,
+    TaskSnapshotId, Timestamp, classify_task_changes,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use async_trait::async_trait;
 use chrono::SecondsFormat;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Row, Sqlite, Transaction};
 
@@ -29,6 +29,7 @@ pub struct ProviderScanBatch {
     pub provider_version: String,
     pub observed_at: Timestamp,
     pub correlation_id: String,
+    pub initiated_by: Option<AuditActor>,
     pub courses: Vec<ScannedCourse>,
     pub tasks: Vec<ScannedTask>,
 }
@@ -60,13 +61,13 @@ pub struct ScannedTask {
     pub remote_raw_sanitized: Value,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TaskScanChange {
     pub task_id: TaskId,
     pub changes: Vec<TaskDiffKind>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderScanReport {
     pub courses_seen: usize,
     pub tasks_created: usize,
@@ -114,9 +115,47 @@ impl ProviderScanRepository for SqliteProviderScanRepository {
         for scanned in &batch.tasks {
             ingest_task(&mut transaction, batch, scanned, &courses, &mut report).await?;
         }
+        insert_scan_audit(&mut transaction, batch, &report).await?;
         transaction.commit().await?;
         Ok(report)
     }
+}
+
+async fn insert_scan_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    batch: &ProviderScanBatch,
+    report: &ProviderScanReport,
+) -> Result<(), StorageError> {
+    let (actor_type, actor_id) = match batch.initiated_by {
+        Some(AuditActor::User(id)) => ("user", Some(id.to_string())),
+        Some(AuditActor::ServiceToken(id)) => ("service_token", Some(id.to_string())),
+        None => ("system", None),
+    };
+    let metadata = serde_json::json!({
+        "provider_id": batch.provider_id,
+        "provider_version": batch.provider_version,
+        "courses_seen": report.courses_seen,
+        "tasks_created": report.tasks_created,
+        "tasks_updated": report.tasks_updated,
+        "tasks_unchanged": report.tasks_unchanged,
+    });
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, ?, ?, 'provider_account_scanned', 'provider_account', ?, ?, \
+                 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(batch.observed_at))
+    .bind(actor_type)
+    .bind(actor_id)
+    .bind(batch.provider_account_id.to_string())
+    .bind(&batch.correlation_id)
+    .bind(serde_json::to_string(&metadata)?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn verify_account(
@@ -774,6 +813,7 @@ mod tests {
             provider_version: "0.1.0".to_owned(),
             observed_at,
             correlation_id: "scan-test".to_owned(),
+            initiated_by: None,
             courses: vec![ScannedCourse {
                 remote_id: "course-a".to_owned(),
                 title: "course".to_owned(),

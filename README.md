@@ -38,6 +38,7 @@ Phase 0 已建立并持续完善以下基础：
 - 点数 grant / reserve / commit / release 流程与不可变流水；
 - SecretStore 抽象、Argon2id 密码、服务端 Session、scoped Service Token 与登录限速；
 - 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；
+- owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
 正在进行的工作以 [Phase 0 架构检查点](docs/architecture/phase-0-foundation.md) 为准。内部 API 在第二批 Provider 完成前仍可能发生不兼容变更。
@@ -144,7 +145,7 @@ Remove-Item Env:ASTERISM_TOKEN
 
 Provider Account 的 owner 始终由认证身份决定，CLI 和 API 都不接受调用方指定 `owner_id`。`--provider` 必须使用小写 canonical `ProviderId`；账号展示名属于本地用户数据，不作为项目内的平台名称或标识。
 
-Task 接口当前只读，任务只能由后续 Provider 扫描链路写入。`task list` 支持 `--account`、`--limit` 和 `--offset`；返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。
+Task 接口当前只读，任务只能由 Provider 扫描链路写入。远端账户完成认证且对应 Provider 已注册 inventory capability 后，可运行 `provider-account scan <account-id>`；`task list` 支持 `--account`、`--limit` 和 `--offset`。返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。
 
 也可以直接访问：
 

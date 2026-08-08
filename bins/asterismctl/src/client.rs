@@ -80,6 +80,17 @@ impl ApiClient {
         send_json(request, expected).await
     }
 
+    pub async fn post_authorized_empty(
+        &self,
+        path: &str,
+        token: &SecretString,
+    ) -> anyhow::Result<serde_json::Value> {
+        let request = self
+            .request(Method::POST, path)?
+            .bearer_auth(token.expose_secret());
+        send_json(request, StatusCode::OK).await
+    }
+
     pub async fn put_authorized(
         &self,
         path: &str,
