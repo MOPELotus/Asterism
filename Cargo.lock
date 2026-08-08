@@ -171,6 +171,7 @@ dependencies = [
  "asterism-events",
  "asterism-provider-api",
  "asterism-scheduler",
+ "asterism-secrets",
  "asterism-storage",
  "async-trait",
  "chrono",

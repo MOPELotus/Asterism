@@ -344,3 +344,17 @@ serializable persistence model.
 dedicated pre-persistence context. This establishes the contract that remote
 Provider validation must succeed before Core may hand plaintext to the
 account-scoped credential transaction.
+
+## Twenty-sixth Phase 0 slice
+
+The twenty-sixth checkpoint adds the validation-gated credential orchestration
+service. It verifies owner access, exact Provider and tenant binding, advertised
+authentication methods and session kinds, and a consistent successful Provider
+status before persistence is called. Rejected or malformed Provider results
+leave both credentials and account authentication state unchanged.
+
+Successful validation replaces the complete encrypted credential set and marks
+the account authenticated in one immediate SQLite transaction. Replacement
+deletes superseded blobs through their account links, writes per-secret and
+per-credential audits, and records one sanitized bundle commit audit without
+persisting candidate account hints or plaintext.

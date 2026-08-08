@@ -1,10 +1,13 @@
 use std::{collections::BTreeMap, fmt, str::FromStr, sync::Arc};
 
-use asterism_domain::{AuditRecordId, ProviderAccountId, SecretId, SessionKind, Timestamp, UserId};
+use asterism_domain::{
+    AuditRecordId, AuthMethod, AuthState, ProviderAccountId, ProviderId, SecretId, SessionKind,
+    Timestamp, UserId,
+};
 use asterism_secrets::{
-    CredentialAcquisition, NewProviderCredential, ProviderCredential, ProviderCredentialStore,
-    SecretAccess, SecretActor, SecretKey, SecretPurpose, SecretRef, SecretStore, SecretStoreError,
-    SecretValue,
+    CredentialAcquisition, CredentialBundle, NewProviderCredential, ProviderCredential,
+    ProviderCredentialStore, SecretAccess, SecretActor, SecretKey, SecretPurpose, SecretRef,
+    SecretStore, SecretStoreError, SecretValue,
 };
 use async_trait::async_trait;
 use chacha20poly1305::{
@@ -17,8 +20,6 @@ use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use crate::Database;
 
 const MAX_SECRET_BYTES: usize = 1024 * 1024;
-const MAX_ACCESS_REASON_BYTES: usize = 256;
-const MAX_CORRELATION_ID_BYTES: usize = 128;
 
 pub struct SecretKeyring {
     active_key_id: String,
@@ -266,6 +267,61 @@ impl SecretStore for SqliteSecretStore {
 
 #[async_trait]
 impl ProviderCredentialStore for SqliteSecretStore {
+    async fn replace_provider_credentials(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        bundle: CredentialBundle,
+        access: &SecretAccess,
+    ) -> Result<Vec<ProviderCredential>, SecretStoreError> {
+        authorize(owner_user_id, access)?;
+        let (key_id, key) = self.keyring.active();
+        let prepared =
+            prepare_credential_bundle(owner_user_id, provider_account_id, bundle, key_id, key)?;
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        ensure_account_binding(
+            &mut transaction,
+            owner_user_id,
+            provider_account_id,
+            &prepared.provider_id,
+            prepared.tenant.as_deref(),
+        )
+        .await?;
+        let replaced_count =
+            replace_previous_credentials(&mut transaction, provider_account_id, access).await?;
+        persist_prepared_credentials(&mut transaction, &prepared.credentials, access).await?;
+        authenticate_provider_account(
+            &mut transaction,
+            owner_user_id,
+            provider_account_id,
+            &prepared.provider_id,
+            prepared.prepared_at,
+        )
+        .await?;
+        insert_bundle_audit(
+            &mut transaction,
+            access,
+            provider_account_id,
+            prepared.auth_method,
+            prepared.session_kind,
+            replaced_count,
+            prepared.credentials.len(),
+        )
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(prepared
+            .credentials
+            .into_iter()
+            .map(|prepared| prepared.credential)
+            .collect())
+    }
+
     async fn create_provider_credential(
         &self,
         owner_user_id: UserId,
@@ -311,23 +367,8 @@ impl ProviderCredentialStore for SqliteSecretStore {
             credential.provider_account_id,
         )
         .await?;
-        insert_secret_blob(&mut transaction, &stored.secret, nonce, encrypted_data).await?;
-        sqlx::query(
-            "INSERT INTO provider_account_credentials \
-             (provider_account_id, secret_blob_id, credential_kind, session_kind, acquired_via, \
-              expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(stored.provider_account_id.to_string())
-        .bind(stored.secret.id.to_string())
-        .bind(encode_purpose(stored.secret.purpose))
-        .bind(encode_session_kind(stored.session_kind))
-        .bind(encode_acquisition(stored.acquired_via))
-        .bind(stored.expires_at.map(encode_timestamp))
-        .bind(encode_timestamp(stored.captured_at))
-        .bind(encode_timestamp(stored.updated_at))
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| map_credential_write_error(&error))?;
+        insert_secret_blob(&mut transaction, &stored.secret, &nonce, &encrypted_data).await?;
+        insert_provider_credential(&mut transaction, &stored).await?;
         insert_secret_audit(&mut transaction, access, "secret_stored", &stored.secret)
             .await
             .map_err(storage_error)?;
@@ -511,6 +552,179 @@ impl ProviderCredentialStore for SqliteSecretStore {
     }
 }
 
+struct PreparedCredentialBundle {
+    provider_id: ProviderId,
+    tenant: Option<String>,
+    auth_method: AuthMethod,
+    session_kind: SessionKind,
+    prepared_at: Timestamp,
+    credentials: Vec<PreparedCredential>,
+}
+
+struct PreparedCredential {
+    credential: ProviderCredential,
+    nonce: Vec<u8>,
+    encrypted_data: Vec<u8>,
+}
+
+fn prepare_credential_bundle(
+    owner_user_id: UserId,
+    provider_account_id: ProviderAccountId,
+    bundle: CredentialBundle,
+    key_id: &str,
+    key: &SecretKey,
+) -> Result<PreparedCredentialBundle, SecretStoreError> {
+    bundle
+        .validate()
+        .map_err(|_| SecretStoreError::InvalidValue)?;
+    let CredentialBundle {
+        provider_id,
+        tenant,
+        auth_method,
+        acquired_via,
+        captured_at,
+        expires_at,
+        session_kind,
+        fields,
+        user_id_hint: _,
+    } = bundle;
+    let prepared_at = Utc::now();
+    let mut credentials = Vec::with_capacity(fields.len());
+    for field in fields {
+        validate_secret(&field.value)?;
+        let credential = ProviderCredential {
+            provider_account_id,
+            secret: SecretRef {
+                id: SecretId::new(),
+                owner_user_id,
+                purpose: field.purpose,
+                version: 1,
+                key_id: key_id.to_owned(),
+                created_at: prepared_at,
+                updated_at: prepared_at,
+            },
+            session_kind,
+            acquired_via,
+            captured_at,
+            expires_at,
+            updated_at: prepared_at,
+        };
+        credential
+            .validate()
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+        let (nonce, encrypted_data) =
+            encrypt(key, &credential.secret, field.value.expose_secret())?;
+        credentials.push(PreparedCredential {
+            credential,
+            nonce,
+            encrypted_data,
+        });
+    }
+    Ok(PreparedCredentialBundle {
+        provider_id,
+        tenant,
+        auth_method,
+        session_kind,
+        prepared_at,
+        credentials,
+    })
+}
+
+async fn replace_previous_credentials(
+    transaction: &mut Transaction<'_, Sqlite>,
+    provider_account_id: ProviderAccountId,
+    access: &SecretAccess,
+) -> Result<usize, SecretStoreError> {
+    let rows = sqlx::query(CREDENTIAL_SELECT)
+        .bind(provider_account_id.to_string())
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(storage_error)?;
+    let previous = rows
+        .iter()
+        .map(decode_provider_credential)
+        .collect::<Result<Vec<_>, _>>()?;
+    for credential in &previous {
+        insert_secret_audit(transaction, access, "secret_replaced", &credential.secret)
+            .await
+            .map_err(storage_error)?;
+        insert_credential_audit(
+            transaction,
+            access,
+            "provider_credential_replaced",
+            credential,
+        )
+        .await
+        .map_err(storage_error)?;
+    }
+    sqlx::query(
+        "DELETE FROM secret_blobs WHERE id IN \
+         (SELECT secret_blob_id FROM provider_account_credentials \
+          WHERE provider_account_id = ?)",
+    )
+    .bind(provider_account_id.to_string())
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(previous.len())
+}
+
+async fn persist_prepared_credentials(
+    transaction: &mut Transaction<'_, Sqlite>,
+    prepared: &[PreparedCredential],
+    access: &SecretAccess,
+) -> Result<(), SecretStoreError> {
+    for prepared in prepared {
+        let credential = &prepared.credential;
+        insert_secret_blob(
+            transaction,
+            &credential.secret,
+            &prepared.nonce,
+            &prepared.encrypted_data,
+        )
+        .await?;
+        insert_provider_credential(transaction, credential).await?;
+        insert_secret_audit(transaction, access, "secret_stored", &credential.secret)
+            .await
+            .map_err(storage_error)?;
+        insert_credential_audit(
+            transaction,
+            access,
+            "provider_credential_created",
+            credential,
+        )
+        .await
+        .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+async fn authenticate_provider_account(
+    transaction: &mut Transaction<'_, Sqlite>,
+    owner_user_id: UserId,
+    provider_account_id: ProviderAccountId,
+    provider_id: &ProviderId,
+    updated_at: Timestamp,
+) -> Result<(), SecretStoreError> {
+    let result = sqlx::query(
+        "UPDATE provider_accounts SET auth_state_json = ?, updated_at = ? \
+         WHERE id = ? AND owner_user_id = ? AND provider_id = ?",
+    )
+    .bind(serde_json::to_string(&AuthState::Authenticated).map_err(|_| SecretStoreError::Storage)?)
+    .bind(encode_timestamp(updated_at))
+    .bind(provider_account_id.to_string())
+    .bind(owner_user_id.to_string())
+    .bind(provider_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if result.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(SecretStoreError::VersionConflict)
+    }
+}
+
 const CREDENTIAL_SELECT: &str = "SELECT c.provider_account_id, c.session_kind, c.acquired_via, c.expires_at, \
             c.created_at AS captured_at, c.updated_at AS credential_updated_at, \
             s.id AS secret_id, s.owner_user_id, s.purpose, s.key_id, s.version, \
@@ -539,11 +753,35 @@ async fn ensure_account_owner(
     }
 }
 
+async fn ensure_account_binding(
+    transaction: &mut Transaction<'_, Sqlite>,
+    owner_user_id: UserId,
+    provider_account_id: ProviderAccountId,
+    provider_id: &ProviderId,
+    tenant: Option<&str>,
+) -> Result<(), SecretStoreError> {
+    let row = sqlx::query(
+        "SELECT provider_id, tenant FROM provider_accounts WHERE id = ? AND owner_user_id = ?",
+    )
+    .bind(provider_account_id.to_string())
+    .bind(owner_user_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?
+    .ok_or(SecretStoreError::NotFound)?;
+    let stored_provider_id: &str = row.try_get("provider_id").map_err(storage_error)?;
+    let stored_tenant: Option<&str> = row.try_get("tenant").map_err(storage_error)?;
+    if stored_provider_id != provider_id.as_str() || stored_tenant != tenant {
+        return Err(SecretStoreError::AccountMismatch);
+    }
+    Ok(())
+}
+
 async fn insert_secret_blob(
     transaction: &mut Transaction<'_, Sqlite>,
     secret: &SecretRef,
-    nonce: Vec<u8>,
-    encrypted_data: Vec<u8>,
+    nonce: &[u8],
+    encrypted_data: &[u8],
 ) -> Result<(), SecretStoreError> {
     sqlx::query(
         "INSERT INTO secret_blobs \
@@ -562,6 +800,29 @@ async fn insert_secret_blob(
     .execute(&mut **transaction)
     .await
     .map_err(storage_error)?;
+    Ok(())
+}
+
+async fn insert_provider_credential(
+    transaction: &mut Transaction<'_, Sqlite>,
+    credential: &ProviderCredential,
+) -> Result<(), SecretStoreError> {
+    sqlx::query(
+        "INSERT INTO provider_account_credentials \
+         (provider_account_id, secret_blob_id, credential_kind, session_kind, acquired_via, \
+          expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(credential.provider_account_id.to_string())
+    .bind(credential.secret.id.to_string())
+    .bind(encode_purpose(credential.secret.purpose))
+    .bind(encode_session_kind(credential.session_kind))
+    .bind(encode_acquisition(credential.acquired_via))
+    .bind(credential.expires_at.map(encode_timestamp))
+    .bind(encode_timestamp(credential.captured_at))
+    .bind(encode_timestamp(credential.updated_at))
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| map_credential_write_error(&error))?;
     Ok(())
 }
 
@@ -648,6 +909,42 @@ async fn insert_credential_audit(
     .bind(actor_id)
     .bind(action)
     .bind(credential.provider_account_id.to_string())
+    .bind(&access.correlation_id)
+    .bind(serde_json::to_string(&metadata).map_err(|error| sqlx::Error::Encode(Box::new(error)))?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn insert_bundle_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    access: &SecretAccess,
+    provider_account_id: ProviderAccountId,
+    auth_method: AuthMethod,
+    session_kind: SessionKind,
+    replaced_count: usize,
+    credential_count: usize,
+) -> Result<(), sqlx::Error> {
+    let (actor_type, actor_id) = encode_secret_actor(&access.actor);
+    let metadata = serde_json::json!({
+        "auth_method": auth_method,
+        "session_kind": session_kind,
+        "replaced_count": replaced_count,
+        "credential_count": credential_count,
+        "reason": access.reason,
+    });
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, ?, ?, 'provider_credentials_committed', 'provider_account', ?, ?, \
+                 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(Utc::now()))
+    .bind(actor_type)
+    .bind(actor_id)
+    .bind(provider_account_id.to_string())
     .bind(&access.correlation_id)
     .bind(serde_json::to_string(&metadata).map_err(|error| sqlx::Error::Encode(Box::new(error)))?)
     .execute(&mut **transaction)
@@ -819,18 +1116,7 @@ fn encode_secret_actor(actor: &SecretActor) -> (&'static str, String) {
 }
 
 fn authorize(owner_user_id: UserId, access: &SecretAccess) -> Result<(), SecretStoreError> {
-    let actor_valid = match &access.actor {
-        SecretActor::User(user_id) => *user_id == owner_user_id,
-        SecretActor::CoreService(service) => valid_actor_label(service),
-        SecretActor::ProviderRuntime(provider_id) => valid_actor_label(provider_id),
-    };
-    let context_valid = !access.correlation_id.is_empty()
-        && access.correlation_id.len() <= MAX_CORRELATION_ID_BYTES
-        && !access.correlation_id.chars().any(char::is_control)
-        && !access.reason.is_empty()
-        && access.reason.len() <= MAX_ACCESS_REASON_BYTES
-        && !access.reason.chars().any(char::is_control);
-    if actor_valid && context_valid {
+    if access.authorizes(owner_user_id) {
         Ok(())
     } else {
         Err(SecretStoreError::Unauthorized)
@@ -849,14 +1135,6 @@ fn validate_secret(value: &SecretValue) -> Result<(), SecretStoreError> {
 fn valid_key_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
-fn valid_actor_label(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -950,6 +1228,7 @@ fn storage_error(_error: sqlx::Error) -> SecretStoreError {
 #[cfg(test)]
 mod tests {
     use asterism_domain::{AuditActor, AuthState, ProviderId, Role};
+    use asterism_secrets::CredentialField;
 
     use super::*;
     use crate::{ProviderAccountRepository, SqliteProviderAccountRepository};
@@ -1192,6 +1471,82 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(credential_audits, 3);
+    }
+
+    #[tokio::test]
+    async fn credential_bundle_replaces_the_full_set_and_authenticates_atomically() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner_id = insert_user(&database).await;
+        let account_id = insert_provider_account(&database, owner_id).await;
+        let access = user_access(owner_id, "credential-bundle-replace");
+        let store = SqliteSecretStore::new(
+            database.clone(),
+            Arc::new(keyring("key-a", &[("key-a", 19)])),
+        );
+        let old = store
+            .create_provider_credential(
+                owner_id,
+                new_cookie_credential(
+                    account_id,
+                    b"old-cookie",
+                    Utc::now() + chrono::Duration::hours(1),
+                ),
+                &access,
+            )
+            .await
+            .unwrap();
+        let captured_at = Utc::now();
+        let committed = store
+            .replace_provider_credentials(
+                owner_id,
+                account_id,
+                CredentialBundle {
+                    provider_id: ProviderId::new("provider-alpha").unwrap(),
+                    tenant: None,
+                    auth_method: AuthMethod::ImportedToken,
+                    acquired_via: CredentialAcquisition::ManualImport,
+                    captured_at,
+                    expires_at: Some(captured_at + chrono::Duration::hours(2)),
+                    session_kind: SessionKind::Composite,
+                    fields: vec![
+                        CredentialField {
+                            purpose: SecretPurpose::ProviderAccessToken,
+                            value: SecretValue::new(b"new-access".to_vec()),
+                        },
+                        CredentialField {
+                            purpose: SecretPurpose::ProviderRefreshToken,
+                            value: SecretValue::new(b"new-refresh".to_vec()),
+                        },
+                    ],
+                    user_id_hint: None,
+                },
+                &access,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(committed.len(), 2);
+        assert!(matches!(
+            store.get(&old.secret, &access).await,
+            Err(SecretStoreError::NotFound)
+        ));
+        let account = SqliteProviderAccountRepository::new(database.clone())
+            .find_provider_account(owner_id, account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.auth_state, AuthState::Authenticated);
+        assert_eq!(account.credential_refs.len(), 2);
+        let committed_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? \
+             AND action = 'provider_credentials_committed'",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(committed_audits, 1);
     }
 
     #[tokio::test]

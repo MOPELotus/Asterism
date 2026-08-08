@@ -2,12 +2,16 @@
 
 use std::{collections::HashSet, fmt};
 
-use asterism_domain::{ProviderAccountId, ProviderId, SecretId, SessionKind, Timestamp, UserId};
+use asterism_domain::{
+    AuthMethod, ProviderAccountId, ProviderId, SecretId, SessionKind, Timestamp, UserId,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const MAX_CREDENTIAL_FIELD_BYTES: usize = 1024 * 1024;
+const MAX_ACCESS_REASON_BYTES: usize = 256;
+const MAX_CORRELATION_ID_BYTES: usize = 128;
 
 /// Owned secret bytes which zero their allocation on drop and never reveal
 /// their value through `Debug`.
@@ -153,6 +157,7 @@ pub struct CredentialField {
 pub struct CredentialBundle {
     pub provider_id: ProviderId,
     pub tenant: Option<String>,
+    pub auth_method: AuthMethod,
     pub acquired_via: CredentialAcquisition,
     pub captured_at: Timestamp,
     pub expires_at: Option<Timestamp>,
@@ -211,6 +216,7 @@ impl fmt::Debug for CredentialBundle {
             .debug_struct("CredentialBundle")
             .field("provider_id", &self.provider_id)
             .field("tenant", &self.tenant.as_ref().map(|_| "[REDACTED]"))
+            .field("auth_method", &self.auth_method)
             .field("acquired_via", &self.acquired_via)
             .field("captured_at", &self.captured_at)
             .field("expires_at", &self.expires_at)
@@ -293,11 +299,36 @@ pub struct SecretAccess {
     pub reason: String,
 }
 
+impl SecretAccess {
+    pub fn authorizes(&self, owner_user_id: UserId) -> bool {
+        let actor_valid = match &self.actor {
+            SecretActor::User(user_id) => *user_id == owner_user_id,
+            SecretActor::CoreService(service) => valid_actor_label(service),
+            SecretActor::ProviderRuntime(provider_id) => valid_actor_label(provider_id),
+        };
+        actor_valid
+            && valid_bounded_text(&self.correlation_id, MAX_CORRELATION_ID_BYTES)
+            && valid_bounded_text(&self.reason, MAX_ACCESS_REASON_BYTES)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SecretActor {
     User(UserId),
     CoreService(&'static str),
     ProviderRuntime(String),
+}
+
+fn valid_bounded_text(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+fn valid_actor_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 #[async_trait]
@@ -332,6 +363,14 @@ pub trait SecretStore: Send + Sync {
 
 #[async_trait]
 pub trait ProviderCredentialStore: Send + Sync {
+    async fn replace_provider_credentials(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        bundle: CredentialBundle,
+        access: &SecretAccess,
+    ) -> Result<Vec<ProviderCredential>, SecretStoreError>;
+
     async fn create_provider_credential(
         &self,
         owner_user_id: UserId,
@@ -376,6 +415,8 @@ pub enum SecretStoreError {
     InvalidValue,
     #[error("Provider credentials require the account-scoped credential store")]
     CredentialManaged,
+    #[error("credential bundle does not match its Provider account")]
+    AccountMismatch,
     #[error("secret encryption key is unavailable")]
     KeyUnavailable,
     #[error("secret storage operation failed")]
@@ -439,6 +480,7 @@ mod tests {
         let bundle = CredentialBundle {
             provider_id: ProviderId::new("provider-a").expect("provider id"),
             tenant: Some("tenant-a".to_owned()),
+            auth_method: AuthMethod::ImportedToken,
             acquired_via: CredentialAcquisition::CaptureTool,
             captured_at,
             expires_at: Some(captured_at + chrono::Duration::hours(1)),
@@ -470,6 +512,7 @@ mod tests {
         let mut bundle = CredentialBundle {
             provider_id: ProviderId::new("provider-a").expect("provider id"),
             tenant: None,
+            auth_method: AuthMethod::ImportedCookie,
             acquired_via: CredentialAcquisition::ManualImport,
             captured_at,
             expires_at: None,

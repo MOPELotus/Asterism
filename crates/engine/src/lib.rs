@@ -1,6 +1,7 @@
 //! Pure orchestration state machines and policy guards.
 
 mod assessment;
+mod credential;
 mod outbox;
 mod scan;
 mod scan_job;
@@ -10,6 +11,7 @@ mod transition;
 pub use assessment::{
     AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action,
 };
+pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredentialService};
 pub use outbox::{
     DeliveryError, DispatchConfig, DispatchError, DispatchReport, EventSink, OutboxDispatcher,
 };
