@@ -607,3 +607,15 @@ Sequences begin at one and advance without gaps. A retry with the same sequence
 and kind returns the first server-timestamped event, while changed content or a
 gap is a conflict. Recording `ClientReportedAuthenticated` never mutates the
 bootstrap session, Core authentication state, Provider account, or SecretStore.
+
+## Forty-sixth Phase 0 slice
+
+The forty-sixth checkpoint exposes the event transaction through
+`AuthBootstrapService`. Capture access tokens are digested at the engine
+boundary, then the repository atomically authenticates the session and records
+the event. Plaintext access tokens never enter domain events or persistence.
+
+The engine distinguishes a new event from an exact retry while returning the
+first server timestamp for both. Invalid access remains a redacted rejection;
+changed or non-contiguous sequences become an explicit conflict for transport
+layers to map without weakening the repository invariant.

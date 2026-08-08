@@ -15,7 +15,8 @@ pub use assessment::{
 };
 pub use auth_bootstrap::{
     AuthBootstrapAccessRequest, AuthBootstrapCancelRequest, AuthBootstrapClaimRequest,
-    AuthBootstrapClaimed, AuthBootstrapCreateRequest, AuthBootstrapCreated, AuthBootstrapService,
+    AuthBootstrapClaimed, AuthBootstrapCreateRequest, AuthBootstrapCreated,
+    AuthBootstrapEventAccepted, AuthBootstrapEventRequest, AuthBootstrapService,
     AuthBootstrapServiceError,
 };
 pub use auth_session::{

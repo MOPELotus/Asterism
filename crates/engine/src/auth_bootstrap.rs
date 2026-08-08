@@ -1,10 +1,14 @@
 use asterism_auth::{OpaqueTokenService, TokenError};
 use asterism_domain::{
-    AuditActor, AuthBootstrapPurpose, AuthBootstrapSession, AuthBootstrapSessionError,
-    AuthBootstrapSessionId, ProviderAccountId, ProviderId, Timestamp, UserId,
+    AuditActor, AuthBootstrapClientEvent, AuthBootstrapClientEventError,
+    AuthBootstrapClientEventKind, AuthBootstrapPurpose, AuthBootstrapSession,
+    AuthBootstrapSessionError, AuthBootstrapSessionId, ProviderAccountId, ProviderId, Timestamp,
+    UserId,
 };
 use asterism_secrets::SecretString;
-use asterism_storage::{AuthBootstrapSessionRepository, StorageError};
+use asterism_storage::{
+    AuthBootstrapClientEventRecord, AuthBootstrapSessionRepository, StorageError,
+};
 
 #[derive(Debug)]
 pub struct AuthBootstrapService<R> {
@@ -119,6 +123,50 @@ where
             .ok_or(AuthBootstrapServiceError::AccessRejected)
     }
 
+    /// Records one path-bound Capture status event after access-token
+    /// authentication. The repository preserves the first server timestamp
+    /// for an exact retry.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid event data, invalid access, or a changed/gapped event
+    /// sequence.
+    pub async fn record_client_event(
+        &self,
+        request: AuthBootstrapEventRequest,
+    ) -> Result<AuthBootstrapEventAccepted, AuthBootstrapServiceError> {
+        let digest = self.access_tokens.digest(&request.access_token);
+        let event = AuthBootstrapClientEvent::new(
+            request.session_id,
+            request.sequence,
+            request.kind,
+            request.received_at,
+        )?;
+        match self
+            .repository
+            .record_auth_bootstrap_client_event(&event, &digest, &request.correlation_id)
+            .await?
+        {
+            AuthBootstrapClientEventRecord::Inserted(event) => Ok(AuthBootstrapEventAccepted {
+                event,
+                duplicate: false,
+            }),
+            AuthBootstrapClientEventRecord::Duplicate(event) => Ok(AuthBootstrapEventAccepted {
+                event,
+                duplicate: true,
+            }),
+            AuthBootstrapClientEventRecord::AccessRejected => {
+                Err(AuthBootstrapServiceError::AccessRejected)
+            }
+            AuthBootstrapClientEventRecord::SequenceConflict => {
+                Err(AuthBootstrapServiceError::EventSequenceConflict {
+                    session_id: request.session_id,
+                    sequence: request.sequence,
+                })
+            }
+        }
+    }
+
     /// Cancels one owner-scoped live pairing and invalidates either token
     /// digest. An overdue session is persisted as expired instead.
     ///
@@ -199,6 +247,22 @@ pub struct AuthBootstrapAccessRequest {
     pub authenticated_at: Timestamp,
 }
 
+#[derive(Debug)]
+pub struct AuthBootstrapEventRequest {
+    pub session_id: AuthBootstrapSessionId,
+    pub access_token: SecretString,
+    pub sequence: u64,
+    pub kind: AuthBootstrapClientEventKind,
+    pub received_at: Timestamp,
+    pub correlation_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthBootstrapEventAccepted {
+    pub event: AuthBootstrapClientEvent,
+    pub duplicate: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthBootstrapCancelRequest {
     pub owner_user_id: UserId,
@@ -216,10 +280,19 @@ pub enum AuthBootstrapServiceError {
     PairingRejected,
     #[error("authentication bootstrap access token is invalid or expired")]
     AccessRejected,
+    #[error(
+        "authentication bootstrap event sequence `{sequence}` conflicts in session `{session_id}`"
+    )]
+    EventSequenceConflict {
+        session_id: AuthBootstrapSessionId,
+        sequence: u64,
+    },
     #[error("authentication bootstrap session `{0}` changed concurrently")]
     RevisionConflict(AuthBootstrapSessionId),
     #[error(transparent)]
     Domain(#[from] AuthBootstrapSessionError),
+    #[error(transparent)]
+    EventDomain(#[from] AuthBootstrapClientEventError),
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
@@ -343,6 +416,109 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn client_events_are_path_bound_idempotent_and_contiguous() {
+        let (database, owner) = database_with_owner().await;
+        let repository = SqliteAuthBootstrapSessionRepository::new(database);
+        let service = AuthBootstrapService::new(repository).unwrap();
+        let created = service
+            .create(create_request(owner, "bootstrap-event-create"))
+            .await
+            .unwrap();
+        let claimed = service
+            .claim(AuthBootstrapClaimRequest {
+                session_id: created.session.id,
+                pairing_token: created.pairing_token,
+                claimed_at: Utc::now(),
+                correlation_id: "bootstrap-event-claim".to_owned(),
+            })
+            .await
+            .unwrap();
+        let access_plaintext = claimed.access_token.expose_secret().to_owned();
+        let first_received_at = Utc::now();
+        let first = service
+            .record_client_event(event_request(
+                claimed.session.id,
+                &access_plaintext,
+                1,
+                AuthBootstrapClientEventKind::ClientReady,
+                first_received_at,
+                "bootstrap-event-first",
+            ))
+            .await
+            .unwrap();
+        assert!(!first.duplicate);
+
+        let retry = service
+            .record_client_event(event_request(
+                claimed.session.id,
+                &access_plaintext,
+                1,
+                AuthBootstrapClientEventKind::ClientReady,
+                Utc::now(),
+                "bootstrap-event-retry",
+            ))
+            .await
+            .unwrap();
+        assert!(retry.duplicate);
+        assert_eq!(retry.event.received_at, first_received_at);
+
+        let changed = service
+            .record_client_event(event_request(
+                claimed.session.id,
+                &access_plaintext,
+                1,
+                AuthBootstrapClientEventKind::Validating,
+                Utc::now(),
+                "bootstrap-event-changed",
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            changed,
+            AuthBootstrapServiceError::EventSequenceConflict { sequence: 1, .. }
+        ));
+
+        let gap = service
+            .record_client_event(event_request(
+                claimed.session.id,
+                &access_plaintext,
+                3,
+                AuthBootstrapClientEventKind::CredentialDetected,
+                Utc::now(),
+                "bootstrap-event-gap",
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            gap,
+            AuthBootstrapServiceError::EventSequenceConflict { sequence: 3, .. }
+        ));
+
+        let reported = service
+            .record_client_event(event_request(
+                claimed.session.id,
+                &access_plaintext,
+                2,
+                AuthBootstrapClientEventKind::ClientReportedAuthenticated,
+                Utc::now(),
+                "bootstrap-event-reported",
+            ))
+            .await
+            .unwrap();
+        assert!(reported.event.is_client_success_report());
+        let session = service
+            .authenticate_access(AuthBootstrapAccessRequest {
+                session_id: claimed.session.id,
+                access_token: SecretString::new(access_plaintext),
+                authenticated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(session.state, AuthBootstrapState::Claimed);
+        assert_eq!(session.revision, 2);
+    }
+
     async fn database_with_owner() -> (Database, UserId) {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
@@ -375,6 +551,24 @@ mod tests {
             created_at: now,
             expires_at: now + Duration::minutes(10),
             actor: AuditActor::User(owner),
+            correlation_id: correlation_id.to_owned(),
+        }
+    }
+
+    fn event_request(
+        session_id: AuthBootstrapSessionId,
+        access_token: &str,
+        sequence: u64,
+        kind: AuthBootstrapClientEventKind,
+        received_at: Timestamp,
+        correlation_id: &str,
+    ) -> AuthBootstrapEventRequest {
+        AuthBootstrapEventRequest {
+            session_id,
+            access_token: SecretString::new(access_token),
+            sequence,
+            kind,
+            received_at,
             correlation_id: correlation_id.to_owned(),
         }
     }
