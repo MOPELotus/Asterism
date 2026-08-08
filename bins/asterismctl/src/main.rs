@@ -7,6 +7,7 @@ use anyhow::Context;
 use asterism_domain::ServiceScope;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use reqwest::StatusCode;
+use serde::Serialize;
 use serde_json::json;
 
 use crate::{
@@ -55,6 +56,11 @@ enum Command {
     System {
         #[command(subcommand)]
         command: SystemCommand,
+    },
+    /// Inspect owner-scoped tasks discovered by Provider scans.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
     },
 }
 
@@ -114,6 +120,21 @@ enum ServiceTokenCommand {
         /// Service token ID returned when the token was created.
         token_id: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskCommand {
+    /// List tasks with optional account filtering and pagination.
+    List {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
+    /// Get one task by ID.
+    Get { task_id: String },
 }
 
 #[derive(Debug, Args)]
@@ -242,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
             let value = client.get_public("/api/v1/system/health").await?;
             write_json(&value)
         }
+        Command::Task { command } => handle_task(&client, command).await,
     }
 }
 
@@ -305,6 +327,42 @@ async fn handle_provider_account(
             write_json(&json!({ "deleted": account_id }))
         }
     }
+}
+
+async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result<()> {
+    let token = service_token_from_process()?;
+    let value = match command {
+        TaskCommand::List {
+            account,
+            limit,
+            offset,
+        } => {
+            client
+                .get_authorized_with_query(
+                    "/api/v1/tasks",
+                    &token,
+                    &TaskListParameters {
+                        provider_account_id: account,
+                        limit,
+                        offset,
+                    },
+                )
+                .await?
+        }
+        TaskCommand::Get { task_id } => {
+            let path = format!("/api/v1/tasks/{task_id}");
+            client.get_authorized(&path, &token).await?
+        }
+    };
+    write_json(&value)
+}
+
+#[derive(Debug, Serialize)]
+struct TaskListParameters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_account_id: Option<String>,
+    limit: u32,
+    offset: u64,
 }
 
 async fn issue_from_password(

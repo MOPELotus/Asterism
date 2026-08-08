@@ -134,12 +134,15 @@ cargo run -p asterismctl -- auth whoami
 cargo run -p asterismctl -- provider list
 cargo run -p asterismctl -- provider-account create --provider provider-alpha --name primary
 cargo run -p asterismctl -- provider-account list
+cargo run -p asterismctl -- task list --limit 50
 Remove-Item Env:ASTERISM_TOKEN
 ```
 
 自动化环境可给 `init` 或 `auth login` 添加 `--password-stdin`，从标准输入读取单行密码，避免把密码放进进程参数。当前内部接口及其请求结构可从 `/api/v1/openapi.json` 查看。
 
 Provider Account 的 owner 始终由认证身份决定，CLI 和 API 都不接受调用方指定 `owner_id`。`--provider` 必须使用小写 canonical `ProviderId`；账号展示名属于本地用户数据，不作为项目内的平台名称或标识。
+
+Task 接口当前只读，任务只能由后续 Provider 扫描链路写入。`task list` 支持 `--account`、`--limit` 和 `--offset`；返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。
 
 也可以直接访问：
 

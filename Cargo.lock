@@ -218,6 +218,7 @@ dependencies = [
  "asterism-scheduler",
  "async-trait",
  "chrono",
+ "serde",
  "serde_json",
  "sqlx",
  "thiserror",

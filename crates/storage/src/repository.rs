@@ -19,6 +19,30 @@ pub trait TaskRepository: Send + Sync {
     async fn save_task(&self, task: &Task) -> Result<(), StorageError>;
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskPage {
+    pub items: Vec<Task>,
+    pub total: u64,
+}
+
+/// Owner-scoped, paginated read model for task surfaces.
+#[async_trait]
+pub trait TaskQueryRepository: Send + Sync {
+    async fn list_owned_tasks(
+        &self,
+        owner_id: UserId,
+        provider_account_id: Option<ProviderAccountId>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<TaskPage, StorageError>;
+
+    async fn find_owned_task(
+        &self,
+        owner_id: UserId,
+        task_id: TaskId,
+    ) -> Result<Option<Task>, StorageError>;
+}
+
 /// Owner-scoped persistence contract for Provider account management.
 #[async_trait]
 pub trait ProviderAccountRepository: Send + Sync {

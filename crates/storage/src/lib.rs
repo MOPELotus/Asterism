@@ -9,6 +9,7 @@ mod recovery;
 mod repository;
 mod scheduler;
 mod session;
+mod task;
 mod user;
 
 pub use credit::{CreditGrant, SqliteCreditRepository};
@@ -19,8 +20,10 @@ pub use provider_account::SqliteProviderAccountRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
     CreditRepository, ExecutionLeaseRepository, OutboxRepository, ProviderAccountRepository,
-    SchedulerRepository, SessionRepository, TaskRepository, UserRepository,
+    SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository, TaskRepository,
+    UserRepository,
 };
 pub use scheduler::{JobFailureDisposition, SqliteSchedulerRepository};
 pub use session::SqliteSessionRepository;
+pub use task::SqliteTaskQueryRepository;
 pub use user::{InitialMaster, SqliteUserRepository};

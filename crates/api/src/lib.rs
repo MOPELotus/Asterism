@@ -3,6 +3,7 @@
 mod account;
 mod auth;
 mod rate_limit;
+mod task;
 
 use std::sync::Arc;
 
@@ -67,6 +68,8 @@ pub fn build_router(state: ApiState) -> Router {
                 .put(account::update_provider_account)
                 .delete(account::delete_provider_account),
         )
+        .route("/api/v1/tasks", get(task::list_tasks))
+        .route("/api/v1/tasks/{task_id}", get(task::get_task))
         .route("/api/v1/service-tokens", post(auth::create_service_token))
         .route(
             "/api/v1/service-tokens/{token_id}",
@@ -200,6 +203,22 @@ async fn openapi() -> Json<Value> {
                     "responses": {"204": {"description": "Provider account deleted"}, "404": {"description": "Provider account not found"}}
                 }
             },
+            "/api/v1/tasks": {"get": {
+                "operationId": "listTasks",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [
+                    {"name": "provider_account_id", "in": "query", "schema": {"type": "string", "format": "uuid"}},
+                    {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+                    {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}
+                ],
+                "responses": {"200": {"description": "Owner-scoped paginated tasks"}, "400": {"description": "Invalid query"}, "401": {"description": "Authentication required"}, "403": {"description": "Insufficient permission"}}
+            }},
+            "/api/v1/tasks/{task_id}": {"get": {
+                "operationId": "getTask",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [{"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "responses": {"200": {"description": "Owner-scoped task"}, "400": {"description": "Invalid task ID"}, "404": {"description": "Task not found"}}
+            }},
             "/api/v1/service-tokens": {"post": {
                 "operationId": "createServiceToken",
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
@@ -431,6 +450,7 @@ mod tests {
         extract::ConnectInfo,
         http::{Request, header},
     };
+    use chrono::{SecondsFormat, Utc};
     use tower::ServiceExt;
 
     use super::*;
@@ -673,6 +693,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_api_is_owner_scoped_paginated_and_keeps_state_dimensions_separate() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/provider-accounts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"provider_id":"provider-alpha","display_name":"primary"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let account = to_bytes(account.into_body(), 16 * 1024).await.unwrap();
+        let account: Value = serde_json::from_slice(&account).unwrap();
+        let account_id = account["id"].as_str().unwrap();
+        let task_id = asterism_domain::TaskId::new();
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+              assessment_class, title, remote_state, orchestration_state, discovered_at, \
+              updated_at, capabilities_json) \
+             VALUES (?, ?, 'remote-task', 'fingerprint', 'exam', 'routine', 'weekly check', \
+                     'pending', 'ready', ?, ?, '[\"progress_read\"]')",
+        )
+        .bind(task_id.to_string())
+        .bind(account_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks?provider_account_id={account_id}&limit=1&offset=0"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert_eq!(listed.headers()[header::CACHE_CONTROL], "no-store");
+        let listed = to_bytes(listed.into_body(), 16 * 1024).await.unwrap();
+        let listed: Value = serde_json::from_slice(&listed).unwrap();
+        assert_eq!(listed["total"], 1);
+        assert_eq!(listed["limit"], 1);
+        assert_eq!(listed["items"][0]["source_type"], "exam");
+        assert_eq!(listed["items"][0]["assessment_class"], "routine");
+        assert!(listed["items"][0].get("remote_fingerprint").is_none());
+
+        let fetched = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/tasks/{task_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+
+        let invalid_page = app
+            .oneshot(
+                Request::get("/api/v1/tasks?limit=0")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_page.status(), StatusCode::BAD_REQUEST);
+        let invalid_page = to_bytes(invalid_page.into_body(), 16 * 1024).await.unwrap();
+        let error: ErrorResponse = serde_json::from_slice(&invalid_page).unwrap();
+        assert_eq!(error.error.code, "invalid_task_pagination");
+    }
+
+    #[tokio::test]
     async fn malformed_auth_json_uses_the_stable_error_model() {
         let app = test_router().await;
         let response = app
@@ -741,6 +855,8 @@ mod tests {
             "/api/v1/service-tokens/{token_id}",
             "/api/v1/provider-accounts",
             "/api/v1/provider-accounts/{account_id}",
+            "/api/v1/tasks",
+            "/api/v1/tasks/{task_id}",
         ] {
             assert!(document["paths"].get(path).is_some(), "missing {path}");
         }

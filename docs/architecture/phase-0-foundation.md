@@ -126,3 +126,15 @@ audits commit in the same transaction as the account mutation.
 
 The next slice exposes owner-scoped Task queries while keeping remote and local
 orchestration state distinct.
+
+## Eighth Phase 0 slice
+
+The eighth checkpoint adds owner-scoped, paginated Task reads through a
+dedicated query repository, API, and CLI. Queries join through the owning
+Provider account, optionally filter by account, use bounded offset pagination,
+and preserve source type, assessment class, remote state, and orchestration
+state as independent dimensions. Provider fingerprints remain internal, and no
+manual Task write endpoint is introduced before Provider ingestion exists.
+
+The next slice defines the Provider scan ingestion contract, including stable
+fingerprints, sanitized snapshots, diffs, and transactional upserts.

@@ -53,6 +53,19 @@ impl ApiClient {
         send_json(request, StatusCode::OK).await
     }
 
+    pub async fn get_authorized_with_query(
+        &self,
+        path: &str,
+        token: &SecretString,
+        query: &impl Serialize,
+    ) -> anyhow::Result<serde_json::Value> {
+        let request = self
+            .request(Method::GET, path)?
+            .bearer_auth(token.expose_secret())
+            .query(query);
+        send_json(request, StatusCode::OK).await
+    }
+
     pub async fn post_authorized(
         &self,
         path: &str,

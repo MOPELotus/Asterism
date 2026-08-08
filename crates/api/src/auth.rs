@@ -108,6 +108,18 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn require_task_read(&self) -> Result<UserId, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } if principal.has(Permission::ReadOwnTasks) => {
+                Ok(principal.user_id)
+            }
+            AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::TaskRead) => {
+                token.owner_user_id.ok_or_else(ApiError::forbidden)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
     fn require_service_token_creation(
         &self,
         requested_scopes: &BTreeSet<ServiceScope>,
