@@ -735,3 +735,18 @@ zeroized on drop. Response acceptance requires immutable session continuity, a
 completed account binding, matching credential count and session kind, and a
 valid Provider status; only then is the in-memory Bootstrap access token
 cleared and the local snapshot advanced to completed.
+
+## Fifty-sixth Phase 0 slice
+
+The Capture binary now exposes a complete manual credential workflow without
+accepting pairing tokens, tenant values, or credential plaintext in process
+arguments. Interactive secrets use hidden terminal input; non-interactive
+callers provide bounded lines through standard input in the declared field
+order.
+
+The workflow validates all non-secret options before claiming, polls the
+claimed session, emits `client_ready`, `manual.input`, `credential_detected`,
+and `validating` events, and derives Provider and account semantics from the
+Core-owned session. Manual authentication choices are limited to imported or
+assisted sessions; native password, QR, and external OAuth remain separate
+Provider-owned flows.

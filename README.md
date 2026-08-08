@@ -153,6 +153,20 @@ Remove-Item Env:ASTERISM_TOKEN
 
 自动化环境可给 `init` 或 `auth login` 添加 `--password-stdin`，从标准输入读取单行密码，避免把密码放进进程参数。当前内部接口及其请求结构可从 `/api/v1/openapi.json` 查看。
 
+需要本地辅助的 Auth Bootstrap 会话可由 `asterism-capture` 认领。手动导入命令只在 argv 中接收 session ID、认证类型和字段用途；pairing token、账号显示名、可选 tenant 与凭据值按顺序从隐藏终端输入或 stdin 读取，不提供 Secret 命令行参数：
+
+```bash
+cargo run -p asterism-capture -- \
+  --url https://asterism.example \
+  manual \
+  --session-id <session-uuid> \
+  --auth-method imported-cookie \
+  --session-kind cookie \
+  --field cookie
+```
+
+复合凭据可按输入顺序重复 `--field`，需要 tenant 时添加 `--with-tenant`。Capture 只主动连接配置的 Asterism HTTPS 地址；明文 HTTP 仅能通过显式开发开关连接 loopback。
+
 Provider Account 的 owner 始终由认证身份决定，CLI 和 API 都不接受调用方指定 `owner_id`。`--provider` 必须使用小写 canonical `ProviderId`；账号展示名属于本地用户数据，不作为项目内的平台名称或标识。
 
 Task 接口当前只读，任务只能由 Provider 扫描链路写入。远端账户完成认证且对应 Provider 已注册 inventory capability 后，可运行 `provider-account scan <account-id>`；`task list` 支持 `--account`、`--limit` 和 `--offset`。返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。

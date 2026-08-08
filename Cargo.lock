@@ -156,6 +156,7 @@ dependencies = [
  "chrono",
  "clap",
  "reqwest",
+ "rpassword",
  "serde",
  "serde_json",
  "tokio",
