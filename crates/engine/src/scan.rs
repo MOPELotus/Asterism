@@ -520,6 +520,7 @@ mod tests {
             implementation_version: "0.1.0".to_owned(),
             verification: VerificationLevel::Development,
             scan_min_interval_seconds: Some(300),
+            capture_recipe_version: None,
             capabilities: BTreeSet::from(capabilities),
             auth_methods: BTreeSet::new(),
             session_kinds: BTreeSet::new(),

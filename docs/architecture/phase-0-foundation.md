@@ -530,3 +530,15 @@ rejection outcome. Secret token wrappers redact every debug representation and
 zero their allocations on drop. Owner cancellation is revisioned and clears
 both pairing and access digests; an overdue cancellation persists `Expired`
 instead of misreporting a live cancellation.
+
+## Fortieth Phase 0 slice
+
+The fortieth checkpoint lets a registered Provider declare an optional,
+positive `capture_recipe_version`. Core treats this metadata as the authoritative
+server-side requirement when creating a local-helper pairing; clients cannot
+choose or downgrade it in a request.
+
+A Capture recipe declaration is valid only when the same Provider advertises
+and implements Authentication. Providers without a bundled recipe remain
+usable through their other authentication methods but cannot start a Capture
+bootstrap flow.

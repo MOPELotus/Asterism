@@ -60,6 +60,17 @@ impl ProviderEntry {
                 provider_id: self.metadata.id.clone(),
             });
         }
+        if self
+            .metadata
+            .capture_recipe_version
+            .is_some_and(|version| version == 0)
+            || (self.metadata.capture_recipe_version.is_some()
+                && !self.metadata.advertises(ProviderCapability::Authentication))
+        {
+            return Err(RegistryError::InvalidCaptureRecipe {
+                provider_id: self.metadata.id.clone(),
+            });
+        }
 
         let checks = [
             (
@@ -241,6 +252,8 @@ pub enum RegistryError {
     },
     #[error("provider `{provider_id}` declares an invalid minimum scan interval")]
     InvalidScanMinimum { provider_id: ProviderId },
+    #[error("provider `{provider_id}` declares an invalid Capture recipe contract")]
+    InvalidCaptureRecipe { provider_id: ProviderId },
 }
 
 #[cfg(test)]
@@ -282,6 +295,7 @@ mod tests {
             implementation_version: "0.0.0".into(),
             verification: VerificationLevel::Development,
             scan_min_interval_seconds: Some(300),
+            capture_recipe_version: None,
             capabilities: BTreeSet::new(),
             auth_methods: BTreeSet::new(),
             session_kinds: BTreeSet::new(),
@@ -318,6 +332,24 @@ mod tests {
         assert!(matches!(
             registry.register(ProviderEntry::metadata_only(metadata)),
             Err(RegistryError::InvalidScanMinimum { .. })
+        ));
+    }
+
+    #[test]
+    fn registry_rejects_zero_or_non_authentication_capture_recipe() {
+        let mut registry = ProviderRegistry::default();
+        let mut zero = metadata();
+        zero.capture_recipe_version = Some(0);
+        assert!(matches!(
+            registry.register(ProviderEntry::metadata_only(zero)),
+            Err(RegistryError::InvalidCaptureRecipe { .. })
+        ));
+
+        let mut without_authentication = metadata();
+        without_authentication.capture_recipe_version = Some(1);
+        assert!(matches!(
+            registry.register(ProviderEntry::metadata_only(without_authentication)),
+            Err(RegistryError::InvalidCaptureRecipe { .. })
         ));
     }
 

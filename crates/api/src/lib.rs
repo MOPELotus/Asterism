@@ -741,6 +741,7 @@ mod tests {
             implementation_version: "0.1.0".to_owned(),
             verification: VerificationLevel::Development,
             scan_min_interval_seconds: Some(300),
+            capture_recipe_version: None,
             capabilities: BTreeSet::from([
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
@@ -830,6 +831,7 @@ mod tests {
             implementation_version: "0.1.0".to_owned(),
             verification: VerificationLevel::Development,
             scan_min_interval_seconds: None,
+            capture_recipe_version: Some(3),
             capabilities: BTreeSet::from([ProviderCapability::Authentication]),
             auth_methods: BTreeSet::from([AuthMethod::ImportedCookie]),
             session_kinds: BTreeSet::from([SessionKind::Cookie]),
