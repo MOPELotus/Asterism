@@ -1,15 +1,18 @@
-use std::{fmt, time::Duration};
+use std::{collections::HashSet, fmt, time::Duration};
 
 use anyhow::{Context, bail};
 use asterism_domain::{
-    AuthBootstrapClientEvent, AuthBootstrapClientEventKind, AuthBootstrapSession,
-    AuthBootstrapSessionId, AuthBootstrapState,
+    AuthBootstrapClientEvent, AuthBootstrapClientEventKind, AuthBootstrapPurpose,
+    AuthBootstrapSession, AuthBootstrapSessionId, AuthBootstrapState, AuthMethod,
+    ProviderAccountId, SessionKind, Timestamp,
 };
-use asterism_secrets::SecretString;
+use asterism_provider_api::SessionStatus;
+use asterism_secrets::{SecretPurpose, SecretString};
+use bytes::Bytes;
 use chrono::Utc;
 use reqwest::{
     Client, Response, StatusCode, Url,
-    header::{AUTHORIZATION, HeaderValue},
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -17,6 +20,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024;
 const MAX_BOOTSTRAP_TOKEN_BYTES: usize = 128;
+const MAX_CREDENTIAL_FIELD_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub struct CaptureClient {
@@ -119,7 +123,7 @@ impl CaptureClient {
             .context("failed to poll the Asterism pairing session")?;
         let snapshot: AuthBootstrapSession =
             deserialize_response(response, &[StatusCode::OK]).await?;
-        validate_session_binding(&snapshot, session_id)?;
+        validate_session_progress(&claimed.session, &snapshot)?;
         claimed.session = snapshot.clone();
         Ok(snapshot)
     }
@@ -178,6 +182,64 @@ impl CaptureClient {
         claimed.next_sequence += 1;
         Ok(receipt)
     }
+
+    /// Submits one locally captured credential candidate for server-side
+    /// Provider validation and atomic persistence.
+    ///
+    /// The serialized request body owns a zeroizing allocation until the HTTP
+    /// request is dropped. A successful response immediately clears the scoped
+    /// access token because Core has completed and invalidated the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid local metadata, rejected credentials,
+    /// transport failure, or a response that is not bound to the current
+    /// session and submitted credential shape.
+    pub async fn submit_credential(
+        &self,
+        claimed: &mut ClaimedCaptureSession,
+        submission: CaptureCredentialSubmission,
+    ) -> anyhow::Result<CaptureCredentialAccepted> {
+        submission.validate_for(&claimed.session)?;
+        let session_id = claimed.session.id;
+        let expected_count = submission.fields.len();
+        let expected_kind = submission.session_kind;
+        let body = submission.serialize_for(&claimed.session)?;
+        let url = self
+            .base_url
+            .join(&format!(
+                "api/v1/auth-bootstrap/sessions/{session_id}/credential"
+            ))
+            .context("failed to construct the credential submission endpoint")?;
+        let request = self
+            .http
+            .post(url)
+            .header(
+                AUTHORIZATION,
+                bootstrap_authorization(&claimed.access_token)?,
+            )
+            .header(CONTENT_TYPE, "application/json")
+            .body(Bytes::from_owner(ZeroizingRequestBody(body)));
+        drop(submission);
+        let response = request
+            .send()
+            .await
+            .context("failed to submit the captured credential")?;
+        let accepted: CaptureCredentialAccepted =
+            deserialize_response(response, &[StatusCode::OK]).await?;
+        validate_session_progress(&claimed.session, &accepted.session)?;
+        if accepted.session.state != AuthBootstrapState::Completed
+            || accepted.session.provider_account_id != Some(accepted.provider_account_id)
+            || accepted.credential_count != expected_count
+            || !accepted.status.valid
+            || accepted.status.kind != expected_kind
+        {
+            bail!("Asterism server returned an invalid credential acceptance response");
+        }
+        claimed.access_token.zeroize();
+        claimed.session = accepted.session.clone();
+        Ok(accepted)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -208,6 +270,200 @@ impl ClaimedCaptureSession {
 pub struct CaptureEventReceipt {
     pub event: AuthBootstrapClientEvent,
     pub duplicate: bool,
+}
+
+pub struct CaptureCredentialField {
+    purpose: SecretPurpose,
+    value: SecretString,
+}
+
+impl CaptureCredentialField {
+    /// Builds one provider credential field held in zeroizing memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the purpose is not a provider credential or the
+    /// plaintext is empty or exceeds the one-mebibyte transport boundary.
+    pub fn new(purpose: SecretPurpose, value: SecretString) -> anyhow::Result<Self> {
+        if !purpose.is_provider_credential()
+            || value.expose_secret().is_empty()
+            || value.expose_secret().len() > MAX_CREDENTIAL_FIELD_BYTES
+        {
+            bail!("captured credential field is invalid");
+        }
+        Ok(Self { purpose, value })
+    }
+
+    pub const fn purpose(&self) -> SecretPurpose {
+        self.purpose
+    }
+}
+
+impl fmt::Debug for CaptureCredentialField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CaptureCredentialField")
+            .field("purpose", &self.purpose)
+            .field("value", &self.value)
+            .finish()
+    }
+}
+
+pub struct CaptureCredentialSubmission {
+    display_name: Option<String>,
+    tenant: Option<SecretString>,
+    auth_method: AuthMethod,
+    session_kind: SessionKind,
+    expires_at: Option<Timestamp>,
+    fields: Vec<CaptureCredentialField>,
+}
+
+impl CaptureCredentialSubmission {
+    /// Builds one manual or assisted credential candidate without copying its
+    /// plaintext fields into ordinary application strings.
+    pub fn new(
+        display_name: Option<String>,
+        tenant: Option<SecretString>,
+        auth_method: AuthMethod,
+        session_kind: SessionKind,
+        expires_at: Option<Timestamp>,
+        fields: Vec<CaptureCredentialField>,
+    ) -> Self {
+        Self {
+            display_name,
+            tenant,
+            auth_method,
+            session_kind,
+            expires_at,
+            fields,
+        }
+    }
+
+    fn validate_for(&self, session: &AuthBootstrapSession) -> anyhow::Result<()> {
+        if session.state != AuthBootstrapState::Claimed {
+            bail!("credential submission requires a claimed pairing session");
+        }
+        let valid_display_name = match session.purpose {
+            AuthBootstrapPurpose::AddAccount => self.display_name.as_deref().is_some_and(|name| {
+                !name.is_empty()
+                    && name.len() <= 128
+                    && name.trim() == name
+                    && !name.chars().any(char::is_control)
+            }),
+            AuthBootstrapPurpose::Reauthenticate | AuthBootstrapPurpose::RepairSession => {
+                self.display_name.is_none()
+            }
+        };
+        if !valid_display_name {
+            bail!("account display name does not match the pairing purpose");
+        }
+        if self.tenant.as_ref().is_some_and(|tenant| {
+            tenant.expose_secret().is_empty()
+                || tenant.expose_secret().len() > 256
+                || tenant.expose_secret().trim() != tenant.expose_secret()
+                || tenant.expose_secret().chars().any(char::is_control)
+        }) {
+            bail!("credential tenant metadata is invalid");
+        }
+        if self.fields.is_empty() || self.fields.len() > 16 {
+            bail!("credential submission must contain 1-16 fields");
+        }
+        let purposes = self
+            .fields
+            .iter()
+            .map(CaptureCredentialField::purpose)
+            .collect::<HashSet<_>>();
+        if purposes.len() != self.fields.len() {
+            bail!("credential submission contains duplicate field purposes");
+        }
+        if self
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+        {
+            bail!("credential expiry must be in the future");
+        }
+        Ok(())
+    }
+
+    fn serialize_for(&self, session: &AuthBootstrapSession) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        let fields = self
+            .fields
+            .iter()
+            .map(|field| SubmitCredentialField {
+                purpose: field.purpose,
+                value: field.value.expose_secret(),
+            })
+            .collect();
+        let request = SubmitCredentialRequest {
+            display_name: self.display_name.as_deref(),
+            provider_id: session.provider_id.as_str(),
+            tenant: self.tenant.as_ref().map(SecretString::expose_secret),
+            auth_method: self.auth_method,
+            session_kind: self.session_kind,
+            expires_at: self.expires_at,
+            fields,
+        };
+        serde_json::to_vec(&request)
+            .map(Zeroizing::new)
+            .context("failed to serialize the captured credential")
+    }
+}
+
+impl fmt::Debug for CaptureCredentialSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CaptureCredentialSubmission")
+            .field(
+                "display_name",
+                &self.display_name.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("tenant", &self.tenant.as_ref().map(|_| "[REDACTED]"))
+            .field("auth_method", &self.auth_method)
+            .field("session_kind", &self.session_kind)
+            .field("expires_at", &self.expires_at)
+            .field(
+                "field_purposes",
+                &self
+                    .fields
+                    .iter()
+                    .map(|field| field.purpose)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CaptureCredentialAccepted {
+    pub session: AuthBootstrapSession,
+    pub provider_account_id: ProviderAccountId,
+    pub credential_count: usize,
+    pub status: SessionStatus,
+}
+
+#[derive(Serialize)]
+struct SubmitCredentialRequest<'a> {
+    display_name: Option<&'a str>,
+    provider_id: &'a str,
+    tenant: Option<&'a str>,
+    auth_method: AuthMethod,
+    session_kind: SessionKind,
+    expires_at: Option<Timestamp>,
+    fields: Vec<SubmitCredentialField<'a>>,
+}
+
+#[derive(Serialize)]
+struct SubmitCredentialField<'a> {
+    purpose: SecretPurpose,
+    value: &'a str,
+}
+
+struct ZeroizingRequestBody(Zeroizing<Vec<u8>>);
+
+impl AsRef<[u8]> for ZeroizingRequestBody {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
 }
 
 #[derive(Serialize)]
@@ -300,6 +556,30 @@ fn validate_session_binding(
     Ok(())
 }
 
+fn validate_session_progress(
+    previous: &AuthBootstrapSession,
+    next: &AuthBootstrapSession,
+) -> anyhow::Result<()> {
+    validate_session_binding(next, previous.id)?;
+    let stable_binding = next.owner_user_id == previous.owner_user_id
+        && next.provider_id == previous.provider_id
+        && next.purpose == previous.purpose
+        && next.required_recipe_version == previous.required_recipe_version
+        && next.created_at == previous.created_at
+        && next.expires_at == previous.expires_at
+        && next.claimed_at == previous.claimed_at;
+    let account_binding = previous.provider_account_id.is_none()
+        || next.provider_account_id == previous.provider_account_id;
+    if !stable_binding
+        || !account_binding
+        || next.revision < previous.revision
+        || next.updated_at < previous.updated_at
+    {
+        bail!("Asterism server returned an inconsistent pairing session update");
+    }
+    Ok(())
+}
+
 async fn read_bounded_body(mut response: Response) -> anyhow::Result<Vec<u8>> {
     if response.content_length().is_some_and(|length| {
         length > u64::try_from(MAX_RESPONSE_BODY_BYTES).expect("response limit fits u64")
@@ -385,8 +665,10 @@ mod tests {
     use tokio::{net::TcpListener, sync::Mutex};
 
     const SESSION_ID: &str = "0198d59e-0194-7ad5-8d2d-e0dbcb332db0";
+    const ACCOUNT_ID: &str = "0198d59e-0194-7ad5-8d2d-e0dbcb332db2";
     type ObservedClaim = Arc<Mutex<Option<(String, String)>>>;
     type ObservedSessionRequests = Arc<Mutex<Vec<(String, String, Value)>>>;
+    type ObservedCredential = Arc<Mutex<Option<(String, String, Value)>>>;
 
     #[test]
     fn capture_url_requires_https_by_default() {
@@ -557,6 +839,74 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn credential_submission_is_bound_and_clears_completed_access() {
+        let observed = ObservedCredential::default();
+        let app = Router::new()
+            .route(
+                "/api/v1/auth-bootstrap/sessions/{session_id}/credential",
+                post(
+                    |State(observed): State<ObservedCredential>,
+                     Path(session_id): Path<String>,
+                     headers: HeaderMap,
+                     Json(payload): Json<Value>| async move {
+                        *observed.lock().await =
+                            Some((session_id, authorization_text(&headers), payload));
+                        Json(json!({
+                            "session": completed_session_json(),
+                            "provider_account_id": ACCOUNT_ID,
+                            "credential_count": 1,
+                            "status": {
+                                "valid": true,
+                                "kind": "cookie",
+                                "expires_at": null,
+                                "account_hint": null
+                            }
+                        }))
+                    },
+                ),
+            )
+            .with_state(observed.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = CaptureClient::new(&format!("http://{address}"), true).unwrap();
+        let session_id = AuthBootstrapSessionId::from_str(SESSION_ID).unwrap();
+        let mut claimed = claimed_response().into_session(session_id).unwrap();
+        let submission = CaptureCredentialSubmission::new(
+            Some("Primary account".to_owned()),
+            None,
+            AuthMethod::ImportedCookie,
+            SessionKind::Cookie,
+            None,
+            vec![
+                CaptureCredentialField::new(
+                    SecretPurpose::ProviderCookie,
+                    SecretString::new("captured-cookie-test"),
+                )
+                .unwrap(),
+            ],
+        );
+        assert!(!format!("{submission:?}").contains("captured-cookie-test"));
+
+        let accepted = client
+            .submit_credential(&mut claimed, submission)
+            .await
+            .unwrap();
+
+        assert_eq!(accepted.session.state, AuthBootstrapState::Completed);
+        assert!(accepted.status.valid);
+        assert!(claimed.access_token().expose_secret().is_empty());
+        let observed = observed.lock().await;
+        let (observed_id, authorization, payload) = observed.as_ref().unwrap();
+        assert_eq!(observed_id, SESSION_ID);
+        assert_eq!(authorization, "Bootstrap ast_boot_access_test");
+        assert_eq!(payload["provider_id"], "cidaren");
+        assert_eq!(payload["fields"][0]["purpose"], "provider_cookie");
+        assert_eq!(payload["fields"][0]["value"], "captured-cookie-test");
+        server.abort();
+    }
+
     #[test]
     fn claim_rejects_a_mismatched_or_non_claimed_response() {
         let now = Utc::now();
@@ -583,6 +933,52 @@ mod tests {
         assert!(response.into_session(session_id).is_err());
     }
 
+    #[test]
+    fn credential_submission_rejects_duplicate_fields_and_wrong_account_metadata() {
+        let session_id = AuthBootstrapSessionId::from_str(SESSION_ID).unwrap();
+        let claimed = claimed_response().into_session(session_id).unwrap();
+        let duplicate_fields = CaptureCredentialSubmission::new(
+            Some("Primary account".to_owned()),
+            None,
+            AuthMethod::ImportedCookie,
+            SessionKind::Cookie,
+            None,
+            vec![
+                CaptureCredentialField::new(
+                    SecretPurpose::ProviderCookie,
+                    SecretString::new("first-cookie"),
+                )
+                .unwrap(),
+                CaptureCredentialField::new(
+                    SecretPurpose::ProviderCookie,
+                    SecretString::new("second-cookie"),
+                )
+                .unwrap(),
+            ],
+        );
+        assert!(duplicate_fields.validate_for(claimed.session()).is_err());
+
+        let missing_display_name = CaptureCredentialSubmission::new(
+            None,
+            None,
+            AuthMethod::ImportedCookie,
+            SessionKind::Cookie,
+            None,
+            vec![
+                CaptureCredentialField::new(
+                    SecretPurpose::ProviderCookie,
+                    SecretString::new("captured-cookie"),
+                )
+                .unwrap(),
+            ],
+        );
+        assert!(
+            missing_display_name
+                .validate_for(claimed.session())
+                .is_err()
+        );
+    }
+
     fn authorization_text(headers: &HeaderMap) -> String {
         headers
             .get(AUTHORIZATION)
@@ -600,7 +996,6 @@ mod tests {
     }
 
     fn claimed_session_json() -> Value {
-        let now = Utc::now();
         json!({
             "id": SESSION_ID,
             "owner_user_id": "0198d59e-0194-7ad5-8d2d-e0dbcb332db1",
@@ -609,11 +1004,20 @@ mod tests {
             "purpose": "add_account",
             "required_recipe_version": 1,
             "state": "claimed",
-            "created_at": now,
-            "updated_at": now,
-            "expires_at": now + ChronoDuration::minutes(10),
-            "claimed_at": now,
+            "created_at": "2026-08-09T00:00:00Z",
+            "updated_at": "2026-08-09T00:00:01Z",
+            "expires_at": "2026-08-09T00:10:00Z",
+            "claimed_at": "2026-08-09T00:00:01Z",
             "revision": 2
         })
+    }
+
+    fn completed_session_json() -> Value {
+        let mut session = claimed_session_json();
+        session["provider_account_id"] = Value::String(ACCOUNT_ID.to_owned());
+        session["state"] = Value::String("completed".to_owned());
+        session["updated_at"] = Value::String("2026-08-09T00:00:02Z".to_owned());
+        session["revision"] = Value::from(3);
+        session
     }
 }

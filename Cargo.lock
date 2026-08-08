@@ -149,8 +149,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "asterism-domain",
+ "asterism-provider-api",
  "asterism-secrets",
  "axum",
+ "bytes",
  "chrono",
  "clap",
  "reqwest",

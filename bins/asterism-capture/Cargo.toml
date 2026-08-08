@@ -10,7 +10,9 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 asterism-domain = { path = "../../crates/domain" }
+asterism-provider-api = { path = "../../crates/provider-api" }
 asterism-secrets = { path = "../../crates/secrets" }
+bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 reqwest.workspace = true

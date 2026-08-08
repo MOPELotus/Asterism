@@ -722,3 +722,16 @@ Event sequence numbers start at one, advance only after an accepted response,
 and remain unchanged after ambiguous transport failures so the same event can
 be retried through the server's idempotent sequence contract. Returned events
 must match the submitted sequence and canonical event kind before acceptance.
+
+## Fifty-fifth Phase 0 slice
+
+The Capture library now submits normalized credential candidates to Core for
+Provider-side validation and atomic persistence. Local validation bounds field
+count and size, rejects duplicate or non-Provider purposes, enforces Bootstrap
+account metadata rules, and derives the Provider ID from the claimed session.
+
+Credential JSON is serialized into an HTTP body whose owning allocation is
+zeroized on drop. Response acceptance requires immutable session continuity, a
+completed account binding, matching credential count and session kind, and a
+valid Provider status; only then is the in-memory Bootstrap access token
+cleared and the local snapshot advanced to completed.
