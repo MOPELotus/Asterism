@@ -240,3 +240,13 @@ is zero or cannot be represented by Scheduler persistence.
 This remains a Provider constraint rather than a Provider-owned timer. The Core
 schedule-management surface applies the floor to a user's desired interval in
 the next slice.
+
+## Seventeenth Phase 0 slice
+
+The seventeenth checkpoint persists a user's desired scan interval separately
+from the effective interval enforced by Core. Existing schedules are migrated
+with identical desired and effective values, while new writes reject zero,
+unrepresentable, or shorter-than-desired effective intervals.
+
+Keeping both values allows a later Provider metadata revision to recalculate
+the effective floor without silently replacing the user's preference.

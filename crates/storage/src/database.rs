@@ -131,7 +131,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 12);
+        assert_eq!(migration_count, 13);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -149,5 +149,35 @@ mod tests {
             .collect();
         assert!(names.contains(&"encrypted_data".to_owned()));
         assert!(!names.iter().any(|name| name == "plaintext"));
+    }
+
+    #[tokio::test]
+    async fn desired_scan_interval_migration_backfills_existing_schedules() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE scan_schedules (\
+                 id TEXT PRIMARY KEY NOT NULL,\
+                 interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0)\
+             ) STRICT;\
+             INSERT INTO scan_schedules (id, interval_seconds) VALUES ('schedule-a', 90);",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/013_scan_schedule_desired_interval.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let desired: i64 = sqlx::query_scalar(
+            "SELECT desired_interval_seconds FROM scan_schedules WHERE id = 'schedule-a'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(desired, 90);
     }
 }

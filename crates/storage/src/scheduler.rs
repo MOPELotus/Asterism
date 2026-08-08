@@ -193,17 +193,24 @@ impl ScanScheduleRepository for SqliteSchedulerRepository {
             .map_err(|_| StorageError::InvalidData("scan interval is too large".to_owned()))?;
         let row = sqlx::query(
             "INSERT INTO scan_schedules \
-             (id, provider_account_id, interval_seconds, next_run_at, enabled, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             (id, provider_account_id, desired_interval_seconds, interval_seconds, next_run_at, \
+              enabled, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(provider_account_id) DO UPDATE SET \
+                 desired_interval_seconds = excluded.desired_interval_seconds, \
                  interval_seconds = excluded.interval_seconds, \
                  next_run_at = excluded.next_run_at, enabled = excluded.enabled, \
                  updated_at = excluded.updated_at \
-             RETURNING id, provider_account_id, interval_seconds, next_run_at, enabled, \
-                       created_at, updated_at",
+             RETURNING id, provider_account_id, desired_interval_seconds, interval_seconds, \
+                       next_run_at, enabled, created_at, updated_at",
         )
         .bind(schedule.id.to_string())
         .bind(schedule.provider_account_id.to_string())
+        .bind(
+            i64::try_from(schedule.desired_interval_seconds).map_err(|_| {
+                StorageError::InvalidData("desired scan interval is too large".to_owned())
+            })?,
+        )
         .bind(interval_seconds)
         .bind(encode_timestamp(schedule.next_run_at))
         .bind(i64::from(schedule.enabled))
@@ -219,8 +226,8 @@ impl ScanScheduleRepository for SqliteSchedulerRepository {
         account_id: ProviderAccountId,
     ) -> Result<Option<ScanSchedule>, StorageError> {
         let row = sqlx::query(
-            "SELECT id, provider_account_id, interval_seconds, next_run_at, enabled, \
-                    created_at, updated_at \
+            "SELECT id, provider_account_id, desired_interval_seconds, interval_seconds, \
+                    next_run_at, enabled, created_at, updated_at \
              FROM scan_schedules WHERE provider_account_id = ?",
         )
         .bind(account_id.to_string())
@@ -241,8 +248,8 @@ impl ScanScheduleRepository for SqliteSchedulerRepository {
         }
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
         let rows = sqlx::query(
-            "SELECT id, provider_account_id, interval_seconds, next_run_at, enabled, \
-                    created_at, updated_at \
+            "SELECT id, provider_account_id, desired_interval_seconds, interval_seconds, \
+                    next_run_at, enabled, created_at, updated_at \
              FROM scan_schedules \
              WHERE enabled = 1 AND next_run_at <= ? \
              ORDER BY next_run_at, id LIMIT ?",
@@ -310,6 +317,10 @@ impl ScanScheduleRepository for SqliteSchedulerRepository {
 }
 
 fn decode_scan_schedule(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSchedule, StorageError> {
+    let desired_interval_seconds =
+        u64::try_from(row.try_get::<i64, _>("desired_interval_seconds")?).map_err(|_| {
+            StorageError::InvalidData("desired scan interval is negative".to_owned())
+        })?;
     let interval_seconds = u64::try_from(row.try_get::<i64, _>("interval_seconds")?)
         .map_err(|_| StorageError::InvalidData("scan interval is negative".to_owned()))?;
     let enabled = match row.try_get::<i64, _>("enabled")? {
@@ -326,6 +337,7 @@ fn decode_scan_schedule(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSchedule, S
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
         provider_account_id: ProviderAccountId::from_str(row.try_get("provider_account_id")?)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        desired_interval_seconds,
         interval_seconds,
         next_run_at: decode_timestamp(row.try_get("next_run_at")?)?,
         enabled,
@@ -503,6 +515,7 @@ mod tests {
         let schedule = ScanSchedule {
             id: ScheduleId::new(),
             provider_account_id: account_id,
+            desired_interval_seconds: 30,
             interval_seconds: 30,
             next_run_at: now - Duration::seconds(95),
             enabled: true,

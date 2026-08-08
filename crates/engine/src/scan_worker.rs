@@ -201,6 +201,7 @@ mod tests {
             .upsert_scan_schedule(&ScanSchedule {
                 id: ScheduleId::new(),
                 provider_account_id: account.id,
+                desired_interval_seconds: 60,
                 interval_seconds: 60,
                 next_run_at: now,
                 enabled: true,

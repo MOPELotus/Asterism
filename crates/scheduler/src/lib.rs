@@ -22,6 +22,7 @@ pub struct ScheduledJob {
 pub struct ScanSchedule {
     pub id: ScheduleId,
     pub provider_account_id: ProviderAccountId,
+    pub desired_interval_seconds: u64,
     pub interval_seconds: u64,
     pub next_run_at: Timestamp,
     pub enabled: bool,
@@ -38,11 +39,16 @@ impl ScanSchedule {
     /// Returns [`ScanScheduleError`] for a zero or unrepresentable interval, or
     /// timestamps that move backwards across the schedule lifecycle.
     pub fn validate(&self) -> Result<(), ScanScheduleError> {
-        if self.interval_seconds == 0 {
+        if self.desired_interval_seconds == 0 || self.interval_seconds == 0 {
             return Err(ScanScheduleError::ZeroInterval);
         }
-        if i64::try_from(self.interval_seconds).is_err() {
+        if i64::try_from(self.desired_interval_seconds).is_err()
+            || i64::try_from(self.interval_seconds).is_err()
+        {
             return Err(ScanScheduleError::IntervalOutOfRange);
+        }
+        if self.interval_seconds < self.desired_interval_seconds {
+            return Err(ScanScheduleError::EffectiveIntervalTooShort);
         }
         if self.updated_at < self.created_at {
             return Err(ScanScheduleError::InvalidTimestamps);
@@ -57,6 +63,8 @@ pub enum ScanScheduleError {
     ZeroInterval,
     #[error("scan schedule interval is outside the supported clock range")]
     IntervalOutOfRange,
+    #[error("effective scan interval must not be shorter than the desired interval")]
+    EffectiveIntervalTooShort,
     #[error("scan schedule lifecycle timestamps move backwards")]
     InvalidTimestamps,
 }
@@ -218,6 +226,7 @@ mod tests {
         let mut schedule = ScanSchedule {
             id: ScheduleId::new(),
             provider_account_id: ProviderAccountId::new(),
+            desired_interval_seconds: 60,
             interval_seconds: 60,
             next_run_at: now,
             enabled: true,
@@ -227,6 +236,11 @@ mod tests {
         assert_eq!(schedule.validate(), Ok(()));
         schedule.interval_seconds = 0;
         assert_eq!(schedule.validate(), Err(ScanScheduleError::ZeroInterval));
+        schedule.interval_seconds = 30;
+        assert_eq!(
+            schedule.validate(),
+            Err(ScanScheduleError::EffectiveIntervalTooShort)
+        );
         schedule.interval_seconds = 60;
         schedule.updated_at = now - chrono::Duration::seconds(1);
         assert_eq!(
