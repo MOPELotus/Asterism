@@ -104,6 +104,7 @@ impl CaptureClient {
         &self,
         claimed: &mut ClaimedCaptureSession,
     ) -> anyhow::Result<AuthBootstrapSession> {
+        claimed.ensure_live()?;
         let session_id = claimed.session.id;
         let url = self
             .base_url
@@ -121,10 +122,17 @@ impl CaptureClient {
             .send()
             .await
             .context("failed to poll the Asterism pairing session")?;
-        let snapshot: AuthBootstrapSession =
-            deserialize_response(response, &[StatusCode::OK]).await?;
+        let access_rejected = response.status() == StatusCode::UNAUTHORIZED;
+        let result = deserialize_response(response, &[StatusCode::OK]).await;
+        if access_rejected {
+            claimed.invalidate_access();
+        }
+        let snapshot: AuthBootstrapSession = result?;
         validate_session_progress(&claimed.session, &snapshot)?;
         claimed.session = snapshot.clone();
+        if claimed.session.state != AuthBootstrapState::Claimed {
+            claimed.invalidate_access();
+        }
         Ok(snapshot)
     }
 
@@ -143,6 +151,7 @@ impl CaptureClient {
         claimed: &mut ClaimedCaptureSession,
         kind: AuthBootstrapClientEventKind,
     ) -> anyhow::Result<CaptureEventReceipt> {
+        claimed.ensure_live()?;
         let session_id = claimed.session.id;
         let sequence = claimed.next_sequence;
         AuthBootstrapClientEvent::new(session_id, sequence, kind.clone(), Utc::now())
@@ -167,8 +176,12 @@ impl CaptureClient {
             .send()
             .await
             .context("failed to record the Capture status event")?;
-        let receipt: CaptureEventReceipt =
-            deserialize_response(response, &[StatusCode::OK, StatusCode::CREATED]).await?;
+        let access_rejected = response.status() == StatusCode::UNAUTHORIZED;
+        let result = deserialize_response(response, &[StatusCode::OK, StatusCode::CREATED]).await;
+        if access_rejected {
+            claimed.invalidate_access();
+        }
+        let receipt: CaptureEventReceipt = result?;
         receipt
             .event
             .validate()
@@ -200,6 +213,7 @@ impl CaptureClient {
         claimed: &mut ClaimedCaptureSession,
         submission: CaptureCredentialSubmission,
     ) -> anyhow::Result<CaptureCredentialAccepted> {
+        claimed.ensure_live()?;
         submission.validate_for(&claimed.session)?;
         let session_id = claimed.session.id;
         let expected_count = submission.fields.len();
@@ -225,8 +239,12 @@ impl CaptureClient {
             .send()
             .await
             .context("failed to submit the captured credential")?;
-        let accepted: CaptureCredentialAccepted =
-            deserialize_response(response, &[StatusCode::OK]).await?;
+        let access_rejected = response.status() == StatusCode::UNAUTHORIZED;
+        let result = deserialize_response(response, &[StatusCode::OK]).await;
+        if access_rejected {
+            claimed.invalidate_access();
+        }
+        let accepted: CaptureCredentialAccepted = result?;
         validate_session_progress(&claimed.session, &accepted.session)?;
         if accepted.session.state != AuthBootstrapState::Completed
             || accepted.session.provider_account_id != Some(accepted.provider_account_id)
@@ -258,6 +276,21 @@ pub struct ClaimedCaptureSession {
 impl ClaimedCaptureSession {
     pub fn session(&self) -> &AuthBootstrapSession {
         &self.session
+    }
+
+    fn ensure_live(&mut self) -> anyhow::Result<()> {
+        if self.session.state != AuthBootstrapState::Claimed
+            || self.session.is_expired_at(Utc::now())
+            || self.access_token.expose_secret().is_empty()
+        {
+            self.invalidate_access();
+            bail!("Capture pairing session is no longer active");
+        }
+        Ok(())
+    }
+
+    fn invalidate_access(&mut self) {
+        self.access_token.zeroize();
     }
 
     #[cfg(test)]
@@ -602,8 +635,9 @@ async fn read_bounded_body(mut response: Response) -> anyhow::Result<Vec<u8>> {
 
 fn bootstrap_authorization(token: &SecretString) -> anyhow::Result<HeaderValue> {
     validate_bootstrap_token(token.expose_secret())?;
-    let plaintext = Zeroizing::new(format!("Bootstrap {}", token.expose_secret()));
-    let mut value = HeaderValue::from_str(&plaintext)
+    let plaintext = Zeroizing::new(format!("Bootstrap {}", token.expose_secret()).into_bytes());
+    let shared = Bytes::from_owner(ZeroizingRequestBody(plaintext));
+    let mut value = HeaderValue::from_maybe_shared(shared)
         .context("pairing token cannot be represented as an HTTP header")?;
     value.set_sensitive(true);
     Ok(value)
@@ -907,6 +941,57 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn rejected_or_locally_expired_access_is_cleared_immediately() {
+        let app = Router::new().route(
+            "/api/v1/auth-bootstrap/sessions/{session_id}/stream",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": {
+                            "code": "invalid_bootstrap_token",
+                            "message": "the Bootstrap token is invalid or expired"
+                        }
+                    })),
+                )
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = CaptureClient::new(&format!("http://{address}"), true).unwrap();
+        let session_id = AuthBootstrapSessionId::from_str(SESSION_ID).unwrap();
+        let mut rejected = claimed_response().into_session(session_id).unwrap();
+
+        assert!(client.poll_session(&mut rejected).await.is_err());
+        assert!(rejected.access_token().expose_secret().is_empty());
+
+        let now = Utc::now();
+        let expired: ClaimResponse = serde_json::from_value(json!({
+            "session": {
+                "id": SESSION_ID,
+                "owner_user_id": "0198d59e-0194-7ad5-8d2d-e0dbcb332db1",
+                "provider_id": "cidaren",
+                "provider_account_id": null,
+                "purpose": "add_account",
+                "required_recipe_version": 1,
+                "state": "claimed",
+                "created_at": now - ChronoDuration::minutes(20),
+                "updated_at": now - ChronoDuration::minutes(19),
+                "expires_at": now - ChronoDuration::minutes(10),
+                "claimed_at": now - ChronoDuration::minutes(19),
+                "revision": 2
+            },
+            "access_token": "ast_boot_access_test"
+        }))
+        .unwrap();
+        let mut expired = expired.into_session(session_id).unwrap();
+        assert!(client.poll_session(&mut expired).await.is_err());
+        assert!(expired.access_token().expose_secret().is_empty());
+        server.abort();
+    }
+
     #[test]
     fn claim_rejects_a_mismatched_or_non_claimed_response() {
         let now = Utc::now();
@@ -931,6 +1016,14 @@ mod tests {
         let session_id = AuthBootstrapSessionId::from_str(SESSION_ID).unwrap();
 
         assert!(response.into_session(session_id).is_err());
+    }
+
+    #[test]
+    fn bootstrap_authorization_is_marked_sensitive() {
+        let token = SecretString::new("ast_pair_test");
+        let authorization = bootstrap_authorization(&token).unwrap();
+        assert!(authorization.is_sensitive());
+        assert!(!format!("{authorization:?}").contains("ast_pair_test"));
     }
 
     #[test]
@@ -1004,10 +1097,10 @@ mod tests {
             "purpose": "add_account",
             "required_recipe_version": 1,
             "state": "claimed",
-            "created_at": "2026-08-09T00:00:00Z",
-            "updated_at": "2026-08-09T00:00:01Z",
-            "expires_at": "2026-08-09T00:10:00Z",
-            "claimed_at": "2026-08-09T00:00:01Z",
+            "created_at": "2099-08-09T00:00:00Z",
+            "updated_at": "2099-08-09T00:00:01Z",
+            "expires_at": "2099-08-09T00:10:00Z",
+            "claimed_at": "2099-08-09T00:00:01Z",
             "revision": 2
         })
     }
@@ -1016,7 +1109,7 @@ mod tests {
         let mut session = claimed_session_json();
         session["provider_account_id"] = Value::String(ACCOUNT_ID.to_owned());
         session["state"] = Value::String("completed".to_owned());
-        session["updated_at"] = Value::String("2026-08-09T00:00:02Z".to_owned());
+        session["updated_at"] = Value::String("2099-08-09T00:00:02Z".to_owned());
         session["revision"] = Value::from(3);
         session
     }

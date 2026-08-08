@@ -121,23 +121,41 @@ pub async fn run_manual(
     validate_command(&command)?;
     let session_id = AuthBootstrapSessionId::from_str(&command.session_id)
         .context("session ID must be a valid UUID")?;
-    let pairing_token = read_secret("Pairing token: ", MAX_BOOTSTRAP_TOKEN_BYTES)?;
-    let mut claimed = client.claim(session_id, &pairing_token).await?;
+    let pairing_token = read_secret("Pairing token: ", MAX_BOOTSTRAP_TOKEN_BYTES).await?;
+    let claimed = client.claim(session_id, &pairing_token).await?;
     drop(pairing_token);
+    let remaining = claimed
+        .session()
+        .expires_at
+        .signed_duration_since(Utc::now())
+        .to_std()
+        .context("claimed pairing session is already expired")?;
+    match tokio::time::timeout(remaining, complete_manual(client, command, claimed)).await {
+        Ok(result) => result,
+        Err(_) => bail!("Capture pairing session expired and local access was cleared"),
+    }
+}
+
+async fn complete_manual(
+    client: &CaptureClient,
+    command: ManualCommand,
+    mut claimed: asterism_capture::ClaimedCaptureSession,
+) -> anyhow::Result<ManualCredentialSummary> {
     client.poll_session(&mut claimed).await?;
     client
         .record_event(&mut claimed, AuthBootstrapClientEventKind::ClientReady)
         .await?;
 
     let display_name = if claimed.session().purpose == AuthBootstrapPurpose::AddAccount {
-        Some(read_text("Account display name: ", MAX_DISPLAY_NAME_BYTES)?)
+        Some(read_text("Account display name: ", MAX_DISPLAY_NAME_BYTES).await?)
     } else {
         None
     };
-    let tenant = command
-        .with_tenant
-        .then(|| read_secret("Tenant: ", MAX_TENANT_BYTES))
-        .transpose()?;
+    let tenant = if command.with_tenant {
+        Some(read_secret("Tenant: ", MAX_TENANT_BYTES).await?)
+    } else {
+        None
+    };
     client
         .record_event(
             &mut claimed,
@@ -146,20 +164,18 @@ pub async fn run_manual(
             },
         )
         .await?;
-    let fields = command
-        .fields
-        .iter()
-        .map(|purpose| {
-            let value = read_secret(
-                &format!(
-                    "{}: ",
-                    purpose.to_possible_value().expect("known value").get_name()
-                ),
-                MAX_CREDENTIAL_FIELD_BYTES,
-            )?;
-            CaptureCredentialField::new((*purpose).into(), value)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut fields = Vec::with_capacity(command.fields.len());
+    for purpose in &command.fields {
+        let value = read_secret(
+            &format!(
+                "{}: ",
+                purpose.to_possible_value().expect("known value").get_name()
+            ),
+            MAX_CREDENTIAL_FIELD_BYTES,
+        )
+        .await?;
+        fields.push(CaptureCredentialField::new((*purpose).into(), value)?);
+    }
     client
         .record_event(
             &mut claimed,

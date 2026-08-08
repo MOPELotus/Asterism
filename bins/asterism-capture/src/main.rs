@@ -3,12 +3,12 @@ mod manual;
 
 use std::io::{self, Write};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use asterism_capture::CaptureClient;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-use crate::manual::{ManualCommand, run_manual};
+use crate::manual::{ManualCommand, ManualCredentialSummary, run_manual};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -43,9 +43,24 @@ async fn main() -> anyhow::Result<()> {
             let health = client.health().await?;
             write_json(&health)?;
         }
-        Command::Manual(command) => write_json(&run_manual(&client, command).await?)?,
+        Command::Manual(command) => {
+            write_json(&run_manual_until_cancel(&client, command).await?)?;
+        }
     }
     Ok(())
+}
+
+async fn run_manual_until_cancel(
+    client: &CaptureClient,
+    command: ManualCommand,
+) -> anyhow::Result<ManualCredentialSummary> {
+    tokio::select! {
+        result = run_manual(client, command) => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("failed to listen for local cancellation")?;
+            bail!("manual Capture workflow cancelled locally; the server session remains owner-controlled")
+        }
+    }
 }
 
 fn write_json(value: &impl Serialize) -> anyhow::Result<()> {

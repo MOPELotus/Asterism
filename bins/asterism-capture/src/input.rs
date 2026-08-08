@@ -1,10 +1,40 @@
-use std::io::{self, IsTerminal, Write};
+use std::{
+    io::{self, IsTerminal, Write},
+    thread,
+};
 
 use anyhow::{Context, bail};
 use asterism_secrets::SecretString;
 use zeroize::Zeroize;
 
-pub fn read_secret(prompt: &str, maximum_bytes: usize) -> anyhow::Result<SecretString> {
+pub async fn read_secret(prompt: &str, maximum_bytes: usize) -> anyhow::Result<SecretString> {
+    let prompt = prompt.to_owned();
+    run_input(move || read_secret_blocking(&prompt, maximum_bytes)).await
+}
+
+pub async fn read_text(prompt: &str, maximum_bytes: usize) -> anyhow::Result<String> {
+    let prompt = prompt.to_owned();
+    run_input(move || read_text_blocking(&prompt, maximum_bytes)).await
+}
+
+async fn run_input<T, F>(operation: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    thread::Builder::new()
+        .name("asterism-capture-input".to_owned())
+        .spawn(move || {
+            let _ = sender.send(operation());
+        })
+        .context("failed to start the terminal input worker")?;
+    receiver
+        .await
+        .context("terminal input worker stopped unexpectedly")?
+}
+
+fn read_secret_blocking(prompt: &str, maximum_bytes: usize) -> anyhow::Result<SecretString> {
     let mut value = if io::stdin().is_terminal() {
         rpassword::prompt_password(prompt).context("failed to read hidden terminal input")?
     } else {
@@ -18,7 +48,7 @@ pub fn read_secret(prompt: &str, maximum_bytes: usize) -> anyhow::Result<SecretS
     Ok(SecretString::new(value))
 }
 
-pub fn read_text(prompt: &str, maximum_bytes: usize) -> anyhow::Result<String> {
+fn read_text_blocking(prompt: &str, maximum_bytes: usize) -> anyhow::Result<String> {
     if io::stdin().is_terminal() {
         let stdout = io::stdout();
         let mut output = stdout.lock();

@@ -165,7 +165,7 @@ cargo run -p asterism-capture -- \
   --field cookie
 ```
 
-复合凭据可按输入顺序重复 `--field`，需要 tenant 时添加 `--with-tenant`。Capture 只主动连接配置的 Asterism HTTPS 地址；明文 HTTP 仅能通过显式开发开关连接 loopback。
+复合凭据可按输入顺序重复 `--field`，需要 tenant 时添加 `--with-tenant`。Capture 只主动连接配置的 Asterism HTTPS 地址；明文 HTTP 仅能通过显式开发开关连接 loopback。会话到期、服务端拒绝 access token、提交成功或本地按下 Ctrl+C 时，Capture 会立即丢弃本地访问材料；服务端会话取消仍由已认证的 owner 通过 WebUI / CLI 发起。
 
 Provider Account 的 owner 始终由认证身份决定，CLI 和 API 都不接受调用方指定 `owner_id`。`--provider` 必须使用小写 canonical `ProviderId`；账号展示名属于本地用户数据，不作为项目内的平台名称或标识。
 

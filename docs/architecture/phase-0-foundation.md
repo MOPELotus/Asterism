@@ -750,3 +750,18 @@ and `validating` events, and derives Provider and account semantics from the
 Core-owned session. Manual authentication choices are limited to imported or
 assisted sessions; native password, QR, and external OAuth remain separate
 Provider-owned flows.
+
+## Fifty-seventh Phase 0 slice
+
+Capture now applies the claimed session deadline to the remaining manual
+workflow and handles local Ctrl+C without requesting owner-only server
+mutations. Terminal reads run on detached input workers so cancellation and the
+session deadline remain observable while a prompt is waiting; dropping the
+workflow releases all zeroizing secret owners.
+
+The local access token is explicitly cleared on expiry, a Bootstrap 401,
+successful credential completion, or ordinary session drop. Authorization
+headers and credential request bodies share zeroizing backing allocations with
+the HTTP request, while response buffers are also zeroized after decoding.
+Server-side cancellation remains an authenticated owner action and is observed
+by Capture as access rejection rather than broadened local authority.
