@@ -2,6 +2,7 @@
 
 mod account;
 mod auth;
+mod auth_bootstrap;
 mod rate_limit;
 mod task;
 
@@ -35,6 +36,7 @@ pub struct ApiState {
     secure_cookies: bool,
     secret_store: Option<SqliteSecretStore>,
     login_rate_limiter: rate_limit::LoginRateLimiter,
+    bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter,
 }
 
 impl ApiState {
@@ -51,6 +53,7 @@ impl ApiState {
             secure_cookies,
             secret_store: None,
             login_rate_limiter: rate_limit::LoginRateLimiter::default(),
+            bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter::default(),
         }
     }
 
@@ -66,6 +69,15 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/auth/session", get(auth::current_identity))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/providers", get(list_providers))
+        .route(
+            "/api/v1/auth-bootstrap/sessions",
+            post(auth_bootstrap::create_auth_bootstrap_session),
+        )
+        .route(
+            "/api/v1/auth-bootstrap/sessions/{session_id}",
+            get(auth_bootstrap::get_auth_bootstrap_session)
+                .delete(auth_bootstrap::cancel_auth_bootstrap_session),
+        )
         .route(
             "/api/v1/provider-accounts",
             get(account::list_provider_accounts).post(account::create_provider_account),
@@ -121,6 +133,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/openapi.json", get(openapi))
         .route("/api/v1/auth/bootstrap", post(auth::bootstrap_master))
         .route("/api/v1/auth/login", post(auth::login))
+        .route(
+            "/api/v1/auth-bootstrap/sessions/{session_id}/claim",
+            post(auth_bootstrap::claim_auth_bootstrap_session),
+        )
         .merge(protected)
         .with_state(state)
         .fallback(not_found)
@@ -206,6 +222,41 @@ async fn openapi() -> Json<Value> {
                 "responses": {"204": {"description": "Web session revoked"}, "400": {"description": "Not a Web session"}, "401": {"description": "Authentication required"}}
             }},
             "/api/v1/providers": {"get": {"operationId": "listProviders", "security": [{"cookieAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Registered provider metadata"}}}},
+            "/api/v1/auth-bootstrap/sessions": {"post": {
+                "operationId": "createAuthBootstrapSession",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateAuthBootstrapSession"}}}},
+                "responses": {
+                    "201": {"description": "Pairing session created; plaintext pairing token returned once"},
+                    "400": {"description": "Invalid purpose or account binding"},
+                    "404": {"description": "Provider account not found"},
+                    "409": {"description": "Provider has no Capture recipe"}
+                }
+            }},
+            "/api/v1/auth-bootstrap/sessions/{session_id}": {
+                "get": {
+                    "operationId": "getAuthBootstrapSession",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                    "responses": {"200": {"description": "Owner-scoped pairing session"}, "404": {"description": "Pairing session not found"}}
+                },
+                "delete": {
+                    "operationId": "cancelAuthBootstrapSession",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                    "responses": {"200": {"description": "Pairing session cancelled or expired"}, "404": {"description": "Pairing session not found"}, "409": {"description": "Pairing session is terminal or changed"}}
+                }
+            },
+            "/api/v1/auth-bootstrap/sessions/{session_id}/claim": {"post": {
+                "operationId": "claimAuthBootstrapSession",
+                "security": [{"bootstrapAuth": []}],
+                "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "responses": {
+                    "200": {"description": "Pairing claimed; scoped access token returned once"},
+                    "401": {"description": "Pairing token is invalid, expired, cancelled, or already used"},
+                    "429": {"description": "Pairing claim rate limit reached"}
+                }
+            }},
             "/api/v1/provider-accounts": {
                 "get": {
                     "operationId": "listProviderAccounts",
@@ -375,7 +426,8 @@ async fn openapi() -> Json<Value> {
         "components": {
             "securitySchemes": {
                 "cookieAuth": {"type": "apiKey", "in": "cookie", "name": "asterism_session"},
-                "bearerAuth": {"type": "http", "scheme": "bearer"}
+                "bearerAuth": {"type": "http", "scheme": "bearer"},
+                "bootstrapAuth": {"type": "apiKey", "in": "header", "name": "Authorization", "description": "Bootstrap followed by the one-time pairing token"}
             },
             "schemas": {
                 "Credentials": {
@@ -404,6 +456,16 @@ async fn openapi() -> Json<Value> {
                         "provider_id": {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"},
                         "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
                         "tenant": {"type": ["string", "null"], "maxLength": 256}
+                    },
+                    "additionalProperties": false
+                },
+                "CreateAuthBootstrapSession": {
+                    "type": "object",
+                    "required": ["provider_id", "purpose"],
+                    "properties": {
+                        "provider_id": {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"},
+                        "provider_account_id": {"type": ["string", "null"], "format": "uuid"},
+                        "purpose": {"type": "string", "enum": ["add_account", "reauthenticate", "repair_session"]}
                     },
                     "additionalProperties": false
                 },
@@ -527,6 +589,15 @@ impl ApiError {
         }
     }
 
+    fn invalid_bootstrap_token() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_bootstrap_token",
+            message: "the pairing token is invalid or expired".to_owned(),
+            retry_after_seconds: None,
+        }
+    }
+
     fn forbidden() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
@@ -628,7 +699,11 @@ impl IntoResponse for ApiError {
         if self.status == StatusCode::UNAUTHORIZED {
             response.headers_mut().insert(
                 header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Bearer realm=\"asterism\""),
+                if self.code == "invalid_bootstrap_token" {
+                    HeaderValue::from_static("Bootstrap realm=\"asterism\"")
+                } else {
+                    HeaderValue::from_static("Bearer realm=\"asterism\"")
+                },
             );
         }
         if let Some(seconds) = self.retry_after_seconds
@@ -929,6 +1004,25 @@ mod tests {
         body["id"].as_str().unwrap().to_owned()
     }
 
+    async fn create_test_auth_bootstrap(app: &Router, cookie: &str) -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth-bootstrap/sessions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from(
+                        r#"{"provider_id":"provider-alpha","purpose":"add_account"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        response_json(response).await
+    }
+
     async fn response_json(response: Response) -> Value {
         let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
         serde_json::from_slice(&body).unwrap()
@@ -1185,6 +1279,178 @@ mod tests {
             serde_json::from_str::<AuthState>(&auth_state).unwrap(),
             AuthState::Authenticated
         );
+    }
+
+    #[tokio::test]
+    async fn auth_bootstrap_api_issues_and_claims_one_time_tokens() {
+        let (app, database) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = create_test_auth_bootstrap(&app, &cookie).await;
+        let session_id = created["session"]["id"].as_str().unwrap().to_owned();
+        let pairing_token = created["pairing_token"].as_str().unwrap().to_owned();
+        assert!(pairing_token.starts_with("ast_pair_"));
+        assert_eq!(created["session"]["required_recipe_version"], 3);
+        assert_eq!(created["session"]["state"], "awaiting_claim");
+
+        let fetched = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/auth-bootstrap/sessions/{session_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        assert!(response_json(fetched).await.get("pairing_token").is_none());
+        let claim_path = format!("/api/v1/auth-bootstrap/sessions/{session_id}/claim");
+        let wrong = app
+            .clone()
+            .oneshot(
+                Request::post(&claim_path)
+                    .header(header::AUTHORIZATION, "Bootstrap ast_pair_wrong")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_001))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            wrong.headers()[header::WWW_AUTHENTICATE],
+            "Bootstrap realm=\"asterism\""
+        );
+        let claimed = app
+            .clone()
+            .oneshot(
+                Request::post(&claim_path)
+                    .header(header::AUTHORIZATION, format!("Bootstrap {pairing_token}"))
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_001))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::OK);
+        assert_eq!(claimed.headers()[header::CACHE_CONTROL], "no-store");
+        let claimed = response_json(claimed).await;
+        assert_eq!(claimed["session"]["state"], "claimed");
+        assert!(
+            claimed["access_token"]
+                .as_str()
+                .unwrap()
+                .starts_with("ast_boot_")
+        );
+        let replay = app
+            .clone()
+            .oneshot(
+                Request::post(claim_path)
+                    .header(header::AUTHORIZATION, format!("Bootstrap {pairing_token}"))
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_001))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? \
+             AND action IN ('auth_bootstrap_session_created', 'auth_bootstrap_session_claimed')",
+        )
+        .bind(session_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 2);
+    }
+
+    #[tokio::test]
+    async fn auth_bootstrap_owner_cancel_invalidates_the_pairing_token() {
+        let (app, _) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let cancellable = create_test_auth_bootstrap(&app, &cookie).await;
+        let cancellable_id = cancellable["session"]["id"].as_str().unwrap();
+        let cancellable_token = cancellable["pairing_token"].as_str().unwrap();
+        let cancelled = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/auth-bootstrap/sessions/{cancellable_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        assert_eq!(response_json(cancelled).await["state"], "cancelled");
+        let cancelled_claim = app
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/auth-bootstrap/sessions/{cancellable_id}/claim"
+                ))
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bootstrap {cancellable_token}"),
+                )
+                .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_001))))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled_claim.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_bootstrap_claim_is_rate_limited_per_session_and_ip() {
+        let (app, _) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = create_test_auth_bootstrap(&app, &cookie).await;
+        let session_id = created["session"]["id"].as_str().unwrap();
+        let claim_path = format!("/api/v1/auth-bootstrap/sessions/{session_id}/claim");
+        for attempt in 0..6 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(&claim_path)
+                        .header(header::AUTHORIZATION, "Bootstrap ast_pair_wrong")
+                        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 2], 42_002))))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if attempt < 5 {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::TOO_MANY_REQUESTS
+                }
+            );
+        }
     }
 
     #[tokio::test]
@@ -1703,6 +1969,9 @@ mod tests {
             "/api/v1/auth/login",
             "/api/v1/auth/session",
             "/api/v1/auth/logout",
+            "/api/v1/auth-bootstrap/sessions",
+            "/api/v1/auth-bootstrap/sessions/{session_id}",
+            "/api/v1/auth-bootstrap/sessions/{session_id}/claim",
             "/api/v1/service-tokens",
             "/api/v1/service-tokens/{token_id}",
             "/api/v1/provider-accounts",
@@ -1722,6 +1991,11 @@ mod tests {
         assert_eq!(
             document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
             "bearer"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/claim"]["post"]["security"]
+                [0]["bootstrapAuth"],
+            json!([])
         );
     }
 

@@ -542,3 +542,17 @@ A Capture recipe declaration is valid only when the same Provider advertises
 and implements Authentication. Providers without a bundled recipe remain
 usable through their other authentication methods but cannot start a Capture
 bootstrap flow.
+
+## Forty-first Phase 0 slice
+
+The forty-first checkpoint exposes owner-authenticated creation, read, and
+cancellation for Capture pairings plus the public one-time claim endpoint.
+Creation derives the recipe version from registered Provider metadata and
+returns the pairing plaintext once; later owner reads contain only the
+serializable session.
+
+Claim accepts only `Authorization: Bootstrap <pairing-token>`, has an isolated
+per-session and per-IP rate limiter, and returns the scoped access plaintext
+once with `no-store`. Missing, wrong, expired, cancelled, and replayed tokens
+share the same 401 response and Bootstrap challenge. OpenAPI distinguishes this
+temporary scheme from long-lived Web and service-token authentication.
