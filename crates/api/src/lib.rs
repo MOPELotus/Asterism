@@ -8,7 +8,7 @@ mod task;
 use std::sync::Arc;
 
 use asterism_provider_api::{ProviderMetadata, ProviderRegistry};
-use asterism_storage::Database;
+use asterism_storage::{Database, SqliteSecretStore};
 use axum::{
     Extension, Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -33,6 +33,7 @@ pub struct ApiState {
     providers: Arc<ProviderRegistry>,
     session_ttl_seconds: u64,
     secure_cookies: bool,
+    secret_store: Option<SqliteSecretStore>,
     login_rate_limiter: rate_limit::LoginRateLimiter,
 }
 
@@ -48,8 +49,15 @@ impl ApiState {
             providers,
             session_ttl_seconds,
             secure_cookies,
+            secret_store: None,
             login_rate_limiter: rate_limit::LoginRateLimiter::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_secret_store(mut self, secret_store: SqliteSecretStore) -> Self {
+        self.secret_store = Some(secret_store);
+        self
     }
 }
 
@@ -126,6 +134,7 @@ async fn health(State(state): State<ApiState>) -> Result<Json<HealthResponse>, A
         registered_providers: state.providers.len(),
         outbox_pending: outbox.pending,
         outbox_dead_letter: outbox.dead_letter,
+        secret_store_configured: state.secret_store.is_some(),
     }))
 }
 
@@ -354,6 +363,7 @@ pub struct HealthResponse {
     pub registered_providers: usize,
     pub outbox_pending: u64,
     pub outbox_dead_letter: u64,
+    pub secret_store_configured: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -708,6 +718,7 @@ mod tests {
         let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
         let health: HealthResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(health.status, "ok");
+        assert!(!health.secret_store_configured);
     }
 
     #[tokio::test]

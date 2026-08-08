@@ -284,3 +284,15 @@ deletions are owner-authorized, version-checked, size-bounded, and audited
 without plaintext. The database migration backfills version one for existing
 blobs; daemon key configuration and Provider-account credential attachment are
 separate following slices.
+
+## Twenty-first Phase 0 slice
+
+The twenty-first checkpoint injects the SecretStore keyring into `asterismd`
+from process environment only. An explicit active key ID and a comma-separated
+set of base64-encoded 32-byte keys must appear together; no TOML field or CLI
+argument can carry key material, and parser failures never echo it.
+
+The API state retains the configured encrypted store for credential services,
+while `/health` exposes only a boolean readiness signal. Running without a
+keyring remains possible until a credential operation is requested, so existing
+non-Provider administration does not require a placeholder key.

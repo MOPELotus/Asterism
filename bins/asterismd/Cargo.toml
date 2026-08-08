@@ -14,8 +14,10 @@ asterism-config = { path = "../../crates/config" }
 asterism-engine = { path = "../../crates/engine" }
 asterism-provider-api = { path = "../../crates/provider-api" }
 asterism-scheduler = { path = "../../crates/scheduler" }
+asterism-secrets = { path = "../../crates/secrets" }
 asterism-storage = { path = "../../crates/storage" }
 axum.workspace = true
+base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 tokio.workspace = true
