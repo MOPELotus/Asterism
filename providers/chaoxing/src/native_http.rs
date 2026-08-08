@@ -6,19 +6,27 @@ use asterism_secrets::SecretString;
 use async_trait::async_trait;
 use reqwest::{
     Client, Response, StatusCode, Url,
-    header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, RETRY_AFTER},
+    header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, REFERER, RETRY_AFTER},
 };
 use scraper::{Html, Selector};
 use zeroize::Zeroize;
 
-use crate::{ChaoxingCourseRoute, ChaoxingInventoryDocument, ChaoxingInventoryTransport};
+use crate::{
+    ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingInventoryDocument,
+    ChaoxingInventoryTransport,
+};
 
 const COURSE_PAGE_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu";
+const COURSE_LIST_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata";
+const COURSE_INTERACTION_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction";
+const COURSE_LIST_REFERER: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans";
 const EXAM_LIST_BASE: &str = "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const WORK_LIST_PATH: &str = "/mooc2/work/list";
 const MAX_COOKIE_BYTES: usize = 64 * 1_024;
 const MAX_HTML_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_COURSE_FOLDERS: usize = 256;
+const MAX_COURSE_FOLDER_ID_BYTES: usize = 64;
 
 /// One short-lived Chaoxing Cookie header resolved through Core's secrets
 /// boundary. Its value is redacted and zeroized on drop.
@@ -121,6 +129,25 @@ impl NativeChaoxingInventoryTransport {
             .map_err(|error| classify_reqwest_error(&error))?;
         classify_response(response).await
     }
+
+    async fn post_course_list(
+        &self,
+        session: &ChaoxingCookieSession,
+        folder_id: &str,
+    ) -> ProviderResult<SensitiveHtml> {
+        let response = self
+            .client
+            .post(static_url(COURSE_LIST_BASE)?)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "text/html,application/xhtml+xml")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(REFERER, COURSE_LIST_REFERER)
+            .body(course_list_form(folder_id)?)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        classify_response(response).await
+    }
 }
 
 impl fmt::Debug for NativeChaoxingInventoryTransport {
@@ -157,6 +184,31 @@ impl ChaoxingInventoryTransport for NativeChaoxingInventoryTransport {
         self.get_html(&session, exam_list_url(route)?)
             .await?
             .into_inventory_document()
+    }
+}
+
+#[async_trait]
+impl ChaoxingCourseInventoryTransport for NativeChaoxingInventoryTransport {
+    async fn fetch_course_inventories(
+        &self,
+        context: &ProviderContext,
+    ) -> ProviderResult<Vec<ChaoxingInventoryDocument>> {
+        let session = self.sessions.resolve_session(context).await?;
+        let root = self.post_course_list(&session, "0").await?;
+        let interaction = self
+            .get_html(&session, static_url(COURSE_INTERACTION_BASE)?)
+            .await?;
+        let folder_ids = parse_course_folder_ids(interaction.as_str())?;
+        let mut documents = Vec::with_capacity(folder_ids.len() + 1);
+        documents.push(root.into_inventory_document()?);
+        for folder_id in folder_ids {
+            documents.push(
+                self.post_course_list(&session, &folder_id)
+                    .await?
+                    .into_inventory_document()?,
+            );
+        }
+        Ok(documents)
     }
 }
 
@@ -209,9 +261,57 @@ fn exam_list_url(route: ChaoxingCourseRoute<'_>) -> ProviderResult<Url> {
 }
 
 fn build_url(base: &str, query: &[(&str, &str)]) -> ProviderResult<Url> {
-    let mut url = Url::parse(base).map_err(|_| static_route_error())?;
+    let mut url = static_url(base)?;
     url.query_pairs_mut().extend_pairs(query.iter().copied());
     Ok(url)
+}
+
+fn static_url(value: &str) -> ProviderResult<Url> {
+    Url::parse(value).map_err(|_| static_route_error())
+}
+
+fn course_list_form(folder_id: &str) -> ProviderResult<String> {
+    if folder_id.len() > MAX_COURSE_FOLDER_ID_BYTES
+        || folder_id.is_empty()
+        || !folder_id.bytes().all(|byte| byte.is_ascii_digit())
+        || (folder_id.len() > 1 && folder_id.starts_with('0'))
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "Chaoxing course folder contains an invalid identity",
+        ));
+    }
+    Ok(format!(
+        "courseType=1&courseFolderId={folder_id}&query=&superstarClass=0"
+    ))
+}
+
+fn parse_course_folder_ids(html: &str) -> ProviderResult<Vec<String>> {
+    if html.len() > MAX_HTML_BYTES {
+        return Err(oversized_response());
+    }
+    let document = Html::parse_document(html);
+    let selector = Selector::parse("ul.file-list > li[fileid]")
+        .expect("static Chaoxing selector must be valid");
+    let mut folder_ids = Vec::new();
+    for folder in document.select(&selector) {
+        if folder_ids.len() == MAX_COURSE_FOLDERS {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing course folder count exceeds the size limit",
+            ));
+        }
+        let folder_id = folder.value().attr("fileid").unwrap_or_default();
+        course_list_form(folder_id)?;
+        if folder_id == "0" || folder_ids.iter().any(|known| known == folder_id) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "Chaoxing course folders contain a duplicate or root identity",
+            ));
+        }
+        folder_ids.push(folder_id.to_owned());
+    }
+    Ok(folder_ids)
 }
 
 fn discover_work_list_url(html: &str, route: ChaoxingCourseRoute<'_>) -> ProviderResult<Url> {
@@ -462,12 +562,16 @@ fn static_route_error() -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use asterism_provider_api::{ProviderRouteContext, RemoteCourse};
 
     use super::*;
 
     const COURSE_PAGE: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/course-page-with-work-iframe.html");
+    const COURSE_FOLDERS: &str =
+        include_str!("../../../fixtures/providers/chaoxing/courses/interaction-folders.html");
 
     #[test]
     fn routes_preserve_course_scope_and_discover_fresh_work_enc() {
@@ -486,6 +590,33 @@ mod tests {
         let work_url = discover_work_list_url(COURSE_PAGE, route).unwrap();
         assert_eq!(work_url.host_str(), Some("mooc1.chaoxing.com"));
         assert_eq!(query(&work_url, "enc").as_deref(), Some("SAFE_ENC"));
+    }
+
+    #[test]
+    fn course_folder_requests_are_bounded_and_deterministic() {
+        assert_eq!(
+            parse_course_folder_ids(COURSE_FOLDERS).unwrap(),
+            ["700".to_owned(), "701".to_owned()]
+        );
+        assert_eq!(
+            course_list_form("700").unwrap(),
+            "courseType=1&courseFolderId=700&query=&superstarClass=0"
+        );
+        for invalid in ["", "00", "folder", "7&query=private"] {
+            assert!(course_list_form(invalid).is_err());
+        }
+
+        let duplicate = COURSE_FOLDERS.replace("701", "700");
+        assert!(parse_course_folder_ids(&duplicate).is_err());
+        let oversized = (1..=MAX_COURSE_FOLDERS + 1).fold(String::new(), |mut html, folder_id| {
+            write!(
+                html,
+                "<ul class='file-list'><li fileid='{folder_id}'></li></ul>"
+            )
+            .unwrap();
+            html
+        });
+        assert!(parse_course_folder_ids(&oversized).is_err());
     }
 
     #[test]

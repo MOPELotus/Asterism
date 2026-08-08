@@ -11,6 +11,7 @@ compatibility.
 ```text
 fixtures/providers/chaoxing/
   courses/
+    interaction-folders.html
     list-mixed.html
     list-mixed.expected.json
   work/
@@ -26,12 +27,12 @@ fixtures/providers/chaoxing/
     list-mixed.expected.json
 ```
 
-The Course fixture covers class-scoped identity, unopened-course filtering,
-bounded metadata, ephemeral `cpi`, and strict allowlisting of the current course
-entry route. The Work course-page fixture covers strict discovery of a fresh
-Work iframe route. The mixed expectation files cover normalized identity, source
-module and remote state. The detail fixtures cover the conservative Work
-redirect classification.
+The Course fixtures cover bounded folder discovery, class-scoped identity,
+unopened-course filtering, bounded metadata, ephemeral `cpi`, and strict
+allowlisting of the current course entry route. The Work course-page fixture
+covers strict discovery of a fresh Work iframe route. The mixed expectation
+files cover normalized identity, source module and remote state. The detail
+fixtures cover the conservative Work redirect classification.
 
 ## Required live-sanitized fixture sets
 

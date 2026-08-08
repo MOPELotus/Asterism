@@ -860,3 +860,19 @@ the normalization and route-rejection invariants. The authenticated course-list
 transport, Core credential resolver, Provider registry entry, and real-account
 verification remain pending, so Chaoxing continues to report `Development` and
 is not available to daemon scans.
+
+## Sixty-fourth Phase 0 slice
+
+The Chaoxing Native HTTP adapter now also supplies the course inventory
+transport. One short-lived resolved Cookie session fetches the root
+`courselistdata` response, the interaction page, and every discovered course
+folder. Requests use the donor-observed form fields and interaction Referer;
+automatic redirects remain disabled by the shared networking client.
+
+Folder discovery accepts only canonical numeric identities, rejects root or
+duplicate IDs, and enforces a fixed count and length bound. Any root, folder,
+status, body, authentication, or parse failure aborts the whole inventory rather
+than persisting a partial course set. Request construction and folder parsing are
+fixture-tested, but no current account has verified this route or the reported
+`uf` fingerprint behavior. Registry wiring and the Core credential resolver
+therefore remain intentionally absent.

@@ -47,8 +47,10 @@ only from that allowlisted route and is stored in non-serialized route context.
 
 Root and folder responses are merged by `courseId + clazzId`. Identical repeats
 are deduplicated; disagreeing rows fail with protocol drift rather than silently
-choosing one. This remains synthetic-fixture evidence. Fetching the root/folder
-documents with a live authenticated session is not implemented or verified yet.
+choosing one. The Native adapter now POSTs the root and every bounded folder list
+with the donor-observed form shape and interaction-page Referer while reusing one
+short-lived resolved session. This remains synthetic-fixture evidence: the
+requests have not been verified against a live authenticated account.
 
 ## ChapterModule
 
