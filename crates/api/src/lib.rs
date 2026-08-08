@@ -141,6 +141,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/auth-bootstrap/sessions/{session_id}/stream",
             get(auth_bootstrap::get_auth_bootstrap_stream_snapshot),
         )
+        .route(
+            "/api/v1/auth-bootstrap/sessions/{session_id}/events",
+            post(auth_bootstrap::record_auth_bootstrap_event),
+        )
         .merge(protected)
         .with_state(state)
         .fallback(not_found)
@@ -268,6 +272,19 @@ async fn openapi() -> Json<Value> {
                 "responses": {
                     "200": {"description": "Current non-secret session snapshot for the HTTP polling fallback"},
                     "401": {"description": "Session-scoped Bootstrap access token is invalid or expired"}
+                }
+            }},
+            "/api/v1/auth-bootstrap/sessions/{session_id}/events": {"post": {
+                "operationId": "recordAuthBootstrapEvent",
+                "security": [{"bootstrapAuth": []}],
+                "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RecordAuthBootstrapEvent"}}}},
+                "responses": {
+                    "200": {"description": "Exact event retry accepted with the original server timestamp"},
+                    "201": {"description": "Client status event recorded"},
+                    "400": {"description": "Invalid event payload"},
+                    "401": {"description": "Session-scoped Bootstrap access token is invalid or expired"},
+                    "409": {"description": "Event sequence changed or is not contiguous"}
                 }
             }},
             "/api/v1/provider-accounts": {
@@ -440,7 +457,7 @@ async fn openapi() -> Json<Value> {
             "securitySchemes": {
                 "cookieAuth": {"type": "apiKey", "in": "cookie", "name": "asterism_session"},
                 "bearerAuth": {"type": "http", "scheme": "bearer"},
-                "bootstrapAuth": {"type": "apiKey", "in": "header", "name": "Authorization", "description": "Bootstrap followed by the one-time pairing token"}
+                "bootstrapAuth": {"type": "apiKey", "in": "header", "name": "Authorization", "description": "Bootstrap followed by a pairing or session-scoped access token, as required by the route"}
             },
             "schemas": {
                 "Credentials": {
@@ -479,6 +496,25 @@ async fn openapi() -> Json<Value> {
                         "provider_id": {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"},
                         "provider_account_id": {"type": ["string", "null"], "format": "uuid"},
                         "purpose": {"type": "string", "enum": ["add_account", "reauthenticate", "repair_session"]}
+                    },
+                    "additionalProperties": false
+                },
+                "RecordAuthBootstrapEvent": {
+                    "type": "object",
+                    "required": ["sequence", "kind"],
+                    "properties": {
+                        "sequence": {"type": "integer", "minimum": 1, "maximum": 9_223_372_036_854_775_807_u64},
+                        "kind": {
+                            "type": "object",
+                            "required": ["type"],
+                            "properties": {
+                                "type": {"type": "string", "enum": ["client_ready", "stage_changed", "progress", "credential_detected", "validating", "authenticated", "failed"]},
+                                "stage": {"type": "string", "pattern": "^[a-z0-9._-]{1,64}$"},
+                                "percent": {"type": "integer", "minimum": 0, "maximum": 100},
+                                "code": {"type": "string", "pattern": "^[a-z0-9._-]{1,64}$"}
+                            },
+                            "additionalProperties": false
+                        }
                     },
                     "additionalProperties": false
                 },
@@ -1051,6 +1087,42 @@ mod tests {
             .unwrap()
     }
 
+    fn auth_bootstrap_event_request(session_id: &str, token: &str, body: &str) -> Request<Body> {
+        Request::post(format!(
+            "/api/v1/auth-bootstrap/sessions/{session_id}/events"
+        ))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bootstrap {token}"))
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+    }
+
+    async fn claim_test_auth_bootstrap(
+        app: &Router,
+        session_id: &str,
+        pairing_token: &str,
+        remote: SocketAddr,
+    ) -> String {
+        let claimed = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/auth-bootstrap/sessions/{session_id}/claim"
+                ))
+                .header(header::AUTHORIZATION, format!("Bootstrap {pairing_token}"))
+                .extension(ConnectInfo(remote))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::OK);
+        response_json(claimed).await["access_token"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
     #[tokio::test]
     async fn health_is_versioned_and_has_a_request_id() {
         let response = test_router()
@@ -1506,6 +1578,203 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(terminal.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_bootstrap_events_require_scoped_access_and_preserve_exact_retries() {
+        let (app, _) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = create_test_auth_bootstrap(&app, &cookie).await;
+        let session_id = created["session"]["id"].as_str().unwrap().to_owned();
+        let pairing_token = created["pairing_token"].as_str().unwrap().to_owned();
+
+        let pairing_rejected = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                &session_id,
+                &pairing_token,
+                r#"{"sequence":1,"kind":{"type":"client_ready"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(pairing_rejected.status(), StatusCode::UNAUTHORIZED);
+
+        let access_token = claim_test_auth_bootstrap(
+            &app,
+            &session_id,
+            &pairing_token,
+            SocketAddr::from(([127, 0, 0, 4], 42_004)),
+        )
+        .await;
+
+        let client_timestamp = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                &session_id,
+                &access_token,
+                r#"{"sequence":1,"kind":{"type":"client_ready"},"received_at":"2026-08-09T00:00:00Z"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(client_timestamp.status(), StatusCode::BAD_REQUEST);
+        let arbitrary_message = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                &session_id,
+                &access_token,
+                r#"{"sequence":1,"kind":{"type":"client_ready","message":"unsafe"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(arbitrary_message.status(), StatusCode::BAD_REQUEST);
+
+        let first = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                &session_id,
+                &access_token,
+                r#"{"sequence":1,"kind":{"type":"client_ready"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(first.headers()[header::CACHE_CONTROL], "no-store");
+        let first = response_json(first).await;
+        assert_eq!(first["duplicate"], false);
+        assert_eq!(first["event"]["sequence"], 1);
+        let first_received_at = first["event"]["received_at"].clone();
+
+        let retry = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                &session_id,
+                &access_token,
+                r#"{"sequence":1,"kind":{"type":"client_ready"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retry = response_json(retry).await;
+        assert_eq!(retry["duplicate"], true);
+        assert_eq!(retry["event"]["received_at"], first_received_at);
+
+        let other = create_test_auth_bootstrap(&app, &cookie).await;
+        let other_id = other["session"]["id"].as_str().unwrap();
+        let cross_session = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                other_id,
+                &access_token,
+                r#"{"sequence":1,"kind":{"type":"client_ready"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(cross_session.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_bootstrap_event_sequences_conflict_without_advancing_core_state() {
+        let (app, database) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = create_test_auth_bootstrap(&app, &cookie).await;
+        let session_id = created["session"]["id"].as_str().unwrap().to_owned();
+        let pairing_token = created["pairing_token"].as_str().unwrap();
+        let access_token = claim_test_auth_bootstrap(
+            &app,
+            &session_id,
+            pairing_token,
+            SocketAddr::from(([127, 0, 0, 5], 42_005)),
+        )
+        .await;
+
+        let first = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                &session_id,
+                &access_token,
+                r#"{"sequence":1,"kind":{"type":"client_ready"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let changed = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                &session_id,
+                &access_token,
+                r#"{"sequence":1,"kind":{"type":"validating"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(changed.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(changed).await["error"]["code"],
+            "auth_bootstrap_event_sequence_conflict"
+        );
+
+        let gap = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                &session_id,
+                &access_token,
+                r#"{"sequence":3,"kind":{"type":"credential_detected"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(gap.status(), StatusCode::CONFLICT);
+
+        let reported = app
+            .clone()
+            .oneshot(auth_bootstrap_event_request(
+                &session_id,
+                &access_token,
+                r#"{"sequence":2,"kind":{"type":"authenticated"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reported.status(), StatusCode::CREATED);
+        assert_eq!(
+            response_json(reported).await["event"]["kind"]["type"],
+            "authenticated"
+        );
+
+        let session = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/auth-bootstrap/sessions/{session_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let session = response_json(session).await;
+        assert_eq!(session["state"], "claimed");
+        assert_eq!(session["revision"], 2);
+
+        let event_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auth_bootstrap_client_events WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(event_count, 2);
     }
 
     #[tokio::test]
@@ -2064,6 +2333,7 @@ mod tests {
             "/api/v1/auth-bootstrap/sessions",
             "/api/v1/auth-bootstrap/sessions/{session_id}",
             "/api/v1/auth-bootstrap/sessions/{session_id}/claim",
+            "/api/v1/auth-bootstrap/sessions/{session_id}/events",
             "/api/v1/auth-bootstrap/sessions/{session_id}/stream",
             "/api/v1/service-tokens",
             "/api/v1/service-tokens/{token_id}",
@@ -2087,6 +2357,11 @@ mod tests {
         );
         assert_eq!(
             document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/claim"]["post"]["security"]
+                [0]["bootstrapAuth"],
+            json!([])
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/events"]["post"]["security"]
                 [0]["bootstrapAuth"],
             json!([])
         );

@@ -619,3 +619,16 @@ The engine distinguishes a new event from an exact retry while returning the
 first server timestamp for both. Invalid access remains a redacted rejection;
 changed or non-contiguous sequences become an explicit conflict for transport
 layers to map without weakening the repository invariant.
+
+## Forty-seventh Phase 0 slice
+
+The forty-seventh checkpoint exposes Capture status submission at
+`POST /api/v1/auth-bootstrap/sessions/{session_id}/events`. The public route
+accepts only the path-bound Bootstrap access token and a sequence plus fixed
+event kind; Core supplies `received_at` and rejects client-provided timestamps
+or unknown fields.
+
+A new event returns 201, an exact retry returns 200 with the original timestamp,
+and changed or gapped sequences return 409. Responses are `no-store`, pairing
+tokens and cross-session access tokens return the same Bootstrap 401, and the
+client-reported `authenticated` event still leaves Core state unchanged.

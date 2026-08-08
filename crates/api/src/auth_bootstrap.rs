@@ -1,12 +1,14 @@
 use std::{fmt, net::SocketAddr, str::FromStr};
 
 use asterism_domain::{
-    AuthBootstrapPurpose, AuthBootstrapSession, AuthBootstrapSessionError, AuthBootstrapSessionId,
-    ProviderAccountId, ProviderId,
+    AuthBootstrapClientEvent, AuthBootstrapClientEventKind, AuthBootstrapPurpose,
+    AuthBootstrapSession, AuthBootstrapSessionError, AuthBootstrapSessionId, ProviderAccountId,
+    ProviderId,
 };
 use asterism_engine::{
     AuthBootstrapAccessRequest, AuthBootstrapCancelRequest, AuthBootstrapClaimRequest,
-    AuthBootstrapCreateRequest, AuthBootstrapService, AuthBootstrapServiceError,
+    AuthBootstrapCreateRequest, AuthBootstrapEventRequest, AuthBootstrapService,
+    AuthBootstrapServiceError,
 };
 use asterism_secrets::SecretString;
 use asterism_storage::{
@@ -178,6 +180,45 @@ pub(super) async fn get_auth_bootstrap_stream_snapshot(
     Ok(crate::auth::no_store(Json(session).into_response()))
 }
 
+pub(super) async fn record_auth_bootstrap_event(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<RecordAuthBootstrapEventRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let session_id = parse_session_id(&session_id)?;
+    let access_token =
+        bootstrap_authorization(&headers).ok_or_else(ApiError::invalid_bootstrap_token)?;
+    let request = api_json(payload)?;
+    let kind = parse_event_kind(&request.kind)?;
+    let accepted = bootstrap_service(&state)?
+        .record_client_event(AuthBootstrapEventRequest {
+            session_id,
+            access_token,
+            sequence: request.sequence,
+            kind,
+            received_at: Utc::now(),
+            correlation_id: request_id(&headers)?.to_owned(),
+        })
+        .await
+        .map_err(map_bootstrap_error)?;
+    let status = if accepted.duplicate {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok(crate::auth::no_store(
+        (
+            status,
+            Json(RecordAuthBootstrapEventResponse {
+                event: accepted.event,
+                duplicate: accepted.duplicate,
+            }),
+        )
+            .into_response(),
+    ))
+}
+
 fn bootstrap_service(
     state: &ApiState,
 ) -> Result<AuthBootstrapService<SqliteAuthBootstrapSessionRepository>, ApiError> {
@@ -237,6 +278,23 @@ fn api_json<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     })
 }
 
+fn parse_event_kind(value: &serde_json::Value) -> Result<AuthBootstrapClientEventKind, ApiError> {
+    let kind = serde_json::from_value(value.clone()).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_auth_bootstrap_event",
+            "the event kind must use a supported shape",
+        )
+    })?;
+    let canonical = serde_json::to_value(&kind).map_err(ApiError::internal)?;
+    if canonical != *value {
+        return Err(ApiError::bad_request(
+            "invalid_auth_bootstrap_event",
+            "the event kind contains fields not allowed for its type",
+        ));
+    }
+    Ok(kind)
+}
+
 fn map_bootstrap_error(error: AuthBootstrapServiceError) -> ApiError {
     match error {
         AuthBootstrapServiceError::SessionNotFound(_) => {
@@ -249,6 +307,10 @@ fn map_bootstrap_error(error: AuthBootstrapServiceError) -> ApiError {
             "auth_bootstrap_session_conflict",
             "the authentication bootstrap session changed concurrently",
         ),
+        AuthBootstrapServiceError::EventSequenceConflict { .. } => ApiError::conflict(
+            "auth_bootstrap_event_sequence_conflict",
+            "the authentication bootstrap event sequence conflicts with stored events",
+        ),
         AuthBootstrapServiceError::Domain(
             error @ (AuthBootstrapSessionError::InvalidTransition
             | AuthBootstrapSessionError::SessionExpired
@@ -257,6 +319,9 @@ fn map_bootstrap_error(error: AuthBootstrapServiceError) -> ApiError {
         ) => ApiError::conflict("auth_bootstrap_session_conflict", error.to_string()),
         AuthBootstrapServiceError::Domain(error) => {
             ApiError::bad_request("invalid_auth_bootstrap_session", error.to_string())
+        }
+        AuthBootstrapServiceError::EventDomain(error) => {
+            ApiError::bad_request("invalid_auth_bootstrap_event", error.to_string())
         }
         AuthBootstrapServiceError::Storage(error) => ApiError::internal(error),
     }
@@ -300,6 +365,19 @@ impl Serialize for CreateAuthBootstrapSessionResponse {
 pub(super) struct ClaimAuthBootstrapSessionResponse {
     session: AuthBootstrapSession,
     access_token: SecretString,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecordAuthBootstrapEventRequest {
+    sequence: u64,
+    kind: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct RecordAuthBootstrapEventResponse {
+    event: AuthBootstrapClientEvent,
+    duplicate: bool,
 }
 
 impl fmt::Debug for ClaimAuthBootstrapSessionResponse {
