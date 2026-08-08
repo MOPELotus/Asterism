@@ -503,3 +503,16 @@ failed, while live sessions may be cancelled or expired without revival. The
 raw pairing token is deliberately absent from this serializable domain object;
 only a token digest belongs in persistence, and token issuance remains at the
 authentication boundary.
+
+## Thirty-eighth Phase 0 slice
+
+The thirty-eighth checkpoint persists Capture pairing sessions and their token
+rotation in migration 017. Creation stores only a 32-byte digest of the
+high-entropy pairing token after rechecking the active owner and optional
+Provider-account binding.
+
+Claim runs under one SQLite immediate transaction. It accepts only the exact
+unexpired, unclaimed digest; clears that digest, stores an independently
+generated Bootstrap access-token digest, advances the domain revision, and
+appends a sanitized audit. Wrong tokens, expired tokens, and replayed tokens all
+return the same empty result and cannot reveal or mutate session state.

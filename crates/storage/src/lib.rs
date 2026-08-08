@@ -1,5 +1,6 @@
 //! `SQLite` adapter for Asterism's repository boundary.
 
+mod auth_bootstrap;
 mod auth_session;
 mod credit;
 mod database;
@@ -15,6 +16,7 @@ mod session;
 mod task;
 mod user;
 
+pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
 pub use credit::{CreditGrant, SqliteCreditRepository};
 pub use database::{Database, StorageError};
@@ -23,8 +25,8 @@ pub use outbox::{FailureDisposition, OutboxHealth, OutboxRecord, SqliteOutboxRep
 pub use provider_account::SqliteProviderAccountRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
-    AuthSessionRepository, AuthenticatedCredentialRepository, CreditRepository,
-    ExecutionLeaseRepository, OutboxRepository, ProviderAccountRepository,
+    AuthBootstrapSessionRepository, AuthSessionRepository, AuthenticatedCredentialRepository,
+    CreditRepository, ExecutionLeaseRepository, OutboxRepository, ProviderAccountRepository,
     ProviderAccountRuntimeRepository, ScanScheduleRepository, SchedulerRepository,
     SessionRepository, TaskPage, TaskQueryRepository, TaskRepository, UserRepository,
 };

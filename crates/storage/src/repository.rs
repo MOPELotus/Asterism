@@ -1,8 +1,9 @@
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AuditActor, AuthSession, AuthSessionId, CreditAccount, CreditReservation, CreditReservationId,
-    CreditTransactionId, ExecutionId, ExecutionLease, ProviderAccount, ProviderAccountId,
-    ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+    AuditActor, AuthBootstrapSession, AuthBootstrapSessionId, AuthSession, AuthSessionId,
+    CreditAccount, CreditReservation, CreditReservationId, CreditTransactionId, ExecutionId,
+    ExecutionLease, ProviderAccount, ProviderAccountId, ServiceToken, ServiceTokenId, Task, TaskId,
+    Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -118,6 +119,33 @@ pub trait AuthSessionRepository: Send + Sync {
         actor: AuditActor,
         correlation_id: &str,
     ) -> Result<bool, StorageError>;
+}
+
+/// Short-lived Capture pairing sessions with one-time token rotation at claim.
+#[async_trait]
+pub trait AuthBootstrapSessionRepository: Send + Sync {
+    async fn create_auth_bootstrap_session(
+        &self,
+        session: &AuthBootstrapSession,
+        pairing_token_digest: &TokenDigest,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<(), StorageError>;
+
+    async fn find_auth_bootstrap_session(
+        &self,
+        owner_user_id: UserId,
+        session_id: AuthBootstrapSessionId,
+    ) -> Result<Option<AuthBootstrapSession>, StorageError>;
+
+    async fn claim_auth_bootstrap_session(
+        &self,
+        session_id: AuthBootstrapSessionId,
+        pairing_token_digest: &TokenDigest,
+        access_token_digest: &TokenDigest,
+        claimed_at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<Option<AuthBootstrapSession>, StorageError>;
 }
 
 /// Atomic commit boundary used after a candidate has passed Provider
