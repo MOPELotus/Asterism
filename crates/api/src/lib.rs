@@ -97,6 +97,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(account::get_auth_session).delete(account::cancel_auth_session),
         )
         .route(
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/credentials",
+            axum::routing::put(account::put_auth_session_credentials),
+        )
+        .route(
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             get(account::get_scan_schedule).put(account::configure_scan_schedule),
         )
@@ -302,6 +306,26 @@ async fn openapi() -> Json<Value> {
                         {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
                     ],
                     "responses": {"200": {"description": "Authentication session cancelled"}, "404": {"description": "Authentication session not found"}, "409": {"description": "Authentication session is terminal or changed"}}
+                }
+            },
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/credentials": {
+                "put": {
+                    "operationId": "submitProviderAccountAuthSessionCredentials",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [
+                        {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                        {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+                    ],
+                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PutProviderCredentials"}}}},
+                    "responses": {
+                        "200": {"description": "Credentials validated and committed with the authenticated session"},
+                        "400": {"description": "Invalid credential bundle"},
+                        "404": {"description": "Provider account or authentication session not found"},
+                        "409": {"description": "Session changed, expired, or Provider rejected the credential"},
+                        "429": {"description": "Provider rate limit reached"},
+                        "502": {"description": "Provider returned inconsistent authentication data"},
+                        "503": {"description": "Provider or encrypted credential store unavailable"}
+                    }
                 }
             },
             "/api/v1/provider-accounts/{account_id}/scan-schedule": {
@@ -1162,6 +1186,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_session_credential_api_commits_one_sanitized_state_transition() {
+        let (app, database) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let started = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/provider-accounts/{account_id}/auth-sessions"
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(r#"{"method":"imported_cookie"}"#))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::CREATED);
+        let started = response_json(started).await;
+        let session_id = started["session"]["id"].as_str().unwrap();
+        let path = format!(
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/credentials"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put(&path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"auth_method":"imported_cookie","acquired_via":"manual_import","session_kind":"cookie","fields":[{"purpose":"provider_cookie","value":"session-credential-value"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        assert!(
+            !body
+                .as_ref()
+                .windows(b"session-credential-value".len())
+                .any(|window| window == b"session-credential-value")
+        );
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["session"]["state"]["state"], "authenticated");
+        assert_eq!(response["session"]["revision"], 4);
+        assert_eq!(response["credential_count"], 1);
+        assert_eq!(response["status"]["valid"], true);
+
+        let repeated = app
+            .oneshot(
+                Request::put(path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from(
+                        r#"{"auth_method":"imported_cookie","acquired_via":"manual_import","session_kind":"cookie","fields":[{"purpose":"provider_cookie","value":"replacement-value"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM secret_blobs")
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn provider_auth_session_api_exposes_one_owner_scoped_state_flow() {
         let (app, _) = credential_test_app(true).await;
         let bootstrap = bootstrap(&app).await;
@@ -1605,6 +1710,7 @@ mod tests {
             "/api/v1/provider-accounts/{account_id}/auth-sessions",
             "/api/v1/provider-accounts/{account_id}/auth-sessions/latest",
             "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}",
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/credentials",
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",

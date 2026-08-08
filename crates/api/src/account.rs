@@ -5,8 +5,9 @@ use asterism_domain::{
     ProviderId, SessionKind, Timestamp, UserId,
 };
 use asterism_engine::{
-    AuthSessionService, AuthSessionServiceError, AuthSessionStartRequest, CredentialProvisionError,
-    ProviderCredentialService, ProviderScanError, ProviderScanService,
+    AuthSessionCredentialRequest, AuthSessionService, AuthSessionServiceError,
+    AuthSessionStartRequest, CredentialProvisionError, ProviderCredentialService,
+    ProviderScanError, ProviderScanService,
 };
 use asterism_provider_api::{ProviderCapability, ProviderError, ProviderErrorKind, SessionStatus};
 use asterism_scheduler::{ScanSchedule, ScanScheduleError};
@@ -184,30 +185,68 @@ pub(super) async fn put_provider_credentials(
         correlation_id: correlation_id.to_owned(),
         reason: "replace Provider account credentials".to_owned(),
     };
-    let bundle = CredentialBundle {
-        provider_id: account.provider_id,
-        tenant: account.tenant,
-        auth_method: request.auth_method,
-        acquired_via: request.acquired_via,
-        captured_at: Utc::now(),
-        expires_at: request.expires_at,
-        session_kind: request.session_kind,
-        fields: request
-            .fields
-            .into_iter()
-            .map(|field| CredentialField {
-                purpose: field.purpose,
-                value: field.into_secret_value(),
-            })
-            .collect(),
-        user_id_hint: None,
-    };
+    let bundle = credential_bundle(account, request);
     let committed = ProviderCredentialService::new(state.providers, accounts, secret_store)
         .validate_and_store(owner_id, account_id, bundle, &access)
         .await
         .map_err(map_credential_error)?;
     Ok(crate::auth::no_store(
         Json(PutProviderCredentialsResponse {
+            credential_count: committed.credentials.len(),
+            status: committed.status,
+        })
+        .into_response(),
+    ))
+}
+
+pub(super) async fn put_auth_session_credentials(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((account_id, session_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    payload: Result<Json<PutProviderCredentialsRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let session_id = parse_auth_session_id(&session_id)?;
+    let request = api_json(payload)?;
+    let accounts = SqliteProviderAccountRepository::new(state.database.clone());
+    let account = accounts
+        .find_provider_account(owner_id, account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    let secret_store = state.secret_store.ok_or_else(|| {
+        ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "the encrypted credential store is not configured",
+        )
+    })?;
+    let access = SecretAccess {
+        actor: auth.secret_actor(),
+        correlation_id: request_id(&headers)?.to_owned(),
+        reason: "complete Provider authentication session".to_owned(),
+    };
+    let committed = AuthSessionService::new(
+        state.providers,
+        accounts,
+        SqliteAuthSessionRepository::new(state.database),
+    )
+    .submit_credentials(
+        &secret_store,
+        AuthSessionCredentialRequest {
+            owner_user_id: owner_id,
+            provider_account_id: account_id,
+            session_id,
+            bundle: credential_bundle(account, request),
+            access,
+        },
+    )
+    .await
+    .map_err(map_auth_session_error)?;
+    Ok(crate::auth::no_store(
+        Json(PutAuthSessionCredentialsResponse {
+            session: committed.session,
             credential_count: committed.credentials.len(),
             status: committed.status,
         })
@@ -573,6 +612,13 @@ pub(super) struct PutProviderCredentialsResponse {
     status: SessionStatus,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct PutAuthSessionCredentialsResponse {
+    session: AuthSession,
+    credential_count: usize,
+    status: SessionStatus,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ConfigureScanScheduleRequest {
@@ -672,6 +718,30 @@ fn request_id(headers: &HeaderMap) -> Result<&str, ApiError> {
         .get("x-request-id")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ApiError::internal("request ID middleware did not provide an ID"))
+}
+
+fn credential_bundle(
+    account: ProviderAccount,
+    request: PutProviderCredentialsRequest,
+) -> CredentialBundle {
+    CredentialBundle {
+        provider_id: account.provider_id,
+        tenant: account.tenant,
+        auth_method: request.auth_method,
+        acquired_via: request.acquired_via,
+        captured_at: Utc::now(),
+        expires_at: request.expires_at,
+        session_kind: request.session_kind,
+        fields: request
+            .fields
+            .into_iter()
+            .map(|field| CredentialField {
+                purpose: field.purpose,
+                value: field.into_secret_value(),
+            })
+            .collect(),
+        user_id_hint: None,
+    }
 }
 
 fn validate_mutable_fields(

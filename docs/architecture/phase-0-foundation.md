@@ -463,3 +463,17 @@ the encrypted credential set, advances the session and account to
 `Authenticated`, and appends their audits. A newer attempt therefore makes an
 older network callback lose the transaction before any ciphertext or account
 state can be committed.
+
+## Thirty-fifth Phase 0 slice
+
+The thirty-fifth checkpoint exposes the atomic completion boundary at
+`PUT /api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/credentials`.
+Both typed IDs remain owner-scoped, and the request reuses the write-only,
+redacted credential bundle contract while binding Provider validation to the
+explicit Core session.
+
+The response contains only the authenticated session, sanitized Provider
+status, and credential count. Reusing a terminal, expired, or superseded
+session returns a conflict and cannot replace the existing ciphertext. The
+account-level credential import route remains available as a compatibility
+surface, while session-aware clients use the stricter completion endpoint.
