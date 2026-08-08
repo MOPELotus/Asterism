@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, fmt, str::FromStr, sync::Arc};
 
 use asterism_domain::{
-    AuditActor, AuditRecordId, AuthMethod, AuthSession, AuthState, ProviderAccountId, ProviderId,
-    SecretId, SessionKind, Timestamp, UserId,
+    AuditActor, AuditRecordId, AuthBootstrapPurpose, AuthBootstrapSessionId, AuthMethod,
+    AuthSession, AuthState, ProviderAccount, ProviderAccountId, ProviderId, SecretId, SessionKind,
+    Timestamp, UserId,
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, NewProviderCredential, ProviderCredential,
@@ -18,7 +19,11 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
 use crate::{
-    AuthenticatedCredentialRepository, Database, auth_session::update_auth_session_in_transaction,
+    AuthBootstrapCredentialCommit, AuthBootstrapCredentialCommitOutcome,
+    AuthBootstrapCredentialCommitRequest, AuthBootstrapCredentialRepository,
+    AuthenticatedCredentialRepository, Database,
+    auth_bootstrap::{authenticate_access_in_transaction, complete_auth_bootstrap_in_transaction},
+    auth_session::update_auth_session_in_transaction,
 };
 
 const MAX_SECRET_BYTES: usize = 1024 * 1024;
@@ -592,6 +597,105 @@ impl ProviderCredentialStore for SqliteSecretStore {
 }
 
 #[async_trait]
+impl AuthBootstrapCredentialRepository for SqliteSecretStore {
+    async fn commit_auth_bootstrap_credentials(
+        &self,
+        request: AuthBootstrapCredentialCommitRequest<'_>,
+    ) -> Result<AuthBootstrapCredentialCommitOutcome, SecretStoreError> {
+        let AuthBootstrapCredentialCommitRequest {
+            session_id,
+            access_token_digest,
+            mut validated_account,
+            bundle,
+            completed_at,
+            access,
+        } = request;
+        authorize(validated_account.owner_id, access)?;
+        let (key_id, key) = self.keyring.active();
+        let prepared = prepare_credential_bundle(
+            validated_account.owner_id,
+            validated_account.id,
+            bundle,
+            key_id,
+            key,
+        )?;
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let Some(session) = authenticate_access_in_transaction(
+            &mut transaction,
+            session_id,
+            access_token_digest,
+            completed_at,
+        )
+        .await
+        .map_err(|_| SecretStoreError::Storage)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(AuthBootstrapCredentialCommitOutcome::AccessRejected);
+        };
+        if !prepare_bootstrap_account_binding(
+            &mut transaction,
+            &session,
+            &validated_account,
+            &prepared,
+            completed_at,
+            access,
+        )
+        .await?
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(AuthBootstrapCredentialCommitOutcome::BindingConflict);
+        }
+        persist_bootstrap_credentials(
+            &mut transaction,
+            &validated_account,
+            &prepared,
+            completed_at,
+            access,
+        )
+        .await?;
+        let Some(completed_session) = complete_auth_bootstrap_in_transaction(
+            &mut transaction,
+            &session,
+            access_token_digest,
+            validated_account.id,
+            completed_at,
+            &access.correlation_id,
+        )
+        .await
+        .map_err(|_| SecretStoreError::Storage)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(AuthBootstrapCredentialCommitOutcome::BindingConflict);
+        };
+        transaction.commit().await.map_err(storage_error)?;
+        let credentials = prepared
+            .credentials
+            .into_iter()
+            .map(|prepared| prepared.credential)
+            .collect::<Vec<_>>();
+        validated_account.auth_state = AuthState::Authenticated;
+        validated_account.credential_refs = credentials
+            .iter()
+            .map(|credential| credential.secret.id)
+            .collect();
+        validated_account.credential_refs.sort_unstable();
+        validated_account.updated_at = completed_at;
+        Ok(AuthBootstrapCredentialCommitOutcome::Committed(Box::new(
+            AuthBootstrapCredentialCommit {
+                session: completed_session,
+                account: validated_account,
+                credentials,
+            },
+        )))
+    }
+}
+
+#[async_trait]
 impl AuthenticatedCredentialRepository for SqliteSecretStore {
     async fn commit_authenticated_credentials(
         &self,
@@ -634,6 +738,156 @@ struct PreparedCredential {
     credential: ProviderCredential,
     nonce: Vec<u8>,
     encrypted_data: Vec<u8>,
+}
+
+async fn prepare_bootstrap_account_binding(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &asterism_domain::AuthBootstrapSession,
+    account: &ProviderAccount,
+    prepared: &PreparedCredentialBundle,
+    completed_at: Timestamp,
+    access: &SecretAccess,
+) -> Result<bool, SecretStoreError> {
+    let base_binding_matches = session.owner_user_id == account.owner_id
+        && session.provider_id == account.provider_id
+        && prepared.provider_id == account.provider_id
+        && prepared.tenant == account.tenant;
+    if !base_binding_matches {
+        return Ok(false);
+    }
+    let binding_matches = match session.purpose {
+        AuthBootstrapPurpose::AddAccount => {
+            session.provider_account_id.is_none()
+                && validate_new_bootstrap_account(account, completed_at)
+        }
+        AuthBootstrapPurpose::Reauthenticate | AuthBootstrapPurpose::RepairSession => {
+            session.provider_account_id == Some(account.id)
+                && account_snapshot_matches(transaction, account).await?
+        }
+    };
+    if !binding_matches {
+        return Ok(false);
+    }
+    if session.purpose == AuthBootstrapPurpose::AddAccount {
+        insert_bootstrap_provider_account(transaction, account, session.id, access).await?;
+    }
+    Ok(true)
+}
+
+async fn persist_bootstrap_credentials(
+    transaction: &mut Transaction<'_, Sqlite>,
+    account: &ProviderAccount,
+    prepared: &PreparedCredentialBundle,
+    completed_at: Timestamp,
+    access: &SecretAccess,
+) -> Result<(), SecretStoreError> {
+    let replaced_count = replace_previous_credentials(transaction, account.id, access).await?;
+    persist_prepared_credentials(transaction, &prepared.credentials, access).await?;
+    authenticate_provider_account(
+        transaction,
+        account.owner_id,
+        account.id,
+        &prepared.provider_id,
+        completed_at,
+    )
+    .await?;
+    insert_bundle_audit(
+        transaction,
+        access,
+        account.id,
+        prepared.auth_method,
+        prepared.session_kind,
+        replaced_count,
+        prepared.credentials.len(),
+    )
+    .await
+    .map_err(storage_error)
+}
+
+fn validate_new_bootstrap_account(account: &ProviderAccount, completed_at: Timestamp) -> bool {
+    let display_name_valid = !account.display_name.is_empty()
+        && account.display_name.len() <= 128
+        && account.display_name.trim() == account.display_name
+        && !account.display_name.chars().any(char::is_control);
+    let tenant_valid = account.tenant.as_ref().is_none_or(|tenant| {
+        !tenant.is_empty()
+            && tenant.len() <= 256
+            && tenant.trim() == tenant
+            && !tenant.chars().any(char::is_control)
+    });
+    display_name_valid
+        && tenant_valid
+        && account.auth_state == AuthState::Idle
+        && account.network_profile_id.is_none()
+        && account.credential_refs.is_empty()
+        && account.created_at == completed_at
+        && account.updated_at == completed_at
+}
+
+async fn account_snapshot_matches(
+    transaction: &mut Transaction<'_, Sqlite>,
+    account: &ProviderAccount,
+) -> Result<bool, SecretStoreError> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM provider_accounts \
+         WHERE id = ? AND owner_user_id = ? AND provider_id = ? AND display_name = ? \
+           AND tenant IS ? AND auth_state_json = ? AND network_profile_id IS ? \
+           AND created_at = ? AND updated_at = ?)",
+    )
+    .bind(account.id.to_string())
+    .bind(account.owner_id.to_string())
+    .bind(account.provider_id.as_str())
+    .bind(&account.display_name)
+    .bind(&account.tenant)
+    .bind(serde_json::to_string(&account.auth_state).map_err(|_| SecretStoreError::Storage)?)
+    .bind(&account.network_profile_id)
+    .bind(encode_timestamp(account.created_at))
+    .bind(encode_timestamp(account.updated_at))
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(exists == 1)
+}
+
+async fn insert_bootstrap_provider_account(
+    transaction: &mut Transaction<'_, Sqlite>,
+    account: &ProviderAccount,
+    bootstrap_session_id: AuthBootstrapSessionId,
+    access: &SecretAccess,
+) -> Result<(), SecretStoreError> {
+    sqlx::query(
+        "INSERT INTO provider_accounts \
+         (id, owner_user_id, provider_id, display_name, tenant, auth_state_json, \
+          network_profile_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+    )
+    .bind(account.id.to_string())
+    .bind(account.owner_id.to_string())
+    .bind(account.provider_id.as_str())
+    .bind(&account.display_name)
+    .bind(&account.tenant)
+    .bind(serde_json::to_string(&account.auth_state).map_err(|_| SecretStoreError::Storage)?)
+    .bind(encode_timestamp(account.created_at))
+    .bind(encode_timestamp(account.updated_at))
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'auth_bootstrap_session', ?, 'provider_account_created', \
+                 'provider_account', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(account.created_at))
+    .bind(bootstrap_session_id.to_string())
+    .bind(account.id.to_string())
+    .bind(&access.correlation_id)
+    .bind(serde_json::json!({ "provider_id": account.provider_id }).to_string())
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
 }
 
 fn prepare_credential_bundle(
@@ -1305,11 +1559,18 @@ fn storage_error(_error: sqlx::Error) -> SecretStoreError {
 
 #[cfg(test)]
 mod tests {
-    use asterism_domain::{AuditActor, AuthState, ProviderId, Role};
+    use asterism_auth::OpaqueTokenService;
+    use asterism_domain::{
+        AuditActor, AuthBootstrapPurpose, AuthBootstrapSession, AuthBootstrapState, AuthState,
+        ProviderAccount, ProviderId, Role,
+    };
     use asterism_secrets::CredentialField;
 
     use super::*;
-    use crate::{ProviderAccountRepository, SqliteProviderAccountRepository};
+    use crate::{
+        AuthBootstrapSessionRepository, ProviderAccountRepository,
+        SqliteAuthBootstrapSessionRepository, SqliteProviderAccountRepository,
+    };
 
     #[tokio::test]
     async fn encrypted_secret_lifecycle_is_versioned_authorized_and_audited() {
@@ -1628,6 +1889,203 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bootstrap_commit_creates_account_and_credentials_only_with_live_access() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner_id = insert_user(&database).await;
+        let now = Utc::now();
+        let mut session = AuthBootstrapSession::awaiting_claim(
+            owner_id,
+            ProviderId::new("provider-alpha").unwrap(),
+            None,
+            AuthBootstrapPurpose::AddAccount,
+            3,
+            now,
+            now + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+        let pairing_tokens = OpaqueTokenService::new("ast_pair").unwrap();
+        let access_tokens = OpaqueTokenService::new("ast_boot").unwrap();
+        let (_, pairing_digest) = pairing_tokens.generate();
+        let (_, access_digest) = access_tokens.generate();
+        let (_, wrong_digest) = access_tokens.generate();
+        let repository = SqliteAuthBootstrapSessionRepository::new(database.clone());
+        repository
+            .create_auth_bootstrap_session(
+                &session,
+                &pairing_digest,
+                AuditActor::User(owner_id),
+                "bootstrap-secret-create",
+            )
+            .await
+            .unwrap();
+        session = repository
+            .claim_auth_bootstrap_session(
+                session.id,
+                &pairing_digest,
+                &access_digest,
+                now + chrono::Duration::seconds(1),
+                "bootstrap-secret-claim",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let completed_at = now + chrono::Duration::seconds(2);
+        let account = new_bootstrap_account(owner_id, completed_at);
+        let store = SqliteSecretStore::new(
+            database.clone(),
+            Arc::new(keyring("key-a", &[("key-a", 31)])),
+        );
+        let denied_access = core_access("bootstrap-secret-denied");
+        let denied = store
+            .commit_auth_bootstrap_credentials(AuthBootstrapCredentialCommitRequest {
+                session_id: session.id,
+                access_token_digest: &wrong_digest,
+                validated_account: account.clone(),
+                bundle: bootstrap_bundle(now, b"denied-cookie"),
+                completed_at,
+                access: &denied_access,
+            })
+            .await
+            .unwrap();
+        assert_eq!(denied, AuthBootstrapCredentialCommitOutcome::AccessRejected);
+        assert_eq!(table_count(&database, "provider_accounts").await, 0);
+        assert_eq!(table_count(&database, "secret_blobs").await, 0);
+
+        let access = core_access("bootstrap-secret-commit");
+        let committed = store
+            .commit_auth_bootstrap_credentials(AuthBootstrapCredentialCommitRequest {
+                session_id: session.id,
+                access_token_digest: &access_digest,
+                validated_account: account.clone(),
+                bundle: bootstrap_bundle(now, b"captured-cookie"),
+                completed_at,
+                access: &access,
+            })
+            .await
+            .unwrap();
+        let AuthBootstrapCredentialCommitOutcome::Committed(committed) = committed else {
+            panic!("live Bootstrap access must commit")
+        };
+        assert_eq!(committed.session.state, AuthBootstrapState::Completed);
+        assert_eq!(committed.session.provider_account_id, Some(account.id));
+        assert_eq!(committed.account.auth_state, AuthState::Authenticated);
+        assert_eq!(committed.credentials.len(), 1);
+        assert_eq!(
+            store
+                .get(&committed.credentials[0].secret, &access)
+                .await
+                .unwrap()
+                .expose_secret(),
+            b"captured-cookie"
+        );
+        assert!(
+            repository
+                .authenticate_auth_bootstrap_access(session.id, &access_digest, completed_at)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(table_count(&database, "provider_accounts").await, 1);
+        assert_eq!(table_count(&database, "secret_blobs").await, 1);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_commit_replaces_bound_account_credentials_and_seals_access() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner_id = insert_user(&database).await;
+        let account_id = insert_provider_account(&database, owner_id).await;
+        let store = SqliteSecretStore::new(
+            database.clone(),
+            Arc::new(keyring("key-a", &[("key-a", 37)])),
+        );
+        let old_access = user_access(owner_id, "bootstrap-old-credential");
+        let old = store
+            .create_provider_credential(
+                owner_id,
+                new_cookie_credential(
+                    account_id,
+                    b"old-bootstrap-cookie",
+                    Utc::now() + chrono::Duration::hours(1),
+                ),
+                &old_access,
+            )
+            .await
+            .unwrap();
+        let account = SqliteProviderAccountRepository::new(database.clone())
+            .find_provider_account(owner_id, account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let now = Utc::now();
+        let (session, access_digest) = claimed_bootstrap_session(
+            &database,
+            owner_id,
+            AuthBootstrapPurpose::Reauthenticate,
+            Some(account_id),
+            now,
+            "bootstrap-replace",
+        )
+        .await;
+        let access = core_access("bootstrap-replace-commit");
+        let mut stale_account = account.clone();
+        stale_account.display_name = "stale-snapshot".to_owned();
+        let conflicted = store
+            .commit_auth_bootstrap_credentials(AuthBootstrapCredentialCommitRequest {
+                session_id: session.id,
+                access_token_digest: &access_digest,
+                validated_account: stale_account,
+                bundle: bootstrap_bundle(now, b"conflicted-bootstrap-cookie"),
+                completed_at: now + chrono::Duration::seconds(2),
+                access: &access,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            conflicted,
+            AuthBootstrapCredentialCommitOutcome::BindingConflict
+        );
+        assert_eq!(
+            store
+                .get(&old.secret, &old_access)
+                .await
+                .unwrap()
+                .expose_secret(),
+            b"old-bootstrap-cookie"
+        );
+        let outcome = store
+            .commit_auth_bootstrap_credentials(AuthBootstrapCredentialCommitRequest {
+                session_id: session.id,
+                access_token_digest: &access_digest,
+                validated_account: account,
+                bundle: bootstrap_bundle(now, b"replacement-bootstrap-cookie"),
+                completed_at: now + chrono::Duration::seconds(2),
+                access: &access,
+            })
+            .await
+            .unwrap();
+        let AuthBootstrapCredentialCommitOutcome::Committed(committed) = outcome else {
+            panic!("bound Bootstrap access must replace credentials")
+        };
+        assert_eq!(committed.account.id, account_id);
+        assert_eq!(committed.session.state, AuthBootstrapState::Completed);
+        assert!(matches!(
+            store.get(&old.secret, &access).await,
+            Err(SecretStoreError::NotFound)
+        ));
+        assert_eq!(table_count(&database, "provider_accounts").await, 1);
+        assert_eq!(table_count(&database, "secret_blobs").await, 1);
+        assert!(
+            SqliteAuthBootstrapSessionRepository::new(database)
+                .authenticate_auth_bootstrap_access(session.id, &access_digest, Utc::now())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_provider_account_removes_attached_secret_blob() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
@@ -1702,6 +2160,98 @@ mod tests {
             correlation_id: correlation_id.to_owned(),
             reason: "provider credential lifecycle".to_owned(),
         }
+    }
+
+    fn core_access(correlation_id: &str) -> SecretAccess {
+        SecretAccess {
+            actor: SecretActor::CoreService("auth-bootstrap"),
+            correlation_id: correlation_id.to_owned(),
+            reason: "complete Capture credential submission".to_owned(),
+        }
+    }
+
+    fn new_bootstrap_account(owner_id: UserId, at: Timestamp) -> ProviderAccount {
+        ProviderAccount {
+            id: ProviderAccountId::new(),
+            owner_id,
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            display_name: "primary".to_owned(),
+            tenant: None,
+            auth_state: AuthState::Idle,
+            network_profile_id: None,
+            credential_refs: Vec::new(),
+            created_at: at,
+            updated_at: at,
+        }
+    }
+
+    fn bootstrap_bundle(captured_at: Timestamp, value: &[u8]) -> CredentialBundle {
+        CredentialBundle {
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            tenant: None,
+            auth_method: AuthMethod::ImportedCookie,
+            acquired_via: CredentialAcquisition::CaptureTool,
+            captured_at,
+            expires_at: Some(captured_at + chrono::Duration::hours(1)),
+            session_kind: SessionKind::Cookie,
+            fields: vec![CredentialField {
+                purpose: SecretPurpose::ProviderCookie,
+                value: SecretValue::new(value.to_vec()),
+            }],
+            user_id_hint: None,
+        }
+    }
+
+    async fn table_count(database: &Database, table: &str) -> i64 {
+        let query = format!("SELECT COUNT(*) FROM {table}");
+        sqlx::query_scalar(&query)
+            .fetch_one(database.pool())
+            .await
+            .unwrap()
+    }
+
+    async fn claimed_bootstrap_session(
+        database: &Database,
+        owner_id: UserId,
+        purpose: AuthBootstrapPurpose,
+        provider_account_id: Option<ProviderAccountId>,
+        now: Timestamp,
+        correlation_prefix: &str,
+    ) -> (AuthBootstrapSession, asterism_auth::TokenDigest) {
+        let session = AuthBootstrapSession::awaiting_claim(
+            owner_id,
+            ProviderId::new("provider-alpha").unwrap(),
+            provider_account_id,
+            purpose,
+            3,
+            now,
+            now + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+        let (_, pairing_digest) = OpaqueTokenService::new("ast_pair").unwrap().generate();
+        let (_, access_digest) = OpaqueTokenService::new("ast_boot").unwrap().generate();
+        let repository = SqliteAuthBootstrapSessionRepository::new(database.clone());
+        repository
+            .create_auth_bootstrap_session(
+                &session,
+                &pairing_digest,
+                AuditActor::User(owner_id),
+                &format!("{correlation_prefix}-create"),
+            )
+            .await
+            .unwrap();
+        let session = repository
+            .claim_auth_bootstrap_session(
+                session.id,
+                &pairing_digest,
+                &access_digest,
+                now + chrono::Duration::seconds(1),
+                &format!("{correlation_prefix}-claim"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        (session, access_digest)
     }
 
     fn new_cookie_credential(

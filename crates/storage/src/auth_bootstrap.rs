@@ -317,7 +317,7 @@ impl AuthBootstrapSessionRepository for SqliteAuthBootstrapSessionRepository {
     }
 }
 
-async fn authenticate_access_in_transaction(
+pub(crate) async fn authenticate_access_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     session_id: AuthBootstrapSessionId,
     access_token_digest: &TokenDigest,
@@ -343,6 +343,50 @@ async fn authenticate_access_in_transaction(
     } else {
         Ok(None)
     }
+}
+
+pub(crate) async fn complete_auth_bootstrap_in_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    current: &AuthBootstrapSession,
+    access_token_digest: &TokenDigest,
+    provider_account_id: asterism_domain::ProviderAccountId,
+    completed_at: Timestamp,
+    correlation_id: &str,
+) -> Result<Option<AuthBootstrapSession>, StorageError> {
+    validate_correlation_id(correlation_id)?;
+    let expected_revision = current.revision;
+    let mut completed = current.clone();
+    completed
+        .complete(provider_account_id, completed_at)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let result = sqlx::query(
+        "UPDATE auth_bootstrap_sessions SET provider_account_id = ?, state_json = ?, \
+         pairing_token_hash = NULL, access_token_hash = NULL, revision = ?, updated_at = ? \
+         WHERE id = ? AND access_token_hash = ? AND pairing_token_hash IS NULL \
+           AND state_json = ? AND revision = ?",
+    )
+    .bind(provider_account_id.to_string())
+    .bind(serde_json::to_string(&completed.state)?)
+    .bind(i64::from(completed.revision))
+    .bind(encode_timestamp(completed.updated_at))
+    .bind(completed.id.to_string())
+    .bind(access_token_digest.as_bytes().as_slice())
+    .bind(serde_json::to_string(&AuthBootstrapState::Claimed)?)
+    .bind(i64::from(expected_revision))
+    .execute(&mut **transaction)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Ok(None);
+    }
+    insert_bootstrap_audit(
+        transaction,
+        ("auth_bootstrap_session", Some(completed.id.to_string())),
+        "auth_bootstrap_session_completed",
+        correlation_id,
+        &completed,
+    )
+    .await?;
+    Ok(Some(completed))
 }
 
 async fn fetch_client_event(

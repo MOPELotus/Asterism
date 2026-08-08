@@ -178,6 +178,39 @@ pub enum AuthBootstrapClientEventRecord {
     SequenceConflict,
 }
 
+#[derive(Debug)]
+pub struct AuthBootstrapCredentialCommitRequest<'a> {
+    pub session_id: AuthBootstrapSessionId,
+    pub access_token_digest: &'a TokenDigest,
+    pub validated_account: ProviderAccount,
+    pub bundle: CredentialBundle,
+    pub completed_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthBootstrapCredentialCommit {
+    pub session: AuthBootstrapSession,
+    pub account: ProviderAccount,
+    pub credentials: Vec<ProviderCredential>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthBootstrapCredentialCommitOutcome {
+    Committed(Box<AuthBootstrapCredentialCommit>),
+    AccessRejected,
+    BindingConflict,
+}
+
+/// Atomic credential commit boundary for a claimed Capture pairing.
+#[async_trait]
+pub trait AuthBootstrapCredentialRepository: Send + Sync {
+    async fn commit_auth_bootstrap_credentials(
+        &self,
+        request: AuthBootstrapCredentialCommitRequest<'_>,
+    ) -> Result<AuthBootstrapCredentialCommitOutcome, SecretStoreError>;
+}
+
 /// Atomic commit boundary used after a candidate has passed Provider
 /// validation inside one current authentication session.
 #[async_trait]

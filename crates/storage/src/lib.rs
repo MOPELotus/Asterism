@@ -25,7 +25,9 @@ pub use outbox::{FailureDisposition, OutboxHealth, OutboxRecord, SqliteOutboxRep
 pub use provider_account::SqliteProviderAccountRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
-    AuthBootstrapClientEventRecord, AuthBootstrapSessionRepository, AuthSessionRepository,
+    AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
+    AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
+    AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, CreditRepository, ExecutionLeaseRepository,
     OutboxRepository, ProviderAccountRepository, ProviderAccountRuntimeRepository,
     ScanScheduleRepository, SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository,

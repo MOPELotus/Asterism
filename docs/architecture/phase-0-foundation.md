@@ -645,3 +645,17 @@ Reauthentication and repair sessions remain bound to their original account
 throughout the lifecycle, and completion rejects any different account ID.
 This gives the future credential transaction one domain transition that works
 for both account creation and credential replacement.
+
+## Forty-ninth Phase 0 slice
+
+The forty-ninth checkpoint adds the atomic Capture credential commit boundary.
+After Provider-side validation, one SQLite immediate transaction revalidates
+the path-bound Bootstrap access digest, creates or snapshot-checks the Provider
+account, replaces its encrypted credential set, marks the account authenticated,
+and completes the bootstrap session while clearing its access digest.
+
+Add-account and reauthentication commits share this boundary. Invalid or
+expired access writes neither accounts nor secret blobs; stale account bindings
+are conflicts; and any failure after account or credential work begins rolls
+the entire transaction back. A successful commit is one-time because the
+completed session no longer retains an access-token digest.
