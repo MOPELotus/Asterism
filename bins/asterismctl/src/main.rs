@@ -131,7 +131,7 @@ enum ProviderAccountCommand {
 
 #[derive(Debug, Subcommand)]
 enum CredentialCommand {
-    /// Read one credential value from stdin and replace the validated set.
+    /// Read one credential value from stdin and complete an authentication session.
     Import(CredentialImportCommand),
 }
 
@@ -159,6 +159,9 @@ enum ProviderAuthCommand {
 #[derive(Debug, Args)]
 struct CredentialImportCommand {
     account_id: String,
+    /// Authentication session returned by `provider-account auth start`.
+    #[arg(long)]
+    session: String,
     #[arg(long, value_enum)]
     purpose: CliCredentialPurpose,
     #[arg(long, value_enum)]
@@ -578,8 +581,8 @@ async fn handle_credential_import(
 ) -> anyhow::Result<()> {
     let value = read_credential_value()?;
     let path = format!(
-        "/api/v1/provider-accounts/{}/credentials",
-        command.account_id
+        "/api/v1/provider-accounts/{}/auth-sessions/{}/credentials",
+        command.account_id, command.session
     );
     let response = {
         let request = PutProviderCredentialsRequest {
@@ -776,6 +779,8 @@ mod tests {
             "credential",
             "import",
             "account-id",
+            "--session",
+            "session-id",
             "--purpose",
             "provider-cookie",
             "--auth-method",
@@ -790,11 +795,12 @@ mod tests {
                 command: ProviderAccountCommand::Credential {
                     command: CredentialCommand::Import(CredentialImportCommand {
                         account_id,
+                        session,
                         acquired_via: CliCredentialAcquisition::ManualImport,
                         ..
                     })
                 }
-            } if account_id == "account-id"
+            } if account_id == "account-id" && session == "session-id"
         ));
         assert!(
             Arguments::try_parse_from([
@@ -803,6 +809,8 @@ mod tests {
                 "credential",
                 "import",
                 "account-id",
+                "--session",
+                "session-id",
                 "--purpose",
                 "provider-cookie",
                 "--auth-method",

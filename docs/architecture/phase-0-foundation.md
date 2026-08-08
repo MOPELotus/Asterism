@@ -477,3 +477,15 @@ status, and credential count. Reusing a terminal, expired, or superseded
 session returns a conflict and cannot replace the existing ciphertext. The
 account-level credential import route remains available as a compatibility
 surface, while session-aware clients use the stricter completion endpoint.
+
+## Thirty-sixth Phase 0 slice
+
+The thirty-sixth checkpoint binds `asterismctl provider-account credential
+import` to a required `--session` ID and sends its stdin-only value to the
+session completion endpoint. The CLI can no longer report a validated import
+without naming the observable authentication attempt that owns it.
+
+Secret input behavior is unchanged: interactive terminals use a hidden prompt,
+pipes accept one bounded line, no plaintext option exists, and output contains
+only the server's sanitized session and credential metadata. The resulting
+operator flow is start, submit, then poll the same session ID.
