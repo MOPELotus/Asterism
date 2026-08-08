@@ -516,3 +516,17 @@ unexpired, unclaimed digest; clears that digest, stores an independently
 generated Bootstrap access-token digest, advances the domain revision, and
 appends a sanitized audit. Wrong tokens, expired tokens, and replayed tokens all
 return the same empty result and cannot reveal or mutate session state.
+
+## Thirty-ninth Phase 0 slice
+
+The thirty-ninth checkpoint adds Core orchestration for pairing-token issuance,
+claim, and owner cancellation. Creation returns the `ast_pair` plaintext only
+after its digest is committed. Claim generates an independent `ast_boot` token,
+rotates the digests transactionally, and returns that plaintext only when the
+one-time claim succeeds.
+
+Invalid, expired, cancelled, and replayed pairings deliberately share one
+rejection outcome. Secret token wrappers redact every debug representation and
+zero their allocations on drop. Owner cancellation is revisioned and clears
+both pairing and access digests; an overdue cancellation persists `Expired`
+instead of misreporting a live cancellation.

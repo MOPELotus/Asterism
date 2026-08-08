@@ -154,6 +154,97 @@ impl AuthBootstrapSessionRepository for SqliteAuthBootstrapSessionRepository {
         transaction.commit().await?;
         Ok(Some(session))
     }
+
+    async fn update_auth_bootstrap_session_for_owner(
+        &self,
+        session: &AuthBootstrapSession,
+        expected_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<bool, StorageError> {
+        validate_correlation_id(correlation_id)?;
+        session
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if session.revision
+            != expected_revision.checked_add(1).ok_or_else(|| {
+                StorageError::InvalidData(
+                    "authentication bootstrap revision is exhausted".to_owned(),
+                )
+            })?
+        {
+            return Err(StorageError::InvalidData(
+                "authentication bootstrap revision is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let Some(current) = fetch_auth_bootstrap_session(&mut transaction, session.id).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        if current.owner_user_id != session.owner_user_id || current.revision != expected_revision {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let mut expected = current;
+        match session.state {
+            AuthBootstrapState::Cancelled => expected.cancel(session.updated_at),
+            AuthBootstrapState::Expired => expected.expire(session.updated_at),
+            _ => Err(asterism_domain::AuthBootstrapSessionError::InvalidTransition),
+        }
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if &expected != session {
+            return Err(StorageError::InvalidData(
+                "authentication bootstrap session changed immutable fields".to_owned(),
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE auth_bootstrap_sessions SET state_json = ?, pairing_token_hash = NULL, \
+             access_token_hash = NULL, revision = ?, updated_at = ? \
+             WHERE id = ? AND owner_user_id = ? AND revision = ?",
+        )
+        .bind(serde_json::to_string(&session.state)?)
+        .bind(i64::from(session.revision))
+        .bind(encode_timestamp(session.updated_at))
+        .bind(session.id.to_string())
+        .bind(session.owner_user_id.to_string())
+        .bind(i64::from(expected_revision))
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        insert_bootstrap_audit(
+            &mut transaction,
+            actor_type(actor),
+            if session.state == AuthBootstrapState::Expired {
+                "auth_bootstrap_session_expired"
+            } else {
+                "auth_bootstrap_session_cancelled"
+            },
+            correlation_id,
+            session,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+}
+
+async fn fetch_auth_bootstrap_session(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: AuthBootstrapSessionId,
+) -> Result<Option<AuthBootstrapSession>, StorageError> {
+    let query = format!("{AUTH_BOOTSTRAP_SELECT} WHERE id = ?");
+    sqlx::query(&query)
+        .bind(session_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .as_ref()
+        .map(decode_auth_bootstrap_session)
+        .transpose()
 }
 
 fn validate_initial_session(

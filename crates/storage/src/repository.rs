@@ -146,6 +146,14 @@ pub trait AuthBootstrapSessionRepository: Send + Sync {
         claimed_at: Timestamp,
         correlation_id: &str,
     ) -> Result<Option<AuthBootstrapSession>, StorageError>;
+
+    async fn update_auth_bootstrap_session_for_owner(
+        &self,
+        session: &AuthBootstrapSession,
+        expected_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<bool, StorageError>;
 }
 
 /// Atomic commit boundary used after a candidate has passed Provider

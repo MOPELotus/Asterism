@@ -167,6 +167,7 @@ dependencies = [
 name = "asterism-engine"
 version = "0.1.0"
 dependencies = [
+ "asterism-auth",
  "asterism-domain",
  "asterism-events",
  "asterism-provider-api",
