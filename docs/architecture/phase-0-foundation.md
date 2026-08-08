@@ -384,3 +384,16 @@ Piped values have one trailing line ending removed, are bounded before the HTTP
 request, and remain in redacted zeroizing wrappers until the request finishes.
 The CLI then drops the value explicitly and prints only the API's sanitized
 commit result.
+
+## Twenty-ninth Phase 0 slice
+
+The twenty-ninth checkpoint models each Provider authentication attempt as an
+owner- and account-scoped `AuthSession`. A session starts in `Starting`, carries
+an independent `AuthMethod`, has a mandatory expiry, and increments a revision
+on every observable state change.
+
+The domain transition table permits waiting, exchange, validation,
+authentication, refresh, expiry, and explicit exception outcomes without
+allowing skipped validation, timestamp regression, revision overflow, or
+revival after a terminal failure or cancellation. `SessionKind` remains outside
+the process state and is produced only by validated credentials.
