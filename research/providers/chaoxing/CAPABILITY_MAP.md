@@ -9,7 +9,7 @@ Chapter card contains a Work-shaped assessment.
 | Authentication / Password | `Samueli924/chaoxing` | CxKitty | Reference | AES-CBC credential payload to `fanyalogin`; live validation pending |
 | Authentication / QR | CxKitty | None | Reference | QR creation and polling chain is statically complete but old |
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
-| CourseInventory | `Samueli924/chaoxing` | CxKitty | Reference | Web folder-aware inventory and mobile `backclazzdata` alternatives |
+| CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata` parser and folder merge are fixture-covered; authenticated transport remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Chapter tree, task-point counts, and card attachments |
 | ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Video, Document, Read, and existing Chapter Work behavior |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
@@ -55,6 +55,10 @@ policy and remains independently guarded.
 
 ## Current implementation checkpoint
 
+- The `courselistdata` parser models `courseId + clazzId` as stable identity,
+  filters unopened rows, validates the allowlisted course route, and keeps `cpi`
+  only in ephemeral route context. A typed `CourseInventoryCapability` merges
+  identical folder results and fails closed on conflicts.
 - Independent Work and Exam list parsers are covered by synthetic sanitized
   fixtures and compose behind `TaskInventoryCapability`.
 - Course/class identity and `cpi` cross the course-to-task boundary only through

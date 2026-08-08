@@ -1,17 +1,16 @@
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{fmt, sync::Arc};
 
-use asterism_domain::ProviderId;
 use asterism_provider_api::{
-    ProviderCapability, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, RemoteCourse, RemoteTask, TaskInventoryCapability,
-    VerificationLevel,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
+    ProviderResult, RemoteCourse, RemoteTask, TaskInventoryCapability,
 };
 use async_trait::async_trait;
 use zeroize::Zeroize;
 
-use crate::{ChaoxingCourseScope, parse_exam_inventory, parse_work_inventory};
+use crate::{
+    ChaoxingCourseScope, metadata::development_metadata, parse_exam_inventory, parse_work_inventory,
+};
 
-const PROVIDER_ID: &str = "chaoxing";
 const COURSE_ID_ROUTE_KEY: &str = "chaoxing.course_id";
 const CLASS_ID_ROUTE_KEY: &str = "chaoxing.class_id";
 const CPI_ROUTE_KEY: &str = "chaoxing.cpi";
@@ -91,7 +90,7 @@ impl ChaoxingInventoryDocument {
         Ok(Self(document))
     }
 
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -142,22 +141,7 @@ impl ChaoxingTaskInventory {
     /// Returns an internal error if the compile-time Provider ID is invalid.
     pub fn try_new(transport: Arc<dyn ChaoxingInventoryTransport>) -> ProviderResult<Self> {
         Ok(Self {
-            metadata: ProviderMetadata {
-                id: ProviderId::new(PROVIDER_ID).map_err(|_| {
-                    ProviderError::new(
-                        ProviderErrorKind::Internal,
-                        "Chaoxing compile-time Provider ID is invalid",
-                    )
-                })?,
-                display_name: "Chaoxing".to_owned(),
-                implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
-                verification: VerificationLevel::Development,
-                scan_min_interval_seconds: None,
-                capture_recipe_version: None,
-                capabilities: BTreeSet::from([ProviderCapability::TaskInventory]),
-                auth_methods: BTreeSet::new(),
-                session_kinds: BTreeSet::new(),
-            },
+            metadata: development_metadata()?,
             transport,
         })
     }
@@ -243,8 +227,8 @@ fn validate_cpi(value: &str) -> ProviderResult<()> {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use asterism_domain::{ProviderAccountId, SecretId, SourceType};
-    use asterism_provider_api::ProviderRouteContext;
+    use asterism_domain::{ProviderAccountId, ProviderId, SecretId, SourceType};
+    use asterism_provider_api::{ProviderCapability, ProviderRouteContext, VerificationLevel};
 
     use super::*;
 
@@ -328,7 +312,10 @@ mod tests {
         );
         assert_eq!(
             inventory.metadata().capabilities,
-            BTreeSet::from([ProviderCapability::TaskInventory])
+            std::collections::BTreeSet::from([
+                ProviderCapability::CourseInventory,
+                ProviderCapability::TaskInventory,
+            ])
         );
         assert!(inventory.metadata().capture_recipe_version.is_none());
     }
@@ -383,7 +370,7 @@ mod tests {
 
     fn context() -> ProviderContext {
         ProviderContext {
-            provider_id: ProviderId::new(PROVIDER_ID).unwrap(),
+            provider_id: ProviderId::new("chaoxing").unwrap(),
             account_id: ProviderAccountId::new(),
             credential_refs: vec![SecretId::new()],
             correlation_id: "chaoxing-test".to_owned(),

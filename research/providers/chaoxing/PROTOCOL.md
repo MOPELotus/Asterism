@@ -36,6 +36,20 @@ dimensions through `backclazzdata`.
 Provider remote identity must include both course and class dimensions; the same
 course content can appear in more than one class context.
 
+## Course inventory checkpoint
+
+The current offline parser consumes the structural `div.course` rows returned by
+the web `courselistdata` response. Rows marked as not open are excluded. Open
+rows must contain course/class identity, title, and an HTTPS
+`mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu` entry whose unique
+`courseid`/`clazzid` values match the row. The account-scoped `cpi` is accepted
+only from that allowlisted route and is stored in non-serialized route context.
+
+Root and folder responses are merged by `courseId + clazzId`. Identical repeats
+are deduplicated; disagreeing rows fail with protocol drift rather than silently
+choosing one. This remains synthetic-fixture evidence. Fetching the root/folder
+documents with a live authenticated session is not implemented or verified yet.
+
 ## ChapterModule
 
 Chapter inventory and card loading propagate:

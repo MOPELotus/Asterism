@@ -844,3 +844,19 @@ duplicates, and mismatches fail closed.
 This adapter is not daemon-registered or live-verified. The Core credential
 resolver, CourseInventory producer, and same-account Native-versus-Browser test
 remain required before metadata can advance beyond `Development`.
+
+## Sixty-third Phase 0 slice
+
+Chaoxing now exposes an offline-verified `CourseInventoryCapability` around the
+current web `courselistdata` shape. The parser keeps course and class dimensions
+in stable identity, excludes unopened rows, bounds normalized metadata, and
+accepts `cpi` only from a matching allowlisted HTTPS course entry. The account
+route value remains in the non-serialized, zeroizing route context used by the
+later Work and Exam scan.
+
+Root and folder documents merge deterministically: identical rows deduplicate,
+while conflicting or duplicate identities fail closed. Synthetic fixtures cover
+the normalization and route-rejection invariants. The authenticated course-list
+transport, Core credential resolver, Provider registry entry, and real-account
+verification remain pending, so Chaoxing continues to report `Development` and
+is not available to daemon scans.

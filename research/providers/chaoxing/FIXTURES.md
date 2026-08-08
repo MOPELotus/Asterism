@@ -1,14 +1,18 @@
 # chaoxing fixture plan
 
 No real-account fixture was added during the 2026-08-09 static donor audit.
-The repository currently contains explicitly labelled synthetic, sanitized Work
-and Exam inventory/detail fixtures for parser development. They prove parser
-invariants only and are not evidence of current live-platform compatibility.
+The repository currently contains explicitly labelled synthetic, sanitized
+Course, Work and Exam inventory/detail fixtures for parser development. They
+prove parser invariants only and are not evidence of current live-platform
+compatibility.
 
 ## Committed synthetic fixture set
 
 ```text
 fixtures/providers/chaoxing/
+  courses/
+    list-mixed.html
+    list-mixed.expected.json
   work/
     course-page-with-work-iframe.html
     list-mixed.html
@@ -22,9 +26,12 @@ fixtures/providers/chaoxing/
     list-mixed.expected.json
 ```
 
-The course-page fixture covers strict discovery of a fresh Work iframe route.
-The mixed expectation files cover normalized identity, source module and remote
-state. The detail fixtures cover the conservative Work redirect classification.
+The Course fixture covers class-scoped identity, unopened-course filtering,
+bounded metadata, ephemeral `cpi`, and strict allowlisting of the current course
+entry route. The Work course-page fixture covers strict discovery of a fresh
+Work iframe route. The mixed expectation files cover normalized identity, source
+module and remote state. The detail fixtures cover the conservative Work
+redirect classification.
 
 ## Required live-sanitized fixture sets
 
