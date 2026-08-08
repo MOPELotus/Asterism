@@ -8,7 +8,7 @@ pending.
 
 | Source | Revision | Updated | Use | Audited implementation surface | Live status |
 |---|---|---|---|---|---|
-| [`MOPELotus/chaoxing-evolved`](https://github.com/MOPELotus/chaoxing-evolved) | `0db3113ffd9f4cfc4474b7b5b56f2b1fd2c9a68f` | 2026-04-18 | Reference | Password and Cookie login, Cookie validation, course/folder inventory, Chapter cards, Video, Document, Chapter Work | Pending |
+| [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `dee643fd0a8e47e2b9ebeefc6515ff8c5acba49a` | 2026-07-22 | Reference | Password and Cookie login, Cookie validation, course/folder inventory, Chapter cards, Video, Document, Chapter Work | Pending |
 | [`surinrasu/CxKitty`](https://github.com/surinrasu/CxKitty) | `1589eac9c07c4bab71f79d762b45210643dd537d` | 2024-09-29 | Reference | Web password/QR login, SSO session validation, mobile course/Chapter APIs, independent Exam inventory, Exam/Chapter Work detail and submission, typed error branches | Pending; protocol age is a risk |
 | [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b36996d27d00577015663ec39e782500` | 2026-06-17 | PortSource | Browser-session Work and Exam inventory/status, submittability classification, result verification, current DOM reliability rules | Donor reports real use; Asterism validation pending |
 | [`ocsjs/ocsjs`](https://github.com/ocsjs/ocsjs) | `890686a5e54f9a6d52d1169bae9ea5971e0863c7` | 2026-07-01 | Reference | Current Work/Exam page route taxonomy, question-page behavior and Browser lifecycle | Pending |
@@ -21,7 +21,7 @@ pending.
   Work/Exam discovery, status classification, and result verification.
 - Use the current OCS branch to cross-check Browser routes and DOM behavior, not
   as a task inventory implementation.
-- Use `chaoxing-evolved` for the existing Chapter path and account/session behavior.
+- Use `Samueli924/chaoxing` for the existing Chapter path and account/session behavior.
 - Use CxKitty to understand the complete mobile API call chain and typed failure
   branches, but do not assume its 2024 transport still works in 2026.
 - Use `chaoxing-exam` only as a Browser/DOM reference for non-formal Chapter tests.
