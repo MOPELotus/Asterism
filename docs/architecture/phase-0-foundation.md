@@ -687,3 +687,15 @@ and sanitized Provider status. Provider rejection returns a retryable conflict
 without writes; success atomically creates or updates the account and then
 invalidates the access token, so a replay receives the same redacted Bootstrap
 401 and never exposes submitted credential material.
+
+## Fifty-second Phase 0 slice
+
+The fifty-second checkpoint introduces the Rust-only `asterism-capture` binary
+as an outbound client rather than a daemon or inbound listener. Its initial
+`doctor` command checks the public Core health endpoint with redirects disabled,
+a bounded response body, and a fixed request timeout.
+
+Capture server URLs require HTTPS and cannot embed credentials, paths, queries,
+or fragments. Cleartext HTTP is disabled by default and can be enabled only by
+an explicit development flag for loopback hosts, preserving local Phase 0
+testing without weakening the public deployment boundary.

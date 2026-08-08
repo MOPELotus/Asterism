@@ -38,6 +38,7 @@ Phase 0 已建立并持续完善以下基础：
 - 点数 grant / reserve / commit / release 流程与不可变流水；
 - SecretStore 抽象、Argon2id 密码、服务端 Session、scoped Service Token 与登录限速；
 - 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；
+- Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
@@ -79,6 +80,7 @@ CLI / WebUI / Asterism-Plugin
 | `crates/api` | Axum HTTP transport 与稳定错误封装 |
 | `bins/asterismd` | 守护进程、数据库生命周期和 API 服务 |
 | `bins/asterismctl` | 只通过 HTTP 调用 Core 的命令行客户端 |
+| `bins/asterism-capture` | 按需运行、仅主动出站连接的本地认证辅助程序 |
 
 更详细的边界说明见 [Phase 0 foundation](docs/architecture/phase-0-foundation.md)。
 

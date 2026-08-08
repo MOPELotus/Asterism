@@ -144,6 +144,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "asterism-capture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "asterism-config"
 version = "0.1.0"
 dependencies = [
