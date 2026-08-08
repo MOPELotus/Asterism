@@ -113,59 +113,79 @@ impl AuthSessionRepository for SqliteAuthSessionRepository {
     ) -> Result<bool, StorageError> {
         validate_updated_session(session, expected_revision, correlation_id)?;
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
-        let Some(current) = fetch_auth_session(&mut transaction, session.id).await? else {
-            transaction.rollback().await?;
-            return Ok(false);
-        };
-        if current.owner_user_id != session.owner_user_id
-            || current.revision != expected_revision
-            || !is_latest_account_session(&mut transaction, &current).await?
+        if !update_auth_session_in_transaction(
+            &mut transaction,
+            session,
+            expected_revision,
+            actor,
+            correlation_id,
+        )
+        .await?
         {
             transaction.rollback().await?;
             return Ok(false);
         }
-        let mut expected = current;
-        expected
-            .transition(session.state.clone(), session.updated_at)
-            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
-        if &expected != session {
-            return Err(StorageError::InvalidData(
-                "authentication session changed immutable fields".to_owned(),
-            ));
-        }
-        let result = sqlx::query(
-            "UPDATE auth_sessions SET state_json = ?, revision = ?, updated_at = ? \
-             WHERE id = ? AND owner_user_id = ? AND provider_account_id = ? \
-               AND method_json = ? AND expires_at = ? AND created_at = ? AND revision = ?",
-        )
-        .bind(serde_json::to_string(&session.state)?)
-        .bind(i64::from(session.revision))
-        .bind(encode_timestamp(session.updated_at))
-        .bind(session.id.to_string())
-        .bind(session.owner_user_id.to_string())
-        .bind(session.provider_account_id.to_string())
-        .bind(serde_json::to_string(&session.method)?)
-        .bind(encode_timestamp(session.expires_at))
-        .bind(encode_timestamp(session.created_at))
-        .bind(i64::from(expected_revision))
-        .execute(&mut *transaction)
-        .await?;
-        if result.rows_affected() == 0 {
-            transaction.rollback().await?;
-            return Ok(false);
-        }
         mirror_account_state(&mut transaction, session).await?;
-        insert_auth_session_audit(
-            &mut transaction,
-            actor,
-            "auth_session_transitioned",
-            correlation_id,
-            session,
-        )
-        .await?;
         transaction.commit().await?;
         Ok(true)
     }
+}
+
+pub(crate) async fn update_auth_session_in_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &AuthSession,
+    expected_revision: u32,
+    actor: AuditActor,
+    correlation_id: &str,
+) -> Result<bool, StorageError> {
+    validate_updated_session(session, expected_revision, correlation_id)?;
+    let Some(current) = fetch_auth_session(transaction, session.id).await? else {
+        return Ok(false);
+    };
+    if current.owner_user_id != session.owner_user_id
+        || current.revision != expected_revision
+        || !is_latest_account_session(transaction, &current).await?
+    {
+        return Ok(false);
+    }
+    let mut expected = current;
+    expected
+        .transition(session.state.clone(), session.updated_at)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    if &expected != session {
+        return Err(StorageError::InvalidData(
+            "authentication session changed immutable fields".to_owned(),
+        ));
+    }
+    let result = sqlx::query(
+        "UPDATE auth_sessions SET state_json = ?, revision = ?, updated_at = ? \
+         WHERE id = ? AND owner_user_id = ? AND provider_account_id = ? \
+           AND method_json = ? AND expires_at = ? AND created_at = ? AND revision = ?",
+    )
+    .bind(serde_json::to_string(&session.state)?)
+    .bind(i64::from(session.revision))
+    .bind(encode_timestamp(session.updated_at))
+    .bind(session.id.to_string())
+    .bind(session.owner_user_id.to_string())
+    .bind(session.provider_account_id.to_string())
+    .bind(serde_json::to_string(&session.method)?)
+    .bind(encode_timestamp(session.expires_at))
+    .bind(encode_timestamp(session.created_at))
+    .bind(i64::from(expected_revision))
+    .execute(&mut **transaction)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+    insert_auth_session_audit(
+        transaction,
+        actor,
+        "auth_session_transitioned",
+        correlation_id,
+        session,
+    )
+    .await?;
+    Ok(true)
 }
 
 fn validate_initial_session(

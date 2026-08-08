@@ -742,27 +742,7 @@ fn map_credential_error(error: CredentialProvisionError) -> ApiError {
         ),
         CredentialProvisionError::Provider(error) => map_credential_provider_error(error),
         CredentialProvisionError::Storage(error) => ApiError::internal(error),
-        CredentialProvisionError::SecretStore(error) => match error {
-            SecretStoreError::Unauthorized => ApiError::forbidden(),
-            SecretStoreError::NotFound => ApiError::not_found("provider_account_not_found"),
-            SecretStoreError::InvalidValue => ApiError::bad_request(
-                "invalid_provider_credential",
-                "the credential payload is invalid",
-            ),
-            SecretStoreError::AccountMismatch => ApiError::conflict(
-                "provider_account_mismatch",
-                "the credential does not match the Provider account",
-            ),
-            SecretStoreError::VersionConflict => ApiError::conflict(
-                "provider_credential_conflict",
-                "the Provider credentials changed concurrently",
-            ),
-            SecretStoreError::KeyUnavailable => ApiError::service_unavailable(
-                "secret_store_unavailable",
-                "the encrypted credential store is not configured",
-            ),
-            error => ApiError::internal(error),
-        },
+        CredentialProvisionError::SecretStore(error) => map_secret_store_error(error),
     }
 }
 
@@ -791,10 +771,36 @@ fn map_auth_session_error(error: AuthSessionServiceError) -> ApiError {
             "the authentication session is expired, terminal, or changed concurrently",
         ),
         AuthSessionServiceError::Provider { source, .. } => map_credential_provider_error(source),
+        AuthSessionServiceError::Credential(error) => map_credential_error(error),
+        AuthSessionServiceError::CredentialStore(error) => map_secret_store_error(error),
         AuthSessionServiceError::Domain(error) => {
             ApiError::bad_request("invalid_auth_session", error.to_string())
         }
         AuthSessionServiceError::Storage(error) => ApiError::internal(error),
+    }
+}
+
+fn map_secret_store_error(error: SecretStoreError) -> ApiError {
+    match error {
+        SecretStoreError::Unauthorized => ApiError::forbidden(),
+        SecretStoreError::NotFound => ApiError::not_found("provider_account_not_found"),
+        SecretStoreError::InvalidValue => ApiError::bad_request(
+            "invalid_provider_credential",
+            "the credential payload is invalid",
+        ),
+        SecretStoreError::AccountMismatch => ApiError::conflict(
+            "provider_account_mismatch",
+            "the credential does not match the Provider account",
+        ),
+        SecretStoreError::VersionConflict => ApiError::conflict(
+            "provider_credential_conflict",
+            "the Provider credentials changed concurrently",
+        ),
+        SecretStoreError::KeyUnavailable => ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "the encrypted credential store is not configured",
+        ),
+        error => ApiError::internal(error),
     }
 }
 

@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, fmt, str::FromStr, sync::Arc};
 
 use asterism_domain::{
-    AuditRecordId, AuthMethod, AuthState, ProviderAccountId, ProviderId, SecretId, SessionKind,
-    Timestamp, UserId,
+    AuditActor, AuditRecordId, AuthMethod, AuthSession, AuthState, ProviderAccountId, ProviderId,
+    SecretId, SessionKind, Timestamp, UserId,
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, NewProviderCredential, ProviderCredential,
@@ -17,7 +17,9 @@ use chacha20poly1305::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
-use crate::Database;
+use crate::{
+    AuthenticatedCredentialRepository, Database, auth_session::update_auth_session_in_transaction,
+};
 
 const MAX_SECRET_BYTES: usize = 1024 * 1024;
 
@@ -94,6 +96,81 @@ pub struct SqliteSecretStore {
 impl SqliteSecretStore {
     pub fn new(database: Database, keyring: Arc<SecretKeyring>) -> Self {
         Self { database, keyring }
+    }
+
+    async fn replace_provider_credentials_internal(
+        &self,
+        request: CredentialSetCommit<'_>,
+    ) -> Result<Vec<ProviderCredential>, SecretStoreError> {
+        let CredentialSetCommit {
+            owner_user_id,
+            provider_account_id,
+            bundle,
+            authenticated_session,
+            access,
+        } = request;
+        authorize(owner_user_id, access)?;
+        let (key_id, key) = self.keyring.active();
+        let prepared =
+            prepare_credential_bundle(owner_user_id, provider_account_id, bundle, key_id, key)?;
+        let authenticated_at = authenticated_session.map(|(session, _)| session.updated_at);
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        ensure_account_binding(
+            &mut transaction,
+            owner_user_id,
+            provider_account_id,
+            &prepared.provider_id,
+            prepared.tenant.as_deref(),
+        )
+        .await?;
+        if let Some((session, expected_revision)) = authenticated_session {
+            let actor = secret_audit_actor(&access.actor).ok_or(SecretStoreError::Unauthorized)?;
+            let updated = update_auth_session_in_transaction(
+                &mut transaction,
+                session,
+                expected_revision,
+                actor,
+                &access.correlation_id,
+            )
+            .await
+            .map_err(|_| SecretStoreError::Storage)?;
+            if !updated {
+                return Err(SecretStoreError::VersionConflict);
+            }
+        }
+        let replaced_count =
+            replace_previous_credentials(&mut transaction, provider_account_id, access).await?;
+        persist_prepared_credentials(&mut transaction, &prepared.credentials, access).await?;
+        authenticate_provider_account(
+            &mut transaction,
+            owner_user_id,
+            provider_account_id,
+            &prepared.provider_id,
+            authenticated_at.unwrap_or(prepared.prepared_at),
+        )
+        .await?;
+        insert_bundle_audit(
+            &mut transaction,
+            access,
+            provider_account_id,
+            prepared.auth_method,
+            prepared.session_kind,
+            replaced_count,
+            prepared.credentials.len(),
+        )
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(prepared
+            .credentials
+            .into_iter()
+            .map(|prepared| prepared.credential)
+            .collect())
     }
 }
 
@@ -274,52 +351,14 @@ impl ProviderCredentialStore for SqliteSecretStore {
         bundle: CredentialBundle,
         access: &SecretAccess,
     ) -> Result<Vec<ProviderCredential>, SecretStoreError> {
-        authorize(owner_user_id, access)?;
-        let (key_id, key) = self.keyring.active();
-        let prepared =
-            prepare_credential_bundle(owner_user_id, provider_account_id, bundle, key_id, key)?;
-        let mut transaction = self
-            .database
-            .pool()
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(storage_error)?;
-        ensure_account_binding(
-            &mut transaction,
+        self.replace_provider_credentials_internal(CredentialSetCommit {
             owner_user_id,
             provider_account_id,
-            &prepared.provider_id,
-            prepared.tenant.as_deref(),
-        )
-        .await?;
-        let replaced_count =
-            replace_previous_credentials(&mut transaction, provider_account_id, access).await?;
-        persist_prepared_credentials(&mut transaction, &prepared.credentials, access).await?;
-        authenticate_provider_account(
-            &mut transaction,
-            owner_user_id,
-            provider_account_id,
-            &prepared.provider_id,
-            prepared.prepared_at,
-        )
-        .await?;
-        insert_bundle_audit(
-            &mut transaction,
+            bundle,
+            authenticated_session: None,
             access,
-            provider_account_id,
-            prepared.auth_method,
-            prepared.session_kind,
-            replaced_count,
-            prepared.credentials.len(),
-        )
+        })
         .await
-        .map_err(storage_error)?;
-        transaction.commit().await.map_err(storage_error)?;
-        Ok(prepared
-            .credentials
-            .into_iter()
-            .map(|prepared| prepared.credential)
-            .collect())
     }
 
     async fn create_provider_credential(
@@ -550,6 +589,36 @@ impl ProviderCredentialStore for SqliteSecretStore {
         transaction.commit().await.map_err(storage_error)?;
         Ok(())
     }
+}
+
+#[async_trait]
+impl AuthenticatedCredentialRepository for SqliteSecretStore {
+    async fn commit_authenticated_credentials(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        bundle: CredentialBundle,
+        authenticated_session: &AuthSession,
+        expected_session_revision: u32,
+        access: &SecretAccess,
+    ) -> Result<Vec<ProviderCredential>, SecretStoreError> {
+        self.replace_provider_credentials_internal(CredentialSetCommit {
+            owner_user_id,
+            provider_account_id,
+            bundle,
+            authenticated_session: Some((authenticated_session, expected_session_revision)),
+            access,
+        })
+        .await
+    }
+}
+
+struct CredentialSetCommit<'a> {
+    owner_user_id: UserId,
+    provider_account_id: ProviderAccountId,
+    bundle: CredentialBundle,
+    authenticated_session: Option<(&'a AuthSession, u32)>,
+    access: &'a SecretAccess,
 }
 
 struct PreparedCredentialBundle {
@@ -1113,6 +1182,14 @@ fn encode_secret_actor(actor: &SecretActor) -> (&'static str, String) {
         SecretActor::ServiceToken(id) => ("service_token", id.to_string()),
         SecretActor::CoreService(service) => ("core_service", (*service).to_owned()),
         SecretActor::ProviderRuntime(provider_id) => ("provider_runtime", provider_id.to_owned()),
+    }
+}
+
+fn secret_audit_actor(actor: &SecretActor) -> Option<AuditActor> {
+    match actor {
+        SecretActor::User(id) => Some(AuditActor::User(*id)),
+        SecretActor::ServiceToken(id) => Some(AuditActor::ServiceToken(*id)),
+        SecretActor::CoreService(_) | SecretActor::ProviderRuntime(_) => None,
     }
 }
 

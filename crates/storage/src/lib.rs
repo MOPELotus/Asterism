@@ -23,10 +23,10 @@ pub use outbox::{FailureDisposition, OutboxHealth, OutboxRecord, SqliteOutboxRep
 pub use provider_account::SqliteProviderAccountRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
-    AuthSessionRepository, CreditRepository, ExecutionLeaseRepository, OutboxRepository,
-    ProviderAccountRepository, ProviderAccountRuntimeRepository, ScanScheduleRepository,
-    SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository, TaskRepository,
-    UserRepository,
+    AuthSessionRepository, AuthenticatedCredentialRepository, CreditRepository,
+    ExecutionLeaseRepository, OutboxRepository, ProviderAccountRepository,
+    ProviderAccountRuntimeRepository, ScanScheduleRepository, SchedulerRepository,
+    SessionRepository, TaskPage, TaskQueryRepository, TaskRepository, UserRepository,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

@@ -448,3 +448,18 @@ These commands carry only authentication method and typed IDs. Credential
 values remain on the separate stdin-only import path, preserving the boundary
 between how authentication is performed and which validated session material
 is ultimately stored.
+
+## Thirty-fourth Phase 0 slice
+
+The thirty-fourth checkpoint closes the Core authentication transaction around
+credential validation. A candidate attached to a waiting session first moves
+that exact attempt to `ValidatingCredential`; the Provider receives the Core
+session ID, and rejection or protocol failure becomes an observable terminal
+state without writing secret material.
+
+After remote validation, one SQLite immediate transaction verifies that the
+session is still the account's newest attempt at the expected revision, writes
+the encrypted credential set, advances the session and account to
+`Authenticated`, and appends their audits. A newer attempt therefore makes an
+older network callback lose the transaction before any ciphertext or account
+state can be committed.

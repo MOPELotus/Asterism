@@ -6,9 +6,16 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AuthChallenge, ProviderAuthContext, ProviderError, ProviderErrorKind, ProviderRegistry,
+    SessionStatus,
 };
-use asterism_storage::{AuthSessionRepository, ProviderAccountRepository, StorageError};
+use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
+use asterism_storage::{
+    AuthSessionRepository, AuthenticatedCredentialRepository, ProviderAccountRepository,
+    StorageError,
+};
 use chrono::Utc;
+
+use crate::credential::{CredentialProvisionError, validate_candidate};
 
 #[derive(Clone, Debug)]
 pub struct AuthSessionService<A, S> {
@@ -174,6 +181,158 @@ where
         }
         Ok(session)
     }
+
+    /// Submits one in-memory candidate through Provider validation and commits
+    /// it only while this remains the account's latest authentication session.
+    ///
+    /// # Errors
+    ///
+    /// Provider rejection and availability failures are persisted on the
+    /// session. Superseded sessions cannot commit credentials or account state.
+    pub async fn submit_credentials<C>(
+        &self,
+        credential_store: &C,
+        request: AuthSessionCredentialRequest,
+    ) -> Result<AuthSessionCredentialCommit, AuthSessionServiceError>
+    where
+        C: AuthenticatedCredentialRepository,
+    {
+        let AuthSessionCredentialRequest {
+            owner_user_id,
+            provider_account_id,
+            session_id,
+            bundle,
+            access,
+        } = request;
+        if !access.authorizes(owner_user_id) {
+            return Err(AuthSessionServiceError::Credential(
+                CredentialProvisionError::Unauthorized,
+            ));
+        }
+        let actor = audit_actor_from_access(&access)?;
+        let mut session = self
+            .enter_credential_validation(
+                owner_user_id,
+                provider_account_id,
+                session_id,
+                bundle.auth_method,
+                actor,
+                &access.correlation_id,
+            )
+            .await?;
+        let (bundle, status) = match validate_candidate(
+            self.registry.as_ref(),
+            &self.accounts,
+            owner_user_id,
+            provider_account_id,
+            bundle,
+            Some(session_id),
+            &access,
+        )
+        .await
+        {
+            Ok(validated) => validated,
+            Err(error) => {
+                transition_once(
+                    &self.sessions,
+                    &mut session,
+                    credential_failure_state(&error),
+                    actor,
+                    &access.correlation_id,
+                )
+                .await?;
+                return Err(AuthSessionServiceError::Credential(error));
+            }
+        };
+        let validating_session = session.clone();
+        if session.is_expired_at(Utc::now()) {
+            transition_once(
+                &self.sessions,
+                &mut session,
+                AuthState::Expired,
+                actor,
+                &access.correlation_id,
+            )
+            .await?;
+            return Err(AuthSessionServiceError::SessionExpired(session.id));
+        }
+        let validating_revision = validating_session.revision;
+        session.transition(AuthState::Authenticated, Utc::now())?;
+        let credentials = match credential_store
+            .commit_authenticated_credentials(
+                owner_user_id,
+                provider_account_id,
+                bundle,
+                &session,
+                validating_revision,
+                &access,
+            )
+            .await
+        {
+            Ok(credentials) => credentials,
+            Err(SecretStoreError::VersionConflict) => {
+                return Err(AuthSessionServiceError::RevisionConflict(session.id));
+            }
+            Err(error) => {
+                let mut failed_session = validating_session;
+                transition_once(
+                    &self.sessions,
+                    &mut failed_session,
+                    AuthState::ProviderUnavailable,
+                    actor,
+                    &access.correlation_id,
+                )
+                .await?;
+                return Err(AuthSessionServiceError::CredentialStore(error));
+            }
+        };
+        Ok(AuthSessionCredentialCommit {
+            session,
+            status,
+            credentials,
+        })
+    }
+
+    async fn enter_credential_validation(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        session_id: AuthSessionId,
+        method: AuthMethod,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<AuthSession, AuthSessionServiceError> {
+        let mut session = self
+            .sessions
+            .find_auth_session(owner_user_id, session_id)
+            .await?
+            .filter(|session| session.provider_account_id == provider_account_id)
+            .ok_or(AuthSessionServiceError::SessionNotFound(session_id))?;
+        if session.method != method || !matches!(session.state, AuthState::WaitingUser(_)) {
+            return Err(AuthSessionServiceError::InvalidSessionState(session_id));
+        }
+        if session.is_expired_at(Utc::now()) {
+            transition_once(
+                &self.sessions,
+                &mut session,
+                AuthState::Expired,
+                actor,
+                correlation_id,
+            )
+            .await?;
+            return Err(AuthSessionServiceError::SessionExpired(session.id));
+        }
+        let expected_revision = session.revision;
+        session.transition(AuthState::ValidatingCredential, Utc::now())?;
+        if !self
+            .sessions
+            .update_auth_session(&session, expected_revision, actor, correlation_id)
+            .await?
+        {
+            return Err(AuthSessionServiceError::RevisionConflict(session_id));
+        }
+        Ok(session)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -191,6 +350,22 @@ pub struct AuthSessionStartRequest {
     pub expires_at: Timestamp,
     pub actor: AuditActor,
     pub correlation_id: String,
+}
+
+#[derive(Debug)]
+pub struct AuthSessionCredentialRequest {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub session_id: AuthSessionId,
+    pub bundle: CredentialBundle,
+    pub access: SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthSessionCredentialCommit {
+    pub session: AuthSession,
+    pub status: SessionStatus,
+    pub credentials: Vec<ProviderCredential>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -220,6 +395,10 @@ pub enum AuthSessionServiceError {
         source: ProviderError,
     },
     #[error(transparent)]
+    Credential(#[from] CredentialProvisionError),
+    #[error("authenticated credential commit failed: {0}")]
+    CredentialStore(SecretStoreError),
+    #[error(transparent)]
     Domain(#[from] AuthSessionError),
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -243,7 +422,18 @@ async fn transition_provider_failure<S: AuthSessionRepository>(
     actor: AuditActor,
     correlation_id: &str,
 ) -> Result<(), AuthSessionServiceError> {
-    let next = match error.kind {
+    transition_once(
+        sessions,
+        session,
+        provider_failure_state(error.kind),
+        actor,
+        correlation_id,
+    )
+    .await
+}
+
+fn provider_failure_state(kind: ProviderErrorKind) -> AuthState {
+    match kind {
         ProviderErrorKind::RateLimited
         | ProviderErrorKind::Network
         | ProviderErrorKind::ProviderUnavailable => AuthState::ProviderUnavailable,
@@ -257,8 +447,39 @@ async fn transition_provider_failure<S: AuthSessionRepository>(
         | ProviderErrorKind::UnsupportedTask
         | ProviderErrorKind::InvalidResponse
         | ProviderErrorKind::Internal => AuthState::AuthFailed,
-    };
-    transition_once(sessions, session, next, actor, correlation_id).await
+    }
+}
+
+fn credential_failure_state(error: &CredentialProvisionError) -> AuthState {
+    match error {
+        CredentialProvisionError::Provider(error) => provider_failure_state(error.kind),
+        CredentialProvisionError::ProviderNotRegistered(_)
+        | CredentialProvisionError::AuthenticationUnavailable
+        | CredentialProvisionError::UnsupportedAuthMethod(_)
+        | CredentialProvisionError::UnsupportedSessionKind(_) => AuthState::ClientUpdateRequired,
+        CredentialProvisionError::Storage(_) | CredentialProvisionError::SecretStore(_) => {
+            AuthState::ProviderUnavailable
+        }
+        CredentialProvisionError::Unauthorized
+        | CredentialProvisionError::InvalidBundle(_)
+        | CredentialProvisionError::AccountNotFound(_)
+        | CredentialProvisionError::AccountMismatch
+        | CredentialProvisionError::CredentialRejected
+        | CredentialProvisionError::InvalidProviderStatus => AuthState::AuthFailed,
+    }
+}
+
+fn audit_actor_from_access(access: &SecretAccess) -> Result<AuditActor, AuthSessionServiceError> {
+    match access.actor {
+        asterism_secrets::SecretActor::User(user_id) => Ok(AuditActor::User(user_id)),
+        asterism_secrets::SecretActor::ServiceToken(token_id) => {
+            Ok(AuditActor::ServiceToken(token_id))
+        }
+        asterism_secrets::SecretActor::CoreService(_)
+        | asterism_secrets::SecretActor::ProviderRuntime(_) => Err(
+            AuthSessionServiceError::Credential(CredentialProvisionError::Unauthorized),
+        ),
+    }
 }
 
 async fn transition_once<S: AuthSessionRepository>(
@@ -288,16 +509,23 @@ async fn transition_once<S: AuthSessionRepository>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
 
     use asterism_domain::{ProviderAccount, Role, SessionKind, WaitingUserState};
     use asterism_provider_api::{
         AuthenticationCapability, ProviderCapability, ProviderContext, ProviderEntry,
         ProviderIdentity, ProviderMetadata, ProviderResult, SessionStatus, VerificationLevel,
     };
-    use asterism_secrets::CredentialBundle;
+    use asterism_secrets::{
+        CredentialAcquisition, CredentialBundle, CredentialField, SecretAccess, SecretActor,
+        SecretKey, SecretPurpose, SecretStore, SecretValue,
+    };
     use asterism_storage::{
-        Database, SqliteAuthSessionRepository, SqliteProviderAccountRepository,
+        Database, SecretKeyring, SqliteAuthSessionRepository, SqliteProviderAccountRepository,
+        SqliteSecretStore,
     };
     use async_trait::async_trait;
     use chrono::Duration;
@@ -380,14 +608,177 @@ mod tests {
         assert_eq!(stored.revision, 2);
     }
 
+    #[tokio::test]
+    async fn validated_credentials_and_authenticated_session_commit_together() {
+        let fixture = fixture(true).await;
+        let started = begin_session(&fixture, "auth-credential-start").await;
+        let committed = fixture
+            .service
+            .submit_credentials(
+                &fixture.store,
+                AuthSessionCredentialRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    bundle: credential_bundle(b"session-cookie"),
+                    access: secret_access(fixture.owner, "auth-credential-submit"),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(committed.session.state, AuthState::Authenticated);
+        assert_eq!(committed.session.revision, 4);
+        assert_eq!(committed.credentials.len(), 1);
+        assert_eq!(
+            fixture
+                .store
+                .get(
+                    &committed.credentials[0].secret,
+                    &secret_access(fixture.owner, "auth-credential-read"),
+                )
+                .await
+                .unwrap()
+                .expose_secret(),
+            b"session-cookie"
+        );
+        let stored = fixture
+            .sessions
+            .find_auth_session(fixture.owner, started.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, committed.session);
+        let account = fixture
+            .accounts
+            .find_provider_account(fixture.owner, fixture.account)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.auth_state, AuthState::Authenticated);
+        assert_eq!(
+            account.credential_refs,
+            [committed.credentials[0].secret.id]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_credentials_fail_the_session_without_storing_plaintext() {
+        let fixture = fixture_with_validation(true, false, None).await;
+        let started = begin_session(&fixture, "auth-rejected-start").await;
+        let error = fixture
+            .service
+            .submit_credentials(
+                &fixture.store,
+                AuthSessionCredentialRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    bundle: credential_bundle(b"rejected-cookie"),
+                    access: secret_access(fixture.owner, "auth-rejected-submit"),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthSessionServiceError::Credential(CredentialProvisionError::CredentialRejected)
+        ));
+        let stored = fixture
+            .sessions
+            .find_auth_session(fixture.owner, started.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, AuthState::AuthFailed);
+        assert_eq!(stored.revision, 4);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM secret_blobs")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn superseded_network_validation_cannot_commit_credentials() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let fixture = fixture_with_validation(
+            true,
+            true,
+            Some((Arc::clone(&entered), Arc::clone(&release))),
+        )
+        .await;
+        let first = begin_session(&fixture, "auth-race-first").await;
+        let service = fixture.service.clone();
+        let store = fixture.store.clone();
+        let owner = fixture.owner;
+        let account = fixture.account;
+        let first_session_id = first.session.id;
+        let submission = tokio::spawn(async move {
+            service
+                .submit_credentials(
+                    &store,
+                    AuthSessionCredentialRequest {
+                        owner_user_id: owner,
+                        provider_account_id: account,
+                        session_id: first_session_id,
+                        bundle: credential_bundle(b"stale-cookie"),
+                        access: secret_access(owner, "auth-race-submit"),
+                    },
+                )
+                .await
+        });
+        entered.notified().await;
+        let second = begin_session(&fixture, "auth-race-second").await;
+        release.notify_one();
+        let error = submission.await.unwrap().unwrap_err();
+
+        assert!(matches!(
+            error,
+            AuthSessionServiceError::RevisionConflict(id) if id == first.session.id
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM secret_blobs")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        let latest = fixture
+            .sessions
+            .find_latest_account_auth_session(fixture.owner, fixture.account)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, second.session.id);
+        assert_eq!(
+            latest.state,
+            AuthState::WaitingUser(WaitingUserState::QrScan)
+        );
+    }
+
     struct Fixture {
+        database: Database,
         owner: UserId,
         account: ProviderAccountId,
+        accounts: SqliteProviderAccountRepository,
         sessions: SqliteAuthSessionRepository,
+        store: SqliteSecretStore,
         service: AuthSessionService<SqliteProviderAccountRepository, SqliteAuthSessionRepository>,
     }
 
     async fn fixture(echo_session_id: bool) -> Fixture {
+        fixture_with_validation(echo_session_id, true, None).await
+    }
+
+    async fn fixture_with_validation(
+        echo_session_id: bool,
+        credential_valid: bool,
+        validation_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    ) -> Fixture {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
         let owner = UserId::new();
@@ -439,6 +830,8 @@ mod tests {
         let authentication = Arc::new(TestAuthentication {
             metadata: metadata.clone(),
             echo_session_id,
+            credential_valid,
+            validation_gate,
         });
         let mut registry = ProviderRegistry::default();
         registry
@@ -447,13 +840,69 @@ mod tests {
                 ..ProviderEntry::metadata_only(metadata)
             })
             .unwrap();
-        let sessions = SqliteAuthSessionRepository::new(database);
-        let service = AuthSessionService::new(Arc::new(registry), accounts, sessions.clone());
+        let sessions = SqliteAuthSessionRepository::new(database.clone());
+        let store = SqliteSecretStore::new(
+            database.clone(),
+            Arc::new(
+                SecretKeyring::new(
+                    "key-a",
+                    BTreeMap::from([("key-a".to_owned(), SecretKey::new([9; 32]))]),
+                )
+                .unwrap(),
+            ),
+        );
+        let service =
+            AuthSessionService::new(Arc::new(registry), accounts.clone(), sessions.clone());
         Fixture {
+            database,
             owner,
             account,
+            accounts,
             sessions,
+            store,
             service,
+        }
+    }
+
+    async fn begin_session(fixture: &Fixture, correlation_id: &str) -> AuthSessionBegin {
+        let now = Utc::now();
+        fixture
+            .service
+            .begin(AuthSessionStartRequest {
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                method: AuthMethod::QrCode,
+                created_at: now,
+                expires_at: now + Duration::minutes(10),
+                actor: AuditActor::User(fixture.owner),
+                correlation_id: correlation_id.to_owned(),
+            })
+            .await
+            .unwrap()
+    }
+
+    fn credential_bundle(value: &[u8]) -> CredentialBundle {
+        CredentialBundle {
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            tenant: None,
+            auth_method: AuthMethod::QrCode,
+            acquired_via: CredentialAcquisition::NativeProviderLogin,
+            captured_at: Utc::now(),
+            expires_at: None,
+            session_kind: SessionKind::Cookie,
+            fields: vec![CredentialField {
+                purpose: SecretPurpose::ProviderCookie,
+                value: SecretValue::new(value.to_vec()),
+            }],
+            user_id_hint: None,
+        }
+    }
+
+    fn secret_access(owner: UserId, correlation_id: &str) -> SecretAccess {
+        SecretAccess {
+            actor: SecretActor::User(owner),
+            correlation_id: correlation_id.to_owned(),
+            reason: "complete authentication session".to_owned(),
         }
     }
 
@@ -461,6 +910,8 @@ mod tests {
     struct TestAuthentication {
         metadata: ProviderMetadata,
         echo_session_id: bool,
+        credential_valid: bool,
+        validation_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     }
 
     impl ProviderIdentity for TestAuthentication {
@@ -491,11 +942,16 @@ mod tests {
 
         async fn validate_credential(
             &self,
-            _context: &ProviderAuthContext,
+            context: &ProviderAuthContext,
             _credential: &CredentialBundle,
         ) -> ProviderResult<SessionStatus> {
+            assert!(context.auth_session_id.is_some());
+            if let Some((entered, release)) = &self.validation_gate {
+                entered.notify_one();
+                release.notified().await;
+            }
             Ok(SessionStatus {
-                valid: true,
+                valid: self.credential_valid,
                 kind: SessionKind::Cookie,
                 expires_at: None,
                 account_hint: None,

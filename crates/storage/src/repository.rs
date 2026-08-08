@@ -4,6 +4,7 @@ use asterism_domain::{
     CreditTransactionId, ExecutionId, ExecutionLease, ProviderAccount, ProviderAccountId,
     ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
+use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
 
 use crate::StorageError;
@@ -117,6 +118,21 @@ pub trait AuthSessionRepository: Send + Sync {
         actor: AuditActor,
         correlation_id: &str,
     ) -> Result<bool, StorageError>;
+}
+
+/// Atomic commit boundary used after a candidate has passed Provider
+/// validation inside one current authentication session.
+#[async_trait]
+pub trait AuthenticatedCredentialRepository: Send + Sync {
+    async fn commit_authenticated_credentials(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        bundle: CredentialBundle,
+        authenticated_session: &AuthSession,
+        expected_session_revision: u32,
+        access: &SecretAccess,
+    ) -> Result<Vec<ProviderCredential>, SecretStoreError>;
 }
 
 /// Persistence contract consumed by identity and authorization services.

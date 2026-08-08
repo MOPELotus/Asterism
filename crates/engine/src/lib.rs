@@ -13,7 +13,8 @@ pub use assessment::{
     AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action,
 };
 pub use auth_session::{
-    AuthSessionBegin, AuthSessionService, AuthSessionServiceError, AuthSessionStartRequest,
+    AuthSessionBegin, AuthSessionCredentialCommit, AuthSessionCredentialRequest,
+    AuthSessionService, AuthSessionServiceError, AuthSessionStartRequest,
 };
 pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredentialService};
 pub use outbox::{

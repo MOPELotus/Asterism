@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use asterism_domain::{AuthMethod, ProviderAccountId, ProviderId, SessionKind, UserId};
+use asterism_domain::{
+    AuthMethod, AuthSessionId, ProviderAccountId, ProviderId, SessionKind, UserId,
+};
 use asterism_provider_api::{ProviderAuthContext, ProviderError, ProviderRegistry, SessionStatus};
 use asterism_secrets::{
     CredentialBundle, CredentialBundleError, ProviderCredential, ProviderCredentialStore,
@@ -43,53 +45,19 @@ where
         &self,
         owner_user_id: UserId,
         provider_account_id: ProviderAccountId,
-        mut bundle: CredentialBundle,
+        bundle: CredentialBundle,
         access: &SecretAccess,
     ) -> Result<CredentialCommit, CredentialProvisionError> {
-        if !access.authorizes(owner_user_id) {
-            return Err(CredentialProvisionError::Unauthorized);
-        }
-        bundle.validate()?;
-        let account = self
-            .accounts
-            .find_provider_account(owner_user_id, provider_account_id)
-            .await?
-            .ok_or(CredentialProvisionError::AccountNotFound(
-                provider_account_id,
-            ))?;
-        if account.provider_id != bundle.provider_id || account.tenant != bundle.tenant {
-            return Err(CredentialProvisionError::AccountMismatch);
-        }
-        let entry = self.registry.get(&bundle.provider_id).ok_or_else(|| {
-            CredentialProvisionError::ProviderNotRegistered(bundle.provider_id.clone())
-        })?;
-        if !entry.metadata.auth_methods.contains(&bundle.auth_method) {
-            return Err(CredentialProvisionError::UnsupportedAuthMethod(
-                bundle.auth_method,
-            ));
-        }
-        if !entry.metadata.session_kinds.contains(&bundle.session_kind) {
-            return Err(CredentialProvisionError::UnsupportedSessionKind(
-                bundle.session_kind,
-            ));
-        }
-        let authentication = entry
-            .authentication
-            .as_ref()
-            .ok_or(CredentialProvisionError::AuthenticationUnavailable)?;
-        let context = ProviderAuthContext {
-            provider_id: account.provider_id,
-            account_id: account.id,
-            auth_session_id: None,
-            correlation_id: access.correlation_id.clone(),
-        };
-        let status = authentication
-            .validate_credential(&context, &bundle)
-            .await?;
-        validate_status(&bundle, &status)?;
-        bundle.expires_at = status.expires_at.or(bundle.expires_at);
-        bundle.user_id_hint = status.account_hint.clone().or(bundle.user_id_hint);
-        bundle.validate()?;
+        let (bundle, status) = validate_candidate(
+            self.registry.as_ref(),
+            &self.accounts,
+            owner_user_id,
+            provider_account_id,
+            bundle,
+            None,
+            access,
+        )
+        .await?;
         let credentials = self
             .credentials
             .replace_provider_credentials(owner_user_id, provider_account_id, bundle, access)
@@ -99,6 +67,61 @@ where
             status,
         })
     }
+}
+
+pub(crate) async fn validate_candidate<A: ProviderAccountRepository>(
+    registry: &ProviderRegistry,
+    accounts: &A,
+    owner_user_id: UserId,
+    provider_account_id: ProviderAccountId,
+    mut bundle: CredentialBundle,
+    auth_session_id: Option<AuthSessionId>,
+    access: &SecretAccess,
+) -> Result<(CredentialBundle, SessionStatus), CredentialProvisionError> {
+    if !access.authorizes(owner_user_id) {
+        return Err(CredentialProvisionError::Unauthorized);
+    }
+    bundle.validate()?;
+    let account = accounts
+        .find_provider_account(owner_user_id, provider_account_id)
+        .await?
+        .ok_or(CredentialProvisionError::AccountNotFound(
+            provider_account_id,
+        ))?;
+    if account.provider_id != bundle.provider_id || account.tenant != bundle.tenant {
+        return Err(CredentialProvisionError::AccountMismatch);
+    }
+    let entry = registry.get(&bundle.provider_id).ok_or_else(|| {
+        CredentialProvisionError::ProviderNotRegistered(bundle.provider_id.clone())
+    })?;
+    if !entry.metadata.auth_methods.contains(&bundle.auth_method) {
+        return Err(CredentialProvisionError::UnsupportedAuthMethod(
+            bundle.auth_method,
+        ));
+    }
+    if !entry.metadata.session_kinds.contains(&bundle.session_kind) {
+        return Err(CredentialProvisionError::UnsupportedSessionKind(
+            bundle.session_kind,
+        ));
+    }
+    let authentication = entry
+        .authentication
+        .as_ref()
+        .ok_or(CredentialProvisionError::AuthenticationUnavailable)?;
+    let context = ProviderAuthContext {
+        provider_id: account.provider_id,
+        account_id: account.id,
+        auth_session_id,
+        correlation_id: access.correlation_id.clone(),
+    };
+    let status = authentication
+        .validate_credential(&context, &bundle)
+        .await?;
+    validate_status(&bundle, &status)?;
+    bundle.expires_at = status.expires_at.or(bundle.expires_at);
+    bundle.user_id_hint = status.account_hint.clone().or(bundle.user_id_hint);
+    bundle.validate()?;
+    Ok((bundle, status))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
