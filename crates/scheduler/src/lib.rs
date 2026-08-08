@@ -19,6 +19,49 @@ pub struct ScheduledJob {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ScanSchedule {
+    pub id: ScheduleId,
+    pub provider_account_id: ProviderAccountId,
+    pub interval_seconds: u64,
+    pub next_run_at: Timestamp,
+    pub enabled: bool,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+impl ScanSchedule {
+    /// Validates persisted schedule fields independently from Provider-specific
+    /// minimum interval policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScanScheduleError`] for a zero or unrepresentable interval, or
+    /// timestamps that move backwards across the schedule lifecycle.
+    pub fn validate(&self) -> Result<(), ScanScheduleError> {
+        if self.interval_seconds == 0 {
+            return Err(ScanScheduleError::ZeroInterval);
+        }
+        if i64::try_from(self.interval_seconds).is_err() {
+            return Err(ScanScheduleError::IntervalOutOfRange);
+        }
+        if self.updated_at < self.created_at {
+            return Err(ScanScheduleError::InvalidTimestamps);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ScanScheduleError {
+    #[error("scan schedule interval must be greater than zero")]
+    ZeroInterval,
+    #[error("scan schedule interval is outside the supported clock range")]
+    IntervalOutOfRange,
+    #[error("scan schedule lifecycle timestamps move backwards")]
+    InvalidTimestamps,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "payload")]
 pub enum ScheduledJobKind {
     Scan {
@@ -167,5 +210,28 @@ mod tests {
         };
         assert_eq!(invalid.validate(), Err(RetryPolicyError::NoAttempts));
         assert_eq!(POLICY.delay_after(0), Err(RetryPolicyError::AttemptZero));
+    }
+
+    #[test]
+    fn scan_schedule_rejects_invalid_interval_and_lifecycle() {
+        let now = chrono::Utc::now();
+        let mut schedule = ScanSchedule {
+            id: ScheduleId::new(),
+            provider_account_id: ProviderAccountId::new(),
+            interval_seconds: 60,
+            next_run_at: now,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        assert_eq!(schedule.validate(), Ok(()));
+        schedule.interval_seconds = 0;
+        assert_eq!(schedule.validate(), Err(ScanScheduleError::ZeroInterval));
+        schedule.interval_seconds = 60;
+        schedule.updated_at = now - chrono::Duration::seconds(1);
+        assert_eq!(
+            schedule.validate(),
+            Err(ScanScheduleError::InvalidTimestamps)
+        );
     }
 }

@@ -193,3 +193,15 @@ bounded exponential policy. A bounded Provider `Retry-After` can extend the
 delay, while authentication, human-action, invalid-inventory, missing-account,
 and unregistered-capability failures dead-letter without a retry loop. This is
 an execution primitive for the unified Scheduler, not a Provider-owned loop.
+
+## Thirteenth Phase 0 slice
+
+The thirteenth checkpoint gives `scan_schedules` a typed repository contract and
+atomically materializes due periods into idempotent Scan jobs. Materialization
+uses an immediate SQLite write transaction so concurrent ticks cannot create
+two jobs for the same schedule occurrence.
+
+After downtime, one due job is created and `next_run_at` advances directly past
+the current time instead of replaying every missed interval. Disabled schedules
+do not materialize, the per-tick batch is bounded, and Provider-specific minimum
+interval policy remains above this persistence primitive.

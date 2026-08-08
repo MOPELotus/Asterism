@@ -1,10 +1,14 @@
-use asterism_domain::{ScheduleId, Timestamp};
-use asterism_scheduler::{ScheduledJob, ScheduledJobKind, ScheduledJobState};
+use std::str::FromStr;
+
+use asterism_domain::{ProviderAccountId, ScheduleId, Timestamp};
+use asterism_scheduler::{ScanSchedule, ScheduledJob, ScheduledJobKind, ScheduledJobState};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::Row;
 
-use crate::{Database, SchedulerRepository, StorageError};
+use crate::{Database, ScanScheduleRepository, SchedulerRepository, StorageError};
+
+const MAX_MATERIALIZED_SCAN_JOBS: u32 = 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobFailureDisposition {
@@ -160,6 +164,175 @@ impl SchedulerRepository for SqliteSchedulerRepository {
     }
 }
 
+#[async_trait]
+impl ScanScheduleRepository for SqliteSchedulerRepository {
+    async fn upsert_scan_schedule(
+        &self,
+        schedule: &ScanSchedule,
+    ) -> Result<ScanSchedule, StorageError> {
+        schedule
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let interval_seconds = i64::try_from(schedule.interval_seconds)
+            .map_err(|_| StorageError::InvalidData("scan interval is too large".to_owned()))?;
+        let row = sqlx::query(
+            "INSERT INTO scan_schedules \
+             (id, provider_account_id, interval_seconds, next_run_at, enabled, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(provider_account_id) DO UPDATE SET \
+                 interval_seconds = excluded.interval_seconds, \
+                 next_run_at = excluded.next_run_at, enabled = excluded.enabled, \
+                 updated_at = excluded.updated_at \
+             RETURNING id, provider_account_id, interval_seconds, next_run_at, enabled, \
+                       created_at, updated_at",
+        )
+        .bind(schedule.id.to_string())
+        .bind(schedule.provider_account_id.to_string())
+        .bind(interval_seconds)
+        .bind(encode_timestamp(schedule.next_run_at))
+        .bind(i64::from(schedule.enabled))
+        .bind(encode_timestamp(schedule.created_at))
+        .bind(encode_timestamp(schedule.updated_at))
+        .fetch_one(self.database.pool())
+        .await?;
+        decode_scan_schedule(&row)
+    }
+
+    async fn find_scan_schedule(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Result<Option<ScanSchedule>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, provider_account_id, interval_seconds, next_run_at, enabled, \
+                    created_at, updated_at \
+             FROM scan_schedules WHERE provider_account_id = ?",
+        )
+        .bind(account_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        row.as_ref().map(decode_scan_schedule).transpose()
+    }
+
+    async fn materialize_due_scan_jobs(
+        &self,
+        now: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<ScheduledJob>, StorageError> {
+        if limit == 0 || limit > MAX_MATERIALIZED_SCAN_JOBS {
+            return Err(StorageError::InvalidData(
+                "scan materialization limit must be 1-1000".to_owned(),
+            ));
+        }
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let rows = sqlx::query(
+            "SELECT id, provider_account_id, interval_seconds, next_run_at, enabled, \
+                    created_at, updated_at \
+             FROM scan_schedules \
+             WHERE enabled = 1 AND next_run_at <= ? \
+             ORDER BY next_run_at, id LIMIT ?",
+        )
+        .bind(encode_timestamp(now))
+        .bind(limit)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut jobs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let schedule = decode_scan_schedule(&row)?;
+            let job = ScheduledJob {
+                id: ScheduleId::new(),
+                kind: ScheduledJobKind::Scan {
+                    provider_account_id: schedule.provider_account_id,
+                },
+                run_at: schedule.next_run_at,
+                state: ScheduledJobState::Pending,
+                attempts: 0,
+                idempotency_key: format!(
+                    "scan-schedule:{}:{}",
+                    schedule.id,
+                    encode_timestamp(schedule.next_run_at)
+                ),
+                created_at: now,
+                updated_at: now,
+            };
+            sqlx::query(
+                "INSERT INTO scheduled_jobs \
+                 (id, job_kind, payload_json, run_at, state, attempts, idempotency_key, \
+                  created_at, updated_at) \
+                 VALUES (?, 'scan', ?, ?, 'pending', 0, ?, ?, ?)",
+            )
+            .bind(job.id.to_string())
+            .bind(serde_json::to_string(&job.kind)?)
+            .bind(encode_timestamp(job.run_at))
+            .bind(&job.idempotency_key)
+            .bind(encode_timestamp(now))
+            .bind(encode_timestamp(now))
+            .execute(&mut *transaction)
+            .await?;
+            let next_run_at = next_run_after(&schedule, now)?;
+            sqlx::query("UPDATE scan_schedules SET next_run_at = ?, updated_at = ? WHERE id = ?")
+                .bind(encode_timestamp(next_run_at))
+                .bind(encode_timestamp(now))
+                .bind(schedule.id.to_string())
+                .execute(&mut *transaction)
+                .await?;
+            jobs.push(job);
+        }
+        transaction.commit().await?;
+        Ok(jobs)
+    }
+}
+
+fn decode_scan_schedule(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSchedule, StorageError> {
+    let interval_seconds = u64::try_from(row.try_get::<i64, _>("interval_seconds")?)
+        .map_err(|_| StorageError::InvalidData("scan interval is negative".to_owned()))?;
+    let enabled = match row.try_get::<i64, _>("enabled")? {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(StorageError::InvalidData(
+                "scan schedule enabled flag is invalid".to_owned(),
+            ));
+        }
+    };
+    let schedule = ScanSchedule {
+        id: ScheduleId::from_str(row.try_get("id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        provider_account_id: ProviderAccountId::from_str(row.try_get("provider_account_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        interval_seconds,
+        next_run_at: decode_timestamp(row.try_get("next_run_at")?)?,
+        enabled,
+        created_at: decode_timestamp(row.try_get("created_at")?)?,
+        updated_at: decode_timestamp(row.try_get("updated_at")?)?,
+    };
+    schedule
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    Ok(schedule)
+}
+
+fn next_run_after(schedule: &ScanSchedule, now: Timestamp) -> Result<Timestamp, StorageError> {
+    let interval = i64::try_from(schedule.interval_seconds)
+        .map_err(|_| StorageError::InvalidData("scan interval is too large".to_owned()))?;
+    let overdue_seconds = now
+        .signed_duration_since(schedule.next_run_at)
+        .num_seconds()
+        .max(0);
+    let periods = overdue_seconds
+        .checked_div(interval)
+        .and_then(|periods| periods.checked_add(1))
+        .ok_or_else(|| StorageError::InvalidData("scan schedule time overflow".to_owned()))?;
+    let advance_seconds = interval
+        .checked_mul(periods)
+        .ok_or_else(|| StorageError::InvalidData("scan schedule time overflow".to_owned()))?;
+    let advance = chrono::Duration::try_seconds(advance_seconds)
+        .ok_or_else(|| StorageError::InvalidData("scan schedule time overflow".to_owned()))?;
+    schedule
+        .next_run_at
+        .checked_add_signed(advance)
+        .ok_or_else(|| StorageError::InvalidData("scan schedule time overflow".to_owned()))
+}
+
 fn decode_claimed_job(
     row: &sqlx::sqlite::SqliteRow,
     worker_id: &str,
@@ -206,7 +379,7 @@ fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
 
 #[cfg(test)]
 mod tests {
-    use asterism_domain::{ExecutionId, ScheduleId};
+    use asterism_domain::{AuthState, ExecutionId, ProviderAccountId, Role, ScheduleId, UserId};
     use chrono::{Duration, Utc};
 
     use super::*;
@@ -284,5 +457,110 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn due_scan_schedule_materializes_once_and_skips_backlog() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let account_id = insert_provider_account(&database).await;
+        let repository = SqliteSchedulerRepository::new(database.clone());
+        let now = Utc::now();
+        let schedule = ScanSchedule {
+            id: ScheduleId::new(),
+            provider_account_id: account_id,
+            interval_seconds: 30,
+            next_run_at: now - Duration::seconds(95),
+            enabled: true,
+            created_at: now - Duration::minutes(5),
+            updated_at: now - Duration::minutes(5),
+        };
+        let stored = repository.upsert_scan_schedule(&schedule).await.unwrap();
+        assert_eq!(stored, schedule);
+
+        let mut replacement = schedule.clone();
+        replacement.id = ScheduleId::new();
+        replacement.updated_at = now - Duration::minutes(4);
+        let stored = repository.upsert_scan_schedule(&replacement).await.unwrap();
+        assert_eq!(stored.id, schedule.id);
+
+        let (first, second) = tokio::join!(
+            repository.materialize_due_scan_jobs(now, 10),
+            repository.materialize_due_scan_jobs(now, 10)
+        );
+        let jobs = [first.unwrap(), second.unwrap()];
+        assert_eq!(jobs.iter().map(Vec::len).sum::<usize>(), 1);
+        let job = jobs.iter().find_map(|jobs| jobs.first()).unwrap();
+        assert_eq!(
+            job.kind,
+            ScheduledJobKind::Scan {
+                provider_account_id: account_id
+            }
+        );
+        assert_eq!(job.run_at, schedule.next_run_at);
+        let advanced = repository
+            .find_scan_schedule(account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(advanced.next_run_at > now);
+        assert!(
+            repository
+                .materialize_due_scan_jobs(now, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut disabled = advanced;
+        disabled.enabled = false;
+        disabled.next_run_at = now - Duration::seconds(1);
+        disabled.updated_at = now;
+        repository.upsert_scan_schedule(&disabled).await.unwrap();
+        assert!(
+            repository
+                .materialize_due_scan_jobs(now, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let jobs_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_jobs")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(jobs_count, 1);
+    }
+
+    async fn insert_provider_account(database: &Database) -> ProviderAccountId {
+        let user_id = UserId::new();
+        let account_id = ProviderAccountId::new();
+        let now = encode_timestamp(Utc::now());
+        sqlx::query(
+            "INSERT INTO users \
+             (id, username, password_hash, status, roles_json, permissions_json, created_at, updated_at) \
+             VALUES (?, 'owner', '$argon2id$test', 'active', ?, '[]', ?, ?)",
+        )
+        .bind(user_id.to_string())
+        .bind(serde_json::to_string(&[Role::User]).unwrap())
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_accounts \
+             (id, owner_user_id, provider_id, display_name, auth_state_json, created_at, updated_at) \
+             VALUES (?, ?, 'provider-alpha', 'primary', ?, ?, ?)",
+        )
+        .bind(account_id.to_string())
+        .bind(user_id.to_string())
+        .bind(serde_json::to_string(&AuthState::Authenticated).unwrap())
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        account_id
     }
 }

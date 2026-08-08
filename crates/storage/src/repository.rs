@@ -202,6 +202,25 @@ pub trait SchedulerRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait ScanScheduleRepository: Send + Sync {
+    async fn upsert_scan_schedule(
+        &self,
+        schedule: &asterism_scheduler::ScanSchedule,
+    ) -> Result<asterism_scheduler::ScanSchedule, StorageError>;
+
+    async fn find_scan_schedule(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Result<Option<asterism_scheduler::ScanSchedule>, StorageError>;
+
+    async fn materialize_due_scan_jobs(
+        &self,
+        now: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<asterism_scheduler::ScheduledJob>, StorageError>;
+}
+
+#[async_trait]
 pub trait SessionRepository: Send + Sync {
     async fn create_web_session(
         &self,
