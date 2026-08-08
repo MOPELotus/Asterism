@@ -197,6 +197,7 @@ name = "asterism-provider-api"
 version = "0.1.0"
 dependencies = [
  "asterism-domain",
+ "asterism-secrets",
  "async-trait",
  "chrono",
  "serde",

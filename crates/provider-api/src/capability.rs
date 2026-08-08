@@ -2,6 +2,7 @@ use asterism_domain::{
     AssessmentClass, AuthMethod, AuthSessionId, CourseId, ProviderAccountId, ProviderId,
     RemoteState, SecretId, SessionKind, SourceType, TaskCapability, TaskId, Timestamp,
 };
+use asterism_secrets::CredentialBundle;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,13 @@ pub struct ProviderContext {
     pub correlation_id: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ProviderAuthContext {
+    pub provider_id: ProviderId,
+    pub account_id: ProviderAccountId,
+    pub correlation_id: String,
+}
+
 pub trait ProviderIdentity: Send + Sync {
     fn metadata(&self) -> &ProviderMetadata;
 }
@@ -27,6 +35,13 @@ pub trait AuthenticationCapability: ProviderIdentity {
         account_id: Option<ProviderAccountId>,
         method: AuthMethod,
     ) -> ProviderResult<AuthChallenge>;
+
+    /// Validates a plaintext candidate before Core permits persistence.
+    async fn validate_credential(
+        &self,
+        context: &ProviderAuthContext,
+        credential: &CredentialBundle,
+    ) -> ProviderResult<SessionStatus>;
 
     async fn validate_session(&self, context: &ProviderContext) -> ProviderResult<SessionStatus>;
 }

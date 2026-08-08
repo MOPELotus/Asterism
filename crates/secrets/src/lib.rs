@@ -1,11 +1,13 @@
 //! The only Core boundary through which plaintext credentials may pass.
 
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
-use asterism_domain::{ProviderAccountId, SecretId, SessionKind, Timestamp, UserId};
+use asterism_domain::{ProviderAccountId, ProviderId, SecretId, SessionKind, Timestamp, UserId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+const MAX_CREDENTIAL_FIELD_BYTES: usize = 1024 * 1024;
 
 /// Owned secret bytes which zero their allocation on drop and never reveal
 /// their value through `Debug`.
@@ -140,6 +142,114 @@ pub struct NewProviderCredential {
     pub acquired_via: CredentialAcquisition,
     pub expires_at: Option<Timestamp>,
     pub value: SecretValue,
+}
+
+#[derive(Debug)]
+pub struct CredentialField {
+    pub purpose: SecretPurpose,
+    pub value: SecretValue,
+}
+
+pub struct CredentialBundle {
+    pub provider_id: ProviderId,
+    pub tenant: Option<String>,
+    pub acquired_via: CredentialAcquisition,
+    pub captured_at: Timestamp,
+    pub expires_at: Option<Timestamp>,
+    pub session_kind: SessionKind,
+    pub fields: Vec<CredentialField>,
+    pub user_id_hint: Option<String>,
+}
+
+impl CredentialBundle {
+    /// Validates a normalized in-memory candidate before a Provider sees it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialBundleError`] when fields are empty, duplicated,
+    /// non-Provider, oversized, or carry invalid lifecycle metadata.
+    pub fn validate(&self) -> Result<(), CredentialBundleError> {
+        if self.fields.is_empty() || self.fields.len() > 16 {
+            return Err(CredentialBundleError::InvalidFieldCount);
+        }
+        let purposes = self
+            .fields
+            .iter()
+            .map(|field| field.purpose)
+            .collect::<HashSet<_>>();
+        if purposes.len() != self.fields.len()
+            || purposes
+                .iter()
+                .any(|purpose| !purpose.is_provider_credential())
+        {
+            return Err(CredentialBundleError::InvalidFields);
+        }
+        if self.fields.iter().any(|field| {
+            let length = field.value.expose_secret().len();
+            length == 0 || length > MAX_CREDENTIAL_FIELD_BYTES
+        }) {
+            return Err(CredentialBundleError::InvalidFields);
+        }
+        if self
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= self.captured_at)
+        {
+            return Err(CredentialBundleError::InvalidTimestamps);
+        }
+        if !valid_optional_hint(self.tenant.as_deref(), 256)
+            || !valid_optional_hint(self.user_id_hint.as_deref(), 256)
+        {
+            return Err(CredentialBundleError::InvalidMetadata);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for CredentialBundle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialBundle")
+            .field("provider_id", &self.provider_id)
+            .field("tenant", &self.tenant.as_ref().map(|_| "[REDACTED]"))
+            .field("acquired_via", &self.acquired_via)
+            .field("captured_at", &self.captured_at)
+            .field("expires_at", &self.expires_at)
+            .field("session_kind", &self.session_kind)
+            .field(
+                "field_purposes",
+                &self
+                    .fields
+                    .iter()
+                    .map(|field| field.purpose)
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "user_id_hint",
+                &self.user_id_hint.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CredentialBundleError {
+    #[error("credential bundle must contain 1-16 fields")]
+    InvalidFieldCount,
+    #[error("credential bundle fields must be unique non-empty Provider credentials")]
+    InvalidFields,
+    #[error("credential bundle timestamps are invalid")]
+    InvalidTimestamps,
+    #[error("credential bundle metadata is invalid")]
+    InvalidMetadata,
+}
+
+fn valid_optional_hint(value: Option<&str>, max_bytes: usize) -> bool {
+    value.is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= max_bytes
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+    })
 }
 
 impl ProviderCredential {
@@ -321,5 +431,65 @@ mod tests {
             credential.validate(),
             Err(ProviderCredentialError::InvalidTimestamps)
         );
+    }
+
+    #[test]
+    fn credential_bundle_accepts_unique_provider_fields() {
+        let captured_at = chrono::Utc::now();
+        let bundle = CredentialBundle {
+            provider_id: ProviderId::new("provider-a").expect("provider id"),
+            tenant: Some("tenant-a".to_owned()),
+            acquired_via: CredentialAcquisition::CaptureTool,
+            captured_at,
+            expires_at: Some(captured_at + chrono::Duration::hours(1)),
+            session_kind: SessionKind::Composite,
+            fields: vec![
+                CredentialField {
+                    purpose: SecretPurpose::ProviderAccessToken,
+                    value: SecretValue::new(b"access-value".to_vec()),
+                },
+                CredentialField {
+                    purpose: SecretPurpose::ProviderRefreshToken,
+                    value: SecretValue::new(b"refresh-value".to_vec()),
+                },
+            ],
+            user_id_hint: Some("account-a".to_owned()),
+        };
+
+        assert_eq!(bundle.validate(), Ok(()));
+        let debug = format!("{bundle:?}");
+        assert!(!debug.contains("access-value"));
+        assert!(!debug.contains("refresh-value"));
+        assert!(!debug.contains("tenant-a"));
+        assert!(!debug.contains("account-a"));
+    }
+
+    #[test]
+    fn credential_bundle_rejects_duplicate_or_non_provider_fields() {
+        let captured_at = chrono::Utc::now();
+        let mut bundle = CredentialBundle {
+            provider_id: ProviderId::new("provider-a").expect("provider id"),
+            tenant: None,
+            acquired_via: CredentialAcquisition::ManualImport,
+            captured_at,
+            expires_at: None,
+            session_kind: SessionKind::Cookie,
+            fields: vec![
+                CredentialField {
+                    purpose: SecretPurpose::ProviderCookie,
+                    value: SecretValue::new(b"cookie-a".to_vec()),
+                },
+                CredentialField {
+                    purpose: SecretPurpose::ProviderCookie,
+                    value: SecretValue::new(b"cookie-b".to_vec()),
+                },
+            ],
+            user_id_hint: None,
+        };
+
+        assert_eq!(bundle.validate(), Err(CredentialBundleError::InvalidFields));
+        bundle.fields.truncate(1);
+        bundle.fields[0].purpose = SecretPurpose::ServiceToken;
+        assert_eq!(bundle.validate(), Err(CredentialBundleError::InvalidFields));
     }
 }

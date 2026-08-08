@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 asterism-domain = { path = "../domain" }
+asterism-secrets = { path = "../secrets" }
 async-trait.workspace = true
 chrono.workspace = true
 serde.workspace = true

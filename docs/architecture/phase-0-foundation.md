@@ -330,3 +330,17 @@ expiry, and association timestamps atomically; deletion removes both the blob
 and its cascading link. Generic SecretStore mutation rejects Provider purposes
 so callers cannot bypass these invariants, and deleting a Provider account now
 removes only its attached encrypted blobs before removing the account.
+
+## Twenty-fifth Phase 0 slice
+
+The twenty-fifth checkpoint introduces a normalized in-memory
+`CredentialBundle` for candidate Provider credentials. Its plaintext fields
+are zeroized on drop, bounded and unique by purpose, and redacted from debug
+output together with account hints. Candidates also carry their Provider,
+session kind, acquisition source, and lifecycle timestamps without becoming a
+serializable persistence model.
+
+`AuthenticationCapability` now validates this candidate bundle through a
+dedicated pre-persistence context. This establishes the contract that remote
+Provider validation must succeed before Core may hand plaintext to the
+account-scoped credential transaction.
