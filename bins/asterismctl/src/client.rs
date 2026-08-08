@@ -111,6 +111,17 @@ impl ApiClient {
         send_empty(request, StatusCode::NO_CONTENT).await
     }
 
+    pub async fn delete_authorized_json(
+        &self,
+        path: &str,
+        token: &SecretString,
+    ) -> anyhow::Result<serde_json::Value> {
+        let request = self
+            .request(Method::DELETE, path)?
+            .bearer_auth(token.expose_secret());
+        send_json(request, StatusCode::OK).await
+    }
+
     pub async fn establish_session(
         &self,
         path: &str,

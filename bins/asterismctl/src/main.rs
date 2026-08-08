@@ -122,12 +122,38 @@ enum ProviderAccountCommand {
         #[command(subcommand)]
         command: CredentialCommand,
     },
+    /// Start, inspect, or cancel Provider authentication sessions.
+    Auth {
+        #[command(subcommand)]
+        command: ProviderAuthCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum CredentialCommand {
     /// Read one credential value from stdin and replace the validated set.
     Import(CredentialImportCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderAuthCommand {
+    /// Start one server-TTL authentication attempt.
+    Start {
+        account_id: String,
+        #[arg(long, value_enum)]
+        method: CliAuthMethod,
+    },
+    /// Read the latest attempt, or one exact session when `--session` is set.
+    Status {
+        account_id: String,
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Cancel one active authentication attempt.
+    Cancel {
+        account_id: String,
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -499,7 +525,50 @@ async fn handle_provider_account(
         ProviderAccountCommand::Credential {
             command: CredentialCommand::Import(command),
         } => handle_credential_import(client, &token, command).await,
+        ProviderAccountCommand::Auth { command } => {
+            handle_provider_auth(client, &token, command).await
+        }
     }
+}
+
+async fn handle_provider_auth(
+    client: &ApiClient,
+    token: &asterism_secrets::SecretString,
+    command: ProviderAuthCommand,
+) -> anyhow::Result<()> {
+    let value = match command {
+        ProviderAuthCommand::Start { account_id, method } => {
+            let path = format!("/api/v1/provider-accounts/{account_id}/auth-sessions");
+            client
+                .post_authorized(
+                    &path,
+                    token,
+                    &json!({ "method": AuthMethod::from(method) }),
+                    StatusCode::CREATED,
+                )
+                .await?
+        }
+        ProviderAuthCommand::Status {
+            account_id,
+            session,
+        } => {
+            let path = match session {
+                Some(session_id) => {
+                    format!("/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}")
+                }
+                None => format!("/api/v1/provider-accounts/{account_id}/auth-sessions/latest"),
+            };
+            client.get_authorized(&path, token).await?
+        }
+        ProviderAuthCommand::Cancel {
+            account_id,
+            session_id,
+        } => {
+            let path = format!("/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}");
+            client.delete_authorized_json(&path, token).await?
+        }
+    };
+    write_json(&value)
 }
 
 async fn handle_credential_import(
@@ -745,5 +814,28 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn provider_auth_status_defaults_to_the_latest_account_attempt() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "provider-account",
+            "auth",
+            "status",
+            "account-id",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::ProviderAccount {
+                command: ProviderAccountCommand::Auth {
+                    command: ProviderAuthCommand::Status {
+                        account_id,
+                        session: None,
+                    }
+                }
+            } if account_id == "account-id"
+        ));
     }
 }

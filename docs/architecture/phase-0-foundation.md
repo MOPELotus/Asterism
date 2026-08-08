@@ -436,3 +436,15 @@ Begin returns the initial bounded Provider challenge once alongside the Core
 session. Polling and cancellation return only the persisted non-secret
 `AuthSession`; every response is marked `no-store`, and OpenAPI describes the
 conflict, Provider failure, expiry, and rate-limit outcomes.
+
+## Thirty-third Phase 0 slice
+
+The thirty-third checkpoint adds `asterismctl provider-account auth` commands
+for starting, inspecting, and cancelling the same Core sessions. `status`
+defaults to the latest attempt for an account and accepts an explicit session
+ID when callers need a stable polling target.
+
+These commands carry only authentication method and typed IDs. Credential
+values remain on the separate stdin-only import path, preserving the boundary
+between how authentication is performed and which validated session material
+is ultimately stored.
