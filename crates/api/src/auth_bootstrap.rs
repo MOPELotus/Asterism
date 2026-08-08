@@ -223,7 +223,9 @@ fn map_bootstrap_error(error: AuthBootstrapServiceError) -> ApiError {
         AuthBootstrapServiceError::SessionNotFound(_) => {
             ApiError::not_found("auth_bootstrap_session_not_found")
         }
-        AuthBootstrapServiceError::PairingRejected => ApiError::invalid_bootstrap_token(),
+        AuthBootstrapServiceError::PairingRejected | AuthBootstrapServiceError::AccessRejected => {
+            ApiError::invalid_bootstrap_token()
+        }
         AuthBootstrapServiceError::RevisionConflict(_) => ApiError::conflict(
             "auth_bootstrap_session_conflict",
             "the authentication bootstrap session changed concurrently",

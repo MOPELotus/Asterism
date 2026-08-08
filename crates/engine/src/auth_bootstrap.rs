@@ -97,6 +97,28 @@ where
         })
     }
 
+    /// Authenticates a short-lived access token only against its path-bound
+    /// claimed session.
+    ///
+    /// # Errors
+    ///
+    /// Wrong, cross-session, expired, cancelled, or otherwise terminal tokens
+    /// share one rejection result.
+    pub async fn authenticate_access(
+        &self,
+        request: AuthBootstrapAccessRequest,
+    ) -> Result<AuthBootstrapSession, AuthBootstrapServiceError> {
+        let digest = self.access_tokens.digest(&request.access_token);
+        self.repository
+            .authenticate_auth_bootstrap_access(
+                request.session_id,
+                &digest,
+                request.authenticated_at,
+            )
+            .await?
+            .ok_or(AuthBootstrapServiceError::AccessRejected)
+    }
+
     /// Cancels one owner-scoped live pairing and invalidates either token
     /// digest. An overdue session is persisted as expired instead.
     ///
@@ -170,6 +192,13 @@ pub struct AuthBootstrapClaimed {
     pub access_token: SecretString,
 }
 
+#[derive(Debug)]
+pub struct AuthBootstrapAccessRequest {
+    pub session_id: AuthBootstrapSessionId,
+    pub access_token: SecretString,
+    pub authenticated_at: Timestamp,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthBootstrapCancelRequest {
     pub owner_user_id: UserId,
@@ -185,6 +214,8 @@ pub enum AuthBootstrapServiceError {
     SessionNotFound(AuthBootstrapSessionId),
     #[error("authentication bootstrap pairing token is invalid or expired")]
     PairingRejected,
+    #[error("authentication bootstrap access token is invalid or expired")]
+    AccessRejected,
     #[error("authentication bootstrap session `{0}` changed concurrently")]
     RevisionConflict(AuthBootstrapSessionId),
     #[error(transparent)]
@@ -238,6 +269,31 @@ mod tests {
         assert!(access_plaintext.starts_with("ast_boot_"));
         assert!(!format!("{claimed:?}").contains(&access_plaintext));
         assert_eq!(claimed.session.state, AuthBootstrapState::Claimed);
+        let other = service
+            .create(create_request(owner, "bootstrap-service-other"))
+            .await
+            .unwrap();
+        let cross_session = service
+            .authenticate_access(AuthBootstrapAccessRequest {
+                session_id: other.session.id,
+                access_token: SecretString::new(access_plaintext.clone()),
+                authenticated_at: Utc::now(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            cross_session,
+            AuthBootstrapServiceError::AccessRejected
+        ));
+        let authenticated = service
+            .authenticate_access(AuthBootstrapAccessRequest {
+                session_id: claimed.session.id,
+                access_token: SecretString::new(access_plaintext),
+                authenticated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(authenticated, claimed.session);
         let replay = service
             .claim(AuthBootstrapClaimRequest {
                 session_id: claimed.session.id,

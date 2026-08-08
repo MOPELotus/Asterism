@@ -556,3 +556,16 @@ per-session and per-IP rate limiter, and returns the scoped access plaintext
 once with `no-store`. Missing, wrong, expired, cancelled, and replayed tokens
 share the same 401 response and Bootstrap challenge. OpenAPI distinguishes this
 temporary scheme from long-lived Web and service-token authentication.
+
+## Forty-second Phase 0 slice
+
+The forty-second checkpoint authenticates a Bootstrap access token only against
+the session ID carried by the request path. The digest must belong to a session
+that is still `Claimed`, unexpired, and backed by an active owner plus its
+original optional Provider-account binding.
+
+Pairing-token digests cannot pass this check, and an access token from one
+session cannot authorize another. Cancellation, failure, completion, expiry,
+owner deactivation, or account deletion all make access authentication fail
+without disclosing which condition occurred. Core exposes one redacted
+`AccessRejected` outcome for future event, stream, and credential endpoints.

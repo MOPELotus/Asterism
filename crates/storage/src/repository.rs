@@ -147,6 +147,13 @@ pub trait AuthBootstrapSessionRepository: Send + Sync {
         correlation_id: &str,
     ) -> Result<Option<AuthBootstrapSession>, StorageError>;
 
+    async fn authenticate_auth_bootstrap_access(
+        &self,
+        session_id: AuthBootstrapSessionId,
+        access_token_digest: &TokenDigest,
+        authenticated_at: Timestamp,
+    ) -> Result<Option<AuthBootstrapSession>, StorageError>;
+
     async fn update_auth_bootstrap_session_for_owner(
         &self,
         session: &AuthBootstrapSession,

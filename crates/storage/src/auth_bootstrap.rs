@@ -155,6 +155,37 @@ impl AuthBootstrapSessionRepository for SqliteAuthBootstrapSessionRepository {
         Ok(Some(session))
     }
 
+    async fn authenticate_auth_bootstrap_access(
+        &self,
+        session_id: AuthBootstrapSessionId,
+        access_token_digest: &TokenDigest,
+        authenticated_at: Timestamp,
+    ) -> Result<Option<AuthBootstrapSession>, StorageError> {
+        let mut transaction = self.database.pool().begin().await?;
+        let query = format!(
+            "{AUTH_BOOTSTRAP_SELECT} WHERE id = ? AND access_token_hash = ? \
+             AND pairing_token_hash IS NULL AND state_json = ? AND expires_at > ?"
+        );
+        let Some(row) = sqlx::query(&query)
+            .bind(session_id.to_string())
+            .bind(access_token_digest.as_bytes().as_slice())
+            .bind(serde_json::to_string(&AuthBootstrapState::Claimed)?)
+            .bind(encode_timestamp(authenticated_at))
+            .fetch_optional(&mut *transaction)
+            .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let session = decode_auth_bootstrap_session(&row)?;
+        if !bootstrap_binding_is_valid(&mut transaction, &session).await? {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        transaction.commit().await?;
+        Ok(Some(session))
+    }
+
     async fn update_auth_bootstrap_session_for_owner(
         &self,
         session: &AuthBootstrapSession,
@@ -283,6 +314,19 @@ async fn ensure_bootstrap_binding(
     transaction: &mut Transaction<'_, Sqlite>,
     session: &AuthBootstrapSession,
 ) -> Result<(), StorageError> {
+    if bootstrap_binding_is_valid(transaction, session).await? {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(
+            "authentication bootstrap owner and Provider account binding is invalid".to_owned(),
+        ))
+    }
+}
+
+async fn bootstrap_binding_is_valid(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &AuthBootstrapSession,
+) -> Result<bool, StorageError> {
     let valid: i64 = match session.provider_account_id {
         Some(account_id) => {
             sqlx::query_scalar(
@@ -306,13 +350,7 @@ async fn ensure_bootstrap_binding(
             .await?
         }
     };
-    if valid == 1 {
-        Ok(())
-    } else {
-        Err(StorageError::InvalidData(
-            "authentication bootstrap owner and Provider account binding is invalid".to_owned(),
-        ))
-    }
+    Ok(valid == 1)
 }
 
 fn decode_auth_bootstrap_session(row: &SqliteRow) -> Result<AuthBootstrapSession, StorageError> {
@@ -509,6 +547,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn access_digest_is_session_scoped_and_expires_with_the_claim() {
+        let fixture = fixture().await;
+        let now = Utc::now();
+        let (claimed, pairing_digest, access_digest) =
+            claimed_session(&fixture, now, "access-primary").await;
+        assert_eq!(
+            fixture
+                .repository
+                .authenticate_auth_bootstrap_access(
+                    claimed.id,
+                    &access_digest,
+                    now + Duration::seconds(2),
+                )
+                .await
+                .unwrap(),
+            Some(claimed.clone())
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .authenticate_auth_bootstrap_access(
+                    claimed.id,
+                    &pairing_digest,
+                    now + Duration::seconds(2),
+                )
+                .await
+                .unwrap(),
+            None
+        );
+        let (other, _, _) = claimed_session(&fixture, now, "access-other").await;
+        assert_eq!(
+            fixture
+                .repository
+                .authenticate_auth_bootstrap_access(
+                    other.id,
+                    &access_digest,
+                    now + Duration::seconds(2),
+                )
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .authenticate_auth_bootstrap_access(claimed.id, &access_digest, claimed.expires_at,)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn expired_pairing_and_invalid_account_binding_cannot_be_claimed() {
         let fixture = fixture().await;
         let now = Utc::now();
@@ -579,6 +670,48 @@ mod tests {
         account: ProviderAccountId,
         provider_id: ProviderId,
         repository: SqliteAuthBootstrapSessionRepository,
+    }
+
+    async fn claimed_session(
+        fixture: &Fixture,
+        now: Timestamp,
+        correlation_prefix: &str,
+    ) -> (AuthBootstrapSession, TokenDigest, TokenDigest) {
+        let session = AuthBootstrapSession::awaiting_claim(
+            fixture.owner,
+            fixture.provider_id.clone(),
+            Some(fixture.account),
+            AuthBootstrapPurpose::Reauthenticate,
+            3,
+            now,
+            now + Duration::minutes(10),
+        )
+        .unwrap();
+        let (_, pairing_digest) = OpaqueTokenService::new("ast_pair").unwrap().generate();
+        let (_, access_digest) = OpaqueTokenService::new("ast_boot").unwrap().generate();
+        fixture
+            .repository
+            .create_auth_bootstrap_session(
+                &session,
+                &pairing_digest,
+                AuditActor::User(fixture.owner),
+                &format!("{correlation_prefix}-create"),
+            )
+            .await
+            .unwrap();
+        let claimed = fixture
+            .repository
+            .claim_auth_bootstrap_session(
+                session.id,
+                &pairing_digest,
+                &access_digest,
+                now + Duration::seconds(1),
+                &format!("{correlation_prefix}-claim"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        (claimed, pairing_digest, access_digest)
     }
 
     async fn fixture() -> Fixture {
