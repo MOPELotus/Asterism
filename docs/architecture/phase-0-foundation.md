@@ -710,3 +710,15 @@ The resulting `ClaimedCaptureSession` retains its short-lived access token only
 inside a redacted, zeroizing secret value. This capability is exposed through
 the Capture library but is not yet a standalone command, avoiding a partial
 workflow that would consume a one-time pairing and immediately discard access.
+
+## Fifty-fourth Phase 0 slice
+
+A claimed Capture session can now poll the Core-owned session snapshot and
+append bounded client status events through the HTTP fallback endpoints. Every
+request reuses the in-memory session-scoped access token in a sensitive header,
+and every response is checked against the current session ID.
+
+Event sequence numbers start at one, advance only after an accepted response,
+and remain unchanged after ambiguous transport failures so the same event can
+be retried through the server's idempotent sequence contract. Returned events
+must match the submitted sequence and canonical event kind before acceptance.

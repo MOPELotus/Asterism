@@ -1,3 +1,3 @@
 mod client;
 
-pub use client::{CaptureClient, CaptureHealth, ClaimedCaptureSession};
+pub use client::{CaptureClient, CaptureEventReceipt, CaptureHealth, ClaimedCaptureSession};

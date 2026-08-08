@@ -11,6 +11,7 @@ repository.workspace = true
 anyhow.workspace = true
 asterism-domain = { path = "../../crates/domain" }
 asterism-secrets = { path = "../../crates/secrets" }
+chrono.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -20,7 +21,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
-chrono.workspace = true
 
 [lints]
 workspace = true
