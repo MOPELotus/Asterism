@@ -311,6 +311,7 @@ mod tests {
                 teacher: None,
                 remote_status: None,
                 metadata_sanitized: serde_json::json!({"revision": 1}),
+                route_context: asterism_provider_api::ProviderRouteContext::default(),
             }])
         }
     }

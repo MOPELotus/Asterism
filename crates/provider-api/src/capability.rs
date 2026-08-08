@@ -1,3 +1,5 @@
+use std::{collections::BTreeMap, fmt};
+
 use asterism_domain::{
     AssessmentClass, AuthMethod, AuthSessionId, CourseId, ProviderAccountId, ProviderId,
     RemoteState, SecretId, SessionKind, SourceType, TaskCapability, TaskId, Timestamp,
@@ -6,8 +8,13 @@ use asterism_domain::{
 use asterism_secrets::CredentialBundle;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::{ProviderMetadata, ProviderResult};
+
+const MAX_ROUTE_CONTEXT_FIELDS: usize = 32;
+const MAX_ROUTE_CONTEXT_KEY_BYTES: usize = 64;
+const MAX_ROUTE_CONTEXT_VALUE_BYTES: usize = 4_096;
 
 #[derive(Clone, Debug)]
 pub struct ProviderContext {
@@ -129,6 +136,141 @@ pub struct RemoteCourse {
     pub teacher: Option<String>,
     pub remote_status: Option<String>,
     pub metadata_sanitized: serde_json::Value,
+    /// Bounded, scan-local routing facts passed from course discovery to later
+    /// Provider capabilities. This field is never serialized or persisted.
+    #[serde(skip)]
+    pub route_context: ProviderRouteContext,
+}
+
+/// Ephemeral Provider routing facts which are redacted in diagnostics, omitted
+/// from serialization, and zeroized when their final owner is dropped.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct ProviderRouteContext {
+    values: BTreeMap<String, String>,
+}
+
+impl ProviderRouteContext {
+    /// Builds one bounded route context from Provider-owned key/value pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-response error for duplicate, malformed, empty, or
+    /// oversized route facts.
+    pub fn try_from_pairs(
+        pairs: impl IntoIterator<Item = (String, String)>,
+    ) -> ProviderResult<Self> {
+        let mut context = Self::default();
+        for (key, mut value) in pairs {
+            if context.values.len() >= MAX_ROUTE_CONTEXT_FIELDS
+                || !valid_route_context_key(&key)
+                || !valid_route_context_value(&value)
+                || context.values.contains_key(&key)
+            {
+                value.zeroize();
+                return Err(crate::ProviderError::new(
+                    crate::ProviderErrorKind::InvalidResponse,
+                    "Provider route context contains invalid or duplicate facts",
+                ));
+            }
+            context.values.insert(key, value);
+        }
+        Ok(context)
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+impl fmt::Debug for ProviderRouteContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderRouteContext")
+            .field("field_count", &self.values.len())
+            .field("values", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for ProviderRouteContext {
+    fn drop(&mut self) {
+        for value in self.values.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+fn valid_route_context_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ROUTE_CONTEXT_KEY_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+}
+
+fn valid_route_context_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ROUTE_CONTEXT_VALUE_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+mod route_context_tests {
+    use super::*;
+
+    #[test]
+    fn route_context_is_bounded_redacted_and_not_serialized() {
+        let private_value = "account-scoped-route-value";
+        let context = ProviderRouteContext::try_from_pairs([(
+            "chaoxing.cpi".to_owned(),
+            private_value.to_owned(),
+        )])
+        .unwrap();
+        assert_eq!(context.get("chaoxing.cpi"), Some(private_value));
+        assert!(!format!("{context:?}").contains(private_value));
+
+        let course = RemoteCourse {
+            remote_id: "course:100:200".to_owned(),
+            title: "course".to_owned(),
+            term: None,
+            teacher: None,
+            remote_status: None,
+            metadata_sanitized: serde_json::json!({"safe": true}),
+            route_context: context,
+        };
+        assert!(!format!("{course:?}").contains(private_value));
+        let encoded = serde_json::to_string(&course).unwrap();
+        assert!(!encoded.contains(private_value));
+        assert!(!encoded.contains("route_context"));
+
+        let decoded: RemoteCourse = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.route_context.is_empty());
+    }
+
+    #[test]
+    fn route_context_rejects_duplicate_or_malformed_facts() {
+        assert!(
+            ProviderRouteContext::try_from_pairs([
+                ("route".to_owned(), "one".to_owned()),
+                ("route".to_owned(), "two".to_owned()),
+            ])
+            .is_err()
+        );
+        assert!(
+            ProviderRouteContext::try_from_pairs([
+                ("Chaoxing.CPI".to_owned(), "value".to_owned(),)
+            ])
+            .is_err()
+        );
+        assert!(
+            ProviderRouteContext::try_from_pairs([("route".to_owned(), "bad\nvalue".to_owned(),)])
+                .is_err()
+        );
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

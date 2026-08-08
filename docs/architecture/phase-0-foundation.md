@@ -782,3 +782,16 @@ route values are excluded from normalized snapshots and fingerprints.
 This checkpoint is fixture-only: it does not register Chaoxing, advertise a live
 capability, or claim current account compatibility. Native HTTP versus
 BrowserBridge transport remains pending real-account validation.
+
+## Fifty-ninth Phase 0 slice
+
+Course discovery can now carry bounded Provider route facts into later
+capability calls without placing them in sanitized metadata. The ephemeral route
+context is omitted by Serde, ignored by scan persistence, redacted in `Debug`,
+and zeroized on drop. Key/value count, shape, size, duplicates, and control
+characters are rejected at construction.
+
+This closes the runtime boundary needed by platforms such as Chaoxing, where a
+course task request needs account-scoped route values such as `cpi`. These facts
+remain available only during the in-memory course-to-task scan and cannot leak
+into API payloads, fixtures, task snapshots, or audit records.

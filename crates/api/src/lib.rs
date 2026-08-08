@@ -898,6 +898,7 @@ mod tests {
                 teacher: None,
                 remote_status: None,
                 metadata_sanitized: json!({"revision": 1}),
+                route_context: asterism_provider_api::ProviderRouteContext::default(),
             }])
         }
     }
