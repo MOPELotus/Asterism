@@ -139,6 +139,7 @@ cargo run -p asterismctl -- auth whoami
 cargo run -p asterismctl -- provider list
 cargo run -p asterismctl -- provider-account create --provider provider-alpha --name primary
 cargo run -p asterismctl -- provider-account list
+cargo run -p asterismctl -- provider-account schedule set <account-id> --interval-seconds 900
 cargo run -p asterismctl -- task list --limit 50
 Remove-Item Env:ASTERISM_TOKEN
 ```
@@ -148,6 +149,8 @@ Remove-Item Env:ASTERISM_TOKEN
 Provider Account 的 owner 始终由认证身份决定，CLI 和 API 都不接受调用方指定 `owner_id`。`--provider` 必须使用小写 canonical `ProviderId`；账号展示名属于本地用户数据，不作为项目内的平台名称或标识。
 
 Task 接口当前只读，任务只能由 Provider 扫描链路写入。远端账户完成认证且对应 Provider 已注册 inventory capability 后，可运行 `provider-account scan <account-id>`；`task list` 支持 `--account`、`--limit` 和 `--offset`。返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。
+
+周期扫描通过 `provider-account schedule get <account-id>` 和 `provider-account schedule set <account-id> --interval-seconds <seconds>` 管理；添加 `--disabled` 可保留配置但停止物化任务。接口同时返回用户期望间隔、Provider 最小间隔和 Core 实际采用的间隔，Provider 自身不创建独立 cron 或后台循环。
 
 也可以直接访问：
 

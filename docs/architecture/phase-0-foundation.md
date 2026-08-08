@@ -263,3 +263,10 @@ Management writes recheck ownership and append the sanitized audit record in
 the same immediate SQLite transaction. Responses distinguish desired,
 Provider-minimum, and effective values; disabling retains the schedule while
 preventing job materialization.
+
+## Nineteenth Phase 0 slice
+
+The nineteenth checkpoint adds `asterismctl provider-account schedule get` and
+`set` as the operational client for the same owner-scoped API. Operators supply
+the desired interval explicitly, may persist a disabled schedule, and receive
+the resolved Provider minimum and effective interval as structured JSON.

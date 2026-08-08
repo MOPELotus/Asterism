@@ -111,6 +111,26 @@ enum ProviderAccountCommand {
     Delete { account_id: String },
     /// Collect and commit the account's current Provider inventory.
     Scan { account_id: String },
+    /// Inspect or configure the account's periodic scan schedule.
+    Schedule {
+        #[command(subcommand)]
+        command: ScanScheduleCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScanScheduleCommand {
+    /// Get the effective schedule for an owned account.
+    Get { account_id: String },
+    /// Set the desired interval; Core applies the Provider minimum.
+    Set {
+        account_id: String,
+        #[arg(long)]
+        interval_seconds: u64,
+        /// Persist the schedule in a disabled state.
+        #[arg(long)]
+        disabled: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -333,6 +353,31 @@ async fn handle_provider_account(
             let value = client.post_authorized_empty(&path, &token).await?;
             write_json(&value)
         }
+        ProviderAccountCommand::Schedule { command } => match command {
+            ScanScheduleCommand::Get { account_id } => {
+                let path = format!("/api/v1/provider-accounts/{account_id}/scan-schedule");
+                let value = client.get_authorized(&path, &token).await?;
+                write_json(&value)
+            }
+            ScanScheduleCommand::Set {
+                account_id,
+                interval_seconds,
+                disabled,
+            } => {
+                let path = format!("/api/v1/provider-accounts/{account_id}/scan-schedule");
+                let value = client
+                    .put_authorized(
+                        &path,
+                        &token,
+                        &json!({
+                            "desired_interval_seconds": interval_seconds,
+                            "enabled": !disabled,
+                        }),
+                    )
+                    .await?;
+                write_json(&value)
+            }
+        },
     }
 }
 
@@ -459,6 +504,33 @@ mod tests {
             arguments.command,
             Command::ProviderAccount {
                 command: ProviderAccountCommand::Scan { account_id }
+            } if account_id == "account-id"
+        ));
+    }
+
+    #[test]
+    fn provider_account_schedule_command_keeps_desired_interval_explicit() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "provider-account",
+            "schedule",
+            "set",
+            "account-id",
+            "--interval-seconds",
+            "60",
+            "--disabled",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::ProviderAccount {
+                command: ProviderAccountCommand::Schedule {
+                    command: ScanScheduleCommand::Set {
+                        account_id,
+                        interval_seconds: 60,
+                        disabled: true,
+                    }
+                }
             } if account_id == "account-id"
         ));
     }
