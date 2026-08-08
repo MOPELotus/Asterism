@@ -397,7 +397,7 @@ mod tests {
         );
         let contexts = inventory.contexts.lock().unwrap();
         assert_eq!(contexts.len(), 2);
-        assert_eq!(contexts[0].credential_refs, ["secret-ref"]);
+        assert_eq!(contexts[0].credential_refs.len(), 1);
     }
 
     #[tokio::test]
@@ -536,7 +536,7 @@ mod tests {
             tenant: None,
             auth_state: AuthState::Authenticated,
             network_profile_id: None,
-            credential_refs: vec!["secret-ref".to_owned()],
+            credential_refs: vec![asterism_domain::SecretId::new()],
             created_at: now,
             updated_at: now,
         }

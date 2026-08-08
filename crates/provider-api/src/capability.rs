@@ -1,6 +1,6 @@
 use asterism_domain::{
     AssessmentClass, AuthMethod, AuthSessionId, CourseId, ProviderAccountId, ProviderId,
-    RemoteState, SessionKind, SourceType, TaskCapability, TaskId, Timestamp,
+    RemoteState, SecretId, SessionKind, SourceType, TaskCapability, TaskId, Timestamp,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ pub struct ProviderContext {
     pub provider_id: ProviderId,
     pub account_id: ProviderAccountId,
     /// Opaque references are resolved only by the secrets boundary at runtime.
-    pub credential_refs: Vec<String>,
+    pub credential_refs: Vec<SecretId>,
     pub correlation_id: String,
 }
 

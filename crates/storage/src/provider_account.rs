@@ -1,7 +1,8 @@
 use std::{collections::BTreeSet, str::FromStr};
 
 use asterism_domain::{
-    AuditActor, AuditRecordId, ProviderAccount, ProviderAccountId, ProviderId, Timestamp, UserId,
+    AuditActor, AuditRecordId, ProviderAccount, ProviderAccountId, ProviderId, SecretId, Timestamp,
+    UserId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -112,6 +113,7 @@ impl ProviderAccountRepository for SqliteProviderAccountRepository {
         .bind(account.id.to_string())
         .fetch_all(&mut *transaction)
         .await?;
+        let persisted_credential_refs = decode_credential_refs(persisted_credential_refs)?;
         if persisted_credential_refs != account.credential_refs {
             return Err(StorageError::InvalidData(
                 "provider account credentials must use the credential repository".to_owned(),
@@ -215,6 +217,7 @@ impl SqliteProviderAccountRepository {
         .bind(account_id.to_string())
         .fetch_all(self.database.pool())
         .await?;
+        let credential_refs = decode_credential_refs(credential_refs)?;
         Ok(ProviderAccount {
             id: account_id,
             owner_id: UserId::from_str(row.try_get("owner_user_id")?)
@@ -230,6 +233,15 @@ impl SqliteProviderAccountRepository {
             updated_at: decode_timestamp(row.try_get("updated_at")?)?,
         })
     }
+}
+
+fn decode_credential_refs(values: Vec<String>) -> Result<Vec<SecretId>, StorageError> {
+    values
+        .into_iter()
+        .map(|value| {
+            SecretId::from_str(&value).map_err(|error| StorageError::InvalidData(error.to_string()))
+        })
+        .collect()
 }
 
 fn validate_account(account: &ProviderAccount, creating: bool) -> Result<(), StorageError> {

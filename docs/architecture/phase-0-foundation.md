@@ -296,3 +296,11 @@ The API state retains the configured encrypted store for credential services,
 while `/health` exposes only a boolean readiness signal. Running without a
 keyring remains possible until a credential operation is requested, so existing
 non-Provider administration does not require a placeholder key.
+
+## Twenty-second Phase 0 slice
+
+The twenty-second checkpoint replaces raw credential-reference strings with
+typed `SecretId` values across Provider accounts, runtime contexts, and SQLite
+decoding. Malformed persisted references now fail at the storage boundary, and
+account metadata updates still cannot bypass the dedicated credential
+repository contract.

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CourseId, ProviderAccountId, Timestamp, UserId};
+use crate::{CourseId, ProviderAccountId, SecretId, Timestamp, UserId};
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -51,7 +51,7 @@ pub struct ProviderAccount {
     pub tenant: Option<String>,
     pub auth_state: crate::AuthState,
     pub network_profile_id: Option<String>,
-    pub credential_refs: Vec<String>,
+    pub credential_refs: Vec<SecretId>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
