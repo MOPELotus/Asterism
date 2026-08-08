@@ -229,3 +229,14 @@ HTTP graceful shutdown and the scheduler share one signal. Shutdown stops new
 ticks, waits for an in-flight tick to return, joins the scheduler task, and only
 then closes SQLite. Missed timer ticks are skipped rather than replayed, and an
 individual tick failure is logged without terminating the long-running daemon.
+
+## Sixteenth Phase 0 slice
+
+The sixteenth checkpoint makes the optional Provider scan-frequency floor part
+of versioned Provider metadata. The value is expressed in seconds, is visible
+through the Provider metadata API, and is rejected during registration when it
+is zero or cannot be represented by Scheduler persistence.
+
+This remains a Provider constraint rather than a Provider-owned timer. The Core
+schedule-management surface applies the floor to a user's desired interval in
+the next slice.

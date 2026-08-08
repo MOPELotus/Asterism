@@ -9,6 +9,7 @@ pub struct ProviderMetadata {
     pub display_name: String,
     pub implementation_version: String,
     pub verification: VerificationLevel,
+    pub scan_min_interval_seconds: Option<u64>,
     pub capabilities: BTreeSet<ProviderCapability>,
     pub auth_methods: BTreeSet<AuthMethod>,
     pub session_kinds: BTreeSet<SessionKind>,

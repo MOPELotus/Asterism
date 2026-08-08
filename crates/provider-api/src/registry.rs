@@ -51,6 +51,16 @@ impl ProviderEntry {
     }
 
     fn validate(&self) -> Result<(), RegistryError> {
+        if self
+            .metadata
+            .scan_min_interval_seconds
+            .is_some_and(|interval| interval == 0 || i64::try_from(interval).is_err())
+        {
+            return Err(RegistryError::InvalidScanMinimum {
+                provider_id: self.metadata.id.clone(),
+            });
+        }
+
         let checks = [
             (
                 ProviderCapability::Authentication,
@@ -229,6 +239,8 @@ pub enum RegistryError {
         provider_id: ProviderId,
         slot: &'static str,
     },
+    #[error("provider `{provider_id}` declares an invalid minimum scan interval")]
+    InvalidScanMinimum { provider_id: ProviderId },
 }
 
 #[cfg(test)]
@@ -269,6 +281,7 @@ mod tests {
             display_name: "chaoxing".into(),
             implementation_version: "0.0.0".into(),
             verification: VerificationLevel::Development,
+            scan_min_interval_seconds: Some(300),
             capabilities: BTreeSet::new(),
             auth_methods: BTreeSet::new(),
             session_kinds: BTreeSet::new(),
@@ -294,6 +307,18 @@ mod tests {
                 .display_name,
             "chaoxing"
         );
+    }
+
+    #[test]
+    fn registry_rejects_invalid_minimum_scan_interval() {
+        let mut metadata = metadata();
+        metadata.scan_min_interval_seconds = Some(0);
+        let mut registry = ProviderRegistry::default();
+
+        assert!(matches!(
+            registry.register(ProviderEntry::metadata_only(metadata)),
+            Err(RegistryError::InvalidScanMinimum { .. })
+        ));
     }
 
     #[test]

@@ -565,6 +565,7 @@ mod tests {
             display_name: "provider-alpha".to_owned(),
             implementation_version: "0.1.0".to_owned(),
             verification: VerificationLevel::Development,
+            scan_min_interval_seconds: Some(300),
             capabilities: BTreeSet::from([
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
