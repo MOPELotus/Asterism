@@ -397,3 +397,16 @@ authentication, refresh, expiry, and explicit exception outcomes without
 allowing skipped validation, timestamp regression, revision overflow, or
 revival after a terminal failure or cancellation. `SessionKind` remains outside
 the process state and is produced only by validated credentials.
+
+## Thirtieth Phase 0 slice
+
+The thirtieth checkpoint persists owner-scoped authentication sessions with
+their method, tagged state, expiry, timestamps, and optimistic revision. Session
+creation and each legal transition mirror the Provider account authentication
+state and append a sanitized audit record in the same immediate transaction.
+
+Updates reload the current record under the write lock, replay the domain
+transition, compare immutable fields, and require the exact prior revision.
+Only the newest session for an account may advance, preventing a stale callback
+from an older attempt from replacing the account's visible authentication
+state. Migration 016 adds owner and account indexes for polling surfaces.

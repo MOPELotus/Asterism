@@ -12,7 +12,7 @@ pub mod user;
 pub use account::{Course, ProviderAccount, ProviderId};
 pub use auth::{
     AuditActor, AuthMethod, AuthSession, AuthSessionError, AuthState, HumanRequiredReason,
-    ServiceScope, ServiceToken, SessionKind, WebSession,
+    ServiceScope, ServiceToken, SessionKind, WaitingUserState, WebSession,
 };
 pub use automation::{
     AutomationPlan, AutomationPlanStatus, BillingPolicy, CoverageSpec, ExecutionPolicy,

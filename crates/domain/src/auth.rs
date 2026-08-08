@@ -116,6 +116,27 @@ impl AuthSession {
     pub fn is_expired_at(&self, at: Timestamp) -> bool {
         at >= self.expires_at
     }
+
+    /// Checks persisted shape independently from transition history.
+    ///
+    /// # Errors
+    ///
+    /// Rejects impossible lifecycle timestamps, zero revisions, `Idle`, and
+    /// malformed revision-one records.
+    pub fn validate(&self) -> Result<(), AuthSessionError> {
+        if self.expires_at <= self.created_at || self.updated_at < self.created_at {
+            return Err(AuthSessionError::InvalidRecord);
+        }
+        if self.revision == 0 || matches!(self.state, AuthState::Idle) {
+            return Err(AuthSessionError::InvalidRecord);
+        }
+        if self.revision == 1
+            && (!matches!(self.state, AuthState::Starting) || self.updated_at != self.created_at)
+        {
+            return Err(AuthSessionError::InvalidRecord);
+        }
+        Ok(())
+    }
 }
 
 fn valid_auth_transition(current: &AuthState, next: &AuthState) -> bool {
@@ -173,6 +194,8 @@ pub enum AuthSessionError {
     SessionExpired,
     #[error("authentication session revision is exhausted")]
     RevisionExhausted,
+    #[error("authentication session record is invalid")]
+    InvalidRecord,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

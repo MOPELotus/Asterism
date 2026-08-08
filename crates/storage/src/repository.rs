@@ -1,8 +1,8 @@
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AuditActor, CreditAccount, CreditReservation, CreditReservationId, CreditTransactionId,
-    ExecutionId, ExecutionLease, ProviderAccount, ProviderAccountId, ServiceToken, ServiceTokenId,
-    Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+    AuditActor, AuthSession, AuthSessionId, CreditAccount, CreditReservation, CreditReservationId,
+    CreditTransactionId, ExecutionId, ExecutionLease, ProviderAccount, ProviderAccountId,
+    ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use async_trait::async_trait;
 
@@ -86,6 +86,37 @@ pub trait ProviderAccountRuntimeRepository: Send + Sync {
         &self,
         account_id: ProviderAccountId,
     ) -> Result<Option<ProviderAccount>, StorageError>;
+}
+
+/// Owner-scoped observable Provider authentication attempts.
+#[async_trait]
+pub trait AuthSessionRepository: Send + Sync {
+    async fn create_auth_session(
+        &self,
+        session: &AuthSession,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<(), StorageError>;
+
+    async fn find_auth_session(
+        &self,
+        owner_user_id: UserId,
+        session_id: AuthSessionId,
+    ) -> Result<Option<AuthSession>, StorageError>;
+
+    async fn find_latest_account_auth_session(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+    ) -> Result<Option<AuthSession>, StorageError>;
+
+    async fn update_auth_session(
+        &self,
+        session: &AuthSession,
+        expected_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<bool, StorageError>;
 }
 
 /// Persistence contract consumed by identity and authorization services.
