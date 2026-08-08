@@ -2,14 +2,16 @@ use std::str::FromStr;
 
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AuditActor, AuditRecordId, AuthBootstrapSession, AuthBootstrapSessionId, AuthBootstrapState,
-    ProviderId, Timestamp, UserId,
+    AuditActor, AuditRecordId, AuthBootstrapClientEvent, AuthBootstrapSession,
+    AuthBootstrapSessionId, AuthBootstrapState, ProviderId, Timestamp, UserId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
-use crate::{AuthBootstrapSessionRepository, Database, StorageError};
+use crate::{
+    AuthBootstrapClientEventRecord, AuthBootstrapSessionRepository, Database, StorageError,
+};
 
 const AUTH_BOOTSTRAP_SELECT: &str = "SELECT id, owner_user_id, provider_id, provider_account_id, \
     purpose_json, required_recipe_version, state_json, revision, expires_at, claimed_at, \
@@ -162,28 +164,79 @@ impl AuthBootstrapSessionRepository for SqliteAuthBootstrapSessionRepository {
         authenticated_at: Timestamp,
     ) -> Result<Option<AuthBootstrapSession>, StorageError> {
         let mut transaction = self.database.pool().begin().await?;
-        let query = format!(
-            "{AUTH_BOOTSTRAP_SELECT} WHERE id = ? AND access_token_hash = ? \
-             AND pairing_token_hash IS NULL AND state_json = ? AND expires_at > ?"
-        );
-        let Some(row) = sqlx::query(&query)
-            .bind(session_id.to_string())
-            .bind(access_token_digest.as_bytes().as_slice())
-            .bind(serde_json::to_string(&AuthBootstrapState::Claimed)?)
-            .bind(encode_timestamp(authenticated_at))
-            .fetch_optional(&mut *transaction)
-            .await?
-        else {
-            transaction.rollback().await?;
-            return Ok(None);
-        };
-        let session = decode_auth_bootstrap_session(&row)?;
-        if !bootstrap_binding_is_valid(&mut transaction, &session).await? {
+        let session = authenticate_access_in_transaction(
+            &mut transaction,
+            session_id,
+            access_token_digest,
+            authenticated_at,
+        )
+        .await?;
+        if session.is_none() {
             transaction.rollback().await?;
             return Ok(None);
         }
         transaction.commit().await?;
-        Ok(Some(session))
+        Ok(session)
+    }
+
+    async fn record_auth_bootstrap_client_event(
+        &self,
+        event: &AuthBootstrapClientEvent,
+        access_token_digest: &TokenDigest,
+        correlation_id: &str,
+    ) -> Result<AuthBootstrapClientEventRecord, StorageError> {
+        event
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        validate_correlation_id(correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let Some(session) = authenticate_access_in_transaction(
+            &mut transaction,
+            event.session_id,
+            access_token_digest,
+            event.received_at,
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(AuthBootstrapClientEventRecord::AccessRejected);
+        };
+        if let Some(existing) =
+            fetch_client_event(&mut transaction, event.session_id, event.sequence).await?
+        {
+            transaction.rollback().await?;
+            return Ok(if existing.kind == event.kind {
+                AuthBootstrapClientEventRecord::Duplicate(existing)
+            } else {
+                AuthBootstrapClientEventRecord::SequenceConflict
+            });
+        }
+        let last_sequence: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM auth_bootstrap_client_events WHERE session_id = ?",
+        )
+        .bind(event.session_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let expected_sequence = last_sequence.map_or(1, |sequence| sequence.saturating_add(1));
+        let event_sequence = i64::try_from(event.sequence)
+            .map_err(|_| StorageError::InvalidData("invalid event sequence".to_owned()))?;
+        if event_sequence != expected_sequence {
+            transaction.rollback().await?;
+            return Ok(AuthBootstrapClientEventRecord::SequenceConflict);
+        }
+        sqlx::query(
+            "INSERT INTO auth_bootstrap_client_events \
+             (session_id, sequence, kind_json, received_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(event.session_id.to_string())
+        .bind(event_sequence)
+        .bind(serde_json::to_string(&event.kind)?)
+        .bind(encode_timestamp(event.received_at))
+        .execute(&mut *transaction)
+        .await?;
+        insert_client_event_audit(&mut transaction, correlation_id, &session, event).await?;
+        transaction.commit().await?;
+        Ok(AuthBootstrapClientEventRecord::Inserted(event.clone()))
     }
 
     async fn update_auth_bootstrap_session_for_owner(
@@ -262,6 +315,93 @@ impl AuthBootstrapSessionRepository for SqliteAuthBootstrapSessionRepository {
         transaction.commit().await?;
         Ok(true)
     }
+}
+
+async fn authenticate_access_in_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: AuthBootstrapSessionId,
+    access_token_digest: &TokenDigest,
+    authenticated_at: Timestamp,
+) -> Result<Option<AuthBootstrapSession>, StorageError> {
+    let query = format!(
+        "{AUTH_BOOTSTRAP_SELECT} WHERE id = ? AND access_token_hash = ? \
+         AND pairing_token_hash IS NULL AND state_json = ? AND expires_at > ?"
+    );
+    let Some(row) = sqlx::query(&query)
+        .bind(session_id.to_string())
+        .bind(access_token_digest.as_bytes().as_slice())
+        .bind(serde_json::to_string(&AuthBootstrapState::Claimed)?)
+        .bind(encode_timestamp(authenticated_at))
+        .fetch_optional(&mut **transaction)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let session = decode_auth_bootstrap_session(&row)?;
+    if bootstrap_binding_is_valid(transaction, &session).await? {
+        Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn fetch_client_event(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: AuthBootstrapSessionId,
+    sequence: u64,
+) -> Result<Option<AuthBootstrapClientEvent>, StorageError> {
+    let sequence = i64::try_from(sequence)
+        .map_err(|_| StorageError::InvalidData("invalid event sequence".to_owned()))?;
+    sqlx::query(
+        "SELECT kind_json, received_at FROM auth_bootstrap_client_events \
+         WHERE session_id = ? AND sequence = ?",
+    )
+    .bind(session_id.to_string())
+    .bind(sequence)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .map(|row| {
+        AuthBootstrapClientEvent::new(
+            session_id,
+            u64::try_from(sequence)
+                .map_err(|_| StorageError::InvalidData("invalid event sequence".to_owned()))?,
+            serde_json::from_str(&row.get::<String, _>("kind_json"))?,
+            decode_timestamp(&row.get::<String, _>("received_at"))?,
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))
+    })
+    .transpose()
+}
+
+async fn insert_client_event_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    correlation_id: &str,
+    session: &AuthBootstrapSession,
+    event: &AuthBootstrapClientEvent,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'auth_bootstrap_session', ?, 'auth_bootstrap_client_event_recorded', \
+                 'auth_bootstrap_session', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(event.received_at))
+    .bind(session.id.to_string())
+    .bind(session.id.to_string())
+    .bind(correlation_id)
+    .bind(
+        serde_json::json!({
+            "sequence": event.sequence,
+            "kind": event.kind,
+            "client_success_is_diagnostic": event.is_client_success_report(),
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn fetch_auth_bootstrap_session(
@@ -597,6 +737,127 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn client_event_sequence_is_contiguous_idempotent_and_immutable() {
+        let fixture = fixture().await;
+        let now = Utc::now();
+        let (claimed, _, access_digest) = claimed_session(&fixture, now, "event-sequence").await;
+        let first = AuthBootstrapClientEvent::new(
+            claimed.id,
+            1,
+            asterism_domain::AuthBootstrapClientEventKind::ClientReady,
+            now + Duration::seconds(2),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .repository
+                .record_auth_bootstrap_client_event(&first, &access_digest, "event-first")
+                .await
+                .unwrap(),
+            AuthBootstrapClientEventRecord::Inserted(first.clone())
+        );
+        let retry = AuthBootstrapClientEvent {
+            received_at: now + Duration::seconds(3),
+            ..first.clone()
+        };
+        assert_eq!(
+            fixture
+                .repository
+                .record_auth_bootstrap_client_event(&retry, &access_digest, "event-retry")
+                .await
+                .unwrap(),
+            AuthBootstrapClientEventRecord::Duplicate(first.clone())
+        );
+        let changed = AuthBootstrapClientEvent::new(
+            claimed.id,
+            1,
+            asterism_domain::AuthBootstrapClientEventKind::CredentialDetected,
+            now + Duration::seconds(3),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .repository
+                .record_auth_bootstrap_client_event(&changed, &access_digest, "event-changed")
+                .await
+                .unwrap(),
+            AuthBootstrapClientEventRecord::SequenceConflict
+        );
+        let gap = AuthBootstrapClientEvent::new(
+            claimed.id,
+            3,
+            asterism_domain::AuthBootstrapClientEventKind::Validating,
+            now + Duration::seconds(4),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .repository
+                .record_auth_bootstrap_client_event(&gap, &access_digest, "event-gap")
+                .await
+                .unwrap(),
+            AuthBootstrapClientEventRecord::SequenceConflict
+        );
+    }
+
+    #[tokio::test]
+    async fn client_success_event_is_diagnostic_and_requires_live_access() {
+        let fixture = fixture().await;
+        let now = Utc::now();
+        let (claimed, pairing_digest, access_digest) =
+            claimed_session(&fixture, now, "event-success").await;
+        let ready = AuthBootstrapClientEvent::new(
+            claimed.id,
+            1,
+            asterism_domain::AuthBootstrapClientEventKind::ClientReady,
+            now + Duration::seconds(2),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .repository
+                .record_auth_bootstrap_client_event(&ready, &pairing_digest, "event-wrong-token")
+                .await
+                .unwrap(),
+            AuthBootstrapClientEventRecord::AccessRejected
+        );
+        fixture
+            .repository
+            .record_auth_bootstrap_client_event(&ready, &access_digest, "event-ready")
+            .await
+            .unwrap();
+        let reported = AuthBootstrapClientEvent::new(
+            claimed.id,
+            2,
+            asterism_domain::AuthBootstrapClientEventKind::ClientReportedAuthenticated,
+            now + Duration::seconds(3),
+        )
+        .unwrap();
+        fixture
+            .repository
+            .record_auth_bootstrap_client_event(&reported, &access_digest, "event-reported")
+            .await
+            .unwrap();
+        let stored = fixture
+            .repository
+            .find_auth_bootstrap_session(fixture.owner, claimed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, AuthBootstrapState::Claimed);
+        assert_eq!(stored.revision, 2);
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? \
+             AND action = 'auth_bootstrap_client_event_recorded'",
+        )
+        .bind(claimed.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audits, 2);
     }
 
     #[tokio::test]

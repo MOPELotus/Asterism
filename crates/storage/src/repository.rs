@@ -1,9 +1,9 @@
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AuditActor, AuthBootstrapSession, AuthBootstrapSessionId, AuthSession, AuthSessionId,
-    CreditAccount, CreditReservation, CreditReservationId, CreditTransactionId, ExecutionId,
-    ExecutionLease, ProviderAccount, ProviderAccountId, ServiceToken, ServiceTokenId, Task, TaskId,
-    Timestamp, User, UserId, WebSession, WebSessionId,
+    AuditActor, AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId,
+    AuthSession, AuthSessionId, CreditAccount, CreditReservation, CreditReservationId,
+    CreditTransactionId, ExecutionId, ExecutionLease, ProviderAccount, ProviderAccountId,
+    ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -154,6 +154,13 @@ pub trait AuthBootstrapSessionRepository: Send + Sync {
         authenticated_at: Timestamp,
     ) -> Result<Option<AuthBootstrapSession>, StorageError>;
 
+    async fn record_auth_bootstrap_client_event(
+        &self,
+        event: &AuthBootstrapClientEvent,
+        access_token_digest: &TokenDigest,
+        correlation_id: &str,
+    ) -> Result<AuthBootstrapClientEventRecord, StorageError>;
+
     async fn update_auth_bootstrap_session_for_owner(
         &self,
         session: &AuthBootstrapSession,
@@ -161,6 +168,14 @@ pub trait AuthBootstrapSessionRepository: Send + Sync {
         actor: AuditActor,
         correlation_id: &str,
     ) -> Result<bool, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthBootstrapClientEventRecord {
+    Inserted(AuthBootstrapClientEvent),
+    Duplicate(AuthBootstrapClientEvent),
+    AccessRejected,
+    SequenceConflict,
 }
 
 /// Atomic commit boundary used after a candidate has passed Provider

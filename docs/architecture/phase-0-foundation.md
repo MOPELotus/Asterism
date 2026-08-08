@@ -595,3 +595,15 @@ The wire-level `authenticated` variant is deliberately represented in Core as
 `ClientReportedAuthenticated`. It is diagnostic input only and cannot advance
 an `AuthSession`, authenticate a Provider account, or write SecretStore without
 the separate server-side credential validation path.
+
+## Forty-fifth Phase 0 slice
+
+The forty-fifth checkpoint persists Capture client events in migration 018.
+Access-token authentication, active owner/account revalidation, contiguous
+sequence checking, event insertion, and sanitized audit all run under one
+SQLite immediate transaction, so cancellation cannot race a late event write.
+
+Sequences begin at one and advance without gaps. A retry with the same sequence
+and kind returns the first server-timestamped event, while changed content or a
+gap is a conflict. Recording `ClientReportedAuthenticated` never mutates the
+bootstrap session, Core authentication state, Provider account, or SecretStore.
