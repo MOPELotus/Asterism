@@ -2,6 +2,7 @@
 
 mod assessment;
 mod outbox;
+mod scan;
 mod transition;
 
 pub use assessment::{
@@ -10,6 +11,7 @@ pub use assessment::{
 pub use outbox::{
     DeliveryError, DispatchConfig, DispatchError, DispatchReport, EventSink, OutboxDispatcher,
 };
+pub use scan::{ProviderScanError, ProviderScanService};
 pub use transition::{
     ExecutionTransitionError, OrchestrationTransitionError, transition_execution,
     validate_orchestration_transition,

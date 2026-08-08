@@ -1,6 +1,6 @@
 use asterism_domain::{
-    AuthMethod, AuthSessionId, CourseId, ProviderAccountId, ProviderId, RemoteState, SessionKind,
-    SourceType, TaskCapability, TaskId, Timestamp,
+    AssessmentClass, AuthMethod, AuthSessionId, CourseId, ProviderAccountId, ProviderId,
+    RemoteState, SessionKind, SourceType, TaskCapability, TaskId, Timestamp,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -119,12 +119,14 @@ pub struct RemoteTask {
     pub course_remote_id: Option<String>,
     pub title: String,
     pub source_type: SourceType,
+    pub assessment_class: AssessmentClass,
     pub remote_state: RemoteState,
     pub opens_at: Option<Timestamp>,
     pub due_at: Option<Timestamp>,
     pub closes_at: Option<Timestamp>,
     pub capabilities: Vec<TaskCapability>,
     pub fingerprint: String,
+    pub normalized: serde_json::Value,
     pub raw_sanitized: serde_json::Value,
 }
 

@@ -152,3 +152,16 @@ Course or Task row is written.
 
 The next slice invokes this contract through registered Provider inventory
 capabilities without introducing any concrete Provider implementation.
+
+## Tenth Phase 0 slice
+
+The tenth checkpoint adds a capability-driven Provider scan service. It accepts
+only authenticated Provider accounts, passes opaque credential references in a
+bounded runtime context, and collects the complete Course and Task inventory
+before one repository write. Course-scoped results cannot escape their scope,
+task capabilities must be a subset of Provider metadata, and Provider failures
+never create a partial local observation.
+
+`RemoteTask` now carries `assessment_class` and a normalized payload explicitly;
+an `Exam` source still does not imply a formal assessment. This checkpoint adds
+no concrete Provider and makes no availability claim.

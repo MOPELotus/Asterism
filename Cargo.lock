@@ -156,9 +156,11 @@ version = "0.1.0"
 dependencies = [
  "asterism-domain",
  "asterism-events",
+ "asterism-provider-api",
  "asterism-storage",
  "async-trait",
  "chrono",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

@@ -30,6 +30,7 @@ Phase 0 已建立并持续完善以下基础：
 - Rust 2024 workspace 与清晰的 crate 边界；
 - Task / Execution、Remote State / Orchestration State 等独立领域模型；
 - Capability-based Provider API、Metadata 与 Registry；
+- 先完整采集后事务提交的 Provider Course / Task inventory 编排；
 - 执行状态机、正式测评保护与崩溃恢复语义；
 - SQLite migration、WAL 策略、事务仓储和并发测试；
 - 版本化任务指纹、脱敏扫描快照、类型化差异与事务化扫描入库；

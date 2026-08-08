@@ -10,12 +10,14 @@ repository.workspace = true
 [dependencies]
 asterism-domain = { path = "../domain" }
 asterism-events = { path = "../events" }
+asterism-provider-api = { path = "../provider-api" }
 asterism-storage = { path = "../storage" }
 async-trait.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tokio.workspace = true
 
 [lints]
