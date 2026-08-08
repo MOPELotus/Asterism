@@ -118,6 +118,9 @@ dependencies = [
  "argon2",
  "asterism-domain",
  "asterism-secrets",
+ "base64",
+ "rand_core 0.6.4",
+ "sha2",
  "thiserror",
 ]
 
@@ -196,6 +199,7 @@ version = "0.1.0"
 dependencies = [
  "asterism-domain",
  "asterism-events",
+ "asterism-scheduler",
  "async-trait",
  "chrono",
  "serde_json",

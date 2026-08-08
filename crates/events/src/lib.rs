@@ -62,6 +62,11 @@ pub enum DomainEvent {
         execution_id: ExecutionId,
         amount: CreditAmount,
     },
+    CreditGranted {
+        user_id: UserId,
+        operator_id: UserId,
+        amount: CreditAmount,
+    },
     CreditCommitted {
         user_id: UserId,
         execution_id: ExecutionId,

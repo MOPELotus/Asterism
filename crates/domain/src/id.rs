@@ -64,6 +64,8 @@ entity_id!(PriceQuoteId);
 entity_id!(CreditTransactionId);
 entity_id!(CreditReservationId);
 entity_id!(AuthSessionId);
+entity_id!(WebSessionId);
+entity_id!(ServiceTokenId);
 entity_id!(SecretId);
 entity_id!(EventId);
 entity_id!(NotificationId);

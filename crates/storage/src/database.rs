@@ -99,6 +99,20 @@ pub enum StorageError {
     OutboxClaimLost,
     #[error("outbox claim expiry must be in the future and its batch must be non-zero")]
     InvalidOutboxClaim,
+    #[error("available credit is insufficient")]
+    InsufficientCredits,
+    #[error("credit reservation is missing or no longer active")]
+    ReservationNotActive,
+    #[error("credit amount cannot be represented by SQLite")]
+    CreditAmountOutOfRange,
+    #[error("persisted credit balances violate ledger invariants")]
+    CreditInvariant,
+    #[error("scheduler claim is no longer owned by this worker")]
+    SchedulerClaimLost,
+    #[error("scheduler claim expiry must be in the future and its batch must be non-zero")]
+    InvalidSchedulerClaim,
+    #[error("the initial master has already been created")]
+    MasterAlreadyInitialized,
 }
 
 #[cfg(test)]
@@ -117,7 +131,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 9);
+        assert_eq!(migration_count, 10);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())

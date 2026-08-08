@@ -2,7 +2,7 @@ use asterism_domain::{EventId, Timestamp};
 use asterism_events::EventEnvelope;
 use async_trait::async_trait;
 use chrono::SecondsFormat;
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 
 use crate::{Database, OutboxRepository, StorageError};
 
@@ -65,18 +65,9 @@ impl Database {
 #[async_trait]
 impl OutboxRepository for SqliteOutboxRepository {
     async fn enqueue(&self, event: &EventEnvelope) -> Result<(), StorageError> {
-        sqlx::query(
-            "INSERT INTO event_outbox \
-             (id, event_type, payload_json, correlation_id, occurred_at) \
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(event.id.to_string())
-        .bind(event_type(event))
-        .bind(serde_json::to_string(event)?)
-        .bind(&event.correlation_id)
-        .bind(encode_timestamp(event.occurred_at))
-        .execute(self.database.pool())
-        .await?;
+        let mut transaction = self.database.pool().begin().await?;
+        enqueue_in_transaction(&mut transaction, event).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -191,14 +182,34 @@ impl OutboxRepository for SqliteOutboxRepository {
     }
 }
 
+pub(crate) async fn enqueue_in_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    event: &EventEnvelope,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO event_outbox \
+         (id, event_type, payload_json, correlation_id, occurred_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(event.id.to_string())
+    .bind(event_type(event))
+    .bind(serde_json::to_string(event)?)
+    .bind(&event.correlation_id)
+    .bind(encode_timestamp(event.occurred_at))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 fn encode_timestamp(value: Timestamp) -> String {
     value.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
 fn event_type(event: &EventEnvelope) -> &'static str {
     use asterism_events::DomainEvent::{
-        AuthStateChanged, CreditCommitted, CreditReleased, CreditReserved, ExecutionProgressed,
-        ExecutionRecoveryRequired, ExecutionStateChanged, HumanRequired, TaskChanged,
+        AuthStateChanged, CreditCommitted, CreditGranted, CreditReleased, CreditReserved,
+        ExecutionProgressed, ExecutionRecoveryRequired, ExecutionStateChanged, HumanRequired,
+        TaskChanged,
     };
     match &event.event {
         TaskChanged { .. } => "task_changed",
@@ -207,6 +218,7 @@ fn event_type(event: &EventEnvelope) -> &'static str {
         AuthStateChanged { .. } => "auth_state_changed",
         HumanRequired { .. } => "human_required",
         CreditReserved { .. } => "credit_reserved",
+        CreditGranted { .. } => "credit_granted",
         CreditCommitted { .. } => "credit_committed",
         CreditReleased { .. } => "credit_released",
         ExecutionRecoveryRequired { .. } => "execution_recovery_required",

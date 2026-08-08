@@ -72,6 +72,13 @@ pending/dead-letter outbox totals.
 
 ## Next Phase 0 slice
 
-The next slice implements atomic credit ledger repositories, user/session and
-master-bootstrap persistence, scheduler job claiming, configuration layering,
-and the first internal management API/CLI actions.
+The third checkpoint adds atomic credit grant/reserve/commit/release operations,
+immutable debit transactions, and same-transaction outbox events. Concurrent
+reservations cannot overspend an account and a reservation cannot be committed
+twice. It also adds leased scheduler job claiming/retry/dead-letter persistence,
+256-bit opaque token generation with digest-only storage values, normalized
+user roles, and a transactionally one-time initial Master bootstrap.
+
+The next slice persists Web sessions and scoped service tokens, adds config
+layering, and exposes the first authenticated internal management API/CLI
+actions.

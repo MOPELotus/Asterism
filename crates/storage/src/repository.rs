@@ -1,9 +1,13 @@
-use asterism_domain::{ExecutionId, ExecutionLease, Task, TaskId, Timestamp, User, UserId};
+use asterism_domain::{
+    CreditAccount, CreditReservation, CreditReservationId, CreditTransactionId, ExecutionId,
+    ExecutionLease, Task, TaskId, Timestamp, User, UserId,
+};
 use async_trait::async_trait;
 
 use crate::StorageError;
 
-use crate::{FailureDisposition, LeaseAcquireOutcome, OutboxRecord};
+use crate::JobFailureDisposition;
+use crate::{CreditGrant, FailureDisposition, LeaseAcquireOutcome, OutboxRecord};
 
 /// Persistence contract consumed by task services. It intentionally contains no
 /// `SQLite` types.
@@ -71,4 +75,56 @@ pub trait OutboxRepository: Send + Sync {
         error_sanitized: &str,
         max_attempts: u32,
     ) -> Result<FailureDisposition, StorageError>;
+}
+
+#[async_trait]
+pub trait CreditRepository: Send + Sync {
+    async fn account(&self, user_id: UserId) -> Result<Option<CreditAccount>, StorageError>;
+
+    async fn grant(&self, grant: &CreditGrant) -> Result<CreditAccount, StorageError>;
+
+    async fn reserve(&self, reservation: &CreditReservation)
+    -> Result<CreditAccount, StorageError>;
+
+    async fn commit(
+        &self,
+        reservation_id: CreditReservationId,
+        transaction_id: CreditTransactionId,
+        at: Timestamp,
+    ) -> Result<CreditAccount, StorageError>;
+
+    async fn release(
+        &self,
+        reservation_id: CreditReservationId,
+        at: Timestamp,
+    ) -> Result<CreditAccount, StorageError>;
+}
+
+#[async_trait]
+pub trait SchedulerRepository: Send + Sync {
+    async fn enqueue(&self, job: &asterism_scheduler::ScheduledJob) -> Result<(), StorageError>;
+
+    async fn claim_due(
+        &self,
+        worker_id: &str,
+        now: Timestamp,
+        lease_expires_at: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<asterism_scheduler::ScheduledJob>, StorageError>;
+
+    async fn complete(
+        &self,
+        job_id: asterism_domain::ScheduleId,
+        worker_id: &str,
+        at: Timestamp,
+    ) -> Result<(), StorageError>;
+
+    async fn fail(
+        &self,
+        job_id: asterism_domain::ScheduleId,
+        worker_id: &str,
+        error_sanitized: &str,
+        retry_at: Option<Timestamp>,
+        at: Timestamp,
+    ) -> Result<JobFailureDisposition, StorageError>;
 }

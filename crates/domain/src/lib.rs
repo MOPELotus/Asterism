@@ -16,7 +16,8 @@ pub use automation::{
     InheritanceMode, PlanScope, SchedulePolicy,
 };
 pub use credits::{
-    CreditAccount, CreditAmount, CreditError, CreditReservation, CreditReservationState, PriceQuote,
+    CreditAccount, CreditAmount, CreditError, CreditReservation, CreditReservationState,
+    CreditTransaction, CreditTransactionType, PriceQuote,
 };
 pub use execution::{
     Execution, ExecutionAttempt, ExecutionLease, ExecutionLogEvent, ExecutionProgress,

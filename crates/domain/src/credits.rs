@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CreditReservationId, ExecutionId, PriceQuoteId, TaskId, Timestamp, UserId};
+use crate::{
+    CreditReservationId, CreditTransactionId, ExecutionId, PriceQuoteId, TaskId, Timestamp, UserId,
+};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -120,6 +122,29 @@ pub struct CreditReservation {
     pub state: CreditReservationState,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CreditTransactionType {
+    MasterGrant,
+    TaskExecution,
+    TaskRefund,
+    ManualAdjustment,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CreditTransaction {
+    pub id: CreditTransactionId,
+    pub user_id: UserId,
+    /// Signed immutable ledger delta. Debits are negative.
+    pub amount: i64,
+    pub transaction_type: CreditTransactionType,
+    pub task_id: Option<TaskId>,
+    pub execution_id: Option<ExecutionId>,
+    pub operator_id: Option<UserId>,
+    pub reason: String,
+    pub created_at: Timestamp,
 }
 
 #[cfg(test)]

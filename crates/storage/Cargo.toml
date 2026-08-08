@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 asterism-domain = { path = "../domain" }
 asterism-events = { path = "../events" }
+asterism-scheduler = { path = "../scheduler" }
 async-trait.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
