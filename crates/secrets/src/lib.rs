@@ -3,7 +3,8 @@
 use std::{collections::HashSet, fmt};
 
 use asterism_domain::{
-    AuthMethod, ProviderAccountId, ProviderId, SecretId, SessionKind, Timestamp, UserId,
+    AuthMethod, ProviderAccountId, ProviderId, SecretId, ServiceTokenId, SessionKind, Timestamp,
+    UserId,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -303,6 +304,7 @@ impl SecretAccess {
     pub fn authorizes(&self, owner_user_id: UserId) -> bool {
         let actor_valid = match &self.actor {
             SecretActor::User(user_id) => *user_id == owner_user_id,
+            SecretActor::ServiceToken(_) => true,
             SecretActor::CoreService(service) => valid_actor_label(service),
             SecretActor::ProviderRuntime(provider_id) => valid_actor_label(provider_id),
         };
@@ -315,6 +317,7 @@ impl SecretAccess {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SecretActor {
     User(UserId),
+    ServiceToken(ServiceTokenId),
     CoreService(&'static str),
     ProviderRuntime(String),
 }

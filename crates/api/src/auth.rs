@@ -5,7 +5,7 @@ use asterism_domain::{
     AuditActor, Permission, ServiceScope, ServiceToken, ServiceTokenId, Timestamp, User, UserId,
     UserStatus, WebSession, WebSessionId,
 };
-use asterism_secrets::SecretString;
+use asterism_secrets::{SecretActor, SecretString};
 use asterism_storage::{
     InitialMaster, SessionRepository, SqliteSessionRepository, SqliteUserRepository, StorageError,
     UserRepository,
@@ -70,6 +70,13 @@ impl AuthContext {
         match &self.identity {
             AuthIdentity::Web { principal, .. } => AuditActor::User(principal.user_id),
             AuthIdentity::Service(token) => AuditActor::ServiceToken(token.id),
+        }
+    }
+
+    pub(super) fn secret_actor(&self) -> SecretActor {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } => SecretActor::User(principal.user_id),
+            AuthIdentity::Service(token) => SecretActor::ServiceToken(token.id),
         }
     }
 

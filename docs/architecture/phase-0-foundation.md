@@ -358,3 +358,17 @@ the account authenticated in one immediate SQLite transaction. Replacement
 deletes superseded blobs through their account links, writes per-secret and
 per-credential audits, and records one sanitized bundle commit audit without
 persisting candidate account hints or plaintext.
+
+## Twenty-seventh Phase 0 slice
+
+The twenty-seventh checkpoint exposes owner-scoped full credential replacement
+at `PUT /api/v1/provider-accounts/{account_id}/credentials`. Provider identity
+and tenant are derived from the owned account rather than accepted from the
+request, and both Web sessions and owner-bound service tokens retain their
+typed audit identity through the secret boundary.
+
+Credential values are converted directly into zeroizing memory wrappers,
+redacted from request debug output, and never returned. The response contains
+only credential count plus the sanitized Provider session status; OpenAPI marks
+every value as write-only and documents validation, conflict, rate-limit, and
+availability outcomes.

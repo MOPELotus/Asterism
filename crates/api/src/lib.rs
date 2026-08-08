@@ -81,6 +81,10 @@ pub fn build_router(state: ApiState) -> Router {
             post(account::scan_provider_account),
         )
         .route(
+            "/api/v1/provider-accounts/{account_id}/credentials",
+            axum::routing::put(account::put_provider_credentials),
+        )
+        .route(
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             get(account::get_scan_schedule).put(account::configure_scan_schedule),
         )
@@ -233,6 +237,21 @@ async fn openapi() -> Json<Value> {
                     "503": {"description": "Provider is temporarily unavailable"}
                 }
             }},
+            "/api/v1/provider-accounts/{account_id}/credentials": {"put": {
+                "operationId": "replaceProviderAccountCredentials",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PutProviderCredentials"}}}},
+                "responses": {
+                    "200": {"description": "Credentials validated, encrypted, and committed"},
+                    "400": {"description": "Invalid credential bundle"},
+                    "404": {"description": "Provider account not found"},
+                    "409": {"description": "Provider rejected or does not support the credential"},
+                    "429": {"description": "Provider rate limit reached"},
+                    "502": {"description": "Provider returned inconsistent authentication data"},
+                    "503": {"description": "Provider or encrypted credential store unavailable"}
+                }
+            }},
             "/api/v1/provider-accounts/{account_id}/scan-schedule": {
                 "get": {
                     "operationId": "getProviderAccountScanSchedule",
@@ -318,6 +337,31 @@ async fn openapi() -> Json<Value> {
                     "properties": {
                         "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
                         "tenant": {"type": ["string", "null"], "maxLength": 256}
+                    },
+                    "additionalProperties": false
+                },
+                "PutProviderCredentials": {
+                    "type": "object",
+                    "required": ["auth_method", "acquired_via", "session_kind", "fields"],
+                    "properties": {
+                        "auth_method": {"type": "string", "enum": ["password", "qr_code", "external_browser_oauth", "assisted_session", "imported_cookie", "imported_token"]},
+                        "acquired_via": {"type": "string", "enum": ["native_provider_login", "capture_tool", "browser_extension", "android_helper", "manual_import"]},
+                        "session_kind": {"type": "string", "enum": ["cookie", "bearer_token", "jwt", "composite", "provider_specific"]},
+                        "expires_at": {"type": ["string", "null"], "format": "date-time"},
+                        "fields": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 16,
+                            "items": {
+                                "type": "object",
+                                "required": ["purpose", "value"],
+                                "properties": {
+                                    "purpose": {"type": "string", "enum": ["provider_password", "provider_cookie", "provider_access_token", "provider_refresh_token", "provider_composite_session"]},
+                                    "value": {"type": "string", "minLength": 1, "writeOnly": true}
+                                },
+                                "additionalProperties": false
+                            }
+                        }
                     },
                     "additionalProperties": false
                 },
@@ -525,14 +569,23 @@ pub struct ErrorBody {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
-
-    use asterism_domain::{AssessmentClass, AuthState, RemoteState, SourceType};
-    use asterism_provider_api::{
-        CourseInventoryCapability, ProviderCapability, ProviderContext, ProviderEntry,
-        ProviderIdentity, ProviderMetadata, ProviderResult, RemoteCourse, RemoteTask,
-        TaskInventoryCapability, VerificationLevel,
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        net::SocketAddr,
+        time::Duration,
     };
+
+    use asterism_domain::{
+        AssessmentClass, AuthMethod, AuthSessionId, AuthState, RemoteState, SessionKind, SourceType,
+    };
+    use asterism_provider_api::{
+        AuthChallenge, AuthenticationCapability, CourseInventoryCapability, ProviderAuthContext,
+        ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata,
+        ProviderResult, RemoteCourse, RemoteTask, SessionStatus, TaskInventoryCapability,
+        VerificationLevel,
+    };
+    use asterism_secrets::{CredentialBundle, SecretKey};
+    use asterism_storage::SecretKeyring;
     use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
@@ -628,6 +681,109 @@ mod tests {
             })
             .unwrap();
         registry
+    }
+
+    #[derive(Debug)]
+    struct ApiCredentialAuthentication {
+        metadata: ProviderMetadata,
+        valid: bool,
+    }
+
+    impl ProviderIdentity for ApiCredentialAuthentication {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl AuthenticationCapability for ApiCredentialAuthentication {
+        async fn begin_authentication(
+            &self,
+            _account_id: Option<asterism_domain::ProviderAccountId>,
+            method: AuthMethod,
+        ) -> ProviderResult<AuthChallenge> {
+            Ok(AuthChallenge {
+                session_id: AuthSessionId::new(),
+                method,
+                user_action: None,
+                expires_at: None,
+            })
+        }
+
+        async fn validate_credential(
+            &self,
+            _context: &ProviderAuthContext,
+            credential: &CredentialBundle,
+        ) -> ProviderResult<SessionStatus> {
+            assert_eq!(credential.fields.len(), 1);
+            assert!(!credential.fields[0].value.expose_secret().is_empty());
+            Ok(SessionStatus {
+                valid: self.valid,
+                kind: SessionKind::Cookie,
+                expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                account_hint: Some("remote-account".to_owned()),
+            })
+        }
+
+        async fn validate_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<SessionStatus> {
+            Ok(SessionStatus {
+                valid: self.valid,
+                kind: SessionKind::Cookie,
+                expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                account_hint: Some("remote-account".to_owned()),
+            })
+        }
+    }
+
+    fn credential_registry(valid: bool) -> ProviderRegistry {
+        let metadata = ProviderMetadata {
+            id: asterism_domain::ProviderId::new("provider-alpha").unwrap(),
+            display_name: "provider-alpha".to_owned(),
+            implementation_version: "0.1.0".to_owned(),
+            verification: VerificationLevel::Development,
+            scan_min_interval_seconds: None,
+            capabilities: BTreeSet::from([ProviderCapability::Authentication]),
+            auth_methods: BTreeSet::from([AuthMethod::ImportedCookie]),
+            session_kinds: BTreeSet::from([SessionKind::Cookie]),
+        };
+        let authentication = Arc::new(ApiCredentialAuthentication {
+            metadata: metadata.clone(),
+            valid,
+        });
+        let mut registry = ProviderRegistry::default();
+        registry
+            .register(ProviderEntry {
+                authentication: Some(authentication),
+                ..ProviderEntry::metadata_only(metadata)
+            })
+            .unwrap();
+        registry
+    }
+
+    async fn credential_test_app(valid: bool) -> (Router, Database) {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let secret_store = SqliteSecretStore::new(
+            database.clone(),
+            Arc::new(
+                SecretKeyring::new(
+                    "key-a",
+                    BTreeMap::from([("key-a".to_owned(), SecretKey::new([9; 32]))]),
+                )
+                .unwrap(),
+            ),
+        );
+        let state = ApiState::new(
+            database.clone(),
+            Arc::new(credential_registry(valid)),
+            3600,
+            false,
+        )
+        .with_secret_store(secret_store);
+        (build_router(state), database)
     }
 
     async fn test_app(
@@ -891,6 +1047,57 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audit_count, 3);
+    }
+
+    #[tokio::test]
+    async fn provider_credential_api_validates_before_returning_sanitized_metadata() {
+        let (app, database) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/api/v1/provider-accounts/{account_id}/credentials"
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(
+                    r#"{"auth_method":"imported_cookie","acquired_via":"manual_import","session_kind":"cookie","fields":[{"purpose":"provider_cookie","value":"credential-value"}]}"#,
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        assert!(
+            !body
+                .as_ref()
+                .windows(b"credential-value".len())
+                .any(|window| window == b"credential-value")
+        );
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["credential_count"], 1);
+        assert_eq!(response["status"]["valid"], true);
+        let auth_state: String =
+            sqlx::query_scalar("SELECT auth_state_json FROM provider_accounts WHERE id = ?")
+                .bind(&account_id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<AuthState>(&auth_state).unwrap(),
+            AuthState::Authenticated
+        );
     }
 
     #[tokio::test]
@@ -1256,6 +1463,7 @@ mod tests {
             "/api/v1/provider-accounts",
             "/api/v1/provider-accounts/{account_id}",
             "/api/v1/provider-accounts/{account_id}/scan",
+            "/api/v1/provider-accounts/{account_id}/credentials",
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",

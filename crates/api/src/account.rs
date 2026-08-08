@@ -1,11 +1,18 @@
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use asterism_domain::{
-    AuthState, ProviderAccount, ProviderAccountId, ProviderId, Timestamp, UserId,
+    AuthMethod, AuthState, ProviderAccount, ProviderAccountId, ProviderId, SessionKind, Timestamp,
+    UserId,
 };
-use asterism_engine::{ProviderScanError, ProviderScanService};
-use asterism_provider_api::{ProviderCapability, ProviderErrorKind};
+use asterism_engine::{
+    CredentialProvisionError, ProviderCredentialService, ProviderScanError, ProviderScanService,
+};
+use asterism_provider_api::{ProviderCapability, ProviderError, ProviderErrorKind, SessionStatus};
 use asterism_scheduler::{ScanSchedule, ScanScheduleError};
+use asterism_secrets::{
+    CredentialAcquisition, CredentialBundle, CredentialField, SecretAccess, SecretPurpose,
+    SecretStoreError, SecretValue,
+};
 use asterism_storage::{
     ProviderAccountRepository, ScanScheduleRepository, SqliteProviderAccountRepository,
     SqliteProviderScanRepository, SqliteSchedulerRepository, StorageError,
@@ -140,6 +147,68 @@ pub(super) async fn delete_provider_account(
     } else {
         Err(ApiError::not_found("provider_account_not_found"))
     }
+}
+
+pub(super) async fn put_provider_credentials(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<PutProviderCredentialsRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let request = api_json(payload)?;
+    let accounts = SqliteProviderAccountRepository::new(state.database.clone());
+    let account = accounts
+        .find_provider_account(owner_id, account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    let secret_store = state.secret_store.ok_or_else(|| {
+        ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "the encrypted credential store is not configured",
+        )
+    })?;
+    let correlation_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::internal("request ID middleware did not provide an ID"))?;
+    let access = SecretAccess {
+        actor: auth.secret_actor(),
+        correlation_id: correlation_id.to_owned(),
+        reason: "replace Provider account credentials".to_owned(),
+    };
+    let bundle = CredentialBundle {
+        provider_id: account.provider_id,
+        tenant: account.tenant,
+        auth_method: request.auth_method,
+        acquired_via: request.acquired_via,
+        captured_at: Utc::now(),
+        expires_at: request.expires_at,
+        session_kind: request.session_kind,
+        fields: request
+            .fields
+            .into_iter()
+            .map(|field| CredentialField {
+                purpose: field.purpose,
+                value: field.into_secret_value(),
+            })
+            .collect(),
+        user_id_hint: None,
+    };
+    let committed = ProviderCredentialService::new(state.providers, accounts, secret_store)
+        .validate_and_store(owner_id, account_id, bundle, &access)
+        .await
+        .map_err(map_credential_error)?;
+    Ok(crate::auth::no_store(
+        Json(PutProviderCredentialsResponse {
+            credential_count: committed.credentials.len(),
+            status: committed.status,
+        })
+        .into_response(),
+    ))
 }
 
 pub(super) async fn scan_provider_account(
@@ -292,6 +361,97 @@ pub(super) struct UpdateProviderAccountRequest {
     tenant: Option<String>,
 }
 
+pub(super) struct PutProviderCredentialsRequest {
+    auth_method: AuthMethod,
+    acquired_via: CredentialAcquisition,
+    session_kind: SessionKind,
+    expires_at: Option<Timestamp>,
+    fields: Vec<CredentialFieldRequest>,
+}
+
+struct CredentialFieldRequest {
+    purpose: SecretPurpose,
+    value: String,
+}
+
+impl CredentialFieldRequest {
+    fn into_secret_value(mut self) -> SecretValue {
+        SecretValue::new(std::mem::take(&mut self.value).into_bytes())
+    }
+}
+
+impl fmt::Debug for PutProviderCredentialsRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PutProviderCredentialsRequest")
+            .field("auth_method", &self.auth_method)
+            .field("acquired_via", &self.acquired_via)
+            .field("session_kind", &self.session_kind)
+            .field("expires_at", &self.expires_at)
+            .field(
+                "field_purposes",
+                &self
+                    .fields
+                    .iter()
+                    .map(|field| field.purpose)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for PutProviderCredentialsRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            auth_method: AuthMethod,
+            acquired_via: CredentialAcquisition,
+            session_kind: SessionKind,
+            expires_at: Option<Timestamp>,
+            fields: Vec<WireField>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireField {
+            purpose: SecretPurpose,
+            value: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            auth_method: wire.auth_method,
+            acquired_via: wire.acquired_via,
+            session_kind: wire.session_kind,
+            expires_at: wire.expires_at,
+            fields: wire
+                .fields
+                .into_iter()
+                .map(|field| CredentialFieldRequest {
+                    purpose: field.purpose,
+                    value: field.value,
+                })
+                .collect(),
+        })
+    }
+}
+
+impl Drop for CredentialFieldRequest {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.value);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct PutProviderCredentialsResponse {
+    credential_count: usize,
+    status: SessionStatus,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ConfigureScanScheduleRequest {
@@ -415,6 +575,93 @@ fn map_storage_error(error: StorageError) -> ApiError {
     }
 }
 
+fn map_credential_error(error: CredentialProvisionError) -> ApiError {
+    match error {
+        CredentialProvisionError::Unauthorized => ApiError::forbidden(),
+        CredentialProvisionError::InvalidBundle(error) => {
+            ApiError::bad_request("invalid_provider_credential", error.to_string())
+        }
+        CredentialProvisionError::AccountNotFound(_) => {
+            ApiError::not_found("provider_account_not_found")
+        }
+        CredentialProvisionError::AccountMismatch => ApiError::conflict(
+            "provider_account_mismatch",
+            "the credential does not match the Provider account",
+        ),
+        CredentialProvisionError::ProviderNotRegistered(_)
+        | CredentialProvisionError::AuthenticationUnavailable
+        | CredentialProvisionError::UnsupportedAuthMethod(_)
+        | CredentialProvisionError::UnsupportedSessionKind(_) => ApiError::conflict(
+            "provider_authentication_unavailable",
+            "the Provider does not support the requested authentication contract",
+        ),
+        CredentialProvisionError::CredentialRejected => ApiError::conflict(
+            "provider_credential_rejected",
+            "the Provider rejected the candidate credential",
+        ),
+        CredentialProvisionError::InvalidProviderStatus => ApiError::bad_gateway(
+            "provider_authentication_invalid",
+            "the Provider returned an inconsistent authentication result",
+        ),
+        CredentialProvisionError::Provider(error) => map_credential_provider_error(error),
+        CredentialProvisionError::Storage(error) => ApiError::internal(error),
+        CredentialProvisionError::SecretStore(error) => match error {
+            SecretStoreError::Unauthorized => ApiError::forbidden(),
+            SecretStoreError::NotFound => ApiError::not_found("provider_account_not_found"),
+            SecretStoreError::InvalidValue => ApiError::bad_request(
+                "invalid_provider_credential",
+                "the credential payload is invalid",
+            ),
+            SecretStoreError::AccountMismatch => ApiError::conflict(
+                "provider_account_mismatch",
+                "the credential does not match the Provider account",
+            ),
+            SecretStoreError::VersionConflict => ApiError::conflict(
+                "provider_credential_conflict",
+                "the Provider credentials changed concurrently",
+            ),
+            SecretStoreError::KeyUnavailable => ApiError::service_unavailable(
+                "secret_store_unavailable",
+                "the encrypted credential store is not configured",
+            ),
+            error => ApiError::internal(error),
+        },
+    }
+}
+
+fn map_credential_provider_error(error: ProviderError) -> ApiError {
+    match error.kind {
+        ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+            error.retry_after_seconds.unwrap_or(60).clamp(1, 86_400),
+        ),
+        ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+            tracing::warn!(%error, "Provider credential validation is temporarily unavailable");
+            ApiError::service_unavailable(
+                "provider_unavailable",
+                "the Provider is temporarily unavailable",
+            )
+        }
+        ProviderErrorKind::Authentication | ProviderErrorKind::Authorization => ApiError::conflict(
+            "provider_credential_rejected",
+            "the Provider rejected the candidate credential",
+        ),
+        ProviderErrorKind::HumanRequired
+        | ProviderErrorKind::RemoteChanged
+        | ProviderErrorKind::UnsupportedTask => ApiError::conflict(
+            "provider_action_required",
+            "the Provider requires additional user action",
+        ),
+        ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+            tracing::warn!(%error, "Provider returned invalid authentication data");
+            ApiError::bad_gateway(
+                "provider_authentication_invalid",
+                "the Provider returned inconsistent authentication data",
+            )
+        }
+        ProviderErrorKind::Internal => ApiError::internal(error),
+    }
+}
+
 fn map_scan_error(error: ProviderScanError) -> ApiError {
     match error {
         ProviderScanError::ProviderNotRegistered(_) => ApiError::conflict(
@@ -476,4 +723,20 @@ fn map_scan_error(error: ProviderScanError) -> ApiError {
 
 fn map_scan_schedule_error(error: ScanScheduleError) -> ApiError {
     ApiError::bad_request("invalid_scan_schedule", error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_request_debug_output_redacts_every_value() {
+        let request: PutProviderCredentialsRequest = serde_json::from_str(
+            r#"{"auth_method":"imported_cookie","acquired_via":"manual_import","session_kind":"cookie","fields":[{"purpose":"provider_cookie","value":"private-cookie"}]}"#,
+        )
+        .unwrap();
+        let debug = format!("{request:?}");
+        assert!(debug.contains("ProviderCookie"));
+        assert!(!debug.contains("private-cookie"));
+    }
 }

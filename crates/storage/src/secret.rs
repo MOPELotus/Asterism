@@ -1110,6 +1110,7 @@ async fn insert_secret_audit(
 fn encode_secret_actor(actor: &SecretActor) -> (&'static str, String) {
     match actor {
         SecretActor::User(id) => ("user", id.to_string()),
+        SecretActor::ServiceToken(id) => ("service_token", id.to_string()),
         SecretActor::CoreService(service) => ("core_service", (*service).to_owned()),
         SecretActor::ProviderRuntime(provider_id) => ("provider_runtime", provider_id.to_owned()),
     }
