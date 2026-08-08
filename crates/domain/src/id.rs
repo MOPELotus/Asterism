@@ -56,6 +56,7 @@ entity_id!(ProviderAccountId);
 entity_id!(CourseId);
 entity_id!(TaskId);
 entity_id!(TaskSnapshotId);
+entity_id!(TaskDiffId);
 entity_id!(ExecutionId);
 entity_id!(ExecutionAttemptId);
 entity_id!(ScheduleId);

@@ -29,7 +29,7 @@ pub use execution::{
 pub use id::*;
 pub use task::{
     AssessmentClass, OrchestrationState, RemoteState, SourceType, Task, TaskCapability,
-    TaskDiffKind, TaskSnapshot,
+    TaskDiffKind, TaskSnapshot, classify_task_changes,
 };
 pub use user::{Permission, QqIdentity, Role, User, UserStatus};
 

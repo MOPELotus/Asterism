@@ -100,7 +100,7 @@ impl TaskQueryRepository for SqliteTaskQueryRepository {
     }
 }
 
-fn decode_task(row: &SqliteRow) -> Result<Task, StorageError> {
+pub(crate) fn decode_task(row: &SqliteRow) -> Result<Task, StorageError> {
     Ok(Task {
         id: TaskId::from_str(row.try_get("id")?)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,

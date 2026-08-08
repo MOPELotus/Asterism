@@ -138,3 +138,17 @@ manual Task write endpoint is introduced before Provider ingestion exists.
 
 The next slice defines the Provider scan ingestion contract, including stable
 fingerprints, sanitized snapshots, diffs, and transactional upserts.
+
+## Ninth Phase 0 slice
+
+The ninth checkpoint adds transactional Provider scan ingestion. Versioned
+fingerprints provide a stable fallback when a remote identifier changes, while
+conflicting remote keys and fingerprints fail closed. Each meaningful change
+writes the normalized and sanitized remote snapshot, its typed diff, the Task
+upsert, and a domain event through the transactional outbox in one commit.
+Identical observations are idempotent, local orchestration state is preserved,
+and bounded payload validation rejects credential-shaped fields before any
+Course or Task row is written.
+
+The next slice invokes this contract through registered Provider inventory
+capabilities without introducing any concrete Provider implementation.

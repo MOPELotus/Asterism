@@ -7,6 +7,7 @@ mod outbox;
 mod provider_account;
 mod recovery;
 mod repository;
+mod scan;
 mod scheduler;
 mod session;
 mod task;
@@ -22,6 +23,10 @@ pub use repository::{
     CreditRepository, ExecutionLeaseRepository, OutboxRepository, ProviderAccountRepository,
     SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository, TaskRepository,
     UserRepository,
+};
+pub use scan::{
+    ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,
+    SqliteProviderScanRepository, TaskScanChange,
 };
 pub use scheduler::{JobFailureDisposition, SqliteSchedulerRepository};
 pub use session::SqliteSessionRepository;
