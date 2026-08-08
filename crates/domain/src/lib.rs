@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod auth;
+pub mod auth_bootstrap;
 pub mod automation;
 pub mod credits;
 pub mod execution;
@@ -13,6 +14,10 @@ pub use account::{Course, ProviderAccount, ProviderId};
 pub use auth::{
     AuditActor, AuthMethod, AuthSession, AuthSessionError, AuthState, HumanRequiredReason,
     ServiceScope, ServiceToken, SessionKind, WaitingUserState, WebSession,
+};
+pub use auth_bootstrap::{
+    AuthBootstrapPurpose, AuthBootstrapSession, AuthBootstrapSessionError, AuthBootstrapState,
+    MAX_AUTH_BOOTSTRAP_TTL_SECONDS,
 };
 pub use automation::{
     AutomationPlan, AutomationPlanStatus, BillingPolicy, CoverageSpec, ExecutionPolicy,

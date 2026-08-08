@@ -489,3 +489,17 @@ Secret input behavior is unchanged: interactive terminals use a hidden prompt,
 pipes accept one bounded line, no plaintext option exists, and output contains
 only the server's sanitized session and credential metadata. The resulting
 operator flow is start, submit, then poll the same session ID.
+
+## Thirty-seventh Phase 0 slice
+
+The thirty-seventh checkpoint models the short-lived Capture pairing lifecycle
+as `AuthBootstrapSession`. It records the owner, Provider, optional account,
+purpose, required bundled recipe version, timestamps, claim time, state, and
+optimistic revision while enforcing a maximum fifteen-minute TTL.
+
+An add-account session has no existing account binding; reauthentication and
+repair require one. A session can be claimed exactly once and then completed or
+failed, while live sessions may be cancelled or expired without revival. The
+raw pairing token is deliberately absent from this serializable domain object;
+only a token digest belongs in persistence, and token issuance remains at the
+authentication boundary.
