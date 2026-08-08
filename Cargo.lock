@@ -148,11 +148,16 @@ name = "asterism-capture"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "asterism-domain",
+ "asterism-secrets",
+ "axum",
+ "chrono",
  "clap",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,11 +1,8 @@
-mod client;
-
 use std::io::{self, Write};
 
 use anyhow::Context;
+use asterism_capture::CaptureClient;
 use clap::{Parser, Subcommand};
-
-use crate::client::CaptureClient;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]

@@ -699,3 +699,14 @@ Capture server URLs require HTTPS and cannot embed credentials, paths, queries,
 or fragments. Cleartext HTTP is disabled by default and can be enabled only by
 an explicit development flag for loopback hosts, preserving local Phase 0
 testing without weakening the public deployment boundary.
+
+## Fifty-third Phase 0 slice
+
+The Capture client now claims an Auth Bootstrap session with the one-time
+pairing token in a sensitive `Bootstrap` authorization header. The response is
+accepted only when the returned session ID and claimed state match the request.
+
+The resulting `ClaimedCaptureSession` retains its short-lived access token only
+inside a redacted, zeroizing secret value. This capability is exposed through
+the Capture library but is not yet a standalone command, avoiding a partial
+workflow that would consume a one-time pairing and immediately discard access.
