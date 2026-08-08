@@ -5,7 +5,7 @@ use asterism_domain::{
     RemoteState, SecretId, SessionKind, SourceType, TaskCapability, TaskId, Timestamp,
     WaitingUserState,
 };
-use asterism_secrets::CredentialBundle;
+use asterism_secrets::{CredentialBundle, CredentialField};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -50,7 +50,7 @@ pub trait AuthenticationCapability: ProviderIdentity {
         &self,
         context: &ProviderAuthContext,
         credential: &CredentialBundle,
-    ) -> ProviderResult<SessionStatus>;
+    ) -> ProviderResult<CredentialValidation>;
 
     async fn validate_session(&self, context: &ProviderContext) -> ProviderResult<SessionStatus>;
 }
@@ -126,6 +126,34 @@ pub struct SessionStatus {
     pub kind: SessionKind,
     pub expires_at: Option<Timestamp>,
     pub account_hint: Option<String>,
+}
+
+/// Provider-produced secret fields which replace a successfully validated
+/// candidate before Core persists it.
+///
+/// Provider code can use this boundary to turn a native password exchange into
+/// a renewable session without gaining access to `SecretStore`. Core retains all
+/// immutable candidate metadata and validates this replacement again.
+#[derive(Debug)]
+pub struct CredentialReplacement {
+    pub session_kind: SessionKind,
+    pub fields: Vec<CredentialField>,
+}
+
+/// Result of Provider-side credential validation.
+#[derive(Debug)]
+pub struct CredentialValidation {
+    pub status: SessionStatus,
+    pub replacement: Option<CredentialReplacement>,
+}
+
+impl CredentialValidation {
+    pub const fn accepted(status: SessionStatus) -> Self {
+        Self {
+            status,
+            replacement: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

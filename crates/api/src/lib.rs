@@ -549,7 +549,7 @@ async fn openapi() -> Json<Value> {
                                 "type": "object",
                                 "required": ["purpose", "value"],
                                 "properties": {
-                                    "purpose": {"type": "string", "enum": ["provider_password", "provider_cookie", "provider_access_token", "provider_refresh_token", "provider_composite_session"]},
+                                    "purpose": {"type": "string", "enum": ["provider_username", "provider_password", "provider_cookie", "provider_access_token", "provider_refresh_token", "provider_composite_session"]},
                                     "value": {"type": "string", "minLength": 1, "writeOnly": true}
                                 },
                                 "additionalProperties": false
@@ -623,7 +623,7 @@ fn auth_bootstrap_credential_schema() -> Value {
                     "type": "object",
                     "required": ["purpose", "value"],
                     "properties": {
-                        "purpose": {"type": "string", "enum": ["provider_password", "provider_cookie", "provider_access_token", "provider_refresh_token", "provider_composite_session"]},
+                        "purpose": {"type": "string", "enum": ["provider_username", "provider_password", "provider_cookie", "provider_access_token", "provider_refresh_token", "provider_composite_session"]},
                         "value": {"type": "string", "minLength": 1, "writeOnly": true}
                     },
                     "additionalProperties": false
@@ -856,10 +856,10 @@ mod tests {
         AssessmentClass, AuthMethod, AuthState, RemoteState, SessionKind, SourceType,
     };
     use asterism_provider_api::{
-        AuthChallenge, AuthenticationCapability, CourseInventoryCapability, ProviderAuthContext,
-        ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata,
-        ProviderResult, RemoteCourse, RemoteTask, SessionStatus, TaskInventoryCapability,
-        VerificationLevel,
+        AuthChallenge, AuthenticationCapability, CourseInventoryCapability, CredentialValidation,
+        ProviderAuthContext, ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity,
+        ProviderMetadata, ProviderResult, RemoteCourse, RemoteTask, SessionStatus,
+        TaskInventoryCapability, VerificationLevel,
     };
     use asterism_secrets::{CredentialBundle, SecretKey};
     use asterism_storage::SecretKeyring;
@@ -994,15 +994,15 @@ mod tests {
             &self,
             _context: &ProviderAuthContext,
             credential: &CredentialBundle,
-        ) -> ProviderResult<SessionStatus> {
+        ) -> ProviderResult<CredentialValidation> {
             assert_eq!(credential.fields.len(), 1);
             assert!(!credential.fields[0].value.expose_secret().is_empty());
-            Ok(SessionStatus {
+            Ok(CredentialValidation::accepted(SessionStatus {
                 valid: self.valid,
                 kind: SessionKind::Cookie,
                 expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
                 account_hint: Some("remote-account".to_owned()),
-            })
+            }))
         }
 
         async fn validate_session(

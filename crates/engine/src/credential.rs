@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use asterism_domain::{
-    AuthMethod, AuthSessionId, ProviderAccount, ProviderAccountId, ProviderId, SessionKind, UserId,
+    AuthMethod, AuthSessionId, ProviderAccount, ProviderAccountId, ProviderId, SessionKind,
+    Timestamp, UserId,
 };
-use asterism_provider_api::{ProviderAuthContext, ProviderError, ProviderRegistry, SessionStatus};
+use asterism_provider_api::{
+    CredentialValidation, ProviderAuthContext, ProviderError, ProviderRegistry, SessionStatus,
+};
 use asterism_secrets::{
     CredentialBundle, CredentialBundleError, ProviderCredential, ProviderCredentialStore,
     SecretAccess, SecretStoreError,
@@ -128,10 +131,23 @@ pub(crate) async fn validate_candidate_for_account(
         auth_session_id,
         correlation_id: access.correlation_id.clone(),
     };
-    let status = authentication
+    let CredentialValidation {
+        status,
+        replacement,
+    } = authentication
         .validate_credential(&context, &bundle)
         .await?;
-    validate_status(&bundle, &status)?;
+    let persisted_kind = replacement
+        .as_ref()
+        .map_or(bundle.session_kind, |replacement| replacement.session_kind);
+    if !entry.metadata.session_kinds.contains(&persisted_kind) {
+        return Err(CredentialProvisionError::InvalidProviderStatus);
+    }
+    validate_status(bundle.captured_at, persisted_kind, &status)?;
+    if let Some(replacement) = replacement {
+        bundle.session_kind = replacement.session_kind;
+        bundle.fields = replacement.fields;
+    }
     bundle.expires_at = status.expires_at.or(bundle.expires_at);
     bundle.user_id_hint = status.account_hint.clone().or(bundle.user_id_hint);
     bundle.validate()?;
@@ -175,7 +191,8 @@ pub enum CredentialProvisionError {
 }
 
 fn validate_status(
-    bundle: &CredentialBundle,
+    captured_at: Timestamp,
+    expected_kind: SessionKind,
     status: &SessionStatus,
 ) -> Result<(), CredentialProvisionError> {
     if !status.valid {
@@ -187,10 +204,10 @@ fn validate_status(
             && hint.trim() == hint
             && !hint.chars().any(char::is_control)
     });
-    if status.kind != bundle.session_kind
+    if status.kind != expected_kind
         || status
             .expires_at
-            .is_some_and(|expires_at| expires_at <= bundle.captured_at)
+            .is_some_and(|expires_at| expires_at <= captured_at)
         || !hint_valid
     {
         return Err(CredentialProvisionError::InvalidProviderStatus);
@@ -200,12 +217,13 @@ fn validate_status(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     use asterism_domain::{AuditActor, AuthState, ProviderAccount, Role, Timestamp};
     use asterism_provider_api::{
-        AuthChallenge, AuthenticationCapability, ProviderCapability, ProviderContext,
-        ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult, VerificationLevel,
+        AuthChallenge, AuthenticationCapability, CredentialReplacement, CredentialValidation,
+        ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata,
+        ProviderResult, VerificationLevel,
     };
     use asterism_secrets::{
         CredentialAcquisition, CredentialField, SecretActor, SecretKey, SecretPurpose, SecretStore,
@@ -299,6 +317,72 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn provider_replacement_is_revalidated_and_committed_atomically() {
+        let fixture = fixture_with_replacement().await;
+        let committed = fixture
+            .service
+            .validate_and_store(
+                fixture.owner_id,
+                fixture.account_id,
+                password_bundle(Utc::now()),
+                &fixture.access,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(committed.status.kind, SessionKind::Composite);
+        assert_eq!(committed.credentials.len(), 3);
+        let mut persisted = HashMap::new();
+        for credential in &committed.credentials {
+            assert_eq!(credential.session_kind, SessionKind::Composite);
+            persisted.insert(
+                credential.secret.purpose,
+                fixture
+                    .store
+                    .get(&credential.secret, &fixture.access)
+                    .await
+                    .unwrap()
+                    .expose_secret()
+                    .to_vec(),
+            );
+        }
+        assert_eq!(
+            persisted.get(&SecretPurpose::ProviderUsername),
+            Some(&b"derived-user".to_vec())
+        );
+        assert_eq!(
+            persisted.get(&SecretPurpose::ProviderPassword),
+            Some(&b"derived-password".to_vec())
+        );
+        assert_eq!(
+            persisted.get(&SecretPurpose::ProviderCookie),
+            Some(&b"derived-cookie".to_vec())
+        );
+        assert!(persisted.values().all(|value| value != b"input-password"));
+    }
+
+    #[tokio::test]
+    async fn invalid_provider_replacement_never_reaches_persistence() {
+        let fixture = fixture_with_options(true, SessionKind::Composite, true, true).await;
+        let error = fixture
+            .service
+            .validate_and_store(
+                fixture.owner_id,
+                fixture.account_id,
+                password_bundle(Utc::now()),
+                &fixture.access,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CredentialProvisionError::InvalidBundle(_)));
+        let blob_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM secret_blobs")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+        assert_eq!(blob_count, 0);
+    }
+
     struct Fixture {
         database: Database,
         owner_id: UserId,
@@ -310,6 +394,19 @@ mod tests {
     }
 
     async fn fixture(valid: bool, kind: SessionKind) -> Fixture {
+        fixture_with_options(valid, kind, false, false).await
+    }
+
+    async fn fixture_with_replacement() -> Fixture {
+        fixture_with_options(true, SessionKind::Composite, true, false).await
+    }
+
+    async fn fixture_with_options(
+        valid: bool,
+        kind: SessionKind,
+        derive_replacement: bool,
+        invalid_replacement: bool,
+    ) -> Fixture {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
         let owner_id = UserId::new();
@@ -355,6 +452,8 @@ mod tests {
                 expires_at: Some(now + chrono::Duration::hours(1)),
                 account_hint: Some("remote-account".to_owned()),
             },
+            derive_replacement,
+            invalid_replacement,
         });
         let mut registry = ProviderRegistry::default();
         registry
@@ -408,6 +507,29 @@ mod tests {
         }
     }
 
+    fn password_bundle(captured_at: Timestamp) -> CredentialBundle {
+        CredentialBundle {
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            tenant: Some("tenant-a".to_owned()),
+            auth_method: AuthMethod::Password,
+            acquired_via: CredentialAcquisition::NativeProviderLogin,
+            captured_at,
+            expires_at: None,
+            session_kind: SessionKind::ProviderSpecific,
+            fields: vec![
+                CredentialField {
+                    purpose: SecretPurpose::ProviderUsername,
+                    value: SecretValue::new(b"input-user".to_vec()),
+                },
+                CredentialField {
+                    purpose: SecretPurpose::ProviderPassword,
+                    value: SecretValue::new(b"input-password".to_vec()),
+                },
+            ],
+            user_id_hint: None,
+        }
+    }
+
     fn provider_metadata(provider_id: ProviderId) -> ProviderMetadata {
         ProviderMetadata {
             id: provider_id,
@@ -417,8 +539,12 @@ mod tests {
             scan_min_interval_seconds: None,
             capture_recipe_version: None,
             capabilities: BTreeSet::from([ProviderCapability::Authentication]),
-            auth_methods: BTreeSet::from([AuthMethod::ImportedCookie]),
-            session_kinds: BTreeSet::from([SessionKind::Cookie]),
+            auth_methods: BTreeSet::from([AuthMethod::ImportedCookie, AuthMethod::Password]),
+            session_kinds: BTreeSet::from([
+                SessionKind::Cookie,
+                SessionKind::Composite,
+                SessionKind::ProviderSpecific,
+            ]),
         }
     }
 
@@ -426,6 +552,8 @@ mod tests {
     struct TestAuthentication {
         metadata: ProviderMetadata,
         status: SessionStatus,
+        derive_replacement: bool,
+        invalid_replacement: bool,
     }
 
     impl ProviderIdentity for TestAuthentication {
@@ -454,11 +582,40 @@ mod tests {
             &self,
             context: &ProviderAuthContext,
             credential: &CredentialBundle,
-        ) -> ProviderResult<SessionStatus> {
+        ) -> ProviderResult<CredentialValidation> {
             assert_eq!(context.provider_id, credential.provider_id);
-            assert_eq!(credential.fields.len(), 1);
-            assert!(!credential.fields[0].value.expose_secret().is_empty());
-            Ok(self.status.clone())
+            assert!(!credential.fields.is_empty());
+            assert!(
+                credential
+                    .fields
+                    .iter()
+                    .all(|field| !field.value.expose_secret().is_empty())
+            );
+            let replacement = self.derive_replacement.then(|| CredentialReplacement {
+                session_kind: SessionKind::Composite,
+                fields: vec![
+                    CredentialField {
+                        purpose: SecretPurpose::ProviderUsername,
+                        value: SecretValue::new(b"derived-user".to_vec()),
+                    },
+                    CredentialField {
+                        purpose: SecretPurpose::ProviderPassword,
+                        value: SecretValue::new(b"derived-password".to_vec()),
+                    },
+                    CredentialField {
+                        purpose: if self.invalid_replacement {
+                            SecretPurpose::ProviderUsername
+                        } else {
+                            SecretPurpose::ProviderCookie
+                        },
+                        value: SecretValue::new(b"derived-cookie".to_vec()),
+                    },
+                ],
+            });
+            Ok(CredentialValidation {
+                status: self.status.clone(),
+                replacement,
+            })
         }
 
         async fn validate_session(

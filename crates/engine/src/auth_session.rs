@@ -516,8 +516,9 @@ mod tests {
 
     use asterism_domain::{ProviderAccount, Role, SessionKind, WaitingUserState};
     use asterism_provider_api::{
-        AuthenticationCapability, ProviderCapability, ProviderContext, ProviderEntry,
-        ProviderIdentity, ProviderMetadata, ProviderResult, SessionStatus, VerificationLevel,
+        AuthenticationCapability, CredentialValidation, ProviderCapability, ProviderContext,
+        ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult, SessionStatus,
+        VerificationLevel,
     };
     use asterism_secrets::{
         CredentialAcquisition, CredentialBundle, CredentialField, SecretAccess, SecretActor,
@@ -945,18 +946,18 @@ mod tests {
             &self,
             context: &ProviderAuthContext,
             _credential: &CredentialBundle,
-        ) -> ProviderResult<SessionStatus> {
+        ) -> ProviderResult<CredentialValidation> {
             assert!(context.auth_session_id.is_some());
             if let Some((entered, release)) = &self.validation_gate {
                 entered.notify_one();
                 release.notified().await;
             }
-            Ok(SessionStatus {
+            Ok(CredentialValidation::accepted(SessionStatus {
                 valid: self.credential_valid,
                 kind: SessionKind::Cookie,
                 expires_at: None,
                 account_hint: None,
-            })
+            }))
         }
 
         async fn validate_session(

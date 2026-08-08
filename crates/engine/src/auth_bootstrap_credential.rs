@@ -216,9 +216,9 @@ mod tests {
         AuditActor, AuthBootstrapState, AuthMethod, ProviderId, Role, SessionKind,
     };
     use asterism_provider_api::{
-        AuthChallenge, AuthenticationCapability, ProviderAuthContext, ProviderCapability,
-        ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
-        VerificationLevel,
+        AuthChallenge, AuthenticationCapability, CredentialValidation, ProviderAuthContext,
+        ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata,
+        ProviderResult, VerificationLevel,
     };
     use asterism_secrets::{
         CredentialAcquisition, CredentialField, SecretKey, SecretPurpose, SecretValue,
@@ -478,15 +478,15 @@ mod tests {
             &self,
             context: &ProviderAuthContext,
             credential: &CredentialBundle,
-        ) -> ProviderResult<SessionStatus> {
+        ) -> ProviderResult<CredentialValidation> {
             assert_eq!(context.provider_id, credential.provider_id);
             assert!(context.auth_session_id.is_none());
-            Ok(SessionStatus {
+            Ok(CredentialValidation::accepted(SessionStatus {
                 valid: self.valid,
                 kind: credential.session_kind,
                 expires_at: None,
                 account_hint: Some("remote-account".to_owned()),
-            })
+            }))
         }
 
         async fn validate_session(

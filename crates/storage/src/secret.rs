@@ -1474,6 +1474,7 @@ fn valid_key_id(value: &str) -> bool {
 
 fn encode_purpose(purpose: SecretPurpose) -> &'static str {
     match purpose {
+        SecretPurpose::ProviderUsername => "provider_username",
         SecretPurpose::ProviderPassword => "provider_password",
         SecretPurpose::ProviderCookie => "provider_cookie",
         SecretPurpose::ProviderAccessToken => "provider_access_token",
@@ -1488,6 +1489,7 @@ fn encode_purpose(purpose: SecretPurpose) -> &'static str {
 
 fn decode_purpose(value: &str) -> Result<SecretPurpose, SecretStoreError> {
     match value {
+        "provider_username" => Ok(SecretPurpose::ProviderUsername),
         "provider_password" => Ok(SecretPurpose::ProviderPassword),
         "provider_cookie" => Ok(SecretPurpose::ProviderCookie),
         "provider_access_token" => Ok(SecretPurpose::ProviderAccessToken),

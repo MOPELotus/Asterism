@@ -94,6 +94,7 @@ pub struct SecretRef {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretPurpose {
+    ProviderUsername,
     ProviderPassword,
     ProviderCookie,
     ProviderAccessToken,
@@ -109,7 +110,8 @@ impl SecretPurpose {
     pub fn is_provider_credential(self) -> bool {
         matches!(
             self,
-            Self::ProviderPassword
+            Self::ProviderUsername
+                | Self::ProviderPassword
                 | Self::ProviderCookie
                 | Self::ProviderAccessToken
                 | Self::ProviderRefreshToken

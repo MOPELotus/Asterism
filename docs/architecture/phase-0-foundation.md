@@ -876,3 +876,21 @@ than persisting a partial course set. Request construction and folder parsing ar
 fixture-tested, but no current account has verified this route or the reported
 `uf` fingerprint behavior. Registry wiring and the Core credential resolver
 therefore remain intentionally absent.
+
+## Sixty-fifth Phase 0 slice
+
+Provider authentication validation can now return an optional derived credential
+replacement without writing to `SecretStore` directly. Core preserves the
+candidate's Provider, tenant, authentication method, acquisition source and
+capture time; it accepts only a metadata-declared target session kind, validates
+the Provider status and replacement bundle again, and then performs the existing
+atomic credential replacement. Invalid, duplicate, empty or unadvertised derived
+credentials never reach persistence.
+
+This closes the contract required by native flows such as Chaoxing
+Password-to-Cookie: a Provider can return renewable username, password and Cookie
+fields as one Composite session while the original request allocation is
+zeroized. `provider_username` is now a first-class protected secret purpose, and
+`credential_input` distinguishes native credential entry from QR, OAuth or
+session import. The contract is integration-tested, but no Chaoxing
+authentication implementation or daemon registration is claimed by this slice.
