@@ -137,6 +137,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/auth-bootstrap/sessions/{session_id}/claim",
             post(auth_bootstrap::claim_auth_bootstrap_session),
         )
+        .route(
+            "/api/v1/auth-bootstrap/sessions/{session_id}/stream",
+            get(auth_bootstrap::get_auth_bootstrap_stream_snapshot),
+        )
         .merge(protected)
         .with_state(state)
         .fallback(not_found)
@@ -255,6 +259,15 @@ async fn openapi() -> Json<Value> {
                     "200": {"description": "Pairing claimed; scoped access token returned once"},
                     "401": {"description": "Pairing token is invalid, expired, cancelled, or already used"},
                     "429": {"description": "Pairing claim rate limit reached"}
+                }
+            }},
+            "/api/v1/auth-bootstrap/sessions/{session_id}/stream": {"get": {
+                "operationId": "pollAuthBootstrapStream",
+                "security": [{"bootstrapAuth": []}],
+                "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "responses": {
+                    "200": {"description": "Current non-secret session snapshot for the HTTP polling fallback"},
+                    "401": {"description": "Session-scoped Bootstrap access token is invalid or expired"}
                 }
             }},
             "/api/v1/provider-accounts": {
@@ -1417,6 +1430,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_bootstrap_access_token_is_scoped_to_one_live_session() {
+        let (app, _) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = create_test_auth_bootstrap(&app, &cookie).await;
+        let session_id = created["session"]["id"].as_str().unwrap();
+        let pairing_token = created["pairing_token"].as_str().unwrap();
+        let claimed = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/auth-bootstrap/sessions/{session_id}/claim"
+                ))
+                .header(header::AUTHORIZATION, format!("Bootstrap {pairing_token}"))
+                .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 3], 42_003))))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let claimed = response_json(claimed).await;
+        let access_token = claimed["access_token"].as_str().unwrap();
+        let stream_path = format!("/api/v1/auth-bootstrap/sessions/{session_id}/stream");
+        let snapshot = app
+            .clone()
+            .oneshot(
+                Request::get(&stream_path)
+                    .header(header::AUTHORIZATION, format!("Bootstrap {access_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status(), StatusCode::OK);
+        assert_eq!(response_json(snapshot).await["state"], "claimed");
+
+        let other = create_test_auth_bootstrap(&app, &cookie).await;
+        let other_id = other["session"]["id"].as_str().unwrap();
+        let cross_session = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/auth-bootstrap/sessions/{other_id}/stream"))
+                    .header(header::AUTHORIZATION, format!("Bootstrap {access_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross_session.status(), StatusCode::UNAUTHORIZED);
+        let cancelled = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/auth-bootstrap/sessions/{session_id}"))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let terminal = app
+            .oneshot(
+                Request::get(stream_path)
+                    .header(header::AUTHORIZATION, format!("Bootstrap {access_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(terminal.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn auth_bootstrap_claim_is_rate_limited_per_session_and_ip() {
         let (app, _) = credential_test_app(true).await;
         let bootstrap = bootstrap(&app).await;
@@ -1972,6 +2064,7 @@ mod tests {
             "/api/v1/auth-bootstrap/sessions",
             "/api/v1/auth-bootstrap/sessions/{session_id}",
             "/api/v1/auth-bootstrap/sessions/{session_id}/claim",
+            "/api/v1/auth-bootstrap/sessions/{session_id}/stream",
             "/api/v1/service-tokens",
             "/api/v1/service-tokens/{token_id}",
             "/api/v1/provider-accounts",

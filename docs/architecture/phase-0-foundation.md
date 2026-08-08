@@ -569,3 +569,16 @@ session cannot authorize another. Cancellation, failure, completion, expiry,
 owner deactivation, or account deletion all make access authentication fail
 without disclosing which condition occurred. Core exposes one redacted
 `AccessRejected` outcome for future event, stream, and credential endpoints.
+
+## Forty-third Phase 0 slice
+
+The forty-third checkpoint exposes the access-token guard on
+`GET /api/v1/auth-bootstrap/sessions/{session_id}/stream`. The first transport
+is a `no-store` JSON snapshot for HTTP polling; the same path-bound guard is
+intended to precede later SSE or WebSocket upgrades.
+
+Only the claimed session's `ast_boot` token can read its snapshot. Using that
+token with another session ID, or using it after owner cancellation, returns
+the same Bootstrap 401 response. This temporary authority remains separate from
+the global Bearer middleware and cannot access any account, task, or system
+route.

@@ -5,8 +5,8 @@ use asterism_domain::{
     ProviderAccountId, ProviderId,
 };
 use asterism_engine::{
-    AuthBootstrapCancelRequest, AuthBootstrapClaimRequest, AuthBootstrapCreateRequest,
-    AuthBootstrapService, AuthBootstrapServiceError,
+    AuthBootstrapAccessRequest, AuthBootstrapCancelRequest, AuthBootstrapClaimRequest,
+    AuthBootstrapCreateRequest, AuthBootstrapService, AuthBootstrapServiceError,
 };
 use asterism_secrets::SecretString;
 use asterism_storage::{
@@ -157,6 +157,25 @@ pub(super) async fn claim_auth_bootstrap_session(
         })
         .into_response(),
     ))
+}
+
+pub(super) async fn get_auth_bootstrap_stream_snapshot(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let session_id = parse_session_id(&session_id)?;
+    let access_token =
+        bootstrap_authorization(&headers).ok_or_else(ApiError::invalid_bootstrap_token)?;
+    let session = bootstrap_service(&state)?
+        .authenticate_access(AuthBootstrapAccessRequest {
+            session_id,
+            access_token,
+            authenticated_at: Utc::now(),
+        })
+        .await
+        .map_err(map_bootstrap_error)?;
+    Ok(crate::auth::no_store(Json(session).into_response()))
 }
 
 fn bootstrap_service(
