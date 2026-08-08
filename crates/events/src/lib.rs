@@ -19,9 +19,17 @@ pub struct EventEnvelope {
 
 impl EventEnvelope {
     pub fn new(correlation_id: impl Into<String>, event: DomainEvent) -> Self {
+        Self::at(correlation_id, event, Utc::now())
+    }
+
+    pub fn at(
+        correlation_id: impl Into<String>,
+        event: DomainEvent,
+        occurred_at: Timestamp,
+    ) -> Self {
         Self {
             id: EventId::new(),
-            occurred_at: Utc::now(),
+            occurred_at,
             correlation_id: correlation_id.into(),
             event,
         }
@@ -63,6 +71,10 @@ pub enum DomainEvent {
         user_id: UserId,
         execution_id: ExecutionId,
         amount: CreditAmount,
+    },
+    ExecutionRecoveryRequired {
+        execution_id: ExecutionId,
+        task_id: TaskId,
     },
 }
 

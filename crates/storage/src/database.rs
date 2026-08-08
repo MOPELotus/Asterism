@@ -1,7 +1,7 @@
 use std::{str::FromStr, time::Duration};
 
 use sqlx::{
-    SqlitePool,
+    Row, SqlitePool,
     migrate::MigrateError,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
@@ -60,6 +60,18 @@ impl Database {
         Ok(())
     }
 
+    /// Returns the highest successfully applied migration version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if migration metadata cannot be queried.
+    pub async fn schema_version(&self) -> Result<i64, StorageError> {
+        let row = sqlx::query("SELECT COALESCE(MAX(version), 0) AS version FROM _sqlx_migrations")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get("version")?)
+    }
+
     pub const fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -77,6 +89,16 @@ pub enum StorageError {
     Migration(#[from] MigrateError),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("persisted data is invalid: {0}")]
+    InvalidData(String),
+    #[error("execution lease is no longer owned by this worker")]
+    LeaseLost,
+    #[error("execution lease expiry must be in the future")]
+    InvalidLeaseExpiry,
+    #[error("outbox claim is no longer owned by this worker")]
+    OutboxClaimLost,
+    #[error("outbox claim expiry must be in the future and its batch must be non-zero")]
+    InvalidOutboxClaim,
 }
 
 #[cfg(test)]
@@ -95,7 +117,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 7);
+        assert_eq!(migration_count, 9);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())

@@ -1,0 +1,171 @@
+//! Unified scheduling primitives. Providers submit jobs here instead of
+//! spawning their own long-running loops.
+
+use std::time::Duration;
+
+use asterism_domain::{ExecutionId, NotificationId, ProviderAccountId, ScheduleId, Timestamp};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ScheduledJob {
+    pub id: ScheduleId,
+    pub kind: ScheduledJobKind,
+    pub run_at: Timestamp,
+    pub state: ScheduledJobState,
+    pub attempts: u32,
+    pub idempotency_key: String,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "payload")]
+pub enum ScheduledJobKind {
+    Scan {
+        provider_account_id: ProviderAccountId,
+    },
+    Execution {
+        execution_id: ExecutionId,
+    },
+    Retry {
+        execution_id: ExecutionId,
+        next_attempt_no: u32,
+    },
+    Notification {
+        notification_id: NotificationId,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum ScheduledJobState {
+    Pending,
+    Claimed {
+        worker_id: String,
+        lease_expires_at: Timestamp,
+    },
+    Completed,
+    Cancelled,
+    DeadLetter,
+}
+
+impl ScheduledJobState {
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Cancelled | Self::DeadLetter)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RetryPolicy {
+    /// Total number of attempts, including the initial attempt.
+    pub max_attempts: u32,
+    pub initial_delay_seconds: u64,
+    pub multiplier: u32,
+    pub max_delay_seconds: u64,
+}
+
+impl RetryPolicy {
+    /// Validates that retry behavior is bounded and non-zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RetryPolicyError`] for an empty attempt budget, zero delay,
+    /// multiplier below one, or a cap below the initial delay.
+    pub const fn validate(self) -> Result<(), RetryPolicyError> {
+        if self.max_attempts == 0 {
+            return Err(RetryPolicyError::NoAttempts);
+        }
+        if self.initial_delay_seconds == 0 {
+            return Err(RetryPolicyError::ZeroDelay);
+        }
+        if self.multiplier == 0 {
+            return Err(RetryPolicyError::ZeroMultiplier);
+        }
+        if self.max_delay_seconds < self.initial_delay_seconds {
+            return Err(RetryPolicyError::CapBelowInitialDelay);
+        }
+        Ok(())
+    }
+
+    /// Returns the backoff after `failed_attempt_no`, or `None` once the total
+    /// attempt budget has been exhausted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RetryPolicyError`] when the policy is invalid or attempt zero
+    /// is supplied.
+    pub fn delay_after(self, failed_attempt_no: u32) -> Result<Option<Duration>, RetryPolicyError> {
+        self.validate()?;
+        if failed_attempt_no == 0 {
+            return Err(RetryPolicyError::AttemptZero);
+        }
+        if failed_attempt_no >= self.max_attempts {
+            return Ok(None);
+        }
+
+        let exponent = failed_attempt_no.saturating_sub(1);
+        let factor = u64::from(self.multiplier).saturating_pow(exponent);
+        let seconds = self
+            .initial_delay_seconds
+            .saturating_mul(factor)
+            .min(self.max_delay_seconds);
+        Ok(Some(Duration::from_secs(seconds)))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum RetryPolicyError {
+    #[error("retry policy must permit at least one attempt")]
+    NoAttempts,
+    #[error("retry delay must be greater than zero")]
+    ZeroDelay,
+    #[error("retry multiplier must be at least one")]
+    ZeroMultiplier,
+    #[error("retry delay cap cannot be below the initial delay")]
+    CapBelowInitialDelay,
+    #[error("attempt numbering starts at one")]
+    AttemptZero,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const POLICY: RetryPolicy = RetryPolicy {
+        max_attempts: 5,
+        initial_delay_seconds: 10,
+        multiplier: 3,
+        max_delay_seconds: 100,
+    };
+
+    #[test]
+    fn exponential_backoff_is_capped_and_stops_at_budget() {
+        assert_eq!(
+            POLICY.delay_after(1).unwrap(),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            POLICY.delay_after(2).unwrap(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            POLICY.delay_after(3).unwrap(),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            POLICY.delay_after(4).unwrap(),
+            Some(Duration::from_secs(100))
+        );
+        assert_eq!(POLICY.delay_after(5).unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_retry_policy_is_rejected() {
+        let invalid = RetryPolicy {
+            max_attempts: 0,
+            ..POLICY
+        };
+        assert_eq!(invalid.validate(), Err(RetryPolicyError::NoAttempts));
+        assert_eq!(POLICY.delay_after(0), Err(RetryPolicyError::AttemptZero));
+    }
+}

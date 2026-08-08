@@ -45,11 +45,24 @@ async fn health(State(state): State<ApiState>) -> Result<Json<HealthResponse>, A
         .health_check()
         .await
         .map_err(ApiError::internal)?;
+    let outbox = state
+        .database
+        .outbox_health()
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(HealthResponse {
         service: "asterismd".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         status: "ok".to_owned(),
         database: "ok".to_owned(),
+        schema_version: state
+            .database
+            .schema_version()
+            .await
+            .map_err(ApiError::internal)?,
+        registered_providers: state.providers.len(),
+        outbox_pending: outbox.pending,
+        outbox_dead_letter: outbox.dead_letter,
     }))
 }
 
@@ -91,6 +104,10 @@ pub struct HealthResponse {
     pub version: String,
     pub status: String,
     pub database: String,
+    pub schema_version: i64,
+    pub registered_providers: usize,
+    pub outbox_pending: u64,
+    pub outbox_dead_letter: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

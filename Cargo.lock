@@ -83,6 +83,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+ "zeroize",
+]
+
+[[package]]
 name = "asterism-api"
 version = "0.1.0"
 dependencies = [
@@ -99,6 +112,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "asterism-auth"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "asterism-domain",
+ "asterism-secrets",
+ "thiserror",
+]
+
+[[package]]
 name = "asterism-domain"
 version = "0.1.0"
 dependencies = [
@@ -107,6 +130,19 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "asterism-engine"
+version = "0.1.0"
+dependencies = [
+ "asterism-domain",
+ "asterism-events",
+ "asterism-storage",
+ "async-trait",
+ "chrono",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -134,15 +170,39 @@ dependencies = [
 ]
 
 [[package]]
-name = "asterism-storage"
+name = "asterism-scheduler"
+version = "0.1.0"
+dependencies = [
+ "asterism-domain",
+ "chrono",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "asterism-secrets"
 version = "0.1.0"
 dependencies = [
  "asterism-domain",
  "async-trait",
+ "serde",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "asterism-storage"
+version = "0.1.0"
+dependencies = [
+ "asterism-domain",
+ "asterism-events",
+ "async-trait",
+ "chrono",
  "serde_json",
  "sqlx",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -166,6 +226,7 @@ dependencies = [
  "asterism-provider-api",
  "asterism-storage",
  "axum",
+ "chrono",
  "clap",
  "tokio",
  "tracing",
@@ -275,6 +336,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -1241,6 +1311,17 @@ dependencies = [
  "redox_syscall 0.5.18",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
 ]
 
 [[package]]
@@ -2759,6 +2840,20 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"

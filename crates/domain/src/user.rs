@@ -21,11 +21,15 @@ pub enum Role {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
+    ReadOwnTasks,
     ManageUsers,
     ManageProviders,
     ManageCredits,
+    GrantCredits,
     ManagePricing,
     ManageSystem,
+    ManageOwnAccounts,
+    ReadOwnCredits,
     ExecuteOwnTasks,
     ExecuteAnyTask,
     ViewOwnAudit,

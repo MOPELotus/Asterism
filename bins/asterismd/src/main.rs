@@ -39,6 +39,16 @@ async fn main() -> anyhow::Result<()> {
         .migrate()
         .await
         .context("failed to migrate the Asterism database")?;
+    let recovery = database
+        .recover_stale_work(chrono::Utc::now())
+        .await
+        .context("failed to recover stale Asterism work")?;
+    tracing::info!(
+        executions = recovery.executions_marked_recovering,
+        execution_leases = recovery.expired_execution_leases_removed,
+        scheduler_claims = recovery.scheduler_claims_requeued,
+        "startup recovery completed"
+    );
 
     let app = build_router(ApiState {
         database: database.clone(),

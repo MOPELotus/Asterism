@@ -1,0 +1,17 @@
+[package]
+name = "asterism-auth"
+description = "Password authentication and permission evaluation for Asterism"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+argon2.workspace = true
+asterism-domain = { path = "../domain" }
+asterism-secrets = { path = "../secrets" }
+thiserror.workspace = true
+
+[lints]
+workspace = true

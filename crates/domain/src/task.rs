@@ -44,6 +44,7 @@ pub enum OrchestrationState {
     CreditBlocked,
     HumanRequired,
     Running,
+    Recovering,
     RetryWaiting,
     Succeeded,
     Failed,

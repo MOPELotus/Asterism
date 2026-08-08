@@ -49,8 +49,29 @@ fingerprint column for providers whose remote IDs are unstable.
 Every response receives an `x-request-id`. The initial CLI supports
 `system health` and `provider list` against the same API.
 
+## Second Phase 0 slice
+
+The second checkpoint adds:
+
+- guarded `Task` orchestration and `Execution` state transitions;
+- an explicit `Recovering` state which requires remote verification after a
+  crash instead of assuming failure;
+- `assessment_class = Formal` execution/submission guards independent of an
+  `Exam` source module;
+- atomic SQLite execution leases with expiry, renewal, release, and concurrent
+  acquisition tests;
+- unified scan/execution/retry/notification job models with bounded backoff;
+- zeroizing, redacted secret values behind a `SecretStore` interface;
+- Argon2id password hashing and permission-based principals;
+- leased transactional-outbox delivery with retry and dead-letter states; and
+- startup recovery which preserves credit reservations and emits durable
+  recovery-required events in the same transaction.
+
+The health endpoint reports the schema version, registered provider count, and
+pending/dead-letter outbox totals.
+
 ## Next Phase 0 slice
 
-The next slice adds execution and orchestration transition guards, atomic lease
-and credit repositories, scheduler job models, the secrets boundary, initial
-authentication/permission services, and durable outbox dispatch.
+The next slice implements atomic credit ledger repositories, user/session and
+master-bootstrap persistence, scheduler job claiming, configuration layering,
+and the first internal management API/CLI actions.

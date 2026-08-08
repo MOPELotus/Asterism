@@ -19,8 +19,8 @@ pub use credits::{
     CreditAccount, CreditAmount, CreditError, CreditReservation, CreditReservationState, PriceQuote,
 };
 pub use execution::{
-    Execution, ExecutionAttempt, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
-    ExecutionState, LogLevel, RequestSource,
+    Execution, ExecutionAttempt, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
+    ExecutionStage, ExecutionState, LogLevel, RequestSource,
 };
 pub use id::*;
 pub use task::{

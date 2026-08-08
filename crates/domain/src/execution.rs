@@ -18,6 +18,7 @@ pub enum ExecutionState {
     Requested,
     Scheduled,
     Running,
+    Recovering,
     RetryWaiting,
     HumanRequired,
     Succeeded,
@@ -55,6 +56,14 @@ pub struct ExecutionAttempt {
     pub result: Option<AttemptResult>,
     pub error_class: Option<ProviderErrorClass>,
     pub provider_trace_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExecutionLease {
+    pub task_id: TaskId,
+    pub execution_id: ExecutionId,
+    pub worker_id: String,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

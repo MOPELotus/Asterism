@@ -13,6 +13,7 @@ asterism-api = { path = "../../crates/api" }
 asterism-provider-api = { path = "../../crates/provider-api" }
 asterism-storage = { path = "../../crates/storage" }
 axum.workspace = true
+chrono.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
