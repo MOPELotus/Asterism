@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use asterism_domain::{
-    AuthMethod, AuthSessionId, ProviderAccountId, ProviderId, SessionKind, UserId,
+    AuthMethod, AuthSessionId, ProviderAccount, ProviderAccountId, ProviderId, SessionKind, UserId,
 };
 use asterism_provider_api::{ProviderAuthContext, ProviderError, ProviderRegistry, SessionStatus};
 use asterism_secrets::{
@@ -74,7 +74,7 @@ pub(crate) async fn validate_candidate<A: ProviderAccountRepository>(
     accounts: &A,
     owner_user_id: UserId,
     provider_account_id: ProviderAccountId,
-    mut bundle: CredentialBundle,
+    bundle: CredentialBundle,
     auth_session_id: Option<AuthSessionId>,
     access: &SecretAccess,
 ) -> Result<(CredentialBundle, SessionStatus), CredentialProvisionError> {
@@ -88,6 +88,20 @@ pub(crate) async fn validate_candidate<A: ProviderAccountRepository>(
         .ok_or(CredentialProvisionError::AccountNotFound(
             provider_account_id,
         ))?;
+    validate_candidate_for_account(registry, &account, bundle, auth_session_id, access).await
+}
+
+pub(crate) async fn validate_candidate_for_account(
+    registry: &ProviderRegistry,
+    account: &ProviderAccount,
+    mut bundle: CredentialBundle,
+    auth_session_id: Option<AuthSessionId>,
+    access: &SecretAccess,
+) -> Result<(CredentialBundle, SessionStatus), CredentialProvisionError> {
+    if !access.authorizes(account.owner_id) {
+        return Err(CredentialProvisionError::Unauthorized);
+    }
+    bundle.validate()?;
     if account.provider_id != bundle.provider_id || account.tenant != bundle.tenant {
         return Err(CredentialProvisionError::AccountMismatch);
     }
@@ -109,7 +123,7 @@ pub(crate) async fn validate_candidate<A: ProviderAccountRepository>(
         .as_ref()
         .ok_or(CredentialProvisionError::AuthenticationUnavailable)?;
     let context = ProviderAuthContext {
-        provider_id: account.provider_id,
+        provider_id: account.provider_id.clone(),
         account_id: account.id,
         auth_session_id,
         correlation_id: access.correlation_id.clone(),

@@ -2,6 +2,7 @@
 
 mod assessment;
 mod auth_bootstrap;
+mod auth_bootstrap_credential;
 mod auth_session;
 mod credential;
 mod outbox;
@@ -18,6 +19,10 @@ pub use auth_bootstrap::{
     AuthBootstrapClaimed, AuthBootstrapCreateRequest, AuthBootstrapCreated,
     AuthBootstrapEventAccepted, AuthBootstrapEventRequest, AuthBootstrapService,
     AuthBootstrapServiceError,
+};
+pub use auth_bootstrap_credential::{
+    AuthBootstrapCredentialAccepted, AuthBootstrapCredentialRequest,
+    AuthBootstrapCredentialService, AuthBootstrapCredentialServiceError,
 };
 pub use auth_session::{
     AuthSessionBegin, AuthSessionCredentialCommit, AuthSessionCredentialRequest,

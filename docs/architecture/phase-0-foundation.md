@@ -659,3 +659,17 @@ expired access writes neither accounts nor secret blobs; stale account bindings
 are conflicts; and any failure after account or credential work begins rolls
 the entire transaction back. A successful commit is one-time because the
 completed session no longer retains an access-token digest.
+
+## Fiftieth Phase 0 slice
+
+The fiftieth checkpoint adds server-side orchestration for Capture credential
+submissions. The engine resolves the claimed session from its scoped access
+token, constructs a Core-owned account identity for `add_account` or reads the
+current bound-account snapshot, and invokes the registered Provider's real
+credential validator before persistence.
+
+Provider rejection leaves the claimed session retryable and writes no account
+or secret. A valid status is normalized back into the credential bundle and
+passed to the atomic bootstrap commit; successful completion seals the access
+token, while an account change during validation is surfaced as a binding
+conflict instead of committing against stale metadata.
