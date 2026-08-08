@@ -218,6 +218,14 @@ pub trait ScanScheduleRepository: Send + Sync {
         now: Timestamp,
         limit: u32,
     ) -> Result<Vec<asterism_scheduler::ScheduledJob>, StorageError>;
+
+    async fn claim_due_scan_jobs(
+        &self,
+        worker_id: &str,
+        now: Timestamp,
+        lease_expires_at: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<asterism_scheduler::ScheduledJob>, StorageError>;
 }
 
 #[async_trait]

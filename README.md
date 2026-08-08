@@ -34,7 +34,7 @@ Phase 0 已建立并持续完善以下基础：
 - 执行状态机、正式测评保护与崩溃恢复语义；
 - SQLite migration、WAL 策略、事务仓储和并发测试；
 - 版本化任务指纹、脱敏扫描快照、类型化差异与事务化扫描入库；
-- 执行租约、周期扫描物化、Scheduler retry/dead-letter 与事务化 Event Outbox；
+- 执行租约、周期扫描物化、隔离认领的 scan worker 与事务化 Event Outbox；
 - 点数 grant / reserve / commit / release 流程与不可变流水；
 - SecretStore 抽象、Argon2id 密码、服务端 Session、scoped Service Token 与登录限速；
 - 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；

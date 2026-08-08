@@ -25,6 +25,56 @@ impl SqliteSchedulerRepository {
     pub const fn new(database: Database) -> Self {
         Self { database }
     }
+
+    async fn claim_due_internal(
+        &self,
+        worker_id: &str,
+        now: Timestamp,
+        lease_expires_at: Timestamp,
+        limit: u32,
+        scan_only: bool,
+    ) -> Result<Vec<ScheduledJob>, StorageError> {
+        if worker_id.is_empty() || limit == 0 || lease_expires_at <= now {
+            return Err(StorageError::InvalidSchedulerClaim);
+        }
+        let now_text = encode_timestamp(now);
+        let lease_text = encode_timestamp(lease_expires_at);
+        let statement = if scan_only {
+            "UPDATE scheduled_jobs \
+             SET state = 'claimed', worker_id = ?, lease_expires_at = ?, updated_at = ? \
+             WHERE id IN ( \
+                 SELECT id FROM scheduled_jobs \
+                 WHERE state = 'pending' AND job_kind = 'scan' AND run_at <= ? \
+                 ORDER BY run_at, id LIMIT ? \
+             ) \
+             RETURNING id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at"
+        } else {
+            "UPDATE scheduled_jobs \
+             SET state = 'claimed', worker_id = ?, lease_expires_at = ?, updated_at = ? \
+             WHERE id IN ( \
+                 SELECT id FROM scheduled_jobs \
+                 WHERE state = 'pending' AND run_at <= ? \
+                 ORDER BY run_at, id LIMIT ? \
+             ) \
+             RETURNING id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at"
+        };
+        let mut transaction = self.database.pool().begin().await?;
+        let rows = sqlx::query(statement)
+            .bind(worker_id)
+            .bind(&lease_text)
+            .bind(&now_text)
+            .bind(&now_text)
+            .bind(limit)
+            .fetch_all(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        let mut jobs: Vec<_> = rows
+            .into_iter()
+            .map(|row| decode_claimed_job(&row, worker_id, lease_expires_at))
+            .collect::<Result<_, _>>()?;
+        jobs.sort_by_key(|job| (job.run_at, job.id));
+        Ok(jobs)
+    }
 }
 
 #[async_trait]
@@ -60,42 +110,8 @@ impl SchedulerRepository for SqliteSchedulerRepository {
         lease_expires_at: Timestamp,
         limit: u32,
     ) -> Result<Vec<ScheduledJob>, StorageError> {
-        if worker_id.is_empty() || limit == 0 || lease_expires_at <= now {
-            return Err(StorageError::InvalidSchedulerClaim);
-        }
-        let now_text = encode_timestamp(now);
-        let lease_text = encode_timestamp(lease_expires_at);
-        let mut transaction = self.database.pool().begin().await?;
-        sqlx::query(
-            "UPDATE scheduled_jobs \
-             SET state = 'claimed', worker_id = ?, lease_expires_at = ?, updated_at = ? \
-             WHERE id IN ( \
-                 SELECT id FROM scheduled_jobs \
-                 WHERE state = 'pending' AND run_at <= ? \
-                 ORDER BY run_at, id LIMIT ? \
-             )",
-        )
-        .bind(worker_id)
-        .bind(&lease_text)
-        .bind(&now_text)
-        .bind(&now_text)
-        .bind(limit)
-        .execute(&mut *transaction)
-        .await?;
-        let rows = sqlx::query(
-            "SELECT id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at \
-             FROM scheduled_jobs \
-             WHERE state = 'claimed' AND worker_id = ? AND lease_expires_at = ? \
-             ORDER BY run_at, id",
-        )
-        .bind(worker_id)
-        .bind(&lease_text)
-        .fetch_all(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        rows.into_iter()
-            .map(|row| decode_claimed_job(&row, worker_id, lease_expires_at))
-            .collect()
+        self.claim_due_internal(worker_id, now, lease_expires_at, limit, false)
+            .await
     }
 
     async fn complete(
@@ -280,6 +296,17 @@ impl ScanScheduleRepository for SqliteSchedulerRepository {
         transaction.commit().await?;
         Ok(jobs)
     }
+
+    async fn claim_due_scan_jobs(
+        &self,
+        worker_id: &str,
+        now: Timestamp,
+        lease_expires_at: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<ScheduledJob>, StorageError> {
+        self.claim_due_internal(worker_id, now, lease_expires_at, limit, true)
+            .await
+    }
 }
 
 fn decode_scan_schedule(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSchedule, StorageError> {
@@ -419,6 +446,13 @@ mod tests {
             repository.complete(job.id, "not-owner", now).await,
             Err(StorageError::SchedulerClaimLost)
         ));
+        assert!(
+            repository
+                .claim_due(owner, now, expiry, 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             repository
                 .fail(
@@ -530,6 +564,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(jobs_count, 1);
+    }
+
+    #[tokio::test]
+    async fn scan_claim_never_takes_another_job_kind() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let repository = SqliteSchedulerRepository::new(database);
+        let now = Utc::now();
+        let scan = ScheduledJob {
+            id: ScheduleId::new(),
+            kind: ScheduledJobKind::Scan {
+                provider_account_id: ProviderAccountId::new(),
+            },
+            run_at: now,
+            state: ScheduledJobState::Pending,
+            attempts: 0,
+            idempotency_key: "scan:test".to_owned(),
+            created_at: now,
+            updated_at: now,
+        };
+        let execution = ScheduledJob {
+            id: ScheduleId::new(),
+            kind: ScheduledJobKind::Execution {
+                execution_id: ExecutionId::new(),
+            },
+            idempotency_key: "execution:filtered".to_owned(),
+            ..scan.clone()
+        };
+        repository.enqueue(&execution).await.unwrap();
+        repository.enqueue(&scan).await.unwrap();
+
+        let claimed = repository
+            .claim_due_scan_jobs("scan-worker", now, now + Duration::minutes(1), 10)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, scan.id);
+        let remaining = repository
+            .claim_due("general-worker", now, now + Duration::minutes(1), 10)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, execution.id);
     }
 
     async fn insert_provider_account(database: &Database) -> ProviderAccountId {

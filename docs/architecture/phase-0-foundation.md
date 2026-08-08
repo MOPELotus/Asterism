@@ -205,3 +205,15 @@ After downtime, one due job is created and `next_run_at` advances directly past
 the current time instead of replaying every missed interval. Disabled schedules
 do not materialize, the per-tick batch is bounded, and Provider-specific minimum
 interval policy remains above this persistence primitive.
+
+## Fourteenth Phase 0 slice
+
+The fourteenth checkpoint adds a bounded unified scan-worker tick. Each tick
+materializes due periods, atomically claims only `scan` jobs with
+`UPDATE ... RETURNING`, and processes them sequentially through the classified
+runner. Repeating the same worker and lease parameters cannot return an older
+claim, and scan workers never consume execution or notification jobs.
+
+Worker identifiers, claim TTLs, materialization batches, claim batches, and
+retry policies are validated before use. The tick produces aggregate operational
+counts and remains a lifecycle-neutral primitive for the daemon loop.
