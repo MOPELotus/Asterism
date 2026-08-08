@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use anyhow::Context;
 use asterism_domain::ServiceScope;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use reqwest::StatusCode;
 use serde_json::json;
 
 use crate::{
@@ -40,6 +41,11 @@ enum Command {
         #[command(subcommand)]
         command: ProviderCommand,
     },
+    /// Manage owner-scoped Provider accounts.
+    ProviderAccount {
+        #[command(subcommand)]
+        command: ProviderAccountCommand,
+    },
     /// Create or revoke scoped service tokens.
     ServiceToken {
         #[command(subcommand)]
@@ -70,6 +76,33 @@ enum SystemCommand {
 enum ProviderCommand {
     /// List registered provider metadata.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderAccountCommand {
+    /// List accounts owned by the authenticated user.
+    List,
+    /// Get one owned account.
+    Get { account_id: String },
+    /// Create an account using a canonical Provider ID.
+    Create {
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Replace the mutable account metadata.
+    Update {
+        account_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Delete an owned account and its dependent local data.
+    Delete { account_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -183,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
             let value = client.get_authorized("/api/v1/providers", &token).await?;
             write_json(&value)
         }
+        Command::ProviderAccount { command } => handle_provider_account(&client, command).await,
         Command::ServiceToken {
             command: ServiceTokenCommand::Create(options),
         } => {
@@ -207,6 +241,68 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let value = client.get_public("/api/v1/system/health").await?;
             write_json(&value)
+        }
+    }
+}
+
+async fn handle_provider_account(
+    client: &ApiClient,
+    command: ProviderAccountCommand,
+) -> anyhow::Result<()> {
+    let token = service_token_from_process()?;
+    match command {
+        ProviderAccountCommand::List => {
+            let value = client
+                .get_authorized("/api/v1/provider-accounts", &token)
+                .await?;
+            write_json(&value)
+        }
+        ProviderAccountCommand::Get { account_id } => {
+            let path = format!("/api/v1/provider-accounts/{account_id}");
+            let value = client.get_authorized(&path, &token).await?;
+            write_json(&value)
+        }
+        ProviderAccountCommand::Create {
+            provider,
+            name,
+            tenant,
+        } => {
+            let value = client
+                .post_authorized(
+                    "/api/v1/provider-accounts",
+                    &token,
+                    &json!({
+                        "provider_id": provider,
+                        "display_name": name,
+                        "tenant": tenant,
+                    }),
+                    StatusCode::CREATED,
+                )
+                .await?;
+            write_json(&value)
+        }
+        ProviderAccountCommand::Update {
+            account_id,
+            name,
+            tenant,
+        } => {
+            let path = format!("/api/v1/provider-accounts/{account_id}");
+            let value = client
+                .put_authorized(
+                    &path,
+                    &token,
+                    &json!({
+                        "display_name": name,
+                        "tenant": tenant,
+                    }),
+                )
+                .await?;
+            write_json(&value)
+        }
+        ProviderAccountCommand::Delete { account_id } => {
+            let path = format!("/api/v1/provider-accounts/{account_id}");
+            client.delete_authorized(&path, &token).await?;
+            write_json(&json!({ "deleted": account_id }))
         }
     }
 }

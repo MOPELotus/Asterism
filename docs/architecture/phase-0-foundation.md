@@ -115,3 +115,14 @@ token, and cleartext HTTP is rejected for non-loopback targets.
 
 The next slice begins Provider account and task-management actions on the same
 authenticated API boundary.
+
+## Seventh Phase 0 slice
+
+The seventh checkpoint adds owner-scoped Provider account lifecycle operations
+through repository, API, and CLI layers. Ownership comes only from the
+authenticated identity, every storage lookup includes the owner, responses
+expose a credential count rather than Secret references, and create/update/delete
+audits commit in the same transaction as the account mutation.
+
+The next slice exposes owner-scoped Task queries while keeping remote and local
+orchestration state distinct.

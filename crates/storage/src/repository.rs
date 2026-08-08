@@ -1,8 +1,8 @@
 use asterism_auth::TokenDigest;
 use asterism_domain::{
     AuditActor, CreditAccount, CreditReservation, CreditReservationId, CreditTransactionId,
-    ExecutionId, ExecutionLease, ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User,
-    UserId, WebSession, WebSessionId,
+    ExecutionId, ExecutionLease, ProviderAccount, ProviderAccountId, ServiceToken, ServiceTokenId,
+    Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use async_trait::async_trait;
 
@@ -17,6 +17,41 @@ use crate::{CreditGrant, FailureDisposition, LeaseAcquireOutcome, OutboxRecord};
 pub trait TaskRepository: Send + Sync {
     async fn find_task(&self, id: TaskId) -> Result<Option<Task>, StorageError>;
     async fn save_task(&self, task: &Task) -> Result<(), StorageError>;
+}
+
+/// Owner-scoped persistence contract for Provider account management.
+#[async_trait]
+pub trait ProviderAccountRepository: Send + Sync {
+    async fn list_provider_accounts(
+        &self,
+        owner_id: UserId,
+    ) -> Result<Vec<ProviderAccount>, StorageError>;
+
+    async fn find_provider_account(
+        &self,
+        owner_id: UserId,
+        account_id: ProviderAccountId,
+    ) -> Result<Option<ProviderAccount>, StorageError>;
+
+    async fn create_provider_account(
+        &self,
+        account: &ProviderAccount,
+        actor: AuditActor,
+    ) -> Result<(), StorageError>;
+
+    async fn update_provider_account(
+        &self,
+        account: &ProviderAccount,
+        actor: AuditActor,
+    ) -> Result<bool, StorageError>;
+
+    async fn delete_provider_account(
+        &self,
+        owner_id: UserId,
+        account_id: ProviderAccountId,
+        at: Timestamp,
+        actor: AuditActor,
+    ) -> Result<bool, StorageError>;
 }
 
 /// Persistence contract consumed by identity and authorization services.

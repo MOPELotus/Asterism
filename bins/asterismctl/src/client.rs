@@ -53,6 +53,40 @@ impl ApiClient {
         send_json(request, StatusCode::OK).await
     }
 
+    pub async fn post_authorized(
+        &self,
+        path: &str,
+        token: &SecretString,
+        body: &impl Serialize,
+        expected: StatusCode,
+    ) -> anyhow::Result<serde_json::Value> {
+        let request = self
+            .request(Method::POST, path)?
+            .bearer_auth(token.expose_secret())
+            .json(body);
+        send_json(request, expected).await
+    }
+
+    pub async fn put_authorized(
+        &self,
+        path: &str,
+        token: &SecretString,
+        body: &impl Serialize,
+    ) -> anyhow::Result<serde_json::Value> {
+        let request = self
+            .request(Method::PUT, path)?
+            .bearer_auth(token.expose_secret())
+            .json(body);
+        send_json(request, StatusCode::OK).await
+    }
+
+    pub async fn delete_authorized(&self, path: &str, token: &SecretString) -> anyhow::Result<()> {
+        let request = self
+            .request(Method::DELETE, path)?
+            .bearer_auth(token.expose_secret());
+        send_empty(request, StatusCode::NO_CONTENT).await
+    }
+
     pub async fn establish_session(
         &self,
         path: &str,
@@ -106,10 +140,7 @@ impl ApiClient {
         token_id: &str,
     ) -> anyhow::Result<()> {
         let path = format!("/api/v1/service-tokens/{token_id}");
-        let request = self
-            .request(Method::DELETE, &path)?
-            .bearer_auth(token.expose_secret());
-        send_empty(request, StatusCode::NO_CONTENT).await
+        self.delete_authorized(&path, token).await
     }
 
     pub async fn logout(&self, session: &SessionCookie) -> anyhow::Result<()> {

@@ -1,5 +1,6 @@
 //! Versioned HTTP transport for Asterism core services.
 
+mod account;
 mod auth;
 mod rate_limit;
 
@@ -56,6 +57,16 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/auth/session", get(auth::current_identity))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/providers", get(list_providers))
+        .route(
+            "/api/v1/provider-accounts",
+            get(account::list_provider_accounts).post(account::create_provider_account),
+        )
+        .route(
+            "/api/v1/provider-accounts/{account_id}",
+            get(account::get_provider_account)
+                .put(account::update_provider_account)
+                .delete(account::delete_provider_account),
+        )
         .route("/api/v1/service-tokens", post(auth::create_service_token))
         .route(
             "/api/v1/service-tokens/{token_id}",
@@ -119,6 +130,10 @@ async fn list_providers(
     }))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the declarative OpenAPI document is kept together for route/schema integrity"
+)]
 async fn openapi() -> Json<Value> {
     Json(json!({
         "openapi": "3.1.0",
@@ -151,6 +166,40 @@ async fn openapi() -> Json<Value> {
                 "responses": {"204": {"description": "Web session revoked"}, "400": {"description": "Not a Web session"}, "401": {"description": "Authentication required"}}
             }},
             "/api/v1/providers": {"get": {"operationId": "listProviders", "security": [{"cookieAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Registered provider metadata"}}}},
+            "/api/v1/provider-accounts": {
+                "get": {
+                    "operationId": "listProviderAccounts",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "responses": {"200": {"description": "Owner-scoped Provider accounts"}, "401": {"description": "Authentication required"}, "403": {"description": "Insufficient permission"}}
+                },
+                "post": {
+                    "operationId": "createProviderAccount",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateProviderAccount"}}}},
+                    "responses": {"201": {"description": "Provider account created"}, "400": {"description": "Invalid account"}, "401": {"description": "Authentication required"}, "403": {"description": "Insufficient permission"}}
+                }
+            },
+            "/api/v1/provider-accounts/{account_id}": {
+                "get": {
+                    "operationId": "getProviderAccount",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                    "responses": {"200": {"description": "Owner-scoped Provider account"}, "404": {"description": "Provider account not found"}}
+                },
+                "put": {
+                    "operationId": "updateProviderAccount",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateProviderAccount"}}}},
+                    "responses": {"200": {"description": "Provider account updated"}, "400": {"description": "Invalid account"}, "404": {"description": "Provider account not found"}}
+                },
+                "delete": {
+                    "operationId": "deleteProviderAccount",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                    "responses": {"204": {"description": "Provider account deleted"}, "404": {"description": "Provider account not found"}}
+                }
+            },
             "/api/v1/service-tokens": {"post": {
                 "operationId": "createServiceToken",
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
@@ -186,6 +235,25 @@ async fn openapi() -> Json<Value> {
                         "name": {"type": "string", "minLength": 1, "maxLength": 128},
                         "scopes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/components/schemas/ServiceScope"}},
                         "expires_in_seconds": {"type": "integer", "minimum": 1}
+                    },
+                    "additionalProperties": false
+                },
+                "CreateProviderAccount": {
+                    "type": "object",
+                    "required": ["provider_id", "display_name"],
+                    "properties": {
+                        "provider_id": {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"},
+                        "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "tenant": {"type": ["string", "null"], "maxLength": 256}
+                    },
+                    "additionalProperties": false
+                },
+                "UpdateProviderAccount": {
+                    "type": "object",
+                    "required": ["display_name"],
+                    "properties": {
+                        "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "tenant": {"type": ["string", "null"], "maxLength": 256}
                     },
                     "additionalProperties": false
                 },
@@ -498,6 +566,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_account_api_is_owner_scoped_and_audited() {
+        let (app, database) = test_app(false, None).await;
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/provider-accounts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/provider-accounts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"provider_id":"provider-alpha","display_name":"primary"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
+        let created_body = to_bytes(created.into_body(), 16 * 1024).await.unwrap();
+        let created: Value = serde_json::from_slice(&created_body).unwrap();
+        let account_id = created["id"].as_str().unwrap();
+        assert_eq!(created["credential_count"], 0);
+        assert!(created.get("credential_refs").is_none());
+
+        let updated = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/api/v1/provider-accounts/{account_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"display_name":"renamed","tenant":"tenant-a"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.status(), StatusCode::OK);
+
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/provider-accounts")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let listed = to_bytes(listed.into_body(), 16 * 1024).await.unwrap();
+        let listed: Value = serde_json::from_slice(&listed).unwrap();
+        assert_eq!(listed["total"], 1);
+        assert_eq!(listed["items"][0]["display_name"], "renamed");
+
+        let deleted = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/provider-accounts/{account_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let missing = app
+            .oneshot(
+                Request::get(format!("/api/v1/provider-accounts/{account_id}"))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? \
+             AND action IN ('provider_account_created', 'provider_account_updated', \
+                            'provider_account_deleted')",
+        )
+        .bind(account_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 3);
+    }
+
+    #[tokio::test]
     async fn malformed_auth_json_uses_the_stable_error_model() {
         let app = test_router().await;
         let response = app
@@ -564,6 +739,8 @@ mod tests {
             "/api/v1/auth/logout",
             "/api/v1/service-tokens",
             "/api/v1/service-tokens/{token_id}",
+            "/api/v1/provider-accounts",
+            "/api/v1/provider-accounts/{account_id}",
         ] {
             assert!(document["paths"].get(path).is_some(), "missing {path}");
         }

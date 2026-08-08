@@ -66,10 +66,45 @@ impl AuthContext {
         }
     }
 
-    fn audit_actor(&self) -> AuditActor {
+    pub(super) fn audit_actor(&self) -> AuditActor {
         match &self.identity {
             AuthIdentity::Web { principal, .. } => AuditActor::User(principal.user_id),
             AuthIdentity::Service(token) => AuditActor::ServiceToken(token.id),
+        }
+    }
+
+    pub(super) fn require_account_read(&self) -> Result<UserId, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. }
+                if principal.has(Permission::ManageOwnAccounts)
+                    || principal.has(Permission::ManageProviders) =>
+            {
+                Ok(principal.user_id)
+            }
+            AuthIdentity::Service(token)
+                if token.scopes.contains(&ServiceScope::ProviderRead)
+                    || token.scopes.contains(&ServiceScope::ProviderManage) =>
+            {
+                token.owner_user_id.ok_or_else(ApiError::forbidden)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
+    pub(super) fn require_account_manage(&self) -> Result<UserId, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. }
+                if principal.has(Permission::ManageOwnAccounts)
+                    || principal.has(Permission::ManageProviders) =>
+            {
+                Ok(principal.user_id)
+            }
+            AuthIdentity::Service(token)
+                if token.scopes.contains(&ServiceScope::ProviderManage) =>
+            {
+                token.owner_user_id.ok_or_else(ApiError::forbidden)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
         }
     }
 
@@ -450,7 +485,7 @@ pub(super) fn require_provider_read(auth: &AuthContext) -> Result<(), ApiError> 
     auth.require(Permission::ReadProviders, Some(ServiceScope::ProviderRead))
 }
 
-fn no_store(mut response: Response) -> Response {
+pub(super) fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
