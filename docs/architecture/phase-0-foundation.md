@@ -582,3 +582,16 @@ token with another session ID, or using it after owner cancellation, returns
 the same Bootstrap 401 response. This temporary authority remains separate from
 the global Bearer middleware and cannot access any account, task, or system
 route.
+
+## Forty-fourth Phase 0 slice
+
+The forty-fourth checkpoint models Capture-to-Core status updates as
+server-timestamped `AuthBootstrapClientEvent` values with a positive monotonic
+session sequence. Events carry only fixed variants, 0-100 progress, and bounded
+safe stage or failure-code identifiers; arbitrary messages, client timestamps,
+and credential material are not part of this channel.
+
+The wire-level `authenticated` variant is deliberately represented in Core as
+`ClientReportedAuthenticated`. It is diagnostic input only and cannot advance
+an `AuthSession`, authenticate a Provider account, or write SecretStore without
+the separate server-side credential validation path.

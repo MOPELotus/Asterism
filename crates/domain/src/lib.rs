@@ -3,6 +3,7 @@
 pub mod account;
 pub mod auth;
 pub mod auth_bootstrap;
+pub mod auth_bootstrap_event;
 pub mod automation;
 pub mod credits;
 pub mod execution;
@@ -18,6 +19,9 @@ pub use auth::{
 pub use auth_bootstrap::{
     AuthBootstrapPurpose, AuthBootstrapSession, AuthBootstrapSessionError, AuthBootstrapState,
     MAX_AUTH_BOOTSTRAP_TTL_SECONDS,
+};
+pub use auth_bootstrap_event::{
+    AuthBootstrapClientEvent, AuthBootstrapClientEventError, AuthBootstrapClientEventKind,
 };
 pub use automation::{
     AutomationPlan, AutomationPlanStatus, BillingPolicy, CoverageSpec, ExecutionPolicy,
