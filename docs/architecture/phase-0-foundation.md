@@ -179,3 +179,17 @@ Successful scan audits share the inventory transaction and retain the request
 correlation ID, actor, Provider version, and aggregate counts. A failed Provider
 call or rejected inventory writes neither partial Task data nor a successful
 scan audit.
+
+## Twelfth Phase 0 slice
+
+The twelfth checkpoint connects claimed Scheduler scan jobs to the Provider
+scan service. Runtime account lookup is internal and account-ID scoped; it does
+not weaken owner-scoped management queries. A valid live worker claim is
+required before any Provider call, and completion/failure updates retain that
+claim owner.
+
+Retryable storage, network, availability, and rate-limit failures use the shared
+bounded exponential policy. A bounded Provider `Retry-After` can extend the
+delay, while authentication, human-action, invalid-inventory, missing-account,
+and unregistered-capability failures dead-letter without a retry loop. This is
+an execution primitive for the unified Scheduler, not a Provider-owned loop.

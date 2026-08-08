@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
-use crate::{Database, ProviderAccountRepository, StorageError};
+use crate::{Database, ProviderAccountRepository, ProviderAccountRuntimeRepository, StorageError};
 
 #[derive(Clone, Debug)]
 pub struct SqliteProviderAccountRepository {
@@ -183,6 +183,27 @@ impl ProviderAccountRepository for SqliteProviderAccountRepository {
     }
 }
 
+#[async_trait]
+impl ProviderAccountRuntimeRepository for SqliteProviderAccountRepository {
+    async fn find_runtime_provider_account(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Result<Option<ProviderAccount>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, owner_user_id, provider_id, display_name, tenant, auth_state_json, \
+                    network_profile_id, created_at, updated_at \
+             FROM provider_accounts WHERE id = ?",
+        )
+        .bind(account_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        match row {
+            Some(row) => Ok(Some(self.decode_account(&row).await?)),
+            None => Ok(None),
+        }
+    }
+}
+
 impl SqliteProviderAccountRepository {
     async fn decode_account(&self, row: &SqliteRow) -> Result<ProviderAccount, StorageError> {
         let account_id = ProviderAccountId::from_str(row.try_get("id")?)
@@ -336,6 +357,13 @@ mod tests {
                 .update_provider_account(&account, AuditActor::User(owner))
                 .await
                 .unwrap()
+        );
+        assert_eq!(
+            repository
+                .find_runtime_provider_account(account.id)
+                .await
+                .unwrap(),
+            Some(account.clone())
         );
         assert!(
             !repository

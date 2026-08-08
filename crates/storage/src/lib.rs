@@ -21,8 +21,8 @@ pub use provider_account::SqliteProviderAccountRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
     CreditRepository, ExecutionLeaseRepository, OutboxRepository, ProviderAccountRepository,
-    SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository, TaskRepository,
-    UserRepository,
+    ProviderAccountRuntimeRepository, SchedulerRepository, SessionRepository, TaskPage,
+    TaskQueryRepository, TaskRepository, UserRepository,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

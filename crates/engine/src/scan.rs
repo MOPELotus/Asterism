@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use asterism_domain::{AuthState, ProviderAccount, ProviderId, TaskCapability, Timestamp};
+use asterism_domain::{
+    AuditActor, AuthState, ProviderAccount, ProviderId, TaskCapability, Timestamp,
+};
 use asterism_provider_api::{
     ProviderCapability, ProviderContext, ProviderError, ProviderMetadata, ProviderRegistry,
     RemoteCourse, RemoteTask,
@@ -9,6 +11,18 @@ use asterism_storage::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,
     StorageError,
 };
+use async_trait::async_trait;
+
+#[async_trait]
+pub trait ProviderAccountScanner: Send + Sync {
+    async fn scan_account(
+        &self,
+        account: &ProviderAccount,
+        correlation_id: String,
+        initiated_by: Option<AuditActor>,
+        observed_at: Timestamp,
+    ) -> Result<ProviderScanReport, ProviderScanError>;
+}
 
 #[derive(Clone, Debug)]
 pub struct ProviderScanService<R> {
@@ -41,7 +55,7 @@ where
         &self,
         account: &ProviderAccount,
         correlation_id: impl Into<String>,
-        initiated_by: Option<asterism_domain::AuditActor>,
+        initiated_by: Option<AuditActor>,
         observed_at: Timestamp,
     ) -> Result<ProviderScanReport, ProviderScanError> {
         let correlation_id = correlation_id.into();
@@ -89,6 +103,23 @@ where
             tasks: remote_tasks.into_iter().map(scanned_task).collect(),
         };
         Ok(self.repository.ingest_scan(&batch).await?)
+    }
+}
+
+#[async_trait]
+impl<R> ProviderAccountScanner for ProviderScanService<R>
+where
+    R: ProviderScanRepository,
+{
+    async fn scan_account(
+        &self,
+        account: &ProviderAccount,
+        correlation_id: String,
+        initiated_by: Option<AuditActor>,
+        observed_at: Timestamp,
+    ) -> Result<ProviderScanReport, ProviderScanError> {
+        ProviderScanService::scan_account(self, account, correlation_id, initiated_by, observed_at)
+            .await
     }
 }
 

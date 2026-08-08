@@ -78,6 +78,16 @@ pub trait ProviderAccountRepository: Send + Sync {
     ) -> Result<bool, StorageError>;
 }
 
+/// Internal lookup used by scheduler/runtime services after a job has already
+/// been authorized and bound to one Provider account.
+#[async_trait]
+pub trait ProviderAccountRuntimeRepository: Send + Sync {
+    async fn find_runtime_provider_account(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Result<Option<ProviderAccount>, StorageError>;
+}
+
 /// Persistence contract consumed by identity and authorization services.
 #[async_trait]
 pub trait UserRepository: Send + Sync {
