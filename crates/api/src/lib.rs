@@ -85,6 +85,18 @@ pub fn build_router(state: ApiState) -> Router {
             axum::routing::put(account::put_provider_credentials),
         )
         .route(
+            "/api/v1/provider-accounts/{account_id}/auth-sessions",
+            post(account::begin_auth_session),
+        )
+        .route(
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/latest",
+            get(account::get_latest_auth_session),
+        )
+        .route(
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}",
+            get(account::get_auth_session).delete(account::cancel_auth_session),
+        )
+        .route(
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             get(account::get_scan_schedule).put(account::configure_scan_schedule),
         )
@@ -252,6 +264,46 @@ async fn openapi() -> Json<Value> {
                     "503": {"description": "Provider or encrypted credential store unavailable"}
                 }
             }},
+            "/api/v1/provider-accounts/{account_id}/auth-sessions": {"post": {
+                "operationId": "beginProviderAccountAuthSession",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BeginAuthSession"}}}},
+                "responses": {
+                    "201": {"description": "Authentication session created with its first challenge"},
+                    "404": {"description": "Provider account not found"},
+                    "409": {"description": "Provider does not support the method or requires action"},
+                    "429": {"description": "Provider rate limit reached"},
+                    "502": {"description": "Provider returned an inconsistent challenge"},
+                    "503": {"description": "Provider is temporarily unavailable"}
+                }
+            }},
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/latest": {"get": {
+                "operationId": "getLatestProviderAccountAuthSession",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "responses": {"200": {"description": "Latest owner-scoped authentication state"}, "404": {"description": "Authentication session not found"}}
+            }},
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}": {
+                "get": {
+                    "operationId": "getProviderAccountAuthSession",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [
+                        {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                        {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+                    ],
+                    "responses": {"200": {"description": "Owner-scoped authentication state"}, "404": {"description": "Authentication session not found"}}
+                },
+                "delete": {
+                    "operationId": "cancelProviderAccountAuthSession",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [
+                        {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                        {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+                    ],
+                    "responses": {"200": {"description": "Authentication session cancelled"}, "404": {"description": "Authentication session not found"}, "409": {"description": "Authentication session is terminal or changed"}}
+                }
+            },
             "/api/v1/provider-accounts/{account_id}/scan-schedule": {
                 "get": {
                     "operationId": "getProviderAccountScanSchedule",
@@ -362,6 +414,14 @@ async fn openapi() -> Json<Value> {
                                 "additionalProperties": false
                             }
                         }
+                    },
+                    "additionalProperties": false
+                },
+                "BeginAuthSession": {
+                    "type": "object",
+                    "required": ["method"],
+                    "properties": {
+                        "method": {"type": "string", "enum": ["password", "qr_code", "external_browser_oauth", "assisted_session", "imported_cookie", "imported_token"]}
                     },
                     "additionalProperties": false
                 },
@@ -1102,6 +1162,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_auth_session_api_exposes_one_owner_scoped_state_flow() {
+        let (app, _) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/provider-accounts/{account_id}/auth-sessions"
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(r#"{"method":"imported_cookie"}"#))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
+        let created = response_json(created).await;
+        let session_id = created["session"]["id"].as_str().unwrap();
+        assert_eq!(created["session"]["state"]["state"], "waiting_user");
+        assert_eq!(created["challenge"]["waiting_for"], "session_import");
+
+        let latest = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/provider-accounts/{account_id}/auth-sessions/latest"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(latest.status(), StatusCode::OK);
+        assert_eq!(response_json(latest).await["id"], session_id);
+
+        let session_path =
+            format!("/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}");
+        let cancelled = app
+            .clone()
+            .oneshot(
+                Request::delete(&session_path)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(cancelled).await["state"]["state"],
+            "cancelled"
+        );
+        let fetched = app
+            .oneshot(
+                Request::get(&session_path)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        assert_eq!(response_json(fetched).await["revision"], 3);
+    }
+
+    #[tokio::test]
     async fn provider_account_scan_requires_remote_auth_and_commits_inventory() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
@@ -1465,6 +1602,9 @@ mod tests {
             "/api/v1/provider-accounts/{account_id}",
             "/api/v1/provider-accounts/{account_id}/scan",
             "/api/v1/provider-accounts/{account_id}/credentials",
+            "/api/v1/provider-accounts/{account_id}/auth-sessions",
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/latest",
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}",
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",

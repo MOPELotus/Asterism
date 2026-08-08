@@ -1,11 +1,12 @@
 use std::{fmt, str::FromStr};
 
 use asterism_domain::{
-    AuthMethod, AuthState, ProviderAccount, ProviderAccountId, ProviderId, SessionKind, Timestamp,
-    UserId,
+    AuthMethod, AuthSession, AuthSessionId, AuthState, ProviderAccount, ProviderAccountId,
+    ProviderId, SessionKind, Timestamp, UserId,
 };
 use asterism_engine::{
-    CredentialProvisionError, ProviderCredentialService, ProviderScanError, ProviderScanService,
+    AuthSessionService, AuthSessionServiceError, AuthSessionStartRequest, CredentialProvisionError,
+    ProviderCredentialService, ProviderScanError, ProviderScanService,
 };
 use asterism_provider_api::{ProviderCapability, ProviderError, ProviderErrorKind, SessionStatus};
 use asterism_scheduler::{ScanSchedule, ScanScheduleError};
@@ -14,8 +15,9 @@ use asterism_secrets::{
     SecretStoreError, SecretValue,
 };
 use asterism_storage::{
-    ProviderAccountRepository, ScanScheduleRepository, SqliteProviderAccountRepository,
-    SqliteProviderScanRepository, SqliteSchedulerRepository, StorageError,
+    AuthSessionRepository, ProviderAccountRepository, ScanScheduleRepository,
+    SqliteAuthSessionRepository, SqliteProviderAccountRepository, SqliteProviderScanRepository,
+    SqliteSchedulerRepository, StorageError,
 };
 use axum::{
     Extension, Json,
@@ -23,10 +25,12 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{ApiError, ApiState, ListResponse, auth::AuthContext};
+
+const AUTH_SESSION_TTL_SECONDS: i64 = 10 * 60;
 
 pub(super) async fn list_provider_accounts(
     State(state): State<ApiState>,
@@ -211,6 +215,111 @@ pub(super) async fn put_provider_credentials(
     ))
 }
 
+pub(super) async fn begin_auth_session(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<BeginAuthSessionRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let request = api_json(payload)?;
+    let correlation_id = request_id(&headers)?;
+    let now = Utc::now();
+    let started = AuthSessionService::new(
+        state.providers,
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteAuthSessionRepository::new(state.database),
+    )
+    .begin(AuthSessionStartRequest {
+        owner_user_id: owner_id,
+        provider_account_id: account_id,
+        method: request.method,
+        created_at: now,
+        expires_at: now + Duration::seconds(AUTH_SESSION_TTL_SECONDS),
+        actor: auth.audit_actor(),
+        correlation_id: correlation_id.to_owned(),
+    })
+    .await
+    .map_err(map_auth_session_error)?;
+    Ok(crate::auth::no_store(
+        (
+            StatusCode::CREATED,
+            Json(AuthSessionBeginResponse {
+                session: started.session,
+                challenge: started.challenge,
+            }),
+        )
+            .into_response(),
+    ))
+}
+
+pub(super) async fn get_latest_auth_session(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_read()?;
+    let account_id = parse_account_id(&account_id)?;
+    let session = SqliteAuthSessionRepository::new(state.database)
+        .find_latest_account_auth_session(owner_id, account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("auth_session_not_found"))?;
+    Ok(crate::auth::no_store(Json(session).into_response()))
+}
+
+pub(super) async fn get_auth_session(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((account_id, session_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_read()?;
+    let account_id = parse_account_id(&account_id)?;
+    let session_id = parse_auth_session_id(&session_id)?;
+    let session = SqliteAuthSessionRepository::new(state.database)
+        .find_auth_session(owner_id, session_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|session| session.provider_account_id == account_id)
+        .ok_or_else(|| ApiError::not_found("auth_session_not_found"))?;
+    Ok(crate::auth::no_store(Json(session).into_response()))
+}
+
+pub(super) async fn cancel_auth_session(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((account_id, session_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let session_id = parse_auth_session_id(&session_id)?;
+    let repository = SqliteAuthSessionRepository::new(state.database.clone());
+    let session = repository
+        .find_auth_session(owner_id, session_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|session| session.provider_account_id == account_id)
+        .ok_or_else(|| ApiError::not_found("auth_session_not_found"))?;
+    let cancelled = AuthSessionService::new(
+        state.providers,
+        SqliteProviderAccountRepository::new(state.database),
+        repository,
+    )
+    .cancel(
+        owner_id,
+        session.id,
+        auth.audit_actor(),
+        request_id(&headers)?,
+        Utc::now(),
+    )
+    .await
+    .map_err(map_auth_session_error)?;
+    Ok(crate::auth::no_store(Json(cancelled).into_response()))
+}
+
 pub(super) async fn scan_provider_account(
     State(state): State<ApiState>,
     Extension(auth): Extension<AuthContext>,
@@ -359,6 +468,18 @@ pub(super) struct CreateProviderAccountRequest {
 pub(super) struct UpdateProviderAccountRequest {
     display_name: String,
     tenant: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BeginAuthSessionRequest {
+    method: AuthMethod,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct AuthSessionBeginResponse {
+    session: AuthSession,
+    challenge: asterism_provider_api::AuthChallenge,
 }
 
 pub(super) struct PutProviderCredentialsRequest {
@@ -537,6 +658,22 @@ fn parse_account_id(value: &str) -> Result<ProviderAccountId, ApiError> {
     })
 }
 
+fn parse_auth_session_id(value: &str) -> Result<AuthSessionId, ApiError> {
+    AuthSessionId::from_str(value).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_auth_session_id",
+            "authentication session ID is invalid",
+        )
+    })
+}
+
+fn request_id(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::internal("request ID middleware did not provide an ID"))
+}
+
 fn validate_mutable_fields(
     display_name: &str,
     tenant: Option<String>,
@@ -626,6 +763,38 @@ fn map_credential_error(error: CredentialProvisionError) -> ApiError {
             ),
             error => ApiError::internal(error),
         },
+    }
+}
+
+fn map_auth_session_error(error: AuthSessionServiceError) -> ApiError {
+    match error {
+        AuthSessionServiceError::AccountNotFound(_) => {
+            ApiError::not_found("provider_account_not_found")
+        }
+        AuthSessionServiceError::SessionNotFound(_) => {
+            ApiError::not_found("auth_session_not_found")
+        }
+        AuthSessionServiceError::ProviderNotRegistered(_)
+        | AuthSessionServiceError::AuthenticationUnavailable
+        | AuthSessionServiceError::UnsupportedAuthMethod(_) => ApiError::conflict(
+            "provider_authentication_unavailable",
+            "the Provider does not support the requested authentication method",
+        ),
+        AuthSessionServiceError::InvalidChallenge(_) => ApiError::bad_gateway(
+            "provider_authentication_invalid",
+            "the Provider returned an inconsistent authentication challenge",
+        ),
+        AuthSessionServiceError::SessionExpired(_)
+        | AuthSessionServiceError::InvalidSessionState(_)
+        | AuthSessionServiceError::RevisionConflict(_) => ApiError::conflict(
+            "auth_session_conflict",
+            "the authentication session is expired, terminal, or changed concurrently",
+        ),
+        AuthSessionServiceError::Provider { source, .. } => map_credential_provider_error(source),
+        AuthSessionServiceError::Domain(error) => {
+            ApiError::bad_request("invalid_auth_session", error.to_string())
+        }
+        AuthSessionServiceError::Storage(error) => ApiError::internal(error),
     }
 }
 

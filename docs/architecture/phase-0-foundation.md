@@ -424,3 +424,15 @@ failures are classified and persisted as authentication failure, human action,
 Provider unavailability, or client update requirement; an attempt that expires
 during the call becomes `Expired`. Cancellation is owner-scoped, revisioned,
 and cannot revive terminal or superseded attempts.
+
+## Thirty-second Phase 0 slice
+
+The thirty-second checkpoint exposes owner-scoped authentication state at the
+Provider-account boundary: begin a server-TTL session, read the latest attempt,
+read an exact account/session pair, and cancel it. Account and session IDs are
+both checked so an owned session cannot be addressed through another account.
+
+Begin returns the initial bounded Provider challenge once alongside the Core
+session. Polling and cancellation return only the persisted non-secret
+`AuthSession`; every response is marked `no-store`, and OpenAPI describes the
+conflict, Provider failure, expiry, and rate-limit outcomes.
