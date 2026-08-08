@@ -673,3 +673,17 @@ or secret. A valid status is normalized back into the credential bundle and
 passed to the atomic bootstrap commit; successful completion seals the access
 token, while an account change during validation is surfaced as a binding
 conflict instead of committing against stale metadata.
+
+## Fifty-first Phase 0 slice
+
+The fifty-first checkpoint exposes the server-validated flow at
+`POST /api/v1/auth-bootstrap/sessions/{session_id}/credential`. The route uses
+only the scoped Bootstrap access token, has its own per-session/IP limiter, and
+sets both the capture timestamp and `capture_tool` acquisition source on the
+server instead of accepting those claims from Capture.
+
+The response contains only the completed session, account ID, credential count,
+and sanitized Provider status. Provider rejection returns a retryable conflict
+without writes; success atomically creates or updates the account and then
+invalidates the access token, so a replay receives the same redacted Bootstrap
+401 and never exposes submitted credential material.

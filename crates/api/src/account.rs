@@ -782,7 +782,7 @@ fn map_storage_error(error: StorageError) -> ApiError {
     }
 }
 
-fn map_credential_error(error: CredentialProvisionError) -> ApiError {
+pub(super) fn map_credential_error(error: CredentialProvisionError) -> ApiError {
     match error {
         CredentialProvisionError::Unauthorized => ApiError::forbidden(),
         CredentialProvisionError::InvalidBundle(error) => {
@@ -850,7 +850,7 @@ fn map_auth_session_error(error: AuthSessionServiceError) -> ApiError {
     }
 }
 
-fn map_secret_store_error(error: SecretStoreError) -> ApiError {
+pub(super) fn map_secret_store_error(error: SecretStoreError) -> ApiError {
     match error {
         SecretStoreError::Unauthorized => ApiError::forbidden(),
         SecretStoreError::NotFound => ApiError::not_found("provider_account_not_found"),

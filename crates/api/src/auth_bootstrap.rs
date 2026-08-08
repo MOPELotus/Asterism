@@ -2,15 +2,19 @@ use std::{fmt, net::SocketAddr, str::FromStr};
 
 use asterism_domain::{
     AuthBootstrapClientEvent, AuthBootstrapClientEventKind, AuthBootstrapPurpose,
-    AuthBootstrapSession, AuthBootstrapSessionError, AuthBootstrapSessionId, ProviderAccountId,
-    ProviderId,
+    AuthBootstrapSession, AuthBootstrapSessionError, AuthBootstrapSessionId, AuthMethod,
+    ProviderAccountId, ProviderId, SessionKind, Timestamp,
 };
 use asterism_engine::{
     AuthBootstrapAccessRequest, AuthBootstrapCancelRequest, AuthBootstrapClaimRequest,
-    AuthBootstrapCreateRequest, AuthBootstrapEventRequest, AuthBootstrapService,
+    AuthBootstrapCreateRequest, AuthBootstrapCredentialRequest, AuthBootstrapCredentialService,
+    AuthBootstrapCredentialServiceError, AuthBootstrapEventRequest, AuthBootstrapService,
     AuthBootstrapServiceError,
 };
-use asterism_secrets::SecretString;
+use asterism_secrets::{
+    CredentialAcquisition, CredentialBundle, CredentialField, SecretPurpose, SecretString,
+    SecretValue,
+};
 use asterism_storage::{
     AuthBootstrapSessionRepository, ProviderAccountRepository,
     SqliteAuthBootstrapSessionRepository, SqliteProviderAccountRepository,
@@ -219,6 +223,57 @@ pub(super) async fn record_auth_bootstrap_event(
     ))
 }
 
+pub(super) async fn submit_auth_bootstrap_credential(
+    State(state): State<ApiState>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<SubmitAuthBootstrapCredentialRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let session_id = parse_session_id(&session_id)?;
+    state
+        .bootstrap_credential_rate_limiter
+        .check_and_record(remote.ip(), &session_id.to_string())
+        .map_err(|limited| ApiError::rate_limited(limited.retry_after_seconds))?;
+    let access_token =
+        bootstrap_authorization(&headers).ok_or_else(ApiError::invalid_bootstrap_token)?;
+    let request = api_json(payload)?;
+    let secret_store = state.secret_store.ok_or_else(|| {
+        ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "the encrypted credential store is not configured",
+        )
+    })?;
+    let submitted_at = Utc::now();
+    let (display_name, bundle) = request.into_parts(submitted_at)?;
+    let accepted = AuthBootstrapCredentialService::new(
+        state.providers,
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteAuthBootstrapSessionRepository::new(state.database),
+        secret_store,
+    )
+    .map_err(ApiError::internal)?
+    .submit(AuthBootstrapCredentialRequest {
+        session_id,
+        access_token,
+        display_name,
+        bundle,
+        submitted_at,
+        correlation_id: request_id(&headers)?.to_owned(),
+    })
+    .await
+    .map_err(map_bootstrap_credential_error)?;
+    Ok(crate::auth::no_store(
+        Json(SubmitAuthBootstrapCredentialResponse {
+            session: accepted.session,
+            provider_account_id: accepted.account.id,
+            credential_count: accepted.credentials.len(),
+            status: accepted.status,
+        })
+        .into_response(),
+    ))
+}
+
 fn bootstrap_service(
     state: &ApiState,
 ) -> Result<AuthBootstrapService<SqliteAuthBootstrapSessionRepository>, ApiError> {
@@ -327,6 +382,27 @@ fn map_bootstrap_error(error: AuthBootstrapServiceError) -> ApiError {
     }
 }
 
+fn map_bootstrap_credential_error(error: AuthBootstrapCredentialServiceError) -> ApiError {
+    match error {
+        AuthBootstrapCredentialServiceError::AccessRejected => ApiError::invalid_bootstrap_token(),
+        AuthBootstrapCredentialServiceError::InvalidAccountMetadata => ApiError::bad_request(
+            "invalid_provider_account",
+            "display_name is required only for a new Provider account",
+        ),
+        AuthBootstrapCredentialServiceError::AccountBindingConflict => ApiError::conflict(
+            "auth_bootstrap_account_conflict",
+            "the Provider account binding changed during credential validation",
+        ),
+        AuthBootstrapCredentialServiceError::Credential(error) => {
+            crate::account::map_credential_error(error)
+        }
+        AuthBootstrapCredentialServiceError::Storage(error) => ApiError::internal(error),
+        AuthBootstrapCredentialServiceError::SecretStore(error) => {
+            crate::account::map_secret_store_error(error)
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateAuthBootstrapSessionRequest {
@@ -378,6 +454,73 @@ pub(super) struct RecordAuthBootstrapEventRequest {
 pub(super) struct RecordAuthBootstrapEventResponse {
     event: AuthBootstrapClientEvent,
     duplicate: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SubmitAuthBootstrapCredentialRequest {
+    display_name: Option<String>,
+    provider_id: String,
+    tenant: Option<String>,
+    auth_method: AuthMethod,
+    session_kind: SessionKind,
+    expires_at: Option<Timestamp>,
+    fields: Vec<SubmitAuthBootstrapCredentialField>,
+}
+
+impl SubmitAuthBootstrapCredentialRequest {
+    fn into_parts(
+        self,
+        captured_at: Timestamp,
+    ) -> Result<(Option<String>, CredentialBundle), ApiError> {
+        let bundle = CredentialBundle {
+            provider_id: ProviderId::new(self.provider_id)
+                .map_err(|error| ApiError::bad_request("invalid_provider_id", error.to_string()))?,
+            tenant: self.tenant,
+            auth_method: self.auth_method,
+            acquired_via: CredentialAcquisition::CaptureTool,
+            captured_at,
+            expires_at: self.expires_at,
+            session_kind: self.session_kind,
+            fields: self
+                .fields
+                .into_iter()
+                .map(|field| CredentialField {
+                    purpose: field.purpose,
+                    value: field.into_secret_value(),
+                })
+                .collect(),
+            user_id_hint: None,
+        };
+        Ok((self.display_name, bundle))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubmitAuthBootstrapCredentialField {
+    purpose: SecretPurpose,
+    value: String,
+}
+
+impl SubmitAuthBootstrapCredentialField {
+    fn into_secret_value(mut self) -> SecretValue {
+        SecretValue::new(std::mem::take(&mut self.value).into_bytes())
+    }
+}
+
+impl Drop for SubmitAuthBootstrapCredentialField {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.value);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct SubmitAuthBootstrapCredentialResponse {
+    session: AuthBootstrapSession,
+    provider_account_id: ProviderAccountId,
+    credential_count: usize,
+    status: asterism_provider_api::SessionStatus,
 }
 
 impl fmt::Debug for ClaimAuthBootstrapSessionResponse {

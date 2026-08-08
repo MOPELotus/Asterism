@@ -37,6 +37,7 @@ pub struct ApiState {
     secret_store: Option<SqliteSecretStore>,
     login_rate_limiter: rate_limit::LoginRateLimiter,
     bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter,
+    bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter,
 }
 
 impl ApiState {
@@ -54,6 +55,7 @@ impl ApiState {
             secret_store: None,
             login_rate_limiter: rate_limit::LoginRateLimiter::default(),
             bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter::default(),
+            bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter::default(),
         }
     }
 
@@ -145,6 +147,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/auth-bootstrap/sessions/{session_id}/events",
             post(auth_bootstrap::record_auth_bootstrap_event),
         )
+        .route(
+            "/api/v1/auth-bootstrap/sessions/{session_id}/credential",
+            post(auth_bootstrap::submit_auth_bootstrap_credential),
+        )
         .merge(protected)
         .with_state(state)
         .fallback(not_found)
@@ -199,7 +205,7 @@ async fn list_providers(
     reason = "the declarative OpenAPI document is kept together for route/schema integrity"
 )]
 async fn openapi() -> Json<Value> {
-    Json(json!({
+    let mut document = json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Asterism internal API",
@@ -580,7 +586,70 @@ async fn openapi() -> Json<Value> {
                 }
             }
         }
-    }))
+    });
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/auth-bootstrap/sessions/{session_id}/credential".to_owned(),
+            auth_bootstrap_credential_path(),
+        );
+    document["components"]["schemas"]
+        .as_object_mut()
+        .expect("static OpenAPI schemas object")
+        .insert(
+            "SubmitAuthBootstrapCredential".to_owned(),
+            auth_bootstrap_credential_schema(),
+        );
+    Json(document)
+}
+
+fn auth_bootstrap_credential_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["provider_id", "auth_method", "session_kind", "fields"],
+        "properties": {
+            "display_name": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+            "provider_id": {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"},
+            "tenant": {"type": ["string", "null"], "minLength": 1, "maxLength": 256},
+            "auth_method": {"type": "string", "enum": ["password", "qr_code", "external_browser_oauth", "assisted_session", "imported_cookie", "imported_token"]},
+            "session_kind": {"type": "string", "enum": ["cookie", "bearer_token", "jwt", "composite", "provider_specific"]},
+            "expires_at": {"type": ["string", "null"], "format": "date-time"},
+            "fields": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                    "type": "object",
+                    "required": ["purpose", "value"],
+                    "properties": {
+                        "purpose": {"type": "string", "enum": ["provider_password", "provider_cookie", "provider_access_token", "provider_refresh_token", "provider_composite_session"]},
+                        "value": {"type": "string", "minLength": 1, "writeOnly": true}
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn auth_bootstrap_credential_path() -> Value {
+    json!({"post": {
+        "operationId": "submitAuthBootstrapCredential",
+        "security": [{"bootstrapAuth": []}],
+        "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SubmitAuthBootstrapCredential"}}}},
+        "responses": {
+            "200": {"description": "Provider-validated credentials committed and pairing completed"},
+            "400": {"description": "Invalid account metadata or credential bundle"},
+            "401": {"description": "Session-scoped Bootstrap access token is invalid or expired"},
+            "409": {"description": "Provider rejected the credential or the account binding changed"},
+            "429": {"description": "Credential submission rate limit reached"},
+            "502": {"description": "Provider returned an inconsistent authentication result"},
+            "503": {"description": "Encrypted credential storage is unavailable"}
+        }
+    }})
 }
 
 async fn not_found() -> ApiError {
@@ -1094,6 +1163,40 @@ mod tests {
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::AUTHORIZATION, format!("Bootstrap {token}"))
         .body(Body::from(body.to_owned()))
+        .unwrap()
+    }
+
+    fn auth_bootstrap_credential_request(
+        session_id: &str,
+        token: &str,
+        value: &str,
+    ) -> Request<Body> {
+        Request::post(format!(
+            "/api/v1/auth-bootstrap/sessions/{session_id}/credential"
+        ))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bootstrap {token}"))
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 7], 42_007))))
+        .body(Body::from(format!(
+            r#"{{"display_name":"primary","provider_id":"provider-alpha","auth_method":"imported_cookie","session_kind":"cookie","fields":[{{"purpose":"provider_cookie","value":"{value}"}}]}}"#
+        )))
+        .unwrap()
+    }
+
+    fn auth_bootstrap_existing_credential_request(
+        session_id: &str,
+        token: &str,
+        value: &str,
+    ) -> Request<Body> {
+        Request::post(format!(
+            "/api/v1/auth-bootstrap/sessions/{session_id}/credential"
+        ))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bootstrap {token}"))
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 9], 42_009))))
+        .body(Body::from(format!(
+            r#"{{"provider_id":"provider-alpha","auth_method":"imported_cookie","session_kind":"cookie","fields":[{{"purpose":"provider_cookie","value":"{value}"}}]}}"#
+        )))
         .unwrap()
     }
 
@@ -1778,6 +1881,236 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_bootstrap_credential_is_provider_validated_committed_and_one_time() {
+        let (app, database) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = create_test_auth_bootstrap(&app, &cookie).await;
+        let session_id = created["session"]["id"].as_str().unwrap().to_owned();
+        let pairing_token = created["pairing_token"].as_str().unwrap().to_owned();
+        let access_token = claim_test_auth_bootstrap(
+            &app,
+            &session_id,
+            &pairing_token,
+            SocketAddr::from(([127, 0, 0, 6], 42_006)),
+        )
+        .await;
+
+        let wrong_family = app
+            .clone()
+            .oneshot(auth_bootstrap_credential_request(
+                &session_id,
+                &pairing_token,
+                "wrong-family-cookie",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong_family.status(), StatusCode::UNAUTHORIZED);
+        let submitted = app
+            .clone()
+            .oneshot(auth_bootstrap_credential_request(
+                &session_id,
+                &access_token,
+                "captured-cookie",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(submitted.status(), StatusCode::OK);
+        assert_eq!(submitted.headers()[header::CACHE_CONTROL], "no-store");
+        let submitted = response_json(submitted).await;
+        assert_eq!(submitted["session"]["state"], "completed");
+        assert_eq!(submitted["credential_count"], 1);
+        assert_eq!(submitted["status"]["valid"], true);
+        assert!(submitted.get("access_token").is_none());
+        assert!(!submitted.to_string().contains("captured-cookie"));
+
+        let owner_view = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/auth-bootstrap/sessions/{session_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let owner_view = response_json(owner_view).await;
+        assert_eq!(owner_view["state"], "completed");
+        assert_eq!(
+            owner_view["provider_account_id"],
+            submitted["provider_account_id"]
+        );
+        let replay = app
+            .clone()
+            .oneshot(auth_bootstrap_credential_request(
+                &session_id,
+                &access_token,
+                "captured-cookie",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+        let account_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_accounts")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        let secret_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM secret_blobs")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        let acquisition: String =
+            sqlx::query_scalar("SELECT acquired_via FROM provider_account_credentials")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        let leaked_audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE metadata_sanitized_json LIKE ?",
+        )
+        .bind("%captured-cookie%")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(account_count, 1);
+        assert_eq!(secret_count, 1);
+        assert_eq!(acquisition, "capture_tool");
+        assert_eq!(leaked_audit_count, 0);
+    }
+
+    #[tokio::test]
+    async fn auth_bootstrap_credential_reauthenticates_the_bound_account() {
+        let (app, _) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth-bootstrap/sessions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(
+                        r#"{{"provider_id":"provider-alpha","provider_account_id":"{account_id}","purpose":"reauthenticate"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = response_json(created).await;
+        let session_id = created["session"]["id"].as_str().unwrap();
+        let pairing_token = created["pairing_token"].as_str().unwrap();
+        let access_token = claim_test_auth_bootstrap(
+            &app,
+            session_id,
+            pairing_token,
+            SocketAddr::from(([127, 0, 0, 10], 42_010)),
+        )
+        .await;
+        let submitted = app
+            .clone()
+            .oneshot(auth_bootstrap_existing_credential_request(
+                session_id,
+                &access_token,
+                "replacement-cookie",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(submitted.status(), StatusCode::OK);
+        let submitted = response_json(submitted).await;
+        assert_eq!(submitted["provider_account_id"], account_id);
+        assert_eq!(submitted["session"]["purpose"], "reauthenticate");
+        assert_eq!(submitted["session"]["state"], "completed");
+
+        let account = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/provider-accounts/{account_id}"))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response_json(account).await["auth_state"]["state"],
+            "authenticated"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_bootstrap_provider_rejection_keeps_claim_retryable_without_writes() {
+        let (app, database) = credential_test_app(false).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = create_test_auth_bootstrap(&app, &cookie).await;
+        let session_id = created["session"]["id"].as_str().unwrap().to_owned();
+        let pairing_token = created["pairing_token"].as_str().unwrap();
+        let access_token = claim_test_auth_bootstrap(
+            &app,
+            &session_id,
+            pairing_token,
+            SocketAddr::from(([127, 0, 0, 8], 42_008)),
+        )
+        .await;
+        let rejected = app
+            .clone()
+            .oneshot(auth_bootstrap_credential_request(
+                &session_id,
+                &access_token,
+                "rejected-cookie",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(rejected).await["error"]["code"],
+            "provider_credential_rejected"
+        );
+        let retryable = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/auth-bootstrap/sessions/{session_id}/stream"
+                ))
+                .header(header::AUTHORIZATION, format!("Bootstrap {access_token}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retryable.status(), StatusCode::OK);
+        assert_eq!(response_json(retryable).await["state"], "claimed");
+        let account_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_accounts")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        let secret_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM secret_blobs")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(account_count, 0);
+        assert_eq!(secret_count, 0);
+    }
+
+    #[tokio::test]
     async fn auth_bootstrap_claim_is_rate_limited_per_session_and_ip() {
         let (app, _) = credential_test_app(true).await;
         let bootstrap = bootstrap(&app).await;
@@ -2333,6 +2666,7 @@ mod tests {
             "/api/v1/auth-bootstrap/sessions",
             "/api/v1/auth-bootstrap/sessions/{session_id}",
             "/api/v1/auth-bootstrap/sessions/{session_id}/claim",
+            "/api/v1/auth-bootstrap/sessions/{session_id}/credential",
             "/api/v1/auth-bootstrap/sessions/{session_id}/events",
             "/api/v1/auth-bootstrap/sessions/{session_id}/stream",
             "/api/v1/service-tokens",
@@ -2362,6 +2696,11 @@ mod tests {
         );
         assert_eq!(
             document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/events"]["post"]["security"]
+                [0]["bootstrapAuth"],
+            json!([])
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/credential"]["post"]["security"]
                 [0]["bootstrapAuth"],
             json!([])
         );
