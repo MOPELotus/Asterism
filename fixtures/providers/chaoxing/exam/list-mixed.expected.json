@@ -1,0 +1,30 @@
+[
+  {
+    "remote_id": "exam:100:200:exam-1",
+    "title": "单元测验一",
+    "source_type": "exam",
+    "assessment_class": "unknown",
+    "remote_state": "pending"
+  },
+  {
+    "remote_id": "exam:100:200:exam-2",
+    "title": "单元测验二",
+    "source_type": "exam",
+    "assessment_class": "unknown",
+    "remote_state": "completed"
+  },
+  {
+    "remote_id": "exam:100:200:exam-3",
+    "title": "单元测验三",
+    "source_type": "exam",
+    "assessment_class": "unknown",
+    "remote_state": "expired"
+  },
+  {
+    "remote_id": "exam:100:200:exam-4",
+    "title": "单元测验四",
+    "source_type": "exam",
+    "assessment_class": "unknown",
+    "remote_state": "unknown"
+  }
+]

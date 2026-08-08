@@ -1,0 +1,23 @@
+[
+  {
+    "remote_id": "work:100:200:work-1",
+    "title": "课程作业一",
+    "source_type": "work",
+    "assessment_class": "unknown",
+    "remote_state": "pending"
+  },
+  {
+    "remote_id": "work:100:200:work-2",
+    "title": "课程作业二",
+    "source_type": "work",
+    "assessment_class": "unknown",
+    "remote_state": "completed"
+  },
+  {
+    "remote_id": "work:100:200:work-3",
+    "title": "课程作业三",
+    "source_type": "work",
+    "assessment_class": "unknown",
+    "remote_state": "expired"
+  }
+]

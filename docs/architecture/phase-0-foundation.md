@@ -765,3 +765,20 @@ headers and credential request bodies share zeroizing backing allocations with
 the HTTP request, while response buffers are also zeroized after decoding.
 Server-side cancellation remains an authenticated owner action and is observed
 by Capture as access rejection rather than broadened local authority.
+
+## Fifty-eighth Phase 0 slice
+
+The first concrete Provider slice adds a Chaoxing crate with bounded, offline
+parsers for independent course Work and Exam inventories. Stable task identity
+includes source module, course, class, and remote task dimensions; Chapter Work
+is not merged into this inventory. Exam rows are selected structurally so status
+words inside scripts cannot create phantom tasks.
+
+List-page state remains conservative. Unknown labels stay `Unknown`, Exam source
+does not imply formal-assessment classification, and Work detail redirects are
+followed before an unsubmitted item is treated as open or expired. Session-bound
+route values are excluded from normalized snapshots and fingerprints.
+
+This checkpoint is fixture-only: it does not register Chaoxing, advertise a live
+capability, or claim current account compatibility. Native HTTP versus
+BrowserBridge transport remains pending real-account validation.

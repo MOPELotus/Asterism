@@ -1,8 +1,30 @@
 # chaoxing fixture plan
 
 No real-account fixture was added during the 2026-08-09 static donor audit.
+The repository currently contains explicitly labelled synthetic, sanitized Work
+and Exam inventory/detail fixtures for parser development. They prove parser
+invariants only and are not evidence of current live-platform compatibility.
 
-## Required fixture sets
+## Committed synthetic fixture set
+
+```text
+fixtures/providers/chaoxing/
+  work/
+    list-mixed.html
+    list-mixed.expected.json
+    detail-editor.html
+    detail-submitted.html
+    detail-closed.html
+  exam/
+    list-empty-script-keywords.html
+    list-mixed.html
+    list-mixed.expected.json
+```
+
+The mixed expectation files cover normalized identity, source module and remote
+state. The detail fixtures cover the conservative Work redirect classification.
+
+## Required live-sanitized fixture sets
 
 ```text
 fixtures/providers/chaoxing/
@@ -17,11 +39,11 @@ fixtures/providers/chaoxing/
     list-pending-submittable.html
     list-pending-expired.html
     list-submitted.html
-    detail-editor.html
-    detail-submitted.html
-    detail-closed.html
+    detail-editor.expected.json
+    detail-submitted.expected.json
+    detail-closed.expected.json
   exam/
-    list-empty-with-status-words-in-scripts.html
+    list-empty-script-keywords.html
     list-pending.html
     list-not-open.html
     list-completed.html
