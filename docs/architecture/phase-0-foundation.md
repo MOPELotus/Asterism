@@ -894,3 +894,16 @@ zeroized. `provider_username` is now a first-class protected secret purpose, and
 `credential_input` distinguishes native credential entry from QR, OAuth or
 session import. The contract is integration-tested, but no Chaoxing
 authentication implementation or daemon registration is claimed by this slice.
+
+## Sixty-sixth Phase 0 slice
+
+Sanitized Provider errors can now attach a typed `HumanRequiredReason`. The Core
+authentication state machine preserves a supplied reason such as
+`ImageCaptcha` instead of collapsing every interactive challenge into generic
+manual intervention; older Providers which omit the reason retain the safe
+fallback behavior.
+
+This enables first-batch native authentication to stop accurately on captcha,
+SMS, browser or confirmation gates without implementing Capture or automated
+challenge solving. The reason is diagnostic state only and does not broaden
+Provider authority or expose response bodies.

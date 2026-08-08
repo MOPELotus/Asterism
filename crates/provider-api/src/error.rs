@@ -1,3 +1,4 @@
+use asterism_domain::HumanRequiredReason;
 use serde::{Deserialize, Serialize};
 
 pub type ProviderResult<T> = Result<T, ProviderError>;
@@ -11,6 +12,7 @@ pub struct ProviderError {
     pub message: String,
     pub provider_code: Option<String>,
     pub retry_after_seconds: Option<u64>,
+    pub human_required_reason: Option<HumanRequiredReason>,
 }
 
 impl ProviderError {
@@ -20,6 +22,17 @@ impl ProviderError {
             message: message.into(),
             provider_code: None,
             retry_after_seconds: None,
+            human_required_reason: None,
+        }
+    }
+
+    pub fn human_required(message: impl Into<String>, reason: HumanRequiredReason) -> Self {
+        Self {
+            kind: ProviderErrorKind::HumanRequired,
+            message: message.into(),
+            provider_code: None,
+            retry_after_seconds: None,
+            human_required_reason: Some(reason),
         }
     }
 

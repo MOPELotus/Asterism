@@ -425,21 +425,23 @@ async fn transition_provider_failure<S: AuthSessionRepository>(
     transition_once(
         sessions,
         session,
-        provider_failure_state(error.kind),
+        provider_failure_state(error),
         actor,
         correlation_id,
     )
     .await
 }
 
-fn provider_failure_state(kind: ProviderErrorKind) -> AuthState {
-    match kind {
+fn provider_failure_state(error: &ProviderError) -> AuthState {
+    match error.kind {
         ProviderErrorKind::RateLimited
         | ProviderErrorKind::Network
         | ProviderErrorKind::ProviderUnavailable => AuthState::ProviderUnavailable,
-        ProviderErrorKind::HumanRequired => {
-            AuthState::HumanRequired(HumanRequiredReason::ManualIntervention)
-        }
+        ProviderErrorKind::HumanRequired => AuthState::HumanRequired(
+            error
+                .human_required_reason
+                .unwrap_or(HumanRequiredReason::ManualIntervention),
+        ),
         ProviderErrorKind::RemoteChanged => AuthState::ClientUpdateRequired,
         ProviderErrorKind::Authentication
         | ProviderErrorKind::Authorization
@@ -452,7 +454,7 @@ fn provider_failure_state(kind: ProviderErrorKind) -> AuthState {
 
 fn credential_failure_state(error: &CredentialProvisionError) -> AuthState {
     match error {
-        CredentialProvisionError::Provider(error) => provider_failure_state(error.kind),
+        CredentialProvisionError::Provider(error) => provider_failure_state(error),
         CredentialProvisionError::ProviderNotRegistered(_)
         | CredentialProvisionError::AuthenticationUnavailable
         | CredentialProvisionError::UnsupportedAuthMethod(_)
@@ -532,6 +534,23 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
+
+    #[test]
+    fn provider_human_required_reason_is_preserved() {
+        let captcha =
+            ProviderError::human_required("sanitized challenge", HumanRequiredReason::ImageCaptcha);
+        assert_eq!(
+            provider_failure_state(&captcha),
+            AuthState::HumanRequired(HumanRequiredReason::ImageCaptcha)
+        );
+        assert_eq!(
+            provider_failure_state(&ProviderError::new(
+                ProviderErrorKind::HumanRequired,
+                "sanitized challenge",
+            )),
+            AuthState::HumanRequired(HumanRequiredReason::ManualIntervention)
+        );
+    }
 
     #[tokio::test]
     async fn begin_and_cancel_are_persisted_as_one_observable_state_flow() {
