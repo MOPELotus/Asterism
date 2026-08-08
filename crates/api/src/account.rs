@@ -4,10 +4,11 @@ use asterism_domain::{
     AuthState, ProviderAccount, ProviderAccountId, ProviderId, Timestamp, UserId,
 };
 use asterism_engine::{ProviderScanError, ProviderScanService};
-use asterism_provider_api::ProviderErrorKind;
+use asterism_provider_api::{ProviderCapability, ProviderErrorKind};
+use asterism_scheduler::{ScanSchedule, ScanScheduleError};
 use asterism_storage::{
-    ProviderAccountRepository, SqliteProviderAccountRepository, SqliteProviderScanRepository,
-    StorageError,
+    ProviderAccountRepository, ScanScheduleRepository, SqliteProviderAccountRepository,
+    SqliteProviderScanRepository, SqliteSchedulerRepository, StorageError,
 };
 use axum::{
     Extension, Json,
@@ -173,6 +174,109 @@ pub(super) async fn scan_provider_account(
     Ok(crate::auth::no_store(Json(report).into_response()))
 }
 
+pub(super) async fn get_scan_schedule(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_read()?;
+    let account_id = parse_account_id(&account_id)?;
+    let account = SqliteProviderAccountRepository::new(state.database.clone())
+        .find_provider_account(owner_id, account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    let schedule = SqliteSchedulerRepository::new(state.database.clone())
+        .find_scan_schedule(account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("scan_schedule_not_found"))?;
+    let provider_min_interval_seconds = state
+        .providers
+        .get(&account.provider_id)
+        .and_then(|entry| entry.metadata.scan_min_interval_seconds);
+    Ok(crate::auth::no_store(
+        Json(ScanScheduleResponse::from_schedule(
+            &schedule,
+            provider_min_interval_seconds,
+        ))
+        .into_response(),
+    ))
+}
+
+pub(super) async fn configure_scan_schedule(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<ConfigureScanScheduleRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let request = api_json(payload)?;
+    let account = SqliteProviderAccountRepository::new(state.database.clone())
+        .find_provider_account(owner_id, account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    let provider = state.providers.get(&account.provider_id).ok_or_else(|| {
+        ApiError::conflict(
+            "provider_not_registered",
+            "the account Provider is not registered",
+        )
+    })?;
+    if request.enabled && !matches!(account.auth_state, AuthState::Authenticated) {
+        return Err(ApiError::conflict(
+            "provider_account_not_authenticated",
+            "the Provider account must be authenticated before enabling scans",
+        ));
+    }
+    if !provider
+        .metadata
+        .advertises(ProviderCapability::CourseInventory)
+        && !provider
+            .metadata
+            .advertises(ProviderCapability::TaskInventory)
+    {
+        return Err(ApiError::conflict(
+            "provider_inventory_unavailable",
+            "the Provider exposes no inventory capability",
+        ));
+    }
+    let provider_min_interval_seconds = provider.metadata.scan_min_interval_seconds;
+    let repository = SqliteSchedulerRepository::new(state.database);
+    let existing = repository
+        .find_scan_schedule(account_id)
+        .await
+        .map_err(ApiError::internal)?;
+    let now = Utc::now();
+    let schedule = ScanSchedule::configured(
+        account_id,
+        request.desired_interval_seconds,
+        provider_min_interval_seconds,
+        request.enabled,
+        now,
+        existing.as_ref(),
+    )
+    .map_err(map_scan_schedule_error)?;
+    let correlation_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::internal("request ID middleware did not provide an ID"))?;
+    let stored = repository
+        .upsert_scan_schedule_for_owner(owner_id, &schedule, auth.audit_actor(), correlation_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    Ok(crate::auth::no_store(
+        Json(ScanScheduleResponse::from_schedule(
+            &stored,
+            provider_min_interval_seconds,
+        ))
+        .into_response(),
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateProviderAccountRequest {
@@ -186,6 +290,42 @@ pub(super) struct CreateProviderAccountRequest {
 pub(super) struct UpdateProviderAccountRequest {
     display_name: String,
     tenant: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ConfigureScanScheduleRequest {
+    desired_interval_seconds: u64,
+    enabled: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct ScanScheduleResponse {
+    id: asterism_domain::ScheduleId,
+    provider_account_id: ProviderAccountId,
+    desired_interval_seconds: u64,
+    effective_interval_seconds: u64,
+    provider_min_interval_seconds: Option<u64>,
+    next_run_at: Timestamp,
+    enabled: bool,
+    created_at: Timestamp,
+    updated_at: Timestamp,
+}
+
+impl ScanScheduleResponse {
+    fn from_schedule(schedule: &ScanSchedule, provider_min_interval_seconds: Option<u64>) -> Self {
+        Self {
+            id: schedule.id,
+            provider_account_id: schedule.provider_account_id,
+            desired_interval_seconds: schedule.desired_interval_seconds,
+            effective_interval_seconds: schedule.interval_seconds,
+            provider_min_interval_seconds,
+            next_run_at: schedule.next_run_at,
+            enabled: schedule.enabled,
+            created_at: schedule.created_at,
+            updated_at: schedule.updated_at,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -332,4 +472,8 @@ fn map_scan_error(error: ProviderScanError) -> ApiError {
             ApiError::internal(error)
         }
     }
+}
+
+fn map_scan_schedule_error(error: ScanScheduleError) -> ApiError {
+    ApiError::bad_request("invalid_scan_schedule", error.to_string())
 }

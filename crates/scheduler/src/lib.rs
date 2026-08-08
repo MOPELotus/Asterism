@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use asterism_domain::{ExecutionId, NotificationId, ProviderAccountId, ScheduleId, Timestamp};
+use chrono::Duration as ChronoDuration;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -31,6 +32,48 @@ pub struct ScanSchedule {
 }
 
 impl ScanSchedule {
+    /// Builds a user-managed schedule after applying the Provider's optional
+    /// minimum interval. Existing identity and creation time are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScanScheduleError`] when either interval is invalid or the
+    /// next run cannot be represented.
+    pub fn configured(
+        provider_account_id: ProviderAccountId,
+        desired_interval_seconds: u64,
+        provider_min_interval_seconds: Option<u64>,
+        enabled: bool,
+        at: Timestamp,
+        existing: Option<&Self>,
+    ) -> Result<Self, ScanScheduleError> {
+        validate_interval(desired_interval_seconds)?;
+        if let Some(minimum) = provider_min_interval_seconds {
+            validate_interval(minimum)?;
+        }
+        let interval_seconds = provider_min_interval_seconds
+            .map_or(desired_interval_seconds, |minimum| {
+                minimum.max(desired_interval_seconds)
+            });
+        let interval =
+            i64::try_from(interval_seconds).map_err(|_| ScanScheduleError::IntervalOutOfRange)?;
+        let next_run_at = at
+            .checked_add_signed(ChronoDuration::seconds(interval))
+            .ok_or(ScanScheduleError::NextRunOutOfRange)?;
+        let schedule = Self {
+            id: existing.map_or_else(ScheduleId::new, |schedule| schedule.id),
+            provider_account_id,
+            desired_interval_seconds,
+            interval_seconds,
+            next_run_at,
+            enabled,
+            created_at: existing.map_or(at, |schedule| schedule.created_at),
+            updated_at: at,
+        };
+        schedule.validate()?;
+        Ok(schedule)
+    }
+
     /// Validates persisted schedule fields independently from Provider-specific
     /// minimum interval policy.
     ///
@@ -67,6 +110,17 @@ pub enum ScanScheduleError {
     EffectiveIntervalTooShort,
     #[error("scan schedule lifecycle timestamps move backwards")]
     InvalidTimestamps,
+    #[error("scan schedule next run is outside the supported clock range")]
+    NextRunOutOfRange,
+}
+
+fn validate_interval(interval_seconds: u64) -> Result<(), ScanScheduleError> {
+    if interval_seconds == 0 {
+        return Err(ScanScheduleError::ZeroInterval);
+    }
+    i64::try_from(interval_seconds)
+        .map(|_| ())
+        .map_err(|_| ScanScheduleError::IntervalOutOfRange)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -247,5 +301,31 @@ mod tests {
             schedule.validate(),
             Err(ScanScheduleError::InvalidTimestamps)
         );
+    }
+
+    #[test]
+    fn configured_schedule_applies_provider_floor_and_preserves_identity() {
+        let now = chrono::Utc::now();
+        let account_id = ProviderAccountId::new();
+        let schedule =
+            ScanSchedule::configured(account_id, 60, Some(300), true, now, None).unwrap();
+        assert_eq!(schedule.desired_interval_seconds, 60);
+        assert_eq!(schedule.interval_seconds, 300);
+        assert_eq!(schedule.next_run_at, now + chrono::Duration::seconds(300));
+
+        let updated_at = now + chrono::Duration::seconds(1);
+        let disabled = ScanSchedule::configured(
+            account_id,
+            600,
+            Some(300),
+            false,
+            updated_at,
+            Some(&schedule),
+        )
+        .unwrap();
+        assert_eq!(disabled.id, schedule.id);
+        assert_eq!(disabled.created_at, schedule.created_at);
+        assert_eq!(disabled.interval_seconds, 600);
+        assert!(!disabled.enabled);
     }
 }

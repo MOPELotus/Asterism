@@ -208,6 +208,14 @@ pub trait ScanScheduleRepository: Send + Sync {
         schedule: &asterism_scheduler::ScanSchedule,
     ) -> Result<asterism_scheduler::ScanSchedule, StorageError>;
 
+    async fn upsert_scan_schedule_for_owner(
+        &self,
+        owner_id: UserId,
+        schedule: &asterism_scheduler::ScanSchedule,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<Option<asterism_scheduler::ScanSchedule>, StorageError>;
+
     async fn find_scan_schedule(
         &self,
         account_id: ProviderAccountId,

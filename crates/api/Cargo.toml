@@ -12,6 +12,7 @@ asterism-auth = { path = "../auth" }
 asterism-domain = { path = "../domain" }
 asterism-engine = { path = "../engine" }
 asterism-provider-api = { path = "../provider-api" }
+asterism-scheduler = { path = "../scheduler" }
 asterism-secrets = { path = "../secrets" }
 asterism-storage = { path = "../storage" }
 axum.workspace = true

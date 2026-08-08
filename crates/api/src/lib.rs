@@ -72,6 +72,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/provider-accounts/{account_id}/scan",
             post(account::scan_provider_account),
         )
+        .route(
+            "/api/v1/provider-accounts/{account_id}/scan-schedule",
+            get(account::get_scan_schedule).put(account::configure_scan_schedule),
+        )
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
         .route("/api/v1/service-tokens", post(auth::create_service_token))
@@ -220,6 +224,21 @@ async fn openapi() -> Json<Value> {
                     "503": {"description": "Provider is temporarily unavailable"}
                 }
             }},
+            "/api/v1/provider-accounts/{account_id}/scan-schedule": {
+                "get": {
+                    "operationId": "getProviderAccountScanSchedule",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                    "responses": {"200": {"description": "Owner-scoped scan schedule"}, "404": {"description": "Account or scan schedule not found"}}
+                },
+                "put": {
+                    "operationId": "configureProviderAccountScanSchedule",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfigureScanSchedule"}}}},
+                    "responses": {"200": {"description": "Scan schedule configured with the Provider floor"}, "400": {"description": "Invalid interval"}, "404": {"description": "Provider account not found"}, "409": {"description": "Provider is not registered"}}
+                }
+            },
             "/api/v1/tasks": {"get": {
                 "operationId": "listTasks",
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
@@ -290,6 +309,15 @@ async fn openapi() -> Json<Value> {
                     "properties": {
                         "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
                         "tenant": {"type": ["string", "null"], "maxLength": 256}
+                    },
+                    "additionalProperties": false
+                },
+                "ConfigureScanSchedule": {
+                    "type": "object",
+                    "required": ["desired_interval_seconds", "enabled"],
+                    "properties": {
+                        "desired_interval_seconds": {"type": "integer", "minimum": 1},
+                        "enabled": {"type": "boolean"}
                     },
                     "additionalProperties": false
                 },
@@ -628,6 +656,31 @@ mod tests {
             .unwrap()
     }
 
+    async fn create_test_provider_account(app: &Router, cookie: &str) -> String {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/provider-accounts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from(
+                        r#"{"provider_id":"provider-alpha","display_name":"primary"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        body["id"].as_str().unwrap().to_owned()
+    }
+
+    async fn response_json(response: Response) -> Value {
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
     fn login_request(password: &str) -> Request<Body> {
         Request::post("/api/v1/auth/login")
             .header(header::CONTENT_TYPE, "application/json")
@@ -921,6 +974,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_schedule_api_applies_provider_floor_and_audits_updates() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let app = build_router(ApiState::new(
+            database.clone(),
+            Arc::new(scan_registry()),
+            3600,
+            false,
+        ));
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let schedule_path = format!("/api/v1/provider-accounts/{account_id}/scan-schedule");
+
+        let idle = app
+            .clone()
+            .oneshot(
+                Request::put(&schedule_path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"desired_interval_seconds":60,"enabled":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(idle.status(), StatusCode::CONFLICT);
+        sqlx::query("UPDATE provider_accounts SET auth_state_json = ? WHERE id = ?")
+            .bind(serde_json::to_string(&AuthState::Authenticated).unwrap())
+            .bind(&account_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        let configured = app
+            .clone()
+            .oneshot(
+                Request::put(&schedule_path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-request-id", "schedule-api-create")
+                    .body(Body::from(
+                        r#"{"desired_interval_seconds":60,"enabled":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(configured.status(), StatusCode::OK);
+        assert_eq!(configured.headers()[header::CACHE_CONTROL], "no-store");
+        let configured = response_json(configured).await;
+        assert_eq!(configured["desired_interval_seconds"], 60);
+        assert_eq!(configured["effective_interval_seconds"], 300);
+        assert_eq!(configured["provider_min_interval_seconds"], 300);
+        let schedule_id = configured["id"].as_str().unwrap().to_owned();
+
+        let disabled = app
+            .clone()
+            .oneshot(
+                Request::put(&schedule_path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-request-id", "schedule-api-disable")
+                    .body(Body::from(
+                        r#"{"desired_interval_seconds":600,"enabled":false}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(disabled.status(), StatusCode::OK);
+        let disabled = response_json(disabled).await;
+        assert_eq!(disabled["id"], schedule_id);
+        assert_eq!(disabled["effective_interval_seconds"], 600);
+        assert_eq!(disabled["enabled"], false);
+
+        let fetched = app
+            .oneshot(
+                Request::get(schedule_path)
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        let fetched = response_json(fetched).await;
+        assert_eq!(fetched, disabled);
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? \
+             AND action = 'scan_schedule_configured'",
+        )
+        .bind(schedule_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 2);
+    }
+
+    #[tokio::test]
     async fn task_api_is_owner_scoped_paginated_and_keeps_state_dimensions_separate() {
         let (app, database) = test_app(false, None).await;
         let bootstrap = bootstrap(&app).await;
@@ -1084,6 +1245,7 @@ mod tests {
             "/api/v1/provider-accounts",
             "/api/v1/provider-accounts/{account_id}",
             "/api/v1/provider-accounts/{account_id}/scan",
+            "/api/v1/provider-accounts/{account_id}/scan-schedule",
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
         ] {

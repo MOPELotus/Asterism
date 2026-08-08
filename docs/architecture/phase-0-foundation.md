@@ -250,3 +250,16 @@ unrepresentable, or shorter-than-desired effective intervals.
 
 Keeping both values allows a later Provider metadata revision to recalculate
 the effective floor without silently replacing the user's preference.
+
+## Eighteenth Phase 0 slice
+
+The eighteenth checkpoint exposes owner-scoped scan schedule reads and updates
+through the versioned API. Core resolves the effective interval as the greater
+of the user's desired interval and the registered Provider floor, preserves
+schedule identity across updates, and schedules the next run from the update
+time without replaying an immediate backlog.
+
+Management writes recheck ownership and append the sanitized audit record in
+the same immediate SQLite transaction. Responses distinguish desired,
+Provider-minimum, and effective values; disabling retains the schedule while
+preventing job materialization.

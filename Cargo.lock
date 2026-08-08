@@ -103,6 +103,7 @@ dependencies = [
  "asterism-domain",
  "asterism-engine",
  "asterism-provider-api",
+ "asterism-scheduler",
  "asterism-secrets",
  "asterism-storage",
  "async-trait",

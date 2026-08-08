@@ -1,10 +1,12 @@
 use std::str::FromStr;
 
-use asterism_domain::{ProviderAccountId, ScheduleId, Timestamp};
+use asterism_domain::{
+    AuditActor, AuditRecordId, ProviderAccountId, ScheduleId, Timestamp, UserId,
+};
 use asterism_scheduler::{ScanSchedule, ScheduledJob, ScheduledJobKind, ScheduledJobState};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 
 use crate::{Database, ScanScheduleRepository, SchedulerRepository, StorageError};
 
@@ -186,39 +188,43 @@ impl ScanScheduleRepository for SqliteSchedulerRepository {
         &self,
         schedule: &ScanSchedule,
     ) -> Result<ScanSchedule, StorageError> {
-        schedule
-            .validate()
-            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
-        let interval_seconds = i64::try_from(schedule.interval_seconds)
-            .map_err(|_| StorageError::InvalidData("scan interval is too large".to_owned()))?;
-        let row = sqlx::query(
-            "INSERT INTO scan_schedules \
-             (id, provider_account_id, desired_interval_seconds, interval_seconds, next_run_at, \
-              enabled, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(provider_account_id) DO UPDATE SET \
-                 desired_interval_seconds = excluded.desired_interval_seconds, \
-                 interval_seconds = excluded.interval_seconds, \
-                 next_run_at = excluded.next_run_at, enabled = excluded.enabled, \
-                 updated_at = excluded.updated_at \
-             RETURNING id, provider_account_id, desired_interval_seconds, interval_seconds, \
-                       next_run_at, enabled, created_at, updated_at",
+        let mut transaction = self.database.pool().begin().await?;
+        let stored = persist_scan_schedule(&mut transaction, schedule).await?;
+        transaction.commit().await?;
+        Ok(stored)
+    }
+
+    async fn upsert_scan_schedule_for_owner(
+        &self,
+        owner_id: UserId,
+        schedule: &ScanSchedule,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<Option<ScanSchedule>, StorageError> {
+        validate_correlation_id(correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let provider_id: Option<String> = sqlx::query_scalar(
+            "SELECT provider_id FROM provider_accounts WHERE id = ? AND owner_user_id = ?",
         )
-        .bind(schedule.id.to_string())
         .bind(schedule.provider_account_id.to_string())
-        .bind(
-            i64::try_from(schedule.desired_interval_seconds).map_err(|_| {
-                StorageError::InvalidData("desired scan interval is too large".to_owned())
-            })?,
-        )
-        .bind(interval_seconds)
-        .bind(encode_timestamp(schedule.next_run_at))
-        .bind(i64::from(schedule.enabled))
-        .bind(encode_timestamp(schedule.created_at))
-        .bind(encode_timestamp(schedule.updated_at))
-        .fetch_one(self.database.pool())
+        .bind(owner_id.to_string())
+        .fetch_optional(&mut *transaction)
         .await?;
-        decode_scan_schedule(&row)
+        let Some(provider_id) = provider_id else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let stored = persist_scan_schedule(&mut transaction, schedule).await?;
+        insert_scan_schedule_audit(
+            &mut transaction,
+            actor,
+            &stored,
+            correlation_id,
+            &provider_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(Some(stored))
     }
 
     async fn find_scan_schedule(
@@ -314,6 +320,92 @@ impl ScanScheduleRepository for SqliteSchedulerRepository {
         self.claim_due_internal(worker_id, now, lease_expires_at, limit, true)
             .await
     }
+}
+
+async fn persist_scan_schedule(
+    transaction: &mut Transaction<'_, Sqlite>,
+    schedule: &ScanSchedule,
+) -> Result<ScanSchedule, StorageError> {
+    schedule
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let desired_interval_seconds = i64::try_from(schedule.desired_interval_seconds)
+        .map_err(|_| StorageError::InvalidData("desired scan interval is too large".to_owned()))?;
+    let interval_seconds = i64::try_from(schedule.interval_seconds)
+        .map_err(|_| StorageError::InvalidData("scan interval is too large".to_owned()))?;
+    let row = sqlx::query(
+        "INSERT INTO scan_schedules \
+         (id, provider_account_id, desired_interval_seconds, interval_seconds, next_run_at, \
+          enabled, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(provider_account_id) DO UPDATE SET \
+             desired_interval_seconds = excluded.desired_interval_seconds, \
+             interval_seconds = excluded.interval_seconds, \
+             next_run_at = excluded.next_run_at, enabled = excluded.enabled, \
+             updated_at = excluded.updated_at \
+         RETURNING id, provider_account_id, desired_interval_seconds, interval_seconds, \
+                   next_run_at, enabled, created_at, updated_at",
+    )
+    .bind(schedule.id.to_string())
+    .bind(schedule.provider_account_id.to_string())
+    .bind(desired_interval_seconds)
+    .bind(interval_seconds)
+    .bind(encode_timestamp(schedule.next_run_at))
+    .bind(i64::from(schedule.enabled))
+    .bind(encode_timestamp(schedule.created_at))
+    .bind(encode_timestamp(schedule.updated_at))
+    .fetch_one(&mut **transaction)
+    .await?;
+    decode_scan_schedule(&row)
+}
+
+async fn insert_scan_schedule_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    actor: AuditActor,
+    schedule: &ScanSchedule,
+    correlation_id: &str,
+    provider_id: &str,
+) -> Result<(), StorageError> {
+    let (actor_type, actor_id) = match actor {
+        AuditActor::User(id) => ("user", id.to_string()),
+        AuditActor::ServiceToken(id) => ("service_token", id.to_string()),
+    };
+    let metadata = serde_json::json!({
+        "provider_account_id": schedule.provider_account_id,
+        "provider_id": provider_id,
+        "desired_interval_seconds": schedule.desired_interval_seconds,
+        "effective_interval_seconds": schedule.interval_seconds,
+        "enabled": schedule.enabled,
+    });
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, ?, ?, 'scan_schedule_configured', 'scan_schedule', ?, ?, \
+                 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(schedule.updated_at))
+    .bind(actor_type)
+    .bind(actor_id)
+    .bind(schedule.id.to_string())
+    .bind(correlation_id)
+    .bind(serde_json::to_string(&metadata)?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn validate_correlation_id(correlation_id: &str) -> Result<(), StorageError> {
+    if correlation_id.is_empty()
+        || correlation_id.len() > 128
+        || correlation_id.chars().any(char::is_control)
+    {
+        return Err(StorageError::InvalidData(
+            "scan schedule correlation ID is invalid".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn decode_scan_schedule(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSchedule, StorageError> {
@@ -509,7 +601,7 @@ mod tests {
     async fn due_scan_schedule_materializes_once_and_skips_backlog() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
-        let account_id = insert_provider_account(&database).await;
+        let (_, account_id) = insert_provider_account(&database).await;
         let repository = SqliteSchedulerRepository::new(database.clone());
         let now = Utc::now();
         let schedule = ScanSchedule {
@@ -622,7 +714,60 @@ mod tests {
         assert_eq!(remaining[0].id, execution.id);
     }
 
-    async fn insert_provider_account(database: &Database) -> ProviderAccountId {
+    #[tokio::test]
+    async fn owner_scoped_schedule_write_is_atomic_and_audited() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let (owner_id, account_id) = insert_provider_account(&database).await;
+        let repository = SqliteSchedulerRepository::new(database.clone());
+        let now = Utc::now();
+        let schedule = ScanSchedule {
+            id: ScheduleId::new(),
+            provider_account_id: account_id,
+            desired_interval_seconds: 60,
+            interval_seconds: 300,
+            next_run_at: now + Duration::seconds(300),
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        assert!(
+            repository
+                .upsert_scan_schedule_for_owner(
+                    UserId::new(),
+                    &schedule,
+                    AuditActor::User(owner_id),
+                    "schedule-test-denied",
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let stored = repository
+            .upsert_scan_schedule_for_owner(
+                owner_id,
+                &schedule,
+                AuditActor::User(owner_id),
+                "schedule-test",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, schedule);
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? \
+             AND action = 'scan_schedule_configured' AND correlation_id = 'schedule-test'",
+        )
+        .bind(schedule.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 1);
+    }
+
+    async fn insert_provider_account(database: &Database) -> (UserId, ProviderAccountId) {
         let user_id = UserId::new();
         let account_id = ProviderAccountId::new();
         let now = encode_timestamp(Utc::now());
@@ -651,6 +796,6 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        account_id
+        (user_id, account_id)
     }
 }
