@@ -4,7 +4,8 @@ mod input;
 use std::collections::BTreeSet;
 
 use anyhow::Context;
-use asterism_domain::ServiceScope;
+use asterism_domain::{AuthMethod, ServiceScope, SessionKind};
+use asterism_secrets::{CredentialAcquisition, SecretPurpose};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use reqwest::StatusCode;
 use serde::Serialize;
@@ -12,7 +13,7 @@ use serde_json::json;
 
 use crate::{
     client::{ApiClient, CreateServiceTokenRequest, write_json},
-    input::{PasswordMode, read_password, service_token_from_process},
+    input::{PasswordMode, read_credential_value, read_password, service_token_from_process},
 };
 
 const DEFAULT_TOKEN_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
@@ -116,6 +117,32 @@ enum ProviderAccountCommand {
         #[command(subcommand)]
         command: ScanScheduleCommand,
     },
+    /// Validate and replace account credentials.
+    Credential {
+        #[command(subcommand)]
+        command: CredentialCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CredentialCommand {
+    /// Read one credential value from stdin and replace the validated set.
+    Import(CredentialImportCommand),
+}
+
+#[derive(Debug, Args)]
+struct CredentialImportCommand {
+    account_id: String,
+    #[arg(long, value_enum)]
+    purpose: CliCredentialPurpose,
+    #[arg(long, value_enum)]
+    auth_method: CliAuthMethod,
+    #[arg(long, value_enum)]
+    session_kind: CliSessionKind,
+    #[arg(long, value_enum, default_value = "manual-import")]
+    acquired_via: CliCredentialAcquisition,
+    #[arg(long)]
+    expires_at: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -214,6 +241,97 @@ enum CliScope {
     CreditManage,
     AuditRead,
     ServiceTokenManage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CliCredentialPurpose {
+    #[value(name = "provider-password")]
+    Password,
+    #[value(name = "provider-cookie")]
+    Cookie,
+    #[value(name = "provider-access-token")]
+    AccessToken,
+    #[value(name = "provider-refresh-token")]
+    RefreshToken,
+    #[value(name = "provider-composite-session")]
+    CompositeSession,
+}
+
+impl From<CliCredentialPurpose> for SecretPurpose {
+    fn from(purpose: CliCredentialPurpose) -> Self {
+        match purpose {
+            CliCredentialPurpose::Password => Self::ProviderPassword,
+            CliCredentialPurpose::Cookie => Self::ProviderCookie,
+            CliCredentialPurpose::AccessToken => Self::ProviderAccessToken,
+            CliCredentialPurpose::RefreshToken => Self::ProviderRefreshToken,
+            CliCredentialPurpose::CompositeSession => Self::ProviderCompositeSession,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CliAuthMethod {
+    Password,
+    QrCode,
+    ExternalBrowserOauth,
+    AssistedSession,
+    ImportedCookie,
+    ImportedToken,
+}
+
+impl From<CliAuthMethod> for AuthMethod {
+    fn from(method: CliAuthMethod) -> Self {
+        match method {
+            CliAuthMethod::Password => Self::Password,
+            CliAuthMethod::QrCode => Self::QrCode,
+            CliAuthMethod::ExternalBrowserOauth => Self::ExternalBrowserOauth,
+            CliAuthMethod::AssistedSession => Self::AssistedSession,
+            CliAuthMethod::ImportedCookie => Self::ImportedCookie,
+            CliAuthMethod::ImportedToken => Self::ImportedToken,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CliSessionKind {
+    Cookie,
+    BearerToken,
+    Jwt,
+    Composite,
+    ProviderSpecific,
+}
+
+impl From<CliSessionKind> for SessionKind {
+    fn from(kind: CliSessionKind) -> Self {
+        match kind {
+            CliSessionKind::Cookie => Self::Cookie,
+            CliSessionKind::BearerToken => Self::BearerToken,
+            CliSessionKind::Jwt => Self::Jwt,
+            CliSessionKind::Composite => Self::Composite,
+            CliSessionKind::ProviderSpecific => Self::ProviderSpecific,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CliCredentialAcquisition {
+    NativeProviderLogin,
+    CaptureTool,
+    BrowserExtension,
+    AndroidHelper,
+    ManualImport,
+}
+
+impl From<CliCredentialAcquisition> for CredentialAcquisition {
+    fn from(acquisition: CliCredentialAcquisition) -> Self {
+        match acquisition {
+            CliCredentialAcquisition::NativeProviderLogin => Self::NativeProviderLogin,
+            CliCredentialAcquisition::CaptureTool => Self::CaptureTool,
+            CliCredentialAcquisition::BrowserExtension => Self::BrowserExtension,
+            CliCredentialAcquisition::AndroidHelper => Self::AndroidHelper,
+            CliCredentialAcquisition::ManualImport => Self::ManualImport,
+        }
+    }
 }
 
 impl From<CliScope> for ServiceScope {
@@ -378,7 +496,53 @@ async fn handle_provider_account(
                 write_json(&value)
             }
         },
+        ProviderAccountCommand::Credential {
+            command: CredentialCommand::Import(command),
+        } => handle_credential_import(client, &token, command).await,
     }
+}
+
+async fn handle_credential_import(
+    client: &ApiClient,
+    token: &asterism_secrets::SecretString,
+    command: CredentialImportCommand,
+) -> anyhow::Result<()> {
+    let value = read_credential_value()?;
+    let path = format!(
+        "/api/v1/provider-accounts/{}/credentials",
+        command.account_id
+    );
+    let response = {
+        let request = PutProviderCredentialsRequest {
+            auth_method: command.auth_method.into(),
+            acquired_via: command.acquired_via.into(),
+            session_kind: command.session_kind.into(),
+            expires_at: command.expires_at,
+            fields: vec![PutProviderCredentialField {
+                purpose: command.purpose.into(),
+                value: value.expose_secret(),
+            }],
+        };
+        client.put_authorized(&path, token, &request).await
+    };
+    drop(value);
+    write_json(&response?)
+}
+
+#[derive(Serialize)]
+struct PutProviderCredentialsRequest<'a> {
+    auth_method: AuthMethod,
+    acquired_via: CredentialAcquisition,
+    session_kind: SessionKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    fields: Vec<PutProviderCredentialField<'a>>,
+}
+
+#[derive(Serialize)]
+struct PutProviderCredentialField<'a> {
+    purpose: SecretPurpose,
+    value: &'a str,
 }
 
 async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result<()> {
@@ -533,5 +697,53 @@ mod tests {
                 }
             } if account_id == "account-id"
         ));
+    }
+
+    #[test]
+    fn credential_import_has_no_plaintext_command_line_option() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "provider-account",
+            "credential",
+            "import",
+            "account-id",
+            "--purpose",
+            "provider-cookie",
+            "--auth-method",
+            "imported-cookie",
+            "--session-kind",
+            "cookie",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::ProviderAccount {
+                command: ProviderAccountCommand::Credential {
+                    command: CredentialCommand::Import(CredentialImportCommand {
+                        account_id,
+                        acquired_via: CliCredentialAcquisition::ManualImport,
+                        ..
+                    })
+                }
+            } if account_id == "account-id"
+        ));
+        assert!(
+            Arguments::try_parse_from([
+                "asterismctl",
+                "provider-account",
+                "credential",
+                "import",
+                "account-id",
+                "--purpose",
+                "provider-cookie",
+                "--auth-method",
+                "imported-cookie",
+                "--session-kind",
+                "cookie",
+                "--value",
+                "must-not-be-accepted",
+            ])
+            .is_err()
+        );
     }
 }

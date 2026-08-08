@@ -372,3 +372,15 @@ redacted from request debug output, and never returned. The response contains
 only credential count plus the sanitized Provider session status; OpenAPI marks
 every value as write-only and documents validation, conflict, rate-limit, and
 availability outcomes.
+
+## Twenty-eighth Phase 0 slice
+
+The twenty-eighth checkpoint adds
+`asterismctl provider-account credential import`. The command accepts only
+non-secret credential metadata as arguments: the value has no command-line
+option and is read from stdin, with hidden terminal input for interactive use.
+
+Piped values have one trailing line ending removed, are bounded before the HTTP
+request, and remain in redacted zeroizing wrappers until the request finishes.
+The CLI then drops the value explicitly and prints only the API's sanitized
+commit result.
