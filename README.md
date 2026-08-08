@@ -34,7 +34,7 @@ Phase 0 已建立并持续完善以下基础：
 - SQLite migration、WAL 策略、事务仓储和并发测试；
 - 执行租约、Scheduler retry/dead-letter 与事务化 Event Outbox；
 - 点数 grant / reserve / commit / release 流程与不可变流水；
-- SecretStore 抽象、Argon2id 密码原语、角色权限和摘要化 Token；
+- SecretStore 抽象、Argon2id 密码、服务端 Session、scoped Service Token 与登录限速；
 - 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
@@ -118,8 +118,9 @@ cargo run -p asterismd
 
 ```bash
 cargo run -p asterismctl -- system health
-cargo run -p asterismctl -- provider list
 ```
+
+Provider 与管理接口需要 Web Session 或 scoped Service Token。当前内部接口及其请求结构可从 `/api/v1/openapi.json` 查看；CLI 鉴权命令仍在 Phase 0 中完善。
 
 也可以直接访问：
 

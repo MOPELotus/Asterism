@@ -73,11 +73,12 @@ fn role_permissions(role: Role) -> &'static [Permission] {
     use Permission::{
         ExecuteAnyTask, ExecuteOwnTasks, GrantCredits, ManageCredits, ManageOwnAccounts,
         ManagePricing, ManageProviders, ManageSystem, ManageUsers, ReadOwnCredits, ReadOwnTasks,
-        ViewAnyAudit, ViewOwnAudit,
+        ReadProviders, ViewAnyAudit, ViewOwnAudit,
     };
     match role {
         Role::Master => &[
             ReadOwnTasks,
+            ReadProviders,
             ExecuteOwnTasks,
             ManageOwnAccounts,
             ReadOwnCredits,
@@ -93,6 +94,7 @@ fn role_permissions(role: Role) -> &'static [Permission] {
         ],
         Role::Operator => &[
             ReadOwnTasks,
+            ReadProviders,
             ExecuteOwnTasks,
             ManageOwnAccounts,
             ReadOwnCredits,
@@ -103,6 +105,7 @@ fn role_permissions(role: Role) -> &'static [Permission] {
         ],
         Role::User => &[
             ReadOwnTasks,
+            ReadProviders,
             ExecuteOwnTasks,
             ManageOwnAccounts,
             ReadOwnCredits,

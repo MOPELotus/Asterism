@@ -99,16 +99,22 @@ dependencies = [
 name = "asterism-api"
 version = "0.1.0"
 dependencies = [
+ "asterism-auth",
+ "asterism-domain",
  "asterism-provider-api",
+ "asterism-secrets",
  "asterism-storage",
  "axum",
+ "chrono",
  "http",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -197,6 +203,7 @@ dependencies = [
 name = "asterism-storage"
 version = "0.1.0"
 dependencies = [
+ "asterism-auth",
  "asterism-domain",
  "asterism-events",
  "asterism-scheduler",

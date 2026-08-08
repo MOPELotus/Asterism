@@ -125,6 +125,17 @@ impl UserRepository for SqliteUserRepository {
         row.map(|row| decode_user(&row)).transpose()
     }
 
+    async fn find_user_by_username(&self, username: &str) -> Result<Option<User>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, username, password_hash, status, roles_json, permissions_json, \
+                    created_at, updated_at FROM users WHERE username = ? COLLATE NOCASE",
+        )
+        .bind(username)
+        .fetch_optional(self.database.pool())
+        .await?;
+        row.map(|row| decode_user(&row)).transpose()
+    }
+
     async fn save_user(&self, user: &User) -> Result<(), StorageError> {
         let mut transaction = self.database.pool().begin().await?;
         sqlx::query(

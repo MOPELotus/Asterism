@@ -43,8 +43,8 @@ fingerprint column for providers whose remote IDs are unstable.
 
 - `GET /health`
 - `GET /api/v1/system/health`
-- `GET /api/v1/providers`
 - `GET /api/v1/openapi.json`
+- authenticated `/api/v1/providers` and auth/session/service-token routes
 
 Every response receives an `x-request-id`. The initial CLI supports
 `system health` and `provider list` against the same API.
@@ -79,6 +79,19 @@ twice. It also adds leased scheduler job claiming/retry/dead-letter persistence,
 256-bit opaque token generation with digest-only storage values, normalized
 user roles, and a transactionally one-time initial Master bootstrap.
 
-The next slice persists Web sessions and scoped service tokens, adds config
-layering, and exposes the first authenticated internal management API/CLI
-actions.
+## Fourth Phase 0 slice
+
+The fourth checkpoint persists server-side Web sessions and scoped service
+tokens using digest-only token storage. It adds atomic expiry/revocation checks,
+same-transaction lifecycle audit records, generic login failures, bounded login
+rate limiting, scope-subset enforcement during token rotation, strict Cookie
+attributes, no-store responses, authenticated Provider metadata, and complete
+auth-route coverage in the internal OpenAPI document.
+
+The daemon rejects non-loopback listeners while Phase 0 lacks native TLS and
+explicit trusted-proxy configuration. Process-level tests cover Master
+bootstrap, Cookie access, Bearer access, self-revocation, logout, and rejection
+after either credential is revoked.
+
+The next slice adds layered configuration and authenticated CLI management
+flows without bypassing the HTTP API.

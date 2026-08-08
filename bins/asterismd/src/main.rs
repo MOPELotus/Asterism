@@ -21,6 +21,14 @@ struct Arguments {
         default_value = "sqlite://asterism.db"
     )]
     database_url: String,
+
+    /// Web session lifetime in seconds.
+    #[arg(long, env = "ASTERISM_SESSION_TTL_SECONDS", default_value_t = 43_200)]
+    session_ttl_seconds: u64,
+
+    /// Mark session cookies Secure (required for non-loopback listeners).
+    #[arg(long, env = "ASTERISM_SECURE_COOKIES", default_value_t = false)]
+    secure_cookies: bool,
 }
 
 #[tokio::main]
@@ -32,6 +40,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let arguments = Arguments::parse();
+    if !arguments.bind.ip().is_loopback() {
+        anyhow::bail!(
+            "non-loopback listeners are unavailable during Phase 0; bind to loopback and place an HTTPS reverse proxy on the same host"
+        );
+    }
+    if arguments.session_ttl_seconds == 0 {
+        anyhow::bail!("--session-ttl-seconds must be greater than zero");
+    }
     let database = Database::connect(&arguments.database_url)
         .await
         .context("failed to connect to the Asterism database")?;
@@ -50,19 +66,24 @@ async fn main() -> anyhow::Result<()> {
         "startup recovery completed"
     );
 
-    let app = build_router(ApiState {
-        database: database.clone(),
-        providers: Arc::new(ProviderRegistry::default()),
-    });
+    let app = build_router(ApiState::new(
+        database.clone(),
+        Arc::new(ProviderRegistry::default()),
+        arguments.session_ttl_seconds,
+        arguments.secure_cookies,
+    ));
     let listener = tokio::net::TcpListener::bind(arguments.bind)
         .await
         .context("failed to bind the Asterism HTTP listener")?;
     tracing::info!(address = %arguments.bind, "asterismd started");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("Asterism HTTP server failed")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("Asterism HTTP server failed")?;
     database.close().await;
     tracing::info!("asterismd stopped");
     Ok(())

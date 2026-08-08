@@ -7,6 +7,7 @@ mod outbox;
 mod recovery;
 mod repository;
 mod scheduler;
+mod session;
 mod user;
 
 pub use credit::{CreditGrant, SqliteCreditRepository};
@@ -16,7 +17,8 @@ pub use outbox::{FailureDisposition, OutboxHealth, OutboxRecord, SqliteOutboxRep
 pub use recovery::RecoveryReport;
 pub use repository::{
     CreditRepository, ExecutionLeaseRepository, OutboxRepository, SchedulerRepository,
-    TaskRepository, UserRepository,
+    SessionRepository, TaskRepository, UserRepository,
 };
 pub use scheduler::{JobFailureDisposition, SqliteSchedulerRepository};
+pub use session::SqliteSessionRepository;
 pub use user::{InitialMaster, SqliteUserRepository};

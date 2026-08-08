@@ -10,7 +10,10 @@ pub mod task;
 pub mod user;
 
 pub use account::{Course, ProviderAccount, ProviderId};
-pub use auth::{AuthMethod, AuthState, HumanRequiredReason, SessionKind};
+pub use auth::{
+    AuditActor, AuthMethod, AuthState, HumanRequiredReason, ServiceScope, ServiceToken,
+    SessionKind, WebSession,
+};
 pub use automation::{
     AutomationPlan, AutomationPlanStatus, BillingPolicy, CoverageSpec, ExecutionPolicy,
     InheritanceMode, PlanScope, SchedulePolicy,

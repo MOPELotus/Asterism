@@ -1,6 +1,8 @@
+use asterism_auth::TokenDigest;
 use asterism_domain::{
-    CreditAccount, CreditReservation, CreditReservationId, CreditTransactionId, ExecutionId,
-    ExecutionLease, Task, TaskId, Timestamp, User, UserId,
+    AuditActor, CreditAccount, CreditReservation, CreditReservationId, CreditTransactionId,
+    ExecutionId, ExecutionLease, ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User,
+    UserId, WebSession, WebSessionId,
 };
 use async_trait::async_trait;
 
@@ -21,6 +23,7 @@ pub trait TaskRepository: Send + Sync {
 #[async_trait]
 pub trait UserRepository: Send + Sync {
     async fn find_user(&self, id: UserId) -> Result<Option<User>, StorageError>;
+    async fn find_user_by_username(&self, username: &str) -> Result<Option<User>, StorageError>;
     async fn save_user(&self, user: &User) -> Result<(), StorageError>;
 }
 
@@ -127,4 +130,47 @@ pub trait SchedulerRepository: Send + Sync {
         retry_at: Option<Timestamp>,
         at: Timestamp,
     ) -> Result<JobFailureDisposition, StorageError>;
+}
+
+#[async_trait]
+pub trait SessionRepository: Send + Sync {
+    async fn create_web_session(
+        &self,
+        session: &WebSession,
+        token_digest: &TokenDigest,
+        actor: AuditActor,
+    ) -> Result<(), StorageError>;
+
+    async fn authenticate_web_session(
+        &self,
+        token_digest: &TokenDigest,
+        now: Timestamp,
+    ) -> Result<Option<(WebSession, User)>, StorageError>;
+
+    async fn revoke_web_session(
+        &self,
+        session_id: WebSessionId,
+        at: Timestamp,
+        actor: AuditActor,
+    ) -> Result<bool, StorageError>;
+
+    async fn create_service_token(
+        &self,
+        token: &ServiceToken,
+        token_digest: &TokenDigest,
+        actor: AuditActor,
+    ) -> Result<(), StorageError>;
+
+    async fn authenticate_service_token(
+        &self,
+        token_digest: &TokenDigest,
+        now: Timestamp,
+    ) -> Result<Option<ServiceToken>, StorageError>;
+
+    async fn revoke_service_token(
+        &self,
+        token_id: ServiceTokenId,
+        at: Timestamp,
+        actor: AuditActor,
+    ) -> Result<bool, StorageError>;
 }
