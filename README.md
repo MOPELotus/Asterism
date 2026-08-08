@@ -21,7 +21,7 @@ Asterism 是一个基于 Rust 的多平台学习任务聚合与调度服务。�
 - 支持自动执行、延迟审批、手动审批和仅通知等策略；
 - 以事务化点数、调度、执行租约和 Event Outbox 保证关键状态一致性；
 - 为敏感凭据、正式测评、浏览器自动化和公网部署设置明确安全边界；
-- 在 Core 与前两批 Provider 完成后，逐步稳定 API 并建设 WebUI 与 Asterism-Plugin。
+- 第一批 Provider 完成后立即准备 OpenAPI Client Generation，并建设正式 WebUI 与 Asterism-Plugin；第二批完成后再冻结兼容基线。
 
 ## 当前进度
 
@@ -91,12 +91,15 @@ CLI / WebUI / Asterism-Plugin
 | 阶段 | Provider / 交付物 | 状态 |
 |---|---|---|
 | Phase 0 | Core、Storage、Scheduler、Auth、内部 API / CLI | 开发中 |
-| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren`、`zhihuishu` | 计划中 |
-| 第二批 | `zjy`、`icve` | 计划中 |
-| 对外接口阶段 | 稳定 API、正式 WebUI、Asterism-Plugin | 第二批完成后开始 |
+| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 计划中 |
+| 第一批后交付 | OpenAPI Client Generation Readiness、Refine v5 + shadcn/ui WebUI、Asterism-Plugin | 第一批完成后立即开始 |
+| 第二批 | `zhihuishu`、`zjy`、`icve` | 计划中 |
+| 兼容性收口 | 稳定并冻结 API / OpenAPI 基线，完成 WebUI / Plugin 兼容性收口 | 第二批完成后开始 |
 | 后续批次 | `fif`、`itest`、`utalk` 及其他已分配 Provider ID 的平台 | 规划中 |
 
 第一批不会以 Demo 或功能残缺的 MVP 作为完成状态。Provider 的研究来源、采用方式、许可证和真实验证情况会记录在 [UPSTREAMS.md](UPSTREAMS.md)。
+
+WebUI 采用 framework-first 原则，但不为复用而强行套用框架。默认直接复用 Refine v5 与 shadcn/ui 的 Layout、CRUD、DataTable、Form、Auth 和 Theme 基础设施，只调整 Asterism Theme / Branding 并实现必要的领域工作流；现成组件明显不适用时允许最小必要自定义，不进行缺少明确 UX 缺陷依据的主动重设计、美化或像素级循环。
 
 ## 快速开始
 
@@ -208,4 +211,4 @@ Commit 使用统一格式：
 
 ## 项目状态
 
-Asterism 当前没有稳定版本或兼容性承诺。公开 API、部署文档、正式 WebUI 和 Asterism-Plugin 会在 Core 与前两批 Provider 完成并经过真实验证后发布。
+Asterism 当前没有稳定版本或兼容性承诺。正式 WebUI 与 Asterism-Plugin 在第一批 Provider 完成后开始建设；公开 API 与 OpenAPI 兼容基线在第二批完成并经过真实验证后稳定和冻结。
