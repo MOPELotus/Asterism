@@ -120,7 +120,22 @@ cargo run -p asterismd
 cargo run -p asterismctl -- system health
 ```
 
-Provider 与管理接口需要 Web Session 或 scoped Service Token。当前内部接口及其请求结构可从 `/api/v1/openapi.json` 查看；CLI 鉴权命令仍在 Phase 0 中完善。
+首次启动后创建 Master。密码默认通过终端隐藏输入，命令会返回一个仅展示一次、默认有效期 30 天的 scoped Service Token：
+
+```bash
+cargo run -p asterismctl -- init --username master
+```
+
+请用 Secret Manager 保存返回的 Token，仅在调用期间注入 `ASTERISM_TOKEN`；不要把它写入 `asterism.toml`、命令行参数或版本库。PowerShell 示例：
+
+```powershell
+$env:ASTERISM_TOKEN = "<one-time token>"
+cargo run -p asterismctl -- auth whoami
+cargo run -p asterismctl -- provider list
+Remove-Item Env:ASTERISM_TOKEN
+```
+
+自动化环境可给 `init` 或 `auth login` 添加 `--password-stdin`，从标准输入读取单行密码，避免把密码放进进程参数。当前内部接口及其请求结构可从 `/api/v1/openapi.json` 查看。
 
 也可以直接访问：
 

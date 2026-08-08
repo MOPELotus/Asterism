@@ -102,3 +102,16 @@ credentials remain outside the ordinary configuration model.
 
 The next slice adds authenticated CLI management flows without bypassing the
 HTTP API.
+
+## Sixth Phase 0 slice
+
+The sixth checkpoint adds HTTP-only CLI flows for one-time Master bootstrap,
+password login, current-identity inspection, Provider metadata, and scoped
+service-token creation and revocation. Passwords use a hidden terminal prompt
+or explicit stdin mode; service tokens are accepted only through the dedicated
+process environment and are never regular configuration or command-line
+arguments. Temporary Web sessions are revoked after issuing the requested CLI
+token, and cleartext HTTP is rejected for non-loopback targets.
+
+The next slice begins Provider account and task-management actions on the same
+authenticated API boundary.

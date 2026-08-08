@@ -9,11 +9,15 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+asterism-domain = { path = "../../crates/domain" }
+asterism-secrets = { path = "../../crates/secrets" }
 clap.workspace = true
 reqwest.workspace = true
+rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

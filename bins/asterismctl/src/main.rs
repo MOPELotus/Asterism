@@ -1,7 +1,19 @@
-use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
-use reqwest::StatusCode;
-use serde::de::DeserializeOwned;
+mod client;
+mod input;
+
+use std::collections::BTreeSet;
+
+use anyhow::Context;
+use asterism_domain::ServiceScope;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde_json::json;
+
+use crate::{
+    client::{ApiClient, CreateServiceTokenRequest, write_json},
+    input::{PasswordMode, read_password, service_token_from_process},
+};
+
+const DEFAULT_TOKEN_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -16,16 +28,36 @@ struct Arguments {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Inspect service state.
-    System {
+    /// Create the one-time initial Master and issue the first CLI token.
+    Init(PasswordTokenCommand),
+    /// Inspect or establish an authenticated identity.
+    Auth {
         #[command(subcommand)]
-        command: SystemCommand,
+        command: AuthCommand,
     },
     /// Inspect registered providers and their capabilities.
     Provider {
         #[command(subcommand)]
         command: ProviderCommand,
     },
+    /// Create or revoke scoped service tokens.
+    ServiceToken {
+        #[command(subcommand)]
+        command: ServiceTokenCommand,
+    },
+    /// Inspect service state.
+    System {
+        #[command(subcommand)]
+        command: SystemCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Authenticate with a password and issue a new CLI token.
+    Login(PasswordTokenCommand),
+    /// Show the identity associated with `ASTERISM_TOKEN`.
+    Whoami,
 }
 
 #[derive(Debug, Subcommand)]
@@ -40,56 +72,220 @@ enum ProviderCommand {
     List,
 }
 
+#[derive(Debug, Subcommand)]
+enum ServiceTokenCommand {
+    /// Issue a scoped token using `ASTERISM_TOKEN`.
+    Create(TokenOptions),
+    /// Revoke a token by ID using `ASTERISM_TOKEN`.
+    Revoke {
+        /// Service token ID returned when the token was created.
+        token_id: String,
+    },
+}
+
+#[derive(Debug, Args)]
+struct PasswordTokenCommand {
+    /// Master username.
+    #[arg(long)]
+    username: String,
+
+    /// Read one password line from stdin instead of prompting on the terminal.
+    #[arg(long)]
+    password_stdin: bool,
+
+    #[command(flatten)]
+    token: TokenOptions,
+}
+
+#[derive(Debug, Args)]
+struct TokenOptions {
+    /// Human-readable token name.
+    #[arg(long, default_value = "asterismctl")]
+    name: String,
+
+    /// Token scope. Repeat the option or use comma-separated values.
+    #[arg(long = "scope", value_enum, value_delimiter = ',')]
+    scopes: Vec<CliScope>,
+
+    /// Token lifetime. The safe default is 30 days.
+    #[arg(long, default_value_t = DEFAULT_TOKEN_TTL_SECONDS)]
+    expires_in_seconds: u64,
+}
+
+impl TokenOptions {
+    fn into_request(self) -> CreateServiceTokenRequest {
+        let scopes = if self.scopes.is_empty() {
+            default_cli_scopes()
+        } else {
+            self.scopes.into_iter().map(ServiceScope::from).collect()
+        };
+        CreateServiceTokenRequest {
+            name: self.name,
+            scopes,
+            expires_in_seconds: Some(self.expires_in_seconds),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CliScope {
+    SystemRead,
+    ProviderRead,
+    ProviderManage,
+    TaskRead,
+    TaskExecute,
+    CreditRead,
+    CreditManage,
+    AuditRead,
+    ServiceTokenManage,
+}
+
+impl From<CliScope> for ServiceScope {
+    fn from(scope: CliScope) -> Self {
+        match scope {
+            CliScope::SystemRead => Self::SystemRead,
+            CliScope::ProviderRead => Self::ProviderRead,
+            CliScope::ProviderManage => Self::ProviderManage,
+            CliScope::TaskRead => Self::TaskRead,
+            CliScope::TaskExecute => Self::TaskExecute,
+            CliScope::CreditRead => Self::CreditRead,
+            CliScope::CreditManage => Self::CreditManage,
+            CliScope::AuditRead => Self::AuditRead,
+            CliScope::ServiceTokenManage => Self::ServiceTokenManage,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let arguments = Arguments::parse();
-    let client = ApiClient::new(&arguments.url);
-    let value = match arguments.command {
-        Command::System {
-            command: SystemCommand::Health,
+    let client = ApiClient::new(&arguments.url)?;
+    match arguments.command {
+        Command::Init(command) => {
+            issue_from_password(&client, "/api/v1/auth/bootstrap", command, true).await
+        }
+        Command::Auth {
+            command: AuthCommand::Login(command),
+        } => issue_from_password(&client, "/api/v1/auth/login", command, false).await,
+        Command::Auth {
+            command: AuthCommand::Whoami,
         } => {
-            client
-                .get::<serde_json::Value>("/api/v1/system/health")
-                .await?
+            let token = service_token_from_process()?;
+            let value = client
+                .get_authorized("/api/v1/auth/session", &token)
+                .await?;
+            write_json(&value)
         }
         Command::Provider {
             command: ProviderCommand::List,
-        } => client.get::<serde_json::Value>("/api/v1/providers").await?,
-    };
-    println!("{}", serde_json::to_string_pretty(&value)?);
-    Ok(())
-}
-
-#[derive(Debug)]
-struct ApiClient {
-    base_url: String,
-    http: reqwest::Client,
-}
-
-impl ApiClient {
-    fn new(base_url: &str) -> Self {
-        Self {
-            base_url: base_url.trim_end_matches('/').to_owned(),
-            http: reqwest::Client::new(),
+        } => {
+            let token = service_token_from_process()?;
+            let value = client.get_authorized("/api/v1/providers", &token).await?;
+            write_json(&value)
+        }
+        Command::ServiceToken {
+            command: ServiceTokenCommand::Create(options),
+        } => {
+            let token = service_token_from_process()?;
+            let issued = client
+                .create_service_token_with_bearer(&token, &options.into_request())
+                .await?;
+            eprintln!(
+                "The service token is shown once; store it in a secret manager and remove it from terminal history."
+            );
+            write_json(&issued)
+        }
+        Command::ServiceToken {
+            command: ServiceTokenCommand::Revoke { token_id },
+        } => {
+            let token = service_token_from_process()?;
+            client.revoke_service_token(&token, &token_id).await?;
+            write_json(&json!({ "revoked": token_id }))
+        }
+        Command::System {
+            command: SystemCommand::Health,
+        } => {
+            let value = client.get_public("/api/v1/system/health").await?;
+            write_json(&value)
         }
     }
+}
 
-    async fn get<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
-        let url = format!("{}{path}", self.base_url);
-        let response = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("failed to request {url}"))?;
-        let status = response.status();
-        let bytes = response.bytes().await.context("failed to read response")?;
-        if status != StatusCode::OK {
-            bail!(
-                "Asterism API returned {status}: {}",
-                String::from_utf8_lossy(&bytes)
-            );
+async fn issue_from_password(
+    client: &ApiClient,
+    authentication_path: &str,
+    command: PasswordTokenCommand,
+    confirm_password: bool,
+) -> anyhow::Result<()> {
+    let mode = if command.password_stdin {
+        PasswordMode::Stdin
+    } else {
+        PasswordMode::Terminal {
+            confirm: confirm_password,
         }
-        serde_json::from_slice(&bytes).context("Asterism API returned invalid JSON")
+    };
+    let password = read_password(mode)?;
+    let session = client
+        .establish_session(authentication_path, &command.username, &password)
+        .await?;
+    let issued = match client
+        .create_service_token_with_session(&session, &command.token.into_request())
+        .await
+    {
+        Ok(issued) => issued,
+        Err(error) => {
+            if let Err(logout_error) = client.logout(&session).await {
+                eprintln!("warning: failed to revoke temporary Web Session: {logout_error:#}");
+            }
+            return Err(error).context("failed to issue CLI service token");
+        }
+    };
+
+    let logout_result = client.logout(&session).await;
+    eprintln!(
+        "The service token is shown once; store it in a secret manager and set ASTERISM_TOKEN only when needed."
+    );
+    write_json(&issued)?;
+    logout_result
+        .context("the token above was issued, but the temporary Web Session could not be revoked")
+}
+
+fn default_cli_scopes() -> BTreeSet<ServiceScope> {
+    [
+        ServiceScope::SystemRead,
+        ServiceScope::ProviderRead,
+        ServiceScope::ProviderManage,
+        ServiceScope::TaskRead,
+        ServiceScope::TaskExecute,
+        ServiceScope::CreditRead,
+        ServiceScope::CreditManage,
+        ServiceScope::AuditRead,
+        ServiceScope::ServiceTokenManage,
+    ]
+    .into_iter()
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_cli_token_has_management_without_integration_scopes() {
+        let scopes = default_cli_scopes();
+        assert!(scopes.contains(&ServiceScope::SystemRead));
+        assert!(scopes.contains(&ServiceScope::ServiceTokenManage));
+        assert_eq!(scopes.len(), 9);
+    }
+
+    #[test]
+    fn explicit_scopes_replace_defaults() {
+        let request = TokenOptions {
+            name: "read-only".to_owned(),
+            scopes: vec![CliScope::ProviderRead],
+            expires_in_seconds: 60,
+        }
+        .into_request();
+        assert_eq!(request.scopes, [ServiceScope::ProviderRead].into());
     }
 }
