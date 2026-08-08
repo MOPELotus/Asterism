@@ -632,3 +632,16 @@ A new event returns 201, an exact retry returns 200 with the original timestamp,
 and changed or gapped sequences return 409. Responses are `no-store`, pairing
 tokens and cross-session access tokens return the same Bootstrap 401, and the
 client-reported `authenticated` event still leaves Core state unchanged.
+
+## Forty-eighth Phase 0 slice
+
+The forty-eighth checkpoint makes successful account binding part of the
+`AuthBootstrapSession` completion transition. An `add_account` session remains
+unbound while awaiting or claimed and receives its Core-created account ID only
+when the credential flow completes. Failed, cancelled, and expired add-account
+sessions cannot retain a partial binding.
+
+Reauthentication and repair sessions remain bound to their original account
+throughout the lifecycle, and completion rejects any different account ID.
+This gives the future credential transaction one domain transition that works
+for both account creation and credential replacement.

@@ -88,13 +88,30 @@ impl AuthBootstrapSession {
         Ok(())
     }
 
-    /// Completes a claimed pairing after its credential flow succeeds.
+    /// Completes a claimed pairing after its credential flow succeeds and
+    /// binds the account created or updated by Core.
     ///
     /// # Errors
     ///
     /// Rejects non-claimed, expired, or timestamp-regressing sessions.
-    pub fn complete(&mut self, at: Timestamp) -> Result<(), AuthBootstrapSessionError> {
-        self.finish(AuthBootstrapState::Completed, at)
+    pub fn complete(
+        &mut self,
+        provider_account_id: ProviderAccountId,
+        at: Timestamp,
+    ) -> Result<(), AuthBootstrapSessionError> {
+        self.require_live_transition(at)?;
+        if self.state != AuthBootstrapState::Claimed {
+            return Err(AuthBootstrapSessionError::InvalidTransition);
+        }
+        match self.purpose {
+            AuthBootstrapPurpose::AddAccount if self.provider_account_id.is_none() => {}
+            AuthBootstrapPurpose::Reauthenticate | AuthBootstrapPurpose::RepairSession
+                if self.provider_account_id == Some(provider_account_id) => {}
+            _ => return Err(AuthBootstrapSessionError::InvalidAccountBinding),
+        }
+        self.advance(AuthBootstrapState::Completed, at)?;
+        self.provider_account_id = Some(provider_account_id);
+        Ok(())
     }
 
     /// Marks a claimed pairing as failed without making it reusable.
@@ -152,7 +169,7 @@ impl AuthBootstrapSession {
     /// Rejects invalid bindings, TTLs, timestamps, claim metadata, and revision
     /// shapes.
     pub fn validate(&self) -> Result<(), AuthBootstrapSessionError> {
-        validate_account_binding(self.purpose, self.provider_account_id)?;
+        validate_account_binding(self.purpose, self.state, self.provider_account_id)?;
         if self.required_recipe_version == 0 {
             return Err(AuthBootstrapSessionError::InvalidRecipeVersion);
         }
@@ -241,10 +258,17 @@ impl AuthBootstrapSession {
 
 fn validate_account_binding(
     purpose: AuthBootstrapPurpose,
+    state: AuthBootstrapState,
     provider_account_id: Option<ProviderAccountId>,
 ) -> Result<(), AuthBootstrapSessionError> {
     let valid = match purpose {
-        AuthBootstrapPurpose::AddAccount => provider_account_id.is_none(),
+        AuthBootstrapPurpose::AddAccount => {
+            if state == AuthBootstrapState::Completed {
+                provider_account_id.is_some()
+            } else {
+                provider_account_id.is_none()
+            }
+        }
         AuthBootstrapPurpose::Reauthenticate | AuthBootstrapPurpose::RepairSession => {
             provider_account_id.is_some()
         }
@@ -300,7 +324,12 @@ mod tests {
             session.claim(now + Duration::seconds(2)),
             Err(AuthBootstrapSessionError::InvalidTransition)
         );
-        session.complete(now + Duration::seconds(3)).unwrap();
+        session
+            .complete(
+                session.provider_account_id.unwrap(),
+                now + Duration::seconds(3),
+            )
+            .unwrap();
         assert_eq!(session.state, AuthBootstrapState::Completed);
         assert_eq!(session.revision, 3);
         assert_eq!(
@@ -367,6 +396,23 @@ mod tests {
         session.expire(now + Duration::minutes(10)).unwrap();
         assert_eq!(session.state, AuthBootstrapState::Expired);
         assert_eq!(session.revision, 2);
+        session.validate().unwrap();
+    }
+
+    #[test]
+    fn add_account_binds_only_when_core_completes_the_claimed_session() {
+        let now = Utc::now();
+        let mut session = session(now, AuthBootstrapPurpose::AddAccount, None);
+        let account_id = ProviderAccountId::new();
+        session.claim(now + Duration::seconds(1)).unwrap();
+        assert_eq!(session.provider_account_id, None);
+
+        session
+            .complete(account_id, now + Duration::seconds(2))
+            .unwrap();
+        assert_eq!(session.state, AuthBootstrapState::Completed);
+        assert_eq!(session.provider_account_id, Some(account_id));
+        assert_eq!(session.revision, 3);
         session.validate().unwrap();
     }
 
