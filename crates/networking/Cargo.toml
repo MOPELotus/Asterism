@@ -1,0 +1,16 @@
+[package]
+name = "asterism-networking"
+description = "Validated network profiles and HTTP client construction for Asterism"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

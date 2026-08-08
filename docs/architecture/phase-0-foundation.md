@@ -810,3 +810,18 @@ adapter must resolve credentials through Core and discover a fresh Work `enc`.
 The capability metadata remains `Development`, advertises only TaskInventory,
 has no Capture recipe, and is not registered until CourseInventory and a
 live-tested transport exist.
+
+## Sixty-first Phase 0 slice
+
+The shared networking crate now resolves field-level policy with the required
+`account > Provider > global > built-in` precedence. Profiles model proxy,
+request timeout, address-family selection, TLS profile, user agent, admission
+rate, and retry backoff; malformed, credential-bearing, or unbounded values are
+rejected before a client is built.
+
+HTTP clients use rustls/WebPKI, HTTPS-only requests, explicit timeouts, optional
+system or configured proxy behavior, and no automatic redirects. Providers must
+therefore classify login and cross-origin redirects rather than inheriting an
+unsafe global policy. Rate-limit enforcement, concurrency semaphores, persistence,
+and API management remain separate follow-up slices; this checkpoint supplies
+the validated client foundation needed by the first native Provider transport.

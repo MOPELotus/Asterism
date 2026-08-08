@@ -31,6 +31,7 @@ Phase 0 已建立并持续完善以下基础：
 - Task / Execution、Remote State / Orchestration State 等独立领域模型；
 - Capability-based Provider API、Metadata 与 Registry；
 - 课程发现到后续 capability 的短命、脱敏且不持久化路由上下文；
+- Account > Provider > Global 覆盖的 NetworkProfile 与集中 HTTP Client 构建；
 - 先完整采集后事务提交的 Provider Course / Task inventory 编排；
 - 执行状态机、正式测评保护与崩溃恢复语义；
 - SQLite migration、WAL 策略、事务仓储和并发测试；
@@ -75,6 +76,7 @@ CLI / WebUI / Asterism-Plugin
 | `crates/provider-api` | Provider Capability、Metadata、错误模型和注册表 |
 | `crates/engine` | 执行状态转换、测评保护和可靠事件派发 |
 | `crates/events` | 结构化实时领域事件 |
+| `crates/networking` | NetworkProfile 覆盖、校验与共享 HTTP Client 构建 |
 | `crates/scheduler` | 扫描、执行、重试和通知任务模型 |
 | `crates/storage` | SQLite adapter、migration、事务仓储与恢复 |
 | `crates/secrets` | 零化内存的 Secret 类型和 SecretStore 边界 |
