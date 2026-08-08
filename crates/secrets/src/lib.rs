@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use asterism_domain::{SecretId, Timestamp, UserId};
+use asterism_domain::{ProviderAccountId, SecretId, SessionKind, Timestamp, UserId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -98,6 +98,68 @@ pub enum SecretPurpose {
     BrowserJobCredential,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialAcquisition {
+    NativeProviderLogin,
+    CaptureTool,
+    BrowserExtension,
+    AndroidHelper,
+    ManualImport,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderCredential {
+    pub provider_account_id: ProviderAccountId,
+    pub secret: SecretRef,
+    pub session_kind: SessionKind,
+    pub acquired_via: CredentialAcquisition,
+    pub captured_at: Timestamp,
+    pub expires_at: Option<Timestamp>,
+    pub updated_at: Timestamp,
+}
+
+impl ProviderCredential {
+    /// Validates non-secret credential metadata independently from persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderCredentialError`] for non-Provider secret purposes or
+    /// lifecycle timestamps that move backwards.
+    pub fn validate(&self) -> Result<(), ProviderCredentialError> {
+        if !matches!(
+            self.secret.purpose,
+            SecretPurpose::ProviderPassword
+                | SecretPurpose::ProviderCookie
+                | SecretPurpose::ProviderAccessToken
+                | SecretPurpose::ProviderRefreshToken
+                | SecretPurpose::ProviderCompositeSession
+        ) {
+            return Err(ProviderCredentialError::InvalidPurpose);
+        }
+        if self.updated_at < self.captured_at
+            || self
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= self.captured_at)
+        {
+            return Err(ProviderCredentialError::InvalidTimestamps);
+        }
+        Ok(())
+    }
+
+    pub fn is_expired_at(&self, at: Timestamp) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= at)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ProviderCredentialError {
+    #[error("credential must use a Provider secret purpose")]
+    InvalidPurpose,
+    #[error("credential lifecycle timestamps are invalid")]
+    InvalidTimestamps,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecretAccess {
     pub actor: SecretActor,
@@ -172,5 +234,40 @@ mod tests {
         assert_eq!(format!("{bytes:?}"), "SecretValue([REDACTED])");
         assert_eq!(format!("{text:?}"), "SecretString([REDACTED])");
         assert_eq!(format!("{key:?}"), "SecretKey([REDACTED])");
+    }
+
+    #[test]
+    fn provider_credential_rejects_non_provider_purpose_and_invalid_expiry() {
+        let now = chrono::Utc::now();
+        let mut credential = ProviderCredential {
+            provider_account_id: ProviderAccountId::new(),
+            secret: SecretRef {
+                id: SecretId::new(),
+                owner_user_id: UserId::new(),
+                purpose: SecretPurpose::ProviderCookie,
+                version: 1,
+                key_id: "key-a".to_owned(),
+                created_at: now,
+                updated_at: now,
+            },
+            session_kind: SessionKind::Cookie,
+            acquired_via: CredentialAcquisition::ManualImport,
+            captured_at: now,
+            expires_at: Some(now + chrono::Duration::hours(1)),
+            updated_at: now,
+        };
+        assert_eq!(credential.validate(), Ok(()));
+        assert!(!credential.is_expired_at(now));
+        credential.secret.purpose = SecretPurpose::ServiceToken;
+        assert_eq!(
+            credential.validate(),
+            Err(ProviderCredentialError::InvalidPurpose)
+        );
+        credential.secret.purpose = SecretPurpose::ProviderCookie;
+        credential.expires_at = Some(now);
+        assert_eq!(
+            credential.validate(),
+            Err(ProviderCredentialError::InvalidTimestamps)
+        );
     }
 }

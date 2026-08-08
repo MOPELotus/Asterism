@@ -131,7 +131,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 14);
+        assert_eq!(migration_count, 15);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -206,5 +206,48 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(version, 1);
+    }
+
+    #[tokio::test]
+    async fn provider_credential_metadata_migration_backfills_existing_links() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE provider_account_credentials (\
+                 provider_account_id TEXT NOT NULL,\
+                 secret_blob_id TEXT NOT NULL,\
+                 credential_kind TEXT NOT NULL,\
+                 created_at TEXT NOT NULL,\
+                 PRIMARY KEY (provider_account_id, secret_blob_id)\
+             ) STRICT;\
+             INSERT INTO provider_account_credentials \
+                 (provider_account_id, secret_blob_id, credential_kind, created_at) \
+             VALUES ('account-a', 'secret-a', 'provider_cookie', \
+                     '2026-08-09T00:00:00.000000000Z');",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/015_provider_credential_metadata.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let row = sqlx::query(
+            "SELECT session_kind, acquired_via, expires_at, updated_at \
+             FROM provider_account_credentials WHERE provider_account_id = 'account-a'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("session_kind"), "provider_specific");
+        assert_eq!(row.get::<String, _>("acquired_via"), "manual_import");
+        assert!(row.get::<Option<String>, _>("expires_at").is_none());
+        assert_eq!(
+            row.get::<String, _>("updated_at"),
+            "2026-08-09T00:00:00.000000000Z"
+        );
     }
 }

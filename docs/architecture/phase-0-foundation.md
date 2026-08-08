@@ -304,3 +304,15 @@ typed `SecretId` values across Provider accounts, runtime contexts, and SQLite
 decoding. Malformed persisted references now fail at the storage boundary, and
 account metadata updates still cannot bypass the dedicated credential
 repository contract.
+
+## Twenty-third Phase 0 slice
+
+The twenty-third checkpoint models non-secret Provider credential metadata as
+`ProviderCredential`: an account-scoped `SecretRef`, independent `SessionKind`,
+acquisition source, captured time, optional expiry, and update time. Validation
+rejects non-Provider secret purposes and backwards lifecycle timestamps.
+
+SQLite now persists this metadata beside the encrypted blob association and
+enforces one live credential per account and purpose. Existing links are
+backfilled as provider-specific manual imports without changing their secret
+material; transactional lifecycle operations follow in the next slice.

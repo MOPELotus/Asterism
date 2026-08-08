@@ -220,6 +220,7 @@ version = "0.1.0"
 dependencies = [
  "asterism-domain",
  "async-trait",
+ "chrono",
  "serde",
  "thiserror",
  "zeroize",
