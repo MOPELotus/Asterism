@@ -234,9 +234,12 @@ version = "0.1.0"
 dependencies = [
  "asterism-domain",
  "asterism-provider-api",
+ "async-trait",
  "scraper",
  "serde_json",
  "sha2",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

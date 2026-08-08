@@ -52,3 +52,15 @@ policy and remains independently guarded.
    unreliable; do not move the entire Provider into a browser runtime.
 6. Add detail, question, submission, and remote-result verification only after
    inventory identity and status are stable.
+
+## Current implementation checkpoint
+
+- Independent Work and Exam list parsers are covered by synthetic sanitized
+  fixtures and compose behind `TaskInventoryCapability`.
+- Course/class identity and `cpi` cross the course-to-task boundary only through
+  the non-serialized ephemeral route context.
+- The runtime transport is an explicit adapter boundary; Native HTTP versus
+  BrowserBridge, fresh Work `enc` discovery, and real-account behavior remain
+  unverified.
+- Chaoxing stays at `Development` and is not registered as an available
+  Provider.

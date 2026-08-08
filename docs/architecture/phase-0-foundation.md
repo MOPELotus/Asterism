@@ -795,3 +795,18 @@ This closes the runtime boundary needed by platforms such as Chaoxing, where a
 course task request needs account-scoped route values such as `cpi`. These facts
 remain available only during the in-memory course-to-task scan and cannot leak
 into API payloads, fixtures, task snapshots, or audit records.
+
+## Sixtieth Phase 0 slice
+
+Chaoxing's independent Work and Exam parsers now compose behind a typed
+`TaskInventoryCapability`. The capability validates Provider/account context,
+requires one course-scoped call, reconstructs course/class identity from the
+ephemeral route context, and returns no partial inventory if either module
+fails.
+
+Network behavior is isolated behind a Chaoxing transport contract. Response
+bodies are bounded, redacted in diagnostics, and zeroized on drop; a future
+adapter must resolve credentials through Core and discover a fresh Work `enc`.
+The capability metadata remains `Development`, advertises only TaskInventory,
+has no Capture recipe, and is not registered until CourseInventory and a
+live-tested transport exist.
