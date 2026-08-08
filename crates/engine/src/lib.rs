@@ -1,6 +1,7 @@
 //! Pure orchestration state machines and policy guards.
 
 mod assessment;
+mod auth_session;
 mod credential;
 mod outbox;
 mod scan;
@@ -10,6 +11,9 @@ mod transition;
 
 pub use assessment::{
     AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action,
+};
+pub use auth_session::{
+    AuthSessionBegin, AuthSessionService, AuthSessionServiceError, AuthSessionStartRequest,
 };
 pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredentialService};
 pub use outbox::{

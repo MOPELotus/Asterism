@@ -410,3 +410,17 @@ transition, compare immutable fields, and require the exact prior revision.
 Only the newest session for an account may advance, preventing a stale callback
 from an older attempt from replacing the account's visible authentication
 state. Migration 016 adds owner and account indexes for polling surfaces.
+
+## Thirty-first Phase 0 slice
+
+The thirty-first checkpoint adds Core orchestration for beginning and cancelling
+Provider authentication. Core persists `Starting` before invoking Provider
+code, passes that typed session ID in the authentication context, and accepts
+only a challenge that echoes the same session and method with bounded public
+user-action data.
+
+A valid challenge advances to its explicit `WaitingUser` subtype. Provider
+failures are classified and persisted as authentication failure, human action,
+Provider unavailability, or client update requirement; an attempt that expires
+during the call becomes `Expired`. Cancellation is owner-scoped, revisioned,
+and cannot revive terminal or superseded attempts.

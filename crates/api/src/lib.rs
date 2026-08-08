@@ -576,7 +576,7 @@ mod tests {
     };
 
     use asterism_domain::{
-        AssessmentClass, AuthMethod, AuthSessionId, AuthState, RemoteState, SessionKind, SourceType,
+        AssessmentClass, AuthMethod, AuthState, RemoteState, SessionKind, SourceType,
     };
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, CourseInventoryCapability, ProviderAuthContext,
@@ -699,12 +699,13 @@ mod tests {
     impl AuthenticationCapability for ApiCredentialAuthentication {
         async fn begin_authentication(
             &self,
-            _account_id: Option<asterism_domain::ProviderAccountId>,
+            context: &ProviderAuthContext,
             method: AuthMethod,
         ) -> ProviderResult<AuthChallenge> {
             Ok(AuthChallenge {
-                session_id: AuthSessionId::new(),
+                session_id: context.auth_session_id.unwrap_or_default(),
                 method,
+                waiting_for: asterism_domain::WaitingUserState::SessionImport,
                 user_action: None,
                 expires_at: None,
             })

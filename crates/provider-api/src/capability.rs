@@ -1,6 +1,7 @@
 use asterism_domain::{
     AssessmentClass, AuthMethod, AuthSessionId, CourseId, ProviderAccountId, ProviderId,
     RemoteState, SecretId, SessionKind, SourceType, TaskCapability, TaskId, Timestamp,
+    WaitingUserState,
 };
 use asterism_secrets::CredentialBundle;
 use async_trait::async_trait;
@@ -21,6 +22,7 @@ pub struct ProviderContext {
 pub struct ProviderAuthContext {
     pub provider_id: ProviderId,
     pub account_id: ProviderAccountId,
+    pub auth_session_id: Option<AuthSessionId>,
     pub correlation_id: String,
 }
 
@@ -32,7 +34,7 @@ pub trait ProviderIdentity: Send + Sync {
 pub trait AuthenticationCapability: ProviderIdentity {
     async fn begin_authentication(
         &self,
-        account_id: Option<ProviderAccountId>,
+        context: &ProviderAuthContext,
         method: AuthMethod,
     ) -> ProviderResult<AuthChallenge>;
 
@@ -106,6 +108,7 @@ pub trait ProgressSink {
 pub struct AuthChallenge {
     pub session_id: AuthSessionId,
     pub method: AuthMethod,
+    pub waiting_for: WaitingUserState,
     pub user_action: Option<String>,
     pub expires_at: Option<Timestamp>,
 }

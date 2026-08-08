@@ -80,6 +80,7 @@ where
         let context = ProviderAuthContext {
             provider_id: account.provider_id,
             account_id: account.id,
+            auth_session_id: None,
             correlation_id: access.correlation_id.clone(),
         };
         let status = authentication
@@ -164,7 +165,7 @@ fn validate_status(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use asterism_domain::{AuditActor, AuthSessionId, AuthState, ProviderAccount, Role, Timestamp};
+    use asterism_domain::{AuditActor, AuthState, ProviderAccount, Role, Timestamp};
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, ProviderCapability, ProviderContext,
         ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult, VerificationLevel,
@@ -399,12 +400,13 @@ mod tests {
     impl AuthenticationCapability for TestAuthentication {
         async fn begin_authentication(
             &self,
-            _account_id: Option<ProviderAccountId>,
+            context: &ProviderAuthContext,
             method: AuthMethod,
         ) -> ProviderResult<AuthChallenge> {
             Ok(AuthChallenge {
-                session_id: AuthSessionId::new(),
+                session_id: context.auth_session_id.unwrap_or_default(),
                 method,
+                waiting_for: asterism_domain::WaitingUserState::SessionImport,
                 user_action: None,
                 expires_at: None,
             })
