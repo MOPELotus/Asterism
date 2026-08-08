@@ -159,10 +159,9 @@ impl ProviderAccountRepository for SqliteProviderAccountRepository {
         at: Timestamp,
         actor: AuditActor,
     ) -> Result<bool, StorageError> {
-        let mut transaction = self.database.pool().begin().await?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
         let provider_id: Option<String> = sqlx::query_scalar(
-            "DELETE FROM provider_accounts WHERE id = ? AND owner_user_id = ? \
-             RETURNING provider_id",
+            "SELECT provider_id FROM provider_accounts WHERE id = ? AND owner_user_id = ?",
         )
         .bind(account_id.to_string())
         .bind(owner_id.to_string())
@@ -170,6 +169,19 @@ impl ProviderAccountRepository for SqliteProviderAccountRepository {
         .await?;
         let deleted = provider_id.is_some();
         if let Some(provider_id) = provider_id {
+            sqlx::query(
+                "DELETE FROM secret_blobs WHERE id IN \
+                 (SELECT secret_blob_id FROM provider_account_credentials \
+                  WHERE provider_account_id = ?)",
+            )
+            .bind(account_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query("DELETE FROM provider_accounts WHERE id = ? AND owner_user_id = ?")
+                .bind(account_id.to_string())
+                .bind(owner_id.to_string())
+                .execute(&mut *transaction)
+                .await?;
             insert_account_audit(
                 &mut transaction,
                 actor,

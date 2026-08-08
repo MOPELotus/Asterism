@@ -316,3 +316,17 @@ SQLite now persists this metadata beside the encrypted blob association and
 enforces one live credential per account and purpose. Existing links are
 backfilled as provider-specific manual imports without changing their secret
 material; transactional lifecycle operations follow in the next slice.
+
+## Twenty-fourth Phase 0 slice
+
+The twenty-fourth checkpoint adds an account-scoped `ProviderCredentialStore`.
+Creating a credential encrypts its plaintext, inserts the account association,
+and appends secret plus credential audits in one immediate transaction.
+Purpose uniqueness requires rotations to use optimistic secret and metadata
+versions instead of silently accumulating competing live values.
+
+Listing returns metadata only. Rotation updates ciphertext, key/version,
+expiry, and association timestamps atomically; deletion removes both the blob
+and its cascading link. Generic SecretStore mutation rejects Provider purposes
+so callers cannot bypass these invariants, and deleting a Provider account now
+removes only its attached encrypted blobs before removing the account.

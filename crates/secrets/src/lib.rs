@@ -98,6 +98,19 @@ pub enum SecretPurpose {
     BrowserJobCredential,
 }
 
+impl SecretPurpose {
+    pub fn is_provider_credential(self) -> bool {
+        matches!(
+            self,
+            Self::ProviderPassword
+                | Self::ProviderCookie
+                | Self::ProviderAccessToken
+                | Self::ProviderRefreshToken
+                | Self::ProviderCompositeSession
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialAcquisition {
@@ -119,6 +132,16 @@ pub struct ProviderCredential {
     pub updated_at: Timestamp,
 }
 
+#[derive(Debug)]
+pub struct NewProviderCredential {
+    pub provider_account_id: ProviderAccountId,
+    pub purpose: SecretPurpose,
+    pub session_kind: SessionKind,
+    pub acquired_via: CredentialAcquisition,
+    pub expires_at: Option<Timestamp>,
+    pub value: SecretValue,
+}
+
 impl ProviderCredential {
     /// Validates non-secret credential metadata independently from persistence.
     ///
@@ -127,14 +150,7 @@ impl ProviderCredential {
     /// Returns [`ProviderCredentialError`] for non-Provider secret purposes or
     /// lifecycle timestamps that move backwards.
     pub fn validate(&self) -> Result<(), ProviderCredentialError> {
-        if !matches!(
-            self.secret.purpose,
-            SecretPurpose::ProviderPassword
-                | SecretPurpose::ProviderCookie
-                | SecretPurpose::ProviderAccessToken
-                | SecretPurpose::ProviderRefreshToken
-                | SecretPurpose::ProviderCompositeSession
-        ) {
+        if !self.secret.purpose.is_provider_credential() {
             return Err(ProviderCredentialError::InvalidPurpose);
         }
         if self.updated_at < self.captured_at
@@ -204,6 +220,40 @@ pub trait SecretStore: Send + Sync {
     ) -> Result<(), SecretStoreError>;
 }
 
+#[async_trait]
+pub trait ProviderCredentialStore: Send + Sync {
+    async fn create_provider_credential(
+        &self,
+        owner_user_id: UserId,
+        credential: NewProviderCredential,
+        access: &SecretAccess,
+    ) -> Result<ProviderCredential, SecretStoreError>;
+
+    async fn list_provider_credentials(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        access: &SecretAccess,
+    ) -> Result<Vec<ProviderCredential>, SecretStoreError>;
+
+    async fn rotate_provider_credential(
+        &self,
+        owner_user_id: UserId,
+        credential: &ProviderCredential,
+        replacement: SecretValue,
+        expires_at: Option<Timestamp>,
+        access: &SecretAccess,
+    ) -> Result<ProviderCredential, SecretStoreError>;
+
+    async fn delete_provider_credential(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        secret_id: SecretId,
+        access: &SecretAccess,
+    ) -> Result<(), SecretStoreError>;
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SecretStoreError {
     #[error("secret does not exist")]
@@ -214,6 +264,8 @@ pub enum SecretStoreError {
     VersionConflict,
     #[error("secret value is empty or exceeds the supported size")]
     InvalidValue,
+    #[error("Provider credentials require the account-scoped credential store")]
+    CredentialManaged,
     #[error("secret encryption key is unavailable")]
     KeyUnavailable,
     #[error("secret storage operation failed")]

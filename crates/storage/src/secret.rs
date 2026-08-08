@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, fmt, str::FromStr, sync::Arc};
 
-use asterism_domain::{AuditRecordId, SecretId, Timestamp, UserId};
+use asterism_domain::{AuditRecordId, ProviderAccountId, SecretId, SessionKind, Timestamp, UserId};
 use asterism_secrets::{
+    CredentialAcquisition, NewProviderCredential, ProviderCredential, ProviderCredentialStore,
     SecretAccess, SecretActor, SecretKey, SecretPurpose, SecretRef, SecretStore, SecretStoreError,
     SecretValue,
 };
@@ -105,6 +106,9 @@ impl SecretStore for SqliteSecretStore {
         access: &SecretAccess,
     ) -> Result<SecretRef, SecretStoreError> {
         authorize(owner_user_id, access)?;
+        if purpose.is_provider_credential() {
+            return Err(SecretStoreError::CredentialManaged);
+        }
         validate_secret(&value)?;
         let now = Utc::now();
         let (key_id, key) = self.keyring.active();
@@ -178,6 +182,9 @@ impl SecretStore for SqliteSecretStore {
         access: &SecretAccess,
     ) -> Result<SecretRef, SecretStoreError> {
         authorize(secret.owner_user_id, access)?;
+        if secret.purpose.is_provider_credential() {
+            return Err(SecretStoreError::CredentialManaged);
+        }
         validate_secret(&replacement)?;
         let mut transaction = self
             .database
@@ -229,6 +236,9 @@ impl SecretStore for SqliteSecretStore {
         access: &SecretAccess,
     ) -> Result<(), SecretStoreError> {
         authorize(secret.owner_user_id, access)?;
+        if secret.purpose.is_provider_credential() {
+            return Err(SecretStoreError::CredentialManaged);
+        }
         let mut transaction = self
             .database
             .pool()
@@ -251,6 +261,408 @@ impl SecretStore for SqliteSecretStore {
             .map_err(storage_error)?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ProviderCredentialStore for SqliteSecretStore {
+    async fn create_provider_credential(
+        &self,
+        owner_user_id: UserId,
+        credential: NewProviderCredential,
+        access: &SecretAccess,
+    ) -> Result<ProviderCredential, SecretStoreError> {
+        authorize(owner_user_id, access)?;
+        validate_secret(&credential.value)?;
+        let now = Utc::now();
+        let (key_id, key) = self.keyring.active();
+        let secret = SecretRef {
+            id: SecretId::new(),
+            owner_user_id,
+            purpose: credential.purpose,
+            version: 1,
+            key_id: key_id.to_owned(),
+            created_at: now,
+            updated_at: now,
+        };
+        let stored = ProviderCredential {
+            provider_account_id: credential.provider_account_id,
+            secret,
+            session_kind: credential.session_kind,
+            acquired_via: credential.acquired_via,
+            captured_at: now,
+            expires_at: credential.expires_at,
+            updated_at: now,
+        };
+        stored
+            .validate()
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+        let (nonce, encrypted_data) =
+            encrypt(key, &stored.secret, credential.value.expose_secret())?;
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        ensure_account_owner(
+            &mut transaction,
+            owner_user_id,
+            credential.provider_account_id,
+        )
+        .await?;
+        insert_secret_blob(&mut transaction, &stored.secret, nonce, encrypted_data).await?;
+        sqlx::query(
+            "INSERT INTO provider_account_credentials \
+             (provider_account_id, secret_blob_id, credential_kind, session_kind, acquired_via, \
+              expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(stored.provider_account_id.to_string())
+        .bind(stored.secret.id.to_string())
+        .bind(encode_purpose(stored.secret.purpose))
+        .bind(encode_session_kind(stored.session_kind))
+        .bind(encode_acquisition(stored.acquired_via))
+        .bind(stored.expires_at.map(encode_timestamp))
+        .bind(encode_timestamp(stored.captured_at))
+        .bind(encode_timestamp(stored.updated_at))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| map_credential_write_error(&error))?;
+        insert_secret_audit(&mut transaction, access, "secret_stored", &stored.secret)
+            .await
+            .map_err(storage_error)?;
+        insert_credential_audit(
+            &mut transaction,
+            access,
+            "provider_credential_created",
+            &stored,
+        )
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(stored)
+    }
+
+    async fn list_provider_credentials(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        access: &SecretAccess,
+    ) -> Result<Vec<ProviderCredential>, SecretStoreError> {
+        authorize(owner_user_id, access)?;
+        let mut transaction = self.database.pool().begin().await.map_err(storage_error)?;
+        ensure_account_owner(&mut transaction, owner_user_id, provider_account_id).await?;
+        let rows = sqlx::query(CREDENTIAL_SELECT)
+            .bind(provider_account_id.to_string())
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        let credentials = rows
+            .iter()
+            .map(decode_provider_credential)
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(credentials)
+    }
+
+    async fn rotate_provider_credential(
+        &self,
+        owner_user_id: UserId,
+        credential: &ProviderCredential,
+        replacement: SecretValue,
+        expires_at: Option<Timestamp>,
+        access: &SecretAccess,
+    ) -> Result<ProviderCredential, SecretStoreError> {
+        authorize(owner_user_id, access)?;
+        validate_secret(&replacement)?;
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        ensure_account_owner(
+            &mut transaction,
+            owner_user_id,
+            credential.provider_account_id,
+        )
+        .await?;
+        let persisted = fetch_provider_credential(
+            &mut transaction,
+            credential.provider_account_id,
+            credential.secret.id,
+        )
+        .await?;
+        if &persisted != credential {
+            return Err(SecretStoreError::VersionConflict);
+        }
+        let row = fetch_secret(&mut transaction, credential.secret.id).await?;
+        verify_reference(&credential.secret, &row)?;
+        let version = credential
+            .secret
+            .version
+            .checked_add(1)
+            .ok_or(SecretStoreError::VersionConflict)?;
+        let now = Utc::now();
+        let (key_id, key) = self.keyring.active();
+        let rotated = ProviderCredential {
+            secret: SecretRef {
+                version,
+                key_id: key_id.to_owned(),
+                updated_at: now,
+                ..credential.secret.clone()
+            },
+            expires_at,
+            updated_at: now,
+            ..credential.clone()
+        };
+        rotated
+            .validate()
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+        let (nonce, encrypted_data) = encrypt(key, &rotated.secret, replacement.expose_secret())?;
+        let secret_result = sqlx::query(
+            "UPDATE secret_blobs SET key_id = ?, nonce = ?, encrypted_data = ?, version = ?, \
+             updated_at = ? WHERE id = ? AND version = ?",
+        )
+        .bind(&rotated.secret.key_id)
+        .bind(nonce)
+        .bind(encrypted_data)
+        .bind(i64::from(rotated.secret.version))
+        .bind(encode_timestamp(rotated.secret.updated_at))
+        .bind(rotated.secret.id.to_string())
+        .bind(i64::from(credential.secret.version))
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        let credential_result = sqlx::query(
+            "UPDATE provider_account_credentials SET expires_at = ?, updated_at = ? \
+             WHERE provider_account_id = ? AND secret_blob_id = ? AND updated_at = ?",
+        )
+        .bind(rotated.expires_at.map(encode_timestamp))
+        .bind(encode_timestamp(rotated.updated_at))
+        .bind(rotated.provider_account_id.to_string())
+        .bind(rotated.secret.id.to_string())
+        .bind(encode_timestamp(credential.updated_at))
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if secret_result.rows_affected() != 1 || credential_result.rows_affected() != 1 {
+            return Err(SecretStoreError::VersionConflict);
+        }
+        insert_secret_audit(&mut transaction, access, "secret_rotated", &rotated.secret)
+            .await
+            .map_err(storage_error)?;
+        insert_credential_audit(
+            &mut transaction,
+            access,
+            "provider_credential_rotated",
+            &rotated,
+        )
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(rotated)
+    }
+
+    async fn delete_provider_credential(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        secret_id: SecretId,
+        access: &SecretAccess,
+    ) -> Result<(), SecretStoreError> {
+        authorize(owner_user_id, access)?;
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        ensure_account_owner(&mut transaction, owner_user_id, provider_account_id).await?;
+        let credential =
+            fetch_provider_credential(&mut transaction, provider_account_id, secret_id).await?;
+        let result = sqlx::query("DELETE FROM secret_blobs WHERE id = ? AND version = ?")
+            .bind(secret_id.to_string())
+            .bind(i64::from(credential.secret.version))
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        if result.rows_affected() != 1 {
+            return Err(SecretStoreError::VersionConflict);
+        }
+        insert_secret_audit(
+            &mut transaction,
+            access,
+            "secret_deleted",
+            &credential.secret,
+        )
+        .await
+        .map_err(storage_error)?;
+        insert_credential_audit(
+            &mut transaction,
+            access,
+            "provider_credential_deleted",
+            &credential,
+        )
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+}
+
+const CREDENTIAL_SELECT: &str = "SELECT c.provider_account_id, c.session_kind, c.acquired_via, c.expires_at, \
+            c.created_at AS captured_at, c.updated_at AS credential_updated_at, \
+            s.id AS secret_id, s.owner_user_id, s.purpose, s.key_id, s.version, \
+            s.created_at AS secret_created_at, s.updated_at AS secret_updated_at \
+     FROM provider_account_credentials c \
+     JOIN secret_blobs s ON s.id = c.secret_blob_id \
+     WHERE c.provider_account_id = ? ORDER BY c.credential_kind, c.secret_blob_id";
+
+async fn ensure_account_owner(
+    transaction: &mut Transaction<'_, Sqlite>,
+    owner_user_id: UserId,
+    provider_account_id: ProviderAccountId,
+) -> Result<(), SecretStoreError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM provider_accounts WHERE id = ? AND owner_user_id = ?)",
+    )
+    .bind(provider_account_id.to_string())
+    .bind(owner_user_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(SecretStoreError::NotFound)
+    }
+}
+
+async fn insert_secret_blob(
+    transaction: &mut Transaction<'_, Sqlite>,
+    secret: &SecretRef,
+    nonce: Vec<u8>,
+    encrypted_data: Vec<u8>,
+) -> Result<(), SecretStoreError> {
+    sqlx::query(
+        "INSERT INTO secret_blobs \
+         (id, owner_user_id, purpose, key_id, nonce, encrypted_data, version, created_at, \
+          updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(secret.id.to_string())
+    .bind(secret.owner_user_id.to_string())
+    .bind(encode_purpose(secret.purpose))
+    .bind(&secret.key_id)
+    .bind(nonce)
+    .bind(encrypted_data)
+    .bind(i64::from(secret.version))
+    .bind(encode_timestamp(secret.created_at))
+    .bind(encode_timestamp(secret.updated_at))
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+async fn fetch_provider_credential(
+    transaction: &mut Transaction<'_, Sqlite>,
+    provider_account_id: ProviderAccountId,
+    secret_id: SecretId,
+) -> Result<ProviderCredential, SecretStoreError> {
+    let rows = sqlx::query(CREDENTIAL_SELECT)
+        .bind(provider_account_id.to_string())
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(storage_error)?;
+    rows.iter()
+        .map(decode_provider_credential)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|credential| credential.secret.id == secret_id)
+        .ok_or(SecretStoreError::NotFound)
+}
+
+fn decode_provider_credential(row: &SqliteRow) -> Result<ProviderCredential, SecretStoreError> {
+    let version = u32::try_from(row.try_get::<i64, _>("version").map_err(storage_error)?)
+        .map_err(|_| SecretStoreError::Storage)?;
+    let credential = ProviderCredential {
+        provider_account_id: ProviderAccountId::from_str(
+            row.try_get("provider_account_id").map_err(storage_error)?,
+        )
+        .map_err(|_| SecretStoreError::Storage)?,
+        secret: SecretRef {
+            id: SecretId::from_str(row.try_get("secret_id").map_err(storage_error)?)
+                .map_err(|_| SecretStoreError::Storage)?,
+            owner_user_id: UserId::from_str(row.try_get("owner_user_id").map_err(storage_error)?)
+                .map_err(|_| SecretStoreError::Storage)?,
+            purpose: decode_purpose(row.try_get("purpose").map_err(storage_error)?)?,
+            version,
+            key_id: row.try_get("key_id").map_err(storage_error)?,
+            created_at: decode_timestamp(row.try_get("secret_created_at").map_err(storage_error)?)?,
+            updated_at: decode_timestamp(row.try_get("secret_updated_at").map_err(storage_error)?)?,
+        },
+        session_kind: decode_session_kind(row.try_get("session_kind").map_err(storage_error)?)?,
+        acquired_via: decode_acquisition(row.try_get("acquired_via").map_err(storage_error)?)?,
+        captured_at: decode_timestamp(row.try_get("captured_at").map_err(storage_error)?)?,
+        expires_at: row
+            .try_get::<Option<&str>, _>("expires_at")
+            .map_err(storage_error)?
+            .map(decode_timestamp)
+            .transpose()?,
+        updated_at: decode_timestamp(
+            row.try_get("credential_updated_at")
+                .map_err(storage_error)?,
+        )?,
+    };
+    credential
+        .validate()
+        .map_err(|_| SecretStoreError::Storage)?;
+    Ok(credential)
+}
+
+async fn insert_credential_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    access: &SecretAccess,
+    action: &str,
+    credential: &ProviderCredential,
+) -> Result<(), sqlx::Error> {
+    let (actor_type, actor_id) = encode_secret_actor(&access.actor);
+    let metadata = serde_json::json!({
+        "secret_id": credential.secret.id,
+        "purpose": encode_purpose(credential.secret.purpose),
+        "session_kind": encode_session_kind(credential.session_kind),
+        "acquired_via": encode_acquisition(credential.acquired_via),
+        "expires_at": credential.expires_at,
+        "reason": access.reason,
+    });
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, ?, ?, ?, 'provider_account', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(Utc::now()))
+    .bind(actor_type)
+    .bind(actor_id)
+    .bind(action)
+    .bind(credential.provider_account_id.to_string())
+    .bind(&access.correlation_id)
+    .bind(serde_json::to_string(&metadata).map_err(|error| sqlx::Error::Encode(Box::new(error)))?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn map_credential_write_error(error: &sqlx::Error) -> SecretStoreError {
+    if error
+        .as_database_error()
+        .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
+    {
+        SecretStoreError::VersionConflict
+    } else {
+        SecretStoreError::Storage
     }
 }
 
@@ -372,11 +784,7 @@ async fn insert_secret_audit(
     action: &str,
     secret: &SecretRef,
 ) -> Result<(), sqlx::Error> {
-    let (actor_type, actor_id) = match &access.actor {
-        SecretActor::User(id) => ("user", id.to_string()),
-        SecretActor::CoreService(service) => ("core_service", (*service).to_owned()),
-        SecretActor::ProviderRuntime(provider_id) => ("provider_runtime", provider_id.to_owned()),
-    };
+    let (actor_type, actor_id) = encode_secret_actor(&access.actor);
     let metadata = serde_json::json!({
         "purpose": encode_purpose(secret.purpose),
         "version": secret.version,
@@ -400,6 +808,14 @@ async fn insert_secret_audit(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+fn encode_secret_actor(actor: &SecretActor) -> (&'static str, String) {
+    match actor {
+        SecretActor::User(id) => ("user", id.to_string()),
+        SecretActor::CoreService(service) => ("core_service", (*service).to_owned()),
+        SecretActor::ProviderRuntime(provider_id) => ("provider_runtime", provider_id.to_owned()),
+    }
 }
 
 fn authorize(owner_user_id: UserId, access: &SecretAccess) -> Result<(), SecretStoreError> {
@@ -475,6 +891,48 @@ fn decode_purpose(value: &str) -> Result<SecretPurpose, SecretStoreError> {
     }
 }
 
+fn encode_session_kind(kind: SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Cookie => "cookie",
+        SessionKind::BearerToken => "bearer_token",
+        SessionKind::Jwt => "jwt",
+        SessionKind::Composite => "composite",
+        SessionKind::ProviderSpecific => "provider_specific",
+    }
+}
+
+fn decode_session_kind(value: &str) -> Result<SessionKind, SecretStoreError> {
+    match value {
+        "cookie" => Ok(SessionKind::Cookie),
+        "bearer_token" => Ok(SessionKind::BearerToken),
+        "jwt" => Ok(SessionKind::Jwt),
+        "composite" => Ok(SessionKind::Composite),
+        "provider_specific" => Ok(SessionKind::ProviderSpecific),
+        _ => Err(SecretStoreError::Storage),
+    }
+}
+
+fn encode_acquisition(acquisition: CredentialAcquisition) -> &'static str {
+    match acquisition {
+        CredentialAcquisition::NativeProviderLogin => "native_provider_login",
+        CredentialAcquisition::CaptureTool => "capture_tool",
+        CredentialAcquisition::BrowserExtension => "browser_extension",
+        CredentialAcquisition::AndroidHelper => "android_helper",
+        CredentialAcquisition::ManualImport => "manual_import",
+    }
+}
+
+fn decode_acquisition(value: &str) -> Result<CredentialAcquisition, SecretStoreError> {
+    match value {
+        "native_provider_login" => Ok(CredentialAcquisition::NativeProviderLogin),
+        "capture_tool" => Ok(CredentialAcquisition::CaptureTool),
+        "browser_extension" => Ok(CredentialAcquisition::BrowserExtension),
+        "android_helper" => Ok(CredentialAcquisition::AndroidHelper),
+        "manual_import" => Ok(CredentialAcquisition::ManualImport),
+        _ => Err(SecretStoreError::Storage),
+    }
+}
+
 fn encode_timestamp(value: Timestamp) -> String {
     value.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
@@ -491,9 +949,10 @@ fn storage_error(_error: sqlx::Error) -> SecretStoreError {
 
 #[cfg(test)]
 mod tests {
-    use asterism_domain::Role;
+    use asterism_domain::{AuditActor, AuthState, ProviderId, Role};
 
     use super::*;
+    use crate::{ProviderAccountRepository, SqliteProviderAccountRepository};
 
     #[tokio::test]
     async fn encrypted_secret_lifecycle_is_versioned_authorized_and_audited() {
@@ -509,7 +968,7 @@ mod tests {
         let secret = store
             .put(
                 owner_id,
-                SecretPurpose::ProviderAccessToken,
+                SecretPurpose::IntegrationCredential,
                 SecretValue::new(b"initial-secret".to_vec()),
                 &access,
             )
@@ -602,7 +1061,7 @@ mod tests {
         let secret = store
             .put(
                 owner_id,
-                SecretPurpose::ProviderCookie,
+                SecretPurpose::IntegrationCredential,
                 SecretValue::new(b"cookie-value".to_vec()),
                 &access,
             )
@@ -626,6 +1085,157 @@ mod tests {
             store.get(&secret, &access).await,
             Err(SecretStoreError::AuthenticationFailed)
         ));
+    }
+
+    #[tokio::test]
+    async fn provider_credential_lifecycle_is_transactional_and_versioned() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner_id = insert_user(&database).await;
+        let account_id = insert_provider_account(&database, owner_id).await;
+        let access = user_access(owner_id, "credential-lifecycle");
+        let store = SqliteSecretStore::new(
+            database.clone(),
+            Arc::new(keyring("key-a", &[("key-a", 17)])),
+        );
+        let expires_at = Utc::now() + chrono::Duration::hours(1);
+        let credential = store
+            .create_provider_credential(
+                owner_id,
+                new_cookie_credential(account_id, b"cookie-a", expires_at),
+                &access,
+            )
+            .await
+            .unwrap();
+        assert_eq!(credential.secret.version, 1);
+        assert_eq!(
+            store
+                .get(&credential.secret, &access)
+                .await
+                .unwrap()
+                .expose_secret(),
+            b"cookie-a"
+        );
+        assert_eq!(
+            SqliteProviderAccountRepository::new(database.clone())
+                .find_provider_account(owner_id, account_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .credential_refs,
+            [credential.secret.id]
+        );
+
+        assert!(matches!(
+            store
+                .create_provider_credential(
+                    owner_id,
+                    new_cookie_credential(account_id, b"duplicate", expires_at),
+                    &access,
+                )
+                .await,
+            Err(SecretStoreError::VersionConflict)
+        ));
+        let blob_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM secret_blobs")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(blob_count, 1);
+
+        let listed = store
+            .list_provider_credentials(owner_id, account_id, &access)
+            .await
+            .unwrap();
+        assert_eq!(listed.as_slice(), std::slice::from_ref(&credential));
+        let rotated = store
+            .rotate_provider_credential(
+                owner_id,
+                &credential,
+                SecretValue::new(b"cookie-b".to_vec()),
+                Some(expires_at + chrono::Duration::hours(1)),
+                &access,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rotated.secret.version, 2);
+        assert!(matches!(
+            store
+                .rotate_provider_credential(
+                    owner_id,
+                    &credential,
+                    SecretValue::new(b"stale".to_vec()),
+                    None,
+                    &access,
+                )
+                .await,
+            Err(SecretStoreError::VersionConflict)
+        ));
+        store
+            .delete_provider_credential(owner_id, account_id, rotated.secret.id, &access)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .list_provider_credentials(owner_id, account_id, &access)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let credential_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE resource_id = ? \
+             AND action IN ('provider_credential_created', 'provider_credential_rotated', \
+                            'provider_credential_deleted')",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(credential_audits, 3);
+    }
+
+    #[tokio::test]
+    async fn deleting_provider_account_removes_attached_secret_blob() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner_id = insert_user(&database).await;
+        let account_id = insert_provider_account(&database, owner_id).await;
+        let access = user_access(owner_id, "account-delete");
+        let store = SqliteSecretStore::new(
+            database.clone(),
+            Arc::new(keyring("key-a", &[("key-a", 23)])),
+        );
+        let credential = store
+            .create_provider_credential(
+                owner_id,
+                new_cookie_credential(
+                    account_id,
+                    b"delete-with-account",
+                    Utc::now() + chrono::Duration::hours(1),
+                ),
+                &access,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            SqliteProviderAccountRepository::new(database.clone())
+                .delete_provider_account(
+                    owner_id,
+                    account_id,
+                    Utc::now(),
+                    AuditActor::User(owner_id),
+                )
+                .await
+                .unwrap()
+        );
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM secret_blobs WHERE id = ?)")
+                .bind(credential.secret.id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert!(!exists);
     }
 
     #[test]
@@ -661,6 +1271,21 @@ mod tests {
         }
     }
 
+    fn new_cookie_credential(
+        provider_account_id: ProviderAccountId,
+        value: &[u8],
+        expires_at: Timestamp,
+    ) -> NewProviderCredential {
+        NewProviderCredential {
+            provider_account_id,
+            purpose: SecretPurpose::ProviderCookie,
+            session_kind: SessionKind::Cookie,
+            acquired_via: CredentialAcquisition::ManualImport,
+            expires_at: Some(expires_at),
+            value: SecretValue::new(value.to_vec()),
+        }
+    }
+
     async fn insert_user(database: &Database) -> UserId {
         let user_id = UserId::new();
         let now = encode_timestamp(Utc::now());
@@ -677,5 +1302,28 @@ mod tests {
         .await
         .unwrap();
         user_id
+    }
+
+    async fn insert_provider_account(
+        database: &Database,
+        owner_user_id: UserId,
+    ) -> ProviderAccountId {
+        let account_id = ProviderAccountId::new();
+        let now = encode_timestamp(Utc::now());
+        sqlx::query(
+            "INSERT INTO provider_accounts \
+             (id, owner_user_id, provider_id, display_name, auth_state_json, created_at, \
+              updated_at) VALUES (?, ?, ?, 'primary', ?, ?, ?)",
+        )
+        .bind(account_id.to_string())
+        .bind(owner_user_id.to_string())
+        .bind(ProviderId::new("provider-alpha").unwrap().as_str())
+        .bind(serde_json::to_string(&AuthState::Idle).unwrap())
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        account_id
     }
 }
