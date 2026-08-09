@@ -1,0 +1,6 @@
+{
+  "code": 0,
+  "course": "{\"name\":\"教程 A\",\"type\":\"synthetic\",\"units\":[{\"id\":\"unit-1\",\"role\":\"unit\",\"caption\":\"Unit 1\",\"name\":\"Getting started\",\"children\":[{\"id\":\"section-1\",\"role\":\"section\",\"caption\":\"Section 1\",\"name\":\"Reading\",\"children\":[{\"id\":\"micro-1\",\"role\":\"node\",\"name\":\"Warm-up\",\"children\":[{\"id\":\"group-1\",\"role\":\"group\",\"name\":\"Read the passage\",\"base\":\"rich-text-read\",\"must_be_dropped\":\"answer-free-only\"}]},{\"id\":\"group-2\",\"role\":\"group\",\"name\":\"Vocabulary\",\"base\":\"vocabulary,input\"}]}]}]}",
+  "version": 3,
+  "k": "must-be-dropped"
+}

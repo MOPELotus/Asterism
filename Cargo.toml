@@ -15,6 +15,7 @@ members = [
     "crates/secrets",
     "crates/storage",
     "providers/chaoxing",
+    "providers/uai",
     "providers/welearn",
 ]
 resolver = "3"

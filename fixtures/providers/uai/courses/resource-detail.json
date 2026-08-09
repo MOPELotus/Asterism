@@ -1,0 +1,12 @@
+{
+  "code": 1,
+  "success": true,
+  "value": {
+    "courseResource": {
+      "courseResourceId": 2001,
+      "courseInstanceId": "course-v2:synthetic+rw+20260809",
+      "strategyId": 3001,
+      "must_be_dropped": "route-noise"
+    }
+  }
+}

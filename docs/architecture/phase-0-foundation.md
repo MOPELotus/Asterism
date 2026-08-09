@@ -2449,3 +2449,27 @@ Capture remain absent. Synthetic fixtures and negative tests cover identity
 binding, bounded nested parsing, independent facts and fail-closed drift. This
 checkpoint is offline/native-boundary evidence only and does not raise WELearn's
 verification level.
+
+## One-hundred-and-fifty-fourth Phase 0 slice
+
+The third first-batch Provider now starts with a frozen clean-room UAI audit and
+a parser-only workspace crate. Three exact donor revisions separate current
+Password/JWT and backend Course/progress behavior, independent duration-summary
+evidence, and page-residence compatibility behavior. Apache-2.0, MIT and
+GPL-3.0 boundaries are recorded explicitly; the GPL userscript remains
+Reference-only and no implementation code is copied.
+
+The bounded Course parser flattens each nested CourseResource into one stable
+`RemoteCourse`, retains only paired point counts, and excludes class/current
+instance routes. A fresh resource-detail parser must bind the repeated resource
+ID before holding `courseInstanceId` in a redacted operation context. The Task
+parser then decodes the outer `course` JSON string, bounds its nested tree and
+emits stable Group Tasks with Unit, Section and Node/Micro ancestry kept as
+separate normalized facts.
+
+Synthetic fixtures and negative tests cover numeric/string resource IDs,
+duplicate identities, impossible point totals, misbound details/contexts,
+unknown roles and route-data exclusion. Metadata deliberately advertises no
+runtime capability: authentication, native transport, progress, completion,
+duration, execution, submission, BrowserBridge and Capture all remain absent.
+This is fixture-only evidence and not live UAI compatibility.

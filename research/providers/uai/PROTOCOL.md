@@ -1,0 +1,73 @@
+# UAI protocol notes
+
+Audit date: 2026-08-09. These are static donor observations and synthetic
+parser coverage, not live compatibility claims.
+
+## Authentication
+
+The two backend donors agree on a JSON Password login:
+
+```text
+POST https://sso.unipus.cn/sso/0.1/sso/login
+     username, password, remember=true, agreement=true,
+     service=https://uai.unipus.cn/home
+```
+
+A successful response uses string code `0` and returns distinct `openid` and
+`jwt` values. Authenticated UAI requests place the returned JWT in
+`Authorization`. Donor code `1506` indicates a slider/captcha state and must
+become `HumanRequired`, not a password retry. The committed checkpoint does not
+implement or store either credential.
+
+## Course resource and tree
+
+```text
+GET https://uai.unipus.cn/api/account/user/info
+GET https://uai.unipus.cn/api/cmgt/course/getCourseListByStudent
+GET https://uai.unipus.cn/api/cmgt/course/getCourseResourceInfoById/{resourceId}
+GET https://ucontent.unipus.cn/course/api/course/{courseInstanceId}/default
+```
+
+The Course list contains Course rows with nested `courseResourceList` rows. A
+CourseResource selects a distinct tutorial instance, so the normalized Course
+identity is the bounded resource `id`, not a mutable title, class ID or current
+instance route. The detail response must repeat `courseResourceId` and supplies
+a fresh `courseInstanceId`; that route is held only in a redacted operation
+context.
+
+The content response stores the actual Course tree as JSON text in outer field
+`course`. The nested root contains `units`; audited roles include `unit`,
+`section`, `node`, `link` and `group`. Group IDs are the stable task leaves used
+by the progress response. Asterism preserves Unit → Section → Node/Micro → Group
+as distinct hierarchy and identity facts. `base` is only a bounded task-type
+label and does not imply an assessment or execution capability.
+
+## Progress and duration separation
+
+```text
+GET https://ucontent.unipus.cn/course/api/v2/course_progress/
+    {courseInstanceId}/{unitId}/{openid}/default
+
+GET https://uai.unipus.cn/api/tla/learningDetail/studyRecord/
+    totalAndUnitSituation?id={strategyId}&appUserId={appUserId}
+
+GET https://uai.unipus.cn/api/tla/learningDetail/studyRecord/
+    unitTaskSituation?nodeId={unitId}&id={strategyId}
+    &appUserId={appUserId}&ssoId={ssoId}
+```
+
+The per-Unit progress donor marks a Group complete only when `pass`, `pass2`
+and `perm` are all `1`. The independent summary response contains both
+`finishProgress` and `duration` for total and Unit records. Their coexistence is
+evidence that completion/progress and learning duration are separate; it is not
+yet evidence for duration units or reporting semantics.
+
+The current userscript distributes a requested residence time across visible
+Unit/Section/Micro pages, tabs and tasks while keeping the real page active. It
+does not expose an explicit portable duration request in the audited source.
+Therefore Asterism must not invent a NativeDurationReporter from the timer.
+BrowserBridge/Capture work remains deferred, and a future native reporter needs
+sanitized network evidence plus fresh duration readback.
+
+Direct answer/submission routes are outside this slice. HTTP success or 100%
+completion cannot satisfy the duration acceptance gate.
