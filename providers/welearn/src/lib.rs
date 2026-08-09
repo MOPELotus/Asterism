@@ -6,7 +6,9 @@
 
 mod authentication;
 mod course_inventory;
+mod inventory_capabilities;
 mod metadata;
+mod provider;
 mod task_inventory;
 
 pub use authentication::{
@@ -15,5 +17,10 @@ pub use authentication::{
     classify_password_login_response, encode_password_at,
 };
 pub use course_inventory::parse_course_inventory;
+pub use inventory_capabilities::{
+    WellearnCourseInventory, WellearnCourseInventoryTransport, WellearnInventoryDocument,
+    WellearnTaskInventory, WellearnTaskInventoryDocuments, WellearnTaskInventoryTransport,
+};
 pub use metadata::development_metadata;
+pub use provider::build_development_provider;
 pub use task_inventory::{WellearnScoLeavesDocument, parse_task_inventory};

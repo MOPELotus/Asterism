@@ -4,8 +4,8 @@
 |---|---|---|---|
 | Authentication | Fanyuchang 2026 | Reference | Injected Password/ImportedCookie capability, deterministic form encoding and typed outcome classification are offline-covered; native OIDC HTTP remains pending |
 | Stored session validation | Fanyuchang 2026 | Reference | Validate with an authenticated read; never infer validity from Cookie presence |
-| CourseInventory | Fanyuchang 2026 + YZBRH | Reference | `authCourse.aspx?action=gmc`; parse `clist` conservatively |
-| TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Course page context → `courseunits` → `scoLeaves`; preserve Unit/SCO identity |
+| CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Injected authenticated read capability parses `authCourse.aspx?action=gmc` conservatively; native HTTP pending |
+| TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Injected Course-scoped capability requires a complete `courseunits` → one `scoLeaves` response per Unit set; native HTTP pending |
 | TaskProgressRead | YZBRH | Reference | Fresh CMI and SCO facts; completion and progress are distinct |
 | DurationRead | YZBRH | Reference | Read `session_time` and `total_time` independently from completion |
 | ResourceExecution | Fanyuchang 2026 + YZBRH | Reference | Start/keep/finalize lifecycle; not implemented until readback is modeled |
@@ -27,5 +27,6 @@ The first code slice is fixture-only and read-only:
 The crate now provides this parser boundary and synthetic fixtures. It also
 implements Password/ImportedCookie orchestration behind injected transport and
 stored-session resolver contracts. Metadata remains `Development` and advertises
-only Authentication; no native HTTP transport or Provider registry entry exists
-yet, while Course/Task runtime capabilities remain unadvertised.
+Authentication, CourseInventory and TaskInventory. A registry-consistent
+development entry can be composed from injected boundaries, but no native HTTP
+transport or daemon registration exists yet.

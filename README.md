@@ -62,7 +62,7 @@ Phase 0 已建立并持续完善以下基础：
 - Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
 - Chaoxing 能力级上游审计、独立 Chapter / Resource / Work / Exam TaskInventory、按稳定身份重新发现并经 Core 校验的 TaskDetail / Progress API 与 CLI、四类任务的模块化只读进度复核、明确区分 Chapter Work 与独立 Work / Exam 的题面离线解析、仅在新鲜详情确认可作答后开放的独立 Work 原生题目读取与无值 SubmissionBuild 预览、Document / Read / Video 原生执行、有界 Work 详情状态复核、Cookie 自动续登与显式开发验证入口；
-- WELearn clean-room 上游审计、Password / ImportedCookie 认证编排与有界 Course / Unit / SCO 离线解析，验证码/短信正确进入 HumanRequired，完成状态、可见性和未确认单位的 donor 时长事实保持独立，尚未注册原生 HTTP 传输；
+- WELearn clean-room 上游审计、Password / ImportedCookie 认证编排与有界 Course / Task inventory capability，验证码/短信正确进入 HumanRequired，完成状态、可见性和未确认单位的 donor 时长事实保持独立；开发 Provider 可由注入边界完整注册，但尚无原生 HTTP 传输；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
 正在进行的工作以 [Phase 0 架构检查点](docs/architecture/phase-0-foundation.md) 为准。内部 API 在第二批 Provider 完成前仍可能发生不兼容变更。

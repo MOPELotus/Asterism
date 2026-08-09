@@ -86,9 +86,9 @@ pub fn parse_task_inventory(
 ) -> ProviderResult<Vec<RemoteTask>> {
     let course_id = validate_course(course)?;
     let units = parse_units(units_document)?;
-    if leaves_documents.len() > units.len() {
+    if leaves_documents.len() != units.len() {
         return Err(protocol_drift(
-            "WELearn Task inventory has more SCO responses than Units",
+            "WELearn Task inventory does not contain one SCO response per Unit",
         ));
     }
     let total_bytes = leaves_documents
@@ -381,7 +381,8 @@ mod tests {
             r#"{"info":[{"id":"duration-only","location":"Practice","learntime":600}]}"#,
         )
         .unwrap();
-        let tasks = parse_task_inventory(course, UNITS, &[document]).unwrap();
+        let empty_locked = WellearnScoLeavesDocument::try_new(1, r#"{"info":[]}"#).unwrap();
+        let tasks = parse_task_inventory(course, UNITS, &[document, empty_locked]).unwrap();
         assert_eq!(tasks[0].remote_state, RemoteState::Unknown);
         assert_eq!(tasks[0].normalized["duration_raw"], "600");
     }

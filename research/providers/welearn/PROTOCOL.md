@@ -50,6 +50,13 @@ Task identity. Unit facts include `unitname` and `visible`. SCO leaf facts inclu
 Stable normalized hierarchy is Course → Unit index → SCO ID. Mutable labels,
 visibility, completion and duration must not be used as identity.
 
+The current runtime boundary requires one Course-list document and, for every
+explicit Course scan, one Unit document plus exactly one `scoLeaves` response
+per Unit. An empty Unit response is valid; a missing, duplicated, out-of-range
+or cross-Unit response rejects the whole scan. Authentication and both inventory
+slots can be composed into a registry-consistent Development entry using
+injected transports, but no native request is issued yet.
+
 ## CMI lifecycle
 
 Observed mutation/read actions on `POST https://welearn.sflep.com/Ajax/SCO.aspx`

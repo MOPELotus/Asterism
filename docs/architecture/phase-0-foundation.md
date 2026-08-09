@@ -2300,3 +2300,23 @@ Metadata remains `Development` and advertises only this Authentication boundary.
 The native prelogin/OIDC redirect chain, Cookie collection, authenticated
 validation request, renewal and Provider registry entry remain separate; this
 checkpoint performs no remote request and makes no live-compatibility claim.
+
+## One-hundred-and-forty-seventh Phase 0 slice
+
+The WELearn Course and Task parsers now sit behind authenticated
+`CourseInventoryCapability` and Course-scoped `TaskInventoryCapability`
+adapters. Context/provider mismatches, absent credential references and missing
+Course scope fail before transport. Response documents are bounded, redacted
+from diagnostics and zeroized when dropped.
+
+Task inventory is all-or-nothing across the Unit hierarchy: the transport must
+return one `scoLeaves` response for every Unit, including an explicit empty
+response when no leaves exist. Missing, duplicate or out-of-range Unit responses
+and duplicate Course/SCO identity reject the whole scan, so Core cannot persist
+a partial task set after an interrupted transport.
+
+Development metadata now advertises exactly Authentication, CourseInventory and
+TaskInventory, and a registry-consistent Provider entry can be composed from
+their injected boundaries. No TaskDetail, Progress, Duration, Execution,
+BrowserBridge or runtime setting is claimed. Native HTTP, stored credential
+resolution and daemon registration remain later checkpoints.

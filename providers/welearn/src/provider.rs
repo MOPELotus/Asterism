@@ -1,0 +1,142 @@
+use std::sync::Arc;
+
+use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
+
+use crate::{
+    WellearnAuthentication, WellearnAuthenticationTransport, WellearnCourseInventory,
+    WellearnCourseInventoryTransport, WellearnSessionResolver, WellearnTaskInventory,
+    WellearnTaskInventoryTransport, metadata::development_metadata,
+};
+
+/// Composes the complete development entry around injected authentication and
+/// inventory boundaries. Calling this function does not register the Provider
+/// or claim native/live compatibility.
+///
+/// # Errors
+///
+/// Returns a sanitized Provider error if compile-time metadata is invalid.
+pub fn build_development_provider(
+    authentication_transport: Arc<dyn WellearnAuthenticationTransport>,
+    sessions: Arc<dyn WellearnSessionResolver>,
+    course_transport: Arc<dyn WellearnCourseInventoryTransport>,
+    task_transport: Arc<dyn WellearnTaskInventoryTransport>,
+) -> ProviderResult<ProviderEntry> {
+    let authentication = Arc::new(WellearnAuthentication::try_new(
+        authentication_transport,
+        sessions,
+    )?);
+    let course_inventory = Arc::new(WellearnCourseInventory::try_new(course_transport)?);
+    let task_inventory = Arc::new(WellearnTaskInventory::try_new(task_transport)?);
+    Ok(ProviderEntry {
+        metadata: development_metadata()?,
+        runtime_settings: ProviderRuntimeSettingsSchema::default(),
+        authentication: Some(authentication),
+        course_inventory: Some(course_inventory),
+        task_inventory: Some(task_inventory),
+        task_detail: None,
+        task_progress: None,
+        question_inventory: None,
+        question_parse: None,
+        answer_resolve: None,
+        submission_build: None,
+        submission_execute: None,
+        submission_verify: None,
+        task_execution: None,
+        browser_bridge: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use asterism_provider_api::{
+        ProviderContext, ProviderError, ProviderErrorKind, ProviderRegistry, RemoteCourse,
+    };
+    use asterism_secrets::SecretString;
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::{WellearnCookieSession, WellearnInventoryDocument, WellearnTaskInventoryDocuments};
+
+    #[derive(Debug)]
+    struct UnusedBoundaries;
+
+    #[async_trait]
+    impl WellearnAuthenticationTransport for UnusedBoundaries {
+        async fn exchange_password(
+            &self,
+            _username: &SecretString,
+            _password: &SecretString,
+        ) -> ProviderResult<WellearnCookieSession> {
+            Err(unused())
+        }
+
+        async fn validate_cookie(&self, _session: &WellearnCookieSession) -> ProviderResult<()> {
+            Err(unused())
+        }
+    }
+
+    #[async_trait]
+    impl WellearnSessionResolver for UnusedBoundaries {
+        async fn resolve_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<WellearnCookieSession> {
+            Err(unused())
+        }
+    }
+
+    #[async_trait]
+    impl WellearnCourseInventoryTransport for UnusedBoundaries {
+        async fn fetch_courses(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<WellearnInventoryDocument> {
+            Err(unused())
+        }
+    }
+
+    #[async_trait]
+    impl WellearnTaskInventoryTransport for UnusedBoundaries {
+        async fn fetch_tasks(
+            &self,
+            _context: &ProviderContext,
+            _course: &RemoteCourse,
+        ) -> ProviderResult<WellearnTaskInventoryDocuments> {
+            Err(unused())
+        }
+    }
+
+    #[test]
+    fn development_factory_is_registry_consistent_without_extra_slots() {
+        let boundaries = Arc::new(UnusedBoundaries);
+        let entry = build_development_provider(
+            boundaries.clone(),
+            boundaries.clone(),
+            boundaries.clone(),
+            boundaries,
+        )
+        .unwrap();
+        assert!(entry.authentication.is_some());
+        assert!(entry.course_inventory.is_some());
+        assert!(entry.task_inventory.is_some());
+        assert!(entry.task_progress.is_none());
+        assert!(entry.task_execution.is_none());
+        assert!(entry.browser_bridge.is_none());
+        assert!(entry.runtime_settings.definitions.is_empty());
+
+        let mut registry = ProviderRegistry::default();
+        registry.register(entry).unwrap();
+        assert!(
+            registry
+                .get(&asterism_domain::ProviderId::new("welearn").unwrap())
+                .is_some()
+        );
+    }
+
+    fn unused() -> ProviderError {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "fixture boundary must not be called",
+        )
+    }
+}

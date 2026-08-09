@@ -10,8 +10,8 @@ pub(crate) const PROVIDER_ID: &str = "welearn";
 
 /// Returns the compile-time metadata for the development crate.
 ///
-/// Authentication is available behind an injected transport boundary. Course
-/// and Task parsing remain fixture-only and are not advertised as capabilities.
+/// Authentication, Course inventory and Task inventory are available behind
+/// injected transport boundaries.
 ///
 /// # Errors
 ///
@@ -29,7 +29,11 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
         capture_recipe_version: None,
-        capabilities: BTreeSet::from([ProviderCapability::Authentication]),
+        capabilities: BTreeSet::from([
+            ProviderCapability::Authentication,
+            ProviderCapability::CourseInventory,
+            ProviderCapability::TaskInventory,
+        ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedCookie]),
         session_kinds: BTreeSet::from([
             SessionKind::Cookie,
@@ -44,13 +48,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn development_metadata_advertises_only_the_injected_authentication_boundary() {
+    fn development_metadata_advertises_only_injected_read_and_auth_boundaries() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
         assert_eq!(
             metadata.capabilities,
-            BTreeSet::from([ProviderCapability::Authentication])
+            BTreeSet::from([
+                ProviderCapability::Authentication,
+                ProviderCapability::CourseInventory,
+                ProviderCapability::TaskInventory,
+            ])
         );
         assert_eq!(
             metadata.auth_methods,
