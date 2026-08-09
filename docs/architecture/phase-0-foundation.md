@@ -957,3 +957,15 @@ resolved network policy. A registry validation test prevents advertised
 metadata from drifting away from attached capability slots. The factory does
 not register itself in `asterismd`, perform network calls during construction,
 or change the Provider's `Development` verification level.
+
+## Seventy-first Phase 0 slice
+
+Provider-scoped runtime credentials now also expose a compare-and-replace
+renewal boundary. A renewal must bind the authenticated account, Provider,
+tenant and complete previous credential metadata, including each Secret
+version, before one SQLite transaction can encrypt the replacement, remove the
+prior blobs, update account references and emit sanitized audits. Concurrent or
+delayed refreshes carrying stale metadata fail with a version conflict and
+cannot overwrite a newer session or password.
+This is a generic persistence contract only; automatic Chaoxing retry remains a
+separate Provider transport slice.

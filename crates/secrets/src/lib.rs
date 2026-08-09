@@ -158,6 +158,14 @@ pub struct ProviderCredentialResolution {
 }
 
 #[derive(Debug)]
+pub struct ProviderCredentialRenewal {
+    pub provider_account_id: ProviderAccountId,
+    pub expected_credentials: Vec<ProviderCredential>,
+    pub bundle: CredentialBundle,
+    pub correlation_id: String,
+}
+
+#[derive(Debug)]
 pub struct NewProviderCredential {
     pub provider_account_id: ProviderAccountId,
     pub purpose: SecretPurpose,
@@ -433,6 +441,17 @@ pub trait ProviderCredentialResolver: Send + Sync {
         &self,
         request: ProviderCredentialResolution,
     ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError>;
+}
+
+/// Provider-scoped compare-and-replace boundary for a runtime which has
+/// established and validated a fresh session. Stale credential metadata must
+/// never overwrite a newer credential set or in-place Secret rotation.
+#[async_trait]
+pub trait ProviderCredentialRenewer: Send + Sync {
+    async fn renew_provider_credentials(
+        &self,
+        request: ProviderCredentialRenewal,
+    ) -> Result<Vec<ProviderCredential>, SecretStoreError>;
 }
 
 #[derive(Debug, thiserror::Error)]

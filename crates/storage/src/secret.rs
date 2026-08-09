@@ -12,9 +12,9 @@ use asterism_domain::{
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, NewProviderCredential, ProviderCredential,
-    ProviderCredentialResolution, ProviderCredentialResolver, ProviderCredentialStore,
-    ResolvedProviderCredential, SecretAccess, SecretActor, SecretKey, SecretPurpose, SecretRef,
-    SecretStore, SecretStoreError, SecretValue,
+    ProviderCredentialRenewal, ProviderCredentialRenewer, ProviderCredentialResolution,
+    ProviderCredentialResolver, ProviderCredentialStore, ResolvedProviderCredential, SecretAccess,
+    SecretActor, SecretKey, SecretPurpose, SecretRef, SecretStore, SecretStoreError, SecretValue,
 };
 use async_trait::async_trait;
 use chacha20poly1305::{
@@ -636,7 +636,7 @@ impl ProviderCredentialResolver for SqliteProviderCredentialResolver {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage_error)?;
-        let owner_user_id = resolve_runtime_account_owner(
+        let account = resolve_runtime_account_binding(
             &mut transaction,
             request.provider_account_id,
             &self.provider_id,
@@ -656,7 +656,7 @@ impl ProviderCredentialResolver for SqliteProviderCredentialResolver {
         let requested_purposes = validate_runtime_credential_binding(
             &credentials,
             request.provider_account_id,
-            owner_user_id,
+            account.owner_user_id,
             &request.credential_refs,
             request.purposes,
         )?;
@@ -690,13 +690,114 @@ impl ProviderCredentialResolver for SqliteProviderCredentialResolver {
     }
 }
 
+#[async_trait]
+impl ProviderCredentialRenewer for SqliteProviderCredentialResolver {
+    async fn renew_provider_credentials(
+        &self,
+        request: ProviderCredentialRenewal,
+    ) -> Result<Vec<ProviderCredential>, SecretStoreError> {
+        if request.expected_credentials.is_empty()
+            || request.expected_credentials.len() > 16
+            || request
+                .expected_credentials
+                .iter()
+                .map(|credential| credential.secret.id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != request.expected_credentials.len()
+        {
+            return Err(SecretStoreError::AccountMismatch);
+        }
+        request
+            .bundle
+            .validate()
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+        let access = SecretAccess {
+            actor: SecretActor::ProviderRuntime(self.provider_id.to_string()),
+            correlation_id: request.correlation_id,
+            reason: "renew account-bound Provider credentials".to_owned(),
+        };
+        let mut transaction = self
+            .store
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let account = resolve_runtime_account_binding(
+            &mut transaction,
+            request.provider_account_id,
+            &self.provider_id,
+            &access,
+        )
+        .await?;
+        if request.bundle.provider_id != self.provider_id || request.bundle.tenant != account.tenant
+        {
+            return Err(SecretStoreError::AccountMismatch);
+        }
+        let rows = sqlx::query(CREDENTIAL_SELECT)
+            .bind(request.provider_account_id.to_string())
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        let credentials = rows
+            .iter()
+            .map(decode_provider_credential)
+            .collect::<Result<Vec<_>, _>>()?;
+        if !runtime_credentials_match(
+            &credentials,
+            &request.expected_credentials,
+            request.provider_account_id,
+            account.owner_user_id,
+        ) {
+            return Err(SecretStoreError::VersionConflict);
+        }
+
+        let (key_id, key) = self.store.keyring.active();
+        let prepared = prepare_credential_bundle(
+            account.owner_user_id,
+            request.provider_account_id,
+            request.bundle,
+            key_id,
+            key,
+        )?;
+        let replaced_count =
+            replace_previous_credentials(&mut transaction, request.provider_account_id, &access)
+                .await?;
+        persist_prepared_credentials(&mut transaction, &prepared.credentials, &access).await?;
+        authenticate_provider_account(
+            &mut transaction,
+            account.owner_user_id,
+            request.provider_account_id,
+            &self.provider_id,
+            prepared.prepared_at,
+        )
+        .await?;
+        insert_bundle_audit(
+            &mut transaction,
+            &access,
+            request.provider_account_id,
+            prepared.auth_method,
+            prepared.session_kind,
+            replaced_count,
+            prepared.credentials.len(),
+        )
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(prepared
+            .credentials
+            .into_iter()
+            .map(|prepared| prepared.credential)
+            .collect())
+    }
+}
+
 fn validate_resolution_request(
     credential_refs: &[SecretId],
     purposes: &[SecretPurpose],
 ) -> Result<(), SecretStoreError> {
-    let references_valid = !credential_refs.is_empty()
-        && credential_refs.len() <= 16
-        && credential_refs.iter().collect::<BTreeSet<_>>().len() == credential_refs.len();
+    let references_valid = credential_refs_are_valid(credential_refs);
     let purposes_valid = !purposes.is_empty()
         && purposes.len() <= 16
         && purposes.iter().copied().collect::<HashSet<_>>().len() == purposes.len()
@@ -710,14 +811,26 @@ fn validate_resolution_request(
     }
 }
 
-async fn resolve_runtime_account_owner(
+fn credential_refs_are_valid(credential_refs: &[SecretId]) -> bool {
+    !credential_refs.is_empty()
+        && credential_refs.len() <= 16
+        && credential_refs.iter().collect::<BTreeSet<_>>().len() == credential_refs.len()
+}
+
+struct RuntimeProviderAccount {
+    owner_user_id: UserId,
+    tenant: Option<String>,
+}
+
+async fn resolve_runtime_account_binding(
     transaction: &mut Transaction<'_, Sqlite>,
     provider_account_id: ProviderAccountId,
     provider_id: &ProviderId,
     access: &SecretAccess,
-) -> Result<UserId, SecretStoreError> {
+) -> Result<RuntimeProviderAccount, SecretStoreError> {
     let account = sqlx::query(
-        "SELECT owner_user_id, provider_id, auth_state_json FROM provider_accounts WHERE id = ?",
+        "SELECT owner_user_id, provider_id, tenant, auth_state_json \
+         FROM provider_accounts WHERE id = ?",
     )
     .bind(provider_account_id.to_string())
     .fetch_optional(&mut **transaction)
@@ -740,7 +853,10 @@ async fn resolve_runtime_account_owner(
     .map_err(|_| SecretStoreError::Storage)?;
     if stored_provider_id == provider_id.as_str() && matches!(auth_state, AuthState::Authenticated)
     {
-        Ok(owner_user_id)
+        Ok(RuntimeProviderAccount {
+            owner_user_id,
+            tenant: account.try_get("tenant").map_err(storage_error)?,
+        })
     } else {
         Err(SecretStoreError::AccountMismatch)
     }
@@ -753,18 +869,12 @@ fn validate_runtime_credential_binding(
     credential_refs: &[SecretId],
     purposes: Vec<SecretPurpose>,
 ) -> Result<HashSet<SecretPurpose>, SecretStoreError> {
-    let requested_refs = credential_refs.iter().copied().collect::<BTreeSet<_>>();
-    let stored_refs = credentials
-        .iter()
-        .map(|credential| credential.secret.id)
-        .collect::<BTreeSet<_>>();
-    if requested_refs != stored_refs
-        || credentials.len() != stored_refs.len()
-        || credentials.iter().any(|credential| {
-            credential.provider_account_id != provider_account_id
-                || credential.secret.owner_user_id != owner_user_id
-        })
-    {
+    if !runtime_credential_refs_match(
+        credentials,
+        provider_account_id,
+        owner_user_id,
+        credential_refs,
+    ) {
         return Err(SecretStoreError::AccountMismatch);
     }
     let requested_purposes = purposes.into_iter().collect::<HashSet<_>>();
@@ -777,6 +887,39 @@ fn validate_runtime_credential_binding(
     } else {
         Err(SecretStoreError::AccountMismatch)
     }
+}
+
+fn runtime_credential_refs_match(
+    credentials: &[ProviderCredential],
+    provider_account_id: ProviderAccountId,
+    owner_user_id: UserId,
+    credential_refs: &[SecretId],
+) -> bool {
+    let requested_refs = credential_refs.iter().copied().collect::<BTreeSet<_>>();
+    let stored_refs = credentials
+        .iter()
+        .map(|credential| credential.secret.id)
+        .collect::<BTreeSet<_>>();
+    requested_refs == stored_refs
+        && credentials.len() == stored_refs.len()
+        && credentials.iter().all(|credential| {
+            credential.provider_account_id == provider_account_id
+                && credential.secret.owner_user_id == owner_user_id
+        })
+}
+
+fn runtime_credentials_match(
+    stored: &[ProviderCredential],
+    expected: &[ProviderCredential],
+    provider_account_id: ProviderAccountId,
+    owner_user_id: UserId,
+) -> bool {
+    stored.len() == expected.len()
+        && stored.iter().all(|credential| {
+            credential.provider_account_id == provider_account_id
+                && credential.secret.owner_user_id == owner_user_id
+                && expected.contains(credential)
+        })
 }
 
 #[async_trait]
@@ -2012,30 +2155,7 @@ mod tests {
             .replace_provider_credentials(
                 owner_id,
                 account_id,
-                CredentialBundle {
-                    provider_id: ProviderId::new("provider-alpha").unwrap(),
-                    tenant: None,
-                    auth_method: AuthMethod::Password,
-                    acquired_via: CredentialAcquisition::NativeProviderLogin,
-                    captured_at,
-                    expires_at: None,
-                    session_kind: SessionKind::Composite,
-                    fields: vec![
-                        CredentialField {
-                            purpose: SecretPurpose::ProviderUsername,
-                            value: SecretValue::new(b"student-a".to_vec()),
-                        },
-                        CredentialField {
-                            purpose: SecretPurpose::ProviderPassword,
-                            value: SecretValue::new(b"password-a".to_vec()),
-                        },
-                        CredentialField {
-                            purpose: SecretPurpose::ProviderCookie,
-                            value: SecretValue::new(b"_uid=123; token=abc".to_vec()),
-                        },
-                    ],
-                    user_id_hint: None,
-                },
+                runtime_password_bundle(captured_at, b"_uid=123; token=abc"),
                 &user_access(owner_id, "runtime-resolution-setup"),
             )
             .await
@@ -2101,10 +2221,130 @@ mod tests {
         assert_eq!(audit_count, 1);
     }
 
+    #[tokio::test]
+    async fn runtime_renewal_is_atomic_and_rejects_stale_metadata() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner_id = insert_user(&database).await;
+        let account_id = insert_provider_account(&database, owner_id).await;
+        let store = SqliteSecretStore::new(
+            database.clone(),
+            Arc::new(keyring("key-a", &[("key-a", 29)])),
+        );
+        let old = store
+            .replace_provider_credentials(
+                owner_id,
+                account_id,
+                runtime_password_bundle(Utc::now(), b"_uid=OLD; token=old"),
+                &user_access(owner_id, "runtime-renewal-setup"),
+            )
+            .await
+            .unwrap();
+        let old_refs = old
+            .iter()
+            .map(|credential| credential.secret.id)
+            .collect::<Vec<_>>();
+        let runtime = SqliteProviderCredentialResolver::new(
+            store.clone(),
+            ProviderId::new("provider-alpha").unwrap(),
+        );
+        let renewed = runtime
+            .renew_provider_credentials(ProviderCredentialRenewal {
+                provider_account_id: account_id,
+                expected_credentials: old.clone(),
+                bundle: runtime_password_bundle(Utc::now(), b"_uid=NEW; token=new"),
+                correlation_id: "scheduled-scan:runtime-renewal".to_owned(),
+            })
+            .await
+            .unwrap();
+        let renewed_refs = renewed
+            .iter()
+            .map(|credential| credential.secret.id)
+            .collect::<Vec<_>>();
+        assert_ne!(renewed_refs, old_refs);
+        assert!(matches!(
+            store
+                .get(
+                    &old.iter()
+                        .find(|credential| {
+                            credential.secret.purpose == SecretPurpose::ProviderCookie
+                        })
+                        .unwrap()
+                        .secret,
+                    &user_access(owner_id, "old-cookie-read"),
+                )
+                .await,
+            Err(SecretStoreError::NotFound)
+        ));
+        let resolved = runtime
+            .resolve_provider_credentials(ProviderCredentialResolution {
+                provider_account_id: account_id,
+                credential_refs: renewed_refs,
+                purposes: vec![SecretPurpose::ProviderCookie],
+                correlation_id: "scheduled-scan:renewed-cookie".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolved[0].value.expose_secret(), b"_uid=NEW; token=new");
+
+        let renewed_password = renewed
+            .iter()
+            .find(|credential| credential.secret.purpose == SecretPurpose::ProviderPassword)
+            .unwrap();
+        store
+            .rotate_provider_credential(
+                owner_id,
+                renewed_password,
+                SecretValue::new(b"password-rotated".to_vec()),
+                None,
+                &user_access(owner_id, "rotate-before-stale-renewal"),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            runtime
+                .renew_provider_credentials(ProviderCredentialRenewal {
+                    provider_account_id: account_id,
+                    expected_credentials: renewed,
+                    bundle: runtime_password_bundle(Utc::now(), b"_uid=STALE; token=stale"),
+                    correlation_id: "scheduled-scan:stale-renewal".to_owned(),
+                })
+                .await,
+            Err(SecretStoreError::VersionConflict)
+        ));
+    }
+
     fn assert_runtime_credentials_are_redacted(credentials: &[ResolvedProviderCredential]) {
         let debug = format!("{credentials:?}");
         for secret in ["student-a", "password-a", "token=abc"] {
             assert!(!debug.contains(secret));
+        }
+    }
+
+    fn runtime_password_bundle(captured_at: Timestamp, cookie: &[u8]) -> CredentialBundle {
+        CredentialBundle {
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            tenant: None,
+            auth_method: AuthMethod::Password,
+            acquired_via: CredentialAcquisition::NativeProviderLogin,
+            captured_at,
+            expires_at: None,
+            session_kind: SessionKind::Composite,
+            fields: vec![
+                CredentialField {
+                    purpose: SecretPurpose::ProviderUsername,
+                    value: SecretValue::new(b"student-a".to_vec()),
+                },
+                CredentialField {
+                    purpose: SecretPurpose::ProviderPassword,
+                    value: SecretValue::new(b"password-a".to_vec()),
+                },
+                CredentialField {
+                    purpose: SecretPurpose::ProviderCookie,
+                    value: SecretValue::new(cookie.to_vec()),
+                },
+            ],
+            user_id_hint: None,
         }
     }
 
