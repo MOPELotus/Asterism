@@ -2597,3 +2597,25 @@ an untyped raw fact and never mapped to `duration_seconds`. This remains
 offline/native-boundary evidence: daemon registration, session renewal,
 DurationRead/Report, execution, BrowserBridge, Capture and live verification
 are still absent.
+
+## One-hundred-and-sixty-first Phase 0 slice
+
+UAI native sessions can now renew through Core's provider-scoped resolver and
+compare-and-replace boundary. Renewal requires exactly one username, password
+and ProviderCompositeSession from the requested account/reference set; all
+three must be unexpired Composite credentials originating from
+NativeProviderLogin. ManualImport+Jwt, mixed lifecycle metadata, duplicates and
+incomplete sets fail before login.
+
+The Password exchange must validate its fresh JWT through user-info before Core
+atomically replaces the complete three-field bundle. Renewal is serialized
+through a fixed per-account lock pool and cached only for the same account,
+credential references and correlation, with TTL and entry bounds. Debug output
+and plaintext lifetimes retain the existing redaction and zeroization rules.
+
+Authentication, CourseInventory, TaskInventory and TaskProgressRead retry only
+an explicit Authentication failure and at most once; multi-request Task and
+progress operations restart from fresh detail after renewal. This is still
+offline/native-boundary evidence. Daemon registration, JWT expiry extraction,
+DurationRead/Report, execution, BrowserBridge, Capture and live verification
+remain separate.

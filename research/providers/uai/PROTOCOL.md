@@ -39,7 +39,15 @@ HTTPS client, posts the exact JSON login shape, passes JWT directly as a
 sensitive `Authorization` header and validates it with a bounded user-info
 read. It classifies status before reading, requires JSON media types and valid
 UTF-8, caps bodies at 64 KiB and never retains returned user profile fields.
-JWT expiry extraction and automatic renewal remain pending.
+
+Runtime renewal is limited to an exact account/reference-bound username,
+password and ProviderCompositeSession set whose three records all originate
+from NativeProviderLogin. Per-account locking and a bounded short-lived cache
+collapse concurrent refreshes. A fresh Password exchange must pass user-info
+validation before Core compare-and-replaces the complete credential set.
+Authentication and every read operation retry at most once. ManualImport+Jwt
+sessions, incomplete metadata and stale credential versions cannot renew. JWT
+expiry extraction remains pending.
 
 ## Course resource and tree
 

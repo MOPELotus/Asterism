@@ -17,8 +17,8 @@ use zeroize::Zeroize;
 use crate::metadata::development_metadata;
 
 const MAX_LOGIN_RESPONSE_BYTES: usize = 64 * 1_024;
-const MAX_USERNAME_BYTES: usize = 512;
-const MAX_PASSWORD_BYTES: usize = 4 * 1_024;
+pub(crate) const MAX_USERNAME_BYTES: usize = 512;
+pub(crate) const MAX_PASSWORD_BYTES: usize = 4 * 1_024;
 const MAX_JWT_BYTES: usize = 64 * 1_024;
 const MAX_OPEN_ID_BYTES: usize = 512;
 const MAX_SESSION_DOCUMENT_BYTES: usize = 96 * 1_024;
@@ -77,7 +77,7 @@ impl UaiJwtSession {
         self.open_id.expose_secret()
     }
 
-    fn to_secret_value(&self) -> ProviderResult<SecretValue> {
+    pub(crate) fn to_secret_value(&self) -> ProviderResult<SecretValue> {
         let envelope = BorrowedSessionEnvelope {
             open_id: self.open_id.expose_secret(),
             jwt: self.authorization.expose_secret(),
@@ -137,6 +137,13 @@ pub trait UaiAuthenticationTransport: Send + Sync {
 #[async_trait]
 pub trait UaiSessionResolver: Send + Sync {
     async fn resolve_session(&self, context: &ProviderContext) -> ProviderResult<UaiJwtSession>;
+
+    async fn renew_session(&self, _context: &ProviderContext) -> ProviderResult<UaiJwtSession> {
+        Err(ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "UAI stored session cannot be renewed automatically",
+        ))
+    }
 }
 
 /// UAI Password and `ImportedToken` authentication orchestration.
@@ -307,8 +314,20 @@ impl AuthenticationCapability for UaiAuthentication {
                 "UAI session validation requires stored credentials",
             ));
         }
-        let session = self.sessions.resolve_session(context).await?;
-        self.transport.validate_jwt(&session).await?;
+        let (session, renewed) = match self.sessions.resolve_session(context).await {
+            Ok(session) => (session, false),
+            Err(error) if error.kind == ProviderErrorKind::Authentication => {
+                (self.sessions.renew_session(context).await?, true)
+            }
+            Err(error) => return Err(error),
+        };
+        match self.transport.validate_jwt(&session).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.transport.validate_jwt(&session).await?;
+            }
+            result => result?,
+        }
         Ok(valid_session(SessionKind::Jwt))
     }
 }
@@ -398,7 +417,7 @@ fn credential_bytes(
     Ok(field.value.expose_secret())
 }
 
-fn validate_login_field(value: &str, maximum: usize, trim: bool) -> ProviderResult<()> {
+pub(crate) fn validate_login_field(value: &str, maximum: usize, trim: bool) -> ProviderResult<()> {
     if value.is_empty()
         || value.len() > maximum
         || value.chars().any(char::is_control)

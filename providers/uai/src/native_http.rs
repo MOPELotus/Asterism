@@ -54,6 +54,19 @@ impl NativeUaiInventoryTransport {
         Ok(Self { client, sessions })
     }
 
+    async fn session_for_operation(
+        &self,
+        context: &ProviderContext,
+    ) -> ProviderResult<(UaiJwtSession, bool)> {
+        match self.sessions.resolve_session(context).await {
+            Ok(session) => Ok((session, false)),
+            Err(error) if error.kind == ProviderErrorKind::Authentication => {
+                Ok((self.sessions.renew_session(context).await?, true))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn fetch_courses_with_session(
         &self,
         session: &UaiJwtSession,
@@ -177,8 +190,14 @@ impl UaiCourseInventoryTransport for NativeUaiInventoryTransport {
         &self,
         context: &ProviderContext,
     ) -> ProviderResult<UaiInventoryDocument> {
-        let session = self.sessions.resolve_session(context).await?;
-        self.fetch_courses_with_session(&session).await
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_courses_with_session(&session).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_courses_with_session(&session).await
+            }
+            result => result,
+        }
     }
 }
 
@@ -189,8 +208,14 @@ impl UaiTaskInventoryTransport for NativeUaiInventoryTransport {
         context: &ProviderContext,
         course: &RemoteCourse,
     ) -> ProviderResult<UaiTaskInventoryDocuments> {
-        let session = self.sessions.resolve_session(context).await?;
-        self.fetch_tasks_with_session(&session, course).await
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_tasks_with_session(&session, course).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_tasks_with_session(&session, course).await
+            }
+            result => result,
+        }
     }
 }
 
@@ -202,9 +227,18 @@ impl UaiProgressTransport for NativeUaiInventoryTransport {
         course_resource_id: &str,
         unit_id: &str,
     ) -> ProviderResult<UaiProgressDocument> {
-        let session = self.sessions.resolve_session(context).await?;
-        self.fetch_progress_with_session(&session, course_resource_id, unit_id)
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_progress_with_session(&session, course_resource_id, unit_id)
             .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_progress_with_session(&session, course_resource_id, unit_id)
+                    .await
+            }
+            result => result,
+        }
     }
 }
 
@@ -446,12 +480,21 @@ fn static_route_error() -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use asterism_domain::{ProviderAccountId, ProviderId, SecretId};
     use asterism_networking::NetworkProfile;
 
     use super::*;
 
     #[derive(Debug)]
     struct FixtureSessions;
+
+    #[derive(Debug, Default)]
+    struct RenewingSessions {
+        resolutions: AtomicUsize,
+        renewals: AtomicUsize,
+    }
 
     #[async_trait]
     impl UaiSessionResolver for FixtureSessions {
@@ -463,6 +506,25 @@ mod tests {
                 "synthetic-open-id",
                 "SAFE_HEADER.SAFE_PAYLOAD.SAFE_SIGNATURE",
             )
+        }
+    }
+
+    #[async_trait]
+    impl UaiSessionResolver for RenewingSessions {
+        async fn resolve_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<UaiJwtSession> {
+            self.resolutions.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "synthetic expired session",
+            ))
+        }
+
+        async fn renew_session(&self, _context: &ProviderContext) -> ProviderResult<UaiJwtSession> {
+            self.renewals.fetch_add(1, Ordering::SeqCst);
+            UaiJwtSession::try_new("renewed-open-id", "NEW.HEADER.SIGNATURE")
         }
     }
 
@@ -479,6 +541,22 @@ mod tests {
             COURSE_LIST_URL,
             "https://uai.unipus.cn/api/cmgt/course/getCourseListByStudent"
         );
+    }
+
+    #[tokio::test]
+    async fn operation_session_renews_only_an_authentication_failure() {
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .expect("built-in network profile");
+        let sessions = Arc::new(RenewingSessions::default());
+        let transport = NativeUaiInventoryTransport::try_new(&network, sessions.clone()).unwrap();
+        let (session, renewed) = transport
+            .session_for_operation(&provider_context())
+            .await
+            .unwrap();
+        assert!(renewed);
+        assert_eq!(session.expose_open_id(), "renewed-open-id");
+        assert_eq!(sessions.resolutions.load(Ordering::SeqCst), 1);
+        assert_eq!(sessions.renewals.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -548,5 +626,14 @@ mod tests {
             "https://ucontent.unipus.cn/course/api/v2/course_progress/course-v2:synthetic+rw/unit-1/open-id/default"
         );
         assert_eq!(ResponseRoute::Progress.maximum_bytes(), 1_024 * 1_024);
+    }
+
+    fn provider_context() -> ProviderContext {
+        ProviderContext {
+            provider_id: ProviderId::new("uai").unwrap(),
+            account_id: ProviderAccountId::new(),
+            credential_refs: vec![SecretId::new()],
+            correlation_id: "uai-native-renewal-test".to_owned(),
+        }
     }
 }

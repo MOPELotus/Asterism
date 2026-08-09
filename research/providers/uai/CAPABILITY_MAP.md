@@ -3,7 +3,7 @@
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
 | Authentication | AutoFinish + UnipusHelperPro | Reference | Password/ImportedToken orchestration, strict login-envelope classification, native Password exchange and atomic openid/JWT CompositeSession are offline/native-boundary covered |
-| Stored session validation | User-info and Course-list reads | FromScratch | Core provider-scoped resolver accepts only exact unexpired native Composite or manual JWT metadata; bounded native user-info JWT validation is implemented, renewal pending |
+| Stored session validation | User-info and Course-list reads | FromScratch | Core provider-scoped resolver accepts only exact unexpired native Composite or manual JWT metadata; native Composite can renew atomically after user-info validation, manual JWT cannot |
 | CourseInventory | AutoFinish + UnipusHelperPro | Reference | Native authenticated Course list plus bounded Course → CourseResource flattening are offline/native-boundary covered |
 | TaskInventory | AutoFinish + UnipusHelperPro | Reference | Native fresh resource-detail/tree reads plus bounded nested Course JSON → Unit/Section/Node/Group parser are offline/native-boundary covered |
 | TaskProgressRead | Both backend donors | Reference | Native fresh-detail + signed per-Unit read and identity-bound Group parser are offline/native-boundary covered; only pass/pass2/perm all 1 maps to completed |
@@ -33,6 +33,7 @@ TaskProgressRead. It:
 7. drops class, instance, content, answer and unknown fields;
 8. implements native Password exchange, user-info JWT validation, complete
    Course/Task inventory and read-only per-Unit Group progress;
-9. retains raw Group duration without assigning a unit and makes no
-   DurationRead/Report, execution, submission, renewal, BrowserBridge or
-   Capture claim.
+9. atomically renews only complete NativeProviderLogin+Composite credentials,
+   with one Authentication-only retry and no ManualImport renewal;
+10. retains raw Group duration without assigning a unit and makes no
+    DurationRead/Report, execution, submission, BrowserBridge or Capture claim.
