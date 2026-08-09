@@ -338,6 +338,16 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn renew_claim(
+            &self,
+            _job_id: ScheduleId,
+            _worker_id: &str,
+            _now: Timestamp,
+            _new_expires_at: Timestamp,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
         async fn complete(
             &self,
             job_id: ScheduleId,

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{Row, sqlite::SqliteRow};
 
-use crate::{Database, StorageError, TaskPage, TaskQueryRepository};
+use crate::{Database, StorageError, TaskPage, TaskQueryRepository, TaskRuntimeRepository};
 
 const MAX_PAGE_SIZE: u32 = 200;
 
@@ -97,6 +97,24 @@ impl TaskQueryRepository for SqliteTaskQueryRepository {
         .fetch_optional(self.database.pool())
         .await?;
         row.as_ref().map(decode_task).transpose()
+    }
+}
+
+#[async_trait]
+impl TaskRuntimeRepository for SqliteTaskQueryRepository {
+    async fn find_runtime_task(&self, task_id: TaskId) -> Result<Option<Task>, StorageError> {
+        let row = sqlx::query(
+            "SELECT task.id, task.provider_account_id, task.course_id, task.remote_id, \
+                    task.source_type, task.assessment_class, task.title, task.remote_state, \
+                    task.orchestration_state, task.opens_at, task.due_at, task.closes_at, \
+                    task.discovered_at, task.updated_at, task.latest_snapshot_id, \
+                    task.capabilities_json \
+             FROM tasks AS task WHERE task.id = ?",
+        )
+        .bind(task_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        row.map(|row| decode_task(&row)).transpose()
     }
 }
 

@@ -1151,3 +1151,23 @@ immediate transaction. Success additionally requires verified completed
 progress, while failed, human-required and retry states retain a typed Provider
 error class. Provider dispatch and lease renewal during long-running calls are
 the next Engine slice.
+
+## Eighty-third Phase 0 slice
+
+The Engine now runs claimed Execution and Retry jobs through the registered
+task-level Provider capability. It loads the persisted Execution, Task and
+authenticated Provider account, acquires the Task-level Execution lease,
+starts one Attempt, maps Provider progress into Core stages, and accepts
+success only when the Provider returns both `verified = true` and remote
+`Completed`.
+
+Scheduler claims and Execution leases are extended before dispatch and renewed
+together on a bounded heartbeat during long calls. Losing either ownership
+stops local finalization so startup recovery can re-read remote state instead
+of guessing. Network, availability and rate-limit errors use the shared retry
+policy; authentication and explicit human requirements stop for user action;
+protocol drift, unsupported tasks and invalid remote outcomes retain typed
+failure classes. Formal assessment execution and submission remain disabled by
+default and stop before the Provider mutation. SQLite-backed tests cover
+verified success, numbered retry and the formal-assessment guard. Daemon worker
+lifecycle and user-facing execution actions remain following slices.

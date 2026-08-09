@@ -35,7 +35,7 @@ pub use repository::{
     ExecutionRepository, ExecutionScheduleOutcome, ExecutionScheduleRequest, OutboxRepository,
     ProviderAccountRepository, ProviderAccountRuntimeRepository, ScanScheduleRepository,
     SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository, TaskRepository,
-    UserRepository,
+    TaskRuntimeRepository, UserRepository,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

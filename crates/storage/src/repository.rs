@@ -47,6 +47,12 @@ pub trait TaskQueryRepository: Send + Sync {
     ) -> Result<Option<Task>, StorageError>;
 }
 
+/// Internal Task lookup for an already authorized Scheduler execution.
+#[async_trait]
+pub trait TaskRuntimeRepository: Send + Sync {
+    async fn find_runtime_task(&self, task_id: TaskId) -> Result<Option<Task>, StorageError>;
+}
+
 /// Owner-scoped persistence contract for Provider account management.
 #[async_trait]
 pub trait ProviderAccountRepository: Send + Sync {
@@ -404,6 +410,14 @@ pub trait SchedulerRepository: Send + Sync {
         lease_expires_at: Timestamp,
         limit: u32,
     ) -> Result<Vec<asterism_scheduler::ScheduledJob>, StorageError>;
+
+    async fn renew_claim(
+        &self,
+        job_id: asterism_domain::ScheduleId,
+        worker_id: &str,
+        now: Timestamp,
+        new_expires_at: Timestamp,
+    ) -> Result<(), StorageError>;
 
     async fn complete(
         &self,

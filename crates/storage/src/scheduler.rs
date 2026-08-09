@@ -116,6 +116,34 @@ impl SchedulerRepository for SqliteSchedulerRepository {
             .await
     }
 
+    async fn renew_claim(
+        &self,
+        job_id: ScheduleId,
+        worker_id: &str,
+        now: Timestamp,
+        new_expires_at: Timestamp,
+    ) -> Result<(), StorageError> {
+        if worker_id.is_empty() || new_expires_at <= now {
+            return Err(StorageError::InvalidSchedulerClaim);
+        }
+        let result = sqlx::query(
+            "UPDATE scheduled_jobs SET lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND state = 'claimed' AND worker_id = ? AND lease_expires_at > ?",
+        )
+        .bind(encode_timestamp(new_expires_at))
+        .bind(encode_timestamp(now))
+        .bind(job_id.to_string())
+        .bind(worker_id)
+        .bind(encode_timestamp(now))
+        .execute(self.database.pool())
+        .await?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::SchedulerClaimLost)
+        }
+    }
+
     async fn complete(
         &self,
         job_id: ScheduleId,
@@ -557,6 +585,16 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert!(matches!(
+            repository
+                .renew_claim(job.id, "not-owner", now, now + Duration::minutes(2))
+                .await,
+            Err(StorageError::SchedulerClaimLost)
+        ));
+        repository
+            .renew_claim(job.id, owner, now, now + Duration::minutes(2))
+            .await
+            .unwrap();
         assert_eq!(
             repository
                 .fail(

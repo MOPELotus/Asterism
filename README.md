@@ -33,7 +33,7 @@ Phase 0 已建立并持续完善以下基础：
 - 课程发现到后续 capability 的短命、脱敏且不持久化路由上下文；
 - Account > Provider > Global 覆盖的 NetworkProfile 与集中 HTTP Client 构建；
 - 先完整采集后事务提交的 Provider Course / Task inventory 编排；
-- 执行状态机、正式测评保护与崩溃恢复语义；
+- Provider 执行调度、可续租执行状态机、正式测评保护与崩溃恢复语义；
 - SQLite migration、WAL 策略、事务仓储和并发测试；
 - 版本化任务指纹、脱敏扫描快照、类型化差异与事务化扫描入库；
 - 幂等执行请求、执行租约、周期扫描物化、隔离认领的 worker 与事务化 Event Outbox；
