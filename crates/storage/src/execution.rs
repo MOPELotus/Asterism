@@ -630,6 +630,7 @@ async fn record_attempt_started(
             message: "execution attempt started",
             provider_trace_id: None,
         },
+        request.correlation_id,
     )
     .await?;
     enqueue_state_event(
@@ -789,6 +790,7 @@ async fn record_attempt_finished(
             message: log_message,
             provider_trace_id: request.provider_trace_id,
         },
+        request.correlation_id,
     )
     .await?;
     enqueue_state_event(
@@ -1150,7 +1152,18 @@ struct ExecutionLogInsert<'a> {
 async fn insert_execution_log(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     record: ExecutionLogInsert<'_>,
+    correlation_id: &str,
 ) -> Result<(), StorageError> {
+    let event = ExecutionLogEvent {
+        execution_id: record.execution_id,
+        attempt_id: record.attempt_id,
+        timestamp: record.at,
+        level: record.level,
+        stage: record.stage,
+        message: record.message.to_owned(),
+        provider_trace_id: record.provider_trace_id.map(str::to_owned),
+        metadata_sanitized: None,
+    };
     sqlx::query(
         "INSERT INTO execution_logs \
          (id, execution_id, attempt_id, timestamp, level, stage, message, provider_trace_id) \
@@ -1166,7 +1179,15 @@ async fn insert_execution_log(
     .bind(record.provider_trace_id)
     .execute(&mut **transaction)
     .await?;
-    Ok(())
+    enqueue_in_transaction(
+        transaction,
+        &EventEnvelope::at(
+            correlation_id,
+            DomainEvent::ExecutionLogged(event),
+            record.at,
+        ),
+    )
+    .await
 }
 
 async fn enqueue_state_event(
@@ -1657,6 +1678,14 @@ mod tests {
             attempt_state,
             ("succeeded".to_owned(), "trace-1".to_owned())
         );
+        let live_log_events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM event_outbox \
+             WHERE event_type = 'execution_logged'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(live_log_events, 2);
 
         assert_execution_read_models(repository, execution, &finished, &completed).await;
     }

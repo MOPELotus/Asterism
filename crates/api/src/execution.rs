@@ -199,6 +199,7 @@ fn execution_stream_event(
         DomainEvent::ExecutionProgressed(progress) if progress.execution_id == execution_id => {
             "execution_progress"
         }
+        DomainEvent::ExecutionLogged(log) if log.execution_id == execution_id => "execution_log",
         DomainEvent::ExecutionRecoveryRequired {
             execution_id: event_execution_id,
             ..

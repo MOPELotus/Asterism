@@ -1324,3 +1324,24 @@ buffering, emits keep-alives, and observes the daemon shutdown signal so a live
 stream cannot hold graceful shutdown open. Detailed `ExecutionLogEvent` live
 fan-out remains a separate slice; this stream does not poll or expose raw
 Provider payloads.
+
+## Ninety-second Phase 0 slice
+
+Persisted Execution lifecycle logs now enter the transactional outbox as typed
+`ExecutionLogged` domain events in the same transaction that inserts their
+history row. Starting an Attempt and finishing either a normal or recovery
+Attempt therefore cannot expose a live log without its durable history, or
+commit history without the corresponding live-delivery record. Repeating an
+idempotent Attempt start still creates neither a duplicate log row nor a
+duplicate event.
+
+The owner-scoped Execution SSE filter now emits those envelopes as
+`execution_log` frames alongside state, progress, recovery and human-required
+events. Each frame retains the Core `ExecutionLogEvent` shape and its outer
+domain-event ID and correlation ID, so consumers can merge live entries with
+the bounded chronological history without receiving unrelated executions.
+The initial frame remains a bounded Execution detail snapshot rather than an
+unbounded log dump; reconnect and lag recovery continue through the paginated
+log API. Provider-authored intermediate diagnostic logs need an explicit
+validated sink before they can use this path; this slice streams only logs
+already owned and sanitized by Core lifecycle persistence.

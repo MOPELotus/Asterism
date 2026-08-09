@@ -2,8 +2,8 @@
 //! integrations.
 
 use asterism_domain::{
-    AuthSessionId, AuthState, CreditAmount, EventId, ExecutionId, ExecutionProgress,
-    HumanRequiredReason, TaskDiffKind, TaskId, Timestamp, UserId,
+    AuthSessionId, AuthState, CreditAmount, EventId, ExecutionId, ExecutionLogEvent,
+    ExecutionProgress, HumanRequiredReason, TaskDiffKind, TaskId, Timestamp, UserId,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,7 @@ pub enum DomainEvent {
         state: asterism_domain::ExecutionState,
     },
     ExecutionProgressed(ExecutionProgress),
+    ExecutionLogged(ExecutionLogEvent),
     AuthStateChanged {
         auth_session_id: AuthSessionId,
         state: AuthState,

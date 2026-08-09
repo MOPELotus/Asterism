@@ -731,7 +731,7 @@ fn execution_logs_path() -> Value {
 fn execution_stream_path() -> Value {
     json!({"get": {
         "operationId": "streamExecution",
-        "description": "Snapshot-first live state/progress stream. Reconnect or resync through the bounded detail and log history APIs; durable event replay is not provided.",
+        "description": "Snapshot-first live state/progress/log stream. Reconnect or resync through the bounded detail and log history APIs; durable event replay is not provided.",
         "security": [{"cookieAuth": []}, {"bearerAuth": []}],
         "parameters": [
             {"name": "execution_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
@@ -3046,6 +3046,35 @@ mod tests {
         assert!(live.contains("event: execution_state"));
         assert!(live.contains("matching-execution"));
         assert!(!live.contains("foreign-execution"));
+
+        let execution_id = execution_id.parse().unwrap();
+        events
+            .publish(asterism_events::EventEnvelope::new(
+                "matching-log",
+                asterism_events::DomainEvent::ExecutionLogged(asterism_domain::ExecutionLogEvent {
+                    execution_id,
+                    attempt_id: None,
+                    timestamp: Utc::now(),
+                    level: asterism_domain::LogLevel::Info,
+                    stage: asterism_domain::ExecutionStage::Executing,
+                    message: "sanitized live log".to_owned(),
+                    provider_trace_id: Some("trace-safe".to_owned()),
+                    metadata_sanitized: Some(json!({"safe": true})),
+                }),
+            ))
+            .unwrap();
+        let log = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio_stream::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let log = std::str::from_utf8(&log).unwrap();
+        assert!(log.contains("event: execution_log"));
+        assert!(log.contains("sanitized live log"));
+        assert!(log.contains("matching-log"));
     }
 
     #[tokio::test]

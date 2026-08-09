@@ -208,13 +208,14 @@ fn encode_timestamp(value: Timestamp) -> String {
 fn event_type(event: &EventEnvelope) -> &'static str {
     use asterism_events::DomainEvent::{
         AuthStateChanged, CreditCommitted, CreditGranted, CreditReleased, CreditReserved,
-        ExecutionProgressed, ExecutionRecoveryRequired, ExecutionStateChanged, HumanRequired,
-        TaskChanged,
+        ExecutionLogged, ExecutionProgressed, ExecutionRecoveryRequired, ExecutionStateChanged,
+        HumanRequired, TaskChanged,
     };
     match &event.event {
         TaskChanged { .. } => "task_changed",
         ExecutionStateChanged { .. } => "execution_state_changed",
         ExecutionProgressed(_) => "execution_progressed",
+        ExecutionLogged(_) => "execution_logged",
         AuthStateChanged { .. } => "auth_state_changed",
         HumanRequired { .. } => "human_required",
         CreditReserved { .. } => "credit_reserved",
