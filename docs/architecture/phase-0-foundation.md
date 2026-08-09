@@ -1971,3 +1971,23 @@ the full reviewable draft from the authoritative Question and Candidate rows,
 then validate it again; they do not persist or recover executable Provider
 payload values. This checkpoint adds no public build endpoint and performs no
 Provider call or remote mutation.
+
+## One-hundred-and-thirtieth Phase 0 slice
+
+Core now builds a `SubmissionDraft` only from an owner-scoped Task, one exact
+immutable QuestionSnapshot and an explicit list of persisted AnswerCandidate
+IDs. The Task and registered Provider must both advertise the independent
+SubmissionBuild capability, and the ProviderAccount must still be authenticated
+and bound to the same owner and Provider.
+
+Selection is fail-closed: every Snapshot Question must have exactly one chosen
+Candidate, while foreign, missing, repeated or multiple-per-Question identities
+fail before the Provider is called. Provider code receives normalized Questions
+and selected answers only and returns a non-executable payload preview. Core
+validates the complete draft before its single repository commit.
+
+Build is classified as a non-mutating formal-assessment action, independently
+from Execute and Submit policy. The service creates no Execution, reserves no
+credit, calls no Task execution slot and cannot submit a remote answer. Chaoxing
+still advertises no SubmissionBuild implementation, and no public route is
+added in this checkpoint.

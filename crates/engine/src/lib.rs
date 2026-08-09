@@ -14,6 +14,7 @@ mod question_read;
 mod scan;
 mod scan_job;
 mod scan_worker;
+mod submission_build;
 mod task_detail;
 mod task_progress;
 mod transition;
@@ -63,6 +64,10 @@ pub use scan_job::{
     ScheduledScanFailure, ScheduledScanOutcome, ScheduledScanRunError, ScheduledScanRunner,
 };
 pub use scan_worker::{ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedulerWorker};
+pub use submission_build::{
+    BuildSubmissionDraftCommand, SubmissionDraftBuildError, SubmissionDraftBuildResult,
+    SubmissionDraftBuildService,
+};
 pub use task_detail::{
     ProviderTaskDetailError, ProviderTaskDetailResult, ProviderTaskDetailService,
     ReadTaskDetailCommand,

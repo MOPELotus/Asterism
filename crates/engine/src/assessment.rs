@@ -7,6 +7,7 @@ pub enum TaskAction {
     ReadDetail,
     Parse,
     Resolve,
+    Build,
     Notify,
     Execute,
     Submit,
@@ -39,6 +40,7 @@ pub fn authorize_task_action(
         | TaskAction::ReadDetail
         | TaskAction::Parse
         | TaskAction::Resolve
+        | TaskAction::Build
         | TaskAction::Notify => Ok(()),
         TaskAction::Execute if formal_policy.allow_execution => Ok(()),
         TaskAction::Submit if formal_policy.allow_submission => Ok(()),
