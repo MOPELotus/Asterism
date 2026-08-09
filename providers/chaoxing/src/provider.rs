@@ -97,6 +97,7 @@ fn compose_development_provider(
         task_progress: Some(task_progress),
         question_inventory: Some(question_read.clone()),
         question_parse: Some(question_read),
+        answer_resolve: None,
         task_execution: Some(task_execution),
         browser_bridge: None,
     })

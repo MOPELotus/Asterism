@@ -1859,3 +1859,17 @@ snapshot ID and capture timestamp beside the Provider version and normalized
 Questions. The response remains `no-store` because it represents a fresh remote
 read; persistence provides an explicit future binding point for AnswerCandidate
 and SubmissionDraft, not permission to resolve answers or submit the Task.
+
+## One-hundred-and-twenty-third Phase 0 slice
+
+Provider-native `AnswerResolve` now has its own Provider trait and Registry slot
+instead of being counted as an implementation of `TaskExecutionCapability`.
+The contract accepts an already normalized Question set and can return bounded
+Domain `AnswerCandidate` values, but it grants no draft-building, remote
+execution or verification authority.
+
+This slot is intentionally Provider-native. Manual input, local cache and
+external answer banks remain Core-side `AnswerSource` concerns and must not be
+forced through a learning-platform Provider or its credentials. Core binding,
+all-or-nothing candidate validation and persistence remain later checkpoints;
+Chaoxing advertises no answer-resolution capability in this slice.

@@ -473,6 +473,7 @@ mod tests {
                 task_progress: None,
                 question_inventory: None,
                 question_parse: None,
+                answer_resolve: None,
                 task_execution: None,
                 browser_bridge: None,
             })

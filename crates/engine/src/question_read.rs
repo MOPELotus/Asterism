@@ -529,6 +529,7 @@ mod tests {
                 task_progress: None,
                 question_inventory: Some(capability.clone()),
                 question_parse: Some(capability.clone()),
+                answer_resolve: None,
                 task_execution: None,
                 browser_bridge: None,
             })

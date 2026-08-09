@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, fmt};
 
 use asterism_domain::{
-    AssessmentClass, AuthMethod, AuthSessionId, CourseId, LogLevel, ProviderAccountId, ProviderId,
-    Question, QuestionKind, RemoteState, SecretId, SessionKind, SourceType, TaskCapability, TaskId,
-    Timestamp, WaitingUserState,
+    AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, CourseId, LogLevel,
+    ProviderAccountId, ProviderId, Question, QuestionKind, RemoteState, SecretId, SessionKind,
+    SourceType, TaskCapability, TaskId, Timestamp, WaitingUserState,
 };
 use asterism_secrets::{CredentialBundle, CredentialField};
 use async_trait::async_trait;
@@ -109,6 +109,19 @@ pub trait QuestionParseCapability: ProviderIdentity {
         remote_task_id: &str,
         question: &RemoteQuestionRef,
     ) -> ProviderResult<Question>;
+}
+
+/// Provider-native answer lookup kept separate from question parsing, draft
+/// construction and every remote mutation capability. Non-Provider sources
+/// such as manual input or external banks use their own Core-side contracts.
+#[async_trait]
+pub trait AnswerResolveCapability: ProviderIdentity {
+    async fn resolve_answers(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        questions: &[Question],
+    ) -> ProviderResult<Vec<AnswerCandidate>>;
 }
 
 #[async_trait]

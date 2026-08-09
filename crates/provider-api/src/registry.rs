@@ -3,10 +3,10 @@ use std::{collections::BTreeMap, sync::Arc};
 use asterism_domain::ProviderId;
 
 use crate::{
-    AuthenticationCapability, BrowserBridgeCapability, CourseInventoryCapability,
-    ProviderCapability, ProviderMetadata, ProviderRuntimeSettingsSchema, ProviderSettingsError,
-    QuestionInventoryCapability, QuestionParseCapability, TaskDetailCapability,
-    TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
+    AnswerResolveCapability, AuthenticationCapability, BrowserBridgeCapability,
+    CourseInventoryCapability, ProviderCapability, ProviderMetadata, ProviderRuntimeSettingsSchema,
+    ProviderSettingsError, QuestionInventoryCapability, QuestionParseCapability,
+    TaskDetailCapability, TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
 };
 
 #[derive(Clone)]
@@ -20,6 +20,7 @@ pub struct ProviderEntry {
     pub task_progress: Option<Arc<dyn TaskProgressCapability>>,
     pub question_inventory: Option<Arc<dyn QuestionInventoryCapability>>,
     pub question_parse: Option<Arc<dyn QuestionParseCapability>>,
+    pub answer_resolve: Option<Arc<dyn AnswerResolveCapability>>,
     pub task_execution: Option<Arc<dyn TaskExecutionCapability>>,
     pub browser_bridge: Option<Arc<dyn BrowserBridgeCapability>>,
 }
@@ -37,6 +38,7 @@ impl std::fmt::Debug for ProviderEntry {
             .field("task_progress", &self.task_progress.is_some())
             .field("question_inventory", &self.question_inventory.is_some())
             .field("question_parse", &self.question_parse.is_some())
+            .field("answer_resolve", &self.answer_resolve.is_some())
             .field("task_execution", &self.task_execution.is_some())
             .field("browser_bridge", &self.browser_bridge.is_some())
             .finish()
@@ -55,6 +57,7 @@ impl ProviderEntry {
             task_progress: None,
             question_inventory: None,
             question_parse: None,
+            answer_resolve: None,
             task_execution: None,
             browser_bridge: None,
         }
@@ -114,6 +117,10 @@ impl ProviderEntry {
                 ProviderCapability::QuestionParse,
                 self.question_parse.is_some(),
             ),
+            (
+                ProviderCapability::AnswerResolve,
+                self.answer_resolve.is_some(),
+            ),
         ];
         for (capability, implemented) in checks {
             if self.metadata.advertises(capability) != implemented {
@@ -128,7 +135,6 @@ impl ProviderEntry {
 
         let execution_capabilities = [
             ProviderCapability::ResourceExecution,
-            ProviderCapability::AnswerResolve,
             ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
             ProviderCapability::SubmissionVerify,
@@ -198,6 +204,12 @@ impl ProviderEntry {
             (
                 "question_parse",
                 self.question_parse
+                    .as_ref()
+                    .map(|implementation| implementation.metadata()),
+            ),
+            (
+                "answer_resolve",
+                self.answer_resolve
                     .as_ref()
                     .map(|implementation| implementation.metadata()),
             ),
@@ -300,7 +312,7 @@ pub enum RegistryError {
 mod tests {
     use std::{collections::BTreeSet, sync::Arc};
 
-    use asterism_domain::{ProviderId, Question, TaskId};
+    use asterism_domain::{AnswerCandidate, ProviderId, Question, TaskId};
     use async_trait::async_trait;
 
     use super::*;
@@ -346,6 +358,18 @@ mod tests {
             _question: &RemoteQuestionRef,
         ) -> ProviderResult<Question> {
             unreachable!("registry identity test does not invoke parsing")
+        }
+    }
+
+    #[async_trait]
+    impl AnswerResolveCapability for FakeQuestionRead {
+        async fn resolve_answers(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+            _questions: &[Question],
+        ) -> ProviderResult<Vec<AnswerCandidate>> {
+            Ok(Vec::new())
         }
     }
 
@@ -492,6 +516,23 @@ mod tests {
         let mut entry = ProviderEntry::metadata_only(metadata);
         entry.question_inventory = Some(implementation.clone());
         entry.question_parse = Some(implementation);
+        assert!(entry.task_execution.is_none());
+
+        let mut registry = ProviderRegistry::default();
+        registry.register(entry).unwrap();
+    }
+
+    #[test]
+    fn answer_resolution_is_independent_from_task_execution() {
+        let mut metadata = metadata();
+        metadata
+            .capabilities
+            .insert(ProviderCapability::AnswerResolve);
+        let implementation = Arc::new(FakeQuestionRead {
+            metadata: metadata.clone(),
+        });
+        let mut entry = ProviderEntry::metadata_only(metadata);
+        entry.answer_resolve = Some(implementation);
         assert!(entry.task_execution.is_none());
 
         let mut registry = ProviderRegistry::default();

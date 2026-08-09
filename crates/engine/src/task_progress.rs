@@ -371,6 +371,7 @@ mod tests {
                 task_progress: Some(capability.clone()),
                 question_inventory: None,
                 question_parse: None,
+                answer_resolve: None,
                 task_execution: None,
                 browser_bridge: None,
             })
