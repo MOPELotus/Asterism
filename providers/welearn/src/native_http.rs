@@ -12,9 +12,11 @@ use reqwest::{
 use zeroize::Zeroize;
 
 use crate::{
-    WellearnCourseInventoryTransport, WellearnInventoryDocument, WellearnScoLeavesDocument,
-    WellearnSessionResolver, WellearnTaskInventoryDocuments, WellearnTaskInventoryTransport,
-    course_context::parse_course_context, course_inventory::course_id_from_remote,
+    WellearnCmiDocument, WellearnCmiTransport, WellearnCourseInventoryTransport,
+    WellearnInventoryDocument, WellearnScoLeavesDocument, WellearnSessionResolver,
+    WellearnTaskInventoryDocuments, WellearnTaskInventoryTransport,
+    course_context::{parse_course_context, parse_course_context_for_id},
+    course_inventory::course_id_from_remote,
     task_inventory::unit_count,
 };
 
@@ -23,6 +25,8 @@ const COURSE_INDEX_REFERER: &str = "https://welearn.sflep.com/student/index.aspx
 const COURSE_INFO_ORIGIN: &str = "https://welearn.sflep.com";
 const COURSE_INFO_PATH: &str = "/student/course_info.aspx";
 const STUDY_STAT_URL: &str = "https://welearn.sflep.com/ajax/StudyStat.aspx";
+const SCO_URL: &str = "https://welearn.sflep.com/Ajax/SCO.aspx";
+const STUDY_COURSE_REFERER: &str = "https://welearn.sflep.com/student/StudyCourse.aspx";
 const MAX_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 
 /// Native, non-redirecting `WELearn` Course/Unit/SCO inventory transport.
@@ -138,6 +142,39 @@ impl NativeWellearnInventoryTransport {
         }
         Ok(WellearnTaskInventoryDocuments::new(units, leaves))
     }
+
+    async fn fetch_cmi_once(
+        &self,
+        session: &crate::WellearnCookieSession,
+        course_id: &str,
+        sco_id: &str,
+    ) -> ProviderResult<WellearnCmiDocument> {
+        let course_page = self
+            .send_get_with_session(
+                session,
+                course_info_url(course_id)?,
+                COURSE_INDEX_REFERER,
+                ResponseContent::Html,
+            )
+            .await?;
+        let route = parse_course_context_for_id(course_id.to_owned(), course_page.as_str())?;
+        let response = self
+            .client
+            .post(sco_url(route.user_id())?)
+            .header(COOKIE, session.expose_secret())
+            .header(REFERER, STUDY_COURSE_REFERER)
+            .form(&[
+                ("action", "getscoinfo_v7"),
+                ("uid", route.user_id()),
+                ("cid", route.course_id()),
+                ("scoid", sco_id),
+            ])
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let document = read_inventory_response(response, ResponseContent::Json).await?;
+        WellearnCmiDocument::try_new(document.as_str().to_owned())
+    }
 }
 
 impl fmt::Debug for NativeWellearnInventoryTransport {
@@ -193,6 +230,25 @@ impl WellearnTaskInventoryTransport for NativeWellearnInventoryTransport {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 let session = self.sessions.renew_session(context).await?;
                 self.fetch_tasks_once(&session, course).await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
+impl WellearnCmiTransport for NativeWellearnInventoryTransport {
+    async fn fetch_cmi(
+        &self,
+        context: &ProviderContext,
+        course_id: &str,
+        sco_id: &str,
+    ) -> ProviderResult<WellearnCmiDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_cmi_once(&session, course_id, sco_id).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_cmi_once(&session, course_id, sco_id).await
             }
             result => result,
         }
@@ -380,6 +436,12 @@ fn sco_leaves_url(route: &crate::WellearnCourseContext, unit_index: u32) -> Prov
     Ok(url)
 }
 
+fn sco_url(user_id: &str) -> ProviderResult<Url> {
+    let mut url = static_url(SCO_URL)?;
+    url.query_pairs_mut().append_pair("uid", user_id);
+    Ok(url)
+}
+
 fn static_url(value: &'static str) -> ProviderResult<Url> {
     Url::parse(value).map_err(|_| static_route_error())
 }
@@ -525,6 +587,10 @@ mod tests {
         assert_eq!(
             leaves.query(),
             Some("action=scoLeaves&cid=1001&uid=7001&unitidx=3&classid=class-8001")
+        );
+        assert_eq!(
+            sco_url("user value").unwrap().as_str(),
+            "https://welearn.sflep.com/Ajax/SCO.aspx?uid=user+value"
         );
     }
 

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt};
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType};
+use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
 use asterism_provider_api::{ProviderError, ProviderResult, RemoteCourse, RemoteTask};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -230,7 +230,7 @@ fn parse_leaves(
             opens_at: None,
             due_at: None,
             closes_at: None,
-            capabilities: Vec::new(),
+            capabilities: vec![TaskCapability::ProgressRead],
             fingerprint: fingerprint(&normalized)?,
             normalized,
             raw_sanitized: serde_json::json!({
@@ -349,7 +349,11 @@ mod tests {
         assert_eq!(tasks[0].remote_state, RemoteState::Completed);
         assert_eq!(tasks[1].remote_state, RemoteState::Unknown);
         assert_eq!(tasks[2].remote_state, RemoteState::NotOpen);
-        assert!(tasks.iter().all(|task| task.capabilities.is_empty()));
+        assert!(
+            tasks
+                .iter()
+                .all(|task| task.capabilities == [TaskCapability::ProgressRead])
+        );
     }
 
     #[test]

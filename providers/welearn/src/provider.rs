@@ -5,10 +5,10 @@ use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettin
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
-    WellearnAuthentication, WellearnAuthenticationTransport, WellearnCourseInventory,
-    WellearnCourseInventoryTransport, WellearnSessionResolver, WellearnTaskInventory,
-    WellearnTaskInventoryTransport, metadata::development_metadata,
-    native_authentication::NativeWellearnAuthenticationTransport,
+    WellearnAuthentication, WellearnAuthenticationTransport, WellearnCmiTransport,
+    WellearnCourseInventory, WellearnCourseInventoryTransport, WellearnSessionResolver,
+    WellearnTaskInventory, WellearnTaskInventoryTransport, WellearnTaskProgress,
+    metadata::development_metadata, native_authentication::NativeWellearnAuthenticationTransport,
     native_http::NativeWellearnInventoryTransport, stored_session::StoredWellearnSessionResolver,
 };
 
@@ -24,6 +24,7 @@ pub fn build_development_provider(
     sessions: Arc<dyn WellearnSessionResolver>,
     course_transport: Arc<dyn WellearnCourseInventoryTransport>,
     task_transport: Arc<dyn WellearnTaskInventoryTransport>,
+    cmi_transport: Arc<dyn WellearnCmiTransport>,
 ) -> ProviderResult<ProviderEntry> {
     let authentication = Arc::new(WellearnAuthentication::try_new(
         authentication_transport,
@@ -31,6 +32,7 @@ pub fn build_development_provider(
     )?);
     let course_inventory = Arc::new(WellearnCourseInventory::try_new(course_transport)?);
     let task_inventory = Arc::new(WellearnTaskInventory::try_new(task_transport)?);
+    let task_progress = Arc::new(WellearnTaskProgress::try_new(cmi_transport)?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: ProviderRuntimeSettingsSchema::default(),
@@ -38,7 +40,7 @@ pub fn build_development_provider(
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),
         task_detail: None,
-        task_progress: None,
+        task_progress: Some(task_progress),
         question_inventory: None,
         question_parse: None,
         answer_resolve: None,
@@ -69,6 +71,7 @@ pub fn build_development_provider_with_native_inventory(
     build_development_provider(
         authentication_transport,
         sessions,
+        inventory.clone(),
         inventory.clone(),
         inventory,
     )
@@ -142,7 +145,10 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::{WellearnCookieSession, WellearnInventoryDocument, WellearnTaskInventoryDocuments};
+    use crate::{
+        WellearnCmiDocument, WellearnCookieSession, WellearnInventoryDocument,
+        WellearnTaskInventoryDocuments,
+    };
 
     #[derive(Debug)]
     struct UnusedBoundaries;
@@ -216,10 +222,23 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl WellearnCmiTransport for UnusedBoundaries {
+        async fn fetch_cmi(
+            &self,
+            _context: &ProviderContext,
+            _course_id: &str,
+            _sco_id: &str,
+        ) -> ProviderResult<WellearnCmiDocument> {
+            Err(unused())
+        }
+    }
+
     #[test]
     fn development_factory_is_registry_consistent_without_extra_slots() {
         let boundaries = Arc::new(UnusedBoundaries);
         let entry = build_development_provider(
+            boundaries.clone(),
             boundaries.clone(),
             boundaries.clone(),
             boundaries.clone(),
@@ -229,7 +248,7 @@ mod tests {
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());
-        assert!(entry.task_progress.is_none());
+        assert!(entry.task_progress.is_some());
         assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_none());
         assert!(entry.runtime_settings.definitions.is_empty());

@@ -1,0 +1,5 @@
+{
+  "ret": 0,
+  "comment": "{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.421\",\"session_time\":\"PT5M\",\"total_time\":\"300\",\"score\":{\"scaled\":\"0.8\",\"raw\":\"80\"},\"success_status\":\"unknown\"},\"adl\":{\"data\":[]}}",
+  "must_be_dropped": "not-runtime-metadata"
+}

@@ -6,8 +6,8 @@
 | Stored session validation | Fanyuchang 2026 | Reference | Core-scoped Cookie resolution, authenticated Course-list validation and atomic Password/Composite renewal are native-boundary covered; live pending |
 | CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Native authenticated `authCourse.aspx?action=gmc` read is implemented behind shared NetworkProfile; live pending |
 | TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Native Course page → `courseunits` → one `scoLeaves` response per Unit is implemented all-or-nothing; live pending |
-| TaskProgressRead | YZBRH | Reference | Fresh CMI and SCO facts; completion and progress are distinct |
-| DurationRead | YZBRH | Reference | Read `session_time` and `total_time` independently from completion |
+| TaskProgressRead | YZBRH | Reference | Implemented through a fresh read-only `getscoinfo_v7` CMI request; completion and progress are parsed independently; live pending |
+| DurationRead | YZBRH | Reference | Parser retains bounded raw `session_time` and `total_time` independently; no Core duration or seconds conversion until live unit evidence exists |
 | ResourceExecution | Fanyuchang 2026 + YZBRH | Reference | Start/keep/finalize lifecycle; not implemented until readback is modeled |
 | DurationReport | YZBRH | Reference | Heartbeat uses explicit session/total time; no blind completion mutation |
 | Submission/assessment | None selected | FromScratch | Out of this inventory slice; donor score-forging paths are not accepted behavior |
@@ -22,12 +22,12 @@ The first code slice is fixture-only and read-only:
 2. parse Unit and SCO-leaf responses into `RemoteTask`;
 3. keep SCO completion and donor-labelled learning time as separate facts,
    without claiming a time unit before live CMI evidence exists;
-4. expose no authentication, network transport, execution or submission slot.
+4. expose no execution, duration-report, submission or Capture slot.
 
 The crate now provides this parser boundary and synthetic fixtures. It also
 implements Password/ImportedCookie orchestration behind injected transport and
 stored-session resolver contracts. Metadata remains `Development` and advertises
-Authentication, CourseInventory and TaskInventory. A registry-consistent
+Authentication, CourseInventory, TaskInventory and TaskProgressRead. A registry-consistent
 development entry can be composed from injected boundaries. A shared-policy,
 non-redirecting native Password/OIDC and Course/Task HTTP transports now exist.
 Stored credential resolution now validates exact account/reference/purpose,
@@ -35,4 +35,7 @@ session kind, expiry and UTF-8 shape before constructing a Cookie session.
 Daemon registration is available only through an explicit disabled-by-default
 development flag and requires a configured SecretStore. Password/Composite
 renewal uses Core compare-and-replace and retries one read operation only after
-an Authentication failure. All live validation remains pending.
+an Authentication failure. Fresh CMI reads re-resolve the Course route, post
+only `getscoinfo_v7`, and never start or mutate a SCO as a fallback. Raw CMI
+times are available to the parser but `RemoteProgress.duration_seconds` remains
+unset. All live validation remains pending.

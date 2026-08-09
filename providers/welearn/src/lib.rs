@@ -1,10 +1,12 @@
 //! `WELearn` Provider implementation.
 //!
-//! The current checkpoint contains clean-room, fixture-only Course and SCO
-//! inventory parsers. It deliberately registers no runtime capability and
-//! makes no claim of live compatibility.
+//! The current Development checkpoint provides native Authentication,
+//! Course/Task inventory and read-only CMI progress behind explicit daemon
+//! opt-in. Its parser/native-boundary coverage makes no claim of live
+//! compatibility.
 
 mod authentication;
+mod cmi;
 mod course_context;
 mod course_inventory;
 mod inventory_capabilities;
@@ -19,6 +21,10 @@ pub use authentication::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCookieSession,
     WellearnLoginRedirect, WellearnPasswordCipher, WellearnSessionResolver,
     classify_password_login_response, encode_password_at,
+};
+pub use cmi::{
+    WellearnCmiDocument, WellearnCmiSnapshot, WellearnCmiTransport, WellearnTaskProgress,
+    parse_cmi_snapshot,
 };
 pub use course_context::{WellearnCourseContext, parse_course_context};
 pub use course_inventory::parse_course_inventory;

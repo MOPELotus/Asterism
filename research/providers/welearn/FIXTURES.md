@@ -19,6 +19,7 @@ fixtures/providers/welearn/
   tasks/leaves-unit-0.json
   tasks/leaves-unit-1.json
   tasks/list-mixed.expected.json
+  cmi/progress-mixed.json
 ```
 
 The Auth fixtures cover bounded response classification, strict callback
@@ -28,7 +29,11 @@ and unknown extra fields. Unit/SCO fixtures cover visible/hidden Units,
 completed/unknown/not-open states, duration separation and stable
 Course/Unit/SCO identity. Inline negative tests cover malformed rows, duplicate
 identities, invalid percentages, misbound Unit responses and duration without a
-completion observation.
+completion observation. The CMI fixture covers the outer `comment` envelope,
+independent completion/progress/session/total facts, unknown-field dropping and
+the explicit absence of any seconds conversion. Inline negative cases reject
+missing envelopes, non-zero result codes, malformed nested JSON, unsupported
+scalars and out-of-range progress.
 
 ## Required live-sanitized fixtures
 
@@ -61,4 +66,7 @@ only structural field names, response codes and bounded placeholder shapes.
   silently deleted.
 - `iscomplete` alone never supplies duration.
 - `learntime` alone never marks a task completed.
+- CMI completion and decimal progress remain independent observations.
+- CMI time strings never populate `duration_seconds` without live unit evidence.
+- Missing or malformed CMI never triggers a start/mutation fallback.
 - Unknown fields are dropped from sanitized normalized data.

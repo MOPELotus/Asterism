@@ -2427,3 +2427,25 @@ form markers before Content-Type rejection, while unrelated HTML remains an
 InvalidResponse and cannot trigger credential use. The daemon now composes this
 renewing resolver by default whenever its WELearn Development opt-in is enabled.
 This remains offline/native-boundary evidence, not live verification.
+
+## One-hundred-and-fifty-third Phase 0 slice
+
+WELearn now exposes read-only `TaskProgressRead` for every normalized SCO. The
+native transport refreshes the selected Course page for its current account
+route, then posts only `getscoinfo_v7` with the stable Course and SCO identities.
+It shares the scoped Cookie resolver and one Authentication-only renewal retry;
+no missing or malformed read can fall back to starting or mutating a SCO.
+
+The bounded redacted CMI document parser handles the audited outer JSON
+`comment` envelope and its nested JSON independently. Completion status and
+decimal progress map to `RemoteProgress`, while raw `session_time` and
+`total_time` remain separate parser facts. Because neither the current static
+donors nor a live sanitized fixture establishes one reliable time unit and
+grammar, `duration_seconds` is deliberately unset.
+
+Metadata and the registry-consistent Development entry now advertise and wire
+`TaskProgressRead`; execution, heartbeat, finalize, duration reporting and
+Capture remain absent. Synthetic fixtures and negative tests cover identity
+binding, bounded nested parsing, independent facts and fail-closed drift. This
+checkpoint is offline/native-boundary evidence only and does not raise WELearn's
+verification level.

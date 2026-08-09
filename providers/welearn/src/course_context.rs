@@ -57,12 +57,19 @@ pub fn parse_course_context(
     course: &RemoteCourse,
     document: &str,
 ) -> ProviderResult<WellearnCourseContext> {
+    let course_id = course_id_from_remote(course)?;
+    parse_course_context_for_id(course_id, document)
+}
+
+pub(crate) fn parse_course_context_for_id(
+    course_id: String,
+    document: &str,
+) -> ProviderResult<WellearnCourseContext> {
     if document.is_empty() || document.len() > MAX_COURSE_PAGE_BYTES {
         return Err(protocol_drift(
             "WELearn Course page is empty or exceeds the size limit",
         ));
     }
-    let course_id = course_id_from_remote(course)?;
     let user_id = unique_json_like_scalar(document, "uid")?;
     let class_id = unique_json_like_scalar(document, "classid")?;
     validate_route_component(&user_id, "user ID")?;

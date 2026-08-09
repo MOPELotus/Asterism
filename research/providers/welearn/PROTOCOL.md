@@ -100,6 +100,24 @@ keepsco_with_getticket_with_updatecmitime
 savescoinfo160928
 ```
 
+The implemented read-only path first refreshes the selected Course page to
+resolve its current `uid`, then sends the exact form action and stable IDs:
+
+```text
+POST /Ajax/SCO.aspx?uid={uid}
+     action=getscoinfo_v7&uid={uid}&cid={cid}&scoid={scoid}
+```
+
+The audited response is an outer JSON object whose `comment` string contains a
+second JSON document. The nested optional `cmi` object is parsed field by field;
+completion, progress and both time strings remain independent. Missing `cmi`
+means the donor-observed not-attempted zero-progress state. A non-zero `ret`, a
+non-string `comment`, malformed nested JSON or an unsafe scalar fails closed.
+The native adapter uses the same bounded authenticated session and one
+Authentication-only renewal retry as inventory. It does not call `startsco160928`
+when CMI is absent or malformed, because a read capability must never mutate
+remote learning state.
+
 The donor CMI object exposes separate `completion_status`, `progress_measure`,
 `session_time`, `total_time`, score and success status. Asterism must preserve
 these independent facts:
@@ -112,6 +130,8 @@ A future duration implementation must acquire fresh CMI, preserve the existing
 completion/progress/score values, start when required, issue bounded heartbeats,
 finalize, and then re-read remote CMI. Donor paths which set completed/progress
 or fabricate scores without first reading the remote state are excluded.
+Until sanitized live responses establish the time grammar and unit, the parser
+retains bounded raw time strings but `TaskProgressRead` does not report seconds.
 
 ## Sanitization and routing
 
