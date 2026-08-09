@@ -141,6 +141,7 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
+        .route("/api/v1/tasks/{task_id}/detail", get(task::get_task_detail))
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
         .merge(runtime_settings_routes())
         .merge(credit_routes())
@@ -753,6 +754,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/detail".to_owned(),
+            task_detail_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
@@ -948,6 +956,25 @@ fn task_execute_path() -> Value {
             "403": {"description": "Insufficient permission"},
             "404": {"description": "Task not found for this owner"},
             "409": {"description": "Task state, capability, assessment policy, or idempotency conflict"}
+        }
+    }})
+}
+
+fn task_detail_path() -> Value {
+    json!({"get": {
+        "operationId": "getTaskDetail",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Fresh bounded and sanitized Provider Task detail"},
+            "400": {"description": "Invalid Task or request ID"},
+            "404": {"description": "Task not found"},
+            "409": {"description": "Provider account, capability, user action, or remote binding conflict"},
+            "429": {"description": "Provider rate limited"},
+            "502": {"description": "Provider returned inconsistent detail"},
+            "503": {"description": "Provider temporarily unavailable"}
         }
     }})
 }
@@ -1930,6 +1957,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fetched.status(), StatusCode::OK);
+
         assert!(response_json(fetched).await.get("pairing_token").is_none());
         let claim_path = format!("/api/v1/auth-bootstrap/sessions/{session_id}/claim");
         let wrong = app
@@ -3449,6 +3477,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_detail_route_rejects_invalid_task_ids_before_provider_access() {
+        let (app, _) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/tasks/not-a-task/detail")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "invalid_task_id"
+        );
+    }
+
+    #[tokio::test]
     #[allow(
         clippy::too_many_lines,
         reason = "the integration test keeps execution authorization, idempotency and atomic side effects together"
@@ -3868,6 +3923,7 @@ mod tests {
             "/api/v1/admin/tasks/{task_id}/runtime-settings",
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
+            "/api/v1/tasks/{task_id}/detail",
             "/api/v1/tasks/{task_id}/execute",
             "/api/v1/credits/account",
             "/api/v1/credits/transactions",
@@ -3882,6 +3938,10 @@ mod tests {
         assert_eq!(
             document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
             "bearer"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/detail"]["get"]["operationId"],
+            "getTaskDetail"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],

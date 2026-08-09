@@ -18,11 +18,11 @@ asterism-storage = { path = "../storage" }
 async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 

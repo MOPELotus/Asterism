@@ -131,21 +131,7 @@ fn validate_task_capabilities(
         .iter()
         .flat_map(|task| task.capabilities.iter().copied())
     {
-        let provider_capability = match capability {
-            TaskCapability::ProgressRead => ProviderCapability::TaskProgressRead,
-            TaskCapability::ResourceExecution => ProviderCapability::ResourceExecution,
-            TaskCapability::QuestionInventory => ProviderCapability::QuestionInventory,
-            TaskCapability::QuestionParse => ProviderCapability::QuestionParse,
-            TaskCapability::AnswerResolve => ProviderCapability::AnswerResolve,
-            TaskCapability::SubmissionBuild => ProviderCapability::SubmissionBuild,
-            TaskCapability::SubmissionExecute => ProviderCapability::SubmissionExecute,
-            TaskCapability::SubmissionVerify => ProviderCapability::SubmissionVerify,
-            TaskCapability::DurationRead => ProviderCapability::DurationRead,
-            TaskCapability::DurationReport => ProviderCapability::DurationReport,
-            TaskCapability::Discussion => ProviderCapability::Discussion,
-            TaskCapability::Practice => ProviderCapability::Practice,
-            TaskCapability::BrowserBridge => ProviderCapability::BrowserBridge,
-        };
+        let provider_capability = task_provider_capability(capability);
         if !metadata.advertises(provider_capability) {
             return Err(ProviderScanError::UnadvertisedTaskCapability {
                 provider_id: metadata.id.clone(),
@@ -154,6 +140,24 @@ fn validate_task_capabilities(
         }
     }
     Ok(())
+}
+
+pub(crate) const fn task_provider_capability(capability: TaskCapability) -> ProviderCapability {
+    match capability {
+        TaskCapability::ProgressRead => ProviderCapability::TaskProgressRead,
+        TaskCapability::ResourceExecution => ProviderCapability::ResourceExecution,
+        TaskCapability::QuestionInventory => ProviderCapability::QuestionInventory,
+        TaskCapability::QuestionParse => ProviderCapability::QuestionParse,
+        TaskCapability::AnswerResolve => ProviderCapability::AnswerResolve,
+        TaskCapability::SubmissionBuild => ProviderCapability::SubmissionBuild,
+        TaskCapability::SubmissionExecute => ProviderCapability::SubmissionExecute,
+        TaskCapability::SubmissionVerify => ProviderCapability::SubmissionVerify,
+        TaskCapability::DurationRead => ProviderCapability::DurationRead,
+        TaskCapability::DurationReport => ProviderCapability::DurationReport,
+        TaskCapability::Discussion => ProviderCapability::Discussion,
+        TaskCapability::Practice => ProviderCapability::Practice,
+        TaskCapability::BrowserBridge => ProviderCapability::BrowserBridge,
+    }
 }
 
 async fn collect_course_tasks(

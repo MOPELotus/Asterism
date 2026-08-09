@@ -1664,3 +1664,19 @@ drift. Returned normalized detail contains only sanitized task facts and no
 followed detail-state classification, while Exam remains conservative fresh
 list evidence until dedicated current detail fixtures are added. This is still
 offline evidence and does not raise Chaoxing above `Development`.
+
+## One-hundred-and-tenth Phase 0 slice
+
+The registered `TaskDetail` capability is now reachable through one owner-scoped
+Core read service, `GET /api/v1/tasks/{task_id}/detail`, and
+`asterismctl task detail`. Core resolves the Task's actual ProviderAccount,
+requires an authenticated account and passes only opaque credential references
+plus the bounded request correlation ID to the Provider.
+
+Before returning a response, Core requires the fresh remote identity and source
+type to match the stored Task, rejects capabilities absent from Provider
+metadata, caps the complete detail payload and rejects credential-shaped keys in
+every sanitized JSON region. Provider rate limits, temporary failures, remote
+changes, required user action and protocol drift retain distinct stable HTTP
+classifications. The read is not persisted as a scan snapshot and does not
+change local orchestration state.

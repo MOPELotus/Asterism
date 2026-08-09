@@ -12,6 +12,7 @@ mod outbox;
 mod scan;
 mod scan_job;
 mod scan_worker;
+mod task_detail;
 mod transition;
 
 pub use assessment::{
@@ -51,6 +52,10 @@ pub use scan_job::{
     ScheduledScanFailure, ScheduledScanOutcome, ScheduledScanRunError, ScheduledScanRunner,
 };
 pub use scan_worker::{ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedulerWorker};
+pub use task_detail::{
+    ProviderTaskDetailError, ProviderTaskDetailResult, ProviderTaskDetailService,
+    ReadTaskDetailCommand,
+};
 pub use transition::{
     ExecutionTransitionError, OrchestrationTransitionError, transition_execution,
     validate_orchestration_transition,
