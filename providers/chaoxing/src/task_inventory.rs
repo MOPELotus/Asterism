@@ -13,7 +13,7 @@ use crate::{
     ChaoxingCourseScope,
     inventory::{apply_work_detail_state, parse_work_inventory_entries},
     metadata::development_metadata,
-    parse_chapter_inventory, parse_exam_inventory,
+    parse_chapter_inventory, parse_chapter_resource_inventory, parse_exam_inventory,
 };
 
 const COURSE_ID_ROUTE_KEY: &str = "chaoxing.course_id";
@@ -22,6 +22,9 @@ const CPI_ROUTE_KEY: &str = "chaoxing.cpi";
 const MAX_INVENTORY_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_WORK_DETAIL_REQUESTS: usize = 256;
 const MAX_WORK_DETAIL_ROUTE_BYTES: usize = 8 * 1_024;
+pub(crate) const MAX_RESOURCE_CHAPTER_REQUESTS: usize = 64;
+pub(crate) const CHAPTER_RESOURCE_CARD_COUNT: u8 = 7;
+pub(crate) const MAX_RESOURCE_BATCH_DOCUMENT_BYTES: usize = 32 * 1_024 * 1_024;
 const WORK_DETAIL_ORIGIN: &str = "https://mooc1.chaoxing.com";
 
 /// Borrowed Chaoxing routing facts carried only inside one Provider scan.
@@ -101,6 +104,10 @@ impl ChaoxingInventoryDocument {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) const fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 impl fmt::Debug for ChaoxingInventoryDocument {
@@ -112,6 +119,126 @@ impl fmt::Debug for ChaoxingInventoryDocument {
 impl Drop for ChaoxingInventoryDocument {
     fn drop(&mut self) {
         self.0.zeroize();
+    }
+}
+
+/// One bounded chapter-resource request derived from a pending Chapter task.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ChaoxingChapterResourceRequest {
+    course: String,
+    class: String,
+    knowledge: String,
+}
+
+impl ChaoxingChapterResourceRequest {
+    pub(crate) fn try_from_chapter(task: &RemoteTask) -> ProviderResult<Option<Self>> {
+        if task.source_type != asterism_domain::SourceType::Chapter
+            || task
+                .normalized
+                .get("schema")
+                .and_then(serde_json::Value::as_str)
+                != Some("chaoxing.chapter.v1")
+        {
+            return Err(protocol_drift(
+                "Chaoxing chapter task cannot produce a resource request",
+            ));
+        }
+        let job_count = task
+            .normalized
+            .get("job_count")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| protocol_drift("Chaoxing chapter task has no valid job count"))?;
+        if task.remote_state != RemoteState::Pending || job_count == 0 {
+            return Ok(None);
+        }
+        let knowledge_id = task
+            .normalized
+            .get("knowledge_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| protocol_drift("Chaoxing chapter task has no knowledge identity"))?;
+        validate_knowledge_id(knowledge_id)?;
+        let course_id = required_normalized_string(task, "course_id")?;
+        let class_id = required_normalized_string(task, "class_id")?;
+        Ok(Some(Self {
+            course: course_id.to_owned(),
+            class: class_id.to_owned(),
+            knowledge: knowledge_id.to_owned(),
+        }))
+    }
+
+    pub fn knowledge_id(&self) -> &str {
+        &self.knowledge
+    }
+
+    pub(crate) fn belongs_to(&self, route: ChaoxingCourseRoute<'_>) -> bool {
+        self.course == route.course_id() && self.class == route.class_id()
+    }
+}
+
+impl fmt::Debug for ChaoxingChapterResourceRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingChapterResourceRequest")
+            .field("course_id", &"[REDACTED]")
+            .field("class_id", &"[REDACTED]")
+            .field("knowledge_id", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// One card document bound to the originating chapter request and card index.
+pub struct ChaoxingChapterResourceDocument {
+    knowledge_id: String,
+    card_index: u8,
+    document: ChaoxingInventoryDocument,
+}
+
+impl ChaoxingChapterResourceDocument {
+    /// Binds one bounded response to an authorized resource request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-response error when the card index is outside the
+    /// donor-observed range or the document is empty or oversized.
+    pub fn for_request(
+        request: &ChaoxingChapterResourceRequest,
+        card_index: u8,
+        document: impl Into<String>,
+    ) -> ProviderResult<Self> {
+        Self::from_document(
+            request,
+            card_index,
+            ChaoxingInventoryDocument::try_new(document)?,
+        )
+    }
+
+    pub(crate) fn from_document(
+        request: &ChaoxingChapterResourceRequest,
+        card_index: u8,
+        document: ChaoxingInventoryDocument,
+    ) -> ProviderResult<Self> {
+        if card_index >= CHAPTER_RESOURCE_CARD_COUNT {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing chapter resource card index exceeds the size limit",
+            ));
+        }
+        Ok(Self {
+            knowledge_id: request.knowledge.clone(),
+            card_index,
+            document,
+        })
+    }
+}
+
+impl fmt::Debug for ChaoxingChapterResourceDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingChapterResourceDocument")
+            .field("knowledge_id", &"[REDACTED]")
+            .field("card_index", &self.card_index)
+            .field("document", &self.document)
+            .finish()
     }
 }
 
@@ -217,8 +344,9 @@ impl ChaoxingWorkDetailState {
 }
 
 /// Runtime adapter which obtains current Chaoxing inventory pages. A concrete
-/// adapter must resolve credentials through Core's secrets boundary and discover
-/// a fresh Work `enc`; neither concern belongs to the HTML parser.
+/// adapter must resolve credentials through Core's secrets boundary, discover
+/// a fresh Work `enc`, and preserve the bounded resource-card matrix; none of
+/// those concerns belongs to the HTML parsers.
 #[async_trait]
 pub trait ChaoxingInventoryTransport: Send + Sync {
     async fn fetch_chapter_inventory(
@@ -232,6 +360,13 @@ pub trait ChaoxingInventoryTransport: Send + Sync {
         context: &ProviderContext,
         route: ChaoxingCourseRoute<'_>,
     ) -> ProviderResult<ChaoxingInventoryDocument>;
+
+    async fn fetch_chapter_resource_inventories(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        requests: &[ChaoxingChapterResourceRequest],
+    ) -> ProviderResult<Vec<ChaoxingChapterResourceDocument>>;
 
     async fn fetch_exam_inventory(
         &self,
@@ -316,6 +451,20 @@ impl TaskInventoryCapability for ChaoxingTaskInventory {
             .transport
             .fetch_chapter_inventory(context, route)
             .await?;
+        let mut tasks = parse_chapter_inventory(chapter.as_str(), &scope)?;
+        let resource_requests = chapter_resource_requests(&tasks)?;
+        let resource_documents = if resource_requests.is_empty() {
+            Vec::new()
+        } else {
+            self.transport
+                .fetch_chapter_resource_inventories(context, route, &resource_requests)
+                .await?
+        };
+        tasks.extend(parse_resource_documents(
+            resource_documents,
+            &resource_requests,
+            &scope,
+        )?);
         let work = self.transport.fetch_work_inventory(context, route).await?;
         let exam = self.transport.fetch_exam_inventory(context, route).await?;
         let mut work_tasks = parse_work_inventory_entries(work.as_str(), &scope)?;
@@ -364,7 +513,6 @@ impl TaskInventoryCapability for ChaoxingTaskInventory {
                 "Chaoxing Work detail transport returned an unexpected task",
             ));
         }
-        let mut tasks = parse_chapter_inventory(chapter.as_str(), &scope)?;
         tasks.extend(
             work_tasks
                 .into_iter()
@@ -373,6 +521,94 @@ impl TaskInventoryCapability for ChaoxingTaskInventory {
         tasks.extend(parse_exam_inventory(exam.as_str(), &scope)?);
         Ok(tasks)
     }
+}
+
+fn chapter_resource_requests(
+    chapters: &[RemoteTask],
+) -> ProviderResult<Vec<ChaoxingChapterResourceRequest>> {
+    let requests = chapters
+        .iter()
+        .filter_map(|task| ChaoxingChapterResourceRequest::try_from_chapter(task).transpose())
+        .collect::<ProviderResult<Vec<_>>>()?;
+    if requests.len() > MAX_RESOURCE_CHAPTER_REQUESTS {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Chaoxing pending resource chapter count exceeds the size limit",
+        ));
+    }
+    Ok(requests)
+}
+
+fn parse_resource_documents(
+    documents: Vec<ChaoxingChapterResourceDocument>,
+    requests: &[ChaoxingChapterResourceRequest],
+    scope: &ChaoxingCourseScope,
+) -> ProviderResult<Vec<RemoteTask>> {
+    let total_bytes = documents
+        .iter()
+        .try_fold(0_usize, |total, document| {
+            total.checked_add(document.document.len())
+        })
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing resource card batch exceeds the aggregate size limit",
+            )
+        })?;
+    if total_bytes > MAX_RESOURCE_BATCH_DOCUMENT_BYTES {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Chaoxing resource card batch exceeds the aggregate size limit",
+        ));
+    }
+    let mut indexed_documents = HashMap::new();
+    for document in documents {
+        let key = (document.knowledge_id.clone(), document.card_index);
+        if indexed_documents.insert(key, document).is_some() {
+            return Err(protocol_drift(
+                "Chaoxing resource transport returned a duplicate card",
+            ));
+        }
+    }
+    let mut documents = indexed_documents;
+    let expected_count = requests
+        .len()
+        .saturating_mul(usize::from(CHAPTER_RESOURCE_CARD_COUNT));
+    if documents.len() != expected_count {
+        return Err(protocol_drift(
+            "Chaoxing resource transport returned an incomplete or duplicate card set",
+        ));
+    }
+    let mut tasks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for request in requests {
+        for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+            let document = documents
+                .remove(&(request.knowledge.clone(), card_index))
+                .ok_or_else(|| {
+                    protocol_drift("Chaoxing resource transport omitted a requested card")
+                })?;
+            for task in parse_chapter_resource_inventory(
+                document.document.as_str(),
+                scope,
+                request.knowledge_id(),
+                card_index,
+            )? {
+                if !seen.insert(task.remote_id.clone()) {
+                    return Err(protocol_drift(
+                        "Chaoxing resource cards contain a duplicate task identity",
+                    ));
+                }
+                tasks.push(task);
+            }
+        }
+    }
+    if !documents.is_empty() {
+        return Err(protocol_drift(
+            "Chaoxing resource transport returned an unexpected card",
+        ));
+    }
+    Ok(tasks)
 }
 
 fn valid_work_detail_url(url: &Url) -> bool {
@@ -433,6 +669,22 @@ fn validate_cpi(value: &str) -> ProviderResult<()> {
     Ok(())
 }
 
+fn validate_knowledge_id(value: &str) -> ProviderResult<()> {
+    if !(1..=20).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(protocol_drift(
+            "Chaoxing chapter resource has an invalid knowledge identity",
+        ));
+    }
+    Ok(())
+}
+
+fn required_normalized_string<'a>(task: &'a RemoteTask, key: &str) -> ProviderResult<&'a str> {
+    task.normalized
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| protocol_drift("Chaoxing chapter task has incomplete route binding"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -446,16 +698,28 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/exam/list-mixed.html");
     const CHAPTER_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
+    const RESOURCE_MIXED: &str =
+        include_str!("../../../fixtures/providers/chaoxing/resources/cards-mixed.html");
     const WORK_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/list-mixed.html");
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    enum ResourceFixtureBehavior {
+        #[default]
+        Complete,
+        OmitLast,
+        DuplicateFirst,
+    }
 
     #[derive(Debug, Default)]
     struct FixtureTransport {
         chapter_calls: AtomicUsize,
         work_calls: AtomicUsize,
         exam_calls: AtomicUsize,
+        resource_calls: AtomicUsize,
         work_detail_calls: AtomicUsize,
         fail_exam: bool,
+        resource_behavior: ResourceFixtureBehavior,
         omit_work_detail: bool,
     }
 
@@ -483,6 +747,45 @@ mod tests {
             assert_eq!(route.cpi(), "300");
             self.work_calls.fetch_add(1, Ordering::Relaxed);
             ChaoxingInventoryDocument::try_new(WORK_MIXED)
+        }
+
+        async fn fetch_chapter_resource_inventories(
+            &self,
+            _context: &ProviderContext,
+            route: ChaoxingCourseRoute<'_>,
+            requests: &[ChaoxingChapterResourceRequest],
+        ) -> ProviderResult<Vec<ChaoxingChapterResourceDocument>> {
+            assert_eq!(route.course_id(), "100");
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].knowledge_id(), "4001");
+            assert!(!format!("{:?}", requests[0]).contains("4001"));
+            self.resource_calls.fetch_add(1, Ordering::Relaxed);
+            let mut documents = Vec::new();
+            for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+                if self.resource_behavior == ResourceFixtureBehavior::OmitLast
+                    && card_index == CHAPTER_RESOURCE_CARD_COUNT - 1
+                {
+                    continue;
+                }
+                let document = if card_index == 0 {
+                    RESOURCE_MIXED
+                } else {
+                    "<html><body>empty card slot</body></html>"
+                };
+                documents.push(ChaoxingChapterResourceDocument::for_request(
+                    &requests[0],
+                    card_index,
+                    document,
+                )?);
+            }
+            if self.resource_behavior == ResourceFixtureBehavior::DuplicateFirst {
+                documents.push(ChaoxingChapterResourceDocument::for_request(
+                    &requests[0],
+                    0,
+                    RESOURCE_MIXED,
+                )?);
+            }
+            Ok(documents)
         }
 
         async fn fetch_exam_inventory(
@@ -531,13 +834,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(tasks.len(), 11);
+        assert_eq!(tasks.len(), 16);
         assert_eq!(
             tasks
                 .iter()
                 .filter(|task| task.source_type == SourceType::Chapter)
                 .count(),
-            3
+            4
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.source_type == SourceType::Resource)
+                .count(),
+            4
         );
         assert_eq!(
             tasks
@@ -561,6 +871,7 @@ mod tests {
         assert_eq!(transport.chapter_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.resource_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_detail_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
             tasks
@@ -605,6 +916,7 @@ mod tests {
         assert_eq!(transport.work_calls.load(Ordering::Relaxed), 0);
         assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 0);
         assert_eq!(transport.chapter_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.resource_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -623,7 +935,43 @@ mod tests {
         assert_eq!(transport.chapter_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.resource_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_detail_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn capability_rejects_an_incomplete_resource_card_scan() {
+        let transport = Arc::new(FixtureTransport {
+            resource_behavior: ResourceFixtureBehavior::OmitLast,
+            ..FixtureTransport::default()
+        });
+        let inventory = ChaoxingTaskInventory::try_new(transport.clone()).unwrap();
+        let error = inventory
+            .list_tasks(&context(), Some(&course()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        assert_eq!(transport.resource_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.work_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn capability_rejects_a_duplicate_resource_card() {
+        let transport = Arc::new(FixtureTransport {
+            resource_behavior: ResourceFixtureBehavior::DuplicateFirst,
+            ..FixtureTransport::default()
+        });
+        let inventory = ChaoxingTaskInventory::try_new(transport.clone()).unwrap();
+        let error = inventory
+            .list_tasks(&context(), Some(&course()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        assert_eq!(transport.resource_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.work_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -649,6 +997,17 @@ mod tests {
         assert!(!format!("{route:?}").contains("300"));
         let document = ChaoxingInventoryDocument::try_new("private page").unwrap();
         assert!(!format!("{document:?}").contains("private page"));
+        let chapter = parse_chapter_inventory(CHAPTER_MIXED, &route.parser_scope().unwrap())
+            .unwrap()
+            .remove(0);
+        let request = ChaoxingChapterResourceRequest::try_from_chapter(&chapter)
+            .unwrap()
+            .unwrap();
+        let document =
+            ChaoxingChapterResourceDocument::for_request(&request, 0, "private card").unwrap();
+        let debug = format!("{document:?}");
+        assert!(!debug.contains("4001"));
+        assert!(!debug.contains("private card"));
     }
 
     #[test]

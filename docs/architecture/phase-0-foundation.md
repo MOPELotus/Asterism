@@ -1072,3 +1072,25 @@ Synthetic donor-shaped fixtures cover state, type, string-brace and redaction
 behavior. Native card transport, integration into TaskInventory and every
 resource execution capability remain separate work, so this slice makes no
 live-support or verification claim and requires no Capture path.
+
+## Seventy-ninth Phase 0 slice
+
+Chaoxing TaskInventory now expands each pending, unlocked Chapter which reports
+at least one job through the primary donor's fixed HTTPS `knowledge/cards`
+route. The native adapter requests card indexes 0 through 6 sequentially with
+the scan-local course, class, knowledge and cpi binding, resolves one Cookie for
+the bounded batch, and may replay the whole batch only once after an
+authentication failure. A scan accepts at most 64 resource-bearing chapters,
+seven documents per chapter, four MiB per document and 32 MiB across the batch.
+Every requested card must be returned exactly once before parsing; missing,
+duplicate, foreign or cross-card duplicate identities fail the full inventory.
+
+Completed attachments discovered inside an active Chapter remain visible, but
+fully completed and locked Chapters are not expanded into another seven network
+requests. Resource Video, Document, Read and Live tasks retain `Resource`
+source semantics, while donor `workid` attachments remain Chapter tasks and are
+not merged with independent Work inventory. Chapter, Resource, Work, Work
+detail and Exam acquisition must all complete before Core receives a snapshot.
+The route and matrix tests are offline evidence only: no resource execution
+capability, Capture dependency, live-account verification or higher Provider
+verification level is claimed.

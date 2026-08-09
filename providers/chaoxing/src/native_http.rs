@@ -12,15 +12,22 @@ use scraper::{Html, Selector};
 use zeroize::Zeroize;
 
 use crate::{
+    ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
     ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingInventoryDocument,
     ChaoxingInventoryTransport, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
     classify_work_detail,
+    task_inventory::{
+        CHAPTER_RESOURCE_CARD_COUNT, MAX_RESOURCE_BATCH_DOCUMENT_BYTES,
+        MAX_RESOURCE_CHAPTER_REQUESTS,
+    },
 };
 
 const COURSE_PAGE_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu";
 const COURSE_LIST_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata";
 const COURSE_INTERACTION_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction";
 const CHAPTER_LIST_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse";
+const CHAPTER_RESOURCE_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/knowledge/cards";
+const CHAPTER_RESOURCE_VERSION: &str = "2025-0424-1038-3";
 const COURSE_LIST_REFERER: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans";
 const EXAM_LIST_BASE: &str = "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
@@ -200,6 +207,50 @@ impl NativeChaoxingInventoryTransport {
             .into_inventory_document()
     }
 
+    async fn fetch_chapter_resource_inventories_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+        requests: &[ChaoxingChapterResourceRequest],
+    ) -> ProviderResult<Vec<ChaoxingChapterResourceDocument>> {
+        if requests.len() > MAX_RESOURCE_CHAPTER_REQUESTS
+            || requests.iter().any(|request| !request.belongs_to(route))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing chapter resource request batch is unbounded or route-mismatched",
+            ));
+        }
+        let mut documents = Vec::with_capacity(
+            requests
+                .len()
+                .saturating_mul(usize::from(CHAPTER_RESOURCE_CARD_COUNT)),
+        );
+        let mut total_bytes = 0_usize;
+        for request in requests {
+            for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+                let document = self
+                    .get_html(session, chapter_resource_url(route, request, card_index)?)
+                    .await?;
+                total_bytes = total_bytes
+                    .checked_add(document.as_str().len())
+                    .filter(|total| *total <= MAX_RESOURCE_BATCH_DOCUMENT_BYTES)
+                    .ok_or_else(|| {
+                        ProviderError::new(
+                            ProviderErrorKind::InvalidResponse,
+                            "Chaoxing resource card batch exceeds the aggregate size limit",
+                        )
+                    })?;
+                documents.push(ChaoxingChapterResourceDocument::from_document(
+                    request,
+                    card_index,
+                    document.into_inventory_document()?,
+                )?);
+            }
+        }
+        Ok(documents)
+    }
+
     async fn fetch_work_detail_states_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -342,6 +393,26 @@ impl ChaoxingInventoryTransport for NativeChaoxingInventoryTransport {
         }
     }
 
+    async fn fetch_chapter_resource_inventories(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        requests: &[ChaoxingChapterResourceRequest],
+    ) -> ProviderResult<Vec<ChaoxingChapterResourceDocument>> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_chapter_resource_inventories_once(&session, route, requests)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_chapter_resource_inventories_once(&session, route, requests)
+                    .await
+            }
+            result => result,
+        }
+    }
+
     async fn fetch_exam_inventory(
         &self,
         context: &ProviderContext,
@@ -451,6 +522,27 @@ fn chapter_list_url(route: ChaoxingCourseRoute<'_>) -> ProviderResult<Url> {
             ("clazzid", route.class_id()),
             ("cpi", route.cpi()),
             ("ut", "s"),
+        ],
+    )
+}
+
+fn chapter_resource_url(
+    route: ChaoxingCourseRoute<'_>,
+    request: &ChaoxingChapterResourceRequest,
+    card_index: u8,
+) -> ProviderResult<Url> {
+    let card_index = card_index.to_string();
+    build_url(
+        CHAPTER_RESOURCE_BASE,
+        &[
+            ("clazzid", route.class_id()),
+            ("courseid", route.course_id()),
+            ("knowledgeid", request.knowledge_id()),
+            ("ut", "s"),
+            ("cpi", route.cpi()),
+            ("v", CHAPTER_RESOURCE_VERSION),
+            ("mooc2", "1"),
+            ("num", &card_index),
         ],
     )
 }
@@ -794,6 +886,8 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/work/course-page-with-work-iframe.html");
     const COURSE_FOLDERS: &str =
         include_str!("../../../fixtures/providers/chaoxing/courses/interaction-folders.html");
+    const CHAPTER_MIXED: &str =
+        include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
 
     #[test]
     fn routes_preserve_course_scope_and_discover_fresh_work_enc() {
@@ -814,6 +908,26 @@ mod tests {
         assert_eq!(query(&chapter_url, "courseid").as_deref(), Some("100"));
         assert_eq!(query(&chapter_url, "clazzid").as_deref(), Some("200"));
         assert_eq!(query(&chapter_url, "cpi").as_deref(), Some("300"));
+
+        let scope = crate::ChaoxingCourseScope::new("course:100:200", "100", "200").unwrap();
+        let chapter = crate::parse_chapter_inventory(CHAPTER_MIXED, &scope)
+            .unwrap()
+            .remove(0);
+        let request = ChaoxingChapterResourceRequest::try_from_chapter(&chapter)
+            .unwrap()
+            .unwrap();
+        let resource_url = chapter_resource_url(route, &request, 6).unwrap();
+        assert_eq!(resource_url.host_str(), Some("mooc1.chaoxing.com"));
+        assert_eq!(resource_url.path(), "/mooc-ans/knowledge/cards");
+        assert_eq!(query(&resource_url, "courseid").as_deref(), Some("100"));
+        assert_eq!(query(&resource_url, "clazzid").as_deref(), Some("200"));
+        assert_eq!(query(&resource_url, "knowledgeid").as_deref(), Some("4001"));
+        assert_eq!(query(&resource_url, "cpi").as_deref(), Some("300"));
+        assert_eq!(query(&resource_url, "num").as_deref(), Some("6"));
+        assert_eq!(
+            query(&resource_url, "v").as_deref(),
+            Some(CHAPTER_RESOURCE_VERSION)
+        );
 
         let work_url = discover_work_list_url(COURSE_PAGE, route).unwrap();
         assert_eq!(work_url.host_str(), Some("mooc1.chaoxing.com"));

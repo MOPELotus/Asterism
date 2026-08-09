@@ -32,6 +32,7 @@ pub use provider::{build_development_provider, build_development_provider_with_r
 pub use resource_inventory::parse_chapter_resource_inventory;
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use task_inventory::{
-    ChaoxingCourseRoute, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
-    ChaoxingTaskInventory, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
+    ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
+    ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingTaskInventory,
+    ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
 };
