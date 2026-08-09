@@ -1786,9 +1786,10 @@ is implied by this API.
 
 ## One-hundred-and-eighteenth Phase 0 slice
 
-The Chaoxing Provider now has a deterministic offline parser for the locked
-CxKitty mobile Work and Exam Question structures, cross-checked against the
-current OCS type-selector taxonomy. Synthetic sanitized fixtures cover
+The Chaoxing Provider now has deterministic offline parsers for the locked
+CxKitty mobile Chapter Work and Exam structures and the current OCS independent
+Work/Exam preview taxonomy. Synthetic sanitized fixtures keep those page modes
+distinct and cover
 attempt-local identity, ordering, choice options, extended Question types and
 non-fetchable attachment labels. The parser rejects duplicate identities,
 missing supported structure, login documents and unbounded input instead of
@@ -1800,3 +1801,16 @@ tokens, and emits only Domain Question data plus short-lived Question
 references. Native transport and the all-or-nothing attempt cache remain a
 separate following slice, so offline fixtures are not presented as real-account
 verification.
+
+## One-hundred-and-nineteenth Phase 0 slice
+
+The Chaoxing Question audit now explicitly corrects a donor-boundary ambiguity:
+CxKitty's mobile `mworkspecial` parser describes Chapter Work, not the
+independent course Work inventory. Independent Work and Exam use the current OCS
+`.questionLi` preview taxonomy and separate fixtures. Parser entry points and
+metadata preserve this distinction so later native transport cannot route an
+independent Work Task through Chapter attachment credentials.
+
+All supported page modes remain parse-only and answer-free at this checkpoint.
+The correction adds no remote execution, Capture dependency, hidden-answer
+reading or submission behavior.

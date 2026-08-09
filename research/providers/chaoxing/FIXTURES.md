@@ -33,6 +33,8 @@ fixtures/providers/chaoxing/
   questions/
     work-mobile-mixed.html
     exam-mobile-mixed.html
+    work-preview-mixed.html
+    exam-preview-mixed.html
   chapter/
     list-mixed.html
     list-mixed.expected.json
@@ -54,10 +56,13 @@ and completed state, the exact resource type split, empty card slots, execution
 token redaction, immediate Document/Read routing, Video object/report metadata,
 donor-compatible signature construction, bounded playback settings,
 idempotence and fresh-card result verification.
-The Question fixtures model the locked CxKitty mobile Work and Exam structures:
-attempt-local IDs, type inputs, stems, options and non-fetchable attachment
-labels are retained, while current/hidden answer inputs and every submission
-field are deliberately excluded from normalized output.
+The Question fixtures separate CxKitty's mobile Chapter Work and Exam structures
+from the current OCS independent `/mooc2/work/dowork` and
+`/mooc2/exam/preview` structures. Attempt-local IDs, type inputs, stems, options
+and non-fetchable attachment labels are retained, while current/hidden answer
+inputs and every submission field are deliberately excluded from normalized
+output. The legacy `work-mobile-mixed.html` filename refers specifically to
+Chapter Work and is not an independent Work transport fixture.
 
 ## Required live-sanitized fixture sets
 

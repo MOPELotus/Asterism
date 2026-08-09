@@ -35,7 +35,8 @@ pub use native_http::{
 };
 pub use provider::{build_development_provider, build_development_provider_with_renewal};
 pub use question_parser::{
-    ParsedChaoxingQuestion, parse_exam_question_page, parse_work_question_page,
+    ParsedChaoxingQuestion, parse_chapter_work_question_page, parse_exam_preview_question_page,
+    parse_exam_question_page, parse_work_preview_question_page,
 };
 pub use resource_execution::ChaoxingResourceExecution;
 pub use resource_inventory::parse_chapter_resource_inventory;

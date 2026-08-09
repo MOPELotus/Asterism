@@ -208,12 +208,13 @@ No duration or fractional score is inferred from list text.
 
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.
-- The offline parser checkpoint recognizes the donor-observed Work
-  `Py-mian1`/`answertype*` and Exam `questionWrap singleQuesId ans-cc-exam`/
-  `questionId` structures. Type codes are normalized independently from answer
-  resolution, hidden/current answer inputs are ignored, and only sanitized
-  attachment labels are retained; fetch URLs and form tokens never enter the
-  Domain Question.
+- The offline parser checkpoint keeps three donor modes distinct: CxKitty's
+  Chapter Work `Py-mian1`/`answertype*`, its mobile Exam
+  `questionWrap singleQuesId ans-cc-exam`/`questionId`, and OCS's current
+  independent Work/Exam `.questionLi` preview pages. Type codes are normalized
+  independently from answer resolution, hidden/current answer inputs are
+  ignored, and only sanitized attachment labels are retained; fetch URLs and
+  form tokens never enter the Domain Question.
 - Browser visual selection is not proof of a saved answer. Hidden fields and the
   server-visible result must be checked after page handlers/AJAX settle.
 - HTTP 200 or a donor `status = true` response is not Asterism completion. Asterism
