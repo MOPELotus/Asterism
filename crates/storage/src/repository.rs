@@ -2,11 +2,11 @@ use asterism_auth::TokenDigest;
 use asterism_domain::{
     AttemptResult, AuditActor, AuthBootstrapClientEvent, AuthBootstrapSession,
     AuthBootstrapSessionId, AuthSession, AuthSessionId, CreditAccount, CreditReservation,
-    CreditReservationId, CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId,
-    ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
-    ExecutionState, LogLevel, OrchestrationState, PriceQuote, ProviderAccount, ProviderAccountId,
-    ProviderErrorClass, ScheduleId, ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User,
-    UserId, WebSession, WebSessionId,
+    CreditReservationId, CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt,
+    ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
+    ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote, ProviderAccount,
+    ProviderAccountId, ProviderErrorClass, ScheduleId, ServiceToken, ServiceTokenId, Task, TaskId,
+    Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -492,6 +492,41 @@ pub trait CreditRepository: Send + Sync {
         reservation_id: CreditReservationId,
         at: Timestamp,
     ) -> Result<CreditAccount, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreditTransactionPage {
+    pub items: Vec<CreditTransaction>,
+    pub total: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreditReservationDetail {
+    pub reservation: CreditReservation,
+    pub quote: PriceQuote,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreditReservationPage {
+    pub items: Vec<CreditReservationDetail>,
+    pub total: u64,
+}
+
+#[async_trait]
+pub trait CreditQueryRepository: Send + Sync {
+    async fn list_owned_credit_transactions(
+        &self,
+        owner_id: UserId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<CreditTransactionPage, StorageError>;
+
+    async fn list_owned_credit_reservations(
+        &self,
+        owner_id: UserId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<CreditReservationPage, StorageError>;
 }
 
 #[async_trait]

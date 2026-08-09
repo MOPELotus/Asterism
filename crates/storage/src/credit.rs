@@ -2,14 +2,21 @@ use std::str::FromStr;
 
 use asterism_domain::{
     CreditAccount, CreditAmount, CreditReservation, CreditReservationId, CreditReservationState,
-    CreditTransactionId, ExecutionId, ExecutionState, TaskId, Timestamp, UserId,
+    CreditTransaction, CreditTransactionId, CreditTransactionType, ExecutionId, ExecutionState,
+    PriceQuote, PriceQuoteId, TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use async_trait::async_trait;
-use chrono::SecondsFormat;
+use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction};
 
-use crate::{CreditRepository, Database, StorageError, outbox::enqueue_in_transaction};
+use crate::{
+    CreditQueryRepository, CreditRepository, CreditReservationDetail, CreditReservationPage,
+    CreditTransactionPage, Database, StorageError, outbox::enqueue_in_transaction,
+};
+
+const MAX_CREDIT_PAGE_SIZE: u32 = 200;
+const MAX_CREDIT_OFFSET: u64 = 1_000_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreditGrant {
@@ -192,6 +199,81 @@ impl CreditRepository for SqliteCreditRepository {
         .await?;
         transaction.commit().await?;
         Ok(account)
+    }
+}
+
+#[async_trait]
+impl CreditQueryRepository for SqliteCreditRepository {
+    async fn list_owned_credit_transactions(
+        &self,
+        owner_id: UserId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<CreditTransactionPage, StorageError> {
+        validate_credit_pagination(limit, offset)?;
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM credit_transactions WHERE user_id = ?")
+                .bind(owner_id.to_string())
+                .fetch_one(self.database.pool())
+                .await?;
+        let rows = sqlx::query(
+            "SELECT id, user_id, amount, transaction_type, task_id, execution_id, operator_id, \
+                    reason, created_at FROM credit_transactions WHERE user_id = ? \
+             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(owner_id.to_string())
+        .bind(i64::from(limit))
+        .bind(i64::try_from(offset).expect("validated credit offset fits i64"))
+        .fetch_all(self.database.pool())
+        .await?;
+        Ok(CreditTransactionPage {
+            items: rows
+                .iter()
+                .map(decode_transaction)
+                .collect::<Result<_, _>>()?,
+            total: decode_count(total, "credit transaction")?,
+        })
+    }
+
+    async fn list_owned_credit_reservations(
+        &self,
+        owner_id: UserId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<CreditReservationPage, StorageError> {
+        validate_credit_pagination(limit, offset)?;
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM credit_reservations WHERE user_id = ?")
+                .bind(owner_id.to_string())
+                .fetch_one(self.database.pool())
+                .await?;
+        let rows = sqlx::query(
+            "SELECT reservation.id AS reservation_id, reservation.user_id, \
+                    reservation.quote_id, reservation.execution_id, \
+                    reservation.amount AS reservation_amount, reservation.state, \
+                    reservation.created_at AS reservation_created_at, reservation.updated_at, \
+                    quote.task_id AS quote_task_id, quote.amount AS quote_amount, \
+                    quote.pricing_revision, quote.reason, quote.created_at AS quote_created_at, \
+                    execution.task_id AS execution_task_id, execution.requested_by, \
+                    execution.quote_id AS execution_quote_id \
+             FROM credit_reservations AS reservation \
+             JOIN price_quotes AS quote ON quote.id = reservation.quote_id \
+             JOIN executions AS execution ON execution.id = reservation.execution_id \
+             WHERE reservation.user_id = ? \
+             ORDER BY reservation.created_at DESC, reservation.id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(owner_id.to_string())
+        .bind(i64::from(limit))
+        .bind(i64::try_from(offset).expect("validated credit offset fits i64"))
+        .fetch_all(self.database.pool())
+        .await?;
+        Ok(CreditReservationPage {
+            items: rows
+                .iter()
+                .map(decode_reservation_detail)
+                .collect::<Result<_, _>>()?,
+            total: decode_count(total, "credit reservation")?,
+        })
     }
 }
 
@@ -393,6 +475,87 @@ struct ActiveReservation {
     execution_state: String,
 }
 
+fn validate_credit_pagination(limit: u32, offset: u64) -> Result<(), StorageError> {
+    if limit == 0 || limit > MAX_CREDIT_PAGE_SIZE || offset > MAX_CREDIT_OFFSET {
+        Err(StorageError::InvalidData(
+            "credit pagination is outside the supported range".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_count(value: i64, resource: &str) -> Result<u64, StorageError> {
+    u64::try_from(value)
+        .map_err(|_| StorageError::InvalidData(format!("{resource} count is invalid")))
+}
+
+fn decode_transaction(row: &sqlx::sqlite::SqliteRow) -> Result<CreditTransaction, StorageError> {
+    Ok(CreditTransaction {
+        id: parse_id(row.try_get("id")?)?,
+        user_id: parse_id(row.try_get("user_id")?)?,
+        amount: row.try_get("amount")?,
+        transaction_type: decode_enum::<CreditTransactionType>(row.try_get("transaction_type")?)?,
+        task_id: row
+            .try_get::<Option<&str>, _>("task_id")?
+            .map(parse_id)
+            .transpose()?,
+        execution_id: row
+            .try_get::<Option<&str>, _>("execution_id")?
+            .map(parse_id)
+            .transpose()?,
+        operator_id: row
+            .try_get::<Option<&str>, _>("operator_id")?
+            .map(parse_id)
+            .transpose()?,
+        reason: row.try_get("reason")?,
+        created_at: decode_timestamp(row.try_get("created_at")?)?,
+    })
+}
+
+fn decode_reservation_detail(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CreditReservationDetail, StorageError> {
+    let quote_id: PriceQuoteId = parse_id(row.try_get("quote_id")?)?;
+    let quote_task_id: TaskId = parse_id(row.try_get("quote_task_id")?)?;
+    let quote_amount = CreditAmount::new(decode_amount(row.try_get("quote_amount")?)?);
+    let reservation = CreditReservation {
+        id: parse_id(row.try_get("reservation_id")?)?,
+        user_id: parse_id(row.try_get("user_id")?)?,
+        quote_id,
+        execution_id: parse_id(row.try_get("execution_id")?)?,
+        amount: CreditAmount::new(decode_amount(row.try_get("reservation_amount")?)?),
+        state: decode_enum(row.try_get("state")?)?,
+        created_at: decode_timestamp(row.try_get("reservation_created_at")?)?,
+        updated_at: decode_timestamp(row.try_get("updated_at")?)?,
+    };
+    let quote = PriceQuote {
+        id: quote_id,
+        task_id: quote_task_id,
+        amount: quote_amount,
+        pricing_revision: row.try_get("pricing_revision")?,
+        reason: row.try_get("reason")?,
+        created_at: decode_timestamp(row.try_get("quote_created_at")?)?,
+    };
+    let execution_task_id: TaskId = parse_id(row.try_get("execution_task_id")?)?;
+    let requested_by = row
+        .try_get::<Option<&str>, _>("requested_by")?
+        .map(parse_id)
+        .transpose()?;
+    let execution_quote_id = row
+        .try_get::<Option<&str>, _>("execution_quote_id")?
+        .map(parse_id)
+        .transpose()?;
+    if reservation.amount != quote.amount
+        || requested_by != Some(reservation.user_id)
+        || execution_quote_id != Some(quote.id)
+        || execution_task_id != quote.task_id
+    {
+        return Err(StorageError::CreditInvariant);
+    }
+    Ok(CreditReservationDetail { reservation, quote })
+}
+
 async fn validate_reservation_binding(
     transaction: &mut Transaction<'_, Sqlite>,
     reservation: &CreditReservation,
@@ -511,6 +674,19 @@ fn encode_amount(value: CreditAmount) -> Result<i64, StorageError> {
 
 fn decode_amount(value: i64) -> Result<u64, StorageError> {
     u64::try_from(value).map_err(|_| StorageError::CreditInvariant)
+}
+
+fn decode_enum<T>(value: &str) -> Result<T, StorageError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(serde_json::Value::String(value.to_owned())).map_err(Into::into)
+}
+
+fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| StorageError::InvalidData(error.to_string()))
 }
 
 fn encode_timestamp(value: Timestamp) -> String {
@@ -766,6 +942,115 @@ mod tests {
             (account.available.value(), account.reserved.value()),
             (200, 0)
         );
+    }
+
+    #[tokio::test]
+    async fn credit_history_is_owner_scoped_paginated_and_keeps_quote_attribution() {
+        let scenario = scenario().await;
+        scenario
+            .repository
+            .grant(&CreditGrant {
+                transaction_id: CreditTransactionId::new(),
+                user_id: scenario.user_id,
+                operator_id: scenario.operator_id,
+                amount: CreditAmount::new(200),
+                reason: "initial".to_owned(),
+                created_at: scenario.now,
+            })
+            .await
+            .unwrap();
+        let committed = scenario.reservation(0);
+        let active = scenario.reservation(1);
+        scenario.repository.reserve(&committed).await.unwrap();
+        scenario.repository.reserve(&active).await.unwrap();
+        scenario.set_execution_state(0, "succeeded").await;
+        scenario
+            .repository
+            .commit(committed.id, CreditTransactionId::new(), scenario.now)
+            .await
+            .unwrap();
+
+        let first_transaction = scenario
+            .repository
+            .list_owned_credit_transactions(scenario.user_id, 1, 0)
+            .await
+            .unwrap();
+        assert_eq!(first_transaction.total, 2);
+        assert_eq!(first_transaction.items.len(), 1);
+        let all_transactions = scenario
+            .repository
+            .list_owned_credit_transactions(scenario.user_id, 2, 0)
+            .await
+            .unwrap();
+        assert!(all_transactions.items.iter().any(|transaction| {
+            transaction.transaction_type == CreditTransactionType::MasterGrant
+                && transaction.amount == 200
+        }));
+        assert!(all_transactions.items.iter().any(|transaction| {
+            transaction.transaction_type == CreditTransactionType::TaskExecution
+                && transaction.amount == -80
+                && transaction.execution_id == Some(committed.execution_id)
+        }));
+
+        let reservations = scenario
+            .repository
+            .list_owned_credit_reservations(scenario.user_id, 2, 0)
+            .await
+            .unwrap();
+        assert_eq!(reservations.total, 2);
+        assert_eq!(reservations.items.len(), 2);
+        for detail in &reservations.items {
+            assert_eq!(detail.reservation.quote_id, detail.quote.id);
+            assert_eq!(detail.reservation.amount, detail.quote.amount);
+            assert_eq!(detail.quote.pricing_revision, "test");
+        }
+        assert!(reservations.items.iter().any(|detail| {
+            detail.reservation.id == committed.id
+                && detail.reservation.state == CreditReservationState::Committed
+        }));
+        assert!(reservations.items.iter().any(|detail| {
+            detail.reservation.id == active.id
+                && detail.reservation.state == CreditReservationState::Reserved
+        }));
+
+        let foreign_transactions = scenario
+            .repository
+            .list_owned_credit_transactions(scenario.operator_id, 50, 0)
+            .await
+            .unwrap();
+        let foreign_reservations = scenario
+            .repository
+            .list_owned_credit_reservations(scenario.operator_id, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(foreign_transactions.total, 0);
+        assert!(foreign_transactions.items.is_empty());
+        assert_eq!(foreign_reservations.total, 0);
+        assert!(foreign_reservations.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn credit_history_rejects_unbounded_pagination() {
+        let scenario = scenario().await;
+        for result in [
+            scenario
+                .repository
+                .list_owned_credit_transactions(scenario.user_id, 0, 0)
+                .await
+                .map(|_| ()),
+            scenario
+                .repository
+                .list_owned_credit_reservations(scenario.user_id, MAX_CREDIT_PAGE_SIZE + 1, 0)
+                .await
+                .map(|_| ()),
+            scenario
+                .repository
+                .list_owned_credit_transactions(scenario.user_id, 1, MAX_CREDIT_OFFSET + 1)
+                .await
+                .map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(StorageError::InvalidData(_))));
+        }
     }
 
     #[tokio::test]

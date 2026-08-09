@@ -3,6 +3,7 @@
 mod account;
 mod auth;
 mod auth_bootstrap;
+mod credit;
 mod execution;
 mod rate_limit;
 mod task;
@@ -140,6 +141,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
+        .merge(credit_routes())
         .merge(execution_routes())
         .route("/api/v1/service-tokens", post(auth::create_service_token))
         .route(
@@ -179,6 +181,19 @@ pub fn build_router(state: ApiState) -> Router {
         .layer(PropagateRequestIdLayer::new(X_REQUEST_ID.clone()))
         .layer(SetRequestIdLayer::new(X_REQUEST_ID, MakeRequestUuid))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
+}
+
+fn credit_routes() -> Router<ApiState> {
+    Router::new()
+        .route("/api/v1/credits/account", get(credit::get_credit_account))
+        .route(
+            "/api/v1/credits/transactions",
+            get(credit::list_credit_transactions),
+        )
+        .route(
+            "/api/v1/credits/reservations",
+            get(credit::list_credit_reservations),
+        )
 }
 
 fn execution_routes() -> Router<ApiState> {
@@ -632,6 +647,30 @@ async fn openapi() -> Json<Value> {
     document["paths"]
         .as_object_mut()
         .expect("static OpenAPI paths object")
+        .insert("/api/v1/credits/account".to_owned(), credit_account_path());
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/credits/transactions".to_owned(),
+            credit_page_path(
+                "listOwnCreditTransactions",
+                "Owner-scoped immutable credit ledger",
+            ),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/credits/reservations".to_owned(),
+            credit_page_path(
+                "listOwnCreditReservations",
+                "Owner-scoped reservations with immutable PriceQuote attribution",
+            ),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
         .insert(
             "/api/v1/executions/{execution_id}/logs".to_owned(),
             execution_logs_path(),
@@ -672,6 +711,35 @@ async fn openapi() -> Json<Value> {
             auth_bootstrap_credential_schema(),
         );
     Json(document)
+}
+
+fn credit_account_path() -> Value {
+    json!({"get": {
+        "operationId": "getOwnCreditAccount",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "responses": {
+            "200": {"description": "Owner credit account; missing accounts read as zero balances without a write"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "ReadOwnCredits or CreditRead is required"}
+        }
+    }})
+}
+
+fn credit_page_path(operation_id: &str, description: &str) -> Value {
+    json!({"get": {
+        "operationId": operation_id,
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+            {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}
+        ],
+        "responses": {
+            "200": {"description": description},
+            "400": {"description": "Invalid pagination"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "ReadOwnCredits or CreditRead is required"}
+        }
+    }})
 }
 
 fn execution_detail_path() -> Value {
@@ -2678,6 +2746,189 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the integration test keeps one complete owner-scoped credit history fixture"
+    )]
+    async fn credit_api_is_owner_scoped_paginated_and_preserves_quote_history() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let bootstrap_body = response_json(bootstrap).await;
+        let owner_id = bootstrap_body["user"]["id"].as_str().unwrap();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let task_id = asterism_domain::TaskId::new();
+        let quote_id = asterism_domain::PriceQuoteId::new();
+        let execution_id = asterism_domain::ExecutionId::new();
+        let reservation_id = asterism_domain::CreditReservationId::new();
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+              assessment_class, title, remote_state, orchestration_state, discovered_at, \
+              updated_at, capabilities_json) \
+             VALUES (?, ?, 'credit-task', 'credit-fingerprint', 'work', 'routine', \
+                     'Credit Task', 'completed', 'succeeded', ?, ?, '[]')",
+        )
+        .bind(task_id.to_string())
+        .bind(account_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO price_quotes (id, task_id, amount, pricing_revision, reason, created_at) \
+             VALUES (?, ?, 30, 'catalog-v1', 'fixed work price', ?)",
+        )
+        .bind(quote_id.to_string())
+        .bind(task_id.to_string())
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO executions \
+             (id, task_id, requested_by, request_source, quote_id, state, created_at, finished_at) \
+             VALUES (?, ?, ?, 'web_ui', ?, 'succeeded', ?, ?)",
+        )
+        .bind(execution_id.to_string())
+        .bind(task_id.to_string())
+        .bind(owner_id)
+        .bind(quote_id.to_string())
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE credit_accounts SET available = 70, reserved = 0, updated_at = ? \
+             WHERE user_id = ?",
+        )
+        .bind(&now)
+        .bind(owner_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO credit_reservations \
+             (id, user_id, quote_id, execution_id, amount, state, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 30, 'committed', ?, ?)",
+        )
+        .bind(reservation_id.to_string())
+        .bind(owner_id)
+        .bind(quote_id.to_string())
+        .bind(execution_id.to_string())
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        for (amount, kind, transaction_task, transaction_execution, reason) in [
+            (100_i64, "master_grant", None, None, "initial grant"),
+            (
+                -30,
+                "task_execution",
+                Some(task_id.to_string()),
+                Some(execution_id.to_string()),
+                "execution succeeded",
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO credit_transactions \
+                 (id, user_id, amount, transaction_type, task_id, execution_id, reason, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(asterism_domain::CreditTransactionId::new().to_string())
+            .bind(owner_id)
+            .bind(amount)
+            .bind(kind)
+            .bind(transaction_task)
+            .bind(transaction_execution)
+            .bind(reason)
+            .bind(&now)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+
+        let account = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/credits/account")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(account.status(), StatusCode::OK);
+        assert_eq!(account.headers()[header::CACHE_CONTROL], "no-store");
+        let account = response_json(account).await;
+        assert_eq!(account["available"], 70);
+        assert_eq!(account["reserved"], 0);
+
+        let transactions = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/credits/transactions?limit=1&offset=0")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(transactions.status(), StatusCode::OK);
+        let transactions = response_json(transactions).await;
+        assert_eq!(transactions["total"], 2);
+        assert_eq!(transactions["limit"], 1);
+        assert_eq!(transactions["items"].as_array().unwrap().len(), 1);
+
+        let reservations = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/credits/reservations?limit=10&offset=0")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reservations.status(), StatusCode::OK);
+        let reservations = response_json(reservations).await;
+        assert_eq!(reservations["total"], 1);
+        assert_eq!(
+            reservations["items"][0]["reservation"]["state"],
+            "committed"
+        );
+        assert_eq!(
+            reservations["items"][0]["quote"]["id"],
+            quote_id.to_string()
+        );
+        assert_eq!(
+            reservations["items"][0]["quote"]["pricing_revision"],
+            "catalog-v1"
+        );
+
+        let invalid = app
+            .oneshot(
+                Request::get("/api/v1/credits/transactions?limit=0")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn task_api_is_owner_scoped_paginated_and_keeps_state_dimensions_separate() {
         let (app, database) = test_app(false, None).await;
         let bootstrap = bootstrap(&app).await;
@@ -3162,6 +3413,9 @@ mod tests {
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/execute",
+            "/api/v1/credits/account",
+            "/api/v1/credits/transactions",
+            "/api/v1/credits/reservations",
             "/api/v1/executions",
             "/api/v1/executions/{execution_id}",
             "/api/v1/executions/{execution_id}/logs",
@@ -3192,6 +3446,18 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/executions/{execution_id}/stream"]["get"]["operationId"],
             "streamExecution"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/credits/account"]["get"]["operationId"],
+            "getOwnCreditAccount"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/credits/transactions"]["get"]["operationId"],
+            "listOwnCreditTransactions"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/credits/reservations"]["get"]["operationId"],
+            "listOwnCreditReservations"
         );
         assert_eq!(
             document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/claim"]["post"]["security"]

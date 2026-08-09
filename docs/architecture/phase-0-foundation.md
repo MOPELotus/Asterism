@@ -1465,3 +1465,21 @@ require a versioned schema and persistence model; until those exist, Core keeps
 only the already bounded scan-schedule field rather than accepting arbitrary
 Provider JSON. Ordinary account, authentication, Task and Execution surfaces
 retain their existing owner permissions.
+
+## Ninety-eighth Phase 0 slice
+
+Authenticated owners can now read their credit account, immutable transaction
+ledger and reservation history through bounded no-store API surfaces. A missing
+account is represented as zero available and reserved credit without creating a
+row during a read. Transaction and reservation lists use explicit limit/offset
+bounds and stable reverse-chronological ordering; malformed or unbounded query
+parameters are rejected before storage access.
+
+Reservation history returns the immutable PriceQuote beside each reservation,
+including the original amount, pricing revision and reason. The storage read
+model revalidates User, Quote, Execution, Task and amount bindings for active
+and settled history before exposing it, rather than trusting foreign keys or
+returning a detached quote. Web access requires `ReadOwnCredits`; automation
+requires an owner-bound `CreditRead` service token. The routes do not expose
+another user's ledger and do not add grant, adjustment, pricing or arbitrary
+settlement controls.

@@ -141,6 +141,18 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn require_credit_read(&self) -> Result<UserId, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } if principal.has(Permission::ReadOwnCredits) => {
+                Ok(principal.user_id)
+            }
+            AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::CreditRead) => {
+                token.owner_user_id.ok_or_else(ApiError::forbidden)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
     pub(super) fn require_task_execute(&self) -> Result<(UserId, RequestSource), ApiError> {
         match &self.identity {
             AuthIdentity::Web { principal, .. }
