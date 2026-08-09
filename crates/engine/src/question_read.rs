@@ -1,10 +1,15 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use asterism_domain::{
-    AuthState, ProviderId, Question, QuestionKind, TaskCapability, TaskId, UserId,
+    AuthState, ProviderId, Question, QuestionKind, QuestionSnapshotId, TaskCapability, TaskId,
+    Timestamp, UserId,
 };
 use asterism_provider_api::{ProviderContext, ProviderError, ProviderRegistry, RemoteQuestionRef};
-use asterism_storage::{ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository};
+use asterism_storage::{
+    ProviderAccountRuntimeRepository, QuestionSnapshot, QuestionSnapshotRepository, StorageError,
+    TaskQueryRepository,
+};
+use chrono::Utc;
 
 use crate::{AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action};
 
@@ -20,33 +25,38 @@ pub struct ReadTaskQuestionsCommand {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderQuestionReadResult {
+    pub snapshot_id: QuestionSnapshotId,
     pub task_id: TaskId,
     pub provider_id: ProviderId,
     pub provider_version: String,
+    pub captured_at: Timestamp,
     pub questions: Vec<Question>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ProviderQuestionReadService<Q, A> {
+pub struct ProviderQuestionReadService<Q, A, S> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
+    snapshots: S,
 }
 
-impl<Q, A> ProviderQuestionReadService<Q, A> {
-    pub const fn new(registry: Arc<ProviderRegistry>, tasks: Q, accounts: A) -> Self {
+impl<Q, A, S> ProviderQuestionReadService<Q, A, S> {
+    pub const fn new(registry: Arc<ProviderRegistry>, tasks: Q, accounts: A, snapshots: S) -> Self {
         Self {
             registry,
             tasks,
             accounts,
+            snapshots,
         }
     }
 }
 
-impl<Q, A> ProviderQuestionReadService<Q, A>
+impl<Q, A, S> ProviderQuestionReadService<Q, A, S>
 where
     Q: TaskQueryRepository,
     A: ProviderAccountRuntimeRepository,
+    S: QuestionSnapshotRepository,
 {
     /// Discovers and parses one complete, fresh Question set. Provider output
     /// is returned only after every reference and normalized Question passes
@@ -114,10 +124,21 @@ where
             validate_question_binding(&task, reference, &question)?;
             questions.push(question);
         }
-        Ok(ProviderQuestionReadResult {
+        let snapshot = QuestionSnapshot {
+            id: QuestionSnapshotId::new(),
             task_id: task.id,
-            provider_id: account.provider_id,
+            provider_id: account.provider_id.clone(),
             provider_version: entry.metadata.implementation_version.clone(),
+            captured_at: Utc::now(),
+            questions: questions.clone(),
+        };
+        self.snapshots.save_question_snapshot(&snapshot).await?;
+        Ok(ProviderQuestionReadResult {
+            snapshot_id: snapshot.id,
+            task_id: snapshot.task_id,
+            provider_id: snapshot.provider_id,
+            provider_version: snapshot.provider_version,
+            captured_at: snapshot.captured_at,
             questions,
         })
     }
@@ -190,7 +211,10 @@ pub enum ProviderQuestionReadError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use asterism_domain::{
         AssessmentClass, OrchestrationState, ProviderAccount, ProviderAccountId, RemoteState,
@@ -201,7 +225,7 @@ mod tests {
         ProviderRouteContext, ProviderRuntimeSettingsSchema, QuestionInventoryCapability,
         QuestionParseCapability, VerificationLevel,
     };
-    use asterism_storage::TaskPage;
+    use asterism_storage::{QuestionSnapshot, QuestionSnapshotRepository, TaskPage};
     use async_trait::async_trait;
     use chrono::Utc;
 
@@ -262,6 +286,36 @@ mod tests {
         parsed_task_id: Mutex<Option<TaskId>>,
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct RecordingSnapshots {
+        snapshots: Arc<Mutex<Vec<QuestionSnapshot>>>,
+        reject: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl QuestionSnapshotRepository for RecordingSnapshots {
+        async fn save_question_snapshot(
+            &self,
+            snapshot: &QuestionSnapshot,
+        ) -> Result<(), StorageError> {
+            if self.reject.load(Ordering::Relaxed) {
+                return Err(StorageError::InvalidData(
+                    "fixture rejected Question snapshot".to_owned(),
+                ));
+            }
+            self.snapshots.lock().unwrap().push(snapshot.clone());
+            Ok(())
+        }
+
+        async fn find_latest_owned_question_snapshot(
+            &self,
+            _owner_id: UserId,
+            _task_id: TaskId,
+        ) -> Result<Option<QuestionSnapshot>, StorageError> {
+            Ok(self.snapshots.lock().unwrap().last().cloned())
+        }
+    }
+
     impl ProviderIdentity for FakeQuestions {
         fn metadata(&self) -> &ProviderMetadata {
             &self.metadata
@@ -319,6 +373,10 @@ mod tests {
         assert_eq!(result.questions.len(), 2);
         assert_eq!(result.questions[0].position, 1);
         assert_eq!(result.questions[1].position, 2);
+        let snapshots = fixture.snapshots.snapshots.lock().unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].id, result.snapshot_id);
+        assert_eq!(snapshots[0].questions, result.questions);
         assert_eq!(
             *fixture.capability.parsed_task_id.lock().unwrap(),
             Some(fixture.task_id)
@@ -347,6 +405,7 @@ mod tests {
             Err(ProviderQuestionReadError::ProviderResponseInvalid)
         ));
         assert!(fixture.capability.parsed_task_id.lock().unwrap().is_none());
+        assert!(fixture.snapshots.snapshots.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -364,13 +423,37 @@ mod tests {
             Err(ProviderQuestionReadError::TaskCapabilityUnavailable)
         ));
         assert!(fixture.capability.parsed_task_id.lock().unwrap().is_none());
+        assert!(fixture.snapshots.snapshots.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn storage_failure_returns_no_question_result() {
+        let fixture = fixture(true);
+        fixture.snapshots.reject.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            fixture
+                .service
+                .read(ReadTaskQuestionsCommand {
+                    owner_id: fixture.owner_id,
+                    task_id: fixture.task_id,
+                    correlation_id: "question-read-storage-failure".to_owned(),
+                })
+                .await,
+            Err(ProviderQuestionReadError::Storage(_))
+        ));
+        assert!(fixture.snapshots.snapshots.lock().unwrap().is_empty());
     }
 
     struct Fixture {
-        service: ProviderQuestionReadService<FakeTaskRepository, FakeAccountRepository>,
+        service: ProviderQuestionReadService<
+            FakeTaskRepository,
+            FakeAccountRepository,
+            RecordingSnapshots,
+        >,
         owner_id: UserId,
         task_id: TaskId,
         capability: Arc<FakeQuestions>,
+        snapshots: RecordingSnapshots,
     }
 
     fn fixture(advertises_questions: bool) -> Fixture {
@@ -450,6 +533,7 @@ mod tests {
                 browser_bridge: None,
             })
             .unwrap();
+        let snapshots = RecordingSnapshots::default();
         let service = ProviderQuestionReadService::new(
             Arc::new(registry),
             FakeTaskRepository {
@@ -457,12 +541,14 @@ mod tests {
                 task: task.clone(),
             },
             FakeAccountRepository(account),
+            snapshots.clone(),
         );
         Fixture {
             service,
             owner_id,
             task_id: task.id,
             capability,
+            snapshots,
         }
     }
 

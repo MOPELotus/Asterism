@@ -1028,13 +1028,13 @@ fn task_progress_path() -> Value {
 fn task_questions_path() -> Value {
     json!({"get": {
         "operationId": "getTaskQuestions",
-        "description": "Discovers and parses one fresh complete Question set; no partial set is returned or persisted.",
+        "description": "Discovers, validates and atomically persists one fresh complete Question snapshot; no partial set is returned or stored.",
         "security": [{"cookieAuth": []}, {"bearerAuth": []}],
         "parameters": [
             {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
         ],
         "responses": {
-            "200": {"description": "Fresh bounded, sanitized and deterministically ordered Provider Questions"},
+            "200": {"description": "Fresh bounded, sanitized and deterministically ordered Provider Questions with immutable snapshot identity"},
             "400": {"description": "Invalid Task or request ID"},
             "404": {"description": "Task not found"},
             "409": {"description": "Task/Provider capability, account, policy, user action, or remote binding conflict"},

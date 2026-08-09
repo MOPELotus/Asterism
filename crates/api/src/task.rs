@@ -1,6 +1,8 @@
 use std::str::FromStr;
 
-use asterism_domain::{Execution, ProviderAccountId, ProviderId, Question, Task, TaskId};
+use asterism_domain::{
+    Execution, ProviderAccountId, ProviderId, Question, QuestionSnapshotId, Task, TaskId, Timestamp,
+};
 use asterism_engine::{
     ExecuteTaskCommand, ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
     ProviderQuestionReadError, ProviderQuestionReadService, ProviderTaskDetailError,
@@ -10,7 +12,8 @@ use asterism_engine::{
 use asterism_provider_api::{ProviderErrorKind, RemoteProgress, RemoteTaskDetail};
 use asterism_storage::{
     SqliteExecutionRepository, SqliteProviderAccountRepository,
-    SqliteProviderRuntimeSettingsRepository, SqliteTaskQueryRepository, TaskQueryRepository,
+    SqliteProviderRuntimeSettingsRepository, SqliteQuestionSnapshotRepository,
+    SqliteTaskQueryRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -163,7 +166,8 @@ pub(super) async fn get_task_questions(
     let result = ProviderQuestionReadService::new(
         state.providers,
         SqliteTaskQueryRepository::new(state.database.clone()),
-        SqliteProviderAccountRepository::new(state.database),
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteQuestionSnapshotRepository::new(state.database),
     )
     .read(ReadTaskQuestionsCommand {
         owner_id,
@@ -174,9 +178,11 @@ pub(super) async fn get_task_questions(
     .map_err(map_task_questions_error)?;
     Ok(crate::auth::no_store(
         Json(TaskQuestionsResponse {
+            snapshot_id: result.snapshot_id,
             task_id: result.task_id,
             provider_id: result.provider_id,
             provider_version: result.provider_version,
+            captured_at: result.captured_at,
             questions: result.questions,
         })
         .into_response(),
@@ -542,9 +548,11 @@ struct TaskProgressResponse {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 struct TaskQuestionsResponse {
+    snapshot_id: QuestionSnapshotId,
     task_id: TaskId,
     provider_id: ProviderId,
     provider_version: String,
+    captured_at: Timestamp,
     questions: Vec<Question>,
 }
 

@@ -1842,6 +1842,20 @@ positions, remote identities, Domain bounds and parent counts.
 
 The schema caps each snapshot at 5,000 Questions and 16 MiB of serialized Domain
 data. HTML, Provider route context, credentials, answers and submission payloads
-have no storage columns. This slice exposes the repository boundary but does
-not yet make every fresh Question API read mutate storage; Core orchestration
-will connect that explicit commit point separately.
+have no storage columns. This slice exposes the repository boundary without
+implicitly changing read orchestration; the following checkpoint connects its
+explicit commit point.
+
+## One-hundred-and-twenty-second Phase 0 slice
+
+The Core Question read service now commits exactly one immutable
+`QuestionSnapshot` after the complete Provider reference set and every parsed
+Question pass owner, capability, assessment, identity, ordering, type, bounds
+and sanitization checks. A duplicate reference, partial parse, binding drift or
+storage failure returns no Question result and cannot leave a partial snapshot.
+
+Fresh HTTP and CLI reads use the SQLite snapshot repository and return the
+snapshot ID and capture timestamp beside the Provider version and normalized
+Questions. The response remains `no-store` because it represents a fresh remote
+read; persistence provides an explicit future binding point for AnswerCandidate
+and SubmissionDraft, not permission to resolve answers or submit the Task.
