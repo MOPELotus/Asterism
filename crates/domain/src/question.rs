@@ -1,7 +1,8 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{QuestionId, TaskId};
 
@@ -15,6 +16,44 @@ const MAX_ANSWER_ITEMS: usize = 256;
 const MAX_COMPOSITE_DEPTH: usize = 8;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_POSITION: u32 = 100_000;
+const QUESTION_CONTENT_FINGERPRINT_PREFIX: &str = "v1:";
+
+/// Stable hash of the exact sanitized Question content used for conservative
+/// cache matching. Snapshot-local identities and position are excluded.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct QuestionContentFingerprint(String);
+
+impl QuestionContentFingerprint {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for QuestionContentFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for QuestionContentFingerprint {
+    type Err = QuestionValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let digest = value
+            .strip_prefix(QUESTION_CONTENT_FINGERPRINT_PREFIX)
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .ok_or(QuestionValidationError::InvalidFingerprint)?;
+        Ok(Self(format!(
+            "{QUESTION_CONTENT_FINGERPRINT_PREFIX}{digest}"
+        )))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +112,15 @@ pub struct Question {
     pub position: u32,
 }
 
+#[derive(Serialize)]
+struct QuestionFingerprintMaterial<'a> {
+    kind: QuestionKind,
+    stem: &'a str,
+    options: &'a [QuestionOption],
+    attachments: &'a [QuestionAttachment],
+    metadata_sanitized: &'a Value,
+}
+
 impl Question {
     /// Validates the bounded, credential-safe normalized Question contract.
     ///
@@ -117,6 +165,36 @@ impl Question {
             return Err(QuestionValidationError::UnsanitizedMetadata);
         }
         Ok(())
+    }
+
+    /// Hashes the complete sanitized semantic shape while excluding IDs and
+    /// attempt position. Callers must still scope matches to one Task and reject
+    /// duplicate fingerprints before reusing answer evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QuestionValidationError`] when the Question is invalid or its
+    /// sanitized representation cannot be encoded.
+    pub fn content_fingerprint(
+        &self,
+    ) -> Result<QuestionContentFingerprint, QuestionValidationError> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(&QuestionFingerprintMaterial {
+            kind: self.kind,
+            stem: &self.stem,
+            options: &self.options,
+            attachments: &self.attachments,
+            metadata_sanitized: &self.metadata_sanitized,
+        })
+        .map_err(|_| QuestionValidationError::InvalidFingerprint)?;
+        let digest = Sha256::digest(encoded);
+        let mut value = String::with_capacity(QUESTION_CONTENT_FINGERPRINT_PREFIX.len() + 64);
+        value.push_str(QUESTION_CONTENT_FINGERPRINT_PREFIX);
+        for byte in digest {
+            write!(&mut value, "{byte:02x}")
+                .map_err(|_| QuestionValidationError::InvalidFingerprint)?;
+        }
+        Ok(QuestionContentFingerprint(value))
     }
 }
 
@@ -372,6 +450,8 @@ pub enum QuestionValidationError {
     UnsanitizedMetadata,
     #[error("normalized answer or candidate data is invalid")]
     InvalidAnswer,
+    #[error("question content fingerprint is invalid")]
+    InvalidFingerprint,
 }
 
 #[cfg(test)]
@@ -454,5 +534,32 @@ mod tests {
             Err(AnswerConfidenceError::OutOfRange)
         );
         assert!(serde_json::from_str::<AnswerConfidence>("10001").is_err());
+    }
+
+    #[test]
+    fn content_fingerprint_excludes_attempt_identity_but_keeps_exact_semantics() {
+        let original = valid_question();
+        let fingerprint = original.content_fingerprint().unwrap();
+        assert_eq!(fingerprint.as_str().len(), 67);
+        assert_eq!(fingerprint.to_string().parse(), Ok(fingerprint.clone()));
+
+        let mut next_attempt = original.clone();
+        next_attempt.id = QuestionId::new();
+        next_attempt.task_id = TaskId::new();
+        next_attempt.remote_question_id = Some("fresh-attempt-question".to_owned());
+        next_attempt.position = 99;
+        assert_eq!(next_attempt.content_fingerprint().unwrap(), fingerprint);
+
+        let mut changed_option = original.clone();
+        changed_option.options[0].content = Some("Changed".to_owned());
+        assert_ne!(changed_option.content_fingerprint().unwrap(), fingerprint);
+
+        let mut changed_option_id = original;
+        changed_option_id.options[0].id = "C".to_owned();
+        assert_ne!(
+            changed_option_id.content_fingerprint().unwrap(),
+            fingerprint
+        );
+        assert!("v1:ABC".parse::<QuestionContentFingerprint>().is_err());
     }
 }

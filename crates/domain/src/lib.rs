@@ -45,8 +45,8 @@ pub use execution::{
 pub use id::*;
 pub use question::{
     AnswerCandidate, AnswerConfidence, AnswerConfidenceError, AnswerPair, AnswerSource,
-    NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind, QuestionKind,
-    QuestionOption, QuestionValidationError,
+    NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind,
+    QuestionContentFingerprint, QuestionKind, QuestionOption, QuestionValidationError,
 };
 pub use submission::{
     SelectedAnswer, SubmissionDraft, SubmissionDraftItem, SubmissionDraftValidationError,

@@ -2184,3 +2184,18 @@ questions only after the mutating exam-start route yields an active attempt and
 does not claim a read-only Exam question path or borrow Work payload semantics;
 that path remains deferred to a later explicitly authorized mutation and
 human-interaction stage, with no first-batch Capture implementation.
+
+## One-hundred-and-forty-first Phase 0 slice
+
+Core Domain now defines a versioned `QuestionContentFingerprint` for future
+LocalCache evidence reuse. The SHA-256 material excludes snapshot-local
+Question ID, Task ID, remote attempt QID and position, while retaining the exact
+sanitized question kind, stem, option IDs/content/attachments, question
+attachments and metadata.
+
+This deliberately favors false negatives over unsafe matches: a changed option
+ID or any normalized content change produces a different fingerprint. The
+fingerprint is not sufficient authority by itself; storage and Core must still
+scope matches to one owned Task and reject duplicate fingerprints on either
+side before copying evidence. No candidate is queried, created or selected by
+this Domain-only checkpoint.
