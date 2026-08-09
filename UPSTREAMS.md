@@ -8,7 +8,7 @@ provider, add every donor and research source here and in
 |---|---|---|---|---|---|---|---|
 | `chaoxing` | [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `dee643fd0a8e` | Auth, Session, Course, Chapter, Resource, Chapter Work | Reference | GPL-3.0 | 2026-08-09 | Pending |
 | `chaoxing` | [`surinrasu/CxKitty`](https://github.com/surinrasu/CxKitty) | `1589eac9c07c` | Auth, Course, Chapter, Exam, Question, Submission, Errors | Reference | GPL-3.0 | 2026-08-09 | Pending; revision is from 2024 |
-| `chaoxing` | [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b369` | Independent Work/Exam inventory, status, verification | PortSource | MIT | 2026-08-09 | Donor-reported only; Asterism pending |
+| `chaoxing` | [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b369` | Independent Work/Exam inventory, status, verification | PortSource | MIT | 2026-08-09 | Inventory and bounded Work status recheck have offline regression coverage; live pending |
 | `chaoxing` | [`ocsjs/ocsjs`](https://github.com/ocsjs/ocsjs) | `890686a5e54f` | Current Work/Exam routes and Browser behavior | Reference | MIT | 2026-08-09 | Pending |
 | `chaoxing` | [`LangHY/chaoxing-exam`](https://github.com/LangHY/chaoxing-exam) | `14e1dfd9cf11` | Chapter-test navigation, DOM and verification | Reference | No license found | 2026-08-09 | Donor-reported only; Asterism pending |
 | `chaoxing` | [`CodFrm/cxmooc-tools`](https://github.com/CodFrm/cxmooc-tools) | `2b81f7b55a68` | Historical Work/Exam Browser routes | Historical | MIT | 2026-08-09 | Not applicable |

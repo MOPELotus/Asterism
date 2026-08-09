@@ -2,14 +2,40 @@ use std::collections::HashSet;
 
 use asterism_domain::{AssessmentClass, RemoteState, SourceType};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTask};
+use asterism_secrets::SecretString;
 use scraper::{ElementRef, Html, Selector};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 const MAX_TITLE_BYTES: usize = 512;
 const MAX_EVIDENCE_BYTES: usize = 1_024;
 const MAX_INVENTORY_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_INVENTORY_TASKS: usize = 2_048;
+
+pub(crate) struct ChaoxingParsedInventoryTask {
+    task: RemoteTask,
+    entry: SecretString,
+}
+
+impl ChaoxingParsedInventoryTask {
+    pub(crate) const fn task(&self) -> &RemoteTask {
+        &self.task
+    }
+
+    pub(crate) const fn task_mut(&mut self) -> &mut RemoteTask {
+        &mut self.task
+    }
+
+    pub(crate) fn entry(&self) -> &str {
+        self.entry.expose_secret()
+    }
+
+    pub(crate) fn into_task(self) -> RemoteTask {
+        self.task
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChaoxingCourseScope {
@@ -56,6 +82,16 @@ pub fn parse_work_inventory(
     html: &str,
     scope: &ChaoxingCourseScope,
 ) -> ProviderResult<Vec<RemoteTask>> {
+    Ok(parse_work_inventory_entries(html, scope)?
+        .into_iter()
+        .map(ChaoxingParsedInventoryTask::into_task)
+        .collect())
+}
+
+pub(crate) fn parse_work_inventory_entries(
+    html: &str,
+    scope: &ChaoxingCourseScope,
+) -> ProviderResult<Vec<ChaoxingParsedInventoryTask>> {
     parse_inventory(html, scope, SourceType::Work)
 }
 
@@ -70,7 +106,10 @@ pub fn parse_exam_inventory(
     html: &str,
     scope: &ChaoxingCourseScope,
 ) -> ProviderResult<Vec<RemoteTask>> {
-    parse_inventory(html, scope, SourceType::Exam)
+    Ok(parse_inventory(html, scope, SourceType::Exam)?
+        .into_iter()
+        .map(ChaoxingParsedInventoryTask::into_task)
+        .collect())
 }
 
 /// Classifies a followed Work detail response instead of trusting `未交` on the
@@ -82,7 +121,9 @@ pub fn parse_exam_inventory(
 /// server result text identifies an editor, completed result, or closed task.
 pub fn classify_work_detail(final_url: &str, visible_text: &str) -> ProviderResult<RemoteState> {
     let route = final_url.to_ascii_lowercase();
-    let text = normalize_evidence(visible_text);
+    let mut visible = strip_inert_markup(visible_text);
+    let text = normalize_evidence(&visible);
+    visible.zeroize();
     if contains_any(
         &text,
         &[
@@ -115,7 +156,7 @@ fn parse_inventory(
     html: &str,
     scope: &ChaoxingCourseScope,
     source_type: SourceType,
-) -> ProviderResult<Vec<RemoteTask>> {
+) -> ProviderResult<Vec<ChaoxingParsedInventoryTask>> {
     if html.len() > MAX_INVENTORY_DOCUMENT_BYTES {
         return Err(invalid_response(
             "Chaoxing inventory document exceeds the configured size limit",
@@ -147,7 +188,14 @@ fn parse_inventory(
             task_id
         );
         if !seen.insert(remote_id.clone()) {
-            continue;
+            return Err(protocol_drift(
+                "Chaoxing inventory contains a duplicate remote task identity",
+            ));
+        }
+        if tasks.len() == MAX_INVENTORY_TASKS {
+            return Err(invalid_response(
+                "Chaoxing inventory task count exceeds the size limit",
+            ));
         }
         let title = extract_title(row, source_type)?;
         let row_text = normalize_evidence(&row.text().collect::<Vec<_>>().join(" "));
@@ -167,7 +215,7 @@ fn parse_inventory(
             "time_text": time_text,
             "entry_kind": entry_kind,
         });
-        tasks.push(RemoteTask {
+        let task = RemoteTask {
             remote_id,
             course_remote_id: Some(scope.course_remote.clone()),
             title,
@@ -185,9 +233,43 @@ fn parse_inventory(
                 "time_text": time_text,
                 "entry_kind": entry_kind,
             }),
+        };
+        tasks.push(ChaoxingParsedInventoryTask {
+            task,
+            entry: SecretString::new(entry),
         });
     }
     Ok(tasks)
+}
+
+pub(crate) fn apply_work_detail_state(
+    task: &mut RemoteTask,
+    remote_state: RemoteState,
+) -> ProviderResult<()> {
+    if task.source_type != SourceType::Work {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Work detail state was applied to another module",
+        ));
+    }
+    let normalized = task.normalized.as_object_mut().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Work task has invalid normalized metadata",
+        )
+    })?;
+    normalized.insert("remote_state".to_owned(), json!(remote_state));
+    normalized.insert("detail_remote_state".to_owned(), json!(remote_state));
+    let raw = task.raw_sanitized.as_object_mut().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Work task has invalid sanitized metadata",
+        )
+    })?;
+    raw.insert("detail_remote_state".to_owned(), json!(remote_state));
+    task.remote_state = remote_state;
+    task.fingerprint = fingerprint(&task.normalized)?;
+    Ok(())
 }
 
 fn entry_value(row: ElementRef<'_>) -> Option<String> {
@@ -368,6 +450,36 @@ fn normalize_evidence(value: &str) -> String {
     normalized
 }
 
+fn strip_inert_markup(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some((start, tag)) = ["script", "style"]
+        .into_iter()
+        .filter_map(|tag| {
+            find_ascii_case_insensitive(value, cursor, &format!("<{tag}")).map(|start| (start, tag))
+        })
+        .min_by_key(|(start, _)| *start)
+    {
+        output.push_str(&value[cursor..start]);
+        let Some(close) = find_ascii_case_insensitive(value, start, &format!("</{tag}")) else {
+            return output;
+        };
+        let Some(end) = value[close..].find('>').map(|offset| close + offset + 1) else {
+            return output;
+        };
+        cursor = end;
+    }
+    output.push_str(&value[cursor..]);
+    output
+}
+
+fn find_ascii_case_insensitive(value: &str, from: usize, needle: &str) -> Option<usize> {
+    value.as_bytes()[from..]
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+        .map(|offset| from + offset)
+}
+
 fn contains_any(value: &str, candidates: &[&str]) -> bool {
     candidates.iter().any(|candidate| value.contains(candidate))
 }
@@ -448,6 +560,14 @@ mod tests {
         assert_eq!(
             classify_work_detail("https://example.invalid/work/prompt", submitted).unwrap(),
             RemoteState::Completed
+        );
+        assert_eq!(
+            classify_work_detail(
+                "https://example.invalid/work/view",
+                "<script>const template = '提交成功';</script><main>未交 已过期 查看详情</main>",
+            )
+            .unwrap(),
+            RemoteState::Expired
         );
     }
 

@@ -1012,3 +1012,21 @@ remain absent from process arguments, retain zeroizing storage through the HTTP
 request, and are dropped immediately afterward. This completes the local
 Password-to-Cookie validation surface but does not constitute live-account
 verification or change Chaoxing's `Development` status.
+
+## Seventy-fifth Phase 0 slice
+
+Chaoxing Work inventory now rechecks every list-level pending item through its
+current detail route before returning a scan. This closes the known ambiguity
+where the list says `未交` after a task has already expired. Each short-lived
+route is bound to the current course and Work identity, redacted in diagnostics,
+limited by document, task, pending-detail, query and redirect budgets, and may
+redirect only among the expected HTTPS Work routes on the fixed Chaoxing host.
+The native adapter resolves one Cookie for the bounded batch and retries the
+whole detail operation at most once after an authentication failure. Missing,
+duplicate, foreign or unclassifiable detail results fail the complete task
+inventory rather than returning a partially corrected snapshot; detail state is
+included in the normalized fingerprint only after the full batch succeeds.
+Script/style template keywords are removed before visible status
+classification. Fixture and route-boundary coverage do not replace the pending
+same-account browser comparison, so Provider verification remains
+`Development`.

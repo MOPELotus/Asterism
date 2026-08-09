@@ -29,5 +29,5 @@ pub use provider::{build_development_provider, build_development_provider_with_r
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use task_inventory::{
     ChaoxingCourseRoute, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
-    ChaoxingTaskInventory,
+    ChaoxingTaskInventory, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
 };

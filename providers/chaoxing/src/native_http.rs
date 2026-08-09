@@ -13,7 +13,8 @@ use zeroize::Zeroize;
 
 use crate::{
     ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingInventoryDocument,
-    ChaoxingInventoryTransport,
+    ChaoxingInventoryTransport, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
+    classify_work_detail,
 };
 
 const COURSE_PAGE_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu";
@@ -27,6 +28,7 @@ const MAX_COOKIE_BYTES: usize = 64 * 1_024;
 const MAX_HTML_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_COURSE_FOLDERS: usize = 256;
 const MAX_COURSE_FOLDER_ID_BYTES: usize = 64;
+const MAX_WORK_DETAIL_REDIRECTS: usize = 3;
 
 /// One short-lived Chaoxing Cookie header resolved through Core's secrets
 /// boundary. Its value is redacted and zeroized on drop.
@@ -187,6 +189,84 @@ impl NativeChaoxingInventoryTransport {
             .into_inventory_document()
     }
 
+    async fn fetch_work_detail_states_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        requests: &[ChaoxingWorkDetailRequest<'_>],
+    ) -> ProviderResult<Vec<ChaoxingWorkDetailState>> {
+        let mut states = Vec::with_capacity(requests.len());
+        for request in requests {
+            states.push(self.fetch_work_detail_state(session, *request).await?);
+        }
+        Ok(states)
+    }
+
+    async fn fetch_work_detail_state(
+        &self,
+        session: &ChaoxingCookieSession,
+        request: ChaoxingWorkDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingWorkDetailState> {
+        let mut url = request.url()?;
+        for redirect_count in 0..=MAX_WORK_DETAIL_REDIRECTS {
+            let response = self
+                .client
+                .get(url.clone())
+                .header(COOKIE, session.header_value()?)
+                .header(ACCEPT, "text/html,application/xhtml+xml")
+                .send()
+                .await
+                .map_err(|error| classify_reqwest_error(&error))?;
+            if response.status().is_redirection() {
+                if redirect_count == MAX_WORK_DETAIL_REDIRECTS {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::ProtocolDrift,
+                        "Chaoxing Work detail exceeded the redirect limit",
+                    ));
+                }
+                let location = response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| {
+                        ProviderError::new(
+                            ProviderErrorKind::ProtocolDrift,
+                            "Chaoxing Work detail redirect has no valid location",
+                        )
+                    })?;
+                if looks_like_login_location(location) {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Authentication,
+                        "Chaoxing Work detail redirected to login",
+                    ));
+                }
+                let next = url.join(location).map_err(|_| {
+                    ProviderError::new(
+                        ProviderErrorKind::ProtocolDrift,
+                        "Chaoxing Work detail redirect is invalid",
+                    )
+                })?;
+                if looks_like_login_location(next.as_str()) {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Authentication,
+                        "Chaoxing Work detail redirected to login",
+                    ));
+                }
+                if !request.allows_redirect(&next) {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::ProtocolDrift,
+                        "Chaoxing Work detail redirected outside its route boundary",
+                    ));
+                }
+                url = next;
+                continue;
+            }
+            let document = classify_response(response).await?;
+            let remote_state = classify_work_detail(url.as_str(), document.as_str())?;
+            return Ok(ChaoxingWorkDetailState::for_request(request, remote_state));
+        }
+        unreachable!("bounded Work detail redirect loop always returns")
+    }
+
     async fn fetch_course_inventories_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -246,6 +326,22 @@ impl ChaoxingInventoryTransport for NativeChaoxingInventoryTransport {
             Err(error) if should_renew_after(&error, renewed) => {
                 let session = self.sessions.renew_session(context).await?;
                 self.fetch_exam_inventory_once(&session, route).await
+            }
+            result => result,
+        }
+    }
+
+    async fn fetch_work_detail_states(
+        &self,
+        context: &ProviderContext,
+        _route: ChaoxingCourseRoute<'_>,
+        requests: &[ChaoxingWorkDetailRequest<'_>],
+    ) -> ProviderResult<Vec<ChaoxingWorkDetailState>> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_work_detail_states_once(&session, requests).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_work_detail_states_once(&session, requests).await
             }
             result => result,
         }
