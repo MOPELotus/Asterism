@@ -1,0 +1,24 @@
+[
+  {
+    "remote_id": "course:1001",
+    "title": "Integrated English",
+    "term": null,
+    "teacher": null,
+    "remote_status": "25%",
+    "metadata_sanitized": {
+      "schema": "welearn.course.v1",
+      "completion_percent": 25
+    }
+  },
+  {
+    "remote_id": "course:course-2002",
+    "title": "Academic Writing",
+    "term": null,
+    "teacher": null,
+    "remote_status": "100%",
+    "metadata_sanitized": {
+      "schema": "welearn.course.v1",
+      "completion_percent": 100
+    }
+  }
+]

@@ -11,14 +11,17 @@ fixtures/providers/welearn/
   courses/list-mixed.json
   courses/list-mixed.expected.json
   units/list-mixed.json
-  tasks/leaves-mixed.json
-  tasks/leaves-mixed.expected.json
+  tasks/leaves-unit-0.json
+  tasks/leaves-unit-1.json
+  tasks/list-mixed.expected.json
 ```
 
-The Course fixture covers numeric/string IDs, completion percentage, unknown
-extra fields and malformed entries. Unit/SCO fixtures cover visible/hidden
-units, pending/completed/unknown states, duration separation and stable
-Course/Unit/SCO identity.
+The Course fixture covers numeric/string IDs, completion percentage and unknown
+extra fields. Unit/SCO fixtures cover visible/hidden Units,
+completed/unknown/not-open states, duration separation and stable
+Course/Unit/SCO identity. Inline negative tests cover malformed rows, duplicate
+identities, invalid percentages, misbound Unit responses and duration without a
+completion observation.
 
 ## Required live-sanitized fixtures
 

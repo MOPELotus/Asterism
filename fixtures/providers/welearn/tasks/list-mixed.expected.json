@@ -1,0 +1,92 @@
+[
+  {
+    "remote_id": "sco:1001:301",
+    "course_remote_id": "course:1001",
+    "title": "Vocabulary",
+    "source_type": "resource",
+    "assessment_class": "routine",
+    "remote_state": "completed",
+    "opens_at": null,
+    "due_at": null,
+    "closes_at": null,
+    "capabilities": [],
+    "fingerprint": "295edce22d5503624048c1c5a67aaf5dfe16d848c57ecd75830739c99e0b37c7",
+    "normalized": {
+      "schema": "welearn.sco.v1",
+      "course_id": "1001",
+      "unit_index": 0,
+      "unit_title": "Unit 1 Getting Started",
+      "unit_code": "U1",
+      "sco_id": "301",
+      "visible": true,
+      "completion": "completed",
+      "duration_raw": "180"
+    },
+    "raw_sanitized": {
+      "schema": "welearn.sco.raw.v1",
+      "completion_raw": "已完成",
+      "visibility_raw": "true",
+      "duration_raw": "180"
+    }
+  },
+  {
+    "remote_id": "sco:1001:302",
+    "course_remote_id": "course:1001",
+    "title": "Reading",
+    "source_type": "resource",
+    "assessment_class": "routine",
+    "remote_state": "unknown",
+    "opens_at": null,
+    "due_at": null,
+    "closes_at": null,
+    "capabilities": [],
+    "fingerprint": "3a8b21e6ea036bda992da49163b5f848fc08349360f42152b639562627caac0b",
+    "normalized": {
+      "schema": "welearn.sco.v1",
+      "course_id": "1001",
+      "unit_index": 0,
+      "unit_title": "Unit 1 Getting Started",
+      "unit_code": "U1",
+      "sco_id": "302",
+      "visible": true,
+      "completion": "unknown",
+      "duration_raw": "45"
+    },
+    "raw_sanitized": {
+      "schema": "welearn.sco.raw.v1",
+      "completion_raw": "服务端新状态",
+      "visibility_raw": null,
+      "duration_raw": "45"
+    }
+  },
+  {
+    "remote_id": "sco:1001:401",
+    "course_remote_id": "course:1001",
+    "title": "Locked Practice",
+    "source_type": "resource",
+    "assessment_class": "routine",
+    "remote_state": "not_open",
+    "opens_at": null,
+    "due_at": null,
+    "closes_at": null,
+    "capabilities": [],
+    "fingerprint": "845536d30d715cbdde80a6142b7bc7d0f6f42847a1966cb735a2208178c37459",
+    "normalized": {
+      "schema": "welearn.sco.v1",
+      "course_id": "1001",
+      "unit_index": 1,
+      "unit_title": "Unit 2 Locked",
+      "unit_code": "U2",
+      "sco_id": "401",
+      "visible": false,
+      "completion": "not_open",
+      "duration_raw": "900"
+    },
+    "raw_sanitized": {
+      "schema": "welearn.sco.raw.v1",
+      "completion_raw": "已完成",
+      "visibility_raw": true,
+      "duration_raw": "900"
+    }
+  }
+]

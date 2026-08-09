@@ -2257,3 +2257,24 @@ This transport performs no Provider call and does not chain into
 AnswerResolution, SubmissionDraft construction, Execution scheduling or remote
 submission. The caller must explicitly inspect the combined candidate set and
 resolution plan after import.
+
+## One-hundred-and-forty-fifth Phase 0 slice
+
+The second first-batch Provider now starts with a clean-room WELearn research
+baseline and fixture-only Rust crate. Exact donor revisions, ambiguous license
+status, route/action evidence and drift risks are recorded before implementation;
+no unlicensed donor source is copied into the repository.
+
+Bounded parsers normalize `authCourse` Course rows and the `courseunits` →
+`scoLeaves` hierarchy. Numeric and string remote IDs share one stable form; the
+stable `cid` remains Course identity while its duplicate route-context copy is
+omitted from serialization. Unknown fields are dropped, and duplicate or
+misbound Course/Unit/SCO identities fail closed. SCO completion,
+visibility and opaque donor `learntime` are retained as independent facts:
+unknown completion stays `Unknown`, a hidden Unit forces `NotOpen`, and duration
+alone never implies completion.
+
+The new metadata remains `Development` with no advertised runtime slots,
+authentication methods or session kinds. This checkpoint performs no HTTP,
+authentication, CMI mutation, execution, duration reporting or Capture work and
+is not evidence of current live WELearn compatibility.

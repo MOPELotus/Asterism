@@ -279,6 +279,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "asterism-provider-welearn"
+version = "0.1.0"
+dependencies = [
+ "asterism-domain",
+ "asterism-provider-api",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "asterism-scheduler"
 version = "0.1.0"
 dependencies = [

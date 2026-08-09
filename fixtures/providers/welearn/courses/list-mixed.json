@@ -1,0 +1,15 @@
+{
+  "clist": [
+    {
+      "cid": 1001,
+      "name": "Integrated English",
+      "per": 25,
+      "opaque": "must-be-dropped"
+    },
+    {
+      "cid": "course-2002",
+      "name": "Academic   Writing",
+      "per": "100"
+    }
+  ]
+}

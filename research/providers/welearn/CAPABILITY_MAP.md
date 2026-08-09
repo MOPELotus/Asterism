@@ -20,8 +20,10 @@ The first code slice is fixture-only and read-only:
 
 1. parse a bounded Course list into `RemoteCourse`;
 2. parse Unit and SCO-leaf responses into `RemoteTask`;
-3. keep completion, progress, session time and total time as separate facts;
+3. keep SCO completion and donor-labelled learning time as separate facts,
+   without claiming a time unit before live CMI evidence exists;
 4. expose no authentication, network transport, execution or submission slot.
 
-Provider metadata remains `Development` until native boundaries are registered
-and live verification is recorded.
+The crate now provides this parser boundary and synthetic fixtures. Its metadata
+remains `Development` and advertises no capability, authentication method or
+session kind until native boundaries are implemented and registered.

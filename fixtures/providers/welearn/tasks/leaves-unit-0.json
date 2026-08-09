@@ -1,0 +1,18 @@
+{
+  "info": [
+    {
+      "id": 301,
+      "location": "Vocabulary",
+      "isvisible": "true",
+      "iscomplete": "已完成",
+      "learntime": 180,
+      "answer": "must-be-dropped"
+    },
+    {
+      "id": "302",
+      "location": "Reading",
+      "iscomplete": "服务端新状态",
+      "learntime": "45"
+    }
+  ]
+}

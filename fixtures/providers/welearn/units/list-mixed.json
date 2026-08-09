@@ -1,0 +1,15 @@
+{
+  "info": [
+    {
+      "unitname": "Unit 1 Getting Started",
+      "name": "U1",
+      "visible": "true",
+      "server_only": "dropped"
+    },
+    {
+      "unitname": "Unit 2 Locked",
+      "name": "U2",
+      "visible": false
+    }
+  ]
+}
