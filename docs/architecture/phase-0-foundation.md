@@ -2108,3 +2108,22 @@ stable bad request and hidden owner/binding mismatches remain not found.
 parses its `--answer` argument into the Domain NormalizedAnswer type before it
 can send a request. This surface appends evidence only: it performs no Provider
 call, candidate selection, draft build, Execution scheduling or remote submit.
+
+## One-hundred-and-thirty-seventh Phase 0 slice
+
+Core Domain now defines a bounded, reviewable `AnswerResolutionPlan` separately
+from both candidate evidence and `SubmissionDraft`. Every Question decision is
+explicitly `Selected`, `Conflict` or `Missing`, carries the considered Candidate
+identities, and can only carry a selected Candidate and normalized answer in the
+`Selected` state.
+
+Plan validation caps Question and Candidate collections, rejects duplicate
+identities, requires a selected Candidate to come from the considered set and
+rejects `Unknown` selected answers. Conflict requires at least two known
+Candidates and Missing requires none; neither unresolved state may conceal a
+selection payload.
+
+This is a transport- and persistence-independent contract only. It does not
+define source preference, overwrite candidate evidence, persist a winner,
+build a SubmissionDraft or authorize remote execution. The Core resolver that
+constructs conservative decisions remains a separate checkpoint.

@@ -1,6 +1,7 @@
 //! Asterism's persistence- and transport-independent domain model.
 
 pub mod account;
+pub mod answer_resolution;
 pub mod auth;
 pub mod auth_bootstrap;
 pub mod auth_bootstrap_event;
@@ -14,6 +15,10 @@ pub mod task;
 pub mod user;
 
 pub use account::{Course, ProviderAccount, ProviderId};
+pub use answer_resolution::{
+    AnswerResolutionDecision, AnswerResolutionPlan, AnswerResolutionStatus,
+    AnswerResolutionValidationError,
+};
 pub use auth::{
     AuditActor, AuthMethod, AuthSession, AuthSessionError, AuthState, HumanRequiredReason,
     ServiceScope, ServiceToken, SessionKind, WaitingUserState, WebSession,
