@@ -5,7 +5,7 @@
 | Authentication | AutoFinish + UnipusHelperPro | Reference | Password/ImportedToken orchestration, strict login-envelope classification, native Password exchange and atomic openid/JWT CompositeSession are offline/native-boundary covered |
 | Stored session validation | User-info and Course-list reads | FromScratch | Core provider-scoped resolver accepts only exact unexpired native Composite or manual JWT metadata; bounded native user-info JWT validation is implemented, renewal pending |
 | CourseInventory | AutoFinish + UnipusHelperPro | Reference | Native authenticated Course list plus bounded Course → CourseResource flattening are offline/native-boundary covered |
-| TaskInventory | AutoFinish + UnipusHelperPro | Reference | Fixture-only nested Course JSON → Unit/Section/Node/Group parser implemented; native read pending |
+| TaskInventory | AutoFinish + UnipusHelperPro | Reference | Native fresh resource-detail/tree reads plus bounded nested Course JSON → Unit/Section/Node/Group parser are offline/native-boundary covered |
 | TaskProgressRead | Both backend donors | Reference | Per-Unit `course_progress` exposes independent Group state; parser pending |
 | DurationRead | UnipusHelperPro | Reference | Summary exposes `finishProgress` and `duration` independently at Course/Unit level; unit/live meaning pending |
 | ResourceExecution | AutoFinish | Reference | Direct completion/submission is not accepted as duration-complete execution |
@@ -15,7 +15,8 @@
 
 ## Initial implementation boundary
 
-The current crate advertises Authentication and CourseInventory. It:
+The current crate advertises Authentication, CourseInventory and TaskInventory.
+It:
 
 1. parses a bounded authenticated Course list and flattens each CourseResource
    into a stable `RemoteCourse`;
@@ -30,6 +31,6 @@ The current crate advertises Authentication and CourseInventory. It:
 6. resolves only the account/reference-bound CompositeSession purpose and
    rejects mismatched origin, kind, expiry, identity or storage shape;
 7. drops class, instance, content, answer and unknown fields;
-8. implements native Password exchange, user-info JWT validation and Course
-   inventory; it makes no native Task inventory, progress, completion,
-   duration, execution, submission, renewal, BrowserBridge or Capture claim.
+8. implements native Password exchange, user-info JWT validation and complete
+   Course/Task inventory; it makes no native progress, completion, duration,
+   execution, submission, renewal, BrowserBridge or Capture claim.

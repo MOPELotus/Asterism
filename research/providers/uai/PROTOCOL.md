@@ -71,6 +71,13 @@ by the progress response. Asterism preserves Unit → Section → Node/Micro →
 as distinct hierarchy and identity facts. `base` is only a bounded task-type
 label and does not imply an assessment or execution capability.
 
+Native TaskInventory first reads and parses the selected resource detail,
+requiring its `courseResourceId` to match the stable Course identity. Only then
+is the fresh `courseInstanceId` encoded as one URL path segment for the tree
+read. Both completed bodies are held in one redacted transport result and
+parsed all-or-nothing; the instance route is never serialized into a Course or
+Task. Renewal and progress remain separate boundaries.
+
 ## Progress and duration separation
 
 ```text

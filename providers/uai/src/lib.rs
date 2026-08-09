@@ -1,8 +1,8 @@
 //! `uai` Provider implementation.
 //!
 //! The current Development checkpoint provides native Password/JWT
-//! authentication and Course inventory plus a bounded offline task parser over
-//! the shared network policy. It makes no claim of live compatibility.
+//! authentication and read-only Course/Task inventory over the shared network
+//! policy. It makes no claim of live compatibility.
 
 mod authentication;
 mod course_inventory;
@@ -19,7 +19,8 @@ pub use authentication::{
 };
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
 pub use inventory_capabilities::{
-    UaiCourseInventory, UaiCourseInventoryTransport, UaiInventoryDocument,
+    UaiCourseInventory, UaiCourseInventoryTransport, UaiInventoryDocument, UaiTaskInventory,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
 };
 pub use metadata::development_metadata;
 pub use native_authentication::NativeUaiAuthenticationTransport;

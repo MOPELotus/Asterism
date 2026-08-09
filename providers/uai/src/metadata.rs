@@ -29,6 +29,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         capabilities: BTreeSet::from([
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
+            ProviderCapability::TaskInventory,
         ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken]),
         session_kinds: BTreeSet::from([SessionKind::Jwt, SessionKind::Composite]),
@@ -40,7 +41,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metadata_advertises_authentication_and_course_inventory() {
+    fn metadata_advertises_authentication_and_inventory() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
@@ -49,6 +50,7 @@ mod tests {
             BTreeSet::from([
                 ProviderCapability::Authentication,
                 ProviderCapability::CourseInventory,
+                ProviderCapability::TaskInventory,
             ])
         );
         assert_eq!(

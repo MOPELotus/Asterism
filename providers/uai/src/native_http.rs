@@ -1,20 +1,28 @@
 use std::{fmt, sync::Arc};
 
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
-use asterism_provider_api::{ProviderContext, ProviderError, ProviderErrorKind, ProviderResult};
+use asterism_provider_api::{
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteCourse,
+};
 use async_trait::async_trait;
 use reqwest::{
-    Client, Response, StatusCode,
+    Client, Response, StatusCode, Url,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER},
 };
 use zeroize::Zeroize;
 
-use crate::{UaiCourseInventoryTransport, UaiInventoryDocument, UaiJwtSession, UaiSessionResolver};
+use crate::{
+    UaiCourseInventoryTransport, UaiInventoryDocument, UaiJwtSession, UaiSessionResolver,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+    course_inventory::course_resource_id_from_remote, parse_course_context,
+};
 
 const COURSE_LIST_URL: &str = "https://uai.unipus.cn/api/cmgt/course/getCourseListByStudent";
+const UAI_ORIGIN: &str = "https://uai.unipus.cn";
+const UCONTENT_ORIGIN: &str = "https://ucontent.unipus.cn";
 const MAX_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 
-/// Native, non-redirecting UAI Course inventory transport.
+/// Native, non-redirecting UAI Course and Task inventory transport.
 pub struct NativeUaiInventoryTransport {
     client: Client,
     sessions: Arc<dyn UaiSessionResolver>,
@@ -44,16 +52,54 @@ impl NativeUaiInventoryTransport {
         &self,
         session: &UaiJwtSession,
     ) -> ProviderResult<UaiInventoryDocument> {
+        self.send_get_with_session(
+            session,
+            static_url(COURSE_LIST_URL)?,
+            ResponseRoute::CourseList,
+        )
+        .await
+    }
+
+    async fn send_get_with_session(
+        &self,
+        session: &UaiJwtSession,
+        url: Url,
+        route: ResponseRoute,
+    ) -> ProviderResult<UaiInventoryDocument> {
         let authorization = sensitive_authorization(session)?;
         let response = self
             .client
-            .get(COURSE_LIST_URL)
+            .get(url)
             .header(ACCEPT, "application/json")
             .header(AUTHORIZATION, authorization)
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
-        read_inventory_response(response).await
+        read_inventory_response(response, route).await
+    }
+
+    async fn fetch_tasks_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course: &RemoteCourse,
+    ) -> ProviderResult<UaiTaskInventoryDocuments> {
+        let resource_id = course_resource_id_from_remote(course)?;
+        let detail = self
+            .send_get_with_session(
+                session,
+                course_resource_detail_url(&resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?;
+        let route = parse_course_context(course, detail.as_str())?;
+        let tree = self
+            .send_get_with_session(
+                session,
+                course_tree_url(route.course_instance_id())?,
+                ResponseRoute::TaskTree,
+            )
+            .await?;
+        Ok(UaiTaskInventoryDocuments::new(detail, tree))
     }
 }
 
@@ -78,6 +124,18 @@ impl UaiCourseInventoryTransport for NativeUaiInventoryTransport {
     }
 }
 
+#[async_trait]
+impl UaiTaskInventoryTransport for NativeUaiInventoryTransport {
+    async fn fetch_tasks(
+        &self,
+        context: &ProviderContext,
+        course: &RemoteCourse,
+    ) -> ProviderResult<UaiTaskInventoryDocuments> {
+        let session = self.sessions.resolve_session(context).await?;
+        self.fetch_tasks_with_session(&session, course).await
+    }
+}
+
 fn sensitive_authorization(session: &UaiJwtSession) -> ProviderResult<HeaderValue> {
     let mut value = HeaderValue::from_str(session.expose_authorization()).map_err(|_| {
         ProviderError::new(
@@ -89,14 +147,34 @@ fn sensitive_authorization(session: &UaiJwtSession) -> ProviderResult<HeaderValu
     Ok(value)
 }
 
-async fn read_inventory_response(mut response: Response) -> ProviderResult<UaiInventoryDocument> {
-    validate_status(response.status(), response.headers())?;
-    validate_json_content_type(response.headers())?;
+#[derive(Clone, Copy)]
+enum ResponseRoute {
+    CourseList,
+    CourseDetail,
+    TaskTree,
+}
+
+impl ResponseRoute {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CourseList => "Course inventory",
+            Self::CourseDetail => "Course-resource detail",
+            Self::TaskTree => "Task tree",
+        }
+    }
+}
+
+async fn read_inventory_response(
+    mut response: Response,
+    route: ResponseRoute,
+) -> ProviderResult<UaiInventoryDocument> {
+    validate_status(response.status(), response.headers(), route)?;
+    validate_json_content_type(response.headers(), route)?;
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err(oversized_response());
+        return Err(oversized_response(route));
     }
 
     let mut bytes = Vec::new();
@@ -107,14 +185,14 @@ async fn read_inventory_response(mut response: Response) -> ProviderResult<UaiIn
     {
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
             bytes.zeroize();
-            return Err(oversized_response());
+            return Err(oversized_response(route));
         }
         bytes.extend_from_slice(&chunk);
     }
     if bytes.is_empty() {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidResponse,
-            "UAI Course inventory endpoint returned an empty response",
+            format!("UAI {} endpoint returned an empty response", route.label()),
         ));
     }
     let document = match String::from_utf8(bytes) {
@@ -124,18 +202,22 @@ async fn read_inventory_response(mut response: Response) -> ProviderResult<UaiIn
             bytes.zeroize();
             return Err(ProviderError::new(
                 ProviderErrorKind::InvalidResponse,
-                "UAI Course inventory endpoint returned invalid UTF-8",
+                format!("UAI {} endpoint returned invalid UTF-8", route.label()),
             ));
         }
     };
     UaiInventoryDocument::try_new(document)
 }
 
-fn validate_status(status: StatusCode, headers: &HeaderMap) -> ProviderResult<()> {
+fn validate_status(
+    status: StatusCode,
+    headers: &HeaderMap,
+    route: ResponseRoute,
+) -> ProviderResult<()> {
     if status == StatusCode::TOO_MANY_REQUESTS {
         let mut error = ProviderError::new(
             ProviderErrorKind::RateLimited,
-            "UAI rate limited the Course inventory request",
+            format!("UAI rate limited the {} request", route.label()),
         );
         error.retry_after_seconds = headers
             .get(RETRY_AFTER)
@@ -147,38 +229,47 @@ fn validate_status(status: StatusCode, headers: &HeaderMap) -> ProviderResult<()
     if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
         return Err(ProviderError::new(
             ProviderErrorKind::Authentication,
-            "UAI rejected the Course inventory session",
+            format!("UAI rejected the {} session", route.label()),
         ));
     }
     if status == StatusCode::NOT_FOUND || status.is_redirection() {
         return Err(ProviderError::new(
             ProviderErrorKind::ProtocolDrift,
-            "UAI Course inventory route changed or redirected unexpectedly",
+            format!(
+                "UAI {} route changed or redirected unexpectedly",
+                route.label()
+            ),
         ));
     }
     if status.is_server_error() {
         return Err(ProviderError::new(
             ProviderErrorKind::ProviderUnavailable,
-            "UAI Course inventory endpoint is temporarily unavailable",
+            format!("UAI {} endpoint is temporarily unavailable", route.label()),
         ));
     }
     if !status.is_success() {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidResponse,
-            "UAI Course inventory endpoint returned an unexpected status",
+            format!(
+                "UAI {} endpoint returned an unexpected status",
+                route.label()
+            ),
         ));
     }
     Ok(())
 }
 
-fn validate_json_content_type(headers: &HeaderMap) -> ProviderResult<()> {
+fn validate_json_content_type(headers: &HeaderMap, route: ResponseRoute) -> ProviderResult<()> {
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| {
             ProviderError::new(
                 ProviderErrorKind::InvalidResponse,
-                "UAI Course inventory endpoint returned no valid Content-Type",
+                format!(
+                    "UAI {} endpoint returned no valid Content-Type",
+                    route.label()
+                ),
             )
         })?;
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
@@ -187,7 +278,10 @@ fn validate_json_content_type(headers: &HeaderMap) -> ProviderResult<()> {
     {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidResponse,
-            "UAI Course inventory endpoint returned an unexpected content type",
+            format!(
+                "UAI {} endpoint returned an unexpected content type",
+                route.label()
+            ),
         ));
     }
     Ok(())
@@ -199,13 +293,53 @@ fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
     } else {
         ProviderErrorKind::InvalidResponse
     };
-    ProviderError::new(kind, "UAI Course inventory HTTP request failed")
+    ProviderError::new(kind, "UAI inventory HTTP request failed")
 }
 
-fn oversized_response() -> ProviderError {
+fn oversized_response(route: ResponseRoute) -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::InvalidResponse,
-        "UAI Course inventory response exceeds the size limit",
+        format!("UAI {} response exceeds the size limit", route.label()),
+    )
+}
+
+fn course_resource_detail_url(resource_id: &str) -> ProviderResult<Url> {
+    route_url(
+        UAI_ORIGIN,
+        &[
+            "api",
+            "cmgt",
+            "course",
+            "getCourseResourceInfoById",
+            resource_id,
+        ],
+    )
+}
+
+fn course_tree_url(course_instance_id: &str) -> ProviderResult<Url> {
+    route_url(
+        UCONTENT_ORIGIN,
+        &["course", "api", "course", course_instance_id, "default"],
+    )
+}
+
+fn route_url(origin: &'static str, segments: &[&str]) -> ProviderResult<Url> {
+    let mut url = static_url(origin)?;
+    url.path_segments_mut()
+        .map_err(|()| static_route_error())?
+        .clear()
+        .extend(segments);
+    Ok(url)
+}
+
+fn static_url(value: &'static str) -> ProviderResult<Url> {
+    Url::parse(value).map_err(|_| static_route_error())
+}
+
+fn static_route_error() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "UAI compile-time inventory route is invalid",
     )
 }
 
@@ -250,27 +384,40 @@ mod tests {
     fn response_heads_are_typed_and_require_json() {
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
-        let limited = validate_status(StatusCode::TOO_MANY_REQUESTS, &headers).unwrap_err();
+        let limited = validate_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            ResponseRoute::CourseList,
+        )
+        .unwrap_err();
         assert_eq!(limited.kind, ProviderErrorKind::RateLimited);
         assert_eq!(limited.retry_after_seconds, Some(7));
         assert_eq!(
-            validate_status(StatusCode::UNAUTHORIZED, &HeaderMap::new())
-                .unwrap_err()
-                .kind,
+            validate_status(
+                StatusCode::UNAUTHORIZED,
+                &HeaderMap::new(),
+                ResponseRoute::CourseDetail,
+            )
+            .unwrap_err()
+            .kind,
             ProviderErrorKind::Authentication
         );
         assert_eq!(
-            validate_status(StatusCode::FOUND, &HeaderMap::new())
-                .unwrap_err()
-                .kind,
+            validate_status(
+                StatusCode::FOUND,
+                &HeaderMap::new(),
+                ResponseRoute::TaskTree,
+            )
+            .unwrap_err()
+            .kind,
             ProviderErrorKind::ProtocolDrift
         );
 
         let mut content = HeaderMap::new();
         content.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        validate_json_content_type(&content).unwrap();
+        validate_json_content_type(&content, ResponseRoute::CourseList).unwrap();
         content.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
-        assert!(validate_json_content_type(&content).is_err());
+        assert!(validate_json_content_type(&content, ResponseRoute::TaskTree).is_err());
     }
 
     #[test]
@@ -279,5 +426,19 @@ mod tests {
         let header = sensitive_authorization(&session).unwrap();
         assert!(header.is_sensitive());
         assert_eq!(header.to_str().unwrap(), "HEADER.PAYLOAD.SIGNATURE");
+    }
+
+    #[test]
+    fn task_routes_are_exact_and_path_encode_fresh_identities() {
+        assert_eq!(
+            course_resource_detail_url("resource-42").unwrap().as_str(),
+            "https://uai.unipus.cn/api/cmgt/course/getCourseResourceInfoById/resource-42"
+        );
+        assert_eq!(
+            course_tree_url("course-v2:synthetic+rw/guard")
+                .unwrap()
+                .as_str(),
+            "https://ucontent.unipus.cn/course/api/course/course-v2:synthetic+rw%2Fguard/default"
+        );
     }
 }

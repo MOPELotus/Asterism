@@ -2,12 +2,15 @@ use std::{fmt, sync::Arc};
 
 use asterism_provider_api::{
     CourseInventoryCapability, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, RemoteCourse,
+    ProviderMetadata, ProviderResult, RemoteCourse, RemoteTask, TaskInventoryCapability,
 };
 use async_trait::async_trait;
 use zeroize::Zeroize;
 
-use crate::{metadata::development_metadata, parse_course_inventory};
+use crate::{
+    metadata::development_metadata, parse_course_context, parse_course_inventory,
+    parse_task_inventory,
+};
 
 const MAX_INVENTORY_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 
@@ -58,6 +61,31 @@ pub trait UaiCourseInventoryTransport: Send + Sync {
     ) -> ProviderResult<UaiInventoryDocument>;
 }
 
+/// Complete fresh resource-detail and nested tree response set for one Course.
+#[derive(Debug)]
+pub struct UaiTaskInventoryDocuments {
+    detail: UaiInventoryDocument,
+    tree: UaiInventoryDocument,
+}
+
+impl UaiTaskInventoryDocuments {
+    /// Binds the two completed responses into one all-or-nothing transport
+    /// result.
+    pub const fn new(detail: UaiInventoryDocument, tree: UaiInventoryDocument) -> Self {
+        Self { detail, tree }
+    }
+}
+
+/// Transport boundary for a fresh Course-resource detail and its nested tree.
+#[async_trait]
+pub trait UaiTaskInventoryTransport: Send + Sync {
+    async fn fetch_tasks(
+        &self,
+        context: &ProviderContext,
+        course: &RemoteCourse,
+    ) -> ProviderResult<UaiTaskInventoryDocuments>;
+}
+
 /// Development-level UAI `CourseInventory` capability.
 pub struct UaiCourseInventory {
     metadata: ProviderMetadata,
@@ -103,6 +131,63 @@ impl CourseInventoryCapability for UaiCourseInventory {
     }
 }
 
+/// Development-level UAI `TaskInventory` capability.
+pub struct UaiTaskInventory {
+    metadata: ProviderMetadata,
+    transport: Arc<dyn UaiTaskInventoryTransport>,
+}
+
+impl UaiTaskInventory {
+    /// Creates the capability around one authenticated all-or-nothing
+    /// transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if compile-time metadata is invalid.
+    pub fn try_new(transport: Arc<dyn UaiTaskInventoryTransport>) -> ProviderResult<Self> {
+        Ok(Self {
+            metadata: development_metadata()?,
+            transport,
+        })
+    }
+}
+
+impl fmt::Debug for UaiTaskInventory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiTaskInventory")
+            .field("metadata", &self.metadata)
+            .field("transport", &"configured")
+            .finish()
+    }
+}
+
+impl ProviderIdentity for UaiTaskInventory {
+    fn metadata(&self) -> &ProviderMetadata {
+        &self.metadata
+    }
+}
+
+#[async_trait]
+impl TaskInventoryCapability for UaiTaskInventory {
+    async fn list_tasks(
+        &self,
+        context: &ProviderContext,
+        course: Option<&RemoteCourse>,
+    ) -> ProviderResult<Vec<RemoteTask>> {
+        validate_context(context, &self.metadata)?;
+        let course = course.ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI Task inventory requires an explicit Course scope",
+            )
+        })?;
+        let documents = self.transport.fetch_tasks(context, course).await?;
+        let route = parse_course_context(course, documents.detail.as_str())?;
+        parse_task_inventory(course, &route, documents.tree.as_str())
+    }
+}
+
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
     if context.provider_id != metadata.id {
         return Err(ProviderError::new(
@@ -140,6 +225,24 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl UaiTaskInventoryTransport for FixtureTransport {
+        async fn fetch_tasks(
+            &self,
+            _context: &ProviderContext,
+            _course: &RemoteCourse,
+        ) -> ProviderResult<UaiTaskInventoryDocuments> {
+            Ok(UaiTaskInventoryDocuments::new(
+                UaiInventoryDocument::try_new(include_str!(
+                    "../../../fixtures/providers/uai/courses/resource-detail.json"
+                ))?,
+                UaiInventoryDocument::try_new(include_str!(
+                    "../../../fixtures/providers/uai/tasks/tree-mixed.json"
+                ))?,
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn capability_reads_one_complete_bound_inventory() {
         let capability = UaiCourseInventory::try_new(Arc::new(FixtureTransport)).unwrap();
@@ -164,6 +267,32 @@ mod tests {
         assert_eq!(
             capability.list_courses(&context).await.unwrap_err().kind,
             ProviderErrorKind::Authentication
+        );
+    }
+
+    #[tokio::test]
+    async fn task_capability_binds_fresh_detail_before_parsing_tree() {
+        let course = parse_course_inventory(COURSES).unwrap().remove(0);
+        let capability = UaiTaskInventory::try_new(Arc::new(FixtureTransport)).unwrap();
+        let tasks = capability
+            .list_tasks(&provider_context(), Some(&course))
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(
+            tasks
+                .iter()
+                .all(|task| task.remote_id.starts_with("group:"))
+        );
+        assert!(format!("{capability:?}").contains("configured"));
+
+        assert_eq!(
+            capability
+                .list_tasks(&provider_context(), None)
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
         );
     }
 

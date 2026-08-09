@@ -2555,3 +2555,22 @@ This checkpoint has offline capability and native-boundary coverage only. It
 does not register UAI in the daemon, renew Password sessions, fetch fresh
 resource detail/tree data, read progress or add execution, duration,
 BrowserBridge or Capture behavior.
+
+## One-hundred-and-fifty-ninth Phase 0 slice
+
+UAI now advertises and implements read-only `TaskInventory` as one complete
+fresh-detail/tree boundary. Every request requires an explicit normalized
+Course. The native transport derives only its stable CourseResource ID, reads
+the resource detail, and must bind the repeated ID before using the returned
+`courseInstanceId` for a tree request.
+
+The fresh instance is encoded as one URL path segment and retained only in the
+redacted operation context. Both authenticated JSON responses share the
+status/media-type/UTF-8/stream-size safeguards and are returned together or not
+at all. The capability revalidates the detail binding before decoding the
+outer `course` JSON and emitting stable Group Tasks with separate Unit, Section
+and Node/Micro ancestry.
+
+This remains offline/native-boundary evidence and UAI is not daemon-registered.
+No session renewal, progress read, duration, execution, BrowserBridge or
+Capture behavior is added by this checkpoint.
