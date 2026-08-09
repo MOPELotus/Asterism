@@ -14,7 +14,7 @@ Chapter card contains a Work-shaped assessment.
 | ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls plus signed interval-based Video progress, idempotence and fresh-card verification are offline-covered; Live and Chapter Work remain pending |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
-| TaskDetail | agent skill | CxKitty, OCS | Reference | Work final URL and Exam entry/detail pages carry task-specific state |
+| TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
 | TaskProgressRead | current Chapter cards | agent skill, CxKitty | Reference | Document/Read fresh-card state is offline-covered for recovery; Work/Exam normalized progress still needs fixtures |
 | QuestionInventory / QuestionParse | CxKitty | OCS, `chaoxing-exam` | Reference | Question IDs, types, options, hidden answers, and per-attempt QID changes |
 | SubmissionBuild / Execute | CxKitty | OCS, agent skill | Reference | Native/mobile form and Browser event paths differ; formal-assessment guard remains Core-owned |
@@ -92,3 +92,9 @@ policy and remains independently guarded.
   Playback rate and report interval come from the immutable Master-controlled
   Execution settings snapshot. Captcha responses become `HumanRequired`; no
   Capture or OCR path is part of this first implementation.
+- Task detail now parses the stable remote identity, rediscovers the exact
+  current course and runs one complete fresh Task inventory for that course.
+  Missing courses/tasks become `RemoteChanged`, duplicate identities fail as
+  protocol drift, and the returned normalized detail contains no route context.
+  Work therefore includes the existing followed detail-state check; Exam detail
+  remains conservative list evidence until dedicated current fixtures exist.

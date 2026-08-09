@@ -15,6 +15,7 @@ mod resource_execution;
 mod resource_inventory;
 mod runtime_settings;
 mod stored_session;
+mod task_detail;
 mod task_inventory;
 
 pub use authentication::{
@@ -34,6 +35,7 @@ pub use provider::{build_development_provider, build_development_provider_with_r
 pub use resource_execution::ChaoxingResourceExecution;
 pub use resource_inventory::parse_chapter_resource_inventory;
 pub use stored_session::StoredChaoxingSessionResolver;
+pub use task_detail::ChaoxingTaskDetail;
 pub use task_inventory::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
     ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingTaskInventory,

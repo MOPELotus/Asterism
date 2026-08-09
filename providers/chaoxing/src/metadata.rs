@@ -25,6 +25,7 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
+            ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
             ProviderCapability::ResourceExecution,
         ]),

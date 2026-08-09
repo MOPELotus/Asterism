@@ -910,6 +910,7 @@ mod tests {
                 ProviderCapability::Authentication,
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
+                ProviderCapability::TaskDetail,
                 ProviderCapability::TaskProgressRead,
                 ProviderCapability::ResourceExecution,
             ])

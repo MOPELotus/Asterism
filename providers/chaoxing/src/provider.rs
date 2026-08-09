@@ -6,9 +6,10 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingResourceExecution,
-    ChaoxingSessionResolver, ChaoxingTaskInventory, NativeChaoxingAuthenticationTransport,
-    NativeChaoxingInventoryTransport, StoredChaoxingSessionResolver,
-    metadata::development_metadata, runtime_settings::runtime_settings_schema,
+    ChaoxingSessionResolver, ChaoxingTaskDetail, ChaoxingTaskInventory,
+    NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
+    StoredChaoxingSessionResolver, metadata::development_metadata,
+    runtime_settings::runtime_settings_schema,
 };
 
 /// Composes the complete development-level Chaoxing Provider around one Core
@@ -67,6 +68,10 @@ fn compose_development_provider(
         inventory_transport.clone(),
     )?);
     let task_inventory = Arc::new(ChaoxingTaskInventory::try_new(inventory_transport.clone())?);
+    let task_detail = Arc::new(ChaoxingTaskDetail::try_new(
+        course_inventory.clone(),
+        task_inventory.clone(),
+    )?);
     let task_execution = Arc::new(ChaoxingResourceExecution::try_new(
         course_inventory.clone(),
         inventory_transport.clone(),
@@ -79,7 +84,7 @@ fn compose_development_provider(
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),
-        task_detail: None,
+        task_detail: Some(task_detail),
         task_progress: Some(task_execution.clone()),
         task_execution: Some(task_execution),
         browser_bridge: None,
@@ -172,6 +177,13 @@ mod tests {
                 .capabilities
                 .contains(&ProviderCapability::TaskProgressRead)
         );
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::TaskDetail)
+        );
+        assert!(entry.task_detail.is_some());
         assert_eq!(entry.runtime_settings.version, 4);
         assert_eq!(entry.runtime_settings.definitions.len(), 5);
         assert!(

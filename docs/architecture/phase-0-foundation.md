@@ -1648,3 +1648,19 @@ Provider metadata floor, then persists and audits the resulting Schedule through
 the existing unified Scheduler. An explicit interval continues to override that
 configuration operation. Chaoxing declares a 300-second to 24-hour range with
 an 1800-second schema default; ordinary users do not receive this field.
+
+## One-hundred-and-ninth Phase 0 slice
+
+Chaoxing now registers a `TaskDetail` capability which treats stored task data
+as a lookup key rather than current remote truth. The capability parses the
+stable module/course/class/task identity, rediscovers the authenticated account's
+course inventory, selects exactly one matching course through non-serialized
+route context, and reruns the complete bounded Task inventory for that course.
+
+The exact remote Task must still exist exactly once. A disappeared course or
+Task becomes `RemoteChanged`; malformed or duplicate identity becomes protocol
+drift. Returned normalized detail contains only sanitized task facts and no
+`cpi`, Work `enc`, final URL or credential material. Work receives the existing
+followed detail-state classification, while Exam remains conservative fresh
+list evidence until dedicated current detail fixtures are added. This is still
+offline evidence and does not raise Chaoxing above `Development`.

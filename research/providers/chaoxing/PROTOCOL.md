@@ -191,6 +191,15 @@ score and a per-task entry action. CxKitty provides an older mobile alternative 
 
 ## Detail, submission and verification
 
+The current `TaskDetail` checkpoint does not trust a previously stored Task
+snapshot. It parses the stable `module:course:class:task` identity, rediscovers
+the current account course list, selects exactly one matching course through
+ephemeral route context, and reruns the bounded all-or-nothing Task inventory
+for that course. The exact remote Task must still exist exactly once. Work tasks
+therefore include their followed final-route state; Exam tasks currently retain
+the freshly parsed list state until a dedicated entry/detail fixture contract is
+available.
+
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.
 - Browser visual selection is not proof of a saved answer. Hidden fields and the
