@@ -1409,3 +1409,24 @@ unbilled path until Pricing and Entitlement resolution is connected; Core does
 not invent a price or hard-code a role bypass. Commit on verified success and
 release on terminal failure/cancellation remain the next worker-transaction
 slice, while recovery and HumanRequired continue preserving active reserves.
+
+## Ninety-sixth Phase 0 slice
+
+The worker finish transaction now settles any bound active reservation after
+moving Execution and Task state, but before committing progress, Scheduler job,
+lease release, audit, logs and outbox events. Succeeded commits the reserve,
+removes it from the reserved balance and writes one immutable negative
+`TaskExecution` ledger transaction. Failed or Cancelled releases the reserve
+back to available credit without inventing a debit. Both paths emit the matching
+credit event with the Execution finish correlation ID.
+
+Settlement reuses the same full User/Quote/Execution/Task/amount validation as
+the standalone ledger boundary and also requires the newly persisted terminal
+Execution state. Missing, inactive or corrupted billing rows fail closed. If a
+balance invariant prevents settlement, every earlier finish mutation rolls
+back: the Attempt remains active, Execution and Task remain Running, the
+Scheduler claim and lease remain owned, and no terminal audit or event becomes
+visible. RetryWaiting, Recovering and HumanRequired are deliberately not
+settled because the remote outcome is not yet final. Recovery success reaches
+the same commit path through the shared finish transaction; uncertain recovery
+continues preserving the reserve for later reconciliation.

@@ -12,6 +12,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use sqlx::Row;
 
+use crate::credit::settle_execution_reservation;
 use crate::outbox::enqueue_in_transaction;
 use crate::{
     Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
@@ -739,6 +740,14 @@ async fn apply_attempt_finish(
         request,
         expected_execution_state,
         expected_task_state,
+    )
+    .await?;
+    settle_execution_reservation(
+        transaction,
+        request.execution_id,
+        request.final_state,
+        request.at,
+        request.correlation_id,
     )
     .await?;
     upsert_progress(transaction, request.progress).await?;
@@ -1950,6 +1959,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_finish_commits_reserved_credit_in_the_worker_transaction() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        insert_credit_account(&database, owner, 100, now).await;
+        let (execution, reservation) =
+            schedule_billed_execution(&repository, owner, task_id, now, 30, "settle-success").await;
+        let (job_id, attempt) = start_execution(&repository, &database, &execution, now).await;
+        let finished_at = now + chrono::Duration::seconds(2);
+        let progress = completed_progress(execution.id, finished_at);
+
+        let finished = repository
+            .finish_attempt(ExecutionAttemptFinishRequest {
+                execution_id: execution.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: job_id,
+                worker_id: "worker-a",
+                final_state: ExecutionState::Succeeded,
+                result: AttemptResult::Succeeded,
+                error_class: None,
+                provider_trace_id: None,
+                retry_at: None,
+                progress: &progress,
+                at: finished_at,
+                correlation_id: "settle-success",
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(finished.state, ExecutionState::Succeeded);
+        assert_eq!(credit_balance(&database, owner).await, (70, 0));
+        assert_eq!(
+            reservation_state(&database, reservation.id).await,
+            "committed"
+        );
+        let ledger: (i64, String, String) = sqlx::query_as(
+            "SELECT amount, transaction_type, execution_id FROM credit_transactions",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            ledger,
+            (-30, "task_execution".to_owned(), execution.id.to_string())
+        );
+        assert_eq!(
+            event_count(&database, "credit_committed").await,
+            1,
+            "credit settlement must share the durable outbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_finish_releases_reserved_credit_in_the_worker_transaction() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        insert_credit_account(&database, owner, 100, now).await;
+        let (execution, reservation) =
+            schedule_billed_execution(&repository, owner, task_id, now, 30, "settle-failed").await;
+        let (job_id, attempt) = start_execution(&repository, &database, &execution, now).await;
+        let finished_at = now + chrono::Duration::seconds(2);
+        let progress = failed_progress(execution.id, finished_at);
+
+        repository
+            .finish_attempt(ExecutionAttemptFinishRequest {
+                execution_id: execution.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: job_id,
+                worker_id: "worker-a",
+                final_state: ExecutionState::Failed,
+                result: AttemptResult::Failed,
+                error_class: Some(asterism_domain::ProviderErrorClass::InvalidRemoteState),
+                provider_trace_id: None,
+                retry_at: None,
+                progress: &progress,
+                at: finished_at,
+                correlation_id: "settle-failed",
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(credit_balance(&database, owner).await, (100, 0));
+        assert_eq!(
+            reservation_state(&database, reservation.id).await,
+            "released"
+        );
+        let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credit_transactions")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(ledger_count, 0);
+        assert_eq!(event_count(&database, "credit_released").await, 1);
+    }
+
+    #[tokio::test]
+    async fn settlement_invariant_failure_rolls_back_the_worker_finish() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        insert_credit_account(&database, owner, 100, now).await;
+        let (execution, reservation) =
+            schedule_billed_execution(&repository, owner, task_id, now, 30, "settle-rollback")
+                .await;
+        let (job_id, attempt) = start_execution(&repository, &database, &execution, now).await;
+        sqlx::query("UPDATE credit_accounts SET reserved = 0 WHERE user_id = ?")
+            .bind(owner.to_string())
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let finished_at = now + chrono::Duration::seconds(2);
+        let progress = completed_progress(execution.id, finished_at);
+
+        assert!(matches!(
+            repository
+                .finish_attempt(ExecutionAttemptFinishRequest {
+                    execution_id: execution.id,
+                    attempt_id: attempt.id,
+                    scheduler_job_id: job_id,
+                    worker_id: "worker-a",
+                    final_state: ExecutionState::Succeeded,
+                    result: AttemptResult::Succeeded,
+                    error_class: None,
+                    provider_trace_id: None,
+                    retry_at: None,
+                    progress: &progress,
+                    at: finished_at,
+                    correlation_id: "settle-rollback",
+                })
+                .await,
+            Err(StorageError::CreditInvariant)
+        ));
+        let execution_state: String =
+            sqlx::query_scalar("SELECT state FROM executions WHERE id = ?")
+                .bind(execution.id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(execution_state, "running");
+        let attempt_finished_at: Option<String> =
+            sqlx::query_scalar("SELECT finished_at FROM execution_attempts WHERE id = ?")
+                .bind(attempt.id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert!(attempt_finished_at.is_none());
+        assert_eq!(
+            reservation_state(&database, reservation.id).await,
+            "reserved"
+        );
+        let job_state: String = sqlx::query_scalar("SELECT state FROM scheduled_jobs WHERE id = ?")
+            .bind(job_id.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(job_state, "claimed");
+        assert_eq!(event_count(&database, "credit_committed").await, 0);
+    }
+
+    #[tokio::test]
     async fn idempotency_key_cannot_be_reused_for_another_task() {
         let (database, owner, task_id) = fixture().await;
         let other_task = insert_task(&database, ProviderAccountId::new(), owner).await;
@@ -2243,11 +2412,9 @@ mod tests {
         let (database, owner, task_id) = fixture().await;
         let repository = SqliteExecutionRepository::new(database.clone());
         let now = Utc::now();
-        let execution = scheduled_execution(owner, task_id, now);
-        repository
-            .schedule_execution(test_request(&execution, owner, "retry-flow"))
-            .await
-            .unwrap();
+        insert_credit_account(&database, owner, 100, now).await;
+        let (execution, reservation) =
+            schedule_billed_execution(&repository, owner, task_id, now, 30, "retry-flow").await;
         let job_id = claim_execution(&database, &execution, "worker-a", now).await;
         let attempt = repository
             .start_attempt(ExecutionAttemptStartRequest {
@@ -2305,6 +2472,13 @@ mod tests {
             (&"retry".to_owned(), &"pending".to_owned())
         );
         assert!(jobs[1].2.contains("\"next_attempt_no\":2"));
+        assert_eq!(credit_balance(&database, owner).await, (70, 30));
+        assert_eq!(
+            reservation_state(&database, reservation.id).await,
+            "reserved"
+        );
+        assert_eq!(event_count(&database, "credit_committed").await, 0);
+        assert_eq!(event_count(&database, "credit_released").await, 0);
     }
 
     fn test_request<'a>(
@@ -2354,6 +2528,117 @@ mod tests {
             finished_at: None,
             created_at: now,
         }
+    }
+
+    async fn schedule_billed_execution(
+        repository: &SqliteExecutionRepository,
+        owner: UserId,
+        task_id: TaskId,
+        now: Timestamp,
+        amount: u64,
+        idempotency_key: &str,
+    ) -> (Execution, CreditReservation) {
+        let mut execution = scheduled_execution(owner, task_id, now);
+        let quote = PriceQuote {
+            id: PriceQuoteId::new(),
+            task_id,
+            amount: CreditAmount::new(amount),
+            pricing_revision: "catalog-2026-08".to_owned(),
+            reason: "resource execution".to_owned(),
+            created_at: now,
+        };
+        execution.quote_id = Some(quote.id);
+        let reservation = CreditReservation {
+            id: CreditReservationId::new(),
+            user_id: owner,
+            quote_id: quote.id,
+            execution_id: execution.id,
+            amount: quote.amount,
+            state: CreditReservationState::Reserved,
+            created_at: now,
+            updated_at: now,
+        };
+        repository
+            .schedule_execution(billed_request(
+                &execution,
+                &quote,
+                &reservation,
+                owner,
+                idempotency_key,
+            ))
+            .await
+            .unwrap();
+        (execution, reservation)
+    }
+
+    async fn start_execution(
+        repository: &SqliteExecutionRepository,
+        database: &Database,
+        execution: &Execution,
+        now: Timestamp,
+    ) -> (ScheduleId, ExecutionAttempt) {
+        let job_id = claim_execution(database, execution, "worker-a", now).await;
+        let attempt = repository
+            .start_attempt(ExecutionAttemptStartRequest {
+                execution_id: execution.id,
+                scheduler_job_id: job_id,
+                worker_id: "worker-a",
+                at: now + chrono::Duration::seconds(1),
+                correlation_id: "settlement-start",
+            })
+            .await
+            .unwrap();
+        (job_id, attempt)
+    }
+
+    fn completed_progress(execution_id: ExecutionId, at: Timestamp) -> ExecutionProgress {
+        ExecutionProgress {
+            execution_id,
+            percent: Some(100),
+            stage: ExecutionStage::Completed,
+            status_text: Some("execution completed".to_owned()),
+            current_item: None,
+            completed_items: None,
+            total_items: None,
+            updated_at: at,
+        }
+    }
+
+    fn failed_progress(execution_id: ExecutionId, at: Timestamp) -> ExecutionProgress {
+        ExecutionProgress {
+            execution_id,
+            percent: None,
+            stage: ExecutionStage::Verifying,
+            status_text: Some("execution failed".to_owned()),
+            current_item: None,
+            completed_items: None,
+            total_items: None,
+            updated_at: at,
+        }
+    }
+
+    async fn credit_balance(database: &Database, owner: UserId) -> (i64, i64) {
+        sqlx::query_as("SELECT available, reserved FROM credit_accounts WHERE user_id = ?")
+            .bind(owner.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap()
+    }
+
+    async fn reservation_state(database: &Database, reservation_id: CreditReservationId) -> String {
+        sqlx::query_scalar("SELECT state FROM credit_reservations WHERE id = ?")
+            .bind(reservation_id.to_string())
+            .fetch_one(database.pool())
+            .await
+            .unwrap()
+    }
+
+    async fn event_count(database: &Database, event_type: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM event_outbox WHERE event_type = ?")
+            .bind(event_type)
+            .fetch_one(database.pool())
+            .await
+            .unwrap()
     }
 
     async fn fixture() -> (Database, UserId, TaskId) {

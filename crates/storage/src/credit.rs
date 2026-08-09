@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use asterism_domain::{
     CreditAccount, CreditAmount, CreditReservation, CreditReservationId, CreditReservationState,
-    CreditTransactionId, ExecutionId, TaskId, Timestamp, UserId,
+    CreditTransactionId, ExecutionId, ExecutionState, TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use async_trait::async_trait;
@@ -159,59 +159,15 @@ impl CreditRepository for SqliteCreditRepository {
         if reservation.execution_state != "succeeded" {
             return Err(StorageError::CreditInvariant);
         }
-        let timestamp = encode_timestamp(at);
-        let changed = sqlx::query(
-            "UPDATE credit_reservations SET state = 'committed', updated_at = ? \
-             WHERE id = ? AND state = 'reserved'",
-        )
-        .bind(&timestamp)
-        .bind(reservation_id.to_string())
-        .execute(&mut *transaction)
-        .await?;
-        if changed.rows_affected() != 1 {
-            return Err(StorageError::ReservationNotActive);
-        }
-        let balance_update = sqlx::query(
-            "UPDATE credit_accounts SET reserved = reserved - ?, updated_at = ? \
-             WHERE user_id = ? AND reserved >= ?",
-        )
-        .bind(reservation.amount)
-        .bind(&timestamp)
-        .bind(reservation.user_id.to_string())
-        .bind(reservation.amount)
-        .execute(&mut *transaction)
-        .await?;
-        if balance_update.rows_affected() != 1 {
-            return Err(StorageError::CreditInvariant);
-        }
-        sqlx::query(
-            "INSERT INTO credit_transactions \
-             (id, user_id, amount, transaction_type, task_id, execution_id, reason, created_at) \
-             VALUES (?, ?, ?, 'task_execution', ?, ?, 'execution succeeded', ?)",
-        )
-        .bind(transaction_id.to_string())
-        .bind(reservation.user_id.to_string())
-        .bind(-reservation.amount)
-        .bind(reservation.task_id.to_string())
-        .bind(reservation.execution_id.to_string())
-        .bind(&timestamp)
-        .execute(&mut *transaction)
-        .await?;
-        let amount = CreditAmount::new(decode_amount(reservation.amount)?);
-        enqueue_in_transaction(
+        let account = commit_active_reservation(
             &mut transaction,
-            &EventEnvelope::at(
-                format!("credit-commit:{reservation_id}"),
-                DomainEvent::CreditCommitted {
-                    user_id: reservation.user_id,
-                    execution_id: reservation.execution_id,
-                    amount,
-                },
-                at,
-            ),
+            reservation_id,
+            &reservation,
+            transaction_id,
+            at,
+            &format!("credit-commit:{reservation_id}"),
         )
         .await?;
-        let account = fetch_account(&mut transaction, reservation.user_id).await?;
         transaction.commit().await?;
         Ok(account)
     }
@@ -226,51 +182,207 @@ impl CreditRepository for SqliteCreditRepository {
         if reservation.execution_state == "succeeded" {
             return Err(StorageError::CreditInvariant);
         }
-        let timestamp = encode_timestamp(at);
-        let changed = sqlx::query(
-            "UPDATE credit_reservations SET state = 'released', updated_at = ? \
-             WHERE id = ? AND state = 'reserved'",
-        )
-        .bind(&timestamp)
-        .bind(reservation_id.to_string())
-        .execute(&mut *transaction)
-        .await?;
-        if changed.rows_affected() != 1 {
-            return Err(StorageError::ReservationNotActive);
-        }
-        let balance_update = sqlx::query(
-            "UPDATE credit_accounts SET \
-                 reserved = reserved - ?, available = available + ?, updated_at = ? \
-             WHERE user_id = ? AND reserved >= ?",
-        )
-        .bind(reservation.amount)
-        .bind(reservation.amount)
-        .bind(&timestamp)
-        .bind(reservation.user_id.to_string())
-        .bind(reservation.amount)
-        .execute(&mut *transaction)
-        .await?;
-        if balance_update.rows_affected() != 1 {
-            return Err(StorageError::CreditInvariant);
-        }
-        let amount = CreditAmount::new(decode_amount(reservation.amount)?);
-        enqueue_in_transaction(
+        let account = release_active_reservation(
             &mut transaction,
-            &EventEnvelope::at(
-                format!("credit-release:{reservation_id}"),
-                DomainEvent::CreditReleased {
-                    user_id: reservation.user_id,
-                    execution_id: reservation.execution_id,
-                    amount,
-                },
-                at,
-            ),
+            reservation_id,
+            &reservation,
+            at,
+            &format!("credit-release:{reservation_id}"),
         )
         .await?;
-        let account = fetch_account(&mut transaction, reservation.user_id).await?;
         transaction.commit().await?;
         Ok(account)
     }
+}
+
+pub(crate) async fn settle_execution_reservation(
+    transaction: &mut Transaction<'_, Sqlite>,
+    execution_id: ExecutionId,
+    final_state: ExecutionState,
+    at: Timestamp,
+    correlation_id: &str,
+) -> Result<(), StorageError> {
+    if !final_state.is_terminal() {
+        return Ok(());
+    }
+    let execution_quote_id = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT quote_id FROM executions WHERE id = ? AND state = ?",
+    )
+    .bind(execution_id.to_string())
+    .bind(match final_state {
+        ExecutionState::Succeeded => "succeeded",
+        ExecutionState::Failed => "failed",
+        ExecutionState::Cancelled => "cancelled",
+        _ => unreachable!("non-terminal states returned above"),
+    })
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StorageError::ExecutionStateConflict)?;
+    let reservation_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM credit_reservations WHERE execution_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let reservation_id = match (execution_quote_id, reservation_id) {
+        (None, None) => return Ok(()),
+        (Some(_), Some(id)) => CreditReservationId::from_str(&id)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        _ => return Err(StorageError::CreditInvariant),
+    };
+    let reservation = active_reservation(transaction, reservation_id)
+        .await
+        .map_err(|error| match error {
+            StorageError::ReservationNotActive => StorageError::CreditInvariant,
+            other => other,
+        })?;
+    if reservation.execution_id != execution_id {
+        return Err(StorageError::CreditInvariant);
+    }
+    match final_state {
+        ExecutionState::Succeeded => {
+            commit_active_reservation(
+                transaction,
+                reservation_id,
+                &reservation,
+                CreditTransactionId::new(),
+                at,
+                correlation_id,
+            )
+            .await?;
+        }
+        ExecutionState::Failed | ExecutionState::Cancelled => {
+            release_active_reservation(
+                transaction,
+                reservation_id,
+                &reservation,
+                at,
+                correlation_id,
+            )
+            .await?;
+        }
+        _ => unreachable!("non-terminal states returned above"),
+    }
+    Ok(())
+}
+
+async fn commit_active_reservation(
+    transaction: &mut Transaction<'_, Sqlite>,
+    reservation_id: CreditReservationId,
+    reservation: &ActiveReservation,
+    transaction_id: CreditTransactionId,
+    at: Timestamp,
+    correlation_id: &str,
+) -> Result<CreditAccount, StorageError> {
+    if reservation.execution_state != "succeeded" {
+        return Err(StorageError::CreditInvariant);
+    }
+    let timestamp = encode_timestamp(at);
+    let changed = sqlx::query(
+        "UPDATE credit_reservations SET state = 'committed', updated_at = ? \
+         WHERE id = ? AND state = 'reserved'",
+    )
+    .bind(&timestamp)
+    .bind(reservation_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    if changed.rows_affected() != 1 {
+        return Err(StorageError::ReservationNotActive);
+    }
+    let balance_update = sqlx::query(
+        "UPDATE credit_accounts SET reserved = reserved - ?, updated_at = ? \
+         WHERE user_id = ? AND reserved >= ?",
+    )
+    .bind(reservation.amount)
+    .bind(&timestamp)
+    .bind(reservation.user_id.to_string())
+    .bind(reservation.amount)
+    .execute(&mut **transaction)
+    .await?;
+    if balance_update.rows_affected() != 1 {
+        return Err(StorageError::CreditInvariant);
+    }
+    sqlx::query(
+        "INSERT INTO credit_transactions \
+         (id, user_id, amount, transaction_type, task_id, execution_id, reason, created_at) \
+         VALUES (?, ?, ?, 'task_execution', ?, ?, 'execution succeeded', ?)",
+    )
+    .bind(transaction_id.to_string())
+    .bind(reservation.user_id.to_string())
+    .bind(-reservation.amount)
+    .bind(reservation.task_id.to_string())
+    .bind(reservation.execution_id.to_string())
+    .bind(&timestamp)
+    .execute(&mut **transaction)
+    .await?;
+    let amount = CreditAmount::new(decode_amount(reservation.amount)?);
+    enqueue_in_transaction(
+        transaction,
+        &EventEnvelope::at(
+            correlation_id,
+            DomainEvent::CreditCommitted {
+                user_id: reservation.user_id,
+                execution_id: reservation.execution_id,
+                amount,
+            },
+            at,
+        ),
+    )
+    .await?;
+    fetch_account(transaction, reservation.user_id).await
+}
+
+async fn release_active_reservation(
+    transaction: &mut Transaction<'_, Sqlite>,
+    reservation_id: CreditReservationId,
+    reservation: &ActiveReservation,
+    at: Timestamp,
+    correlation_id: &str,
+) -> Result<CreditAccount, StorageError> {
+    if reservation.execution_state == "succeeded" {
+        return Err(StorageError::CreditInvariant);
+    }
+    let timestamp = encode_timestamp(at);
+    let changed = sqlx::query(
+        "UPDATE credit_reservations SET state = 'released', updated_at = ? \
+         WHERE id = ? AND state = 'reserved'",
+    )
+    .bind(&timestamp)
+    .bind(reservation_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    if changed.rows_affected() != 1 {
+        return Err(StorageError::ReservationNotActive);
+    }
+    let balance_update = sqlx::query(
+        "UPDATE credit_accounts SET reserved = reserved - ?, available = available + ?, \
+             updated_at = ? WHERE user_id = ? AND reserved >= ?",
+    )
+    .bind(reservation.amount)
+    .bind(reservation.amount)
+    .bind(&timestamp)
+    .bind(reservation.user_id.to_string())
+    .bind(reservation.amount)
+    .execute(&mut **transaction)
+    .await?;
+    if balance_update.rows_affected() != 1 {
+        return Err(StorageError::CreditInvariant);
+    }
+    let amount = CreditAmount::new(decode_amount(reservation.amount)?);
+    enqueue_in_transaction(
+        transaction,
+        &EventEnvelope::at(
+            correlation_id,
+            DomainEvent::CreditReleased {
+                user_id: reservation.user_id,
+                execution_id: reservation.execution_id,
+                amount,
+            },
+            at,
+        ),
+    )
+    .await?;
+    fetch_account(transaction, reservation.user_id).await
 }
 
 struct ActiveReservation {
