@@ -57,6 +57,13 @@ instance route. The detail response must repeat `courseResourceId` and supplies
 a fresh `courseInstanceId`; that route is held only in a redacted operation
 context.
 
+The native CourseInventory resolves one account-bound composite session and
+reads the fixed Course-list route with the raw JWT in a sensitive Authorization
+header. It applies status, JSON Content-Type, UTF-8 and 4 MiB response bounds
+before the complete parser runs; no partial inventory or route-only class and
+instance fields are returned. Session renewal and the detail/tree reads remain
+separate follow-up boundaries.
+
 The content response stores the actual Course tree as JSON text in outer field
 `course`. The nested root contains `units`; audited roles include `unit`,
 `section`, `node`, `link` and `group`. Group IDs are the stable task leaves used

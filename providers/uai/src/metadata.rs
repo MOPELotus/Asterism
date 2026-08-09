@@ -8,7 +8,7 @@ use asterism_provider_api::{
 
 pub(crate) const PROVIDER_ID: &str = "uai";
 
-/// Returns metadata for the Authentication-only Development checkpoint.
+/// Returns metadata for the current read-only Development checkpoint.
 ///
 /// # Errors
 ///
@@ -26,7 +26,10 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
         capture_recipe_version: None,
-        capabilities: BTreeSet::from([ProviderCapability::Authentication]),
+        capabilities: BTreeSet::from([
+            ProviderCapability::Authentication,
+            ProviderCapability::CourseInventory,
+        ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken]),
         session_kinds: BTreeSet::from([SessionKind::Jwt, SessionKind::Composite]),
     })
@@ -37,13 +40,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metadata_advertises_only_authentication() {
+    fn metadata_advertises_authentication_and_course_inventory() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
         assert_eq!(
             metadata.capabilities,
-            BTreeSet::from([ProviderCapability::Authentication])
+            BTreeSet::from([
+                ProviderCapability::Authentication,
+                ProviderCapability::CourseInventory,
+            ])
         );
         assert_eq!(
             metadata.auth_methods,

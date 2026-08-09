@@ -2535,3 +2535,23 @@ This makes Password exchange and stored/imported JWT validation concrete at the
 native HTTP boundary, but does not register UAI in the daemon or claim live
 compatibility. Password renewal, native Course/Task/progress reads, duration,
 execution, BrowserBridge and Capture remain separate slices.
+
+## One-hundred-and-fifty-eighth Phase 0 slice
+
+UAI now advertises and implements read-only `CourseInventory`. The capability
+rejects mismatched Provider or credential-free contexts before transport use,
+then accepts exactly one complete redacted response document and runs the
+existing bounded Course → CourseResource parser. Each resource remains a
+stable Course identity with point counts kept independent from completion.
+
+The native transport resolves only the operation account's atomic openid/JWT
+session, sends the raw JWT as a sensitive Authorization value to the fixed
+Course-list route, and uses the shared non-redirecting HTTPS policy. HTTP
+status, JSON media type, Content-Length, streamed 4 MiB limit and UTF-8 are
+validated before parsing; raw bodies are zeroized and cannot produce partial
+inventory.
+
+This checkpoint has offline capability and native-boundary coverage only. It
+does not register UAI in the daemon, renew Password sessions, fetch fresh
+resource detail/tree data, read progress or add execution, duration,
+BrowserBridge or Capture behavior.
