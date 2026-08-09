@@ -80,7 +80,7 @@ impl fmt::Debug for WellearnCookieSession {
 }
 
 /// Provider-internal boundary for password exchange and authenticated session
-/// validation. A native HTTP implementation is a later checkpoint.
+/// validation. Native HTTP and test transports implement the same contract.
 #[async_trait]
 pub trait WellearnAuthenticationTransport: Send + Sync {
     async fn exchange_password(
@@ -307,7 +307,7 @@ fn valid_session(kind: SessionKind) -> SessionStatus {
     }
 }
 
-fn valid_cookie_name(value: &str) -> bool {
+pub(crate) fn valid_cookie_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_COOKIE_NAME_BYTES
         && value.bytes().all(|byte| {

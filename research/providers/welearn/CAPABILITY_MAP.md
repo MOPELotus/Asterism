@@ -2,8 +2,8 @@
 
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
-| Authentication | Fanyuchang 2026 | Reference | Injected Password/ImportedCookie capability, deterministic form encoding and typed outcome classification are offline-covered; native OIDC HTTP remains pending |
-| Stored session validation | Fanyuchang 2026 | Reference | Validate with an authenticated read; never infer validity from Cookie presence |
+| Authentication | Fanyuchang 2026 | Reference | Native Password/OIDC manual redirects, scoped Cookie collection and typed captcha/SMS outcomes are offline/native-boundary covered; live pending |
+| Stored session validation | Fanyuchang 2026 | Reference | Native Course-list validation exists; persistence resolver and live validation remain pending, and Cookie presence alone is never accepted |
 | CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Native authenticated `authCourse.aspx?action=gmc` read is implemented behind shared NetworkProfile; live pending |
 | TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Native Course page → `courseunits` → one `scoLeaves` response per Unit is implemented all-or-nothing; live pending |
 | TaskProgressRead | YZBRH | Reference | Fresh CMI and SCO facts; completion and progress are distinct |
@@ -29,6 +29,6 @@ implements Password/ImportedCookie orchestration behind injected transport and
 stored-session resolver contracts. Metadata remains `Development` and advertises
 Authentication, CourseInventory and TaskInventory. A registry-consistent
 development entry can be composed from injected boundaries. A shared-policy,
-non-redirecting native Course/Task HTTP transport now exists, but password SSO,
-stored credential resolution, daemon registration and all live validation remain
-pending.
+non-redirecting native Password/OIDC and Course/Task HTTP transports now exist.
+Stored credential resolution, renewal, daemon registration and all live
+validation remain pending.

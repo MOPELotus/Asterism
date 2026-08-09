@@ -7,6 +7,7 @@ use crate::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCourseInventory,
     WellearnCourseInventoryTransport, WellearnSessionResolver, WellearnTaskInventory,
     WellearnTaskInventoryTransport, metadata::development_metadata,
+    native_authentication::NativeWellearnAuthenticationTransport,
     native_http::NativeWellearnInventoryTransport,
 };
 
@@ -70,6 +71,22 @@ pub fn build_development_provider_with_native_inventory(
         inventory.clone(),
         inventory,
     )
+}
+
+/// Composes the Development entry with native Password/OIDC, Cookie validation
+/// and Course/Task HTTP around one injected stored-session resolver. Calling
+/// this function does not register the Provider or raise its verification level.
+///
+/// # Errors
+///
+/// Returns a sanitized Provider error if metadata or either shared HTTP client
+/// cannot be initialized.
+pub fn build_development_provider_native(
+    network: &ResolvedNetworkProfile,
+    sessions: Arc<dyn WellearnSessionResolver>,
+) -> ProviderResult<ProviderEntry> {
+    let authentication = Arc::new(NativeWellearnAuthenticationTransport::try_new(network)?);
+    build_development_provider_with_native_inventory(network, authentication, sessions)
 }
 
 #[cfg(test)]
@@ -168,6 +185,11 @@ mod tests {
             boundaries,
         )
         .unwrap();
+        let mut registry = ProviderRegistry::default();
+        registry.register(native).unwrap();
+
+        let native =
+            build_development_provider_native(&network, Arc::new(UnusedBoundaries)).unwrap();
         let mut registry = ProviderRegistry::default();
         registry.register(native).unwrap();
     }

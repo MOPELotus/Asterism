@@ -9,6 +9,7 @@ mod course_context;
 mod course_inventory;
 mod inventory_capabilities;
 mod metadata;
+mod native_authentication;
 mod native_http;
 mod provider;
 mod task_inventory;
@@ -25,6 +26,10 @@ pub use inventory_capabilities::{
     WellearnTaskInventory, WellearnTaskInventoryDocuments, WellearnTaskInventoryTransport,
 };
 pub use metadata::development_metadata;
+pub use native_authentication::NativeWellearnAuthenticationTransport;
 pub use native_http::NativeWellearnInventoryTransport;
-pub use provider::{build_development_provider, build_development_provider_with_native_inventory};
+pub use provider::{
+    build_development_provider, build_development_provider_native,
+    build_development_provider_with_native_inventory,
+};
 pub use task_inventory::{WellearnScoLeavesDocument, parse_task_inventory};

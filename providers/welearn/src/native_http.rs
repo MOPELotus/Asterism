@@ -52,18 +52,6 @@ impl NativeWellearnInventoryTransport {
         Ok(Self { client, sessions })
     }
 
-    async fn send_inventory_get(
-        &self,
-        context: &ProviderContext,
-        url: Url,
-        referer: &str,
-        expected_content: ResponseContent,
-    ) -> ProviderResult<WellearnInventoryDocument> {
-        let session = self.sessions.resolve_session(context).await?;
-        self.send_get_with_session(&session, url, referer, expected_content)
-            .await
-    }
-
     async fn send_get_with_session(
         &self,
         session: &crate::WellearnCookieSession,
@@ -99,14 +87,23 @@ impl WellearnCourseInventoryTransport for NativeWellearnInventoryTransport {
         &self,
         context: &ProviderContext,
     ) -> ProviderResult<WellearnInventoryDocument> {
-        self.send_inventory_get(
-            context,
-            static_url(COURSE_LIST_URL)?,
-            COURSE_INDEX_REFERER,
-            ResponseContent::Json,
-        )
-        .await
+        let session = self.sessions.resolve_session(context).await?;
+        fetch_course_inventory_document(&self.client, &session).await
     }
+}
+
+pub(crate) async fn fetch_course_inventory_document(
+    client: &Client,
+    session: &crate::WellearnCookieSession,
+) -> ProviderResult<WellearnInventoryDocument> {
+    let response = client
+        .get(static_url(COURSE_LIST_URL)?)
+        .header(COOKIE, session.expose_secret())
+        .header(REFERER, COURSE_INDEX_REFERER)
+        .send()
+        .await
+        .map_err(|error| classify_reqwest_error(&error))?;
+    read_inventory_response(response, ResponseContent::Json).await
 }
 
 #[async_trait]
@@ -360,7 +357,7 @@ fn looks_like_login_document(document: &str) -> bool {
         && lowercase.contains("pwd")
 }
 
-fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
+pub(crate) fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
     let kind = if error.is_timeout() || error.is_connect() || error.is_body() {
         ProviderErrorKind::Network
     } else {

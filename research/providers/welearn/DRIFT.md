@@ -3,6 +3,8 @@
 | Risk | Static evidence | Required response |
 |---|---|---|
 | OIDC authorize/return shape changes | 2025 and 2026 donors construct/extract `rturl` differently | Parse redirects structurally, allowlist hosts and fixture each observed variant |
+| OIDC introduces another trusted host or redirect count grows | The audited flow currently stays on two hosts and completes within a short chain | Fail closed at the host/redirect bound; expand only from sanitized current evidence |
+| SSO Cookie domain/path layout changes | Current native boundary accepts only three audited domains and applies path scoping | Treat rejected scope or missing authenticated Course read as protocol drift, never relax from an error body alone |
 | Course path alternates between `/student` and `/2019/student` | Donors mix both paths | Treat one as current only after live comparison; do not scatter hard-coded paths |
 | `courseunits` accepts GET and POST in different donors | Both forms appear in audited revisions | Select one after live validation and retain the other only as a classified fallback |
 | Completion labels are localized or schema-dependent | `scoLeaves` donors inspect text fields directly | Keep raw sanitized label and map unknown values to `Unknown` |

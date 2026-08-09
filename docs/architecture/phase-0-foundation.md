@@ -2339,3 +2339,26 @@ The native inventory transport can compose a registry-consistent Development
 entry with an injected authentication exchange. Password SSO/OIDC HTTP, stored
 credential resolution, renewal and daemon registration are still absent, and
 no real WELearn account was contacted by this checkpoint.
+
+## One-hundred-and-forty-ninth Phase 0 slice
+
+WELearn Password authentication now has a native transport around the shared
+non-redirecting NetworkProfile client. The prelogin and OIDC flows are followed
+manually for at most twelve hops, and every requested or returned URL must stay
+on HTTPS at exactly `welearn.sflep.com` or `sso.sflep.com`. The decoded
+`returnUrl` is unique, bounded and restricted to the expected authorize callback
+shape; the login callback retains the existing stricter SSO route check.
+
+The transport collects Set-Cookie fields in a bounded redacted jar. Cookie
+domains are limited to the audited SFLEP scopes, domain and path rules are
+applied for every hop, replacements zero the prior value, and empty or
+`Max-Age=0` deletions remove retained values. Response bodies, redirect state and Cookie
+values are excluded from diagnostics; owned login buffers and retained secret
+values are zeroized.
+
+A completed exchange returns a bounded Cookie candidate, but Authentication
+accepts it only after a native Course-list read parses successfully. A fully
+native Development entry can now be composed around an injected stored-session
+resolver. Persistent credential resolution, renewal, daemon registration and
+live-account validation remain later gates, so this checkpoint does not raise
+the Provider verification level.
