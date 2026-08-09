@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::{
     client::{ApiClient, CreateServiceTokenRequest, write_json},
-    input::{PasswordMode, read_credential_value, read_password, service_token_from_process},
+    input::{PasswordMode, read_credential_values, read_password, service_token_from_process},
 };
 
 const DEFAULT_TOKEN_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
@@ -131,7 +131,7 @@ enum ProviderAccountCommand {
 
 #[derive(Debug, Subcommand)]
 enum CredentialCommand {
-    /// Read one credential value from stdin and complete an authentication session.
+    /// Read credential values from hidden prompts or stdin and complete an authentication session.
     Import(CredentialImportCommand),
 }
 
@@ -162,8 +162,9 @@ struct CredentialImportCommand {
     /// Authentication session returned by `provider-account auth start`.
     #[arg(long)]
     session: String,
-    #[arg(long, value_enum)]
-    purpose: CliCredentialPurpose,
+    /// Credential field to submit; repeat in the same order as the prompted or piped values.
+    #[arg(long = "purpose", value_enum, required = true)]
+    purposes: Vec<CliCredentialPurpose>,
     #[arg(long, value_enum)]
     auth_method: CliAuthMethod,
     #[arg(long, value_enum)]
@@ -272,8 +273,10 @@ enum CliScope {
     ServiceTokenManage,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, ValueEnum)]
 enum CliCredentialPurpose {
+    #[value(name = "provider-username")]
+    Username,
     #[value(name = "provider-password")]
     Password,
     #[value(name = "provider-cookie")]
@@ -289,11 +292,25 @@ enum CliCredentialPurpose {
 impl From<CliCredentialPurpose> for SecretPurpose {
     fn from(purpose: CliCredentialPurpose) -> Self {
         match purpose {
+            CliCredentialPurpose::Username => Self::ProviderUsername,
             CliCredentialPurpose::Password => Self::ProviderPassword,
             CliCredentialPurpose::Cookie => Self::ProviderCookie,
             CliCredentialPurpose::AccessToken => Self::ProviderAccessToken,
             CliCredentialPurpose::RefreshToken => Self::ProviderRefreshToken,
             CliCredentialPurpose::CompositeSession => Self::ProviderCompositeSession,
+        }
+    }
+}
+
+impl CliCredentialPurpose {
+    const fn prompt(self) -> &'static str {
+        match self {
+            Self::Username => "Provider username",
+            Self::Password => "Provider password",
+            Self::Cookie => "Provider cookie",
+            Self::AccessToken => "Provider access token",
+            Self::RefreshToken => "Provider refresh token",
+            Self::CompositeSession => "Provider composite session",
         }
     }
 }
@@ -579,7 +596,14 @@ async fn handle_credential_import(
     token: &asterism_secrets::SecretString,
     command: CredentialImportCommand,
 ) -> anyhow::Result<()> {
-    let value = read_credential_value()?;
+    ensure_unique_credential_purposes(&command.purposes)?;
+    let prompts = command
+        .purposes
+        .iter()
+        .copied()
+        .map(CliCredentialPurpose::prompt)
+        .collect::<Vec<_>>();
+    let values = read_credential_values(&prompts)?;
     let path = format!(
         "/api/v1/provider-accounts/{}/auth-sessions/{}/credentials",
         command.account_id, command.session
@@ -590,15 +614,34 @@ async fn handle_credential_import(
             acquired_via: command.acquired_via.into(),
             session_kind: command.session_kind.into(),
             expires_at: command.expires_at,
-            fields: vec![PutProviderCredentialField {
-                purpose: command.purpose.into(),
-                value: value.expose_secret(),
-            }],
+            fields: command
+                .purposes
+                .iter()
+                .copied()
+                .zip(&values)
+                .map(|(purpose, value)| PutProviderCredentialField {
+                    purpose: purpose.into(),
+                    value: value.expose_secret(),
+                })
+                .collect(),
         };
         client.put_authorized(&path, token, &request).await
     };
-    drop(value);
+    drop(values);
     write_json(&response?)
+}
+
+fn ensure_unique_credential_purposes(purposes: &[CliCredentialPurpose]) -> anyhow::Result<()> {
+    let mut unique = BTreeSet::new();
+    for purpose in purposes {
+        if !unique.insert(*purpose) {
+            anyhow::bail!(
+                "credential purpose {} was supplied more than once",
+                purpose.prompt()
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -819,6 +862,54 @@ mod tests {
                 "cookie",
                 "--value",
                 "must-not-be-accepted",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn credential_import_accepts_an_ordered_multi_field_bundle() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "provider-account",
+            "credential",
+            "import",
+            "account-id",
+            "--session",
+            "session-id",
+            "--purpose",
+            "provider-username",
+            "--purpose",
+            "provider-password",
+            "--auth-method",
+            "password",
+            "--session-kind",
+            "provider-specific",
+            "--acquired-via",
+            "native-provider-login",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            arguments.command,
+            Command::ProviderAccount {
+                command: ProviderAccountCommand::Credential {
+                    command: CredentialCommand::Import(CredentialImportCommand {
+                        purposes,
+                        acquired_via: CliCredentialAcquisition::NativeProviderLogin,
+                        ..
+                    })
+                }
+            } if purposes == [CliCredentialPurpose::Username, CliCredentialPurpose::Password]
+        ));
+    }
+
+    #[test]
+    fn credential_import_rejects_duplicate_purposes_before_input() {
+        assert!(
+            ensure_unique_credential_purposes(&[
+                CliCredentialPurpose::Cookie,
+                CliCredentialPurpose::Cookie,
             ])
             .is_err()
         );

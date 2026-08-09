@@ -998,3 +998,17 @@ shared built-in network policy, logs an unverified-development warning, and
 continues to expose `Development` metadata rather than a support claim. TOML,
 environment and CLI settings follow the normal precedence model, contain no
 credentials, and do not enable Capture.
+
+## Seventy-fourth Phase 0 slice
+
+`asterismctl provider-account credential import` now accepts an ordered,
+repeatable set of credential purposes so a native login can submit one complete
+candidate bundle. Chaoxing's Password flow can therefore collect Provider
+username and password through separate hidden prompts, while ImportedCookie and
+other single-field flows remain compatible. Non-interactive input holds one
+stdin lock and consumes exactly one line per purpose, avoiding buffered-line
+loss; duplicate purposes are rejected before any Secret is requested. Values
+remain absent from process arguments, retain zeroizing storage through the HTTP
+request, and are dropped immediately afterward. This completes the local
+Password-to-Cookie validation surface but does not constitute live-account
+verification or change Chaoxing's `Development` status.

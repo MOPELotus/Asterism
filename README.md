@@ -42,7 +42,7 @@ Phase 0 已建立并持续完善以下基础：
 - 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；
 - Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
-- Chaoxing 能力级上游审计、独立 Work / Exam TaskInventory 与未实测 Native HTTP 边界；
+- Chaoxing 能力级上游审计、独立 Work / Exam TaskInventory、Cookie 自动续登与显式开发验证入口；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
 正在进行的工作以 [Phase 0 架构检查点](docs/architecture/phase-0-foundation.md) 为准。内部 API 在第二批 Provider 完成前仍可能发生不兼容变更。
@@ -95,7 +95,7 @@ CLI / WebUI / Asterism-Plugin
 | 阶段 | Provider / 交付物 | 状态 |
 |---|---|---|
 | Phase 0 | Core、Storage、Scheduler、Auth、内部 API / CLI | 开发中 |
-| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中（Chaoxing 已完成静态审计、TaskInventory 与未实测 Native HTTP 边界） |
+| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中（Chaoxing 已建立 Password → Cookie → Course / Work / Exam 的开发验证链路，尚未完成真实账号验证） |
 | 第一批后交付 | OpenAPI Client Generation Readiness、Refine v5 + shadcn/ui WebUI、Asterism-Plugin | 第一批完成后立即开始 |
 | 第二批 | `zhihuishu`、`zjy`、`icve` | 计划中 |
 | 兼容性收口 | 稳定并冻结 API / OpenAPI 基线，完成 WebUI / Plugin 兼容性收口 | 第二批完成后开始 |
@@ -127,6 +127,17 @@ cargo run -p asterismd
 `asterismd` 默认监听 `127.0.0.1:8068`，并在当前目录使用 `asterism.db`。配置按 `CLI > 环境变量 > 配置文件 > 默认值` 合并；可复制 `asterism.example.toml` 为本地 `asterism.toml`，也可通过 `--config` 或 `ASTERISM_CONFIG` 指定文件。服务端变量包括 `ASTERISM_BIND`、`ASTERISM_DATABASE_URL`、`ASTERISM_SESSION_TTL_SECONDS` 和 `ASTERISM_SECURE_COOKIES`；统一扫描调度器使用 `ASTERISM_SCHEDULER_*` 对应 `[scheduler]` 字段，并可由 `--scheduler-*` 参数覆盖。普通配置文件不得保存凭据或其他 Secret。
 
 Chaoxing 仍处于 `Development` 且默认不注册。仅在本地真实账号验证时，才可通过 `[providers].enable_development_chaoxing = true`、`ASTERISM_ENABLE_DEVELOPMENT_CHAOXING=true` 或 `--enable-development-chaoxing` 显式启用；启用时必须同时配置 SecretStore keyring。这个开关只开放验证入口，不代表 Supported/Verified，也不会启用 Capture。
+
+启用后可通过 CLI 完成 Password → Cookie → 扫描的开发验证。先创建账号并启动认证会话，再把返回的 ID 代入后续命令：
+
+```powershell
+cargo run -p asterismctl -- provider-account create --provider chaoxing --name chaoxing-dev
+cargo run -p asterismctl -- provider-account auth start <account-id> --method password
+cargo run -p asterismctl -- provider-account credential import <account-id> --session <session-id> --purpose provider-username --purpose provider-password --auth-method password --session-kind provider-specific --acquired-via native-provider-login
+cargo run -p asterismctl -- provider-account scan <account-id>
+```
+
+`credential import` 会按 `--purpose` 顺序隐藏提示输入，用户名和密码不会进入命令行参数；从非交互 stdin 读取时则要求每个字段独占一行。当前流程只用于开发验证，必须在留下脱敏运行记录并通过完整验收后，才能提升 Chaoxing 的支持状态。
 
 SecretStore keyring 只从进程环境读取，不接受 TOML 或 CLI 参数。`ASTERISM_SECRET_ACTIVE_KEY_ID` 指定活动 key ID，`ASTERISM_SECRET_KEYS` 使用逗号分隔的 `<key-id>=<base64-encoded-32-byte-key>`；两者必须同时提供。轮换时保留旧 key 并添加新 key，再切换活动 ID；确认所有密文已轮换前不要移除旧 key。`/health` 的 `secret_store_configured` 只报告是否已配置，不返回 key ID 或 key material。
 
