@@ -12,6 +12,7 @@ mod metadata;
 mod native_authentication;
 mod native_http;
 mod progress;
+mod provider;
 mod stored_session;
 mod task_inventory;
 
@@ -30,6 +31,11 @@ pub use native_http::NativeUaiInventoryTransport;
 pub use progress::{
     UaiGroupProgressSnapshot, UaiProgressDocument, UaiProgressTransport, UaiTaskProgress,
     parse_group_progress,
+};
+pub use provider::{
+    build_development_provider, build_development_provider_native,
+    build_development_provider_with_native_inventory, build_development_provider_with_renewal,
+    build_development_provider_with_stored_session,
 };
 pub use stored_session::StoredUaiSessionResolver;
 pub use task_inventory::parse_task_inventory;

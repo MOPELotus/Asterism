@@ -49,6 +49,13 @@ Authentication and every read operation retry at most once. ManualImport+Jwt
 sessions, incomplete metadata and stale credential versions cannot renew. JWT
 expiry extraction remains pending.
 
+The complete read-only Provider factory shares one resolved network policy and
+one account-scoped stored-session resolver across Authentication,
+CourseInventory, TaskInventory and TaskProgressRead. The daemon does not
+register this entry by default. Its config, environment and CLI opt-ins are
+independent from the other development Providers, require a configured
+SecretStore and retain Development verification with a startup warning.
+
 ## Course resource and tree
 
 ```text
@@ -69,8 +76,8 @@ The native CourseInventory resolves one account-bound composite session and
 reads the fixed Course-list route with the raw JWT in a sensitive Authorization
 header. It applies status, JSON Content-Type, UTF-8 and 4 MiB response bounds
 before the complete parser runs; no partial inventory or route-only class and
-instance fields are returned. Session renewal and the detail/tree reads remain
-separate follow-up boundaries.
+instance fields are returned. Authentication failures can renew one complete
+native session and restart the operation once.
 
 The content response stores the actual Course tree as JSON text in outer field
 `course`. The nested root contains `units`; audited roles include `unit`,
@@ -84,7 +91,9 @@ requiring its `courseResourceId` to match the stable Course identity. Only then
 is the fresh `courseInstanceId` encoded as one URL path segment for the tree
 read. Both completed bodies are held in one redacted transport result and
 parsed all-or-nothing; the instance route is never serialized into a Course or
-Task. Renewal and progress remain separate boundaries.
+Task. Authentication renewal restarts the detail/tree pair from the fresh
+detail; progress remains an independent capability over the same native
+transport.
 
 ## Progress and duration separation
 

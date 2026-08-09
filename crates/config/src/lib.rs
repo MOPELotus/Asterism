@@ -17,6 +17,7 @@ pub const SESSION_TTL_SECONDS_ENV: &str = "ASTERISM_SESSION_TTL_SECONDS";
 pub const SECURE_COOKIES_ENV: &str = "ASTERISM_SECURE_COOKIES";
 pub const ENABLE_DEVELOPMENT_CHAOXING_ENV: &str = "ASTERISM_ENABLE_DEVELOPMENT_CHAOXING";
 pub const ENABLE_DEVELOPMENT_WELEARN_ENV: &str = "ASTERISM_ENABLE_DEVELOPMENT_WELEARN";
+pub const ENABLE_DEVELOPMENT_UAI_ENV: &str = "ASTERISM_ENABLE_DEVELOPMENT_UAI";
 pub const SCHEDULER_ENABLED_ENV: &str = "ASTERISM_SCHEDULER_ENABLED";
 pub const SCHEDULER_TICK_INTERVAL_SECONDS_ENV: &str = "ASTERISM_SCHEDULER_TICK_INTERVAL_SECONDS";
 pub const SCHEDULER_MATERIALIZE_LIMIT_ENV: &str = "ASTERISM_SCHEDULER_MATERIALIZE_LIMIT";
@@ -166,6 +167,9 @@ pub struct ProviderConfig {
     /// Explicitly exposes the unverified `WELearn` Provider for local
     /// development and real-account validation. This is false by default.
     pub enable_development_welearn: bool,
+    /// Explicitly exposes the unverified UAI Provider for local development
+    /// and real-account validation. This is false by default.
+    pub enable_development_uai: bool,
 }
 
 impl ProviderConfig {
@@ -175,6 +179,9 @@ impl ProviderConfig {
         }
         if let Some(value) = overrides.enable_development_welearn {
             self.enable_development_welearn = value;
+        }
+        if let Some(value) = overrides.enable_development_uai {
+            self.enable_development_uai = value;
         }
     }
 }
@@ -322,6 +329,7 @@ pub struct SchedulerOverrides {
 pub struct ProviderOverrides {
     pub enable_development_chaoxing: Option<bool>,
     pub enable_development_welearn: Option<bool>,
+    pub enable_development_uai: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -391,6 +399,10 @@ impl Environment {
                 }
                 ENABLE_DEVELOPMENT_WELEARN_ENV => {
                     environment.overrides.providers.enable_development_welearn =
+                        Some(parse_bool_env(&name, &value)?);
+                }
+                ENABLE_DEVELOPMENT_UAI_ENV => {
+                    environment.overrides.providers.enable_development_uai =
                         Some(parse_bool_env(&name, &value)?);
                 }
                 SCHEDULER_ENABLED_ENV => {
@@ -516,6 +528,7 @@ fn is_supported_environment_name(name: &str) -> bool {
             | SECURE_COOKIES_ENV
             | ENABLE_DEVELOPMENT_CHAOXING_ENV
             | ENABLE_DEVELOPMENT_WELEARN_ENV
+            | ENABLE_DEVELOPMENT_UAI_ENV
             | SCHEDULER_ENABLED_ENV
             | SCHEDULER_TICK_INTERVAL_SECONDS_ENV
             | SCHEDULER_MATERIALIZE_LIMIT_ENV
@@ -564,6 +577,7 @@ execution_concurrency_limit = 8
 [providers]
 enable_development_chaoxing = false
 enable_development_welearn = false
+enable_development_uai = false
 "#,
         )
         .unwrap();
@@ -576,6 +590,7 @@ enable_development_welearn = false
                 "true".to_owned(),
             ),
             (ENABLE_DEVELOPMENT_WELEARN_ENV.to_owned(), "true".to_owned()),
+            (ENABLE_DEVELOPMENT_UAI_ENV.to_owned(), "true".to_owned()),
             (
                 SCHEDULER_TICK_INTERVAL_SECONDS_ENV.to_owned(),
                 "12".to_owned(),
@@ -603,6 +618,7 @@ enable_development_welearn = false
             providers: ProviderOverrides {
                 enable_development_chaoxing: Some(false),
                 enable_development_welearn: Some(false),
+                enable_development_uai: Some(false),
             },
         };
 
@@ -617,6 +633,7 @@ enable_development_welearn = false
         assert_eq!(config.scheduler.execution_concurrency_limit, 24);
         assert!(!config.providers.enable_development_chaoxing);
         assert!(!config.providers.enable_development_welearn);
+        assert!(!config.providers.enable_development_uai);
         fs::remove_file(path).unwrap();
     }
 
@@ -673,6 +690,13 @@ enable_development_welearn = false
                 .unwrap();
         assert_eq!(
             environment.overrides.providers.enable_development_welearn,
+            Some(true)
+        );
+        let environment =
+            Environment::parse([(ENABLE_DEVELOPMENT_UAI_ENV.to_owned(), "true".to_owned())])
+                .unwrap();
+        assert_eq!(
+            environment.overrides.providers.enable_development_uai,
             Some(true)
         );
     }

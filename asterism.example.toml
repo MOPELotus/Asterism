@@ -13,6 +13,7 @@ url = "sqlite://asterism.db"
 # Local validation only. These Providers remain unverified and disabled by default.
 enable_development_chaoxing = false
 enable_development_welearn = false
+enable_development_uai = false
 
 [scheduler]
 enabled = true

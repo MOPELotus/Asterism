@@ -2619,3 +2619,22 @@ progress operations restart from fresh detail after renewal. This is still
 offline/native-boundary evidence. Daemon registration, JWT expiry extraction,
 DurationRead/Report, execution, BrowserBridge, Capture and live verification
 remain separate.
+
+## One-hundred-and-sixty-second Phase 0 slice
+
+UAI now has one registry-consistent Development factory for Authentication,
+CourseInventory, TaskInventory and TaskProgressRead. The native composition
+shares one resolved NetworkProfile, one account-scoped stored-session resolver
+and one inventory transport; the renewal variant binds Core's credential
+resolver and atomic renewer to the native Password/user-info transport.
+
+The daemon can register that complete entry through the independent
+`enable_development_uai` configuration, `ASTERISM_ENABLE_DEVELOPMENT_UAI`
+environment variable or `--enable-development-uai` CLI flag. Registration is
+false by default, requires the configured SecretStore keyring and emits the
+same unverified Development warning as the other first-batch Providers.
+
+Factory and daemon tests require the metadata and populated registry slots to
+agree and prove UAI can be enabled independently. No runtime settings,
+DurationRead/Report, execution, BrowserBridge or Capture slot is inferred, and
+this composition checkpoint does not claim live compatibility.

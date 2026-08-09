@@ -7,6 +7,7 @@
 | CourseInventory | AutoFinish + UnipusHelperPro | Reference | Native authenticated Course list plus bounded Course → CourseResource flattening are offline/native-boundary covered |
 | TaskInventory | AutoFinish + UnipusHelperPro | Reference | Native fresh resource-detail/tree reads plus bounded nested Course JSON → Unit/Section/Node/Group parser are offline/native-boundary covered |
 | TaskProgressRead | Both backend donors | Reference | Native fresh-detail + signed per-Unit read and identity-bound Group parser are offline/native-boundary covered; only pass/pass2/perm all 1 maps to completed |
+| Daemon composition | Asterism Core | FromScratch | Complete read-only Development entry is registered only through an independent disabled-by-default opt-in and configured SecretStore |
 | DurationRead | UnipusHelperPro | Reference | Summary exposes `finishProgress` and `duration` independently at Course/Unit level; unit/live meaning pending |
 | ResourceExecution | AutoFinish | Reference | Direct completion/submission is not accepted as duration-complete execution |
 | DurationReport | AutoPlayer | Reference | Current evidence is page residence and interaction, not a confirmed public HTTP reporter; deferred |
@@ -35,5 +36,7 @@ TaskProgressRead. It:
    Course/Task inventory and read-only per-Unit Group progress;
 9. atomically renews only complete NativeProviderLogin+Composite credentials,
    with one Authentication-only retry and no ManualImport renewal;
-10. retains raw Group duration without assigning a unit and makes no
+10. composes those four capabilities into an independently opted-in daemon
+    Development entry that still requires the configured SecretStore;
+11. retains raw Group duration without assigning a unit and makes no
     DurationRead/Report, execution, submission, BrowserBridge or Capture claim.
