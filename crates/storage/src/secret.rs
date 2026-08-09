@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fmt, str::FromStr, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    str::FromStr,
+    sync::Arc,
+};
 
 use asterism_domain::{
     AuditActor, AuditRecordId, AuthBootstrapPurpose, AuthBootstrapSessionId, AuthMethod,
@@ -7,7 +12,8 @@ use asterism_domain::{
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, NewProviderCredential, ProviderCredential,
-    ProviderCredentialStore, SecretAccess, SecretActor, SecretKey, SecretPurpose, SecretRef,
+    ProviderCredentialResolution, ProviderCredentialResolver, ProviderCredentialStore,
+    ResolvedProviderCredential, SecretAccess, SecretActor, SecretKey, SecretPurpose, SecretRef,
     SecretStore, SecretStoreError, SecretValue,
 };
 use async_trait::async_trait;
@@ -96,6 +102,21 @@ pub enum SecretKeyringError {
 pub struct SqliteSecretStore {
     database: Database,
     keyring: Arc<SecretKeyring>,
+}
+
+/// SQLite-backed credential resolver permanently scoped to one Provider ID.
+/// The scope is selected by Core at composition time rather than by Provider
+/// request data.
+#[derive(Clone, Debug)]
+pub struct SqliteProviderCredentialResolver {
+    store: SqliteSecretStore,
+    provider_id: ProviderId,
+}
+
+impl SqliteProviderCredentialResolver {
+    pub const fn new(store: SqliteSecretStore, provider_id: ProviderId) -> Self {
+        Self { store, provider_id }
+    }
 }
 
 impl SqliteSecretStore {
@@ -593,6 +614,116 @@ impl ProviderCredentialStore for SqliteSecretStore {
         .map_err(storage_error)?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ProviderCredentialResolver for SqliteProviderCredentialResolver {
+    async fn resolve_provider_credentials(
+        &self,
+        request: ProviderCredentialResolution,
+    ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError> {
+        if request.credential_refs.is_empty()
+            || request.credential_refs.len() > 16
+            || request
+                .credential_refs
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != request.credential_refs.len()
+        {
+            return Err(SecretStoreError::AccountMismatch);
+        }
+        let access = SecretAccess {
+            actor: SecretActor::ProviderRuntime(self.provider_id.to_string()),
+            correlation_id: request.correlation_id,
+            reason: "resolve account-bound Provider credentials".to_owned(),
+        };
+        let mut transaction = self
+            .store
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let account = sqlx::query(
+            "SELECT owner_user_id, provider_id, auth_state_json FROM provider_accounts WHERE id = ?",
+        )
+        .bind(request.provider_account_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        .ok_or(SecretStoreError::NotFound)?;
+        let owner_user_id = UserId::from_str(
+            account
+                .try_get::<&str, _>("owner_user_id")
+                .map_err(storage_error)?,
+        )
+        .map_err(|_| SecretStoreError::Storage)?;
+        authorize(owner_user_id, &access)?;
+        let stored_provider_id: &str = account.try_get("provider_id").map_err(storage_error)?;
+        let auth_state: AuthState = serde_json::from_str(
+            account
+                .try_get::<&str, _>("auth_state_json")
+                .map_err(storage_error)?,
+        )
+        .map_err(|_| SecretStoreError::Storage)?;
+        if stored_provider_id != self.provider_id.as_str()
+            || !matches!(auth_state, AuthState::Authenticated)
+        {
+            return Err(SecretStoreError::AccountMismatch);
+        }
+
+        let rows = sqlx::query(CREDENTIAL_SELECT)
+            .bind(request.provider_account_id.to_string())
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        let credentials = rows
+            .iter()
+            .map(decode_provider_credential)
+            .collect::<Result<Vec<_>, _>>()?;
+        let requested_refs = request
+            .credential_refs
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let stored_refs = credentials
+            .iter()
+            .map(|credential| credential.secret.id)
+            .collect::<BTreeSet<_>>();
+        if requested_refs != stored_refs
+            || credentials.len() != stored_refs.len()
+            || credentials
+                .iter()
+                .any(|credential| credential.secret.owner_user_id != owner_user_id)
+        {
+            return Err(SecretStoreError::AccountMismatch);
+        }
+
+        let mut resolved = Vec::with_capacity(credentials.len());
+        for credential in credentials {
+            let row = fetch_secret(&mut transaction, credential.secret.id).await?;
+            verify_reference(&credential.secret, &row)?;
+            let key = self.store.keyring.get(&row.key_id)?;
+            let value = SecretValue::new(decrypt(
+                key,
+                &credential.secret,
+                &row.nonce,
+                &row.encrypted_data,
+            )?);
+            insert_secret_audit(
+                &mut transaction,
+                &access,
+                "provider_credential_resolved",
+                &credential.secret,
+            )
+            .await
+            .map_err(storage_error)?;
+            resolved.push(ResolvedProviderCredential { credential, value });
+        }
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(resolved)
     }
 }
 
@@ -1812,6 +1943,110 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(credential_audits, 3);
+    }
+
+    #[tokio::test]
+    async fn runtime_resolution_requires_exact_authenticated_provider_binding() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner_id = insert_user(&database).await;
+        let account_id = insert_provider_account(&database, owner_id).await;
+        let store = SqliteSecretStore::new(
+            database.clone(),
+            Arc::new(keyring("key-a", &[("key-a", 23)])),
+        );
+        let captured_at = Utc::now();
+        let credentials = store
+            .replace_provider_credentials(
+                owner_id,
+                account_id,
+                CredentialBundle {
+                    provider_id: ProviderId::new("provider-alpha").unwrap(),
+                    tenant: None,
+                    auth_method: AuthMethod::Password,
+                    acquired_via: CredentialAcquisition::NativeProviderLogin,
+                    captured_at,
+                    expires_at: None,
+                    session_kind: SessionKind::Composite,
+                    fields: vec![
+                        CredentialField {
+                            purpose: SecretPurpose::ProviderUsername,
+                            value: SecretValue::new(b"student-a".to_vec()),
+                        },
+                        CredentialField {
+                            purpose: SecretPurpose::ProviderPassword,
+                            value: SecretValue::new(b"password-a".to_vec()),
+                        },
+                        CredentialField {
+                            purpose: SecretPurpose::ProviderCookie,
+                            value: SecretValue::new(b"_uid=123; token=abc".to_vec()),
+                        },
+                    ],
+                    user_id_hint: None,
+                },
+                &user_access(owner_id, "runtime-resolution-setup"),
+            )
+            .await
+            .unwrap();
+        let credential_refs = credentials
+            .iter()
+            .map(|credential| credential.secret.id)
+            .collect::<Vec<_>>();
+        let resolver = SqliteProviderCredentialResolver::new(
+            store.clone(),
+            ProviderId::new("provider-alpha").unwrap(),
+        );
+        let resolved_credentials = resolver
+            .resolve_provider_credentials(ProviderCredentialResolution {
+                provider_account_id: account_id,
+                credential_refs: credential_refs.clone(),
+                correlation_id: "scheduled-scan:runtime-resolution".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolved_credentials.len(), 3);
+        assert!(resolved_credentials.iter().any(|item| {
+            item.credential.secret.purpose == SecretPurpose::ProviderCookie
+                && item.value.expose_secret() == b"_uid=123; token=abc"
+        }));
+        let debug = format!("{resolved_credentials:?}");
+        assert!(!debug.contains("student-a"));
+        assert!(!debug.contains("password-a"));
+        assert!(!debug.contains("token=abc"));
+
+        let wrong_provider = SqliteProviderCredentialResolver::new(
+            store.clone(),
+            ProviderId::new("provider-beta").unwrap(),
+        );
+        assert!(matches!(
+            wrong_provider
+                .resolve_provider_credentials(ProviderCredentialResolution {
+                    provider_account_id: account_id,
+                    credential_refs: credential_refs.clone(),
+                    correlation_id: "scheduled-scan:wrong-provider".to_owned(),
+                })
+                .await,
+            Err(SecretStoreError::AccountMismatch)
+        ));
+        assert!(matches!(
+            resolver
+                .resolve_provider_credentials(ProviderCredentialResolution {
+                    provider_account_id: account_id,
+                    credential_refs: credential_refs[..2].to_vec(),
+                    correlation_id: "scheduled-scan:incomplete-binding".to_owned(),
+                })
+                .await,
+            Err(SecretStoreError::AccountMismatch)
+        ));
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE action = 'provider_credential_resolved' \
+             AND correlation_id = 'scheduled-scan:runtime-resolution'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 3);
     }
 
     #[tokio::test]

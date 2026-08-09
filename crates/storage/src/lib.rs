@@ -38,7 +38,9 @@ pub use scan::{
     SqliteProviderScanRepository, TaskScanChange,
 };
 pub use scheduler::{JobFailureDisposition, SqliteSchedulerRepository};
-pub use secret::{SecretKeyring, SecretKeyringError, SqliteSecretStore};
+pub use secret::{
+    SecretKeyring, SecretKeyringError, SqliteProviderCredentialResolver, SqliteSecretStore,
+};
 pub use session::SqliteSessionRepository;
 pub use task::SqliteTaskQueryRepository;
 pub use user::{InitialMaster, SqliteUserRepository};

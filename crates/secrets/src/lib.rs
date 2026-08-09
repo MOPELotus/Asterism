@@ -141,6 +141,21 @@ pub struct ProviderCredential {
     pub updated_at: Timestamp,
 }
 
+/// One provider credential decrypted for a single bounded runtime operation.
+/// The plaintext remains redacted in `Debug` output and is zeroized on drop.
+#[derive(Debug)]
+pub struct ResolvedProviderCredential {
+    pub credential: ProviderCredential,
+    pub value: SecretValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderCredentialResolution {
+    pub provider_account_id: ProviderAccountId,
+    pub credential_refs: Vec<SecretId>,
+    pub correlation_id: String,
+}
+
 #[derive(Debug)]
 pub struct NewProviderCredential {
     pub provider_account_id: ProviderAccountId,
@@ -406,6 +421,17 @@ pub trait ProviderCredentialStore: Send + Sync {
         secret_id: SecretId,
         access: &SecretAccess,
     ) -> Result<(), SecretStoreError>;
+}
+
+/// Provider-scoped runtime boundary for resolving only the credentials already
+/// bound to one account. Implementations must verify the complete opaque
+/// reference set before returning plaintext.
+#[async_trait]
+pub trait ProviderCredentialResolver: Send + Sync {
+    async fn resolve_provider_credentials(
+        &self,
+        request: ProviderCredentialResolution,
+    ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError>;
 }
 
 #[derive(Debug, thiserror::Error)]

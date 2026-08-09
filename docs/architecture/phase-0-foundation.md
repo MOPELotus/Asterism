@@ -926,3 +926,13 @@ Synthetic fixtures and donor-compatible encryption vectors cover the offline
 contract. No real account has verified `fanyalogin`, Cookie persistence or the
 reported `uf` TLS-fingerprint behavior, so Chaoxing remains `Development` and is
 still absent from the daemon registry.
+
+## Sixty-eighth Phase 0 slice
+
+Provider runtime credential access now uses a Provider-scoped Core resolver
+instead of exposing storage or owner lookup to Provider implementations. The
+SQLite adapter resolves only an authenticated account whose Provider ID and
+complete opaque credential-reference set match the runtime request, decrypts
+inside one transaction, returns redacted and zeroizing values, and records an
+audit entry for every resolved field. This reusable boundary is independent of
+Capture and does not make any Provider live or verified by itself.
