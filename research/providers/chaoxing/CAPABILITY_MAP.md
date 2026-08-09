@@ -16,7 +16,7 @@ Chapter card contains a Work-shaped assessment.
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
-| QuestionInventory / QuestionParse | CxKitty | OCS, `chaoxing-exam` | Reference | Question IDs, types, options, hidden answers, and per-attempt QID changes |
+| QuestionInventory / QuestionParse | OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work now has an offline-covered native fresh-page read and account/correlation/task-bound attempt cache; Chapter Work and Exam remain parse-only, and all live behavior is pending |
 | SubmissionBuild / Execute | CxKitty | OCS, agent skill | Reference | Native/mobile form and Browser event paths differ; formal-assessment guard remains Core-owned |
 | SubmissionVerify | agent skill | `chaoxing-exam` | PortSource | Re-fetch final task page, verify server-visible answers/result rather than HTTP 200 or CSS |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
@@ -103,3 +103,10 @@ policy and remains independently guarded.
   rediscovery. Completed/Pending become conservative 100/0 binary completion;
   other states expose no invented percentage. These tasks advertise
   `ProgressRead`, but the result remains offline fixture evidence only.
+- Independent Work advertises `QuestionInventory` and `QuestionParse` only after
+  its fresh detail redirect ends at the readable editor. The Question reader
+  rediscovers the course and Work entry, accepts only the final `/work/dowork`
+  route, parses one bounded page and shares it through a five-minute
+  account/correlation/task-bound process-local cache. HTML, route credentials
+  and attempt-local QIDs are never persisted. Exam and Chapter Work remain
+  parser-only because no equally safe current read-only native route is locked.

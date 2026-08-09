@@ -273,7 +273,7 @@ pub struct ChaoxingWorkDetailRequest<'a> {
 }
 
 impl<'a> ChaoxingWorkDetailRequest<'a> {
-    fn try_new(
+    pub(crate) fn try_new(
         course: ChaoxingCourseRoute<'_>,
         remote_task_id: &'a str,
         route: &'a str,
@@ -920,6 +920,8 @@ mod tests {
                 ProviderCapability::TaskInventory,
                 ProviderCapability::TaskDetail,
                 ProviderCapability::TaskProgressRead,
+                ProviderCapability::QuestionInventory,
+                ProviderCapability::QuestionParse,
                 ProviderCapability::ResourceExecution,
             ])
         );

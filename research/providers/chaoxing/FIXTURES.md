@@ -62,7 +62,10 @@ from the current OCS independent `/mooc2/work/dowork` and
 and non-fetchable attachment labels are retained, while current/hidden answer
 inputs and every submission field are deliberately excluded from normalized
 output. The legacy `work-mobile-mixed.html` filename refers specifically to
-Chapter Work and is not an independent Work transport fixture.
+Chapter Work and is not an independent Work transport fixture. The independent
+Work preview fixture also exercises the registered native Question reader after
+strict route acquisition; it remains synthetic parser/transport-boundary
+evidence rather than a live response.
 
 ## Required live-sanitized fixture sets
 

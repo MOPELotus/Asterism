@@ -1814,3 +1814,19 @@ independent Work Task through Chapter attachment credentials.
 All supported page modes remain parse-only and answer-free at this checkpoint.
 The correction adds no remote execution, Capture dependency, hidden-answer
 reading or submission behavior.
+
+## One-hundred-and-twentieth Phase 0 slice
+
+Chaoxing now registers native `QuestionInventory` and `QuestionParse` for
+independent Work only. A Work Task advertises both capabilities only after its
+fresh detail redirect confirms the pending editor state. The reader then
+rediscovers the exact course and Work entry, follows the existing fixed-host
+redirect boundary, requires the final `/work/dowork` route and parses one
+bounded response through the independent Work preview grammar.
+
+Core inventory and parse calls share normalized Questions through a bounded
+five-minute process-local cache keyed by ProviderAccount, correlation ID and
+stable Task identity. It is removed after the final Question and never persists
+HTML, route credentials, form tokens or attempt-local question IDs. Exam and
+Chapter Work remain parse-only because this slice does not guess an Exam route,
+start an assessment, add Capture behavior or claim live-account verification.

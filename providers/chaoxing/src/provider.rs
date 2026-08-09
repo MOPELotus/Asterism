@@ -5,9 +5,9 @@ use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
-    ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingResourceExecution,
-    ChaoxingSessionResolver, ChaoxingTaskDetail, ChaoxingTaskInventory, ChaoxingTaskProgress,
-    NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
+    ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingQuestionRead,
+    ChaoxingResourceExecution, ChaoxingSessionResolver, ChaoxingTaskDetail, ChaoxingTaskInventory,
+    ChaoxingTaskProgress, NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
     StoredChaoxingSessionResolver, metadata::development_metadata,
     runtime_settings::runtime_settings_schema,
 };
@@ -72,6 +72,11 @@ fn compose_development_provider(
         course_inventory.clone(),
         task_inventory.clone(),
     )?);
+    let question_read = Arc::new(ChaoxingQuestionRead::try_new(
+        course_inventory.clone(),
+        inventory_transport.clone(),
+        inventory_transport.clone(),
+    )?);
     let task_execution = Arc::new(ChaoxingResourceExecution::try_new(
         course_inventory.clone(),
         inventory_transport.clone(),
@@ -90,8 +95,8 @@ fn compose_development_provider(
         task_inventory: Some(task_inventory),
         task_detail: Some(task_detail),
         task_progress: Some(task_progress),
-        question_inventory: None,
-        question_parse: None,
+        question_inventory: Some(question_read.clone()),
+        question_parse: Some(question_read),
         task_execution: Some(task_execution),
         browser_bridge: None,
     })
@@ -164,6 +169,8 @@ mod tests {
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());
         assert!(entry.task_progress.is_some());
+        assert!(entry.question_inventory.is_some());
+        assert!(entry.question_parse.is_some());
         assert!(entry.task_execution.is_some());
         assert!(
             entry
@@ -188,6 +195,18 @@ mod tests {
                 .metadata
                 .capabilities
                 .contains(&ProviderCapability::TaskDetail)
+        );
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::QuestionInventory)
+        );
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::QuestionParse)
         );
         assert!(entry.task_detail.is_some());
         assert_eq!(entry.runtime_settings.version, 4);

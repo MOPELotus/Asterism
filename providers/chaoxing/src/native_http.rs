@@ -17,8 +17,8 @@ use zeroize::Zeroize;
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
     ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingInventoryDocument,
-    ChaoxingInventoryTransport, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
-    classify_work_detail,
+    ChaoxingInventoryTransport, ChaoxingQuestionTransport, ChaoxingWorkDetailRequest,
+    ChaoxingWorkDetailState, classify_work_detail,
     resource_execution::{
         ChaoxingImmediateResourceTransport, ChaoxingVideoStatus, ChaoxingVideoTransport,
     },
@@ -297,6 +297,16 @@ impl NativeChaoxingInventoryTransport {
         session: &ChaoxingCookieSession,
         request: ChaoxingWorkDetailRequest<'_>,
     ) -> ProviderResult<ChaoxingWorkDetailState> {
+        let (url, document) = self.fetch_work_page(session, request).await?;
+        let remote_state = classify_work_detail(url.as_str(), document.as_str())?;
+        Ok(ChaoxingWorkDetailState::for_request(request, remote_state))
+    }
+
+    async fn fetch_work_page(
+        &self,
+        session: &ChaoxingCookieSession,
+        request: ChaoxingWorkDetailRequest<'_>,
+    ) -> ProviderResult<(Url, SensitiveHtml)> {
         let mut url = request.url()?;
         for redirect_count in 0..=MAX_WORK_DETAIL_REDIRECTS {
             let response = self
@@ -352,10 +362,24 @@ impl NativeChaoxingInventoryTransport {
                 continue;
             }
             let document = classify_response(response).await?;
-            let remote_state = classify_work_detail(url.as_str(), document.as_str())?;
-            return Ok(ChaoxingWorkDetailState::for_request(request, remote_state));
+            return Ok((url, document));
         }
         unreachable!("bounded Work detail redirect loop always returns")
+    }
+
+    async fn fetch_work_question_document_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        request: ChaoxingWorkDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        let (url, document) = self.fetch_work_page(session, request).await?;
+        if !is_readable_work_question_url(&url) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing Work task is not currently on a readable editor route",
+            ));
+        }
+        document.into_inventory_document()
     }
 
     async fn complete_immediate_resource_once(
@@ -491,6 +515,10 @@ impl NativeChaoxingInventoryTransport {
     }
 }
 
+fn is_readable_work_question_url(url: &Url) -> bool {
+    url.path().to_ascii_lowercase().ends_with("/work/dowork")
+}
+
 impl fmt::Debug for NativeChaoxingInventoryTransport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -579,6 +607,28 @@ impl ChaoxingInventoryTransport for NativeChaoxingInventoryTransport {
             Err(error) if should_renew_after(&error, renewed) => {
                 let session = self.sessions.renew_session(context).await?;
                 self.fetch_work_detail_states_once(&session, requests).await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
+impl ChaoxingQuestionTransport for NativeChaoxingInventoryTransport {
+    async fn fetch_work_question_document(
+        &self,
+        context: &ProviderContext,
+        request: ChaoxingWorkDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_work_question_document_once(&session, request)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_work_question_document_once(&session, request)
+                    .await
             }
             result => result,
         }
@@ -1391,6 +1441,23 @@ mod tests {
         let work_url = discover_work_list_url(COURSE_PAGE, route).unwrap();
         assert_eq!(work_url.host_str(), Some("mooc1.chaoxing.com"));
         assert_eq!(query(&work_url, "enc").as_deref(), Some("SAFE_ENC"));
+    }
+
+    #[test]
+    fn question_reads_accept_only_the_independent_work_editor_route() {
+        let editor = Url::parse(
+            "https://mooc1.chaoxing.com/mooc-ans/mooc2/work/dowork?courseId=100&classId=200&workId=work-1",
+        )
+        .unwrap();
+        assert!(is_readable_work_question_url(&editor));
+
+        for route in ["view", "prompt", "task"] {
+            let url = Url::parse(&format!(
+                "https://mooc1.chaoxing.com/mooc-ans/mooc2/work/{route}?courseId=100&classId=200&workId=work-1"
+            ))
+            .unwrap();
+            assert!(!is_readable_work_question_url(&url));
+        }
     }
 
     #[test]

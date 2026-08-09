@@ -45,6 +45,13 @@ pub struct ParsedChaoxingQuestion {
 }
 
 impl ParsedChaoxingQuestion {
+    pub(crate) fn matches_reference(&self, reference: &RemoteQuestionRef) -> bool {
+        self.remote_id == reference.remote_id
+            && self.position == reference.position
+            && self.kind == reference.kind_hint
+            && self.metadata_sanitized == reference.metadata_sanitized
+    }
+
     /// Builds the bounded attempt-local reference consumed by Core before
     /// requesting this normalized Question.
     ///

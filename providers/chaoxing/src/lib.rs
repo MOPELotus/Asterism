@@ -12,6 +12,7 @@ mod metadata;
 mod native_http;
 mod provider;
 mod question_parser;
+mod question_read;
 mod resource_execution;
 mod resource_inventory;
 mod runtime_settings;
@@ -38,6 +39,7 @@ pub use question_parser::{
     ParsedChaoxingQuestion, parse_chapter_work_question_page, parse_exam_preview_question_page,
     parse_exam_question_page, parse_work_preview_question_page,
 };
+pub use question_read::{ChaoxingQuestionRead, ChaoxingQuestionTransport};
 pub use resource_execution::ChaoxingResourceExecution;
 pub use resource_inventory::parse_chapter_resource_inventory;
 pub use stored_session::StoredChaoxingSessionResolver;

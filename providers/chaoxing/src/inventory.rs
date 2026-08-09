@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType};
+use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTask};
 use asterism_secrets::SecretString;
 use scraper::{ElementRef, Html, Selector};
@@ -280,6 +280,15 @@ pub(crate) fn apply_work_detail_state(
     })?;
     raw.insert("detail_remote_state".to_owned(), json!(remote_state));
     task.remote_state = remote_state;
+    task.capabilities = if remote_state == RemoteState::Pending {
+        vec![
+            TaskCapability::ProgressRead,
+            TaskCapability::QuestionInventory,
+            TaskCapability::QuestionParse,
+        ]
+    } else {
+        vec![TaskCapability::ProgressRead]
+    };
     task.fingerprint = fingerprint(&task.normalized)?;
     Ok(())
 }
@@ -599,6 +608,28 @@ mod tests {
             .unwrap(),
             RemoteState::Expired
         );
+    }
+
+    #[test]
+    fn only_a_fresh_pending_work_detail_advertises_question_read() {
+        let mut task = parse_work_inventory(WORK_MIXED, &scope())
+            .unwrap()
+            .into_iter()
+            .find(|task| task.remote_id.ends_with(":work-1"))
+            .unwrap();
+
+        apply_work_detail_state(&mut task, RemoteState::Pending).unwrap();
+        assert_eq!(
+            task.capabilities,
+            [
+                TaskCapability::ProgressRead,
+                TaskCapability::QuestionInventory,
+                TaskCapability::QuestionParse,
+            ]
+        );
+
+        apply_work_detail_state(&mut task, RemoteState::Expired).unwrap();
+        assert_eq!(task.capabilities, [TaskCapability::ProgressRead]);
     }
 
     #[test]

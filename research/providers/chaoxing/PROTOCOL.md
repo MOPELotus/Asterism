@@ -206,6 +206,26 @@ Exam tasks use exact Task rediscovery; `Completed` and `Pending` expose only
 binary 100/0 completion while all other remote states leave percentage absent.
 No duration or fractional score is inferred from list text.
 
+## Native independent Work question read
+
+Independent Work question inventory does not reuse a stored task entry or
+session-bound `enc`. It rediscovers the current course, obtains a fresh Work
+inventory entry, follows only the existing fixed-host Work redirect allowlist,
+and accepts the response as a readable question page only when the final path
+ends in `/work/dowork`. Final `work/view`, `work/prompt`, login and unknown pages
+fail closed instead of producing a partial question list.
+
+The bounded page is parsed once and retained only as normalized Questions in a
+five-minute, process-local cache keyed by ProviderAccount, correlation ID and
+stable Work task identity. `QuestionInventory` returns references from that
+attempt and `QuestionParse` must consume matching references in the same Core
+read. The cache has a hard capacity, is removed after the final Question, and
+never persists HTML, entry URLs, `enc`, form tokens or attempt-local QIDs.
+
+This checkpoint does not construct an Exam preview URL or start an assessment.
+Exam and Chapter Work remain offline parse modes until a current, safe read path
+is locked independently; no Capture behavior is introduced.
+
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.
 - The offline parser checkpoint keeps three donor modes distinct: CxKitty's
