@@ -142,6 +142,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
         .route("/api/v1/tasks/{task_id}/detail", get(task::get_task_detail))
+        .route(
+            "/api/v1/tasks/{task_id}/progress",
+            get(task::get_task_progress),
+        )
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
         .merge(runtime_settings_routes())
         .merge(credit_routes())
@@ -761,6 +765,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/progress".to_owned(),
+            task_progress_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
@@ -974,6 +985,25 @@ fn task_detail_path() -> Value {
             "409": {"description": "Provider account, capability, user action, or remote binding conflict"},
             "429": {"description": "Provider rate limited"},
             "502": {"description": "Provider returned inconsistent detail"},
+            "503": {"description": "Provider temporarily unavailable"}
+        }
+    }})
+}
+
+fn task_progress_path() -> Value {
+    json!({"get": {
+        "operationId": "getTaskProgress",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Fresh bounded Provider Task progress"},
+            "400": {"description": "Invalid Task or request ID"},
+            "404": {"description": "Task not found"},
+            "409": {"description": "Task/Provider capability, account, user action, or remote binding conflict"},
+            "429": {"description": "Provider rate limited"},
+            "502": {"description": "Provider returned inconsistent progress"},
             "503": {"description": "Provider temporarily unavailable"}
         }
     }})
@@ -3477,7 +3507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_detail_route_rejects_invalid_task_ids_before_provider_access() {
+    async fn task_provider_reads_reject_invalid_task_ids_before_provider_access() {
         let (app, _) = test_app(false, None).await;
         let bootstrap = bootstrap(&app).await;
         let cookie = bootstrap.headers()[header::SET_COOKIE]
@@ -3486,21 +3516,27 @@ mod tests {
             .split(';')
             .next()
             .unwrap();
-        let response = app
-            .oneshot(
-                Request::get("/api/v1/tasks/not-a-task/detail")
-                    .header(header::COOKIE, cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(
-            response_json(response).await["error"]["code"],
-            "invalid_task_id"
-        );
+        for path in [
+            "/api/v1/tasks/not-a-task/detail",
+            "/api/v1/tasks/not-a-task/progress",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(path)
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(
+                response_json(response).await["error"]["code"],
+                "invalid_task_id"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3924,6 +3960,7 @@ mod tests {
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/detail",
+            "/api/v1/tasks/{task_id}/progress",
             "/api/v1/tasks/{task_id}/execute",
             "/api/v1/credits/account",
             "/api/v1/credits/transactions",
@@ -3942,6 +3979,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/detail"]["get"]["operationId"],
             "getTaskDetail"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/progress"]["get"]["operationId"],
+            "getTaskProgress"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],

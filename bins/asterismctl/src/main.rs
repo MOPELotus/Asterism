@@ -221,6 +221,8 @@ enum TaskCommand {
     Get { task_id: String },
     /// Rediscover and get one task's current sanitized Provider detail.
     Detail { task_id: String },
+    /// Read one task's current normalized Provider progress.
+    Progress { task_id: String },
     /// Schedule one task through the shared idempotent Core Action.
     Execute {
         task_id: String,
@@ -721,6 +723,10 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
             let path = format!("/api/v1/tasks/{task_id}/detail");
             client.get_authorized(&path, &token).await?
         }
+        TaskCommand::Progress { task_id } => {
+            let path = format!("/api/v1/tasks/{task_id}/progress");
+            client.get_authorized(&path, &token).await?
+        }
         TaskCommand::Execute {
             task_id,
             idempotency_key,
@@ -916,6 +922,18 @@ mod tests {
             arguments.command,
             Command::Task {
                 command: TaskCommand::Detail { task_id }
+            } if task_id == "task-id"
+        ));
+    }
+
+    #[test]
+    fn task_progress_is_a_distinct_fresh_provider_read() {
+        let arguments =
+            Arguments::try_parse_from(["asterismctl", "task", "progress", "task-id"]).unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::Progress { task_id }
             } if task_id == "task-id"
         ));
     }

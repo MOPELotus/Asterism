@@ -3,9 +3,10 @@ use std::str::FromStr;
 use asterism_domain::{Execution, ProviderAccountId, ProviderId, Task, TaskId};
 use asterism_engine::{
     ExecuteTaskCommand, ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
-    ProviderTaskDetailError, ProviderTaskDetailService, ReadTaskDetailCommand,
+    ProviderTaskDetailError, ProviderTaskDetailService, ProviderTaskProgressError,
+    ProviderTaskProgressService, ReadTaskDetailCommand, ReadTaskProgressCommand,
 };
-use asterism_provider_api::{ProviderErrorKind, RemoteTaskDetail};
+use asterism_provider_api::{ProviderErrorKind, RemoteProgress, RemoteTaskDetail};
 use asterism_storage::{
     SqliteExecutionRepository, SqliteProviderAccountRepository,
     SqliteProviderRuntimeSettingsRepository, SqliteTaskQueryRepository, TaskQueryRepository,
@@ -110,6 +111,39 @@ pub(super) async fn get_task_detail(
             provider_id: result.provider_id,
             provider_version: result.provider_version,
             detail: result.detail,
+        })
+        .into_response(),
+    ))
+}
+
+pub(super) async fn get_task_progress(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let result = ProviderTaskProgressService::new(
+        state.providers,
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database),
+    )
+    .read(ReadTaskProgressCommand {
+        owner_id,
+        task_id,
+        correlation_id: correlation_id.to_owned(),
+    })
+    .await
+    .map_err(map_task_progress_error)?;
+    Ok(crate::auth::no_store(
+        Json(TaskProgressResponse {
+            task_id: result.task_id,
+            provider_id: result.provider_id,
+            provider_version: result.provider_version,
+            progress: result.progress,
         })
         .into_response(),
     ))
@@ -294,6 +328,74 @@ fn map_task_detail_error(error: ProviderTaskDetailError) -> ApiError {
     }
 }
 
+fn map_task_progress_error(error: ProviderTaskProgressError) -> ApiError {
+    match error {
+        ProviderTaskProgressError::TaskNotFound => ApiError::not_found("task_not_found"),
+        ProviderTaskProgressError::TaskCapabilityUnavailable
+        | ProviderTaskProgressError::CapabilityUnavailable(_) => ApiError::conflict(
+            "task_progress_unavailable",
+            "the task does not expose readable remote progress",
+        ),
+        ProviderTaskProgressError::AccountNotAuthenticated => ApiError::conflict(
+            "provider_account_not_authenticated",
+            "the Provider account must be authenticated before reading task progress",
+        ),
+        ProviderTaskProgressError::ProviderNotRegistered(_) => ApiError::conflict(
+            "provider_not_registered",
+            "the task Provider is not registered",
+        ),
+        ProviderTaskProgressError::InvalidCorrelationId => ApiError::bad_request(
+            "invalid_request_id",
+            "the request correlation ID is invalid",
+        ),
+        ProviderTaskProgressError::ProviderResponseInvalid => {
+            tracing::warn!(%error, "Provider returned invalid Task progress");
+            ApiError::bad_gateway(
+                "provider_task_progress_invalid",
+                "the Provider returned inconsistent task progress",
+            )
+        }
+        ProviderTaskProgressError::Provider(provider_error) => match provider_error.kind {
+            ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+                provider_error
+                    .retry_after_seconds
+                    .unwrap_or(60)
+                    .clamp(1, 86_400),
+            ),
+            ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+                tracing::warn!(error = %provider_error, "Provider Task progress is temporarily unavailable");
+                ApiError::service_unavailable(
+                    "provider_unavailable",
+                    "the Provider is temporarily unavailable",
+                )
+            }
+            ProviderErrorKind::Authentication
+            | ProviderErrorKind::Authorization
+            | ProviderErrorKind::HumanRequired => ApiError::conflict(
+                "provider_action_required",
+                "the Provider requires authentication or user action",
+            ),
+            ProviderErrorKind::RemoteChanged => ApiError::conflict(
+                "task_remote_changed",
+                "the remote task no longer matches the stored task",
+            ),
+            ProviderErrorKind::UnsupportedTask => ApiError::conflict(
+                "task_progress_unavailable",
+                "the Provider cannot read progress for this task",
+            ),
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+                tracing::warn!(error = %provider_error, "Provider returned invalid Task progress");
+                ApiError::bad_gateway(
+                    "provider_task_progress_invalid",
+                    "the Provider returned inconsistent task progress",
+                )
+            }
+            ProviderErrorKind::Internal => ApiError::internal(provider_error),
+        },
+        ProviderTaskProgressError::Storage(error) => ApiError::internal(error),
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TaskListQuery {
@@ -322,6 +424,14 @@ struct TaskDetailResponse {
     provider_id: ProviderId,
     provider_version: String,
     detail: RemoteTaskDetail,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskProgressResponse {
+    task_id: TaskId,
+    provider_id: ProviderId,
+    provider_version: String,
+    progress: RemoteProgress,
 }
 
 fn parse_provider_account_id(value: &str) -> Result<ProviderAccountId, ApiError> {

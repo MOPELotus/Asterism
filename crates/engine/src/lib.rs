@@ -13,6 +13,7 @@ mod scan;
 mod scan_job;
 mod scan_worker;
 mod task_detail;
+mod task_progress;
 mod transition;
 
 pub use assessment::{
@@ -55,6 +56,10 @@ pub use scan_worker::{ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedule
 pub use task_detail::{
     ProviderTaskDetailError, ProviderTaskDetailResult, ProviderTaskDetailService,
     ReadTaskDetailCommand,
+};
+pub use task_progress::{
+    ProviderTaskProgressError, ProviderTaskProgressResult, ProviderTaskProgressService,
+    ReadTaskProgressCommand,
 };
 pub use transition::{
     ExecutionTransitionError, OrchestrationTransitionError, transition_execution,

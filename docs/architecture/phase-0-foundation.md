@@ -1695,3 +1695,18 @@ percentage. They never infer duration, score or partial progress from localized
 list text. Foreign identities and mismatched detail results fail as protocol
 drift, and all evidence remains offline-only until live-sanitized fixtures are
 recorded.
+
+## One-hundred-and-twelfth Phase 0 slice
+
+Fresh `TaskProgressRead` is now reachable through one owner-scoped Core service,
+`GET /api/v1/tasks/{task_id}/progress`, and `asterismctl task progress`. Core
+requires the stored Task to advertise `ProgressRead`, resolves its actual
+ProviderAccount, requires authenticated state and passes only opaque credential
+references to the registered Provider capability.
+
+The transport returns stable Task, Provider and implementation-version context
+with the fresh normalized progress. Percentages above 100 fail at the Core
+boundary. Missing task/provider capabilities, remote changes, user action, rate
+limits, temporary failures and malformed Provider results receive distinct
+stable API classifications, and the read neither persists a scan snapshot nor
+changes orchestration state.
