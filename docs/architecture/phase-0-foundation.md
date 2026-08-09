@@ -1783,3 +1783,20 @@ The route is documented in the generated OpenAPI surface and rejects malformed
 Task IDs before any Provider access. It remains a read-only inspection boundary:
 no Question persistence, answer lookup, draft creation or submission authority
 is implied by this API.
+
+## One-hundred-and-eighteenth Phase 0 slice
+
+The Chaoxing Provider now has a deterministic offline parser for the locked
+CxKitty mobile Work and Exam Question structures, cross-checked against the
+current OCS type-selector taxonomy. Synthetic sanitized fixtures cover
+attempt-local identity, ordering, choice options, extended Question types and
+non-fetchable attachment labels. The parser rejects duplicate identities,
+missing supported structure, login documents and unbounded input instead of
+returning an incomplete set.
+
+This parser is intentionally not yet registered as a live Provider capability.
+It never reads hidden/current answer fields, fetch URLs or submission-form
+tokens, and emits only Domain Question data plus short-lived Question
+references. Native transport and the all-or-nothing attempt cache remain a
+separate following slice, so offline fixtures are not presented as real-account
+verification.

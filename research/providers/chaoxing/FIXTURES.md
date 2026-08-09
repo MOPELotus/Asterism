@@ -30,6 +30,9 @@ fixtures/providers/chaoxing/
     list-empty-script-keywords.html
     list-mixed.html
     list-mixed.expected.json
+  questions/
+    work-mobile-mixed.html
+    exam-mobile-mixed.html
   chapter/
     list-mixed.html
     list-mixed.expected.json
@@ -51,6 +54,10 @@ and completed state, the exact resource type split, empty card slots, execution
 token redaction, immediate Document/Read routing, Video object/report metadata,
 donor-compatible signature construction, bounded playback settings,
 idempotence and fresh-card result verification.
+The Question fixtures model the locked CxKitty mobile Work and Exam structures:
+attempt-local IDs, type inputs, stems, options and non-fetchable attachment
+labels are retained, while current/hidden answer inputs and every submission
+field are deliberately excluded from normalized output.
 
 ## Required live-sanitized fixture sets
 

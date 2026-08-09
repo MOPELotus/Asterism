@@ -11,6 +11,7 @@ mod inventory;
 mod metadata;
 mod native_http;
 mod provider;
+mod question_parser;
 mod resource_execution;
 mod resource_inventory;
 mod runtime_settings;
@@ -33,6 +34,9 @@ pub use native_http::{
     ChaoxingCookieSession, ChaoxingSessionResolver, NativeChaoxingInventoryTransport,
 };
 pub use provider::{build_development_provider, build_development_provider_with_renewal};
+pub use question_parser::{
+    ParsedChaoxingQuestion, parse_exam_question_page, parse_work_question_page,
+};
 pub use resource_execution::ChaoxingResourceExecution;
 pub use resource_inventory::parse_chapter_resource_inventory;
 pub use stored_session::StoredChaoxingSessionResolver;
