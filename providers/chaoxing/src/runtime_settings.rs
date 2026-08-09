@@ -74,6 +74,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 },
                 default: ProviderSettingValue::DecimalMillis(1_000),
                 scopes: scopes.clone(),
+                core_behavior: None,
             },
             ProviderSettingDefinition {
                 key: VIDEO_PROGRESS_INTERVAL_KEY.to_owned(),
@@ -87,6 +88,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 },
                 default: ProviderSettingValue::DurationSeconds(60),
                 scopes,
+                core_behavior: None,
             },
         ],
     }

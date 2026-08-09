@@ -1342,6 +1342,7 @@ mod tests {
                     ProviderSettingScope::ProviderAccount,
                     ProviderSettingScope::Task,
                 ]),
+                core_behavior: None,
             }],
         };
         let mut registry = ProviderRegistry::default();

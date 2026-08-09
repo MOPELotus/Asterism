@@ -1877,6 +1877,7 @@ mod tests {
                     ProviderSettingScope::ProviderAccount,
                     ProviderSettingScope::Task,
                 ]),
+                core_behavior: None,
             }],
         }
     }

@@ -11,7 +11,8 @@ pub use error::{ProviderError, ProviderErrorKind, ProviderResult};
 pub use metadata::{ProviderCapability, ProviderMetadata, VerificationLevel};
 pub use registry::{ProviderEntry, ProviderRegistry, RegistryError};
 pub use settings::{
-    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
-    ProviderSettingDefinition, ProviderSettingKind, ProviderSettingScope, ProviderSettingValue,
-    ProviderSettingsError, ResolvedProviderRuntimeSettings,
+    ProviderExecutionConcurrency, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
+    ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior, ProviderSettingDefinition,
+    ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, ProviderSettingsError,
+    ResolvedProviderRuntimeSettings,
 };

@@ -8,6 +8,8 @@ const MAX_SETTING_LABEL_BYTES: usize = 120;
 const MAX_SETTING_DESCRIPTION_BYTES: usize = 400;
 const MAX_CHOICE_OPTIONS: usize = 64;
 const MAX_CHOICE_BYTES: usize = 120;
+const MAX_PROVIDER_EXECUTION_CONCURRENCY: i64 = 64;
+const MAX_ACCOUNT_EXECUTION_CONCURRENCY: i64 = 16;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +26,30 @@ pub enum ProviderRuntimeSettingSource {
     Provider,
     ProviderAccount,
     Task,
+}
+
+/// A portable Core scheduling behavior attached to one Provider-authored
+/// setting. Core interprets this enum and never Provider-specific key names.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderSettingCoreBehavior {
+    ProviderExecutionConcurrency,
+    AccountExecutionConcurrency,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderExecutionConcurrency {
+    pub provider: u32,
+    pub account: u32,
+}
+
+impl Default for ProviderExecutionConcurrency {
+    fn default() -> Self {
+        Self {
+            provider: 1,
+            account: 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -68,6 +94,8 @@ pub struct ProviderSettingDefinition {
     pub kind: ProviderSettingKind,
     pub default: ProviderSettingValue,
     pub scopes: BTreeSet<ProviderSettingScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_behavior: Option<ProviderSettingCoreBehavior>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -106,6 +134,7 @@ impl ProviderRuntimeSettingsSchema {
         }
 
         let mut keys = BTreeSet::new();
+        let mut core_behaviors = BTreeSet::new();
         for definition in &self.definitions {
             if !valid_key(&definition.key)
                 || !bounded_text(&definition.display_name, MAX_SETTING_LABEL_BYTES)
@@ -126,6 +155,12 @@ impl ProviderRuntimeSettingsSchema {
             definition
                 .kind
                 .validate_value(&definition.key, &definition.default)?;
+            if let Some(behavior) = definition.core_behavior {
+                if !core_behaviors.insert(behavior) {
+                    return Err(ProviderSettingsError::DuplicateCoreBehavior { behavior });
+                }
+                validate_core_behavior(definition, behavior)?;
+            }
         }
         Ok(())
     }
@@ -288,6 +323,43 @@ impl ProviderRuntimeSettingsSchema {
         }
         Ok(())
     }
+
+    /// Resolves the Core-owned execution admission limits from a validated,
+    /// immutable settings snapshot. Schemas without these optional hints keep
+    /// the conservative one-at-a-time Provider and account defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] when the snapshot or a scheduling
+    /// hint is incompatible with this schema.
+    pub fn execution_concurrency(
+        &self,
+        resolved: &ResolvedProviderRuntimeSettings,
+    ) -> Result<ProviderExecutionConcurrency, ProviderSettingsError> {
+        self.validate_resolved(resolved)?;
+        let mut limits = ProviderExecutionConcurrency::default();
+        for definition in &self.definitions {
+            let Some(behavior) = definition.core_behavior else {
+                continue;
+            };
+            let value = resolved
+                .integer(&definition.key)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| ProviderSettingsError::InvalidCoreBehavior {
+                    key: definition.key.clone(),
+                    behavior,
+                })?;
+            match behavior {
+                ProviderSettingCoreBehavior::ProviderExecutionConcurrency => {
+                    limits.provider = value;
+                }
+                ProviderSettingCoreBehavior::AccountExecutionConcurrency => {
+                    limits.account = value;
+                }
+            }
+        }
+        Ok(limits)
+    }
 }
 
 impl ProviderSettingKind {
@@ -434,6 +506,15 @@ pub enum ProviderSettingsError {
     InvalidDefinition { key: String },
     #[error("provider runtime settings definition `{key}` is duplicated")]
     DuplicateDefinition { key: String },
+    #[error("provider runtime settings declare Core behavior `{behavior:?}` more than once")]
+    DuplicateCoreBehavior {
+        behavior: ProviderSettingCoreBehavior,
+    },
+    #[error("provider runtime settings definition `{key}` has invalid Core behavior `{behavior:?}")]
+    InvalidCoreBehavior {
+        key: String,
+        behavior: ProviderSettingCoreBehavior,
+    },
     #[error("provider runtime settings definition `{key}` has invalid constraints")]
     InvalidConstraint { key: String },
     #[error("provider runtime settings patch uses a different schema version")]
@@ -451,6 +532,45 @@ pub enum ProviderSettingsError {
     },
     #[error("provider runtime settings value for `{key}` is invalid")]
     InvalidValue { key: String },
+}
+
+fn validate_core_behavior(
+    definition: &ProviderSettingDefinition,
+    behavior: ProviderSettingCoreBehavior,
+) -> Result<(), ProviderSettingsError> {
+    let maximum = match behavior {
+        ProviderSettingCoreBehavior::ProviderExecutionConcurrency => {
+            MAX_PROVIDER_EXECUTION_CONCURRENCY
+        }
+        ProviderSettingCoreBehavior::AccountExecutionConcurrency => {
+            MAX_ACCOUNT_EXECUTION_CONCURRENCY
+        }
+    };
+    let valid_kind = matches!(
+        definition.kind,
+        ProviderSettingKind::Integer {
+            minimum: 1,
+            maximum: declared_maximum,
+            step: 1,
+        } if declared_maximum <= maximum
+    );
+    let valid_scopes = match behavior {
+        ProviderSettingCoreBehavior::ProviderExecutionConcurrency => {
+            definition.scopes.len() == 1
+                && definition.scopes.contains(&ProviderSettingScope::Provider)
+        }
+        ProviderSettingCoreBehavior::AccountExecutionConcurrency => {
+            definition.scopes.contains(&ProviderSettingScope::Provider)
+        }
+    };
+    if valid_kind && valid_scopes {
+        Ok(())
+    } else {
+        Err(ProviderSettingsError::InvalidCoreBehavior {
+            key: definition.key.clone(),
+            behavior,
+        })
+    }
 }
 
 fn valid_key(value: &str) -> bool {
@@ -501,6 +621,7 @@ mod tests {
                         ProviderSettingScope::Provider,
                         ProviderSettingScope::Task,
                     ]),
+                    core_behavior: None,
                 },
                 ProviderSettingDefinition {
                     key: "video.playback_rate".to_owned(),
@@ -517,6 +638,7 @@ mod tests {
                         ProviderSettingScope::ProviderAccount,
                         ProviderSettingScope::Task,
                     ]),
+                    core_behavior: None,
                 },
             ],
         }
@@ -631,6 +753,71 @@ mod tests {
         assert!(matches!(
             schema.validate_resolved(&unknown),
             Err(ProviderSettingsError::UnknownSetting { .. })
+        ));
+    }
+
+    #[test]
+    fn execution_concurrency_uses_declared_core_behaviors_and_safe_defaults() {
+        let mut schema = schema();
+        schema.definitions[0].core_behavior =
+            Some(ProviderSettingCoreBehavior::AccountExecutionConcurrency);
+        let resolved = schema
+            .resolve(
+                None,
+                None,
+                Some(&patch([(
+                    "video.max_concurrency",
+                    ProviderSettingValue::Integer(4),
+                )])),
+            )
+            .unwrap();
+
+        assert_eq!(
+            schema.execution_concurrency(&resolved).unwrap(),
+            ProviderExecutionConcurrency {
+                provider: 1,
+                account: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn core_behaviors_reject_duplicates_wrong_scopes_and_unsafe_caps() {
+        let mut duplicate = schema();
+        for definition in &mut duplicate.definitions {
+            definition.kind = ProviderSettingKind::Integer {
+                minimum: 1,
+                maximum: 8,
+                step: 1,
+            };
+            definition.default = ProviderSettingValue::Integer(1);
+            definition.core_behavior =
+                Some(ProviderSettingCoreBehavior::AccountExecutionConcurrency);
+        }
+        assert!(matches!(
+            duplicate.validate(),
+            Err(ProviderSettingsError::DuplicateCoreBehavior { .. })
+        ));
+
+        let mut wrong_scope = schema();
+        wrong_scope.definitions[0].core_behavior =
+            Some(ProviderSettingCoreBehavior::ProviderExecutionConcurrency);
+        assert!(matches!(
+            wrong_scope.validate(),
+            Err(ProviderSettingsError::InvalidCoreBehavior { .. })
+        ));
+
+        let mut unsafe_cap = schema();
+        unsafe_cap.definitions[0].kind = ProviderSettingKind::Integer {
+            minimum: 1,
+            maximum: 17,
+            step: 1,
+        };
+        unsafe_cap.definitions[0].core_behavior =
+            Some(ProviderSettingCoreBehavior::AccountExecutionConcurrency);
+        assert!(matches!(
+            unsafe_cap.validate(),
+            Err(ProviderSettingsError::InvalidCoreBehavior { .. })
         ));
     }
 }
