@@ -2,8 +2,9 @@ use asterism_auth::TokenDigest;
 use asterism_domain::{
     AuditActor, AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId,
     AuthSession, AuthSessionId, CreditAccount, CreditReservation, CreditReservationId,
-    CreditTransactionId, ExecutionId, ExecutionLease, ProviderAccount, ProviderAccountId,
-    ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+    CreditTransactionId, Execution, ExecutionId, ExecutionLease, OrchestrationState,
+    ProviderAccount, ProviderAccountId, ServiceToken, ServiceTokenId, Task, TaskId, Timestamp,
+    User, UserId, WebSession, WebSessionId,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -257,6 +258,40 @@ pub trait ExecutionLeaseRepository: Send + Sync {
         execution_id: ExecutionId,
         worker_id: &str,
     ) -> Result<bool, StorageError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionScheduleRequest<'a> {
+    pub execution: &'a Execution,
+    pub expected_task_state: OrchestrationState,
+    pub idempotency_scope: &'a str,
+    pub idempotency_key: &'a str,
+    pub actor: AuditActor,
+    pub correlation_id: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionScheduleOutcome {
+    Created(Execution),
+    Existing(Execution),
+    IdempotencyConflict,
+    TaskStateConflict,
+}
+
+/// Atomic execution request boundary. Creating the execution, moving the task
+/// to `scheduled`, enqueuing the scheduler job, and recording audit/outbox
+/// entries either all commit or all roll back.
+#[async_trait]
+pub trait ExecutionRepository: Send + Sync {
+    async fn schedule_execution(
+        &self,
+        request: ExecutionScheduleRequest<'_>,
+    ) -> Result<ExecutionScheduleOutcome, StorageError>;
+
+    async fn find_execution(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<Execution>, StorageError>;
 }
 
 #[async_trait]

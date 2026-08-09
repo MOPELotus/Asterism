@@ -1116,3 +1116,19 @@ Work and Exam do not borrow this path and advertise no newly implemented
 execution capability. Provider-to-Core execution dispatch and live-account
 behavior remain unverified, so Chaoxing stays `Development`; no Capture path is
 introduced.
+
+## Eighty-first Phase 0 slice
+
+Core execution requests now have a dedicated SQLite repository and persisted
+idempotency scope/key. One immediate transaction moves the Task from its
+expected orchestration state to `Scheduled`, creates the `Execution`, enqueues
+the unified Scheduler job, appends the sanitized audit record, and writes the
+durable execution-state event. A failure at any point rolls the whole request
+back.
+
+Replaying the same scoped key returns the original Execution without creating
+another job, audit, or event; reusing it for a different Task fails closed.
+Existing databases migrate without fabricating keys for historical rows. This
+slice establishes the request-side transaction boundary only: worker-owned
+Attempt, Progress, terminal-state persistence and Provider dispatch remain the
+next Core execution slices.

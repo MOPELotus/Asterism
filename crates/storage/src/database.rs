@@ -131,7 +131,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 18);
+        assert_eq!(migration_count, 19);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -249,5 +249,41 @@ mod tests {
             row.get::<String, _>("updated_at"),
             "2026-08-09T00:00:00.000000000Z"
         );
+    }
+
+    #[tokio::test]
+    async fn execution_idempotency_migration_preserves_existing_rows() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE executions (\
+                 id TEXT PRIMARY KEY NOT NULL,\
+                 task_id TEXT NOT NULL,\
+                 request_source TEXT NOT NULL,\
+                 state TEXT NOT NULL,\
+                 created_at TEXT NOT NULL\
+             ) STRICT;\
+             INSERT INTO executions (id, task_id, request_source, state, created_at)\
+             VALUES ('execution-a', 'task-a', 'system', 'requested',\
+                     '2026-08-09T00:00:00.000000000Z');",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/019_execution_idempotency.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let row = sqlx::query(
+            "SELECT idempotency_scope, idempotency_key FROM executions WHERE id = 'execution-a'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(row.get::<Option<String>, _>("idempotency_scope").is_none());
+        assert!(row.get::<Option<String>, _>("idempotency_key").is_none());
     }
 }

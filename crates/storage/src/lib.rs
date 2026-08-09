@@ -4,6 +4,7 @@ mod auth_bootstrap;
 mod auth_session;
 mod credit;
 mod database;
+mod execution;
 mod lease;
 mod outbox;
 mod provider_account;
@@ -20,6 +21,7 @@ pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
 pub use credit::{CreditGrant, SqliteCreditRepository};
 pub use database::{Database, StorageError};
+pub use execution::SqliteExecutionRepository;
 pub use lease::{LeaseAcquireOutcome, SqliteExecutionLeaseRepository};
 pub use outbox::{FailureDisposition, OutboxHealth, OutboxRecord, SqliteOutboxRepository};
 pub use provider_account::SqliteProviderAccountRepository;
@@ -29,9 +31,10 @@ pub use repository::{
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, CreditRepository, ExecutionLeaseRepository,
-    OutboxRepository, ProviderAccountRepository, ProviderAccountRuntimeRepository,
-    ScanScheduleRepository, SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository,
-    TaskRepository, UserRepository,
+    ExecutionRepository, ExecutionScheduleOutcome, ExecutionScheduleRequest, OutboxRepository,
+    ProviderAccountRepository, ProviderAccountRuntimeRepository, ScanScheduleRepository,
+    SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository, TaskRepository,
+    UserRepository,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,
