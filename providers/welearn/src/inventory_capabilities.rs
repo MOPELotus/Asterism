@@ -35,7 +35,7 @@ impl WellearnInventoryDocument {
         Ok(Self(document))
     }
 
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }

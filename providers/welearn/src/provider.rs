@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
+use asterism_networking::ResolvedNetworkProfile;
 use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
 
 use crate::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCourseInventory,
     WellearnCourseInventoryTransport, WellearnSessionResolver, WellearnTaskInventory,
     WellearnTaskInventoryTransport, metadata::development_metadata,
+    native_http::NativeWellearnInventoryTransport,
 };
 
 /// Composes the complete development entry around injected authentication and
@@ -46,8 +48,33 @@ pub fn build_development_provider(
     })
 }
 
+/// Composes the Development entry with native Course/Task HTTP and an injected
+/// authentication exchange. Calling this function does not register it.
+///
+/// # Errors
+///
+/// Returns a sanitized Provider error if metadata or the shared HTTP client
+/// cannot be initialized.
+pub fn build_development_provider_with_native_inventory(
+    network: &ResolvedNetworkProfile,
+    authentication_transport: Arc<dyn WellearnAuthenticationTransport>,
+    sessions: Arc<dyn WellearnSessionResolver>,
+) -> ProviderResult<ProviderEntry> {
+    let inventory = Arc::new(NativeWellearnInventoryTransport::try_new(
+        network,
+        sessions.clone(),
+    )?);
+    build_development_provider(
+        authentication_transport,
+        sessions,
+        inventory.clone(),
+        inventory,
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use asterism_networking::NetworkProfile;
     use asterism_provider_api::{
         ProviderContext, ProviderError, ProviderErrorKind, ProviderRegistry, RemoteCourse,
     };
@@ -131,6 +158,18 @@ mod tests {
                 .get(&asterism_domain::ProviderId::new("welearn").unwrap())
                 .is_some()
         );
+
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .expect("built-in network profile");
+        let boundaries = Arc::new(UnusedBoundaries);
+        let native = build_development_provider_with_native_inventory(
+            &network,
+            boundaries.clone(),
+            boundaries,
+        )
+        .unwrap();
+        let mut registry = ProviderRegistry::default();
+        registry.register(native).unwrap();
     }
 
     fn unused() -> ProviderError {

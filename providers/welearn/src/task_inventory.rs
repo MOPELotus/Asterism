@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::course_inventory::{
-    invalid_response, optional_scalar_text, protocol_drift, required_remote_component,
-    required_text,
+    course_id_from_remote, invalid_response, optional_scalar_text, protocol_drift,
+    required_remote_component, required_text,
 };
 
 const MAX_UNIT_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -84,7 +84,7 @@ pub fn parse_task_inventory(
     units_document: &str,
     leaves_documents: &[WellearnScoLeavesDocument],
 ) -> ProviderResult<Vec<RemoteTask>> {
-    let course_id = validate_course(course)?;
+    let course_id = course_id_from_remote(course)?;
     let units = parse_units(units_document)?;
     if leaves_documents.len() != units.len() {
         return Err(protocol_drift(
@@ -140,31 +140,6 @@ pub fn parse_task_inventory(
     Ok(tasks.into_values().collect())
 }
 
-fn validate_course(course: &RemoteCourse) -> ProviderResult<String> {
-    if course
-        .metadata_sanitized
-        .get("schema")
-        .and_then(Value::as_str)
-        != Some("welearn.course.v1")
-    {
-        return Err(protocol_drift(
-            "WELearn Task inventory received a foreign Course",
-        ));
-    }
-    let course_id = course
-        .route_context
-        .get("welearn.cid")
-        .ok_or_else(|| protocol_drift("WELearn Course has no scan-local Course ID"))?;
-    let course_id =
-        required_remote_component(Some(&Value::String(course_id.to_owned())), "Course ID")?;
-    if course.remote_id != format!("course:{course_id}") {
-        return Err(protocol_drift(
-            "WELearn Course route identity does not match its remote identity",
-        ));
-    }
-    Ok(course_id)
-}
-
 fn parse_units(document: &str) -> ProviderResult<Vec<WellearnUnit>> {
     if document.is_empty() || document.len() > MAX_UNIT_DOCUMENT_BYTES {
         return Err(invalid_response(
@@ -197,6 +172,10 @@ fn parse_units(document: &str) -> ProviderResult<Vec<WellearnUnit>> {
             })
         })
         .collect()
+}
+
+pub(crate) fn unit_count(document: &str) -> ProviderResult<usize> {
+    parse_units(document).map(|units| units.len())
 }
 
 fn parse_leaves(

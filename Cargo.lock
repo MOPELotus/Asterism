@@ -283,6 +283,7 @@ name = "asterism-provider-welearn"
 version = "0.1.0"
 dependencies = [
  "asterism-domain",
+ "asterism-networking",
  "asterism-provider-api",
  "asterism-secrets",
  "async-trait",

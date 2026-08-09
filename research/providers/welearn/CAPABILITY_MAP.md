@@ -4,8 +4,8 @@
 |---|---|---|---|
 | Authentication | Fanyuchang 2026 | Reference | Injected Password/ImportedCookie capability, deterministic form encoding and typed outcome classification are offline-covered; native OIDC HTTP remains pending |
 | Stored session validation | Fanyuchang 2026 | Reference | Validate with an authenticated read; never infer validity from Cookie presence |
-| CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Injected authenticated read capability parses `authCourse.aspx?action=gmc` conservatively; native HTTP pending |
-| TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Injected Course-scoped capability requires a complete `courseunits` → one `scoLeaves` response per Unit set; native HTTP pending |
+| CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Native authenticated `authCourse.aspx?action=gmc` read is implemented behind shared NetworkProfile; live pending |
+| TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Native Course page → `courseunits` → one `scoLeaves` response per Unit is implemented all-or-nothing; live pending |
 | TaskProgressRead | YZBRH | Reference | Fresh CMI and SCO facts; completion and progress are distinct |
 | DurationRead | YZBRH | Reference | Read `session_time` and `total_time` independently from completion |
 | ResourceExecution | Fanyuchang 2026 + YZBRH | Reference | Start/keep/finalize lifecycle; not implemented until readback is modeled |
@@ -28,5 +28,7 @@ The crate now provides this parser boundary and synthetic fixtures. It also
 implements Password/ImportedCookie orchestration behind injected transport and
 stored-session resolver contracts. Metadata remains `Development` and advertises
 Authentication, CourseInventory and TaskInventory. A registry-consistent
-development entry can be composed from injected boundaries, but no native HTTP
-transport or daemon registration exists yet.
+development entry can be composed from injected boundaries. A shared-policy,
+non-redirecting native Course/Task HTTP transport now exists, but password SSO,
+stored credential resolution, daemon registration and all live validation remain
+pending.

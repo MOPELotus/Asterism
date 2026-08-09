@@ -69,6 +69,31 @@ pub fn parse_course_inventory(document: &str) -> ProviderResult<Vec<RemoteCourse
     Ok(courses.into_values().collect())
 }
 
+pub(crate) fn course_id_from_remote(course: &RemoteCourse) -> ProviderResult<String> {
+    if course
+        .metadata_sanitized
+        .get("schema")
+        .and_then(Value::as_str)
+        != Some("welearn.course.v1")
+    {
+        return Err(protocol_drift(
+            "WELearn inventory received a foreign Course",
+        ));
+    }
+    let course_id = course
+        .route_context
+        .get("welearn.cid")
+        .ok_or_else(|| protocol_drift("WELearn Course has no scan-local Course ID"))?;
+    let course_id =
+        required_remote_component(Some(&Value::String(course_id.to_owned())), "Course ID")?;
+    if course.remote_id != format!("course:{course_id}") {
+        return Err(protocol_drift(
+            "WELearn Course route identity does not match its remote identity",
+        ));
+    }
+    Ok(course_id)
+}
+
 pub(crate) fn required_remote_component(
     value: Option<&Value>,
     label: &'static str,

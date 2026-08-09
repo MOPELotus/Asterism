@@ -12,6 +12,7 @@ fixtures/providers/welearn/
   auth/password-rejected.json
   auth/password-captcha.json
   auth/password-sms.json
+  courses/course-context.html
   courses/list-mixed.json
   courses/list-mixed.expected.json
   units/list-mixed.json
@@ -39,7 +40,7 @@ fixtures/providers/welearn/
   auth/password-sms-live.json
   courses/list-empty.json
   courses/list-mixed.json
-  courses/course-context.html
+  courses/course-context-live.html
   units/list-visible-hidden.json
   tasks/leaves-pending-completed.json
   cmi/not-attempted.json

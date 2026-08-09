@@ -55,7 +55,15 @@ explicit Course scan, one Unit document plus exactly one `scoLeaves` response
 per Unit. An empty Unit response is valid; a missing, duplicated, out-of-range
 or cross-Unit response rejects the whole scan. Authentication and both inventory
 slots can be composed into a registry-consistent Development entry using
-injected transports, but no native request is issued yet.
+injected transports.
+
+The native inventory adapter now uses the shared non-redirecting HTTP client.
+It reads the fixed HTTPS Course endpoint, re-fetches the selected Course page,
+extracts one unambiguous `uid`/`classid` pair, posts `courseunits`, then reads
+every indexed `scoLeaves` document with the same resolved Cookie. HTTP status,
+login redirects/pages, response content type, UTF-8 and body limits are typed
+before parser entry. This is native-boundary coverage only; it has not been run
+against a live account.
 
 ## CMI lifecycle
 

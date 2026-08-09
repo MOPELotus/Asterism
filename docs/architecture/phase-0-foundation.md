@@ -2320,3 +2320,22 @@ TaskInventory, and a registry-consistent Provider entry can be composed from
 their injected boundaries. No TaskDetail, Progress, Duration, Execution,
 BrowserBridge or runtime setting is claimed. Native HTTP, stored credential
 resolution and daemon registration remain later checkpoints.
+
+## One-hundred-and-forty-eighth Phase 0 slice
+
+WELearn Course and Task inventory now have a native reqwest transport built only
+from the shared resolved NetworkProfile. Redirects remain disabled. Fixed HTTPS
+routes cover `authCourse`, the fresh Course page, `courseunits` and every indexed
+`scoLeaves` read; dynamic query values are URL-encoded rather than interpolated.
+
+One Task scan resolves its account Cookie once, reacquires `uid` and `classid`
+from the selected Course page, and uses that same session for Unit and SCO reads.
+Course context accepts repeated identical facts but rejects missing, conflicting
+or unsafe values, remains redacted in diagnostics and is never serialized.
+Response status, bounded Retry-After, login redirects/pages, content type,
+content length, UTF-8 and streaming body size are classified before parsing.
+
+The native inventory transport can compose a registry-consistent Development
+entry with an injected authentication exchange. Password SSO/OIDC HTTP, stored
+credential resolution, renewal and daemon registration are still absent, and
+no real WELearn account was contacted by this checkpoint.
