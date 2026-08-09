@@ -1,0 +1,28 @@
+{
+  "code": 0,
+  "msg": "success",
+  "rt": {
+    "duration_time": 26,
+    "leafs": {
+      "group-1": {
+        "duration": 17,
+        "state": {
+          "pass": 1,
+          "pass2": 1,
+          "perm": 1
+        }
+      },
+      "group-2": {
+        "duration": 9,
+        "state": {
+          "pass": 0,
+          "pass2": 0,
+          "perm": 1
+        }
+      }
+    },
+    "open_id": "synthetic-open-id",
+    "tutorialId": "course-v2:synthetic+rw+20260809",
+    "unit_id": "unit-1"
+  }
+}

@@ -12,6 +12,7 @@
 | New tree role appears | Audited roles are Unit, Section, Node, Link and Group | Reject unknown roles and add a sanitized fixture before mapping them |
 | Group ID disappears or becomes URL-only | Historical parser falls back to URLs for generic nodes | Require explicit bounded Group IDs; never persist route URLs as Task identity |
 | Completion flags gain new values | Current donor requires `pass == pass2 == perm == 1` | Keep each flag independent and map only sanitized verified combinations |
+| Annotator token claims/signature change | Both backend donors independently use the same HS256 openid claims and millisecond expiry | Keep generation private to account-bound GET reads, pin an exact-time vector and fail closed on header/clock errors |
 | Duration unit/meaning drifts | Summary exposes integer `duration` without a proven unit | Preserve raw value only until live before/after measurements establish semantics |
 | Page residence stops producing duration | Current userscript relies on active page lifecycle | Prefer native network evidence; otherwise isolate a headless compatibility worker and verify fresh duration |
 | Direct submit completes without duration | Backend donors submit answers independently of page residence | Keep CompletionService and DurationService separate; never claim execution from completion alone |
@@ -20,7 +21,8 @@
 
 Before advancing verification:
 
-1. validate Password login, captcha classification, JWT expiry and recovery;
+1. validate Password login, captcha classification, JWT/annotator acceptance,
+   expiry and recovery;
 2. compare CourseResource and Unit/Section/Micro/Group trees with the visible
    account;
 3. record per-Group flags plus Course/Unit completion and duration before and

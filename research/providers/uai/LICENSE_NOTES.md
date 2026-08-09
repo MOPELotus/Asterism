@@ -8,6 +8,10 @@
 - `uxudjs/UnipusAIAutoPlayer` declares GPL-3.0. It is Reference-only: Asterism
   records the observable page-residence lifecycle and does not copy DOM or UI
   implementation code.
+- The Apache and MIT backend donors independently expose the same fixed
+  annotator-token claims/signature protocol. Asterism implements that protocol
+  from the recorded contract only and confines generated tokens to
+  account-bound read-only progress requests.
 - Usernames, passwords, JWTs, open IDs, annotator tokens, user IDs, class IDs,
   instance routes, answer material and donor sample identities are excluded
   from committed fixtures.

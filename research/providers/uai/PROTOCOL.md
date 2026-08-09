@@ -92,11 +92,25 @@ GET https://uai.unipus.cn/api/tla/learningDetail/studyRecord/
     &appUserId={appUserId}&ssoId={ssoId}
 ```
 
-The per-Unit progress donor marks a Group complete only when `pass`, `pass2`
-and `perm` are all `1`. The independent summary response contains both
+Both backend donors generate the same HS256 `x-annotator-auth-token` from the
+account-bound openid and send it beside the raw Authorization JWT. The native
+reader recreates that fixed protocol token internally for this GET only; both
+headers are sensitive and neither is logged or persisted. A fresh resource
+detail is rebound before each progress URL is built.
+
+Normalized Group identity is `group:{resourceId}:{unitId}:{groupId}` so the
+per-Unit route never guesses an ancestor or persists `courseInstanceId`. The
+response must repeat the Unit and contain the exact Group leaf. A Group maps to
+Completed/100 only when `pass`, `pass2` and `perm` are all `1`; every other
+valid flag combination remains Unknown with no percentage.
+
+The independent summary response contains both
 `finishProgress` and `duration` for total and Unit records. Their coexistence is
 evidence that completion/progress and learning duration are separate; it is not
 yet evidence for duration units or reporting semantics.
+
+The per-Group response can also contain numeric `duration`. Asterism retains it
+only as `duration_raw`; it never populates `duration_seconds` from that field.
 
 The current userscript distributes a requested residence time across visible
 Unit/Section/Micro pages, tabs and tasks while keeping the real page active. It

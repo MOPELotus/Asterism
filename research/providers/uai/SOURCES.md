@@ -14,4 +14,6 @@ is an independent route/schema cross-check and proves that completion,
 progress and duration are separate observations. The GPL userscript is used
 only to understand browser lifecycle behavior; no implementation code is
 copied. Asterism's native authentication boundary and read-only parsers remain
-offline-covered; no donor implementation code is copied.
+offline-covered. The two backend donors independently corroborate the
+annotator-token/progress contract; Asterism reimplements that bounded protocol
+without copying donor implementation code.

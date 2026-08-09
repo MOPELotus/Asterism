@@ -63,7 +63,7 @@ Phase 0 已建立并持续完善以下基础：
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
 - Chaoxing 能力级上游审计、独立 Chapter / Resource / Work / Exam TaskInventory、按稳定身份重新发现并经 Core 校验的 TaskDetail / Progress API 与 CLI、四类任务的模块化只读进度复核、明确区分 Chapter Work 与独立 Work / Exam 的题面离线解析、仅在新鲜详情确认可作答后开放的独立 Work 原生题目读取与无值 SubmissionBuild 预览、Document / Read / Video 原生执行、有界 Work 详情状态复核、Cookie 自动续登与显式开发验证入口；
 - WELearn clean-room 上游审计、Password / ImportedCookie 认证编排与有界 Course / Task inventory capability，验证码/短信正确进入 HumanRequired，完成状态、可见性和未确认单位的 donor 时长事实保持独立；Password/OIDC 手动重定向、限定域 Cookie 收集、Core 持久会话解析与原子自动续登、Course / Unit / SCO 原生读取及只读 CMI `TaskProgressRead` 均已接入，并提供默认关闭的 daemon 开发注册入口；CMI 时间仍按原始事实保留、不换算秒数，真实账号验证仍待完成；
-- UAI clean-room 上游审计、Password / ImportedToken 认证编排、Core scoped 持久会话解析及 CourseResource / Unit / Section / Micro / Group 有界解析；原生 Password JSON 登录、只读 user-info JWT 校验以及 Course/Task inventory 已复用共享网络策略，Task 扫描先重新绑定 fresh CourseResource detail 再读取嵌套 tree，openid/JWT 作为原子加密 CompositeSession 保存，滑块验证码进入 HumanRequired；Course 点数、Task completion 和 Learning Duration 保持独立，自动续登、原生 progress 读取与时长上报尚未接入；
+- UAI clean-room 上游审计、Password / ImportedToken 认证编排、Core scoped 持久会话解析及 CourseResource / Unit / Section / Micro / Group 有界解析；原生 Password JSON 登录、只读 user-info JWT 校验、Course/Task inventory 与 per-Unit `TaskProgressRead` 已复用共享网络策略，Task/Progress 均先重新绑定 fresh CourseResource detail，openid/JWT 作为原子加密 CompositeSession 保存，滑块验证码进入 HumanRequired；Group 仅在 pass/pass2/perm 均为 1 时完成，原始 duration 不换算秒数；自动续登、DurationRead/Report 与执行尚未接入；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
 正在进行的工作以 [Phase 0 架构检查点](docs/architecture/phase-0-foundation.md) 为准。内部 API 在第二批 Provider 完成前仍可能发生不兼容变更。

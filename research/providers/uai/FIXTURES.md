@@ -14,14 +14,16 @@ fixtures/providers/uai/
   courses/list-mixed.json
   courses/resource-detail.json
   tasks/tree-mixed.json
+  progress/unit-mixed.json
 ```
 
 They cover typed Password success/rejection/slider outcomes, strict atomic
 openid/JWT parsing, bounded user-info identity validation, Course →
 CourseResource flattening, paired point counts, fresh detail binding, redacted
-Course-instance routing, the outer/nested Course-tree envelope and
-Unit/Section/Micro/Group identity separation. Inline negative tests cover
-malformed/extra composite fields, duplicate
+Course-instance routing, the outer/nested Course-tree envelope,
+Unit/Section/Micro/Group identity separation and identity-bound per-Unit flags
+plus raw duration. Inline negative tests cover malformed/extra composite
+fields, duplicate
 resources/groups, misbound details/contexts, unknown roles and impossible point
 totals.
 
@@ -50,6 +52,7 @@ field names, placeholder identities and response/result codes.
 - Numeric and string CourseResource IDs normalize identically.
 - Duplicate resources or Groups fail the complete scan.
 - `courseInstanceId` remains operation-only and absent from serialized Tasks.
+- Stable Group identity contains CourseResource, Unit and Group components.
 - Course point totals never imply Group completion.
 - `base` labels never imply executable or assessment capability.
 - Unknown tree roles fail closed.

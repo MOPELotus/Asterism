@@ -1,15 +1,17 @@
 //! `uai` Provider implementation.
 //!
 //! The current Development checkpoint provides native Password/JWT
-//! authentication and read-only Course/Task inventory over the shared network
-//! policy. It makes no claim of live compatibility.
+//! authentication, read-only Course/Task inventory and Group progress over the
+//! shared network policy. It makes no claim of live compatibility.
 
+mod annotator;
 mod authentication;
 mod course_inventory;
 mod inventory_capabilities;
 mod metadata;
 mod native_authentication;
 mod native_http;
+mod progress;
 mod stored_session;
 mod task_inventory;
 
@@ -25,5 +27,9 @@ pub use inventory_capabilities::{
 pub use metadata::development_metadata;
 pub use native_authentication::NativeUaiAuthenticationTransport;
 pub use native_http::NativeUaiInventoryTransport;
+pub use progress::{
+    UaiGroupProgressSnapshot, UaiProgressDocument, UaiProgressTransport, UaiTaskProgress,
+    parse_group_progress,
+};
 pub use stored_session::StoredUaiSessionResolver;
 pub use task_inventory::parse_task_inventory;

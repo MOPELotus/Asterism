@@ -282,7 +282,7 @@ mod tests {
         assert!(
             tasks
                 .iter()
-                .all(|task| task.remote_id.starts_with("group:"))
+                .all(|task| { task.remote_id.starts_with("group:2001:unit-1:group-") })
         );
         assert!(format!("{capability:?}").contains("configured"));
 

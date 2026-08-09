@@ -13,7 +13,9 @@ asterism-networking = { path = "../../crates/networking" }
 asterism-provider-api = { path = "../../crates/provider-api" }
 asterism-secrets = { path = "../../crates/secrets" }
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
+hmac.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

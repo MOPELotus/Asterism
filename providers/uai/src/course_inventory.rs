@@ -121,6 +121,15 @@ pub fn parse_course_context(
     document: &str,
 ) -> ProviderResult<UaiCourseContext> {
     let resource_id = course_resource_id_from_remote(course)?;
+    parse_course_context_for_resource_id(resource_id, document)
+}
+
+pub(crate) fn parse_course_context_for_resource_id(
+    resource_id: String,
+    document: &str,
+) -> ProviderResult<UaiCourseContext> {
+    let resource_id =
+        required_remote_component(Some(&Value::String(resource_id)), "Course-resource ID")?;
     let root = parse_object(document, "Course-resource detail")?;
     require_success_if_present(&root, "Course-resource detail")?;
     let detail = root

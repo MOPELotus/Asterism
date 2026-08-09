@@ -2574,3 +2574,26 @@ and Node/Micro ancestry.
 This remains offline/native-boundary evidence and UAI is not daemon-registered.
 No session renewal, progress read, duration, execution, BrowserBridge or
 Capture behavior is added by this checkpoint.
+
+## One-hundred-and-sixtieth Phase 0 slice
+
+UAI now advertises native read-only `TaskProgressRead`. Group Task identities
+include stable CourseResource, Unit and Group components so progress routing
+does not guess ancestry or persist `courseInstanceId`. Each read resolves the
+account-bound openid/JWT, rebinds a fresh resource detail, then fetches the
+exact per-Unit progress document.
+
+Two frozen backend donors independently corroborate the HS256
+`x-annotator-auth-token` contract used beside the raw JWT. Asterism generates
+that token only inside this account-bound GET transport, marks both headers
+sensitive and pins the millisecond-expiry claims/signature with an exact-time
+test vector. Route segments, response status/media type/UTF-8 and a 1 MiB body
+limit all fail closed.
+
+The parser requires the repeated Unit and exact Group leaf. Only
+`pass == pass2 == perm == 1` maps to Completed and 100%; other valid flag sets
+remain Unknown without a percentage. Per-Group numeric duration is retained as
+an untyped raw fact and never mapped to `duration_seconds`. This remains
+offline/native-boundary evidence: daemon registration, session renewal,
+DurationRead/Report, execution, BrowserBridge, Capture and live verification
+are still absent.

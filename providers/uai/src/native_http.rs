@@ -12,17 +12,23 @@ use reqwest::{
 use zeroize::Zeroize;
 
 use crate::{
-    UaiCourseInventoryTransport, UaiInventoryDocument, UaiJwtSession, UaiSessionResolver,
-    UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
-    course_inventory::course_resource_id_from_remote, parse_course_context,
+    UaiCourseInventoryTransport, UaiInventoryDocument, UaiJwtSession, UaiProgressDocument,
+    UaiProgressTransport, UaiSessionResolver, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+    annotator::generate_annotator_token,
+    course_inventory::{
+        course_resource_id_from_remote, parse_course_context_for_resource_id,
+        required_remote_component,
+    },
+    parse_course_context,
 };
 
 const COURSE_LIST_URL: &str = "https://uai.unipus.cn/api/cmgt/course/getCourseListByStudent";
 const UAI_ORIGIN: &str = "https://uai.unipus.cn";
 const UCONTENT_ORIGIN: &str = "https://ucontent.unipus.cn";
-const MAX_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_INVENTORY_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_PROGRESS_RESPONSE_BYTES: usize = 1_024 * 1_024;
 
-/// Native, non-redirecting UAI Course and Task inventory transport.
+/// Native, non-redirecting UAI Course/Task inventory and progress transport.
 pub struct NativeUaiInventoryTransport {
     client: Client,
     sessions: Arc<dyn UaiSessionResolver>,
@@ -52,12 +58,14 @@ impl NativeUaiInventoryTransport {
         &self,
         session: &UaiJwtSession,
     ) -> ProviderResult<UaiInventoryDocument> {
-        self.send_get_with_session(
-            session,
-            static_url(COURSE_LIST_URL)?,
-            ResponseRoute::CourseList,
+        UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                static_url(COURSE_LIST_URL)?,
+                ResponseRoute::CourseList,
+            )
+            .await?,
         )
-        .await
     }
 
     async fn send_get_with_session(
@@ -65,7 +73,7 @@ impl NativeUaiInventoryTransport {
         session: &UaiJwtSession,
         url: Url,
         route: ResponseRoute,
-    ) -> ProviderResult<UaiInventoryDocument> {
+    ) -> ProviderResult<String> {
         let authorization = sensitive_authorization(session)?;
         let response = self
             .client
@@ -75,7 +83,7 @@ impl NativeUaiInventoryTransport {
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
-        read_inventory_response(response, route).await
+        read_json_response(response, route).await
     }
 
     async fn fetch_tasks_with_session(
@@ -84,22 +92,72 @@ impl NativeUaiInventoryTransport {
         course: &RemoteCourse,
     ) -> ProviderResult<UaiTaskInventoryDocuments> {
         let resource_id = course_resource_id_from_remote(course)?;
-        let detail = self
-            .send_get_with_session(
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
                 session,
                 course_resource_detail_url(&resource_id)?,
                 ResponseRoute::CourseDetail,
             )
-            .await?;
+            .await?,
+        )?;
         let route = parse_course_context(course, detail.as_str())?;
-        let tree = self
-            .send_get_with_session(
+        let tree = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
                 session,
                 course_tree_url(route.course_instance_id())?,
                 ResponseRoute::TaskTree,
             )
-            .await?;
+            .await?,
+        )?;
         Ok(UaiTaskInventoryDocuments::new(detail, tree))
+    }
+
+    async fn fetch_progress_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+    ) -> ProviderResult<UaiProgressDocument> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "progress Course-resource ID",
+        )?;
+        let unit_id = required_remote_component(
+            Some(&serde_json::Value::String(unit_id.to_owned())),
+            "progress Unit ID",
+        )?;
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let response = self
+            .client
+            .get(course_progress_url(
+                route.course_instance_id(),
+                &unit_id,
+                session.expose_open_id(),
+            )?)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        UaiProgressDocument::try_new(read_json_response(response, ResponseRoute::Progress).await?)
     }
 }
 
@@ -136,6 +194,20 @@ impl UaiTaskInventoryTransport for NativeUaiInventoryTransport {
     }
 }
 
+#[async_trait]
+impl UaiProgressTransport for NativeUaiInventoryTransport {
+    async fn fetch_progress(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+    ) -> ProviderResult<UaiProgressDocument> {
+        let session = self.sessions.resolve_session(context).await?;
+        self.fetch_progress_with_session(&session, course_resource_id, unit_id)
+            .await
+    }
+}
+
 fn sensitive_authorization(session: &UaiJwtSession) -> ProviderResult<HeaderValue> {
     let mut value = HeaderValue::from_str(session.expose_authorization()).map_err(|_| {
         ProviderError::new(
@@ -152,6 +224,7 @@ enum ResponseRoute {
     CourseList,
     CourseDetail,
     TaskTree,
+    Progress,
 }
 
 impl ResponseRoute {
@@ -160,19 +233,27 @@ impl ResponseRoute {
             Self::CourseList => "Course inventory",
             Self::CourseDetail => "Course-resource detail",
             Self::TaskTree => "Task tree",
+            Self::Progress => "Task progress",
+        }
+    }
+
+    const fn maximum_bytes(self) -> usize {
+        match self {
+            Self::Progress => MAX_PROGRESS_RESPONSE_BYTES,
+            Self::CourseList | Self::CourseDetail | Self::TaskTree => MAX_INVENTORY_RESPONSE_BYTES,
         }
     }
 }
 
-async fn read_inventory_response(
+async fn read_json_response(
     mut response: Response,
     route: ResponseRoute,
-) -> ProviderResult<UaiInventoryDocument> {
+) -> ProviderResult<String> {
     validate_status(response.status(), response.headers(), route)?;
     validate_json_content_type(response.headers(), route)?;
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        .is_some_and(|length| length > route.maximum_bytes() as u64)
     {
         return Err(oversized_response(route));
     }
@@ -183,7 +264,7 @@ async fn read_inventory_response(
         .await
         .map_err(|error| classify_reqwest_error(&error))?
     {
-        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+        if bytes.len().saturating_add(chunk.len()) > route.maximum_bytes() {
             bytes.zeroize();
             return Err(oversized_response(route));
         }
@@ -206,7 +287,7 @@ async fn read_inventory_response(
             ));
         }
     };
-    UaiInventoryDocument::try_new(document)
+    Ok(document)
 }
 
 fn validate_status(
@@ -320,6 +401,26 @@ fn course_tree_url(course_instance_id: &str) -> ProviderResult<Url> {
     route_url(
         UCONTENT_ORIGIN,
         &["course", "api", "course", course_instance_id, "default"],
+    )
+}
+
+fn course_progress_url(
+    course_instance_id: &str,
+    unit_id: &str,
+    open_id: &str,
+) -> ProviderResult<Url> {
+    route_url(
+        UCONTENT_ORIGIN,
+        &[
+            "course",
+            "api",
+            "v2",
+            "course_progress",
+            course_instance_id,
+            unit_id,
+            open_id,
+            "default",
+        ],
     )
 }
 
@@ -440,5 +541,12 @@ mod tests {
                 .as_str(),
             "https://ucontent.unipus.cn/course/api/course/course-v2:synthetic+rw%2Fguard/default"
         );
+        assert_eq!(
+            course_progress_url("course-v2:synthetic+rw", "unit-1", "open-id")
+                .unwrap()
+                .as_str(),
+            "https://ucontent.unipus.cn/course/api/v2/course_progress/course-v2:synthetic+rw/unit-1/open-id/default"
+        );
+        assert_eq!(ResponseRoute::Progress.maximum_bytes(), 1_024 * 1_024);
     }
 }

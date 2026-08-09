@@ -197,7 +197,7 @@ fn build_task(
         .as_ref()
         .ok_or_else(|| protocol_drift("UAI Group Task is not nested under a Unit"))?;
     let task_types = task_types(object.get("base"))?;
-    let remote_id = format!("group:{resource_id}:{group_id}");
+    let remote_id = format!("group:{resource_id}:{}:{group_id}", unit.id);
     let normalized = serde_json::json!({
         "schema": "uai.group-task.v1",
         "course_resource_id": resource_id,
@@ -293,7 +293,7 @@ mod tests {
         let context = parse_course_context(&course, DETAIL).unwrap();
         let tasks = parse_task_inventory(&course, &context, TREE).unwrap();
         assert_eq!(tasks.len(), 2);
-        assert_eq!(tasks[0].remote_id, "group:2001:group-1");
+        assert_eq!(tasks[0].remote_id, "group:2001:unit-1:group-1");
         assert_eq!(tasks[0].title, "Read the passage");
         assert_eq!(tasks[0].remote_state, RemoteState::Unknown);
         assert!(tasks[0].capabilities.is_empty());
