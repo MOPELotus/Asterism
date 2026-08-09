@@ -1,16 +1,17 @@
 use std::collections::BTreeSet;
 
-use asterism_domain::ProviderId;
+use asterism_domain::{AuthMethod, ProviderId, SessionKind};
 use asterism_provider_api::{
-    ProviderError, ProviderErrorKind, ProviderMetadata, ProviderResult, VerificationLevel,
+    ProviderCapability, ProviderError, ProviderErrorKind, ProviderMetadata, ProviderResult,
+    VerificationLevel,
 };
 
 pub(crate) const PROVIDER_ID: &str = "welearn";
 
-/// Returns the compile-time metadata for the fixture-only development crate.
+/// Returns the compile-time metadata for the development crate.
 ///
-/// No capability is advertised until its authenticated native runtime slot is
-/// implemented and registered.
+/// Authentication is available behind an injected transport boundary. Course
+/// and Task parsing remain fixture-only and are not advertised as capabilities.
 ///
 /// # Errors
 ///
@@ -28,9 +29,13 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
         capture_recipe_version: None,
-        capabilities: BTreeSet::new(),
-        auth_methods: BTreeSet::new(),
-        session_kinds: BTreeSet::new(),
+        capabilities: BTreeSet::from([ProviderCapability::Authentication]),
+        auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedCookie]),
+        session_kinds: BTreeSet::from([
+            SessionKind::Cookie,
+            SessionKind::Composite,
+            SessionKind::ProviderSpecific,
+        ]),
     })
 }
 
@@ -39,12 +44,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixture_only_metadata_advertises_no_runtime_slots() {
+    fn development_metadata_advertises_only_the_injected_authentication_boundary() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
-        assert!(metadata.capabilities.is_empty());
-        assert!(metadata.auth_methods.is_empty());
-        assert!(metadata.session_kinds.is_empty());
+        assert_eq!(
+            metadata.capabilities,
+            BTreeSet::from([ProviderCapability::Authentication])
+        );
+        assert_eq!(
+            metadata.auth_methods,
+            BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedCookie])
+        );
     }
 }

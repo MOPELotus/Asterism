@@ -2278,3 +2278,25 @@ The new metadata remains `Development` with no advertised runtime slots,
 authentication methods or session kinds. This checkpoint performs no HTTP,
 authentication, CMI mutation, execution, duration reporting or Capture work and
 is not evidence of current live WELearn compatibility.
+
+## One-hundred-and-forty-sixth Phase 0 slice
+
+WELearn now has the common Password/ImportedCookie authentication orchestration
+behind injected exchange, Cookie-validation and stored-session resolver
+boundaries. Password candidates must contain exactly username/password fields
+acquired through NativeProviderLogin; successful exchange produces a Composite
+replacement containing the renewable credentials and validated Cookie. Imported
+Cookies are validated without a password exchange, and stored-session checks
+require an explicit credential reference.
+
+The current SSO password form encoding is deterministic around one explicit
+millisecond timestamp. Bounded synthetic envelopes distinguish ordinary
+credential rejection, ImageCaptcha and SmsVerification; challenges stop at
+`HumanRequired` rather than retrying. Successful responses must yield an HTTPS
+callback under exactly `sso.sflep.com/idsvr/`, while callback query values,
+Cookie contents and verification tokens are redacted and zeroized.
+
+Metadata remains `Development` and advertises only this Authentication boundary.
+The native prelogin/OIDC redirect chain, Cookie collection, authenticated
+validation request, renewal and Provider registry entry remain separate; this
+checkpoint performs no remote request and makes no live-compatibility claim.

@@ -23,6 +23,13 @@ The returned redirect must be followed to complete Cookie establishment.
 Authentication responses may signal image captcha or SMS verification. Those
 states are `HumanRequired`; automated password retry must stop.
 
+The current implementation covers the deterministic password form encoding,
+bounded login-envelope classification and a strict
+`https://sso.sflep.com/idsvr/` callback allowlist. Password and ImportedCookie
+flow through the common Authentication capability behind injected transport and
+stored-session boundaries. The real prelogin/OIDC redirect and Cookie transport
+is not implemented or registered yet.
+
 ## Course and task inventory
 
 ```text

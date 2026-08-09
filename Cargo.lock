@@ -284,8 +284,15 @@ version = "0.1.0"
 dependencies = [
  "asterism-domain",
  "asterism-provider-api",
+ "asterism-secrets",
+ "async-trait",
+ "base64",
+ "chrono",
+ "reqwest",
+ "serde",
  "serde_json",
  "sha2",
+ "tokio",
  "zeroize",
 ]
 

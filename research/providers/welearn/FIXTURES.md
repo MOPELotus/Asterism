@@ -8,6 +8,10 @@ parser invariants only and are not live-platform evidence.
 
 ```text
 fixtures/providers/welearn/
+  auth/password-success.json
+  auth/password-rejected.json
+  auth/password-captcha.json
+  auth/password-sms.json
   courses/list-mixed.json
   courses/list-mixed.expected.json
   units/list-mixed.json
@@ -16,8 +20,10 @@ fixtures/providers/welearn/
   tasks/list-mixed.expected.json
 ```
 
-The Course fixture covers numeric/string IDs, completion percentage and unknown
-extra fields. Unit/SCO fixtures cover visible/hidden Units,
+The Auth fixtures cover bounded response classification, strict callback
+allowlisting and `HumanRequired` separation without retaining callback/token
+material. The Course fixture covers numeric/string IDs, completion percentage
+and unknown extra fields. Unit/SCO fixtures cover visible/hidden Units,
 completed/unknown/not-open states, duration separation and stable
 Course/Unit/SCO identity. Inline negative tests cover malformed rows, duplicate
 identities, invalid percentages, misbound Unit responses and duration without a
@@ -27,10 +33,10 @@ completion observation.
 
 ```text
 fixtures/providers/welearn/
-  auth/password-success.json
-  auth/password-rejected.json
-  auth/password-captcha.json
-  auth/password-sms.json
+  auth/password-success-live.json
+  auth/password-rejected-live.json
+  auth/password-captcha-live.json
+  auth/password-sms-live.json
   courses/list-empty.json
   courses/list-mixed.json
   courses/course-context.html
