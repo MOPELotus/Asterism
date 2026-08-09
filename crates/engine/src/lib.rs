@@ -7,6 +7,7 @@ mod auth_session;
 mod credential;
 mod execution_job;
 mod execution_request;
+mod execution_worker;
 mod outbox;
 mod scan;
 mod scan_job;
@@ -37,6 +38,10 @@ pub use execution_job::{
 };
 pub use execution_request::{
     ExecuteTaskCommand, ExecutionRequestError, ExecutionRequestResult, ExecutionRequestService,
+};
+pub use execution_worker::{
+    ExecutionSchedulerConfig, ExecutionSchedulerTickReport, ExecutionSchedulerWorker,
+    ExecutionSchedulerWorkerError,
 };
 pub use outbox::{
     DeliveryError, DispatchConfig, DispatchError, DispatchReport, EventSink, OutboxDispatcher,

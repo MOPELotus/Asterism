@@ -417,6 +417,14 @@ pub trait SchedulerRepository: Send + Sync {
         limit: u32,
     ) -> Result<Vec<asterism_scheduler::ScheduledJob>, StorageError>;
 
+    async fn claim_due_execution_jobs(
+        &self,
+        worker_id: &str,
+        now: Timestamp,
+        lease_expires_at: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<asterism_scheduler::ScheduledJob>, StorageError>;
+
     async fn renew_claim(
         &self,
         job_id: asterism_domain::ScheduleId,

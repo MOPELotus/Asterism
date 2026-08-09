@@ -338,6 +338,16 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn claim_due_execution_jobs(
+            &self,
+            _worker_id: &str,
+            _now: Timestamp,
+            _lease_expires_at: Timestamp,
+            _limit: u32,
+        ) -> Result<Vec<ScheduledJob>, StorageError> {
+            Ok(Vec::new())
+        }
+
         async fn renew_claim(
             &self,
             _job_id: ScheduleId,

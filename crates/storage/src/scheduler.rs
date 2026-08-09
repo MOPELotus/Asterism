@@ -13,6 +13,13 @@ use crate::{Database, ScanScheduleRepository, SchedulerRepository, StorageError}
 const MAX_MATERIALIZED_SCAN_JOBS: u32 = 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimFilter {
+    Any,
+    Scan,
+    Execution,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobFailureDisposition {
     RetryPending,
     DeadLetter,
@@ -34,15 +41,16 @@ impl SqliteSchedulerRepository {
         now: Timestamp,
         lease_expires_at: Timestamp,
         limit: u32,
-        scan_only: bool,
+        filter: ClaimFilter,
     ) -> Result<Vec<ScheduledJob>, StorageError> {
         if worker_id.is_empty() || limit == 0 || lease_expires_at <= now {
             return Err(StorageError::InvalidSchedulerClaim);
         }
         let now_text = encode_timestamp(now);
         let lease_text = encode_timestamp(lease_expires_at);
-        let statement = if scan_only {
-            "UPDATE scheduled_jobs \
+        let statement = match filter {
+            ClaimFilter::Scan => {
+                "UPDATE scheduled_jobs \
              SET state = 'claimed', worker_id = ?, lease_expires_at = ?, updated_at = ? \
              WHERE id IN ( \
                  SELECT id FROM scheduled_jobs \
@@ -50,8 +58,19 @@ impl SqliteSchedulerRepository {
                  ORDER BY run_at, id LIMIT ? \
              ) \
              RETURNING id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at"
-        } else {
-            "UPDATE scheduled_jobs \
+            }
+            ClaimFilter::Execution => {
+                "UPDATE scheduled_jobs \
+             SET state = 'claimed', worker_id = ?, lease_expires_at = ?, updated_at = ? \
+             WHERE id IN ( \
+                 SELECT id FROM scheduled_jobs \
+                 WHERE state = 'pending' AND job_kind IN ('execution', 'retry') AND run_at <= ? \
+                 ORDER BY run_at, id LIMIT ? \
+             ) \
+             RETURNING id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at"
+            }
+            ClaimFilter::Any => {
+                "UPDATE scheduled_jobs \
              SET state = 'claimed', worker_id = ?, lease_expires_at = ?, updated_at = ? \
              WHERE id IN ( \
                  SELECT id FROM scheduled_jobs \
@@ -59,6 +78,7 @@ impl SqliteSchedulerRepository {
                  ORDER BY run_at, id LIMIT ? \
              ) \
              RETURNING id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at"
+            }
         };
         let mut transaction = self.database.pool().begin().await?;
         let rows = sqlx::query(statement)
@@ -112,8 +132,25 @@ impl SchedulerRepository for SqliteSchedulerRepository {
         lease_expires_at: Timestamp,
         limit: u32,
     ) -> Result<Vec<ScheduledJob>, StorageError> {
-        self.claim_due_internal(worker_id, now, lease_expires_at, limit, false)
+        self.claim_due_internal(worker_id, now, lease_expires_at, limit, ClaimFilter::Any)
             .await
+    }
+
+    async fn claim_due_execution_jobs(
+        &self,
+        worker_id: &str,
+        now: Timestamp,
+        lease_expires_at: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<ScheduledJob>, StorageError> {
+        self.claim_due_internal(
+            worker_id,
+            now,
+            lease_expires_at,
+            limit,
+            ClaimFilter::Execution,
+        )
+        .await
     }
 
     async fn renew_claim(
@@ -345,7 +382,7 @@ impl ScanScheduleRepository for SqliteSchedulerRepository {
         lease_expires_at: Timestamp,
         limit: u32,
     ) -> Result<Vec<ScheduledJob>, StorageError> {
-        self.claim_due_internal(worker_id, now, lease_expires_at, limit, true)
+        self.claim_due_internal(worker_id, now, lease_expires_at, limit, ClaimFilter::Scan)
             .await
     }
 }
@@ -750,6 +787,60 @@ mod tests {
             .unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, execution.id);
+    }
+
+    #[tokio::test]
+    async fn execution_claim_takes_initial_and_retry_jobs_but_not_scans() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let repository = SqliteSchedulerRepository::new(database);
+        let now = Utc::now();
+        let base = ScheduledJob {
+            id: ScheduleId::new(),
+            kind: ScheduledJobKind::Scan {
+                provider_account_id: ProviderAccountId::new(),
+            },
+            run_at: now,
+            state: ScheduledJobState::Pending,
+            attempts: 0,
+            idempotency_key: "scan:execution-filter".to_owned(),
+            created_at: now,
+            updated_at: now,
+        };
+        let execution_id = ExecutionId::new();
+        let execution = ScheduledJob {
+            id: ScheduleId::new(),
+            kind: ScheduledJobKind::Execution { execution_id },
+            idempotency_key: "execution:claim-filter".to_owned(),
+            ..base.clone()
+        };
+        let retry = ScheduledJob {
+            id: ScheduleId::new(),
+            kind: ScheduledJobKind::Retry {
+                execution_id,
+                next_attempt_no: 2,
+            },
+            idempotency_key: "execution:claim-filter:retry:2".to_owned(),
+            ..base.clone()
+        };
+        repository.enqueue(&base).await.unwrap();
+        repository.enqueue(&execution).await.unwrap();
+        repository.enqueue(&retry).await.unwrap();
+
+        let claimed = repository
+            .claim_due_execution_jobs("execution-worker", now, now + Duration::minutes(1), 10)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 2);
+        assert!(claimed.iter().any(|job| job.id == execution.id));
+        assert!(claimed.iter().any(|job| job.id == retry.id));
+
+        let scan = repository
+            .claim_due_scan_jobs("scan-worker", now, now + Duration::minutes(1), 10)
+            .await
+            .unwrap();
+        assert_eq!(scan.len(), 1);
+        assert_eq!(scan[0].id, base.id);
     }
 
     #[tokio::test]

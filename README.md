@@ -141,7 +141,7 @@ cargo run -p asterismctl -- provider-account scan <account-id>
 
 SecretStore keyring 只从进程环境读取，不接受 TOML 或 CLI 参数。`ASTERISM_SECRET_ACTIVE_KEY_ID` 指定活动 key ID，`ASTERISM_SECRET_KEYS` 使用逗号分隔的 `<key-id>=<base64-encoded-32-byte-key>`；两者必须同时提供。轮换时保留旧 key 并添加新 key，再切换活动 ID；确认所有密文已轮换前不要移除旧 key。`/health` 的 `secret_store_configured` 只报告是否已配置，不返回 key ID 或 key material。
 
-扫描调度器默认启用，每 5 秒执行一次有界 tick、每次只领取一个 Scan Job，claim TTL 为 300 秒。停止 `asterismd` 时会先停止新 tick，等待当前 tick 返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
+统一 Scheduler worker 默认启用，每 5 秒分别执行一次有界 Scan tick 与 Execution tick；默认每次最多领取一个 Scan Job，Execution worker 固定串行领取一个 `execution` 或 `retry` Job，避免长任务的后续预领取 claim 在等待时过期。claim TTL 与 Execution lease 默认均为 300 秒，运行期间会一起续租。停止 `asterismd` 时会先停止新 tick，等待当前 Scan 或 Execution 返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
 
 另开一个终端检查服务：
 

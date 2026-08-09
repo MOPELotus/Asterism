@@ -8,7 +8,9 @@ use asterism_config::{
 };
 use asterism_domain::ProviderId;
 use asterism_engine::{
-    ProviderScanService, ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedulerWorker,
+    ExecutionRunnerConfig, ExecutionSchedulerConfig, ExecutionSchedulerTickReport,
+    ExecutionSchedulerWorker, FormalAssessmentPolicy, ProviderScanService, ScanSchedulerConfig,
+    ScanSchedulerTickReport, ScanSchedulerWorker,
 };
 use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
 use asterism_provider_api::ProviderRegistry;
@@ -16,8 +18,10 @@ use asterism_provider_chaoxing::build_development_provider_with_renewal;
 use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
 use asterism_storage::{
-    Database, SecretKeyring, SqliteProviderAccountRepository, SqliteProviderCredentialResolver,
+    Database, SecretKeyring, SqliteExecutionLeaseRepository, SqliteExecutionRepository,
+    SqliteProviderAccountRepository, SqliteProviderCredentialResolver,
     SqliteProviderScanRepository, SqliteSchedulerRepository, SqliteSecretStore,
+    SqliteTaskQueryRepository,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Parser;
@@ -28,6 +32,14 @@ type DaemonScanWorker = ScanSchedulerWorker<
     SqliteSchedulerRepository,
     SqliteProviderAccountRepository,
     ProviderScanService<SqliteProviderScanRepository>,
+>;
+
+type DaemonExecutionWorker = ExecutionSchedulerWorker<
+    SqliteExecutionRepository,
+    SqliteExecutionLeaseRepository,
+    SqliteSchedulerRepository,
+    SqliteProviderAccountRepository,
+    SqliteTaskQueryRepository,
 >;
 
 const SECRET_ACTIVE_KEY_ID_ENV: &str = "ASTERISM_SECRET_ACTIVE_KEY_ID";
@@ -146,7 +158,14 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(address = %config.server.bind, secret_store_configured, "asterismd started");
 
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-    let scheduler_handle = start_scan_scheduler(&database, providers, &config, shutdown_receiver)?;
+    let scan_scheduler_handle = start_scan_scheduler(
+        &database,
+        providers.clone(),
+        &config,
+        shutdown_receiver.clone(),
+    )?;
+    let execution_scheduler_handle =
+        start_execution_scheduler(&database, providers, &config, shutdown_receiver)?;
 
     let graceful_shutdown_sender = shutdown_sender.clone();
     let server_result = axum::serve(
@@ -159,8 +178,11 @@ async fn main() -> anyhow::Result<()> {
     })
     .await;
     let _ = shutdown_sender.send(true);
-    if let Some(handle) = scheduler_handle {
+    if let Some(handle) = scan_scheduler_handle {
         handle.await.context("scan scheduler task panicked")?;
+    }
+    if let Some(handle) = execution_scheduler_handle {
+        handle.await.context("execution scheduler task panicked")?;
     }
     server_result.context("Asterism HTTP server failed")?;
     database.close().await;
@@ -320,6 +342,52 @@ fn start_scan_scheduler(
     Ok(handle)
 }
 
+fn start_execution_scheduler(
+    database: &Database,
+    providers: Arc<ProviderRegistry>,
+    config: &Config,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    let handle = if config.scheduler.enabled {
+        let execution_lease_ttl =
+            std::time::Duration::from_secs(config.scheduler.claim_ttl_seconds);
+        let worker = ExecutionSchedulerWorker::new(
+            providers,
+            SqliteExecutionRepository::new(database.clone()),
+            SqliteExecutionLeaseRepository::new(database.clone()),
+            SqliteSchedulerRepository::new(database.clone()),
+            SqliteProviderAccountRepository::new(database.clone()),
+            SqliteTaskQueryRepository::new(database.clone()),
+            ExecutionSchedulerConfig {
+                worker_id: format!("asterismd-execution-{}", std::process::id()),
+                claim_limit: 1,
+                claim_ttl: execution_lease_ttl,
+                runner: ExecutionRunnerConfig {
+                    execution_lease_ttl,
+                    heartbeat_interval: execution_lease_ttl / 3,
+                    retry_policy: RetryPolicy {
+                        max_attempts: config.scheduler.retry_max_attempts,
+                        initial_delay_seconds: config.scheduler.retry_initial_delay_seconds,
+                        multiplier: config.scheduler.retry_multiplier,
+                        max_delay_seconds: config.scheduler.retry_max_delay_seconds,
+                    },
+                    formal_assessment_policy: FormalAssessmentPolicy::default(),
+                },
+            },
+        )
+        .context("failed to configure the execution scheduler")?;
+        let tick_interval = std::time::Duration::from_secs(config.scheduler.tick_interval_seconds);
+        Some(tokio::spawn(run_execution_scheduler(
+            worker,
+            tick_interval,
+            shutdown,
+        )))
+    } else {
+        None
+    };
+    Ok(handle)
+}
+
 async fn run_scan_scheduler(
     worker: DaemonScanWorker,
     tick_interval: std::time::Duration,
@@ -328,34 +396,81 @@ async fn run_scan_scheduler(
     let mut interval = tokio::time::interval(tick_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        tokio::select! {
+        let should_tick = tokio::select! {
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
                 }
+                false
             }
-            _ = interval.tick() => {
-                match worker.tick_once(chrono::Utc::now()).await {
-                    Ok(report) if report != ScanSchedulerTickReport::default() => {
-                        tracing::info!(
-                            materialized = report.materialized,
-                            claimed = report.claimed,
-                            completed = report.completed,
-                            retry_scheduled = report.retry_scheduled,
-                            dead_lettered = report.dead_lettered,
-                            "scan scheduler tick completed"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::error!(%error, "scan scheduler tick failed");
-                    }
-                }
+            _ = interval.tick() => true,
+        };
+        if !should_tick {
+            continue;
+        }
+        match worker.tick_once(chrono::Utc::now()).await {
+            Ok(report) if report != ScanSchedulerTickReport::default() => {
+                tracing::info!(
+                    materialized = report.materialized,
+                    claimed = report.claimed,
+                    completed = report.completed,
+                    retry_scheduled = report.retry_scheduled,
+                    dead_lettered = report.dead_lettered,
+                    "scan scheduler tick completed"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "scan scheduler tick failed");
             }
         }
     }
     tracing::info!("scan scheduler stopped");
+}
+
+async fn run_execution_scheduler(
+    worker: DaemonExecutionWorker,
+    tick_interval: std::time::Duration,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(tick_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        let should_tick = tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                false
+            }
+            _ = interval.tick() => true,
+        };
+        if !should_tick {
+            continue;
+        }
+        match worker.tick_once(chrono::Utc::now()).await {
+            Ok(report) if report != ExecutionSchedulerTickReport::default() => {
+                tracing::info!(
+                    claimed = report.claimed,
+                    succeeded = report.succeeded,
+                    retry_scheduled = report.retry_scheduled,
+                    human_required = report.human_required,
+                    failed = report.failed,
+                    deferred = report.deferred,
+                    dead_lettered = report.dead_lettered,
+                    already_terminal = report.already_terminal,
+                    "execution scheduler tick completed"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "execution scheduler tick failed");
+            }
+        }
+    }
+    tracing::info!("execution scheduler stopped");
 }
 
 async fn shutdown_signal() {
@@ -369,21 +484,30 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn scan_scheduler_stops_before_database_shutdown() {
+    async fn scheduler_workers_stop_before_database_shutdown() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-        let handle = start_scan_scheduler(
+        let providers = Arc::new(ProviderRegistry::default());
+        let scan_handle = start_scan_scheduler(
             &database,
-            Arc::new(ProviderRegistry::default()),
+            providers.clone(),
             &Config::default(),
-            shutdown_receiver,
+            shutdown_receiver.clone(),
         )
         .unwrap()
         .unwrap();
+        let execution_handle =
+            start_execution_scheduler(&database, providers, &Config::default(), shutdown_receiver)
+                .unwrap()
+                .unwrap();
 
         shutdown_sender.send(true).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+        tokio::time::timeout(std::time::Duration::from_secs(1), scan_handle)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), execution_handle)
             .await
             .unwrap()
             .unwrap();

@@ -1190,3 +1190,24 @@ Sessions are recorded as `WebUi`; scoped service tokens are recorded as `Cli`
 or `Yunzai` without accepting a caller-supplied owner or source. The OpenAPI
 document and `asterismctl task execute --idempotency-key` expose the same
 contract. Daemon claim-loop integration remains the next slice.
+
+## Eighty-fifth Phase 0 slice
+
+`asterismd` now runs a dedicated Execution scheduler loop beside the existing
+Scan loop. SQLite claims are kind-filtered: Scan workers can only take `scan`,
+while Execution workers can only take `execution` and `retry`; notification or
+future job kinds remain untouched. The Execution worker intentionally claims
+one job at a time so a long Provider call cannot let later preclaimed jobs
+expire while waiting in a local sequential batch.
+
+The daemon composes the registered Provider runtime with the persisted
+Execution, lease, account, Task and Scheduler repositories. Its initial claim
+TTL is also the Execution lease TTL; the runner renews both on a one-third-TTL
+heartbeat and preserves the shared bounded retry policy and formal-assessment
+guard. Each tick reports success, retry, human-required, failure, deferral,
+dead-letter and already-terminal outcomes without logging Provider payloads or
+credentials. Shutdown stops new ticks but drains the in-flight Scan or
+Execution tick before closing SQLite, so dropping a Provider future does not
+become the normal shutdown path. Filtered claim, worker tick and dual-loop
+lifecycle tests remain offline evidence and do not change Provider verification
+status.
