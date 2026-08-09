@@ -64,7 +64,7 @@ impl SqliteSchedulerRepository {
              SET state = 'claimed', worker_id = ?, lease_expires_at = ?, updated_at = ? \
              WHERE id IN ( \
                  SELECT id FROM scheduled_jobs \
-                 WHERE state = 'pending' AND job_kind IN ('execution', 'retry') AND run_at <= ? \
+                 WHERE state = 'pending' AND job_kind IN ('execution', 'retry', 'recovery') AND run_at <= ? \
                  ORDER BY run_at, id LIMIT ? \
              ) \
              RETURNING id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at"
@@ -559,6 +559,7 @@ fn job_kind_name(kind: &ScheduledJobKind) -> &'static str {
         ScheduledJobKind::Scan { .. } => "scan",
         ScheduledJobKind::Execution { .. } => "execution",
         ScheduledJobKind::Retry { .. } => "retry",
+        ScheduledJobKind::Recovery { .. } => "recovery",
         ScheduledJobKind::Notification { .. } => "notification",
     }
 }
@@ -790,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_claim_takes_initial_and_retry_jobs_but_not_scans() {
+    async fn execution_claim_takes_initial_retry_and_recovery_jobs_but_not_scans() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
         let repository = SqliteSchedulerRepository::new(database);
@@ -823,17 +824,25 @@ mod tests {
             idempotency_key: "execution:claim-filter:retry:2".to_owned(),
             ..base.clone()
         };
+        let recovery = ScheduledJob {
+            id: ScheduleId::new(),
+            kind: ScheduledJobKind::Recovery { execution_id },
+            idempotency_key: "execution:claim-filter:recovery".to_owned(),
+            ..base.clone()
+        };
         repository.enqueue(&base).await.unwrap();
         repository.enqueue(&execution).await.unwrap();
         repository.enqueue(&retry).await.unwrap();
+        repository.enqueue(&recovery).await.unwrap();
 
         let claimed = repository
             .claim_due_execution_jobs("execution-worker", now, now + Duration::minutes(1), 10)
             .await
             .unwrap();
-        assert_eq!(claimed.len(), 2);
+        assert_eq!(claimed.len(), 3);
         assert!(claimed.iter().any(|job| job.id == execution.id));
         assert!(claimed.iter().any(|job| job.id == retry.id));
+        assert!(claimed.iter().any(|job| job.id == recovery.id));
 
         let scan = repository
             .claim_due_scan_jobs("scan-worker", now, now + Duration::minutes(1), 10)

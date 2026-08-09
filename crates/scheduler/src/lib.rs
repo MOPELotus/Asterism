@@ -136,6 +136,9 @@ pub enum ScheduledJobKind {
         execution_id: ExecutionId,
         next_attempt_no: u32,
     },
+    Recovery {
+        execution_id: ExecutionId,
+    },
     Notification {
         notification_id: NotificationId,
     },

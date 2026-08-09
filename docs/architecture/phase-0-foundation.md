@@ -1276,3 +1276,27 @@ mutable action. Video, Live and Chapter Work still advertise neither capability
 until their separate implementations exist. The Provider remains Development
 and disabled by default: fixture-backed remote-state reads establish a safe
 input for Core crash recovery, not real-account compatibility.
+
+## Ninetieth Phase 0 slice
+
+Crash recovery now closes the loop through a dedicated Scheduler job rather
+than leaving `Recovering` as a terminal holding state. Startup and every daemon
+Execution tick scan only Running executions whose Task lease is absent or
+expired. One SQLite transaction moves Execution and Task to Recovering,
+cancels their stale pending/claimed Execution or Retry jobs, inserts one
+idempotent Recovery job, removes expired leases and emits the durable
+recovery-required event. Recovery jobs share the serial Execution worker and
+the same renewable Scheduler claim plus Task-level lease.
+
+The Recovery runner uses only the registered `TaskProgressRead` capability. A
+fresh remote Completed state closes the abandoned Attempt as succeeded without
+calling execute; a fresh Pending state closes it and creates the uniquely
+numbered Retry job. Remote InProgress and transient network/rate-limit/service
+errors retry only the bounded verification job. Unknown, removed, expired,
+unauthenticated, unsupported or retry-exhausted outcomes become
+HumanRequired, preserving uncertainty instead of guessing failure. Finalizing
+the abandoned Attempt, Execution, Task, structured progress, Recovery job,
+lease, audit, log, outbox events and optional execution Retry is one immediate
+transaction. Existing credit reservations remain preserved; attaching quote
+and reservation creation plus success-commit/failure-release to the unified
+execution action is still a separate billing integration slice.

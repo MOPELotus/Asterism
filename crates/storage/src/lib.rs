@@ -32,11 +32,12 @@ pub use repository::{
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, CreditRepository, ExecutionAttemptFinishRequest,
     ExecutionAttemptStartRequest, ExecutionDetail, ExecutionLeaseRepository, ExecutionLogPage,
-    ExecutionPage, ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionRepository,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, OutboxRepository,
-    ProviderAccountRepository, ProviderAccountRuntimeRepository, ScanScheduleRepository,
-    SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository, TaskRepository,
-    TaskRuntimeRepository, UserRepository,
+    ExecutionPage, ExecutionProgressUpdate, ExecutionQueryRepository,
+    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionScheduleOutcome,
+    ExecutionScheduleRequest, OutboxRepository, ProviderAccountRepository,
+    ProviderAccountRuntimeRepository, ScanScheduleRepository, SchedulerRepository,
+    SessionRepository, TaskPage, TaskQueryRepository, TaskRepository, TaskRuntimeRepository,
+    UserRepository,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

@@ -362,6 +362,20 @@ pub struct ExecutionAttemptFinishRequest<'a> {
     pub correlation_id: &'a str,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExecutionRecoveryFinishRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub final_state: ExecutionState,
+    pub error_class: Option<ProviderErrorClass>,
+    pub provider_trace_id: Option<&'a str>,
+    pub retry_at: Option<Timestamp>,
+    pub progress: &'a ExecutionProgress,
+    pub at: Timestamp,
+    pub correlation_id: &'a str,
+}
+
 /// Atomic execution request boundary. Creating the execution, moving the task
 /// to `scheduled`, enqueuing the scheduler job, and recording audit/outbox
 /// entries either all commit or all roll back.
@@ -396,6 +410,11 @@ pub trait ExecutionRepository: Send + Sync {
     async fn finish_attempt(
         &self,
         request: ExecutionAttemptFinishRequest<'_>,
+    ) -> Result<Execution, StorageError>;
+
+    async fn finish_recovery(
+        &self,
+        request: ExecutionRecoveryFinishRequest<'_>,
     ) -> Result<Execution, StorageError>;
 }
 

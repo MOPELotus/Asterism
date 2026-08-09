@@ -48,7 +48,7 @@ impl<E, L, S, A, T> ExecutionSchedulerWorker<E, L, S, A, T>
 where
     S: Clone,
 {
-    /// Builds one worker which only claims Execution and Retry jobs.
+    /// Builds one worker which only claims Execution, Retry and Recovery jobs.
     ///
     /// # Errors
     ///
@@ -89,7 +89,7 @@ where
     A: ProviderAccountRuntimeRepository,
     T: TaskRuntimeRepository,
 {
-    /// Claims and runs one bounded batch of due Execution and Retry jobs.
+    /// Claims and runs one bounded batch of due Execution, Retry and Recovery jobs.
     ///
     /// # Errors
     ///

@@ -15,8 +15,8 @@ use sqlx::Row;
 use crate::outbox::enqueue_in_transaction;
 use crate::{
     Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionProgressUpdate,
-    ExecutionQueryRepository, ExecutionRepository, ExecutionScheduleOutcome,
-    ExecutionScheduleRequest, StorageError,
+    ExecutionQueryRepository, ExecutionRecoveryFinishRequest, ExecutionRepository,
+    ExecutionScheduleOutcome, ExecutionScheduleRequest, StorageError,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage};
 
@@ -249,8 +249,79 @@ impl ExecutionRepository for SqliteExecutionRepository {
         if execution.state != ExecutionState::Running {
             return Err(StorageError::ExecutionStateConflict);
         }
-        apply_attempt_finish(&mut transaction, &mut execution, &request).await?;
-        record_attempt_finished(&mut transaction, &request).await?;
+        apply_attempt_finish(
+            &mut transaction,
+            &mut execution,
+            &request,
+            ExecutionState::Running,
+            OrchestrationState::Running,
+        )
+        .await?;
+        record_attempt_finished(
+            &mut transaction,
+            &request,
+            "execution_attempt_finished",
+            "execution attempt finished",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(execution)
+    }
+
+    async fn finish_recovery(
+        &self,
+        request: ExecutionRecoveryFinishRequest<'_>,
+    ) -> Result<Execution, StorageError> {
+        validate_recovery_finish_request(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            false,
+        )
+        .await?;
+        let execution_row = select_execution(&mut transaction, request.execution_id).await?;
+        let mut execution = decode_execution(&execution_row)?;
+        if execution.state != ExecutionState::Recovering {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        let attempt = find_active_attempt(&mut transaction, request.execution_id).await?;
+        let finish = ExecutionAttemptFinishRequest {
+            execution_id: request.execution_id,
+            attempt_id: attempt.id,
+            scheduler_job_id: request.scheduler_job_id,
+            worker_id: request.worker_id,
+            final_state: request.final_state,
+            result: if request.final_state == ExecutionState::Succeeded {
+                AttemptResult::Succeeded
+            } else {
+                AttemptResult::Failed
+            },
+            error_class: request.error_class,
+            provider_trace_id: request.provider_trace_id,
+            retry_at: request.retry_at,
+            progress: request.progress,
+            at: request.at,
+            correlation_id: request.correlation_id,
+        };
+        apply_attempt_finish(
+            &mut transaction,
+            &mut execution,
+            &finish,
+            ExecutionState::Recovering,
+            OrchestrationState::Recovering,
+        )
+        .await?;
+        record_attempt_finished(
+            &mut transaction,
+            &finish,
+            "execution_recovery_finished",
+            "execution recovery finished",
+        )
+        .await?;
         transaction.commit().await?;
         Ok(execution)
     }
@@ -576,6 +647,8 @@ async fn apply_attempt_finish(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     execution: &mut Execution,
     request: &ExecutionAttemptFinishRequest<'_>,
+    expected_execution_state: ExecutionState,
+    expected_task_state: OrchestrationState,
 ) -> Result<(), StorageError> {
     let attempt_update = sqlx::query(
         "UPDATE execution_attempts SET finished_at = ?, result = ?, error_class = ?, \
@@ -593,7 +666,14 @@ async fn apply_attempt_finish(
     if attempt_update.rows_affected() != 1 {
         return Err(StorageError::ExecutionAttemptNotActive);
     }
-    update_finished_states(transaction, execution, request).await?;
+    update_finished_states(
+        transaction,
+        execution,
+        request,
+        expected_execution_state,
+        expected_task_state,
+    )
+    .await?;
     upsert_progress(transaction, request.progress).await?;
     complete_scheduler_job(transaction, request).await?;
     if let Some(retry_at) = request.retry_at {
@@ -615,26 +695,30 @@ async fn update_finished_states(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     execution: &mut Execution,
     request: &ExecutionAttemptFinishRequest<'_>,
+    expected_execution_state: ExecutionState,
+    expected_task_state: OrchestrationState,
 ) -> Result<(), StorageError> {
     let task_state = orchestration_for_execution(request.final_state)?;
     let finished_at = request.final_state.is_terminal().then_some(request.at);
     let execution_update = sqlx::query(
         "UPDATE executions SET state = ?, scheduled_at = COALESCE(?, scheduled_at), \
-             finished_at = ? WHERE id = ? AND state = 'running'",
+             finished_at = ? WHERE id = ? AND state = ?",
     )
     .bind(enum_name(request.final_state)?)
     .bind(request.retry_at.map(encode_timestamp))
     .bind(finished_at.map(encode_timestamp))
     .bind(request.execution_id.to_string())
+    .bind(enum_name(expected_execution_state)?)
     .execute(&mut **transaction)
     .await?;
     let task_update = sqlx::query(
         "UPDATE tasks SET orchestration_state = ?, updated_at = ? \
-         WHERE id = ? AND orchestration_state = 'running'",
+         WHERE id = ? AND orchestration_state = ?",
     )
     .bind(enum_name(task_state)?)
     .bind(encode_timestamp(request.at))
     .bind(execution.task_id.to_string())
+    .bind(enum_name(expected_task_state)?)
     .execute(&mut **transaction)
     .await?;
     if execution_update.rows_affected() != 1 || task_update.rows_affected() != 1 {
@@ -672,12 +756,14 @@ async fn complete_scheduler_job(
 async fn record_attempt_finished(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     request: &ExecutionAttemptFinishRequest<'_>,
+    audit_action: &str,
+    log_message: &str,
 ) -> Result<(), StorageError> {
     insert_worker_audit(
         transaction,
         request.execution_id,
         request.worker_id,
-        "execution_attempt_finished",
+        audit_action,
         request.at,
         request.correlation_id,
         serde_json::json!({
@@ -700,7 +786,7 @@ async fn record_attempt_finished(
             at: request.at,
             level,
             stage: request.progress.stage,
-            message: "execution attempt finished",
+            message: log_message,
             provider_trace_id: request.provider_trace_id,
         },
     )
@@ -761,6 +847,9 @@ async fn assert_worker_claims(
     | ScheduledJobKind::Retry {
         execution_id: claimed_execution,
         ..
+    }
+    | ScheduledJobKind::Recovery {
+        execution_id: claimed_execution,
     }) = kind
     else {
         return Err(StorageError::ExecutionClaimLost);
@@ -873,6 +962,47 @@ fn validate_finish_request(
     {
         return Err(StorageError::InvalidData(
             "execution attempt finish request is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recovery_finish_request(
+    request: &ExecutionRecoveryFinishRequest<'_>,
+) -> Result<(), StorageError> {
+    validate_worker_token(request.worker_id, request.correlation_id)?;
+    validate_progress(request.progress)?;
+    let trace_valid = request.provider_trace_id.is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= 256
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+    });
+    let state_valid = match request.final_state {
+        ExecutionState::Succeeded => {
+            request.error_class.is_none()
+                && request.retry_at.is_none()
+                && request.progress.stage == ExecutionStage::Completed
+                && request.progress.percent == Some(100)
+        }
+        ExecutionState::HumanRequired => {
+            request.error_class.is_some() && request.retry_at.is_none()
+        }
+        ExecutionState::RetryWaiting => {
+            request.error_class.is_some()
+                && request
+                    .retry_at
+                    .is_some_and(|retry_at| retry_at > request.at)
+        }
+        _ => false,
+    };
+    if request.progress.execution_id != request.execution_id
+        || request.progress.updated_at != request.at
+        || !trace_valid
+        || !state_valid
+    {
+        return Err(StorageError::InvalidData(
+            "execution recovery finish request is invalid".to_owned(),
         ));
     }
     Ok(())

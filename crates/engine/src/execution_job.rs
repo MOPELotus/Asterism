@@ -14,14 +14,16 @@ use asterism_domain::{
 use asterism_provider_api::{
     ExecutionRequest as ProviderExecutionRequest, ProgressSink, ProviderContext, ProviderError,
     ProviderErrorKind, ProviderProgress, ProviderRegistry, TaskExecutionCapability,
+    TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
 };
 use asterism_storage::{
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionLeaseRepository,
-    ExecutionProgressUpdate, ExecutionRepository, LeaseAcquireOutcome,
-    ProviderAccountRuntimeRepository, SchedulerRepository, StorageError, TaskRuntimeRepository,
+    ExecutionProgressUpdate, ExecutionRecoveryFinishRequest, ExecutionRepository,
+    LeaseAcquireOutcome, ProviderAccountRuntimeRepository, SchedulerRepository, StorageError,
+    TaskRuntimeRepository,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -137,7 +139,7 @@ where
             .find_runtime_task(execution.task_id)
             .await?
             .ok_or(ScheduledExecutionRunError::TaskMissing(execution.task_id))?;
-        validate_execution_binding(&execution, &task)?;
+        validate_execution_binding(&execution, &task, claim.recovery)?;
 
         let lease = ExecutionLease {
             task_id: task.id,
@@ -182,6 +184,11 @@ where
         }
 
         let correlation_id = format!("scheduled-execution:{}", job.id);
+        if claim.recovery {
+            return self
+                .recover_execution(job, &task, now, &correlation_id)
+                .await;
+        }
         let attempt = self
             .executions
             .start_attempt(ExecutionAttemptStartRequest {
@@ -209,6 +216,324 @@ where
         }
         self.execute_attempt(job, &task, &attempt, now, &correlation_id)
             .await
+    }
+
+    async fn recover_execution(
+        &self,
+        job: &ScheduledJob,
+        task: &Task,
+        now: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let prepared = match self.prepare_recovery_call(task, correlation_id).await? {
+            Ok(prepared) => prepared,
+            Err(error_class) => {
+                return self
+                    .finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(error_class),
+                        None,
+                        now,
+                        correlation_id,
+                    )
+                    .await;
+            }
+        };
+        let provider = prepared
+            .capability
+            .read_progress(&prepared.context, &task.remote_id);
+        tokio::pin!(provider);
+        let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        let result = loop {
+            tokio::select! {
+                result = &mut provider => break result,
+                _ = heartbeat.tick() => {
+                    self.renew_claims(job, claimed_execution_id(job)?).await?;
+                }
+            }
+        };
+        let finished_at = Utc::now().max(now);
+        match result {
+            Ok(progress) => {
+                self.finish_from_remote_progress(
+                    job,
+                    progress.remote_state,
+                    finished_at,
+                    correlation_id,
+                )
+                .await
+            }
+            Err(error) => {
+                self.finish_from_recovery_error(job, &error, finished_at, correlation_id)
+                    .await
+            }
+        }
+    }
+
+    async fn prepare_recovery_call(
+        &self,
+        task: &Task,
+        correlation_id: &str,
+    ) -> Result<Result<PreparedRecoveryCall, ProviderErrorClass>, ScheduledExecutionRunError> {
+        if !task.capabilities.contains(&TaskCapability::ProgressRead) {
+            return Ok(Err(ProviderErrorClass::UnsupportedTask));
+        }
+        let Some(account) = self
+            .accounts
+            .find_runtime_provider_account(task.provider_account_id)
+            .await?
+        else {
+            return Ok(Err(ProviderErrorClass::Internal));
+        };
+        if account.auth_state != AuthState::Authenticated {
+            return Ok(Err(ProviderErrorClass::Authentication));
+        }
+        let Some(capability) = self
+            .registry
+            .get(&account.provider_id)
+            .and_then(|entry| entry.task_progress.clone())
+        else {
+            return Ok(Err(ProviderErrorClass::UnsupportedTask));
+        };
+        Ok(Ok(PreparedRecoveryCall {
+            capability,
+            context: ProviderContext {
+                provider_id: account.provider_id,
+                account_id: account.id,
+                credential_refs: account.credential_refs,
+                correlation_id: correlation_id.to_owned(),
+            },
+        }))
+    }
+
+    async fn finish_from_remote_progress(
+        &self,
+        job: &ScheduledJob,
+        remote_state: RemoteState,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        match remote_state {
+            RemoteState::Completed => {
+                self.finish_recovery(
+                    job,
+                    ExecutionState::Succeeded,
+                    None,
+                    None,
+                    at,
+                    correlation_id,
+                )
+                .await
+            }
+            RemoteState::Pending => {
+                if let Some(retry_at) = self.recovery_retry_at(job, at)? {
+                    self.finish_recovery(
+                        job,
+                        ExecutionState::RetryWaiting,
+                        Some(ProviderErrorClass::InvalidRemoteState),
+                        Some(retry_at),
+                        at,
+                        correlation_id,
+                    )
+                    .await
+                } else {
+                    self.finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(ProviderErrorClass::InvalidRemoteState),
+                        None,
+                        at,
+                        correlation_id,
+                    )
+                    .await
+                }
+            }
+            RemoteState::InProgress => {
+                if let Some(retry_at) = self.recovery_retry_at(job, at)? {
+                    self.defer_recovery(job, retry_at, at).await
+                } else {
+                    self.finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(ProviderErrorClass::InvalidRemoteState),
+                        None,
+                        at,
+                        correlation_id,
+                    )
+                    .await
+                }
+            }
+            RemoteState::Unknown
+            | RemoteState::NotOpen
+            | RemoteState::Expired
+            | RemoteState::Removed => {
+                self.finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::InvalidRemoteState),
+                    None,
+                    at,
+                    correlation_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn finish_from_recovery_error(
+        &self,
+        job: &ScheduledJob,
+        error: &ProviderError,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let error_class = provider_error_class(error);
+        if matches!(
+            error.kind,
+            ProviderErrorKind::RateLimited
+                | ProviderErrorKind::Network
+                | ProviderErrorKind::ProviderUnavailable
+        ) && let Some(retry_at) = self.recovery_retry_at_with_provider(job, error, at)?
+        {
+            return self.defer_recovery(job, retry_at, at).await;
+        }
+        self.finish_recovery(
+            job,
+            ExecutionState::HumanRequired,
+            Some(error_class),
+            None,
+            at,
+            correlation_id,
+        )
+        .await
+    }
+
+    fn recovery_retry_at(
+        &self,
+        job: &ScheduledJob,
+        at: Timestamp,
+    ) -> Result<Option<Timestamp>, ScheduledExecutionRunError> {
+        self.config
+            .retry_policy
+            .delay_after(job.attempts.saturating_add(1))?
+            .map(|delay| add_duration(at, delay))
+            .transpose()
+    }
+
+    fn recovery_retry_at_with_provider(
+        &self,
+        job: &ScheduledJob,
+        error: &ProviderError,
+        at: Timestamp,
+    ) -> Result<Option<Timestamp>, ScheduledExecutionRunError> {
+        let Some(policy_delay) = self
+            .config
+            .retry_policy
+            .delay_after(job.attempts.saturating_add(1))?
+        else {
+            return Ok(None);
+        };
+        let provider_delay = error
+            .retry_after_seconds
+            .unwrap_or_default()
+            .min(self.config.retry_policy.max_delay_seconds);
+        add_duration(at, policy_delay.max(StdDuration::from_secs(provider_delay))).map(Some)
+    }
+
+    async fn defer_recovery(
+        &self,
+        job: &ScheduledJob,
+        retry_at: Timestamp,
+        at: Timestamp,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let worker_id = claimed_worker(job)?;
+        self.scheduler
+            .fail(
+                job.id,
+                worker_id,
+                "execution_recovery_verification_deferred",
+                Some(retry_at),
+                at,
+            )
+            .await?;
+        let execution_id = claimed_execution_id(job)?;
+        let task_id = execution_id_to_task(&self.executions, execution_id).await?;
+        let _ = self
+            .leases
+            .release(task_id, execution_id, worker_id)
+            .await?;
+        Ok(ScheduledExecutionOutcome::Deferred { retry_at })
+    }
+
+    async fn finish_recovery(
+        &self,
+        job: &ScheduledJob,
+        final_state: ExecutionState,
+        error_class: Option<ProviderErrorClass>,
+        retry_at: Option<Timestamp>,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let (percent, stage, status_text) = match final_state {
+            ExecutionState::Succeeded => (
+                Some(100),
+                ExecutionStage::Completed,
+                "remote completion verified during recovery",
+            ),
+            ExecutionState::RetryWaiting => (
+                None,
+                ExecutionStage::Finalizing,
+                "remote state confirmed pending; execution retry scheduled",
+            ),
+            ExecutionState::HumanRequired => (
+                None,
+                ExecutionStage::Finalizing,
+                "remote outcome remains uncertain; human action required",
+            ),
+            _ => return Err(ScheduledExecutionRunError::StateConflict),
+        };
+        let execution_id = claimed_execution_id(job)?;
+        let progress = ExecutionProgress {
+            execution_id,
+            percent,
+            stage,
+            status_text: Some(status_text.to_owned()),
+            current_item: None,
+            completed_items: None,
+            total_items: None,
+            updated_at: at,
+        };
+        let execution = self
+            .executions
+            .finish_recovery(ExecutionRecoveryFinishRequest {
+                execution_id,
+                scheduler_job_id: job.id,
+                worker_id: claimed_worker(job)?,
+                final_state,
+                error_class,
+                provider_trace_id: None,
+                retry_at,
+                progress: &progress,
+                at,
+                correlation_id,
+            })
+            .await?;
+        Ok(match final_state {
+            ExecutionState::Succeeded => ScheduledExecutionOutcome::Succeeded(execution),
+            ExecutionState::RetryWaiting => ScheduledExecutionOutcome::RetryScheduled {
+                execution,
+                error_class: error_class.expect("recovery retry has an error class"),
+                retry_at: retry_at.expect("recovery retry has a timestamp"),
+            },
+            ExecutionState::HumanRequired => ScheduledExecutionOutcome::HumanRequired {
+                execution,
+                error_class: error_class.expect("human recovery has an error class"),
+            },
+            _ => unreachable!("recovery finish states were validated"),
+        })
     }
 
     async fn execute_attempt(
@@ -533,6 +858,11 @@ struct PreparedProviderCall {
     request: ProviderExecutionRequest,
 }
 
+struct PreparedRecoveryCall {
+    capability: Arc<dyn TaskProgressCapability>,
+    context: ProviderContext,
+}
+
 struct PreparedFailure {
     error_class: ProviderErrorClass,
     disposition: FailureDisposition,
@@ -628,19 +958,25 @@ fn authorize_execution(
 fn validate_execution_binding(
     execution: &Execution,
     task: &Task,
+    recovery_job: bool,
 ) -> Result<(), ScheduledExecutionRunError> {
-    let synchronized = matches!(
-        (execution.state, task.orchestration_state),
-        (ExecutionState::Scheduled, OrchestrationState::Scheduled)
-            | (
-                ExecutionState::RetryWaiting,
-                OrchestrationState::RetryWaiting
-            )
-            | (
-                ExecutionState::HumanRequired,
-                OrchestrationState::HumanRequired
-            )
-    );
+    let synchronized = if recovery_job {
+        (execution.state, task.orchestration_state)
+            == (ExecutionState::Recovering, OrchestrationState::Recovering)
+    } else {
+        matches!(
+            (execution.state, task.orchestration_state),
+            (ExecutionState::Scheduled, OrchestrationState::Scheduled)
+                | (
+                    ExecutionState::RetryWaiting,
+                    OrchestrationState::RetryWaiting
+                )
+                | (
+                    ExecutionState::HumanRequired,
+                    OrchestrationState::HumanRequired
+                )
+        )
+    };
     if execution.task_id == task.id && synchronized {
         Ok(())
     } else {
@@ -652,18 +988,20 @@ struct ClaimedExecution<'a> {
     execution_id: ExecutionId,
     next_attempt_no: Option<u32>,
     worker_id: &'a str,
+    recovery: bool,
 }
 
 fn claimed_execution(
     job: &ScheduledJob,
     now: Timestamp,
 ) -> Result<ClaimedExecution<'_>, ScheduledExecutionRunError> {
-    let (execution_id, next_attempt_no) = match job.kind {
-        ScheduledJobKind::Execution { execution_id } => (execution_id, None),
+    let (execution_id, next_attempt_no, recovery) = match job.kind {
+        ScheduledJobKind::Execution { execution_id } => (execution_id, None, false),
         ScheduledJobKind::Retry {
             execution_id,
             next_attempt_no,
-        } => (execution_id, Some(next_attempt_no)),
+        } => (execution_id, Some(next_attempt_no), false),
+        ScheduledJobKind::Recovery { execution_id } => (execution_id, None, true),
         _ => return Err(ScheduledExecutionRunError::UnsupportedJobKind),
     };
     match &job.state {
@@ -674,6 +1012,7 @@ fn claimed_execution(
             execution_id,
             next_attempt_no,
             worker_id,
+            recovery,
         }),
         ScheduledJobState::Claimed { .. } => Err(ScheduledExecutionRunError::ClaimExpired),
         _ => Err(ScheduledExecutionRunError::JobNotClaimed),
@@ -687,26 +1026,22 @@ fn claimed_worker(job: &ScheduledJob) -> Result<&str, ScheduledExecutionRunError
     }
 }
 
+fn claimed_execution_id(job: &ScheduledJob) -> Result<ExecutionId, ScheduledExecutionRunError> {
+    match job.kind {
+        ScheduledJobKind::Execution { execution_id }
+        | ScheduledJobKind::Retry { execution_id, .. }
+        | ScheduledJobKind::Recovery { execution_id } => Ok(execution_id),
+        _ => Err(ScheduledExecutionRunError::UnsupportedJobKind),
+    }
+}
+
 fn classify_provider_error(
     error: &ProviderError,
     attempt_no: u32,
     now: Timestamp,
     retry_policy: RetryPolicy,
 ) -> Result<(ProviderErrorClass, FailureDisposition), ScheduledExecutionRunError> {
-    let error_class = match error.kind {
-        ProviderErrorKind::Authentication => ProviderErrorClass::Authentication,
-        ProviderErrorKind::Authorization => ProviderErrorClass::Authorization,
-        ProviderErrorKind::RateLimited => ProviderErrorClass::RateLimited,
-        ProviderErrorKind::Network => ProviderErrorClass::Network,
-        ProviderErrorKind::ProviderUnavailable => ProviderErrorClass::ProviderUnavailable,
-        ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
-            ProviderErrorClass::ProtocolDrift
-        }
-        ProviderErrorKind::RemoteChanged => ProviderErrorClass::InvalidRemoteState,
-        ProviderErrorKind::UnsupportedTask => ProviderErrorClass::UnsupportedTask,
-        ProviderErrorKind::HumanRequired => ProviderErrorClass::HumanRequired,
-        ProviderErrorKind::Internal => ProviderErrorClass::Internal,
-    };
+    let error_class = provider_error_class(error);
     let disposition = match error.kind {
         ProviderErrorKind::Authentication | ProviderErrorKind::HumanRequired => {
             FailureDisposition::HumanRequired
@@ -729,6 +1064,23 @@ fn classify_provider_error(
         _ => FailureDisposition::Failed,
     };
     Ok((error_class, disposition))
+}
+
+fn provider_error_class(error: &ProviderError) -> ProviderErrorClass {
+    match error.kind {
+        ProviderErrorKind::Authentication => ProviderErrorClass::Authentication,
+        ProviderErrorKind::Authorization => ProviderErrorClass::Authorization,
+        ProviderErrorKind::RateLimited => ProviderErrorClass::RateLimited,
+        ProviderErrorKind::Network => ProviderErrorClass::Network,
+        ProviderErrorKind::ProviderUnavailable => ProviderErrorClass::ProviderUnavailable,
+        ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+            ProviderErrorClass::ProtocolDrift
+        }
+        ProviderErrorKind::RemoteChanged => ProviderErrorClass::InvalidRemoteState,
+        ProviderErrorKind::UnsupportedTask => ProviderErrorClass::UnsupportedTask,
+        ProviderErrorKind::HumanRequired => ProviderErrorClass::HumanRequired,
+        ProviderErrorKind::Internal => ProviderErrorClass::Internal,
+    }
 }
 
 fn add_duration(
@@ -775,7 +1127,7 @@ pub enum ScheduledExecutionOutcome {
 pub enum ScheduledExecutionRunError {
     #[error("execution worker configuration is invalid")]
     InvalidConfiguration,
-    #[error("scheduler job is not an execution or retry job")]
+    #[error("scheduler job is not an execution, retry or recovery job")]
     UnsupportedJobKind,
     #[error("scheduler job is not claimed")]
     JobNotClaimed,
@@ -809,7 +1161,7 @@ mod tests {
     };
     use asterism_provider_api::{
         ExecutionOutcome, ProviderCapability, ProviderEntry, ProviderIdentity, ProviderMetadata,
-        ProviderResult, VerificationLevel,
+        ProviderResult, RemoteProgress, TaskProgressCapability, VerificationLevel,
     };
     use asterism_storage::{
         Database, ExecutionScheduleRequest, SqliteExecutionLeaseRepository,
@@ -824,6 +1176,7 @@ mod tests {
     enum ProviderBehavior {
         Success,
         NetworkFailure,
+        RecoveryPending,
     }
 
     #[derive(Debug)]
@@ -831,6 +1184,7 @@ mod tests {
         metadata: ProviderMetadata,
         behavior: ProviderBehavior,
         calls: Mutex<u32>,
+        progress_calls: Mutex<u32>,
     }
 
     impl ProviderIdentity for FakeExecution {
@@ -872,6 +1226,39 @@ mod tests {
                 ProviderBehavior::NetworkFailure => Err(ProviderError::new(
                     ProviderErrorKind::Network,
                     "temporary network failure",
+                )),
+                ProviderBehavior::RecoveryPending => Err(ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "recovery-only fixture cannot execute",
+                )),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TaskProgressCapability for FakeExecution {
+        async fn read_progress(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+        ) -> ProviderResult<RemoteProgress> {
+            *self.progress_calls.lock().unwrap() += 1;
+            match self.behavior {
+                ProviderBehavior::Success => Ok(RemoteProgress {
+                    remote_state: RemoteState::Completed,
+                    percent: Some(100),
+                    duration_seconds: None,
+                    updated_at: Utc::now(),
+                }),
+                ProviderBehavior::RecoveryPending => Ok(RemoteProgress {
+                    remote_state: RemoteState::Pending,
+                    percent: Some(0),
+                    duration_seconds: None,
+                    updated_at: Utc::now(),
+                }),
+                ProviderBehavior::NetworkFailure => Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "temporary progress read failure",
                 )),
             }
         }
@@ -951,6 +1338,98 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn recovery_verifies_remote_completion_without_reexecuting() {
+        let fixture = Fixture::recovering(ProviderBehavior::Success).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+        let state = fixture.persisted_state().await;
+        assert_eq!(state, ("succeeded".to_owned(), "succeeded".to_owned(), 100));
+    }
+
+    #[tokio::test]
+    async fn recovery_retries_only_after_remote_pending_is_confirmed() {
+        let fixture = Fixture::recovering(ProviderBehavior::RecoveryPending).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::RetryScheduled {
+                error_class: ProviderErrorClass::InvalidRemoteState,
+                ..
+            }
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        let jobs: Vec<(String, String)> =
+            sqlx::query("SELECT job_kind, state FROM scheduled_jobs ORDER BY created_at, id")
+                .fetch_all(fixture.database.pool())
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get("job_kind"), row.get("state")))
+                .collect();
+        assert!(jobs.contains(&("execution".to_owned(), "cancelled".to_owned())));
+        assert!(jobs.contains(&("recovery".to_owned(), "completed".to_owned())));
+        assert!(jobs.contains(&("retry".to_owned(), "pending".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn transient_recovery_read_retries_verification_not_execution() {
+        let fixture = Fixture::recovering(ProviderBehavior::NetworkFailure).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::Deferred { .. }
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        let state: (String, String, i64) = sqlx::query_as(
+            "SELECT e.state, t.orchestration_state, j.attempts FROM executions e \
+             JOIN tasks t ON t.id = e.task_id \
+             JOIN scheduled_jobs j ON j.job_kind = 'recovery' WHERE e.id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(state, ("recovering".to_owned(), "recovering".to_owned(), 1));
+    }
+
+    #[tokio::test]
+    async fn recovery_without_advertised_progress_requires_human_review() {
+        let fixture = Fixture::recovering(ProviderBehavior::Success).await;
+        sqlx::query("UPDATE tasks SET capabilities_json = '[\"resource_execution\"]'")
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::HumanRequired {
+                error_class: ProviderErrorClass::UnsupportedTask,
+                ..
+            }
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
+    }
+
     type TestRunner = ScheduledExecutionRunner<
         SqliteExecutionRepository,
         SqliteExecutionLeaseRepository,
@@ -991,6 +1470,7 @@ mod tests {
                 metadata: provider_metadata(),
                 behavior,
                 calls: Mutex::new(0),
+                progress_calls: Mutex::new(0),
             });
             let mut registry = ProviderRegistry::default();
             registry
@@ -1000,7 +1480,7 @@ mod tests {
                     course_inventory: None,
                     task_inventory: None,
                     task_detail: None,
-                    task_progress: None,
+                    task_progress: Some(provider.clone()),
                     task_execution: Some(provider.clone()),
                     browser_bridge: None,
                 })
@@ -1024,6 +1504,66 @@ mod tests {
                 execution_id,
                 now,
             }
+        }
+
+        async fn recovering(behavior: ProviderBehavior) -> Self {
+            let mut fixture = Self::new(AssessmentClass::Routine, behavior).await;
+            let task_id = execution_id_to_task(
+                &SqliteExecutionRepository::new(fixture.database.clone()),
+                fixture.execution_id,
+            )
+            .await
+            .unwrap();
+            let lease = ExecutionLease {
+                task_id,
+                execution_id: fixture.execution_id,
+                worker_id: "execution-worker".to_owned(),
+                expires_at: fixture.now + chrono::Duration::minutes(1),
+            };
+            SqliteExecutionLeaseRepository::new(fixture.database.clone())
+                .try_acquire(&lease, fixture.now)
+                .await
+                .unwrap();
+            SqliteExecutionRepository::new(fixture.database.clone())
+                .start_attempt(ExecutionAttemptStartRequest {
+                    execution_id: fixture.execution_id,
+                    scheduler_job_id: fixture.job.id,
+                    worker_id: "execution-worker",
+                    at: fixture.now,
+                    correlation_id: "stale-execution-test",
+                })
+                .await
+                .unwrap();
+            let expired = (fixture.now - chrono::Duration::seconds(1)).to_rfc3339();
+            sqlx::query("UPDATE execution_leases SET expires_at = ? WHERE execution_id = ?")
+                .bind(&expired)
+                .bind(fixture.execution_id.to_string())
+                .execute(fixture.database.pool())
+                .await
+                .unwrap();
+            sqlx::query("UPDATE scheduled_jobs SET lease_expires_at = ? WHERE id = ?")
+                .bind(&expired)
+                .bind(fixture.job.id.to_string())
+                .execute(fixture.database.pool())
+                .await
+                .unwrap();
+            fixture
+                .database
+                .recover_stale_work(fixture.now)
+                .await
+                .unwrap();
+            fixture.job = SqliteSchedulerRepository::new(fixture.database.clone())
+                .claim_due_execution_jobs(
+                    "recovery-worker",
+                    fixture.now,
+                    fixture.now + chrono::Duration::minutes(5),
+                    1,
+                )
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            fixture
         }
 
         async fn persisted_state(&self) -> (String, String, i64) {
@@ -1089,7 +1629,13 @@ mod tests {
         })
         .bind(&now_text)
         .bind(&now_text)
-        .bind(serde_json::to_string(&[TaskCapability::ResourceExecution]).unwrap())
+        .bind(
+            serde_json::to_string(&[
+                TaskCapability::ProgressRead,
+                TaskCapability::ResourceExecution,
+            ])
+            .unwrap(),
+        )
         .execute(database.pool())
         .await
         .unwrap();
@@ -1136,7 +1682,10 @@ mod tests {
             verification: VerificationLevel::Development,
             scan_min_interval_seconds: None,
             capture_recipe_version: None,
-            capabilities: BTreeSet::from([ProviderCapability::ResourceExecution]),
+            capabilities: BTreeSet::from([
+                ProviderCapability::TaskProgressRead,
+                ProviderCapability::ResourceExecution,
+            ]),
             auth_methods: BTreeSet::new(),
             session_kinds: BTreeSet::new(),
         }

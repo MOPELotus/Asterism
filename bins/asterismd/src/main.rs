@@ -18,8 +18,8 @@ use asterism_provider_chaoxing::build_development_provider_with_renewal;
 use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
 use asterism_storage::{
-    Database, SecretKeyring, SqliteExecutionLeaseRepository, SqliteExecutionRepository,
-    SqliteProviderAccountRepository, SqliteProviderCredentialResolver,
+    Database, RecoveryReport, SecretKeyring, SqliteExecutionLeaseRepository,
+    SqliteExecutionRepository, SqliteProviderAccountRepository, SqliteProviderCredentialResolver,
     SqliteProviderScanRepository, SqliteSchedulerRepository, SqliteSecretStore,
     SqliteTaskQueryRepository,
 };
@@ -134,6 +134,8 @@ async fn main() -> anyhow::Result<()> {
         executions = recovery.executions_marked_recovering,
         execution_leases = recovery.expired_execution_leases_removed,
         scheduler_claims = recovery.scheduler_claims_requeued,
+        scheduler_jobs_cancelled = recovery.scheduler_jobs_cancelled,
+        recovery_jobs = recovery.recovery_jobs_enqueued,
         "startup recovery completed"
     );
 
@@ -378,6 +380,7 @@ fn start_execution_scheduler(
         .context("failed to configure the execution scheduler")?;
         let tick_interval = std::time::Duration::from_secs(config.scheduler.tick_interval_seconds);
         Some(tokio::spawn(run_execution_scheduler(
+            database.clone(),
             worker,
             tick_interval,
             shutdown,
@@ -430,6 +433,7 @@ async fn run_scan_scheduler(
 }
 
 async fn run_execution_scheduler(
+    database: Database,
     worker: DaemonExecutionWorker,
     tick_interval: std::time::Duration,
     mut shutdown: watch::Receiver<bool>,
@@ -450,7 +454,25 @@ async fn run_execution_scheduler(
         if !should_tick {
             continue;
         }
-        match worker.tick_once(chrono::Utc::now()).await {
+        let now = chrono::Utc::now();
+        match database.recover_stale_work(now).await {
+            Ok(report) if report != RecoveryReport::default() => {
+                tracing::warn!(
+                    executions = report.executions_marked_recovering,
+                    execution_leases = report.expired_execution_leases_removed,
+                    scheduler_claims = report.scheduler_claims_requeued,
+                    scheduler_jobs_cancelled = report.scheduler_jobs_cancelled,
+                    recovery_jobs = report.recovery_jobs_enqueued,
+                    "runtime recovery sweep completed"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "runtime recovery sweep failed");
+                continue;
+            }
+        }
+        match worker.tick_once(now).await {
             Ok(report) if report != ExecutionSchedulerTickReport::default() => {
                 tracing::info!(
                     claimed = report.claimed,
