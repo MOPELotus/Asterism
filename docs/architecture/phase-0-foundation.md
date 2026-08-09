@@ -2070,3 +2070,22 @@ This checkpoint intentionally exposes no Result creation endpoint and no
 submission execution endpoint. Results can only originate from the internal
 repository boundary that requires a real ExecutionAttempt; remote mutation and
 formal-assessment submission policy remain unwired.
+
+## One-hundred-and-thirty-fifth Phase 0 slice
+
+Core now owns a Manual answer-candidate creation service rather than routing
+manual evidence through a learning-platform Provider. Each command carries an
+owner, Task, immutable QuestionSnapshot and Question identity. The service first
+resolves the owner-scoped Snapshot, rechecks its Task path and requires the
+Question to exist before constructing any candidate.
+
+The caller supplies only the typed normalized answer, optional confidence and
+optional explanation. Core fixes `AnswerSource` to `Manual` and creates a small
+sanitized provenance marker itself, so callers cannot impersonate Provider,
+cache or external-bank evidence and cannot inject arbitrary provenance JSON.
+Unknown, malformed or unbounded answers fail before the repository write.
+
+Creation persists one immutable candidate through the existing transactional
+repository. It does not call a Provider, select a winning answer, build a
+SubmissionDraft, create an Execution or submit anything remotely. HTTP and CLI
+transport remain a separate checkpoint.

@@ -9,6 +9,7 @@ mod credential;
 mod execution_job;
 mod execution_request;
 mod execution_worker;
+mod manual_answer;
 mod outbox;
 mod question_read;
 mod scan;
@@ -51,6 +52,9 @@ pub use execution_request::{
 pub use execution_worker::{
     ExecutionSchedulerConfig, ExecutionSchedulerTickReport, ExecutionSchedulerWorker,
     ExecutionSchedulerWorkerError,
+};
+pub use manual_answer::{
+    CreateManualAnswerCandidateCommand, ManualAnswerCandidateError, ManualAnswerCandidateService,
 };
 pub use outbox::{
     DeliveryError, DispatchConfig, DispatchError, DispatchReport, EventSink, OutboxDispatcher,
