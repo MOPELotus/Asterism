@@ -4,8 +4,8 @@ use asterism_domain::{
     ProviderAccount, ProviderAccountId, ProviderId, ProviderRuntimeSettingsId, TaskId, Timestamp,
 };
 use asterism_provider_api::{
-    ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema, ProviderSettingScope,
-    ProviderSettingValue, ResolvedProviderRuntimeSettings,
+    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
+    ProviderSettingScope, ProviderSettingValue, ResolvedProviderRuntimeSettings,
 };
 use asterism_storage::{
     ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
@@ -479,13 +479,4 @@ impl From<&ProviderRuntimeSettingsRecord> for ProviderRuntimeSettingsOverride {
             updated_at: record.updated_at,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ProviderRuntimeSettingSource {
-    SchemaDefault,
-    Provider,
-    ProviderAccount,
-    Task,
 }

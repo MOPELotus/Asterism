@@ -1544,3 +1544,24 @@ default, Provider, ProviderAccount or Task. Scan-schedule administration now
 uses the same authority model, so a Master is system-wide while automation
 remains owner-bound. Execution creation still needs the next transactional
 slice to freeze these resolved settings and layer revisions into the run.
+
+## One-hundred-and-second Phase 0 slice
+
+The atomic Execution scheduling boundary can now persist one immutable runtime
+settings snapshot beside a newly created Execution. The snapshot contains the
+registered Provider ID, schema version, resolved typed values, per-field source,
+the three optional override revisions and a capture timestamp equal to the
+Execution creation time. It is inserted in the same immediate transaction as
+the Task transition, Execution, optional billing reservation, Scheduler job,
+Audit record and Outbox event. Idempotent replay continues returning the first
+Execution and therefore its original snapshot.
+
+Storage rejects zero revisions, mismatched value/source keys, a source without
+its required layer revision, oversized serialized maps, timestamp drift and a
+Provider ID that does not match the Task's actual ProviderAccount chain. A
+binding failure rolls back all scheduling mutations. Reads rejoin the snapshot
+through Execution, Task and ProviderAccount and repeat the Provider and
+lifecycle validation before returning it. Request Audit includes only Provider,
+schema and revision attribution, never setting keys or values. Legacy and
+explicitly unconfigured internal callers may still omit a snapshot; connecting
+the standard Core execution Action to the settings resolver is the next slice.

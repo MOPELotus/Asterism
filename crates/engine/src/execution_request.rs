@@ -111,6 +111,7 @@ where
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
                 billing: None,
+                runtime_settings: None,
                 expected_task_state: task.orchestration_state,
                 idempotency_scope: &scope,
                 idempotency_key: &command.idempotency_key,

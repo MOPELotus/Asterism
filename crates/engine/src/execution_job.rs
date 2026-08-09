@@ -1738,6 +1738,7 @@ mod tests {
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
                 billing: None,
+                runtime_settings: None,
                 expected_task_state: OrchestrationState::Ready,
                 idempotency_scope: "test",
                 idempotency_key: "execution",

@@ -17,6 +17,15 @@ pub enum ProviderSettingScope {
     Task,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderRuntimeSettingSource {
+    SchemaDefault,
+    Provider,
+    ProviderAccount,
+    Task,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ProviderSettingValue {

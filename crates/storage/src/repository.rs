@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use asterism_auth::TokenDigest;
 use asterism_domain::{
     AttemptResult, AuditActor, AuthBootstrapClientEvent, AuthBootstrapSession,
@@ -9,7 +11,8 @@ use asterism_domain::{
     ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
-    ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema, ProviderSettingScope,
+    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
+    ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -400,10 +403,22 @@ pub struct ExecutionBillingReservation<'a> {
     pub reservation: &'a CreditReservation,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionRuntimeSettingsSnapshot {
+    pub provider_id: ProviderId,
+    pub resolved: ResolvedProviderRuntimeSettings,
+    pub sources: BTreeMap<String, ProviderRuntimeSettingSource>,
+    pub provider_revision: Option<u32>,
+    pub provider_account_revision: Option<u32>,
+    pub task_revision: Option<u32>,
+    pub captured_at: Timestamp,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionScheduleRequest<'a> {
     pub execution: &'a Execution,
     pub billing: Option<ExecutionBillingReservation<'a>>,
+    pub runtime_settings: Option<&'a ExecutionRuntimeSettingsSnapshot>,
     pub expected_task_state: OrchestrationState,
     pub idempotency_scope: &'a str,
     pub idempotency_key: &'a str,
@@ -500,6 +515,11 @@ pub trait ExecutionRepository: Send + Sync {
         &self,
         execution_id: ExecutionId,
     ) -> Result<Option<Execution>, StorageError>;
+
+    async fn find_execution_runtime_settings(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionRuntimeSettingsSnapshot>, StorageError>;
 
     async fn start_attempt(
         &self,
