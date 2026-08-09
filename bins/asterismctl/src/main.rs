@@ -184,11 +184,11 @@ struct CredentialImportCommand {
 enum ScanScheduleCommand {
     /// Get the effective schedule for an owned account.
     Get { account_id: String },
-    /// Set the desired interval; Core applies the Provider minimum.
+    /// Set a schedule; omit the interval to snapshot the current Provider/account default.
     Set {
         account_id: String,
         #[arg(long)]
-        interval_seconds: u64,
+        interval_seconds: Option<u64>,
         /// Persist the schedule in a disabled state.
         #[arg(long)]
         disabled: bool,
@@ -565,16 +565,11 @@ async fn handle_provider_account(
                 disabled,
             } => {
                 let path = format!("/api/v1/provider-accounts/{account_id}/scan-schedule");
-                let value = client
-                    .put_authorized(
-                        &path,
-                        &token,
-                        &json!({
-                            "desired_interval_seconds": interval_seconds,
-                            "enabled": !disabled,
-                        }),
-                    )
-                    .await?;
+                let mut payload = json!({"enabled": !disabled});
+                if let Some(interval_seconds) = interval_seconds {
+                    payload["desired_interval_seconds"] = json!(interval_seconds);
+                }
+                let value = client.put_authorized(&path, &token, &payload).await?;
                 write_json(&value)
             }
         },
@@ -989,11 +984,32 @@ mod tests {
                 command: ProviderAccountCommand::Schedule {
                     command: ScanScheduleCommand::Set {
                         account_id,
-                        interval_seconds: 60,
+                        interval_seconds: Some(60),
                         disabled: true,
                     }
                 }
             } if account_id == "account-id"
+        ));
+
+        let provider_default = Arguments::try_parse_from([
+            "asterismctl",
+            "provider-account",
+            "schedule",
+            "set",
+            "account-id",
+        ])
+        .unwrap();
+        assert!(matches!(
+            provider_default.command,
+            Command::ProviderAccount {
+                command: ProviderAccountCommand::Schedule {
+                    command: ScanScheduleCommand::Set {
+                        interval_seconds: None,
+                        disabled: false,
+                        ..
+                    }
+                }
+            }
         ));
     }
 

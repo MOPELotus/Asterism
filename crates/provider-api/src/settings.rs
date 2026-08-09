@@ -10,6 +10,8 @@ const MAX_CHOICE_OPTIONS: usize = 64;
 const MAX_CHOICE_BYTES: usize = 120;
 const MAX_PROVIDER_EXECUTION_CONCURRENCY: i64 = 64;
 const MAX_ACCOUNT_EXECUTION_CONCURRENCY: i64 = 16;
+const MIN_ACCOUNT_SCAN_INTERVAL_SECONDS: u64 = 60;
+const MAX_ACCOUNT_SCAN_INTERVAL_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +37,7 @@ pub enum ProviderRuntimeSettingSource {
 pub enum ProviderSettingCoreBehavior {
     ProviderExecutionConcurrency,
     AccountExecutionConcurrency,
+    AccountScanInterval,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,6 +345,9 @@ impl ProviderRuntimeSettingsSchema {
             let Some(behavior) = definition.core_behavior else {
                 continue;
             };
+            if behavior == ProviderSettingCoreBehavior::AccountScanInterval {
+                continue;
+            }
             let value = resolved
                 .integer(&definition.key)
                 .and_then(|value| u32::try_from(value).ok())
@@ -356,9 +362,39 @@ impl ProviderRuntimeSettingsSchema {
                 ProviderSettingCoreBehavior::AccountExecutionConcurrency => {
                     limits.account = value;
                 }
+                ProviderSettingCoreBehavior::AccountScanInterval => unreachable!(),
             }
         }
         Ok(limits)
+    }
+
+    /// Returns the Provider-defined default scan interval for one account
+    /// settings resolution. The Core Scheduler remains the sole owner of the
+    /// actual schedule and enable/disable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] when the snapshot or declared hint is
+    /// incompatible with this schema.
+    pub fn account_scan_interval(
+        &self,
+        resolved: &ResolvedProviderRuntimeSettings,
+    ) -> Result<Option<u64>, ProviderSettingsError> {
+        self.validate_resolved(resolved)?;
+        self.definitions
+            .iter()
+            .find(|definition| {
+                definition.core_behavior == Some(ProviderSettingCoreBehavior::AccountScanInterval)
+            })
+            .map(|definition| {
+                resolved.duration_seconds(&definition.key).ok_or_else(|| {
+                    ProviderSettingsError::InvalidCoreBehavior {
+                        key: definition.key.clone(),
+                        behavior: ProviderSettingCoreBehavior::AccountScanInterval,
+                    }
+                })
+            })
+            .transpose()
     }
 }
 
@@ -545,15 +581,28 @@ fn validate_core_behavior(
         ProviderSettingCoreBehavior::AccountExecutionConcurrency => {
             MAX_ACCOUNT_EXECUTION_CONCURRENCY
         }
+        ProviderSettingCoreBehavior::AccountScanInterval => 0,
     };
-    let valid_kind = matches!(
-        definition.kind,
-        ProviderSettingKind::Integer {
-            minimum: 1,
-            maximum: declared_maximum,
-            step: 1,
-        } if declared_maximum <= maximum
-    );
+    let valid_kind = match behavior {
+        ProviderSettingCoreBehavior::ProviderExecutionConcurrency
+        | ProviderSettingCoreBehavior::AccountExecutionConcurrency => matches!(
+            definition.kind,
+            ProviderSettingKind::Integer {
+                minimum: 1,
+                maximum: declared_maximum,
+                step: 1,
+            } if declared_maximum <= maximum
+        ),
+        ProviderSettingCoreBehavior::AccountScanInterval => matches!(
+            definition.kind,
+            ProviderSettingKind::DurationSeconds {
+                minimum,
+                maximum,
+                ..
+            } if minimum >= MIN_ACCOUNT_SCAN_INTERVAL_SECONDS
+                && maximum <= MAX_ACCOUNT_SCAN_INTERVAL_SECONDS
+        ),
+    };
     let valid_scopes = match behavior {
         ProviderSettingCoreBehavior::ProviderExecutionConcurrency => {
             definition.scopes.len() == 1
@@ -561,6 +610,13 @@ fn validate_core_behavior(
         }
         ProviderSettingCoreBehavior::AccountExecutionConcurrency => {
             definition.scopes.contains(&ProviderSettingScope::Provider)
+        }
+        ProviderSettingCoreBehavior::AccountScanInterval => {
+            definition.scopes
+                == BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                ])
         }
     };
     if valid_kind && valid_scopes {
@@ -817,6 +873,42 @@ mod tests {
             Some(ProviderSettingCoreBehavior::AccountExecutionConcurrency);
         assert!(matches!(
             unsafe_cap.validate(),
+            Err(ProviderSettingsError::InvalidCoreBehavior { .. })
+        ));
+    }
+
+    #[test]
+    fn account_scan_interval_requires_a_bounded_account_overridable_duration() {
+        let mut schema = schema();
+        schema.definitions.push(ProviderSettingDefinition {
+            key: "discovery.scan_interval".to_owned(),
+            display_name: "Scan interval".to_owned(),
+            description: "Default periodic account inventory interval.".to_owned(),
+            kind: ProviderSettingKind::DurationSeconds {
+                minimum: 300,
+                maximum: 86_400,
+                step: 300,
+            },
+            default: ProviderSettingValue::DurationSeconds(1_800),
+            scopes: BTreeSet::from([
+                ProviderSettingScope::Provider,
+                ProviderSettingScope::ProviderAccount,
+            ]),
+            core_behavior: Some(ProviderSettingCoreBehavior::AccountScanInterval),
+        });
+        let resolved = schema.resolve(None, None, None).unwrap();
+        assert_eq!(
+            schema.account_scan_interval(&resolved).unwrap(),
+            Some(1_800)
+        );
+
+        schema.definitions.last_mut().unwrap().scopes = BTreeSet::from([
+            ProviderSettingScope::Provider,
+            ProviderSettingScope::ProviderAccount,
+            ProviderSettingScope::Task,
+        ]);
+        assert!(matches!(
+            schema.validate(),
             Err(ProviderSettingsError::InvalidCoreBehavior { .. })
         ));
     }

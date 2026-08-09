@@ -505,7 +505,7 @@ async fn openapi() -> Json<Value> {
                     "security": [{"cookieAuth": []}, {"bearerAuth": []}],
                     "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
                     "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfigureScanSchedule"}}}},
-                    "responses": {"200": {"description": "Master scan schedule configured with the Provider floor"}, "400": {"description": "Invalid interval"}, "403": {"description": "Master Provider settings permission required"}, "404": {"description": "Provider account not found"}, "409": {"description": "Provider is not registered"}}
+                    "responses": {"200": {"description": "Master scan schedule configured with the explicit or Provider-default interval and Provider floor"}, "400": {"description": "Invalid interval or Provider default unavailable"}, "403": {"description": "Master Provider settings permission required"}, "404": {"description": "Provider account not found"}, "409": {"description": "Provider is not registered or stored settings no longer match its schema"}}
                 }
             },
             "/api/v1/tasks": {"get": {
@@ -646,9 +646,9 @@ async fn openapi() -> Json<Value> {
                 },
                 "ConfigureScanSchedule": {
                     "type": "object",
-                    "required": ["desired_interval_seconds", "enabled"],
+                    "required": ["enabled"],
                     "properties": {
-                        "desired_interval_seconds": {"type": "integer", "minimum": 1},
+                        "desired_interval_seconds": {"type": "integer", "minimum": 1, "description": "Omit to snapshot the current Provider/account runtime-settings default"},
                         "enabled": {"type": "boolean"}
                     },
                     "additionalProperties": false
@@ -1206,9 +1206,10 @@ mod tests {
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, CourseInventoryCapability, CredentialValidation,
         ProviderAuthContext, ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity,
-        ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingDefinition,
-        ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask,
-        SessionStatus, TaskInventoryCapability, VerificationLevel,
+        ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema,
+        ProviderSettingCoreBehavior, ProviderSettingDefinition, ProviderSettingKind,
+        ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask, SessionStatus,
+        TaskInventoryCapability, VerificationLevel,
     };
     use asterism_secrets::{CredentialBundle, SecretKey};
     use asterism_storage::SecretKeyring;
@@ -1299,7 +1300,25 @@ mod tests {
         registry
             .register(ProviderEntry {
                 metadata,
-                runtime_settings: asterism_provider_api::ProviderRuntimeSettingsSchema::default(),
+                runtime_settings: ProviderRuntimeSettingsSchema {
+                    version: 1,
+                    definitions: vec![ProviderSettingDefinition {
+                        key: "discovery.scan_interval".to_owned(),
+                        display_name: "Scan interval".to_owned(),
+                        description: "Default periodic account inventory interval.".to_owned(),
+                        kind: ProviderSettingKind::DurationSeconds {
+                            minimum: 300,
+                            maximum: 86_400,
+                            step: 300,
+                        },
+                        default: ProviderSettingValue::DurationSeconds(1_800),
+                        scopes: BTreeSet::from([
+                            ProviderSettingScope::Provider,
+                            ProviderSettingScope::ProviderAccount,
+                        ]),
+                        core_behavior: Some(ProviderSettingCoreBehavior::AccountScanInterval),
+                    }],
+                },
                 authentication: None,
                 course_inventory: Some(inventory.clone()),
                 task_inventory: Some(inventory),
@@ -3007,6 +3026,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the integration test keeps one complete runtime-default schedule lifecycle"
+    )]
     async fn scan_schedule_api_applies_provider_floor_and_audits_updates() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
@@ -3070,6 +3093,40 @@ mod tests {
         assert_eq!(configured["provider_min_interval_seconds"], 300);
         let schedule_id = configured["id"].as_str().unwrap().to_owned();
 
+        let provider_settings = app
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/admin/providers/provider-alpha/runtime-settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-request-id", "schedule-api-provider-settings")
+                    .body(Body::from(
+                        r#"{"expected_revision":0,"schema_version":1,"values":{"discovery.scan_interval":{"type":"duration_seconds","value":3600}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider_settings.status(), StatusCode::CREATED);
+
+        let provider_default = app
+            .clone()
+            .oneshot(
+                Request::put(&schedule_path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-request-id", "schedule-api-provider-default")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider_default.status(), StatusCode::OK);
+        let provider_default = response_json(provider_default).await;
+        assert_eq!(provider_default["id"], schedule_id);
+        assert_eq!(provider_default["desired_interval_seconds"], 3_600);
+        assert_eq!(provider_default["effective_interval_seconds"], 3_600);
+
         let disabled = app
             .clone()
             .oneshot(
@@ -3111,7 +3168,7 @@ mod tests {
         .fetch_one(database.pool())
         .await
         .unwrap();
-        assert_eq!(audit_count, 2);
+        assert_eq!(audit_count, 3);
     }
 
     #[tokio::test]

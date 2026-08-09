@@ -8,6 +8,7 @@ use asterism_provider_api::{
 
 pub(crate) const PROVIDER_EXECUTION_CONCURRENCY_KEY: &str = "execution.provider_concurrency";
 pub(crate) const ACCOUNT_EXECUTION_CONCURRENCY_KEY: &str = "execution.account_concurrency";
+pub(crate) const ACCOUNT_SCAN_INTERVAL_KEY: &str = "discovery.scan_interval";
 pub(crate) const VIDEO_PLAYBACK_RATE_KEY: &str = "video.playback_rate";
 pub(crate) const VIDEO_PROGRESS_INTERVAL_KEY: &str = "video.progress_interval";
 
@@ -63,7 +64,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 3,
+        version: 4,
         definitions: vec![
             ProviderSettingDefinition {
                 key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
@@ -92,6 +93,22 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 default: ProviderSettingValue::Integer(1),
                 scopes: scopes.clone(),
                 core_behavior: Some(ProviderSettingCoreBehavior::AccountExecutionConcurrency),
+            },
+            ProviderSettingDefinition {
+                key: ACCOUNT_SCAN_INTERVAL_KEY.to_owned(),
+                display_name: "账号巡查间隔".to_owned(),
+                description: "Core Scheduler 周期检查课程、章节及任务变化的默认间隔。".to_owned(),
+                kind: ProviderSettingKind::DurationSeconds {
+                    minimum: 300,
+                    maximum: 86_400,
+                    step: 300,
+                },
+                default: ProviderSettingValue::DurationSeconds(1_800),
+                scopes: BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                ]),
+                core_behavior: Some(ProviderSettingCoreBehavior::AccountScanInterval),
             },
             ProviderSettingDefinition {
                 key: VIDEO_PLAYBACK_RATE_KEY.to_owned(),
@@ -163,6 +180,10 @@ mod tests {
                 provider: 1,
                 account: 3,
             }
+        );
+        assert_eq!(
+            schema.account_scan_interval(&resolved).unwrap(),
+            Some(1_800)
         );
 
         let invalid = ProviderRuntimeSettingsPatch {

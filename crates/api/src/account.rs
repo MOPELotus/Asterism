@@ -9,7 +9,9 @@ use asterism_engine::{
     AuthSessionStartRequest, CredentialProvisionError, ProviderCredentialService,
     ProviderScanError, ProviderScanService,
 };
-use asterism_provider_api::{ProviderCapability, ProviderError, ProviderErrorKind, SessionStatus};
+use asterism_provider_api::{
+    ProviderCapability, ProviderEntry, ProviderError, ProviderErrorKind, SessionStatus,
+};
 use asterism_scheduler::{ScanSchedule, ScanScheduleError};
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, CredentialField, SecretAccess, SecretPurpose,
@@ -17,8 +19,10 @@ use asterism_secrets::{
 };
 use asterism_storage::{
     AuthSessionRepository, ProviderAccountRepository, ProviderAccountRuntimeRepository,
-    ScanScheduleRepository, SqliteAuthSessionRepository, SqliteProviderAccountRepository,
-    SqliteProviderScanRepository, SqliteSchedulerRepository, StorageError,
+    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget, ScanScheduleRepository,
+    SqliteAuthSessionRepository, SqliteProviderAccountRepository,
+    SqliteProviderRuntimeSettingsRepository, SqliteProviderScanRepository,
+    SqliteSchedulerRepository, StorageError,
 };
 use axum::{
     Extension, Json,
@@ -465,6 +469,10 @@ pub(super) async fn configure_scan_schedule(
         ));
     }
     let provider_min_interval_seconds = provider.metadata.scan_min_interval_seconds;
+    let desired_interval_seconds = match request.desired_interval_seconds {
+        Some(interval) => interval,
+        None => resolve_account_scan_default(&state, provider, account.id).await?,
+    };
     let repository = SqliteSchedulerRepository::new(state.database);
     let existing = repository
         .find_scan_schedule(account_id)
@@ -473,7 +481,7 @@ pub(super) async fn configure_scan_schedule(
     let now = Utc::now();
     let schedule = ScanSchedule::configured(
         account_id,
-        request.desired_interval_seconds,
+        desired_interval_seconds,
         provider_min_interval_seconds,
         request.enabled,
         now,
@@ -631,8 +639,57 @@ pub(super) struct PutAuthSessionCredentialsResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ConfigureScanScheduleRequest {
-    desired_interval_seconds: u64,
+    desired_interval_seconds: Option<u64>,
     enabled: bool,
+}
+
+async fn resolve_account_scan_default(
+    state: &ApiState,
+    provider: &ProviderEntry,
+    account_id: ProviderAccountId,
+) -> Result<u64, ApiError> {
+    let repository = SqliteProviderRuntimeSettingsRepository::new(state.database.clone());
+    let provider_settings = repository
+        .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::Provider {
+            provider_id: provider.metadata.id.clone(),
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let account_settings = repository
+        .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::ProviderAccount {
+            provider_id: provider.metadata.id.clone(),
+            provider_account_id: account_id,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let resolved = provider
+        .runtime_settings
+        .resolve(
+            provider_settings.as_ref().map(|record| &record.patch),
+            account_settings.as_ref().map(|record| &record.patch),
+            None,
+        )
+        .map_err(|_| {
+            ApiError::conflict(
+                "runtime_settings_schema_mismatch",
+                "stored Provider settings no longer match the registered schema",
+            )
+        })?;
+    provider
+        .runtime_settings
+        .account_scan_interval(&resolved)
+        .map_err(|_| {
+            ApiError::conflict(
+                "runtime_settings_schema_mismatch",
+                "the Provider scan interval setting is incompatible",
+            )
+        })?
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "scan_default_unavailable",
+                "desired_interval_seconds is required because this Provider declares no scan default",
+            )
+        })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
