@@ -16,6 +16,8 @@ use crate::{
     ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingInventoryDocument,
     ChaoxingInventoryTransport, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
     classify_work_detail,
+    resource_execution::ChaoxingImmediateResourceTransport,
+    resource_inventory::{ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget},
     task_inventory::{
         CHAPTER_RESOURCE_CARD_COUNT, MAX_RESOURCE_BATCH_DOCUMENT_BYTES,
         MAX_RESOURCE_CHAPTER_REQUESTS,
@@ -28,6 +30,8 @@ const COURSE_INTERACTION_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/
 const CHAPTER_LIST_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse";
 const CHAPTER_RESOURCE_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/knowledge/cards";
 const CHAPTER_RESOURCE_VERSION: &str = "2025-0424-1038-3";
+const DOCUMENT_COMPLETE_BASE: &str = "https://mooc1.chaoxing.com/ananas/job/document";
+const READ_COMPLETE_BASE: &str = "https://mooc1.chaoxing.com/ananas/job/readv2";
 const COURSE_LIST_REFERER: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans";
 const EXAM_LIST_BASE: &str = "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
@@ -329,6 +333,26 @@ impl NativeChaoxingInventoryTransport {
         unreachable!("bounded Work detail redirect loop always returns")
     }
 
+    async fn complete_immediate_resource_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+        knowledge_id: &str,
+        target: &ChaoxingImmediateResourceTarget,
+    ) -> ProviderResult<()> {
+        let response = self
+            .client
+            .get(immediate_resource_url(route, knowledge_id, target)?)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "application/json,text/html,*/*")
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        validate_response_status(&response)?;
+        let _response = read_response_body(response).await?;
+        Ok(())
+    }
+
     async fn fetch_course_inventories_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -446,6 +470,30 @@ impl ChaoxingInventoryTransport for NativeChaoxingInventoryTransport {
 }
 
 #[async_trait]
+impl ChaoxingImmediateResourceTransport for NativeChaoxingInventoryTransport {
+    async fn complete_immediate_resource(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        knowledge_id: &str,
+        target: &ChaoxingImmediateResourceTarget,
+    ) -> ProviderResult<()> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .complete_immediate_resource_once(&session, route, knowledge_id, target)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.complete_immediate_resource_once(&session, route, knowledge_id, target)
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
 impl ChaoxingCourseInventoryTransport for NativeChaoxingInventoryTransport {
     async fn fetch_course_inventories(
         &self,
@@ -545,6 +593,36 @@ fn chapter_resource_url(
             ("num", &card_index),
         ],
     )
+}
+
+fn immediate_resource_url(
+    route: ChaoxingCourseRoute<'_>,
+    knowledge_id: &str,
+    target: &ChaoxingImmediateResourceTarget,
+) -> ProviderResult<Url> {
+    let token = target.token().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "Chaoxing immediate resource no longer has an execution token",
+        )
+    })?;
+    let mut query = vec![
+        ("jobid", target.job_id()),
+        ("knowledgeid", knowledge_id),
+        ("courseid", route.course_id()),
+        ("clazzid", route.class_id()),
+        ("jtoken", token.expose_secret()),
+    ];
+    let timestamp;
+    let base = match target.kind() {
+        ChaoxingImmediateResourceKind::Document => {
+            timestamp = chrono::Utc::now().timestamp_millis().to_string();
+            query.push(("_dc", &timestamp));
+            DOCUMENT_COMPLETE_BASE
+        }
+        ChaoxingImmediateResourceKind::Read => READ_COMPLETE_BASE,
+    };
+    build_url(base, &query)
 }
 
 fn build_url(base: &str, query: &[(&str, &str)]) -> ProviderResult<Url> {
@@ -888,6 +966,8 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/courses/interaction-folders.html");
     const CHAPTER_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
+    const RESOURCE_MIXED: &str =
+        include_str!("../../../fixtures/providers/chaoxing/resources/cards-mixed.html");
 
     #[test]
     fn routes_preserve_course_scope_and_discover_fresh_work_enc() {
@@ -928,6 +1008,42 @@ mod tests {
             query(&resource_url, "v").as_deref(),
             Some(CHAPTER_RESOURCE_VERSION)
         );
+
+        let read = crate::resource_inventory::locate_immediate_resource_target(
+            RESOURCE_MIXED,
+            &scope,
+            "4001",
+            0,
+            "resource:100:200:4001:job-read",
+        )
+        .unwrap()
+        .unwrap();
+        let read_url = immediate_resource_url(route, "4001", &read).unwrap();
+        assert_eq!(read_url.path(), "/ananas/job/readv2");
+        assert_eq!(query(&read_url, "jobid").as_deref(), Some("job-read"));
+        assert_eq!(query(&read_url, "knowledgeid").as_deref(), Some("4001"));
+        assert_eq!(
+            query(&read_url, "jtoken").as_deref(),
+            Some("PRIVATE_READ_TOKEN")
+        );
+        assert!(query(&read_url, "_dc").is_none());
+
+        let pending_document = RESOURCE_MIXED.replace(
+            "\"jobid\":\"job-document\",\"isPassed\":true",
+            "\"jobid\":\"job-document\",\"isPassed\":false",
+        );
+        let document = crate::resource_inventory::locate_immediate_resource_target(
+            &pending_document,
+            &scope,
+            "4001",
+            0,
+            "resource:100:200:4001:job-document",
+        )
+        .unwrap()
+        .unwrap();
+        let document_url = immediate_resource_url(route, "4001", &document).unwrap();
+        assert_eq!(document_url.path(), "/ananas/job/document");
+        assert!(query(&document_url, "_dc").is_some());
 
         let work_url = discover_work_list_url(COURSE_PAGE, route).unwrap();
         assert_eq!(work_url.host_str(), Some("mooc1.chaoxing.com"));

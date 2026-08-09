@@ -11,6 +11,7 @@ mod inventory;
 mod metadata;
 mod native_http;
 mod provider;
+mod resource_execution;
 mod resource_inventory;
 mod stored_session;
 mod task_inventory;
@@ -29,6 +30,7 @@ pub use native_http::{
     ChaoxingCookieSession, ChaoxingSessionResolver, NativeChaoxingInventoryTransport,
 };
 pub use provider::{build_development_provider, build_development_provider_with_renewal};
+pub use resource_execution::ChaoxingResourceExecution;
 pub use resource_inventory::parse_chapter_resource_inventory;
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use task_inventory::{

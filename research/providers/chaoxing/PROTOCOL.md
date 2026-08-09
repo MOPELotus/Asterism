@@ -83,6 +83,32 @@ courseId + clazzId + cpi
 Chapter Work remains `ChapterModule`; it must not be merged with independent
 course homework just because both ultimately use Work-shaped pages.
 
+The current native inventory requests pending, unlocked Chapters with a nonzero
+job count through card indexes 0 through 6. Completed or locked Chapters are not
+expanded. The exact matrix is bounded and atomic; card-level `enc`, `jtoken`,
+`mid`, `otherInfo`, defaults and live identifiers never enter task snapshots.
+
+## Immediate Document and Read execution
+
+Document and Read are the first resource execution subset. Before either call,
+Asterism rediscovers the current course route and Chapter card, then matches the
+stable `resource:{course}:{class}:{knowledge}:{job}` identity against exactly
+one fresh attachment. Only that short-lived parsed object may expose `jtoken`
+to the native request builder.
+
+```text
+Document -> GET https://mooc1.chaoxing.com/ananas/job/document
+Read     -> GET https://mooc1.chaoxing.com/ananas/job/readv2
+```
+
+Both calls bind job, knowledge, course, class and `jtoken`; Document also sends
+the donor-observed cache-busting timestamp. HTTP success is provisional. The
+capability refetches the complete seven-card matrix and returns a verified
+outcome only when the same stable attachment reports `isPassed = true`.
+Already-completed attachments are idempotent and make no mutation request.
+Video, Live and Chapter Work use different duration/question lifecycles and are
+not routed through this immediate path.
+
 ## WorkModule inventory
 
 The current browser route is:

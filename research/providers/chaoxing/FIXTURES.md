@@ -30,6 +30,12 @@ fixtures/providers/chaoxing/
     list-empty-script-keywords.html
     list-mixed.html
     list-mixed.expected.json
+  chapter/
+    list-mixed.html
+    list-mixed.expected.json
+  resources/
+    cards-mixed.html
+    cards-mixed.expected.json
 ```
 
 The Auth fixtures cover bounded JSON outcome classification only; synthetic
@@ -40,6 +46,10 @@ allowlisting of the current course entry route. The Work course-page fixture
 covers strict discovery of a fresh Work iframe route. The mixed expectation
 files cover normalized identity, source module and remote state. The detail
 fixtures cover the conservative Work redirect classification.
+The Chapter and Resource fixtures cover stable knowledge/job identity, locked
+and completed state, the exact resource type split, empty card slots, execution
+token redaction, immediate Document/Read routing, unsupported type rejection,
+idempotence and fresh-card result verification.
 
 ## Required live-sanitized fixture sets
 

@@ -66,7 +66,7 @@ impl<'a> ChaoxingCourseRoute<'a> {
         self.cpi
     }
 
-    fn parser_scope(self) -> ProviderResult<ChaoxingCourseScope> {
+    pub(crate) fn parser_scope(self) -> ProviderResult<ChaoxingCourseScope> {
         ChaoxingCourseScope::new(self.remote_course_id, self.course_id, self.class_id)
     }
 }
@@ -132,6 +132,14 @@ pub struct ChaoxingChapterResourceRequest {
 
 impl ChaoxingChapterResourceRequest {
     pub(crate) fn try_from_chapter(task: &RemoteTask) -> ProviderResult<Option<Self>> {
+        let request = Self::try_from_available_chapter(task)?;
+        if task.remote_state != RemoteState::Pending {
+            return Ok(None);
+        }
+        Ok(request)
+    }
+
+    pub(crate) fn try_from_available_chapter(task: &RemoteTask) -> ProviderResult<Option<Self>> {
         if task.source_type != asterism_domain::SourceType::Chapter
             || task
                 .normalized
@@ -148,7 +156,7 @@ impl ChaoxingChapterResourceRequest {
             .get("job_count")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| protocol_drift("Chaoxing chapter task has no valid job count"))?;
-        if task.remote_state != RemoteState::Pending || job_count == 0 {
+        if task.remote_state == RemoteState::NotOpen || job_count == 0 {
             return Ok(None);
         }
         let knowledge_id = task
@@ -228,6 +236,18 @@ impl ChaoxingChapterResourceDocument {
             card_index,
             document,
         })
+    }
+
+    pub(crate) fn knowledge_id(&self) -> &str {
+        &self.knowledge_id
+    }
+
+    pub(crate) const fn card_index(&self) -> u8 {
+        self.card_index
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        self.document.as_str()
     }
 }
 
@@ -890,6 +910,7 @@ mod tests {
                 ProviderCapability::Authentication,
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
+                ProviderCapability::ResourceExecution,
             ])
         );
         assert!(inventory.metadata().capture_recipe_version.is_none());

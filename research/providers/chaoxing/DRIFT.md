@@ -11,6 +11,7 @@
 | Per-attempt QIDs change | Current Exam donor observed complete QID regeneration on retake | Reparse every attempt; never make QID the task identity |
 | Browser DOM handlers change | OCS and agent donors use different current page modes | Fixture each supported page mode and fail closed on unknown form structure |
 | Formal assessment ambiguity | Exam is a source module, not an assessment nature | Inventory is allowed; automatic submission remains independently policy-gated |
+| Card version or execution token changes | Primary donor currently sends card version `2025-0424-1038-3` and attachment `jtoken` | Re-fetch before every execution, never persist token/version-derived routes, and require fresh-card completion verification |
 
 ## Live-validation gate
 

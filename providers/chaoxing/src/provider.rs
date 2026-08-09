@@ -5,9 +5,10 @@ use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
-    ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingSessionResolver,
-    ChaoxingTaskInventory, NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
-    StoredChaoxingSessionResolver, metadata::development_metadata,
+    ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingResourceExecution,
+    ChaoxingSessionResolver, ChaoxingTaskInventory, NativeChaoxingAuthenticationTransport,
+    NativeChaoxingInventoryTransport, StoredChaoxingSessionResolver,
+    metadata::development_metadata,
 };
 
 /// Composes the complete development-level Chaoxing Provider around one Core
@@ -65,7 +66,12 @@ fn compose_development_provider(
     let course_inventory = Arc::new(ChaoxingCourseInventory::try_new(
         inventory_transport.clone(),
     )?);
-    let task_inventory = Arc::new(ChaoxingTaskInventory::try_new(inventory_transport)?);
+    let task_inventory = Arc::new(ChaoxingTaskInventory::try_new(inventory_transport.clone())?);
+    let task_execution = Arc::new(ChaoxingResourceExecution::try_new(
+        course_inventory.clone(),
+        inventory_transport.clone(),
+        inventory_transport,
+    )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         authentication: Some(authentication),
@@ -73,7 +79,7 @@ fn compose_development_provider(
         task_inventory: Some(task_inventory),
         task_detail: None,
         task_progress: None,
-        task_execution: None,
+        task_execution: Some(task_execution),
         browser_bridge: None,
     })
 }
@@ -144,11 +150,18 @@ mod tests {
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());
+        assert!(entry.task_execution.is_some());
         assert!(
             entry
                 .metadata
                 .capabilities
                 .contains(&ProviderCapability::Authentication)
+        );
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::ResourceExecution)
         );
         let mut registry = ProviderRegistry::default();
         registry.register(entry).unwrap();

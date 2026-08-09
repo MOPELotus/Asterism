@@ -10,8 +10,8 @@ Chapter card contains a Work-shaped assessment.
 | Authentication / QR | CxKitty | None | Reference | QR creation and polling chain is statically complete but old |
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
-| ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Chapter tree, task-point counts, and card attachments |
-| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Video, Document, Read, and existing Chapter Work behavior |
+| ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
+| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls, idempotence and fresh-card verification are offline-covered; Video, Live and Chapter Work remain pending |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
 | TaskDetail | agent skill | CxKitty, OCS | Reference | Work final URL and Exam entry/detail pages carry task-specific state |
@@ -75,5 +75,10 @@ policy and remains independently guarded.
 - Native HTTP versus BrowserBridge remains a per-capability live-test decision;
   the presence of this adapter is not evidence that the `uf` session works in
   reqwest.
-- Chaoxing stays at `Development` and is not registered as an available
-  Provider.
+- Chaoxing stays at `Development`; the daemon keeps it absent by default and
+  registers it only through the explicit local-validation opt-in.
+- Pending Document and Read cards now advertise task-level `ResourceExecution`.
+  The execution capability rediscovers the current course/cpi and Chapter card,
+  submits only a fresh zeroizing `jtoken`, then refetches all seven cards and
+  accepts success only when the remote attachment is completed. Video, Live and
+  Chapter Work deliberately advertise no execution capability yet.

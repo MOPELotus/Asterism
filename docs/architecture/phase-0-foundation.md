@@ -1094,3 +1094,25 @@ detail and Exam acquisition must all complete before Core receives a snapshot.
 The route and matrix tests are offline evidence only: no resource execution
 capability, Capture dependency, live-account verification or higher Provider
 verification level is claimed.
+
+## Eightieth Phase 0 slice
+
+Chaoxing now implements the first task-level `ResourceExecution` subset for
+pending Document and Read attachments. The Provider entry advertises and
+attaches the generic execution slot, but only those two resource kinds receive
+the corresponding task capability. Each execution rediscovers current Course
+and cpi facts, rechecks the Chapter tree, fetches the exact seven-card matrix,
+and binds one stable resource identity before any mutation. The attachment
+`jtoken` exists only inside a redacted, zeroizing target; parsed JSON string
+values are explicitly zeroed when their short-lived owner drops.
+
+Document uses the donor-observed `ananas/job/document` GET and Read uses
+`ananas/job/readv2`, with course, class, knowledge, job and fresh token bound to
+the fixed Chaoxing origin. HTTP success is not completion: the capability
+refetches all seven cards and returns `verified = true` only when that same task
+reports completed. A task already completed on the first fresh read is
+idempotent and performs no mutation. Video, Live, Chapter Work, independent
+Work and Exam do not borrow this path and advertise no newly implemented
+execution capability. Provider-to-Core execution dispatch and live-account
+behavior remain unverified, so Chaoxing stays `Development`; no Capture path is
+introduced.

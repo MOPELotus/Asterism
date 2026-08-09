@@ -25,6 +25,7 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
+            ProviderCapability::ResourceExecution,
         ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedCookie]),
         session_kinds: BTreeSet::from([

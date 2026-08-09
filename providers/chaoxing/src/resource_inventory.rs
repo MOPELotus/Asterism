@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType};
+use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTask};
+use asterism_secrets::SecretString;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::ChaoxingCourseScope;
 
@@ -12,6 +14,66 @@ const MAX_ATTACHMENTS_PER_CARD: usize = 256;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 const MAX_TITLE_BYTES: usize = 512;
 const MAX_CARD_INDEX: u8 = 6;
+const MAX_EPHEMERAL_TOKEN_BYTES: usize = 4 * 1_024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChaoxingImmediateResourceKind {
+    Document,
+    Read,
+}
+
+pub(crate) struct ChaoxingImmediateResourceTarget {
+    kind: ChaoxingImmediateResourceKind,
+    remote_state: RemoteState,
+    job_id: String,
+    token: Option<SecretString>,
+}
+
+struct SensitiveCardRoot(Map<String, Value>);
+
+impl SensitiveCardRoot {
+    fn as_map(&self) -> &Map<String, Value> {
+        &self.0
+    }
+}
+
+impl Drop for SensitiveCardRoot {
+    fn drop(&mut self) {
+        for value in self.0.values_mut() {
+            zeroize_json_value(value);
+        }
+    }
+}
+
+impl ChaoxingImmediateResourceTarget {
+    pub(crate) const fn kind(&self) -> ChaoxingImmediateResourceKind {
+        self.kind
+    }
+
+    pub(crate) const fn remote_state(&self) -> RemoteState {
+        self.remote_state
+    }
+
+    pub(crate) fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
+    pub(crate) fn token(&self) -> Option<&SecretString> {
+        self.token.as_ref()
+    }
+}
+
+impl std::fmt::Debug for ChaoxingImmediateResourceTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChaoxingImmediateResourceTarget")
+            .field("kind", &self.kind)
+            .field("remote_state", &self.remote_state)
+            .field("job_id", &"[REDACTED]")
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
 
 /// Parses one donor-observed `knowledge/cards` response without executing its
 /// script. Routing and submission fields stay outside the normalized tasks.
@@ -41,30 +103,10 @@ pub fn parse_chapter_resource_inventory(
     if html.contains("章节未开放") {
         return Ok(Vec::new());
     }
-    let Some(object) = extract_marg_object(html)? else {
+    let Some(root) = parse_card_root(html)? else {
         return Ok(Vec::new());
     };
-    let cards_data = serde_json::from_str::<Value>(object)
-        .map_err(|_| protocol_drift("Chaoxing chapter card contains malformed mArg JSON"))?;
-    let root = cards_data
-        .as_object()
-        .ok_or_else(|| protocol_drift("Chaoxing chapter card mArg is not an object"))?;
-    let attachments = match root.get("attachments") {
-        None | Some(Value::Null) => return Ok(Vec::new()),
-        Some(Value::Array(attachments)) if attachments.len() <= MAX_ATTACHMENTS_PER_CARD => {
-            attachments
-        }
-        Some(Value::Array(_)) => {
-            return Err(invalid_response(
-                "Chaoxing chapter attachment count exceeds the size limit",
-            ));
-        }
-        Some(_) => {
-            return Err(protocol_drift(
-                "Chaoxing chapter attachments are not an array",
-            ));
-        }
-    };
+    let attachments = card_attachments(root.as_map())?;
 
     let mut tasks = Vec::new();
     let mut seen = HashSet::new();
@@ -81,6 +123,148 @@ pub fn parse_chapter_resource_inventory(
         tasks.push(task);
     }
     Ok(tasks)
+}
+
+/// Locates one immediate Document or Read execution target without persisting
+/// its short-lived token. Callers must use a freshly fetched card document.
+///
+/// # Errors
+///
+/// Returns a typed error for foreign task identities, malformed or duplicate
+/// card entries, unsupported resource kinds, or missing execution fields.
+pub(crate) fn locate_immediate_resource_target(
+    html: &str,
+    scope: &ChaoxingCourseScope,
+    knowledge_id: &str,
+    card_index: u8,
+    remote_task_id: &str,
+) -> ProviderResult<Option<ChaoxingImmediateResourceTarget>> {
+    if html.is_empty() || html.len() > MAX_CARD_DOCUMENT_BYTES {
+        return Err(invalid_response(
+            "Chaoxing chapter card document is empty or exceeds the size limit",
+        ));
+    }
+    validate_component(knowledge_id, "knowledge identity")?;
+    if card_index > MAX_CARD_INDEX {
+        return Err(protocol_drift(
+            "Chaoxing chapter card index exceeds the donor range",
+        ));
+    }
+    let prefix = format!(
+        "resource:{}:{}:{knowledge_id}:",
+        scope.course_id(),
+        scope.class_id()
+    );
+    let expected_task_id = remote_task_id
+        .strip_prefix(&prefix)
+        .ok_or_else(|| protocol_drift("Chaoxing resource target is outside the current scope"))?;
+    validate_component(expected_task_id, "resource identity")?;
+    if html.contains("章节未开放") {
+        return Ok(None);
+    }
+    let Some(root) = parse_card_root(html)? else {
+        return Ok(None);
+    };
+    let mut found = None;
+    for attachment in card_attachments(root.as_map())? {
+        let Some(task) = parse_resource_attachment(attachment, scope, knowledge_id, card_index)?
+        else {
+            continue;
+        };
+        if task.remote_id != remote_task_id {
+            continue;
+        }
+        if found.is_some() {
+            return Err(protocol_drift(
+                "Chaoxing chapter card contains a duplicate execution target",
+            ));
+        }
+        let card = attachment
+            .as_object()
+            .ok_or_else(|| protocol_drift("Chaoxing chapter attachment is not an object"))?;
+        let kind = match task.normalized.get("resource_kind").and_then(Value::as_str) {
+            Some("document") => ChaoxingImmediateResourceKind::Document,
+            Some("read") => ChaoxingImmediateResourceKind::Read,
+            Some(_) => {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::UnsupportedTask,
+                    "Chaoxing resource kind has no immediate execution path",
+                ));
+            }
+            None => {
+                return Err(protocol_drift(
+                    "Chaoxing resource target has no normalized kind",
+                ));
+            }
+        };
+        let job_id = optional_string(card, "jobid")?
+            .filter(|job_id| *job_id == expected_task_id)
+            .ok_or_else(|| {
+                protocol_drift("Chaoxing immediate resource has no matching job identity")
+            })?
+            .to_owned();
+        let token = if task.remote_state == RemoteState::Completed {
+            None
+        } else {
+            let token = optional_string(card, "jtoken")?
+                .filter(|token| {
+                    !token.is_empty()
+                        && token.len() <= MAX_EPHEMERAL_TOKEN_BYTES
+                        && !token.chars().any(char::is_control)
+                })
+                .ok_or_else(|| {
+                    protocol_drift("Chaoxing immediate resource has no valid execution token")
+                })?;
+            Some(SecretString::new(token))
+        };
+        found = Some(ChaoxingImmediateResourceTarget {
+            kind,
+            remote_state: task.remote_state,
+            job_id,
+            token,
+        });
+    }
+    Ok(found)
+}
+
+fn parse_card_root(html: &str) -> ProviderResult<Option<SensitiveCardRoot>> {
+    let Some(object) = extract_marg_object(html)? else {
+        return Ok(None);
+    };
+    let mut cards_data = serde_json::from_str::<Value>(object)
+        .map_err(|_| protocol_drift("Chaoxing chapter card contains malformed mArg JSON"))?;
+    if let Value::Object(root) = cards_data {
+        Ok(Some(SensitiveCardRoot(root)))
+    } else {
+        zeroize_json_value(&mut cards_data);
+        Err(protocol_drift(
+            "Chaoxing chapter card mArg is not an object",
+        ))
+    }
+}
+
+fn zeroize_json_value(value: &mut Value) {
+    match value {
+        Value::String(value) => value.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_json_value),
+        Value::Object(values) => values.values_mut().for_each(zeroize_json_value),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn card_attachments(root: &Map<String, Value>) -> ProviderResult<&[Value]> {
+    match root.get("attachments") {
+        None | Some(Value::Null) => Ok(&[]),
+        Some(Value::Array(attachments)) if attachments.len() <= MAX_ATTACHMENTS_PER_CARD => {
+            Ok(attachments)
+        }
+        Some(Value::Array(_)) => Err(invalid_response(
+            "Chaoxing chapter attachment count exceeds the size limit",
+        )),
+        Some(_) => Err(protocol_drift(
+            "Chaoxing chapter attachments are not an array",
+        )),
+    }
 }
 
 fn parse_resource_attachment(
@@ -150,7 +334,12 @@ fn parse_resource_attachment(
         opens_at: None,
         due_at: None,
         closes_at: None,
-        capabilities: Vec::new(),
+        capabilities: if remote_state == RemoteState::Pending && matches!(kind, "document" | "read")
+        {
+            vec![TaskCapability::ResourceExecution]
+        } else {
+            Vec::new()
+        },
         fingerprint: fingerprint(&normalized)?,
         normalized,
         raw_sanitized: json!({
@@ -418,6 +607,19 @@ mod tests {
             selected,
             serde_json::from_str::<Value>(CARDS_EXPECTED).unwrap()
         );
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.remote_id.ends_with(":job-read"))
+                .map(|task| task.capabilities.as_slice()),
+            Some([TaskCapability::ResourceExecution].as_slice())
+        );
+        assert!(
+            tasks
+                .iter()
+                .find(|task| task.remote_id.ends_with(":job-document"))
+                .is_some_and(|task| task.capabilities.is_empty())
+        );
         let serialized = serde_json::to_string(&tasks).unwrap();
         for private in [
             "PRIVATE_ENC",
@@ -425,6 +627,7 @@ mod tests {
             "PRIVATE_MID",
             "PRIVATE_OTHER",
             "PRIVATE_LIVE",
+            "PRIVATE_READ_TOKEN",
         ] {
             assert!(!serialized.contains(private));
         }
@@ -482,6 +685,96 @@ mod tests {
                 0
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn immediate_locator_keeps_tokens_ephemeral_and_handles_completed_targets() {
+        let pending_document = CARDS_MIXED.replace(
+            "\"jobid\":\"job-document\",\"isPassed\":true",
+            "\"jobid\":\"job-document\",\"isPassed\":false",
+        );
+        let document = locate_immediate_resource_target(
+            &pending_document,
+            &scope(),
+            "4001",
+            0,
+            "resource:100:200:4001:job-document",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.kind(), ChaoxingImmediateResourceKind::Document);
+        assert_eq!(document.remote_state(), RemoteState::Pending);
+        assert_eq!(document.job_id(), "job-document");
+        assert_eq!(document.token().unwrap().expose_secret(), "PRIVATE_TOKEN");
+        assert!(!format!("{document:?}").contains("PRIVATE_TOKEN"));
+
+        let read = locate_immediate_resource_target(
+            CARDS_MIXED,
+            &scope(),
+            "4001",
+            0,
+            "resource:100:200:4001:job-read",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(read.kind(), ChaoxingImmediateResourceKind::Read);
+        assert_eq!(read.token().unwrap().expose_secret(), "PRIVATE_READ_TOKEN");
+
+        let completed = locate_immediate_resource_target(
+            CARDS_MIXED,
+            &scope(),
+            "4001",
+            0,
+            "resource:100:200:4001:job-document",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(completed.remote_state(), RemoteState::Completed);
+        assert!(completed.token().is_none());
+    }
+
+    #[test]
+    fn immediate_locator_rejects_foreign_unsupported_or_malformed_targets() {
+        let unsupported = locate_immediate_resource_target(
+            CARDS_MIXED,
+            &scope(),
+            "4001",
+            0,
+            "resource:100:200:4001:job-video",
+        )
+        .unwrap_err();
+        assert_eq!(unsupported.kind, ProviderErrorKind::UnsupportedTask);
+        assert!(
+            locate_immediate_resource_target(
+                CARDS_MIXED,
+                &scope(),
+                "4001",
+                0,
+                "resource:999:200:4001:job-read",
+            )
+            .is_err()
+        );
+        assert!(
+            locate_immediate_resource_target(
+                &CARDS_MIXED.replace("\"jtoken\":\"PRIVATE_READ_TOKEN\"", "\"jtoken\":42"),
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:job-read",
+            )
+            .is_err()
+        );
+        assert!(
+            locate_immediate_resource_target(
+                CARDS_MIXED,
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:job-missing",
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
