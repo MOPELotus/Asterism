@@ -67,6 +67,10 @@ impl ChaoxingCookieSession {
         value.set_sensitive(true);
         Ok(value)
     }
+
+    pub(crate) fn expose_secret(&self) -> &str {
+        self.0.expose_secret()
+    }
 }
 
 impl fmt::Debug for ChaoxingCookieSession {
@@ -135,18 +139,7 @@ impl NativeChaoxingInventoryTransport {
         session: &ChaoxingCookieSession,
         folder_id: &str,
     ) -> ProviderResult<SensitiveHtml> {
-        let response = self
-            .client
-            .post(static_url(COURSE_LIST_BASE)?)
-            .header(COOKIE, session.header_value()?)
-            .header(ACCEPT, "text/html,application/xhtml+xml")
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .header(REFERER, COURSE_LIST_REFERER)
-            .body(course_list_form(folder_id)?)
-            .send()
-            .await
-            .map_err(|error| classify_reqwest_error(&error))?;
-        classify_response(response).await
+        fetch_course_list_html(&self.client, session, folder_id).await
     }
 }
 
@@ -212,10 +205,10 @@ impl ChaoxingCourseInventoryTransport for NativeChaoxingInventoryTransport {
     }
 }
 
-struct SensitiveHtml(String);
+pub(crate) struct SensitiveHtml(String);
 
 impl SensitiveHtml {
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
@@ -284,6 +277,24 @@ fn course_list_form(folder_id: &str) -> ProviderResult<String> {
     Ok(format!(
         "courseType=1&courseFolderId={folder_id}&query=&superstarClass=0"
     ))
+}
+
+pub(crate) async fn fetch_course_list_html(
+    client: &Client,
+    session: &ChaoxingCookieSession,
+    folder_id: &str,
+) -> ProviderResult<SensitiveHtml> {
+    let response = client
+        .post(static_url(COURSE_LIST_BASE)?)
+        .header(COOKIE, session.header_value()?)
+        .header(ACCEPT, "text/html,application/xhtml+xml")
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(REFERER, COURSE_LIST_REFERER)
+        .body(course_list_form(folder_id)?)
+        .send()
+        .await
+        .map_err(|error| classify_reqwest_error(&error))?;
+    classify_response(response).await
 }
 
 fn parse_course_folder_ids(html: &str) -> ProviderResult<Vec<String>> {
@@ -378,6 +389,11 @@ async fn classify_response(response: Response) -> ProviderResult<SensitiveHtml> 
 }
 
 fn validate_response_head(response: &Response) -> ProviderResult<()> {
+    validate_response_status(response)?;
+    validate_html_response_head(response)
+}
+
+pub(crate) fn validate_response_status(response: &Response) -> ProviderResult<()> {
     let status = response.status();
     if status == StatusCode::TOO_MANY_REQUESTS {
         let mut error = ProviderError::new(
@@ -438,6 +454,10 @@ fn validate_response_head(response: &Response) -> ProviderResult<()> {
             "Chaoxing inventory endpoint returned an unexpected status",
         ));
     }
+    Ok(())
+}
+
+fn validate_html_response_head(response: &Response) -> ProviderResult<()> {
     if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
         let content_type = content_type.to_str().map_err(|_| {
             ProviderError::new(
@@ -506,7 +526,7 @@ async fn read_response_body(mut response: Response) -> ProviderResult<SensitiveH
     Ok(SensitiveHtml(html))
 }
 
-fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
+pub(crate) fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
     let kind = if error.is_timeout() || error.is_connect() || error.is_body() {
         ProviderErrorKind::Network
     } else {

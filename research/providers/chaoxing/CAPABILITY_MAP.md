@@ -6,7 +6,7 @@ Chapter card contains a Work-shaped assessment.
 
 | Asterism capability | Primary source | Secondary source | Planned use | Current evidence |
 |---|---|---|---|---|
-| Authentication / Password | `Samueli924/chaoxing` | CxKitty | Reference | AES-CBC credential payload to `fanyalogin`; live validation pending |
+| Authentication / Password | `Samueli924/chaoxing` | CxKitty | PortSource | AES-CBC `fanyalogin`, derived Composite credential and Cookie revalidation are offline-covered; live validation pending |
 | Authentication / QR | CxKitty | None | Reference | QR creation and polling chain is statically complete but old |
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
@@ -59,6 +59,9 @@ policy and remains independently guarded.
   filters unopened rows, validates the allowlisted course route, and keeps `cpi`
   only in ephemeral route context. A typed `CourseInventoryCapability` merges
   identical folder results and fails closed on conflicts.
+- Password and ImportedCookie now compose behind `AuthenticationCapability`.
+  Password derives username/password/Cookie as a Core-revalidated Composite;
+  captcha and SMS outcomes stop with typed `HumanRequired` reasons.
 - The Native HTTP adapter fetches the root list, discovers bounded folder IDs
   from the interaction page, and fetches every folder using one short-lived
   resolved session. Any request or parse failure aborts the entire inventory.

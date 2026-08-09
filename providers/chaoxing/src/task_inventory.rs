@@ -313,6 +313,7 @@ mod tests {
         assert_eq!(
             inventory.metadata().capabilities,
             std::collections::BTreeSet::from([
+                ProviderCapability::Authentication,
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
             ])

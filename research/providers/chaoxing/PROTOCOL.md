@@ -26,6 +26,21 @@ That conflicts with assuming every imported browser Cookie will work in reqwest.
 The first live test must therefore compare the same account through Native HTTP
 and same-origin Browser fetch before selecting transport per capability.
 
+## Native authentication checkpoint
+
+The native Password transport mirrors the current donor's AES-128-CBC/PKCS#7
+field encoding and bounded `fanyalogin` form. It accepts only a boolean-status
+JSON response, normalizes the first pair from bounded `Set-Cookie` headers, and
+requires an `_uid`/`UID` identity marker. A reported success is still provisional:
+the resulting Cookie must pass the root `courselistdata` request before Core can
+atomically store username, password and Cookie as a Composite credential.
+
+ImportedCookie skips the password exchange but uses the same live course-list
+validation. Known captcha and secondary/SMS messages become typed
+`HumanRequired` results; Asterism does not automate either challenge. These paths
+are covered only by synthetic response fixtures and donor-compatible encryption
+vectors. No real credential or current live response has been recorded.
+
 ## Course identity
 
 The web inventory posts to `mooc2-ans` course-list data and also enumerates course

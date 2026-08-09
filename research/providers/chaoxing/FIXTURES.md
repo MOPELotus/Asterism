@@ -10,6 +10,11 @@ compatibility.
 
 ```text
 fixtures/providers/chaoxing/
+  auth/
+    password-success.json
+    password-rejected.json
+    password-captcha.json
+    password-sms.json
   courses/
     interaction-folders.html
     list-mixed.html
@@ -27,7 +32,9 @@ fixtures/providers/chaoxing/
     list-mixed.expected.json
 ```
 
-The Course fixtures cover bounded folder discovery, class-scoped identity,
+The Auth fixtures cover bounded JSON outcome classification only; synthetic
+`Set-Cookie` headers remain in unit tests. The Course fixtures cover bounded
+folder discovery, class-scoped identity,
 unopened-course filtering, bounded metadata, ephemeral `cpi`, and strict
 allowlisting of the current course entry route. The Work course-page fixture
 covers strict discovery of a fresh Work iframe route. The mixed expectation
@@ -39,8 +46,6 @@ fixtures cover the conservative Work redirect classification.
 ```text
 fixtures/providers/chaoxing/
   auth/
-    password-success.json
-    password-rejected.json
     session-expired.html
   courses/
     root-and-folders.html

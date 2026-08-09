@@ -907,3 +907,22 @@ This enables first-batch native authentication to stop accurately on captcha,
 SMS, browser or confirmation gates without implementing Capture or automated
 challenge solving. The reason is diagnostic state only and does not broaden
 Provider authority or expose response bodies.
+
+## Sixty-seventh Phase 0 slice
+
+Chaoxing now implements development-level Password and ImportedCookie
+authentication without Capture. Password fields use the donor-compatible
+AES-128-CBC/PKCS#7 login encoding, and the native transport accepts only bounded
+JSON plus bounded `Set-Cookie` pairs. Successful login is provisional until the
+derived Cookie passes the authenticated root course-list request.
+
+After revalidation, the Provider returns username, password and Cookie as a
+Composite replacement through Core's derived-credential boundary; it never
+writes secrets itself. Imported Cookie sessions use the same course-list check
+without performing a password exchange. Captcha and SMS/secondary verification
+stop as typed `HumanRequired` states and are not solved automatically.
+
+Synthetic fixtures and donor-compatible encryption vectors cover the offline
+contract. No real account has verified `fanyalogin`, Cookie persistence or the
+reported `uf` TLS-fingerprint behavior, so Chaoxing remains `Development` and is
+still absent from the daemon registry.

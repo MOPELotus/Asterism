@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use asterism_domain::ProviderId;
+use asterism_domain::{AuthMethod, ProviderId, SessionKind};
 use asterism_provider_api::{
     ProviderCapability, ProviderError, ProviderErrorKind, ProviderMetadata, ProviderResult,
     VerificationLevel,
@@ -22,10 +22,15 @@ pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
         scan_min_interval_seconds: None,
         capture_recipe_version: None,
         capabilities: BTreeSet::from([
+            ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
         ]),
-        auth_methods: BTreeSet::new(),
-        session_kinds: BTreeSet::new(),
+        auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedCookie]),
+        session_kinds: BTreeSet::from([
+            SessionKind::Cookie,
+            SessionKind::Composite,
+            SessionKind::ProviderSpecific,
+        ]),
     })
 }

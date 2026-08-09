@@ -1,15 +1,19 @@
 //! Chaoxing Provider implementation.
 //!
-//! The implementation contains deterministic Course, Work and Exam inventory
-//! parsing plus an unverified native Work/Exam transport. It deliberately does
-//! not claim live compatibility or a verified Provider.
+//! The implementation contains deterministic authentication, Course, Work and
+//! Exam contracts plus unverified native transports. It deliberately does not
+//! claim live compatibility or a verified Provider.
 
+mod authentication;
 mod course_inventory;
 mod inventory;
 mod metadata;
 mod native_http;
 mod task_inventory;
 
+pub use authentication::{
+    ChaoxingAuthentication, ChaoxingAuthenticationTransport, NativeChaoxingAuthenticationTransport,
+};
 pub use course_inventory::{
     ChaoxingCourseInventory, ChaoxingCourseInventoryTransport, parse_course_inventory,
 };
