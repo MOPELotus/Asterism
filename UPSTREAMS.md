@@ -6,7 +6,7 @@ provider, add every donor and research source here and in
 
 | Provider | Source | Revision | Capability | Use | License | Audited | Live validation |
 |---|---|---|---|---|---|---|---|
-| `chaoxing` | [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `dee643fd0a8e` | Auth, Session, Course, Chapter, Resource, Chapter Work | Reference | GPL-3.0 | 2026-08-09 | Auth, Course and Chapter behavior have offline/native-boundary coverage; live pending |
+| `chaoxing` | [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `dee643fd0a8e` | Auth, Session, Course, Chapter, Resource, Chapter Work | Reference | GPL-3.0 | 2026-08-09 | Auth, Course and Chapter have offline/native-boundary coverage; chapter-resource parsing has offline coverage; native resource transport and live validation pending |
 | `chaoxing` | [`surinrasu/CxKitty`](https://github.com/surinrasu/CxKitty) | `1589eac9c07c` | Auth, Course, Chapter, Exam, Question, Submission, Errors | Reference | GPL-3.0 | 2026-08-09 | Exam list shape and state vocabulary have offline regression coverage; 2024 protocol still needs live verification |
 | `chaoxing` | [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b369` | Independent Work/Exam inventory, status, verification | PortSource | MIT | 2026-08-09 | Inventory and bounded Work status recheck have offline regression coverage; live pending |
 | `chaoxing` | [`ocsjs/ocsjs`](https://github.com/ocsjs/ocsjs) | `890686a5e54f` | Current Work/Exam routes and Browser behavior | Reference | MIT | 2026-08-09 | Pending |

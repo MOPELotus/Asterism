@@ -1056,3 +1056,19 @@ facts, using the existing Cookie-first bounded renewal behavior. Chapter, Work
 and Exam documents must all succeed before a combined inventory is returned.
 Fixtures and route tests remain offline evidence, so no execution capability or
 higher verification level is advertised.
+
+## Seventy-eighth Phase 0 slice
+
+Chaoxing now has a bounded offline parser for the primary donor's
+`knowledge/cards` chapter-resource document. It extracts the assigned `mArg`
+JSON object without evaluating page scripts, treats donor-style empty card
+slots as no tasks, and keeps video, document, reading, live and chapter-work
+attachments distinct. Completed resources remain visible in inventory, while
+unknown job types, malformed objects, duplicate identities and over-budget
+documents fail closed. Stable task identities exclude the mutable resource
+kind, and normalized or sanitized output excludes transient routing and
+submission material such as `enc`, `jtoken`, `mid`, `otherInfo` and defaults.
+Synthetic donor-shaped fixtures cover state, type, string-brace and redaction
+behavior. Native card transport, integration into TaskInventory and every
+resource execution capability remain separate work, so this slice makes no
+live-support or verification claim and requires no Capture path.

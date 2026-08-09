@@ -1,0 +1,37 @@
+[
+  {
+    "remote_id": "resource:100:200:4001:job-video",
+    "title": "视频导论",
+    "source_type": "resource",
+    "remote_state": "pending",
+    "resource_kind": "video"
+  },
+  {
+    "remote_id": "resource:100:200:4001:job-document",
+    "title": "课程讲义",
+    "source_type": "resource",
+    "remote_state": "completed",
+    "resource_kind": "document"
+  },
+  {
+    "remote_id": "resource:100:200:4001:job-work",
+    "title": "章节练习",
+    "source_type": "chapter",
+    "remote_state": "pending",
+    "resource_kind": "chapter_work"
+  },
+  {
+    "remote_id": "resource:100:200:4001:job-read",
+    "title": "阅读材料",
+    "source_type": "resource",
+    "remote_state": "pending",
+    "resource_kind": "read"
+  },
+  {
+    "remote_id": "resource:100:200:4001:job-live",
+    "title": "课程直播",
+    "source_type": "resource",
+    "remote_state": "pending",
+    "resource_kind": "live"
+  }
+]
