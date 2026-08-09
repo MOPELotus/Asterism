@@ -9,6 +9,7 @@ mod task;
 
 use std::sync::Arc;
 
+use asterism_events::EventBus;
 use asterism_provider_api::{ProviderMetadata, ProviderRegistry};
 use asterism_storage::{Database, SqliteSecretStore};
 use axum::{
@@ -21,6 +22,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::watch;
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     trace::TraceLayer,
@@ -36,6 +38,8 @@ pub struct ApiState {
     session_ttl_seconds: u64,
     secure_cookies: bool,
     secret_store: Option<SqliteSecretStore>,
+    events: EventBus,
+    stream_shutdown: Option<watch::Receiver<bool>>,
     login_rate_limiter: rate_limit::LoginRateLimiter,
     bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter,
     bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter,
@@ -54,6 +58,8 @@ impl ApiState {
             session_ttl_seconds,
             secure_cookies,
             secret_store: None,
+            events: EventBus::new(512),
+            stream_shutdown: None,
             login_rate_limiter: rate_limit::LoginRateLimiter::default(),
             bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter::default(),
             bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter::default(),
@@ -63,6 +69,18 @@ impl ApiState {
     #[must_use]
     pub fn with_secret_store(mut self, secret_store: SqliteSecretStore) -> Self {
         self.secret_store = Some(secret_store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_event_bus(mut self, events: EventBus) -> Self {
+        self.events = events;
+        self
+    }
+
+    #[must_use]
+    pub fn with_stream_shutdown(mut self, shutdown: watch::Receiver<bool>) -> Self {
+        self.stream_shutdown = Some(shutdown);
         self
     }
 }
@@ -173,6 +191,10 @@ fn execution_routes() -> Router<ApiState> {
         .route(
             "/api/v1/executions/{execution_id}/logs",
             get(execution::list_execution_logs),
+        )
+        .route(
+            "/api/v1/executions/{execution_id}/stream",
+            get(execution::stream_execution),
         )
 }
 
@@ -618,6 +640,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/executions/{execution_id}/stream".to_owned(),
+            execution_stream_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/executions/{execution_id}".to_owned(),
             execution_detail_path(),
         );
@@ -692,6 +721,24 @@ fn execution_logs_path() -> Value {
         "responses": {
             "200": {"description": "Owner-scoped chronological Execution log page"},
             "400": {"description": "Invalid Execution ID or pagination"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Insufficient permission"},
+            "404": {"description": "Execution not found for this owner"}
+        }
+    }})
+}
+
+fn execution_stream_path() -> Value {
+    json!({"get": {
+        "operationId": "streamExecution",
+        "description": "Snapshot-first live state/progress stream. Reconnect or resync through the bounded detail and log history APIs; durable event replay is not provided.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "execution_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Owner-scoped text/event-stream with snapshot and live Execution events"},
+            "400": {"description": "Invalid Execution ID"},
             "401": {"description": "Authentication required"},
             "403": {"description": "Insufficient permission"},
             "404": {"description": "Execution not found for this owner"}
@@ -1186,18 +1233,28 @@ mod tests {
         secure_cookies: bool,
         login_rate_limiter: Option<rate_limit::LoginRateLimiter>,
     ) -> (Router, Database) {
+        let (app, database, _) = test_app_with_events(secure_cookies, login_rate_limiter).await;
+        (app, database)
+    }
+
+    async fn test_app_with_events(
+        secure_cookies: bool,
+        login_rate_limiter: Option<rate_limit::LoginRateLimiter>,
+    ) -> (Router, Database, EventBus) {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
+        let events = EventBus::new(16);
         let mut state = ApiState::new(
             database.clone(),
             Arc::new(ProviderRegistry::default()),
             3600,
             secure_cookies,
-        );
+        )
+        .with_event_bus(events.clone());
         if let Some(login_rate_limiter) = login_rate_limiter {
             state.login_rate_limiter = login_rate_limiter;
         }
-        (build_router(state), database)
+        (build_router(state), database, events)
     }
 
     async fn test_router() -> Router {
@@ -2716,7 +2773,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_execution_action_is_atomic_idempotent_and_policy_guarded() {
-        let (app, database, cookie, routine_task, other_task, formal_task, read_only_task) =
+        let (app, database, events, cookie, routine_task, other_task, formal_task, read_only_task) =
             execution_action_fixture().await;
 
         let created =
@@ -2763,6 +2820,8 @@ mod tests {
         assert_eq!(detail["execution"]["id"], execution_id);
         assert!(detail["progress"].is_null());
         assert_eq!(detail["attempts"], json!([]));
+
+        assert_execution_stream(&app, &cookie, &execution_id, &events).await;
 
         let logs = app
             .clone()
@@ -2830,13 +2889,14 @@ mod tests {
     async fn execution_action_fixture() -> (
         Router,
         Database,
+        EventBus,
         String,
         asterism_domain::TaskId,
         asterism_domain::TaskId,
         asterism_domain::TaskId,
         asterism_domain::TaskId,
     ) {
-        let (app, database) = test_app(false, None).await;
+        let (app, database, events) = test_app_with_events(false, None).await;
         let bootstrap = bootstrap(&app).await;
         let cookie = bootstrap.headers()[header::SET_COOKIE]
             .to_str()
@@ -2893,6 +2953,7 @@ mod tests {
         (
             app,
             database,
+            events,
             cookie,
             routine_task,
             other_task,
@@ -2917,6 +2978,74 @@ mod tests {
             .oneshot(request.body(Body::empty()).unwrap())
             .await
             .unwrap()
+    }
+
+    async fn assert_execution_stream(
+        app: &Router,
+        cookie: &str,
+        execution_id: &str,
+        events: &EventBus,
+    ) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/executions/{execution_id}/stream"))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()["x-accel-buffering"], "no");
+        let mut stream = response.into_body().into_data_stream();
+        let snapshot = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio_stream::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let snapshot = std::str::from_utf8(&snapshot).unwrap();
+        assert!(snapshot.contains("event: snapshot"));
+        assert!(snapshot.contains(execution_id));
+
+        events
+            .publish(asterism_events::EventEnvelope::new(
+                "foreign-execution",
+                asterism_events::DomainEvent::ExecutionStateChanged {
+                    execution_id: asterism_domain::ExecutionId::new(),
+                    state: asterism_domain::ExecutionState::Running,
+                },
+            ))
+            .unwrap();
+        events
+            .publish(asterism_events::EventEnvelope::new(
+                "matching-execution",
+                asterism_events::DomainEvent::ExecutionStateChanged {
+                    execution_id: execution_id.parse().unwrap(),
+                    state: asterism_domain::ExecutionState::Running,
+                },
+            ))
+            .unwrap();
+        let live = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio_stream::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let live = std::str::from_utf8(&live).unwrap();
+        assert!(live.contains("event: execution_state"));
+        assert!(live.contains("matching-execution"));
+        assert!(!live.contains("foreign-execution"));
     }
 
     #[tokio::test]
@@ -3007,6 +3136,7 @@ mod tests {
             "/api/v1/executions",
             "/api/v1/executions/{execution_id}",
             "/api/v1/executions/{execution_id}/logs",
+            "/api/v1/executions/{execution_id}/stream",
         ] {
             assert!(document["paths"].get(path).is_some(), "missing {path}");
         }
@@ -3029,6 +3159,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/executions/{execution_id}/logs"]["get"]["operationId"],
             "listExecutionLogs"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/executions/{execution_id}/stream"]["get"]["operationId"],
+            "streamExecution"
         );
         assert_eq!(
             document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/claim"]["post"]["security"]

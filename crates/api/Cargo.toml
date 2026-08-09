@@ -11,16 +11,20 @@ repository.workspace = true
 asterism-auth = { path = "../auth" }
 asterism-domain = { path = "../domain" }
 asterism-engine = { path = "../engine" }
+asterism-events = { path = "../events" }
 asterism-provider-api = { path = "../provider-api" }
 asterism-scheduler = { path = "../scheduler" }
 asterism-secrets = { path = "../secrets" }
 asterism-storage = { path = "../storage" }
 axum.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 tower-http.workspace = true
+tokio-stream.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 

@@ -1,5 +1,5 @@
 use asterism_domain::Timestamp;
-use asterism_events::EventEnvelope;
+use asterism_events::{EventBus, EventEnvelope};
 use asterism_storage::{FailureDisposition, OutboxRepository, StorageError};
 use async_trait::async_trait;
 use chrono::Duration;
@@ -7,6 +7,17 @@ use chrono::Duration;
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn deliver(&self, event: &EventEnvelope) -> Result<(), DeliveryError>;
+}
+
+#[async_trait]
+impl EventSink for EventBus {
+    async fn deliver(&self, event: &EventEnvelope) -> Result<(), DeliveryError> {
+        // The transactional outbox is the durable source of truth. A live bus
+        // with no current subscribers is therefore a successful ephemeral
+        // delivery; new subscribers resynchronize through bounded read APIs.
+        let _ = self.publish(event.clone());
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -228,5 +239,23 @@ mod tests {
             1
         );
         assert_eq!(dispatcher.dispatch_once(now).await.unwrap().claimed, 0);
+    }
+
+    #[tokio::test]
+    async fn event_bus_delivery_is_live_and_does_not_require_a_subscriber() {
+        let (repository, now) = repository_with_event().await;
+        let bus = EventBus::new(8);
+        let mut receiver = bus.subscribe();
+        let dispatcher = OutboxDispatcher::new(repository, bus, config()).unwrap();
+
+        assert_eq!(dispatcher.dispatch_once(now).await.unwrap().delivered, 1);
+        assert!(matches!(
+            receiver.recv().await.unwrap().event,
+            DomainEvent::TaskChanged { .. }
+        ));
+
+        let (repository, now) = repository_with_event().await;
+        let dispatcher = OutboxDispatcher::new(repository, EventBus::new(8), config()).unwrap();
+        assert_eq!(dispatcher.dispatch_once(now).await.unwrap().delivered, 1);
     }
 }

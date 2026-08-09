@@ -1300,3 +1300,27 @@ lease, audit, log, outbox events and optional execution Retry is one immediate
 transaction. Existing credit reservations remain preserved; attaching quote
 and reservation creation plus success-commit/failure-release to the unified
 execution action is still a separate billing integration slice.
+
+## Ninety-first Phase 0 slice
+
+The daemon now drains committed transactional-outbox records through a bounded,
+leased dispatcher into the shared in-process `EventBus`. Dispatch runs
+independently of Scheduler enablement, claims at most 128 records per tick, and
+completes an in-flight batch before SQLite shutdown. The live bus is the current
+sole sink: absence of a subscriber is a successful ephemeral delivery because
+the database read models remain the synchronization source. Future durable
+notification or integration consumers require their own per-consumer delivery
+state rather than reusing this global live-delivery marker.
+
+`GET /api/v1/executions/{execution_id}/stream` is an authenticated,
+owner-scoped SSE surface. It subscribes before verifying and loading the
+bounded Execution detail, sends that detail as the initial `snapshot`, then
+filters the shared bus to state, progress, recovery-required and human-required
+events for only that Execution. A lagged broadcast receiver emits an explicit
+`resync` frame; reconnect and resynchronization use the existing detail and
+paginated log-history endpoints instead of pretending that the in-memory bus
+offers durable `Last-Event-ID` replay. The response disables caching and proxy
+buffering, emits keep-alives, and observes the daemon shutdown signal so a live
+stream cannot hold graceful shutdown open. Detailed `ExecutionLogEvent` live
+fan-out remains a separate slice; this stream does not poll or expose raw
+Provider payloads.

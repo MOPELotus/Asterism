@@ -141,7 +141,7 @@ cargo run -p asterismctl -- provider-account scan <account-id>
 
 SecretStore keyring 只从进程环境读取，不接受 TOML 或 CLI 参数。`ASTERISM_SECRET_ACTIVE_KEY_ID` 指定活动 key ID，`ASTERISM_SECRET_KEYS` 使用逗号分隔的 `<key-id>=<base64-encoded-32-byte-key>`；两者必须同时提供。轮换时保留旧 key 并添加新 key，再切换活动 ID；确认所有密文已轮换前不要移除旧 key。`/health` 的 `secret_store_configured` 只报告是否已配置，不返回 key ID 或 key material。
 
-统一 Scheduler worker 默认启用，每 5 秒分别执行一次有界 Scan tick 与 Execution tick；默认每次最多领取一个 Scan Job，Execution worker 固定串行领取一个 `execution`、`retry` 或 `recovery` Job，避免长任务的后续预领取 claim 在等待时过期。每个 Execution tick 会先扫描失去租约的 Running Execution，原子转入 Recovering 并创建只读远端复核任务；远端完成才收口成功，明确 Pending 才重新执行，无法判断则要求人工处理。claim TTL 与 Execution lease 默认均为 300 秒，运行期间会一起续租。停止 `asterismd` 时会先停止新 tick，等待当前 Scan 或 Execution 返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
+统一 Scheduler worker 默认启用，每 5 秒分别执行一次有界 Scan tick 与 Execution tick；默认每次最多领取一个 Scan Job，Execution worker 固定串行领取一个 `execution`、`retry` 或 `recovery` Job，避免长任务的后续预领取 claim 在等待时过期。每个 Execution tick 会先扫描失去租约的 Running Execution，原子转入 Recovering 并创建只读远端复核任务；远端完成才收口成功，明确 Pending 才重新执行，无法判断则要求人工处理。claim TTL 与 Execution lease 默认均为 300 秒，运行期间会一起续租。独立 Outbox dispatcher 每 250 毫秒领取最多 128 条已提交领域事件并派发到有界进程内实时总线；没有在线订阅者不会让已持久化事件无限重试，后续连接以查询快照重新同步。停止 `asterismd` 时会终止 SSE、停止新 tick，等待当前 Scan、Execution 或 Outbox 派发返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
 
 另开一个终端检查服务：
 
@@ -190,7 +190,7 @@ cargo run -p asterism-capture -- \
 
 Provider Account 的 owner 始终由认证身份决定，CLI 和 API 都不接受调用方指定 `owner_id`。`--provider` 必须使用小写 canonical `ProviderId`；账号展示名属于本地用户数据，不作为项目内的平台名称或标识。
 
-Task 仍只能由 Provider 扫描链路写入；读取和执行则统一通过 owner-scoped Core Action。远端账户完成认证且对应 Provider 已注册 inventory capability 后，可运行 `provider-account scan <account-id>`；`task list` 支持 `--account`、`--limit` 和 `--offset`。`task execute <task-id> --idempotency-key <key>` 会原子创建并调度 Execution；调用方重试同一语义请求时必须复用该 key，Core 会返回原 Execution，跨任务复用则拒绝。`execution list` 按创建时间稳定分页列出同一 owner 的 Execution，并可用 `--task` 缩小到单个 Task；`execution get <execution-id>` 返回当前结构化进度和按尝试序号排列的 Attempt 历史，`execution logs` 按稳定时间顺序分页读取脱敏日志；不存在或属于其他 owner 的 ID 均不会泄露。正式测评默认在创建 Scheduler Job 前拦截。返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。
+Task 仍只能由 Provider 扫描链路写入；读取和执行则统一通过 owner-scoped Core Action。远端账户完成认证且对应 Provider 已注册 inventory capability 后，可运行 `provider-account scan <account-id>`；`task list` 支持 `--account`、`--limit` 和 `--offset`。`task execute <task-id> --idempotency-key <key>` 会原子创建并调度 Execution；调用方重试同一语义请求时必须复用该 key，Core 会返回原 Execution，跨任务复用则拒绝。`execution list` 按创建时间稳定分页列出同一 owner 的 Execution，并可用 `--task` 缩小到单个 Task；`execution get <execution-id>` 返回当前结构化进度和按尝试序号排列的 Attempt 历史，`execution logs` 按稳定时间顺序分页读取脱敏日志。`GET /api/v1/executions/{execution_id}/stream` 提供 `snapshot` 起始帧以及该 Execution 的实时状态/进度事件；它不提供持久事件重放，收到 `resync` 或重新连接时应重新读取 detail，并按需读取 logs。不存在或属于其他 owner 的 ID 均不会泄露。正式测评默认在创建 Scheduler Job 前拦截。返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。
 
 周期扫描通过 `provider-account schedule get <account-id>` 和 `provider-account schedule set <account-id> --interval-seconds <seconds>` 管理；添加 `--disabled` 可保留配置但停止物化任务。接口同时返回用户期望间隔、Provider 最小间隔和 Core 实际采用的间隔，Provider 自身不创建独立 cron 或后台循环。
 

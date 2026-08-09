@@ -8,10 +8,12 @@ use asterism_config::{
 };
 use asterism_domain::ProviderId;
 use asterism_engine::{
-    ExecutionRunnerConfig, ExecutionSchedulerConfig, ExecutionSchedulerTickReport,
-    ExecutionSchedulerWorker, FormalAssessmentPolicy, ProviderScanService, ScanSchedulerConfig,
-    ScanSchedulerTickReport, ScanSchedulerWorker,
+    DispatchConfig, DispatchReport, ExecutionRunnerConfig, ExecutionSchedulerConfig,
+    ExecutionSchedulerTickReport, ExecutionSchedulerWorker, FormalAssessmentPolicy,
+    OutboxDispatcher, ProviderScanService, ScanSchedulerConfig, ScanSchedulerTickReport,
+    ScanSchedulerWorker,
 };
+use asterism_events::EventBus;
 use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
 use asterism_provider_api::ProviderRegistry;
 use asterism_provider_chaoxing::build_development_provider_with_renewal;
@@ -19,9 +21,9 @@ use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
 use asterism_storage::{
     Database, RecoveryReport, SecretKeyring, SqliteExecutionLeaseRepository,
-    SqliteExecutionRepository, SqliteProviderAccountRepository, SqliteProviderCredentialResolver,
-    SqliteProviderScanRepository, SqliteSchedulerRepository, SqliteSecretStore,
-    SqliteTaskQueryRepository,
+    SqliteExecutionRepository, SqliteOutboxRepository, SqliteProviderAccountRepository,
+    SqliteProviderCredentialResolver, SqliteProviderScanRepository, SqliteSchedulerRepository,
+    SqliteSecretStore, SqliteTaskQueryRepository,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Parser;
@@ -42,8 +44,15 @@ type DaemonExecutionWorker = ExecutionSchedulerWorker<
     SqliteTaskQueryRepository,
 >;
 
+type DaemonOutboxDispatcher = OutboxDispatcher<SqliteOutboxRepository, EventBus>;
+
 const SECRET_ACTIVE_KEY_ID_ENV: &str = "ASTERISM_SECRET_ACTIVE_KEY_ID";
 const SECRET_KEYS_ENV: &str = "ASTERISM_SECRET_KEYS";
+const LIVE_EVENT_CAPACITY: usize = 512;
+const OUTBOX_BATCH_SIZE: u32 = 128;
+const OUTBOX_CLAIM_TTL_SECONDS: u64 = 30;
+const OUTBOX_MAX_ATTEMPTS: u32 = 8;
+const OUTBOX_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -144,12 +153,16 @@ async fn main() -> anyhow::Result<()> {
         secret_keyring.map(|keyring| SqliteSecretStore::new(database.clone(), keyring));
     let secret_store_configured = secret_store.is_some();
     let providers = Arc::new(build_provider_registry(&config, secret_store.as_ref())?);
+    let events = EventBus::new(LIVE_EVENT_CAPACITY);
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let mut api_state = ApiState::new(
         database.clone(),
         providers.clone(),
         config.server.session_ttl_seconds,
         config.server.secure_cookies,
-    );
+    )
+    .with_event_bus(events.clone())
+    .with_stream_shutdown(shutdown_receiver.clone());
     if let Some(secret_store) = secret_store {
         api_state = api_state.with_secret_store(secret_store);
     }
@@ -159,7 +172,8 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to bind the Asterism HTTP listener")?;
     tracing::info!(address = %config.server.bind, secret_store_configured, "asterismd started");
 
-    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let outbox_dispatcher_handle =
+        start_outbox_dispatcher(&database, events, shutdown_receiver.clone())?;
     let scan_scheduler_handle = start_scan_scheduler(
         &database,
         providers.clone(),
@@ -186,10 +200,36 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = execution_scheduler_handle {
         handle.await.context("execution scheduler task panicked")?;
     }
+    outbox_dispatcher_handle
+        .await
+        .context("outbox dispatcher task panicked")?;
     server_result.context("Asterism HTTP server failed")?;
     database.close().await;
     tracing::info!("asterismd stopped");
     Ok(())
+}
+
+fn start_outbox_dispatcher(
+    database: &Database,
+    events: EventBus,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    let dispatcher = OutboxDispatcher::new(
+        SqliteOutboxRepository::new(database.clone()),
+        events,
+        DispatchConfig {
+            worker_id: format!("asterismd-outbox-{}", std::process::id()),
+            batch_size: OUTBOX_BATCH_SIZE,
+            claim_ttl_seconds: OUTBOX_CLAIM_TTL_SECONDS,
+            max_attempts: OUTBOX_MAX_ATTEMPTS,
+        },
+    )
+    .context("failed to configure the outbox dispatcher")?;
+    Ok(tokio::spawn(run_outbox_dispatcher(
+        dispatcher,
+        OUTBOX_TICK_INTERVAL,
+        shutdown,
+    )))
 }
 
 fn load_config(arguments: Arguments) -> anyhow::Result<Config> {
@@ -495,6 +535,46 @@ async fn run_execution_scheduler(
     tracing::info!("execution scheduler stopped");
 }
 
+async fn run_outbox_dispatcher(
+    dispatcher: DaemonOutboxDispatcher,
+    tick_interval: std::time::Duration,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(tick_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        let should_tick = tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                false
+            }
+            _ = interval.tick() => true,
+        };
+        if !should_tick {
+            continue;
+        }
+        match dispatcher.dispatch_once(chrono::Utc::now()).await {
+            Ok(report) if report != DispatchReport::default() => {
+                tracing::info!(
+                    claimed = report.claimed,
+                    delivered = report.delivered,
+                    retry_pending = report.retry_pending,
+                    dead_lettered = report.dead_lettered,
+                    "outbox dispatch tick completed"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "outbox dispatch tick failed");
+            }
+        }
+    }
+    tracing::info!("outbox dispatcher stopped");
+}
+
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         tracing::error!(%error, "failed to install the shutdown signal handler");
@@ -511,6 +591,9 @@ mod tests {
         database.migrate().await.unwrap();
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
         let providers = Arc::new(ProviderRegistry::default());
+        let outbox_handle =
+            start_outbox_dispatcher(&database, EventBus::new(8), shutdown_receiver.clone())
+                .unwrap();
         let scan_handle = start_scan_scheduler(
             &database,
             providers.clone(),
@@ -530,6 +613,10 @@ mod tests {
             .unwrap()
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), execution_handle)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), outbox_handle)
             .await
             .unwrap()
             .unwrap();

@@ -1,15 +1,19 @@
-use std::str::FromStr;
+use std::{future::pending, str::FromStr, time::Duration};
 
 use asterism_domain::{
     Execution, ExecutionAttempt, ExecutionId, ExecutionLogEvent, ExecutionProgress, TaskId,
 };
+use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_storage::{ExecutionQueryRepository, SqliteExecutionRepository};
 use axum::{
     Extension, Json,
     extract::{Path, Query, State, rejection::QueryRejection},
-    response::{IntoResponse, Response},
+    http::{HeaderName, HeaderValue},
+    response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::{ApiError, ApiState, auth::AuthContext};
 
@@ -19,6 +23,7 @@ const MAX_LOG_OFFSET: u64 = 1_000_000;
 const DEFAULT_EXECUTION_PAGE_SIZE: u32 = 50;
 const MAX_EXECUTION_PAGE_SIZE: u32 = 200;
 const MAX_EXECUTION_OFFSET: u64 = 1_000_000;
+const X_ACCEL_BUFFERING: HeaderName = HeaderName::from_static("x-accel-buffering");
 
 pub(super) async fn list_executions(
     State(state): State<ApiState>,
@@ -121,6 +126,110 @@ pub(super) async fn list_execution_logs(
         })
         .into_response(),
     ))
+}
+
+pub(super) async fn stream_execution(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(execution_id): Path<String>,
+) -> Result<Response, ApiError> {
+    // Subscribe before loading the snapshot so an event committed between the
+    // ownership check and response construction remains visible to the client.
+    let receiver = state.events.subscribe();
+    let shutdown = state.stream_shutdown.clone();
+    let owner_id = auth.require_task_read()?;
+    let execution_id = ExecutionId::from_str(&execution_id)
+        .map_err(|_| ApiError::bad_request("invalid_execution_id", "execution ID is invalid"))?;
+    let detail = SqliteExecutionRepository::new(state.database)
+        .find_owned_execution_detail(owner_id, execution_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("execution_not_found"))?;
+    let snapshot = ExecutionDetailResponse {
+        execution: detail.execution,
+        progress: detail.progress,
+        attempts: detail.attempts,
+    };
+    let snapshot = Event::default()
+        .event("snapshot")
+        .data(serde_json::to_string(&snapshot).map_err(ApiError::internal)?);
+
+    let live =
+        tokio_stream::StreamExt::filter_map(BroadcastStream::new(receiver), move |received| {
+            match received {
+                Ok(envelope) => match execution_stream_event(&envelope, execution_id) {
+                    Ok(Some(event)) => Some(Ok(event)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                },
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped)) => {
+                    Some(Ok(Event::default().event("resync").data(
+                        serde_json::json!({"reason": "lagged", "skipped": skipped}).to_string(),
+                    )))
+                }
+            }
+        });
+    let stream = tokio_stream::StreamExt::chain(
+        tokio_stream::once(Ok::<_, serde_json::Error>(snapshot)),
+        live,
+    );
+    let stream = futures_util::StreamExt::take_until(stream, wait_for_stream_shutdown(shutdown));
+    let mut response = Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(X_ACCEL_BUFFERING, HeaderValue::from_static("no"));
+    Ok(crate::auth::no_store(response))
+}
+
+fn execution_stream_event(
+    envelope: &EventEnvelope,
+    execution_id: ExecutionId,
+) -> Result<Option<Event>, serde_json::Error> {
+    let name = match &envelope.event {
+        DomainEvent::ExecutionStateChanged {
+            execution_id: event_execution_id,
+            ..
+        } if *event_execution_id == execution_id => "execution_state",
+        DomainEvent::ExecutionProgressed(progress) if progress.execution_id == execution_id => {
+            "execution_progress"
+        }
+        DomainEvent::ExecutionRecoveryRequired {
+            execution_id: event_execution_id,
+            ..
+        } if *event_execution_id == execution_id => "execution_recovery_required",
+        DomainEvent::HumanRequired {
+            execution_id: Some(event_execution_id),
+            ..
+        } if *event_execution_id == execution_id => "human_required",
+        _ => return Ok(None),
+    };
+    Ok(Some(
+        Event::default()
+            .event(name)
+            .id(envelope.id.to_string())
+            .data(serde_json::to_string(envelope)?),
+    ))
+}
+
+async fn wait_for_stream_shutdown(mut shutdown: Option<watch::Receiver<bool>>) {
+    let Some(shutdown) = shutdown.as_mut() else {
+        pending::<()>().await;
+        return;
+    };
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
