@@ -1,13 +1,15 @@
 use std::str::FromStr;
 
 use asterism_domain::{
-    Execution, ProviderAccountId, ProviderId, Question, QuestionSnapshotId, Task, TaskId, Timestamp,
+    AnswerCandidate, AnswerCandidateId, Execution, ProviderAccountId, ProviderId, Question,
+    QuestionSnapshotId, Task, TaskId, Timestamp,
 };
 use asterism_engine::{
     ExecuteTaskCommand, ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
-    ProviderQuestionReadError, ProviderQuestionReadService, ProviderTaskDetailError,
-    ProviderTaskDetailService, ProviderTaskProgressError, ProviderTaskProgressService,
-    ReadTaskDetailCommand, ReadTaskProgressCommand, ReadTaskQuestionsCommand,
+    ProviderAnswerResolveError, ProviderAnswerResolveService, ProviderQuestionReadError,
+    ProviderQuestionReadService, ProviderTaskDetailError, ProviderTaskDetailService,
+    ProviderTaskProgressError, ProviderTaskProgressService, ReadTaskDetailCommand,
+    ReadTaskProgressCommand, ReadTaskQuestionsCommand, ResolveProviderAnswersCommand,
 };
 use asterism_provider_api::{ProviderErrorKind, RemoteProgress, RemoteTaskDetail};
 use asterism_storage::{
@@ -184,6 +186,57 @@ pub(super) async fn get_task_questions(
             provider_version: result.provider_version,
             captured_at: result.captured_at,
             questions: result.questions,
+        })
+        .into_response(),
+    ))
+}
+
+pub(super) async fn resolve_provider_answer_candidates(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((task_id, snapshot_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let snapshot_id = QuestionSnapshotId::from_str(&snapshot_id).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_question_snapshot_id",
+            "Question snapshot ID is invalid",
+        )
+    })?;
+    let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let answers = SqliteQuestionSnapshotRepository::new(state.database.clone());
+    let result = ProviderAnswerResolveService::new(
+        state.providers,
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database),
+        answers,
+    )
+    .resolve(ResolveProviderAnswersCommand {
+        owner_id,
+        task_id,
+        question_snapshot_id: snapshot_id,
+        correlation_id: correlation_id.to_owned(),
+    })
+    .await
+    .map_err(map_provider_answer_resolve_error)?;
+    Ok(crate::auth::no_store(
+        Json(ProviderAnswerCandidatesResponse {
+            task_id: result.task_id,
+            question_snapshot_id: result.question_snapshot_id,
+            provider_id: result.provider_id,
+            provider_version: result.provider_version,
+            candidates: result
+                .candidates
+                .into_iter()
+                .map(|record| AnswerCandidateResponse {
+                    id: record.id,
+                    candidate: record.candidate,
+                    created_at: record.created_at,
+                })
+                .collect(),
         })
         .into_response(),
     ))
@@ -508,6 +561,85 @@ fn map_task_questions_error(error: ProviderQuestionReadError) -> ApiError {
     }
 }
 
+fn map_provider_answer_resolve_error(error: ProviderAnswerResolveError) -> ApiError {
+    match error {
+        ProviderAnswerResolveError::TaskNotFound => ApiError::not_found("task_not_found"),
+        ProviderAnswerResolveError::QuestionSnapshotNotFound => {
+            ApiError::not_found("question_snapshot_not_found")
+        }
+        ProviderAnswerResolveError::TaskCapabilityUnavailable
+        | ProviderAnswerResolveError::CapabilityUnavailable(_) => ApiError::conflict(
+            "provider_answer_resolve_unavailable",
+            "the task does not expose Provider-native answer resolution",
+        ),
+        ProviderAnswerResolveError::QuestionSnapshotBindingInvalid => ApiError::conflict(
+            "question_snapshot_binding_invalid",
+            "the Question snapshot is not bound to this task and Provider",
+        ),
+        ProviderAnswerResolveError::AccountNotAuthenticated => ApiError::conflict(
+            "provider_account_not_authenticated",
+            "the Provider account must be authenticated before resolving candidates",
+        ),
+        ProviderAnswerResolveError::ProviderNotRegistered(_) => ApiError::conflict(
+            "provider_not_registered",
+            "the task Provider is not registered",
+        ),
+        ProviderAnswerResolveError::InvalidCorrelationId => ApiError::bad_request(
+            "invalid_request_id",
+            "the request correlation ID is invalid",
+        ),
+        ProviderAnswerResolveError::ProviderResponseInvalid => {
+            tracing::warn!(%error, "Provider returned invalid AnswerCandidates");
+            ApiError::bad_gateway(
+                "provider_answer_candidates_invalid",
+                "the Provider returned inconsistent answer candidates",
+            )
+        }
+        ProviderAnswerResolveError::Assessment(_) => ApiError::conflict(
+            "formal_assessment_blocked",
+            "formal assessment answer resolution is disabled by Core policy",
+        ),
+        ProviderAnswerResolveError::Provider(provider_error) => match provider_error.kind {
+            ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+                provider_error
+                    .retry_after_seconds
+                    .unwrap_or(60)
+                    .clamp(1, 86_400),
+            ),
+            ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+                tracing::warn!(error = %provider_error, "Provider answer resolution is temporarily unavailable");
+                ApiError::service_unavailable(
+                    "provider_unavailable",
+                    "the Provider is temporarily unavailable",
+                )
+            }
+            ProviderErrorKind::Authentication
+            | ProviderErrorKind::Authorization
+            | ProviderErrorKind::HumanRequired => ApiError::conflict(
+                "provider_action_required",
+                "the Provider requires authentication or user action",
+            ),
+            ProviderErrorKind::RemoteChanged => ApiError::conflict(
+                "task_remote_changed",
+                "the remote task no longer matches the stored task",
+            ),
+            ProviderErrorKind::UnsupportedTask => ApiError::conflict(
+                "provider_answer_resolve_unavailable",
+                "the Provider cannot resolve answers for this task",
+            ),
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+                tracing::warn!(error = %provider_error, "Provider returned invalid AnswerCandidates");
+                ApiError::bad_gateway(
+                    "provider_answer_candidates_invalid",
+                    "the Provider returned inconsistent answer candidates",
+                )
+            }
+            ProviderErrorKind::Internal => ApiError::internal(provider_error),
+        },
+        ProviderAnswerResolveError::Storage(error) => ApiError::internal(error),
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TaskListQuery {
@@ -554,6 +686,22 @@ struct TaskQuestionsResponse {
     provider_version: String,
     captured_at: Timestamp,
     questions: Vec<Question>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct ProviderAnswerCandidatesResponse {
+    task_id: TaskId,
+    question_snapshot_id: QuestionSnapshotId,
+    provider_id: ProviderId,
+    provider_version: String,
+    candidates: Vec<AnswerCandidateResponse>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct AnswerCandidateResponse {
+    id: AnswerCandidateId,
+    candidate: AnswerCandidate,
+    created_at: Timestamp,
 }
 
 fn parse_provider_account_id(value: &str) -> Result<ProviderAccountId, ApiError> {

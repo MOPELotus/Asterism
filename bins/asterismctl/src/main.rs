@@ -225,6 +225,11 @@ enum TaskCommand {
     Progress { task_id: String },
     /// Discover and parse one task's complete current Provider Question set.
     Questions { task_id: String },
+    /// Resolve Provider-native candidates for one immutable Question snapshot.
+    ResolveAnswers {
+        task_id: String,
+        snapshot_id: String,
+    },
     /// Schedule one task through the shared idempotent Core Action.
     Execute {
         task_id: String,
@@ -733,6 +738,15 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
             let path = format!("/api/v1/tasks/{task_id}/questions");
             client.get_authorized(&path, &token).await?
         }
+        TaskCommand::ResolveAnswers {
+            task_id,
+            snapshot_id,
+        } => {
+            let path = format!(
+                "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates"
+            );
+            client.post_authorized_empty(&path, &token).await?
+        }
         TaskCommand::Execute {
             task_id,
             idempotency_key,
@@ -953,6 +967,27 @@ mod tests {
             Command::Task {
                 command: TaskCommand::Questions { task_id }
             } if task_id == "task-id"
+        ));
+    }
+
+    #[test]
+    fn task_answer_resolution_requires_an_explicit_snapshot() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "resolve-answers",
+            "task-id",
+            "snapshot-id",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::ResolveAnswers {
+                    task_id,
+                    snapshot_id,
+                }
+            } if task_id == "task-id" && snapshot_id == "snapshot-id"
         ));
     }
 

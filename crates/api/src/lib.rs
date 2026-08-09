@@ -249,6 +249,10 @@ fn task_routes() -> Router<ApiState> {
             "/api/v1/tasks/{task_id}/questions",
             get(task::get_task_questions),
         )
+        .route(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
+            post(task::resolve_provider_answer_candidates),
+        )
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
 }
 
@@ -788,6 +792,14 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates"
+                .to_owned(),
+            provider_answer_candidates_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
@@ -1040,6 +1052,27 @@ fn task_questions_path() -> Value {
             "409": {"description": "Task/Provider capability, account, policy, user action, or remote binding conflict"},
             "429": {"description": "Provider rate limited"},
             "502": {"description": "Provider returned inconsistent Questions"},
+            "503": {"description": "Provider temporarily unavailable"}
+        }
+    }})
+}
+
+fn provider_answer_candidates_path() -> Value {
+    json!({"post": {
+        "operationId": "resolveProviderAnswerCandidates",
+        "description": "Resolves and atomically persists Provider-native AnswerCandidates for one explicit immutable Question snapshot; this does not build or execute a submission.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Complete validated Provider-native candidate batch, possibly empty"},
+            "400": {"description": "Invalid Task, Question snapshot, or request ID"},
+            "404": {"description": "Task or owner-scoped Question snapshot not found"},
+            "409": {"description": "Capability, account, policy, user action, or snapshot binding conflict"},
+            "429": {"description": "Provider rate limited"},
+            "502": {"description": "Provider returned inconsistent candidates"},
             "503": {"description": "Provider temporarily unavailable"}
         }
     }})
@@ -4002,6 +4035,7 @@ mod tests {
             "/api/v1/tasks/{task_id}/detail",
             "/api/v1/tasks/{task_id}/progress",
             "/api/v1/tasks/{task_id}/questions",
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
             "/api/v1/tasks/{task_id}/execute",
             "/api/v1/credits/account",
             "/api/v1/credits/transactions",
@@ -4028,6 +4062,11 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/questions"]["get"]["operationId"],
             "getTaskQuestions"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates"]
+                ["post"]["operationId"],
+            "resolveProviderAnswerCandidates"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],

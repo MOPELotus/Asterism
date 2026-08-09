@@ -1903,3 +1903,18 @@ the bounded batch. Only the complete validated batch is persisted. Formal
 assessment policy treats Resolve as read-only like Parse, while Execute and
 Submit remain independently disabled. This checkpoint has no public API route
 and Chaoxing still advertises no answer-resolution implementation.
+
+## One-hundred-and-twenty-sixth Phase 0 slice
+
+Provider-native resolution is exposed through an explicit Task plus
+QuestionSnapshot HTTP path and `asterismctl task resolve-answers`. The route
+requires Task Read permission, validates both typed IDs before orchestration,
+returns `no-store`, and maps Provider rate-limit, availability, user-action,
+remote-change and invalid-response failures without exposing raw details.
+
+The response carries the immutable Snapshot binding, current Provider version
+and persisted Candidate record IDs. This POST represents a read that records
+new evidence; it deliberately does not use the Task execution route, accept an
+answer payload, build a draft or grant any Submission capability. Providers
+without `AnswerResolve`, including Chaoxing at this checkpoint, fail before a
+Provider call.
