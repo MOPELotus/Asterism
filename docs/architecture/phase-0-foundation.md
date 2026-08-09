@@ -2382,3 +2382,23 @@ only into the bounded redacted Cookie session used by the request.
 The resulting Development entry is registry-consistent and has no Capture
 dependency. Automatic password renewal, daemon opt-in registration and
 live-account validation remain separate gates.
+
+## One-hundred-and-fifty-first Phase 0 slice
+
+The daemon can now register the complete WELearn Development entry around a
+provider-scoped `SqliteProviderCredentialResolver`. Registration is disabled by
+default and requires the independent `enable_development_welearn` configuration,
+`ASTERISM_ENABLE_DEVELOPMENT_WELEARN` environment variable or
+`--enable-development-welearn` CLI flag. Enabling any development Provider also
+requires the SecretStore keyring before startup can continue.
+
+Chaoxing and WELearn opt-ins are evaluated independently, so either or both can
+be registered without one platform's disabled state short-circuiting the other.
+Each gets its own canonical Provider ID and resolver scope. Startup emits an
+explicit unverified-development warning, while metadata remains Development and
+Capture stays disabled.
+
+This makes the native WELearn authentication and Course/Task scan path reachable
+for intentional local validation. It is not a live verification result:
+automatic renewal is still absent, expired sessions fail authentication, and no
+verification level is raised.

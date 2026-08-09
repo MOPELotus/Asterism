@@ -17,6 +17,7 @@ use asterism_events::EventBus;
 use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
 use asterism_provider_api::ProviderRegistry;
 use asterism_provider_chaoxing::build_development_provider_with_renewal;
+use asterism_provider_welearn::build_development_provider_with_stored_session;
 use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
 use asterism_storage::{
@@ -120,6 +121,10 @@ struct Arguments {
     /// Expose the unverified Chaoxing Provider for local validation only.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     enable_development_chaoxing: Option<bool>,
+
+    /// Expose the unverified `WELearn` Provider for local validation only.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    enable_development_welearn: Option<bool>,
 }
 
 #[tokio::main]
@@ -270,6 +275,7 @@ fn load_config(arguments: Arguments) -> anyhow::Result<Config> {
         },
         providers: ProviderOverrides {
             enable_development_chaoxing: arguments.enable_development_chaoxing,
+            enable_development_welearn: arguments.enable_development_welearn,
         },
     };
     Config::load(&config_file, &environment, &overrides)
@@ -323,28 +329,50 @@ fn build_provider_registry(
     secret_store: Option<&SqliteSecretStore>,
 ) -> anyhow::Result<ProviderRegistry> {
     let mut registry = ProviderRegistry::default();
-    if !config.providers.enable_development_chaoxing {
+    if !config.providers.enable_development_chaoxing && !config.providers.enable_development_welearn
+    {
         return Ok(registry);
     }
     let secret_store = secret_store
-        .context("the development Chaoxing Provider requires a configured SecretStore keyring")?;
-    let provider_id = ProviderId::new("chaoxing")
-        .map_err(|_| anyhow::anyhow!("the compile-time Chaoxing Provider ID is invalid"))?;
-    let runtime = Arc::new(SqliteProviderCredentialResolver::new(
-        secret_store.clone(),
-        provider_id,
-    ));
-    let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
-        .context("failed to resolve the development Chaoxing network profile")?;
-    let entry = build_development_provider_with_renewal(&network, runtime.clone(), runtime)
-        .context("failed to build the development Chaoxing Provider")?;
-    registry
-        .register(entry)
-        .context("failed to register the development Chaoxing Provider")?;
-    tracing::warn!(
-        provider = "chaoxing",
-        "unverified development Provider explicitly enabled"
-    );
+        .context("enabled development Providers require a configured SecretStore keyring")?;
+    if config.providers.enable_development_chaoxing {
+        let provider_id = ProviderId::new("chaoxing")
+            .map_err(|_| anyhow::anyhow!("the compile-time Chaoxing Provider ID is invalid"))?;
+        let runtime = Arc::new(SqliteProviderCredentialResolver::new(
+            secret_store.clone(),
+            provider_id,
+        ));
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .context("failed to resolve the development Chaoxing network profile")?;
+        let entry = build_development_provider_with_renewal(&network, runtime.clone(), runtime)
+            .context("failed to build the development Chaoxing Provider")?;
+        registry
+            .register(entry)
+            .context("failed to register the development Chaoxing Provider")?;
+        tracing::warn!(
+            provider = "chaoxing",
+            "unverified development Provider explicitly enabled"
+        );
+    }
+    if config.providers.enable_development_welearn {
+        let provider_id = ProviderId::new("welearn")
+            .map_err(|_| anyhow::anyhow!("the compile-time WELearn Provider ID is invalid"))?;
+        let runtime = Arc::new(SqliteProviderCredentialResolver::new(
+            secret_store.clone(),
+            provider_id,
+        ));
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .context("failed to resolve the development WELearn network profile")?;
+        let entry = build_development_provider_with_stored_session(&network, runtime)
+            .context("failed to build the development WELearn Provider")?;
+        registry
+            .register(entry)
+            .context("failed to register the development WELearn Provider")?;
+        tracing::warn!(
+            provider = "welearn",
+            "unverified development Provider explicitly enabled"
+        );
+    }
     Ok(registry)
 }
 
@@ -638,6 +666,7 @@ mod tests {
             "--scheduler-claim-limit=2",
             "--scheduler-execution-concurrency-limit=24",
             "--enable-development-chaoxing=false",
+            "--enable-development-welearn=true",
         ])
         .unwrap();
         assert_eq!(arguments.scheduler_enabled, Some(false));
@@ -646,6 +675,7 @@ mod tests {
         assert_eq!(arguments.scheduler_execution_concurrency_limit, Some(24));
         assert_eq!(arguments.scheduler_materialize_limit, None);
         assert_eq!(arguments.enable_development_chaoxing, Some(false));
+        assert_eq!(arguments.enable_development_welearn, Some(true));
     }
 
     #[test]
@@ -679,12 +709,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn development_chaoxing_registration_is_explicit_and_requires_secrets() {
+    async fn development_provider_registration_is_explicit_and_requires_secrets() {
         let default_registry = build_provider_registry(&Config::default(), None).unwrap();
         assert!(default_registry.is_empty());
 
         let mut config = Config::default();
         config.providers.enable_development_chaoxing = true;
+        assert!(build_provider_registry(&config, None).is_err());
+        config.providers.enable_development_welearn = true;
         assert!(build_provider_registry(&config, None).is_err());
 
         let database = Database::connect("sqlite::memory:").await.unwrap();
@@ -698,8 +730,28 @@ mod tests {
         .unwrap()
         .unwrap();
         let store = SqliteSecretStore::new(database.clone(), keyring);
+
+        config.providers.enable_development_chaoxing = false;
+        let welearn_only = build_provider_registry(&config, Some(&store)).unwrap();
+        assert!(
+            welearn_only
+                .get(&ProviderId::new("chaoxing").unwrap())
+                .is_none()
+        );
+        assert!(
+            welearn_only
+                .get(&ProviderId::new("welearn").unwrap())
+                .is_some()
+        );
+
+        config.providers.enable_development_chaoxing = true;
         let registry = build_provider_registry(&config, Some(&store)).unwrap();
         let provider = registry.get(&ProviderId::new("chaoxing").unwrap()).unwrap();
+        assert_eq!(
+            provider.metadata.verification,
+            asterism_provider_api::VerificationLevel::Development
+        );
+        let provider = registry.get(&ProviderId::new("welearn").unwrap()).unwrap();
         assert_eq!(
             provider.metadata.verification,
             asterism_provider_api::VerificationLevel::Development

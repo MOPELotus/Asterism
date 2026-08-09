@@ -369,6 +369,7 @@ dependencies = [
  "asterism-networking",
  "asterism-provider-api",
  "asterism-provider-chaoxing",
+ "asterism-provider-welearn",
  "asterism-scheduler",
  "asterism-secrets",
  "asterism-storage",

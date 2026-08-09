@@ -32,4 +32,6 @@ development entry can be composed from injected boundaries. A shared-policy,
 non-redirecting native Password/OIDC and Course/Task HTTP transports now exist.
 Stored credential resolution now validates exact account/reference/purpose,
 session kind, expiry and UTF-8 shape before constructing a Cookie session.
-Renewal, daemon registration and all live validation remain pending.
+Daemon registration is available only through an explicit disabled-by-default
+development flag and requires a configured SecretStore. Renewal and all live
+validation remain pending.
