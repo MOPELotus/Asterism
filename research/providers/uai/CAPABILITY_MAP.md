@@ -2,8 +2,8 @@
 
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
-| Authentication | AutoFinish + UnipusHelperPro | Reference | Password JSON login returns openid/JWT; parser/native transport pending |
-| Stored session validation | User-info and Course-list reads | FromScratch | Validate JWT with bounded authenticated reads before persistence; pending |
+| Authentication | AutoFinish + UnipusHelperPro | Reference | Password/ImportedToken orchestration, strict login-envelope classification and atomic openid/JWT CompositeSession are offline-covered; native transport pending |
+| Stored session validation | User-info and Course-list reads | FromScratch | Injected account-bound resolver and JWT validation boundary implemented; Core storage/native read/renewal pending |
 | CourseInventory | AutoFinish + UnipusHelperPro | Reference | Fixture-only Course → CourseResource flattening implemented; native read pending |
 | TaskInventory | AutoFinish + UnipusHelperPro | Reference | Fixture-only nested Course JSON → Unit/Section/Node/Group parser implemented; native read pending |
 | TaskProgressRead | Both backend donors | Reference | Per-Unit `course_progress` exposes independent Group state; parser pending |
@@ -15,7 +15,7 @@
 
 ## Initial implementation boundary
 
-The current crate advertises no runtime capability. It only:
+The current crate advertises only injected Authentication. It:
 
 1. parses a bounded authenticated Course list and flattens each CourseResource
    into a stable `RemoteCourse`;
@@ -23,6 +23,10 @@ The current crate advertises no runtime capability. It only:
    serializing `courseInstanceId`;
 3. decodes the bounded nested `course` JSON string and emits stable Group Tasks
    with separate Unit, Section and Micro hierarchy facts;
-4. drops class, instance, content, answer and unknown fields;
-5. makes no authentication, progress, completion, duration, execution,
+4. classifies bounded Password results, separates slider verification as
+   `HumanRequired`, and validates Password or strict ImportedToken input;
+5. stores openid/JWT together as one encrypted ProviderCompositeSession while
+   retaining username/password only for future explicit renewal;
+6. drops class, instance, content, answer and unknown fields;
+7. makes no native-network, progress, completion, duration, execution,
    submission, BrowserBridge or Capture claim.

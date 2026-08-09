@@ -15,9 +15,22 @@ POST https://sso.unipus.cn/sso/0.1/sso/login
 
 A successful response uses string code `0` and returns distinct `openid` and
 `jwt` values. Authenticated UAI requests place the returned JWT in
-`Authorization`. Donor code `1506` indicates a slider/captcha state and must
-become `HumanRequired`, not a password retry. The committed checkpoint does not
-implement or store either credential.
+`Authorization`. Donor code `1506` indicates a slider/captcha state and becomes
+`HumanRequired`, not a password retry.
+
+The injected Authentication boundary accepts exact username/password fields or
+one manually imported provider session document:
+
+```json
+{"openid":"...","jwt":"header.payload.signature"}
+```
+
+The document rejects unknown fields, unsafe open IDs and non-JWT shapes. Native
+Password success produces username + password + one encrypted
+ProviderCompositeSession replacement so openid/JWT cannot be committed or
+renewed separately. Debug output redacts both. Injected session validation
+resolves an account-bound composite and validates the JWT through the transport;
+native HTTP, expiry extraction and automatic renewal remain pending.
 
 ## Course resource and tree
 

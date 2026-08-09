@@ -2473,3 +2473,25 @@ unknown roles and route-data exclusion. Metadata deliberately advertises no
 runtime capability: authentication, native transport, progress, completion,
 duration, execution, submission, BrowserBridge and Capture all remain absent.
 This is fixture-only evidence and not live UAI compatibility.
+
+## One-hundred-and-fifty-fifth Phase 0 slice
+
+UAI now exposes injected Password and ImportedToken Authentication without a
+Capture dependency. Password candidates require exact username/password fields
+and produce username, password and one atomic ProviderCompositeSession only
+after the transport validates the returned session. Manual imports accept one
+strict JSON document containing both openid and a three-segment JWT; unknown
+fields, unsafe route identities and malformed tokens fail before transport use.
+
+The bounded login classifier accepts only the donor-observed string success
+code and complete result pair. Ordinary failures remain Authentication errors,
+while code `1506` becomes an image/slider `HumanRequired` state. Response
+messages, open IDs, JWTs and serialized composite values remain redacted and
+zeroized across their owning boundaries.
+
+An injected account-bound resolver also supports stored-session validation, but
+native HTTP, Core persistence wiring, JWT expiry/recovery and automatic Password
+renewal remain absent. Metadata therefore adds only Authentication plus
+Password/ImportedToken and Jwt/Composite session declarations; Course/Task
+parsers remain offline helpers rather than advertised registry slots. This is
+offline orchestration evidence, not live authentication.

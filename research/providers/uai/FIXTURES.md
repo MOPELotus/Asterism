@@ -7,24 +7,29 @@ explicitly synthetic and prove parser invariants only.
 
 ```text
 fixtures/providers/uai/
+  auth/password-success.json
+  auth/password-rejected.json
+  auth/password-captcha.json
   courses/list-mixed.json
   courses/resource-detail.json
   tasks/tree-mixed.json
 ```
 
-They cover Course → CourseResource flattening, paired point counts, fresh detail
-binding, redacted Course-instance routing, the outer/nested Course-tree envelope
-and Unit/Section/Micro/Group identity separation. Inline negative tests cover
-duplicate resources/groups, misbound details/contexts, unknown roles and
-impossible point totals.
+They cover typed Password success/rejection/slider outcomes, strict atomic
+openid/JWT parsing, Course → CourseResource flattening, paired point counts,
+fresh detail binding, redacted Course-instance routing, the outer/nested
+Course-tree envelope and Unit/Section/Micro/Group identity separation. Inline
+negative tests cover malformed/extra composite fields, duplicate
+resources/groups, misbound details/contexts, unknown roles and impossible point
+totals.
 
 ## Required live-sanitized fixtures
 
 ```text
 fixtures/providers/uai/
-  auth/password-success.json
-  auth/password-captcha.json
-  auth/password-rejected.json
+  auth/password-success-live.json
+  auth/password-captcha-live.json
+  auth/password-rejected-live.json
   courses/list-empty.json
   courses/list-mixed-live.json
   courses/resource-detail-live.json

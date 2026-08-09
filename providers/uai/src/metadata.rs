@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
-use asterism_domain::ProviderId;
+use asterism_domain::{AuthMethod, ProviderId, SessionKind};
 use asterism_provider_api::{
-    ProviderError, ProviderErrorKind, ProviderMetadata, ProviderResult, VerificationLevel,
+    ProviderCapability, ProviderError, ProviderErrorKind, ProviderMetadata, ProviderResult,
+    VerificationLevel,
 };
 
 pub(crate) const PROVIDER_ID: &str = "uai";
@@ -25,9 +26,9 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
         capture_recipe_version: None,
-        capabilities: BTreeSet::new(),
-        auth_methods: BTreeSet::new(),
-        session_kinds: BTreeSet::new(),
+        capabilities: BTreeSet::from([ProviderCapability::Authentication]),
+        auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken]),
+        session_kinds: BTreeSet::from([SessionKind::Jwt, SessionKind::Composite]),
     })
 }
 
@@ -36,12 +37,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parser_only_metadata_advertises_no_runtime_boundary() {
+    fn metadata_advertises_only_injected_authentication() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
-        assert!(metadata.capabilities.is_empty());
-        assert!(metadata.auth_methods.is_empty());
-        assert!(metadata.session_kinds.is_empty());
+        assert_eq!(
+            metadata.capabilities,
+            BTreeSet::from([ProviderCapability::Authentication])
+        );
+        assert_eq!(
+            metadata.auth_methods,
+            BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken])
+        );
+        assert_eq!(
+            metadata.session_kinds,
+            BTreeSet::from([SessionKind::Jwt, SessionKind::Composite])
+        );
     }
 }
