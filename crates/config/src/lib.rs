@@ -15,6 +15,7 @@ pub const BIND_ENV: &str = "ASTERISM_BIND";
 pub const DATABASE_URL_ENV: &str = "ASTERISM_DATABASE_URL";
 pub const SESSION_TTL_SECONDS_ENV: &str = "ASTERISM_SESSION_TTL_SECONDS";
 pub const SECURE_COOKIES_ENV: &str = "ASTERISM_SECURE_COOKIES";
+pub const ENABLE_DEVELOPMENT_CHAOXING_ENV: &str = "ASTERISM_ENABLE_DEVELOPMENT_CHAOXING";
 pub const SCHEDULER_ENABLED_ENV: &str = "ASTERISM_SCHEDULER_ENABLED";
 pub const SCHEDULER_TICK_INTERVAL_SECONDS_ENV: &str = "ASTERISM_SCHEDULER_TICK_INTERVAL_SECONDS";
 pub const SCHEDULER_MATERIALIZE_LIMIT_ENV: &str = "ASTERISM_SCHEDULER_MATERIALIZE_LIMIT";
@@ -33,6 +34,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub scheduler: SchedulerConfig,
+    pub providers: ProviderConfig,
 }
 
 impl Config {
@@ -109,6 +111,7 @@ impl Config {
             self.database.url.clone_from(url);
         }
         self.scheduler.apply(&overrides.scheduler);
+        self.providers.apply(&overrides.providers);
     }
 }
 
@@ -148,6 +151,22 @@ pub struct SchedulerConfig {
     pub retry_initial_delay_seconds: u64,
     pub retry_multiplier: u32,
     pub retry_max_delay_seconds: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProviderConfig {
+    /// Explicitly exposes the unverified Chaoxing Provider for local
+    /// development and real-account validation. This is false by default.
+    pub enable_development_chaoxing: bool,
+}
+
+impl ProviderConfig {
+    fn apply(&mut self, overrides: &ProviderOverrides) {
+        if let Some(value) = overrides.enable_development_chaoxing {
+            self.enable_development_chaoxing = value;
+        }
+    }
 }
 
 impl Default for SchedulerConfig {
@@ -255,6 +274,7 @@ pub struct ConfigOverrides {
     pub server: ServerOverrides,
     pub database: DatabaseOverrides,
     pub scheduler: SchedulerOverrides,
+    pub providers: ProviderOverrides,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -280,6 +300,11 @@ pub struct SchedulerOverrides {
     pub retry_initial_delay_seconds: Option<u64>,
     pub retry_multiplier: Option<u32>,
     pub retry_max_delay_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProviderOverrides {
+    pub enable_development_chaoxing: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -341,6 +366,10 @@ impl Environment {
                 }
                 SECURE_COOKIES_ENV => {
                     environment.overrides.server.secure_cookies =
+                        Some(parse_bool_env(&name, &value)?);
+                }
+                ENABLE_DEVELOPMENT_CHAOXING_ENV => {
+                    environment.overrides.providers.enable_development_chaoxing =
                         Some(parse_bool_env(&name, &value)?);
                 }
                 SCHEDULER_ENABLED_ENV => {
@@ -460,6 +489,7 @@ fn is_supported_environment_name(name: &str) -> bool {
             | DATABASE_URL_ENV
             | SESSION_TTL_SECONDS_ENV
             | SECURE_COOKIES_ENV
+            | ENABLE_DEVELOPMENT_CHAOXING_ENV
             | SCHEDULER_ENABLED_ENV
             | SCHEDULER_TICK_INTERVAL_SECONDS_ENV
             | SCHEDULER_MATERIALIZE_LIMIT_ENV
@@ -502,6 +532,9 @@ url = "sqlite://from-file.db"
 [scheduler]
 tick_interval_seconds = 11
 claim_limit = 2
+
+[providers]
+enable_development_chaoxing = false
 "#,
         )
         .unwrap();
@@ -509,6 +542,10 @@ claim_limit = 2
             (BIND_ENV.to_owned(), "127.0.0.1:9002".to_owned()),
             (SESSION_TTL_SECONDS_ENV.to_owned(), "202".to_owned()),
             (SECURE_COOKIES_ENV.to_owned(), "true".to_owned()),
+            (
+                ENABLE_DEVELOPMENT_CHAOXING_ENV.to_owned(),
+                "true".to_owned(),
+            ),
             (
                 SCHEDULER_TICK_INTERVAL_SECONDS_ENV.to_owned(),
                 "12".to_owned(),
@@ -528,6 +565,9 @@ claim_limit = 2
                 claim_limit: Some(3),
                 ..SchedulerOverrides::default()
             },
+            providers: ProviderOverrides {
+                enable_development_chaoxing: Some(false),
+            },
         };
 
         let config = Config::load(&ConfigFile::required(&path), &environment, &cli).unwrap();
@@ -538,6 +578,7 @@ claim_limit = 2
         assert_eq!(config.database.url, "sqlite://from-cli.db");
         assert_eq!(config.scheduler.tick_interval_seconds, 12);
         assert_eq!(config.scheduler.claim_limit, 3);
+        assert!(!config.providers.enable_development_chaoxing);
         fs::remove_file(path).unwrap();
     }
 

@@ -9,6 +9,10 @@ secure_cookies = false
 [database]
 url = "sqlite://asterism.db"
 
+[providers]
+# Local validation only. This Provider remains unverified and is disabled by default.
+enable_development_chaoxing = false
+
 [scheduler]
 enabled = true
 tick_interval_seconds = 5

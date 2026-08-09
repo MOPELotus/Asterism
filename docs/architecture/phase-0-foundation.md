@@ -988,3 +988,13 @@ the pre-renewal references; entries remain redacted and zeroize when evicted.
 The development factory can compose this resolver and renewer directly while
 sharing the same native authentication transport with session validation; it
 still does not register Chaoxing in the daemon or imply live verification.
+
+## Seventy-third Phase 0 slice
+
+`asterismd` can now register the complete Chaoxing development entry only behind
+an explicit local-validation setting. The default registry remains empty; the
+opt-in refuses startup without a configured encrypted SecretStore, uses the
+shared built-in network policy, logs an unverified-development warning, and
+continues to expose `Development` metadata rather than a support claim. TOML,
+environment and CLI settings follow the normal precedence model, contain no
+credentials, and do not enable Capture.

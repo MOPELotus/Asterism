@@ -4,17 +4,20 @@ use anyhow::Context;
 use asterism_api::{ApiState, build_router};
 use asterism_config::{
     Config, ConfigFile, ConfigOverrides, DEFAULT_CONFIG_FILE, DatabaseOverrides, Environment,
-    SchedulerOverrides, ServerOverrides,
+    ProviderOverrides, SchedulerOverrides, ServerOverrides,
 };
+use asterism_domain::ProviderId;
 use asterism_engine::{
     ProviderScanService, ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedulerWorker,
 };
+use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
 use asterism_provider_api::ProviderRegistry;
+use asterism_provider_chaoxing::build_development_provider_with_renewal;
 use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
 use asterism_storage::{
-    Database, SecretKeyring, SqliteProviderAccountRepository, SqliteProviderScanRepository,
-    SqliteSchedulerRepository, SqliteSecretStore,
+    Database, SecretKeyring, SqliteProviderAccountRepository, SqliteProviderCredentialResolver,
+    SqliteProviderScanRepository, SqliteSchedulerRepository, SqliteSecretStore,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Parser;
@@ -88,6 +91,10 @@ struct Arguments {
     /// Maximum retry delay in seconds.
     #[arg(long)]
     scheduler_retry_max_delay_seconds: Option<u64>,
+
+    /// Expose the unverified Chaoxing Provider for local validation only.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    enable_development_chaoxing: Option<bool>,
 }
 
 #[tokio::main]
@@ -118,17 +125,19 @@ async fn main() -> anyhow::Result<()> {
         "startup recovery completed"
     );
 
-    let providers = Arc::new(ProviderRegistry::default());
     let secret_keyring = load_secret_keyring_from_process()?;
-    let secret_store_configured = secret_keyring.is_some();
+    let secret_store =
+        secret_keyring.map(|keyring| SqliteSecretStore::new(database.clone(), keyring));
+    let secret_store_configured = secret_store.is_some();
+    let providers = Arc::new(build_provider_registry(&config, secret_store.as_ref())?);
     let mut api_state = ApiState::new(
         database.clone(),
         providers.clone(),
         config.server.session_ttl_seconds,
         config.server.secure_cookies,
     );
-    if let Some(keyring) = secret_keyring {
-        api_state = api_state.with_secret_store(SqliteSecretStore::new(database.clone(), keyring));
+    if let Some(secret_store) = secret_store {
+        api_state = api_state.with_secret_store(secret_store);
     }
     let app = build_router(api_state);
     let listener = tokio::net::TcpListener::bind(config.server.bind)
@@ -190,6 +199,9 @@ fn load_config(arguments: Arguments) -> anyhow::Result<Config> {
             retry_multiplier: arguments.scheduler_retry_multiplier,
             retry_max_delay_seconds: arguments.scheduler_retry_max_delay_seconds,
         },
+        providers: ProviderOverrides {
+            enable_development_chaoxing: arguments.enable_development_chaoxing,
+        },
     };
     Config::load(&config_file, &environment, &overrides)
         .context("failed to load Asterism configuration")
@@ -235,6 +247,36 @@ fn load_secret_keyring(
     let keyring = SecretKeyring::new(active_key_id, keys)
         .context("failed to configure the SecretStore keyring")?;
     Ok(Some(Arc::new(keyring)))
+}
+
+fn build_provider_registry(
+    config: &Config,
+    secret_store: Option<&SqliteSecretStore>,
+) -> anyhow::Result<ProviderRegistry> {
+    let mut registry = ProviderRegistry::default();
+    if !config.providers.enable_development_chaoxing {
+        return Ok(registry);
+    }
+    let secret_store = secret_store
+        .context("the development Chaoxing Provider requires a configured SecretStore keyring")?;
+    let provider_id = ProviderId::new("chaoxing")
+        .map_err(|_| anyhow::anyhow!("the compile-time Chaoxing Provider ID is invalid"))?;
+    let runtime = Arc::new(SqliteProviderCredentialResolver::new(
+        secret_store.clone(),
+        provider_id,
+    ));
+    let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+        .context("failed to resolve the development Chaoxing network profile")?;
+    let entry = build_development_provider_with_renewal(&network, runtime.clone(), runtime)
+        .context("failed to build the development Chaoxing Provider")?;
+    registry
+        .register(entry)
+        .context("failed to register the development Chaoxing Provider")?;
+    tracing::warn!(
+        provider = "chaoxing",
+        "unverified development Provider explicitly enabled"
+    );
+    Ok(registry)
 }
 
 fn start_scan_scheduler(
@@ -355,12 +397,14 @@ mod tests {
             "--scheduler-enabled=false",
             "--scheduler-tick-interval-seconds=9",
             "--scheduler-claim-limit=2",
+            "--enable-development-chaoxing=false",
         ])
         .unwrap();
         assert_eq!(arguments.scheduler_enabled, Some(false));
         assert_eq!(arguments.scheduler_tick_interval_seconds, Some(9));
         assert_eq!(arguments.scheduler_claim_limit, Some(2));
         assert_eq!(arguments.scheduler_materialize_limit, None);
+        assert_eq!(arguments.enable_development_chaoxing, Some(false));
     }
 
     #[test]
@@ -391,5 +435,34 @@ mod tests {
         )
         .unwrap_err();
         assert!(!error.to_string().contains(invalid));
+    }
+
+    #[tokio::test]
+    async fn development_chaoxing_registration_is_explicit_and_requires_secrets() {
+        let default_registry = build_provider_registry(&Config::default(), None).unwrap();
+        assert!(default_registry.is_empty());
+
+        let mut config = Config::default();
+        config.providers.enable_development_chaoxing = true;
+        assert!(build_provider_registry(&config, None).is_err());
+
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        let keyring = load_secret_keyring(
+            Some("key-a".to_owned()),
+            Some(SecretString::new(format!(
+                "key-a={}",
+                STANDARD.encode([7; 32])
+            ))),
+        )
+        .unwrap()
+        .unwrap();
+        let store = SqliteSecretStore::new(database.clone(), keyring);
+        let registry = build_provider_registry(&config, Some(&store)).unwrap();
+        let provider = registry.get(&ProviderId::new("chaoxing").unwrap()).unwrap();
+        assert_eq!(
+            provider.metadata.verification,
+            asterism_provider_api::VerificationLevel::Development
+        );
+        database.close().await;
     }
 }

@@ -126,6 +126,8 @@ cargo run -p asterismd
 
 `asterismd` 默认监听 `127.0.0.1:8068`，并在当前目录使用 `asterism.db`。配置按 `CLI > 环境变量 > 配置文件 > 默认值` 合并；可复制 `asterism.example.toml` 为本地 `asterism.toml`，也可通过 `--config` 或 `ASTERISM_CONFIG` 指定文件。服务端变量包括 `ASTERISM_BIND`、`ASTERISM_DATABASE_URL`、`ASTERISM_SESSION_TTL_SECONDS` 和 `ASTERISM_SECURE_COOKIES`；统一扫描调度器使用 `ASTERISM_SCHEDULER_*` 对应 `[scheduler]` 字段，并可由 `--scheduler-*` 参数覆盖。普通配置文件不得保存凭据或其他 Secret。
 
+Chaoxing 仍处于 `Development` 且默认不注册。仅在本地真实账号验证时，才可通过 `[providers].enable_development_chaoxing = true`、`ASTERISM_ENABLE_DEVELOPMENT_CHAOXING=true` 或 `--enable-development-chaoxing` 显式启用；启用时必须同时配置 SecretStore keyring。这个开关只开放验证入口，不代表 Supported/Verified，也不会启用 Capture。
+
 SecretStore keyring 只从进程环境读取，不接受 TOML 或 CLI 参数。`ASTERISM_SECRET_ACTIVE_KEY_ID` 指定活动 key ID，`ASTERISM_SECRET_KEYS` 使用逗号分隔的 `<key-id>=<base64-encoded-32-byte-key>`；两者必须同时提供。轮换时保留旧 key 并添加新 key，再切换活动 ID；确认所有密文已轮换前不要移除旧 key。`/health` 的 `secret_store_configured` 只报告是否已配置，不返回 key ID 或 key material。
 
 扫描调度器默认启用，每 5 秒执行一次有界 tick、每次只领取一个 Scan Job，claim TTL 为 300 秒。停止 `asterismd` 时会先停止新 tick，等待当前 tick 返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
