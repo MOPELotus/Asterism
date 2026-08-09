@@ -18,6 +18,8 @@ enabled = true
 tick_interval_seconds = 5
 materialize_limit = 100
 claim_limit = 1
+# Deployment-wide hard ceiling. Provider and account settings can only reduce it.
+execution_concurrency_limit = 32
 claim_ttl_seconds = 300
 retry_max_attempts = 5
 retry_initial_delay_seconds = 30

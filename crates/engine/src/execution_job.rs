@@ -1,6 +1,7 @@
 use std::{
+    collections::BTreeMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration as StdDuration,
@@ -8,13 +9,13 @@ use std::{
 
 use asterism_domain::{
     AttemptResult, AuthState, Execution, ExecutionAttempt, ExecutionId, ExecutionLease,
-    ExecutionProgress, ExecutionStage, ExecutionState, OrchestrationState, ProviderErrorClass,
-    RemoteState, Task, TaskCapability, Timestamp,
+    ExecutionProgress, ExecutionStage, ExecutionState, OrchestrationState, ProviderAccountId,
+    ProviderErrorClass, ProviderId, RemoteState, Task, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionRequest as ProviderExecutionRequest, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderExecutionLog, ProviderProgress, ProviderRegistry,
-    TaskExecutionCapability, TaskProgressCapability,
+    ProviderError, ProviderErrorKind, ProviderExecutionConcurrency, ProviderExecutionLog,
+    ProviderProgress, ProviderRegistry, TaskExecutionCapability, TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
@@ -27,6 +28,7 @@ use asterism_storage::{
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use tokio::sync::Notify;
 
 use crate::{FormalAssessmentPolicy, TaskAction, authorize_task_action};
 
@@ -34,6 +36,7 @@ use crate::{FormalAssessmentPolicy, TaskAction, authorize_task_action};
 pub struct ExecutionRunnerConfig {
     pub execution_lease_ttl: StdDuration,
     pub heartbeat_interval: StdDuration,
+    pub global_concurrency_limit: u32,
     pub retry_policy: RetryPolicy,
     pub formal_assessment_policy: FormalAssessmentPolicy,
 }
@@ -50,6 +53,8 @@ impl ExecutionRunnerConfig {
         if self.execution_lease_ttl.is_zero()
             || self.heartbeat_interval.is_zero()
             || self.heartbeat_interval >= self.execution_lease_ttl
+            || self.global_concurrency_limit == 0
+            || self.global_concurrency_limit > 1_000
             || i64::try_from(self.execution_lease_ttl.as_secs()).is_err()
             || i64::try_from(self.heartbeat_interval.as_secs()).is_err()
             || i64::try_from(self.retry_policy.max_delay_seconds).is_err()
@@ -57,6 +62,100 @@ impl ExecutionRunnerConfig {
             return Err(ScheduledExecutionRunError::InvalidConfiguration);
         }
         Ok(self)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ExecutionAdmissionState {
+    global: u32,
+    providers: BTreeMap<ProviderId, u32>,
+    accounts: BTreeMap<ProviderAccountId, u32>,
+}
+
+#[derive(Debug)]
+struct ExecutionAdmissionController {
+    global_limit: u32,
+    state: Mutex<ExecutionAdmissionState>,
+    changed: Notify,
+}
+
+impl ExecutionAdmissionController {
+    fn new(global_limit: u32) -> Self {
+        Self {
+            global_limit,
+            state: Mutex::new(ExecutionAdmissionState::default()),
+            changed: Notify::new(),
+        }
+    }
+
+    async fn acquire(
+        self: &Arc<Self>,
+        provider_id: &ProviderId,
+        account_id: ProviderAccountId,
+        limits: ProviderExecutionConcurrency,
+    ) -> ExecutionAdmissionGuard {
+        loop {
+            let changed = self.changed.notified();
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let provider_active = state
+                    .providers
+                    .get(provider_id)
+                    .copied()
+                    .unwrap_or_default();
+                let account_active = state.accounts.get(&account_id).copied().unwrap_or_default();
+                if state.global < self.global_limit
+                    && provider_active < limits.provider
+                    && account_active < limits.account
+                {
+                    state.global += 1;
+                    *state.providers.entry(provider_id.clone()).or_default() += 1;
+                    *state.accounts.entry(account_id).or_default() += 1;
+                    return ExecutionAdmissionGuard {
+                        controller: Arc::clone(self),
+                        provider_id: provider_id.clone(),
+                        account_id,
+                    };
+                }
+            }
+            changed.await;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ExecutionAdmissionGuard {
+    controller: Arc<ExecutionAdmissionController>,
+    provider_id: ProviderId,
+    account_id: ProviderAccountId,
+}
+
+impl Drop for ExecutionAdmissionGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .controller
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.global = state.global.saturating_sub(1);
+        decrement_or_remove(&mut state.providers, &self.provider_id);
+        decrement_or_remove(&mut state.accounts, &self.account_id);
+        drop(state);
+        self.controller.changed.notify_waiters();
+    }
+}
+
+fn decrement_or_remove<K: Ord + Clone>(values: &mut BTreeMap<K, u32>, key: &K) {
+    let Some(value) = values.get_mut(key) else {
+        return;
+    };
+    if *value <= 1 {
+        values.remove(key);
+    } else {
+        *value -= 1;
     }
 }
 
@@ -68,6 +167,7 @@ pub struct ScheduledExecutionRunner<E, L, S, A, T> {
     scheduler: S,
     accounts: A,
     tasks: T,
+    admission: Arc<ExecutionAdmissionController>,
     config: ExecutionRunnerConfig,
 }
 
@@ -87,6 +187,7 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
         tasks: T,
         config: ExecutionRunnerConfig,
     ) -> Result<Self, ScheduledExecutionRunError> {
+        let config = config.validate()?;
         Ok(Self {
             registry,
             executions,
@@ -94,7 +195,10 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
             scheduler,
             accounts,
             tasks,
-            config: config.validate()?,
+            admission: Arc::new(ExecutionAdmissionController::new(
+                config.global_concurrency_limit,
+            )),
+            config,
         })
     }
 }
@@ -225,7 +329,11 @@ where
         now: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
-        let prepared = match self.prepare_recovery_call(task, correlation_id).await? {
+        let execution_id = claimed_execution_id(job)?;
+        let prepared = match self
+            .prepare_recovery_call(execution_id, task, correlation_id)
+            .await?
+        {
             Ok(prepared) => prepared,
             Err(error_class) => {
                 return self
@@ -240,6 +348,9 @@ where
                     .await;
             }
         };
+        let _admission = self
+            .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
+            .await?;
         let provider = prepared
             .capability
             .read_progress(&prepared.context, &task.remote_id);
@@ -275,6 +386,7 @@ where
 
     async fn prepare_recovery_call(
         &self,
+        execution_id: ExecutionId,
         task: &Task,
         correlation_id: &str,
     ) -> Result<Result<PreparedRecoveryCall, ProviderErrorClass>, ScheduledExecutionRunError> {
@@ -291,12 +403,27 @@ where
         if account.auth_state != AuthState::Authenticated {
             return Ok(Err(ProviderErrorClass::Authentication));
         }
-        let Some(capability) = self
-            .registry
-            .get(&account.provider_id)
-            .and_then(|entry| entry.task_progress.clone())
-        else {
+        let Some(entry) = self.registry.get(&account.provider_id) else {
             return Ok(Err(ProviderErrorClass::UnsupportedTask));
+        };
+        let Some(capability) = entry.task_progress.clone() else {
+            return Ok(Err(ProviderErrorClass::UnsupportedTask));
+        };
+        let Some(runtime_settings) = self
+            .executions
+            .find_execution_runtime_settings(execution_id)
+            .await?
+        else {
+            return Ok(Err(ProviderErrorClass::Internal));
+        };
+        if runtime_settings.provider_id != account.provider_id {
+            return Ok(Err(ProviderErrorClass::Internal));
+        }
+        let Ok(concurrency) = entry
+            .runtime_settings
+            .execution_concurrency(&runtime_settings.resolved)
+        else {
+            return Ok(Err(ProviderErrorClass::Internal));
         };
         Ok(Ok(PreparedRecoveryCall {
             capability,
@@ -306,6 +433,7 @@ where
                 credential_refs: account.credential_refs,
                 correlation_id: correlation_id.to_owned(),
             },
+            concurrency,
         }))
     }
 
@@ -641,17 +769,21 @@ where
                 disposition: FailureDisposition::Failed,
             }));
         };
-        if runtime_settings.provider_id != account.provider_id
-            || entry
-                .runtime_settings
-                .validate_resolved(&runtime_settings.resolved)
-                .is_err()
-        {
+        if runtime_settings.provider_id != account.provider_id {
             return Ok(Err(PreparedFailure {
                 error_class: ProviderErrorClass::Internal,
                 disposition: FailureDisposition::Failed,
             }));
         }
+        let Ok(concurrency) = entry
+            .runtime_settings
+            .execution_concurrency(&runtime_settings.resolved)
+        else {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Internal,
+                disposition: FailureDisposition::Failed,
+            }));
+        };
         Ok(Ok(PreparedProviderCall {
             capability,
             context: ProviderContext {
@@ -667,6 +799,7 @@ where
                 requested_capabilities: capabilities,
                 runtime_settings: runtime_settings.resolved,
             },
+            concurrency,
         }))
     }
 
@@ -678,6 +811,14 @@ where
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
         let now = attempt.started_at;
+        let _admission = self
+            .acquire_admission(
+                job,
+                attempt.execution_id,
+                &prepared.context,
+                prepared.concurrency,
+            )
+            .await?;
         let claim_lost = Arc::new(AtomicBool::new(false));
         let sink = PersistedExecutionEventSink {
             executions: &self.executions,
@@ -737,6 +878,28 @@ where
                     correlation_id,
                 )
                 .await
+            }
+        }
+    }
+
+    async fn acquire_admission(
+        &self,
+        job: &ScheduledJob,
+        execution_id: ExecutionId,
+        context: &ProviderContext,
+        limits: ProviderExecutionConcurrency,
+    ) -> Result<ExecutionAdmissionGuard, ScheduledExecutionRunError> {
+        let admission = self
+            .admission
+            .acquire(&context.provider_id, context.account_id, limits);
+        tokio::pin!(admission);
+        let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        loop {
+            tokio::select! {
+                guard = &mut admission => return Ok(guard),
+                _ = heartbeat.tick() => self.renew_claims(job, execution_id).await?,
             }
         }
     }
@@ -885,11 +1048,13 @@ struct PreparedProviderCall {
     capability: Arc<dyn TaskExecutionCapability>,
     context: ProviderContext,
     request: ProviderExecutionRequest,
+    concurrency: ProviderExecutionConcurrency,
 }
 
 struct PreparedRecoveryCall {
     capability: Arc<dyn TaskProgressCapability>,
     context: ProviderContext,
+    concurrency: ProviderExecutionConcurrency,
 }
 
 struct PreparedFailure {
@@ -1247,6 +1412,65 @@ mod tests {
         Success,
         NetworkFailure,
         RecoveryPending,
+    }
+
+    #[tokio::test]
+    async fn admission_controller_enforces_global_provider_and_account_limits() {
+        let provider = ProviderId::new("provider-alpha").unwrap();
+        let account_a = ProviderAccountId::new();
+        let account_b = ProviderAccountId::new();
+        let limits = ProviderExecutionConcurrency {
+            provider: 2,
+            account: 1,
+        };
+        let controller = Arc::new(ExecutionAdmissionController::new(3));
+        let first = controller.acquire(&provider, account_a, limits).await;
+        let second = controller.acquire(&provider, account_b, limits).await;
+        assert!(
+            tokio::time::timeout(
+                StdDuration::from_millis(1),
+                controller.acquire(&provider, account_a, limits),
+            )
+            .await
+            .is_err()
+        );
+        let account_c = ProviderAccountId::new();
+        assert!(
+            tokio::time::timeout(
+                StdDuration::from_millis(1),
+                controller.acquire(&provider, account_c, limits),
+            )
+            .await
+            .is_err()
+        );
+        drop(first);
+        let third = tokio::time::timeout(
+            StdDuration::from_millis(10),
+            controller.acquire(&provider, account_a, limits),
+        )
+        .await
+        .unwrap();
+        drop(second);
+        drop(third);
+
+        let global = Arc::new(ExecutionAdmissionController::new(2));
+        let permissive = ProviderExecutionConcurrency {
+            provider: 3,
+            account: 2,
+        };
+        let provider_b = ProviderId::new("provider-beta").unwrap();
+        let one = global.acquire(&provider, account_a, permissive).await;
+        let two = global.acquire(&provider_b, account_b, permissive).await;
+        assert!(
+            tokio::time::timeout(
+                StdDuration::from_millis(1),
+                global.acquire(&provider_b, account_c, permissive),
+            )
+            .await
+            .is_err()
+        );
+        drop(one);
+        drop(two);
     }
 
     #[derive(Debug)]
@@ -1903,6 +2127,7 @@ mod tests {
         ExecutionRunnerConfig {
             execution_lease_ttl: StdDuration::from_mins(1),
             heartbeat_interval: StdDuration::from_secs(10),
+            global_concurrency_limit: 8,
             retry_policy: RetryPolicy {
                 max_attempts: 3,
                 initial_delay_seconds: 10,

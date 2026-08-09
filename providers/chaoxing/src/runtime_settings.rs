@@ -2,10 +2,12 @@ use std::collections::BTreeSet;
 
 use asterism_provider_api::{
     ProviderError, ProviderErrorKind, ProviderResult, ProviderRuntimeSettingsSchema,
-    ProviderSettingDefinition, ProviderSettingKind, ProviderSettingScope, ProviderSettingValue,
-    ResolvedProviderRuntimeSettings,
+    ProviderSettingCoreBehavior, ProviderSettingDefinition, ProviderSettingKind,
+    ProviderSettingScope, ProviderSettingValue, ResolvedProviderRuntimeSettings,
 };
 
+pub(crate) const PROVIDER_EXECUTION_CONCURRENCY_KEY: &str = "execution.provider_concurrency";
+pub(crate) const ACCOUNT_EXECUTION_CONCURRENCY_KEY: &str = "execution.account_concurrency";
 pub(crate) const VIDEO_PLAYBACK_RATE_KEY: &str = "video.playback_rate";
 pub(crate) const VIDEO_PROGRESS_INTERVAL_KEY: &str = "video.progress_interval";
 
@@ -61,8 +63,36 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 2,
+        version: 3,
         definitions: vec![
+            ProviderSettingDefinition {
+                key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
+                display_name: "平台执行并发".to_owned(),
+                description: "Core 同时向超星发起的执行数量上限；未完成真实并发验证前默认 1。"
+                    .to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: 32,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(1),
+                scopes: BTreeSet::from([ProviderSettingScope::Provider]),
+                core_behavior: Some(ProviderSettingCoreBehavior::ProviderExecutionConcurrency),
+            },
+            ProviderSettingDefinition {
+                key: ACCOUNT_EXECUTION_CONCURRENCY_KEY.to_owned(),
+                display_name: "账号执行并发".to_owned(),
+                description: "同一超星账号的并行执行上限，可按账号或具体任务覆盖；默认串行。"
+                    .to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: 4,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(1),
+                scopes: scopes.clone(),
+                core_behavior: Some(ProviderSettingCoreBehavior::AccountExecutionConcurrency),
+            },
             ProviderSettingDefinition {
                 key: VIDEO_PLAYBACK_RATE_KEY.to_owned(),
                 display_name: "视频播放速度".to_owned(),
@@ -108,10 +138,16 @@ mod tests {
         schema.validate().unwrap();
         let task = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
-            values: BTreeMap::from([(
-                VIDEO_PLAYBACK_RATE_KEY.to_owned(),
-                ProviderSettingValue::DecimalMillis(1_500),
-            )]),
+            values: BTreeMap::from([
+                (
+                    VIDEO_PLAYBACK_RATE_KEY.to_owned(),
+                    ProviderSettingValue::DecimalMillis(1_500),
+                ),
+                (
+                    ACCOUNT_EXECUTION_CONCURRENCY_KEY.to_owned(),
+                    ProviderSettingValue::Integer(3),
+                ),
+            ]),
         };
         let resolved = schema.resolve(None, None, Some(&task)).unwrap();
         assert_eq!(
@@ -119,6 +155,13 @@ mod tests {
             ChaoxingRuntimeSettings {
                 video_playback_rate_millis: 1_500,
                 video_progress_interval_seconds: 60,
+            }
+        );
+        assert_eq!(
+            schema.execution_concurrency(&resolved).unwrap(),
+            asterism_provider_api::ProviderExecutionConcurrency {
+                provider: 1,
+                account: 3,
             }
         );
 

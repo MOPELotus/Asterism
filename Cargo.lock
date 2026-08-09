@@ -211,6 +211,7 @@ dependencies = [
  "asterism-storage",
  "async-trait",
  "chrono",
+ "futures-util",
  "serde_json",
  "sqlx",
  "thiserror",

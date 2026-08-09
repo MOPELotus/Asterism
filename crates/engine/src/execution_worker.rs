@@ -6,6 +6,7 @@ use asterism_storage::{
     ExecutionLeaseRepository, ExecutionRepository, ProviderAccountRuntimeRepository,
     SchedulerRepository, StorageError, TaskRuntimeRepository,
 };
+use futures_util::{StreamExt as _, stream};
 
 use crate::{
     ExecutionRunnerConfig, ScheduledExecutionOutcome, ScheduledExecutionRunError,
@@ -26,7 +27,8 @@ impl ExecutionSchedulerConfig {
             || self.worker_id.len() > 128
             || self.worker_id.trim() != self.worker_id
             || self.worker_id.chars().any(char::is_control)
-            || self.claim_limit != 1
+            || self.claim_limit == 0
+            || self.claim_limit > self.runner.global_concurrency_limit
             || self.claim_ttl.is_zero()
         {
             return Err(ExecutionSchedulerWorkerError::InvalidConfig);
@@ -118,8 +120,14 @@ where
             claimed: jobs.len(),
             ..ExecutionSchedulerTickReport::default()
         };
-        for job in jobs {
-            match self.runner.run_claimed(&job, now).await? {
+        let runner = &self.runner;
+        let outcomes = stream::iter(jobs)
+            .map(|job| async move { runner.run_claimed(&job, now).await })
+            .buffer_unordered(self.config.claim_limit as usize)
+            .collect::<Vec<_>>()
+            .await;
+        for outcome in outcomes {
+            match outcome? {
                 ScheduledExecutionOutcome::Succeeded(_) => report.succeeded += 1,
                 ScheduledExecutionOutcome::RetryScheduled { .. } => report.retry_scheduled += 1,
                 ScheduledExecutionOutcome::HumanRequired { .. } => report.human_required += 1,
@@ -239,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_rejects_parallel_preclaim_configuration() {
+    fn worker_rejects_claims_above_the_global_execution_limit() {
         let mut config = config();
         config.claim_limit = 2;
         assert!(matches!(
@@ -256,6 +264,25 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn worker_accepts_bounded_parallel_claims() {
+        let mut config = config();
+        config.claim_limit = 4;
+        config.runner.global_concurrency_limit = 4;
+        assert!(
+            ExecutionSchedulerWorker::new(
+                Arc::new(ProviderRegistry::default()),
+                (),
+                (),
+                (),
+                (),
+                (),
+                config,
+            )
+            .is_ok()
+        );
+    }
+
     fn config() -> ExecutionSchedulerConfig {
         ExecutionSchedulerConfig {
             worker_id: "execution-worker".to_owned(),
@@ -264,6 +291,7 @@ mod tests {
             runner: ExecutionRunnerConfig {
                 execution_lease_ttl: StdDuration::from_mins(1),
                 heartbeat_interval: StdDuration::from_secs(10),
+                global_concurrency_limit: 1,
                 retry_policy: RetryPolicy {
                     max_attempts: 3,
                     initial_delay_seconds: 10,

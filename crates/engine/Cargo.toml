@@ -17,6 +17,7 @@ asterism-secrets = { path = "../secrets" }
 asterism-storage = { path = "../storage" }
 async-trait.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

@@ -93,6 +93,10 @@ struct Arguments {
     #[arg(long)]
     scheduler_claim_limit: Option<u32>,
 
+    /// Hard Core cap for concurrently running executions.
+    #[arg(long)]
+    scheduler_execution_concurrency_limit: Option<u32>,
+
     /// Scheduler claim lifetime in seconds.
     #[arg(long)]
     scheduler_claim_ttl_seconds: Option<u64>,
@@ -257,6 +261,7 @@ fn load_config(arguments: Arguments) -> anyhow::Result<Config> {
             tick_interval_seconds: arguments.scheduler_tick_interval_seconds,
             materialize_limit: arguments.scheduler_materialize_limit,
             claim_limit: arguments.scheduler_claim_limit,
+            execution_concurrency_limit: arguments.scheduler_execution_concurrency_limit,
             claim_ttl_seconds: arguments.scheduler_claim_ttl_seconds,
             retry_max_attempts: arguments.scheduler_retry_max_attempts,
             retry_initial_delay_seconds: arguments.scheduler_retry_initial_delay_seconds,
@@ -402,11 +407,12 @@ fn start_execution_scheduler(
             SqliteTaskQueryRepository::new(database.clone()),
             ExecutionSchedulerConfig {
                 worker_id: format!("asterismd-execution-{}", std::process::id()),
-                claim_limit: 1,
+                claim_limit: config.scheduler.execution_concurrency_limit,
                 claim_ttl: execution_lease_ttl,
                 runner: ExecutionRunnerConfig {
                     execution_lease_ttl,
                     heartbeat_interval: execution_lease_ttl / 3,
+                    global_concurrency_limit: config.scheduler.execution_concurrency_limit,
                     retry_policy: RetryPolicy {
                         max_attempts: config.scheduler.retry_max_attempts,
                         initial_delay_seconds: config.scheduler.retry_initial_delay_seconds,
@@ -630,12 +636,14 @@ mod tests {
             "--scheduler-enabled=false",
             "--scheduler-tick-interval-seconds=9",
             "--scheduler-claim-limit=2",
+            "--scheduler-execution-concurrency-limit=24",
             "--enable-development-chaoxing=false",
         ])
         .unwrap();
         assert_eq!(arguments.scheduler_enabled, Some(false));
         assert_eq!(arguments.scheduler_tick_interval_seconds, Some(9));
         assert_eq!(arguments.scheduler_claim_limit, Some(2));
+        assert_eq!(arguments.scheduler_execution_concurrency_limit, Some(24));
         assert_eq!(arguments.scheduler_materialize_limit, None);
         assert_eq!(arguments.enable_development_chaoxing, Some(false));
     }

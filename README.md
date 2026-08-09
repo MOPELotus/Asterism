@@ -124,7 +124,7 @@ cargo build --workspace
 cargo run -p asterismd
 ```
 
-`asterismd` 默认监听 `127.0.0.1:8068`，并在当前目录使用 `asterism.db`。配置按 `CLI > 环境变量 > 配置文件 > 默认值` 合并；可复制 `asterism.example.toml` 为本地 `asterism.toml`，也可通过 `--config` 或 `ASTERISM_CONFIG` 指定文件。服务端变量包括 `ASTERISM_BIND`、`ASTERISM_DATABASE_URL`、`ASTERISM_SESSION_TTL_SECONDS` 和 `ASTERISM_SECURE_COOKIES`；统一扫描调度器使用 `ASTERISM_SCHEDULER_*` 对应 `[scheduler]` 字段，并可由 `--scheduler-*` 参数覆盖。普通配置文件不得保存凭据或其他 Secret。
+`asterismd` 默认监听 `127.0.0.1:8068`，并在当前目录使用 `asterism.db`。配置按 `CLI > 环境变量 > 配置文件 > 默认值` 合并；可复制 `asterism.example.toml` 为本地 `asterism.toml`，也可通过 `--config` 或 `ASTERISM_CONFIG` 指定文件。服务端变量包括 `ASTERISM_BIND`、`ASTERISM_DATABASE_URL`、`ASTERISM_SESSION_TTL_SECONDS` 和 `ASTERISM_SECURE_COOKIES`；统一调度器使用 `ASTERISM_SCHEDULER_*` 对应 `[scheduler]` 字段，并可由 `--scheduler-*` 参数覆盖。`execution_concurrency_limit` 是部署级全局硬上限，Provider/账号的后台设置只能在该上限内进一步收紧。普通配置文件不得保存凭据或其他 Secret。
 
 Chaoxing 仍处于 `Development` 且默认不注册。仅在本地真实账号验证时，才可通过 `[providers].enable_development_chaoxing = true`、`ASTERISM_ENABLE_DEVELOPMENT_CHAOXING=true` 或 `--enable-development-chaoxing` 显式启用；启用时必须同时配置 SecretStore keyring。这个开关只开放验证入口，不代表 Supported/Verified，也不会启用 Capture。
 
@@ -196,7 +196,7 @@ Provider 执行期间只能通过 Core 注入的 `ExecutionEventSink` 上报进�
 
 周期扫描当前仅由 Master 通过 `provider-account schedule get <account-id>` 和 `provider-account schedule set <account-id> --interval-seconds <seconds>` 管理；添加 `--disabled` 可保留配置但停止物化任务。接口同时返回 Master 期望间隔、Provider 最小间隔和 Core 实际采用的间隔，普通用户第一阶段不展示也不能修改该设置，Provider 自身不创建独立 cron 或后台循环。
 
-Provider 技术运行参数属于 Master 后台控制面：可设置平台默认值，并按需对 ProviderAccount 或单个 Task 做更具体覆盖；视频并发/线程数、播放速度、章节及其他任务的周期巡查只是示例，实际字段由各 Provider 的版本化 schema 定义并受安全上限约束。Provider API 已提供布尔、整数、千分位定点小数、秒级时长与受限选项类型，以及 Provider / ProviderAccount / Task 作用域声明和逐字段覆盖解析；不接受自由字符串或任意 JSON。Core 已按三个作用域持久化校验后的局部覆盖，使用 optimistic revision 防止后台并发覆盖，并在同一事务写入不含配置值的 Audit。第一阶段普通用户不展示也不能修改这些参数。周期巡查仍必须统一进入 Core Scheduler，Provider 不得据此自行创建后台循环；标准 Core 执行 Action 会原子解析并冻结最终设置，Worker 只把该 Execution 的版本化快照传给 Provider，Retry 不受后台后续修改影响。`chaoxing` 已以受限 schema 消费视频倍速和进度上报间隔；视频并发和巡查默认值仍待接入 Core 调度语义。
+Provider 技术运行参数属于 Master 后台控制面：可设置平台默认值，并按需对 ProviderAccount 或单个 Task 做更具体覆盖；视频并发/线程数、播放速度、章节及其他任务的周期巡查只是示例，实际字段由各 Provider 的版本化 schema 定义并受安全上限约束。Provider API 已提供布尔、整数、千分位定点小数、秒级时长与受限选项类型，以及 Provider / ProviderAccount / Task 作用域声明和逐字段覆盖解析；不接受自由字符串或任意 JSON。Core 已按三个作用域持久化校验后的局部覆盖，使用 optimistic revision 防止后台并发覆盖，并在同一事务写入不含配置值的 Audit。第一阶段普通用户不展示也不能修改这些参数。周期巡查仍必须统一进入 Core Scheduler，Provider 不得据此自行创建后台循环；标准 Core 执行 Action 会原子解析并冻结最终设置，Worker 只把该 Execution 的版本化快照传给 Provider，Retry 不受后台后续修改影响。Provider 可通过受限的 portable behavior 将自定义字段声明为平台或账号执行并发，Core 不按字段名猜语义；Worker 以同一原子准入门同时执行全局、Provider、ProviderAccount 三层限制，并在等待期间续租。`chaoxing` schema 已接入平台/账号执行并发、视频倍速和进度上报间隔；同一账号默认仍为 1，Master 可在 schema 安全上限内设置平台默认、账号或单 Task 覆盖。巡查默认值仍待接入 Core Scheduler。
 
 Master 控制面使用 `/api/v1/admin/providers/{provider_id}/runtime-settings`、`/api/v1/admin/provider-accounts/{account_id}/runtime-settings` 与 `/api/v1/admin/tasks/{task_id}/runtime-settings` 读取或替换各层覆盖；Provider schema 可从前一路径下的 `/schema` 读取。读取结果同时返回三层 override、最终解析值和逐字段来源。Provider 默认值仅允许 Master Web Session 管理；owner-bound `ProviderManage` 服务令牌只能管理其 owner 的账号和任务覆盖。
 

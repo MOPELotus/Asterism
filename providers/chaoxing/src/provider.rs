@@ -172,8 +172,8 @@ mod tests {
                 .capabilities
                 .contains(&ProviderCapability::TaskProgressRead)
         );
-        assert_eq!(entry.runtime_settings.version, 2);
-        assert_eq!(entry.runtime_settings.definitions.len(), 2);
+        assert_eq!(entry.runtime_settings.version, 3);
+        assert_eq!(entry.runtime_settings.definitions.len(), 4);
         assert!(
             entry
                 .runtime_settings

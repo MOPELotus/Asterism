@@ -20,6 +20,8 @@ pub const SCHEDULER_ENABLED_ENV: &str = "ASTERISM_SCHEDULER_ENABLED";
 pub const SCHEDULER_TICK_INTERVAL_SECONDS_ENV: &str = "ASTERISM_SCHEDULER_TICK_INTERVAL_SECONDS";
 pub const SCHEDULER_MATERIALIZE_LIMIT_ENV: &str = "ASTERISM_SCHEDULER_MATERIALIZE_LIMIT";
 pub const SCHEDULER_CLAIM_LIMIT_ENV: &str = "ASTERISM_SCHEDULER_CLAIM_LIMIT";
+pub const SCHEDULER_EXECUTION_CONCURRENCY_LIMIT_ENV: &str =
+    "ASTERISM_SCHEDULER_EXECUTION_CONCURRENCY_LIMIT";
 pub const SCHEDULER_CLAIM_TTL_SECONDS_ENV: &str = "ASTERISM_SCHEDULER_CLAIM_TTL_SECONDS";
 pub const SCHEDULER_RETRY_MAX_ATTEMPTS_ENV: &str = "ASTERISM_SCHEDULER_RETRY_MAX_ATTEMPTS";
 pub const SCHEDULER_RETRY_INITIAL_DELAY_SECONDS_ENV: &str =
@@ -146,6 +148,7 @@ pub struct SchedulerConfig {
     pub tick_interval_seconds: u64,
     pub materialize_limit: u32,
     pub claim_limit: u32,
+    pub execution_concurrency_limit: u32,
     pub claim_ttl_seconds: u64,
     pub retry_max_attempts: u32,
     pub retry_initial_delay_seconds: u64,
@@ -176,6 +179,7 @@ impl Default for SchedulerConfig {
             tick_interval_seconds: 5,
             materialize_limit: 100,
             claim_limit: 1,
+            execution_concurrency_limit: 32,
             claim_ttl_seconds: 300,
             retry_max_attempts: 5,
             retry_initial_delay_seconds: 30,
@@ -191,6 +195,7 @@ impl SchedulerConfig {
             && self.tick_interval_seconds <= 3_600
             && (1..=1_000).contains(&self.materialize_limit)
             && (1..=1_000).contains(&self.claim_limit)
+            && (1..=1_000).contains(&self.execution_concurrency_limit)
             && self.claim_ttl_seconds >= self.tick_interval_seconds
             && self.claim_ttl_seconds <= 86_400
             && (1..=100).contains(&self.retry_max_attempts)
@@ -220,6 +225,9 @@ impl SchedulerConfig {
         }
         if let Some(value) = overrides.claim_limit {
             self.claim_limit = value;
+        }
+        if let Some(value) = overrides.execution_concurrency_limit {
+            self.execution_concurrency_limit = value;
         }
         if let Some(value) = overrides.claim_ttl_seconds {
             self.claim_ttl_seconds = value;
@@ -295,6 +303,7 @@ pub struct SchedulerOverrides {
     pub tick_interval_seconds: Option<u64>,
     pub materialize_limit: Option<u32>,
     pub claim_limit: Option<u32>,
+    pub execution_concurrency_limit: Option<u32>,
     pub claim_ttl_seconds: Option<u64>,
     pub retry_max_attempts: Option<u32>,
     pub retry_initial_delay_seconds: Option<u64>,
@@ -385,6 +394,10 @@ impl Environment {
                 }
                 SCHEDULER_CLAIM_LIMIT_ENV => {
                     environment.overrides.scheduler.claim_limit = Some(parse_env(&name, &value)?);
+                }
+                SCHEDULER_EXECUTION_CONCURRENCY_LIMIT_ENV => {
+                    environment.overrides.scheduler.execution_concurrency_limit =
+                        Some(parse_env(&name, &value)?);
                 }
                 SCHEDULER_CLAIM_TTL_SECONDS_ENV => {
                     environment.overrides.scheduler.claim_ttl_seconds =
@@ -494,6 +507,7 @@ fn is_supported_environment_name(name: &str) -> bool {
             | SCHEDULER_TICK_INTERVAL_SECONDS_ENV
             | SCHEDULER_MATERIALIZE_LIMIT_ENV
             | SCHEDULER_CLAIM_LIMIT_ENV
+            | SCHEDULER_EXECUTION_CONCURRENCY_LIMIT_ENV
             | SCHEDULER_CLAIM_TTL_SECONDS_ENV
             | SCHEDULER_RETRY_MAX_ATTEMPTS_ENV
             | SCHEDULER_RETRY_INITIAL_DELAY_SECONDS_ENV
@@ -532,6 +546,7 @@ url = "sqlite://from-file.db"
 [scheduler]
 tick_interval_seconds = 11
 claim_limit = 2
+execution_concurrency_limit = 8
 
 [providers]
 enable_development_chaoxing = false
@@ -550,6 +565,10 @@ enable_development_chaoxing = false
                 SCHEDULER_TICK_INTERVAL_SECONDS_ENV.to_owned(),
                 "12".to_owned(),
             ),
+            (
+                SCHEDULER_EXECUTION_CONCURRENCY_LIMIT_ENV.to_owned(),
+                "16".to_owned(),
+            ),
         ])
         .unwrap();
         let cli = ConfigOverrides {
@@ -563,6 +582,7 @@ enable_development_chaoxing = false
             },
             scheduler: SchedulerOverrides {
                 claim_limit: Some(3),
+                execution_concurrency_limit: Some(24),
                 ..SchedulerOverrides::default()
             },
             providers: ProviderOverrides {
@@ -578,6 +598,7 @@ enable_development_chaoxing = false
         assert_eq!(config.database.url, "sqlite://from-cli.db");
         assert_eq!(config.scheduler.tick_interval_seconds, 12);
         assert_eq!(config.scheduler.claim_limit, 3);
+        assert_eq!(config.scheduler.execution_concurrency_limit, 24);
         assert!(!config.providers.enable_development_chaoxing);
         fs::remove_file(path).unwrap();
     }
