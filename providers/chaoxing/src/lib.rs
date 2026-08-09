@@ -5,6 +5,7 @@
 //! claim live compatibility or a verified Provider.
 
 mod authentication;
+mod chapter_inventory;
 mod course_inventory;
 mod inventory;
 mod metadata;
@@ -16,6 +17,7 @@ mod task_inventory;
 pub use authentication::{
     ChaoxingAuthentication, ChaoxingAuthenticationTransport, NativeChaoxingAuthenticationTransport,
 };
+pub use chapter_inventory::parse_chapter_inventory;
 pub use course_inventory::{
     ChaoxingCourseInventory, ChaoxingCourseInventoryTransport, parse_course_inventory,
 };

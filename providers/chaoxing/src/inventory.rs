@@ -70,6 +70,18 @@ impl ChaoxingCourseScope {
         }
         Ok(scope)
     }
+
+    pub(crate) fn remote_course_id(&self) -> &str {
+        &self.course_remote
+    }
+
+    pub(crate) fn course_id(&self) -> &str {
+        &self.course
+    }
+
+    pub(crate) fn class_id(&self) -> &str {
+        &self.clazz
+    }
 }
 
 /// Parses independent course homework from one sanitized Work list document.

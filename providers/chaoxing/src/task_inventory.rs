@@ -13,7 +13,7 @@ use crate::{
     ChaoxingCourseScope,
     inventory::{apply_work_detail_state, parse_work_inventory_entries},
     metadata::development_metadata,
-    parse_exam_inventory,
+    parse_chapter_inventory, parse_exam_inventory,
 };
 
 const COURSE_ID_ROUTE_KEY: &str = "chaoxing.course_id";
@@ -221,6 +221,12 @@ impl ChaoxingWorkDetailState {
 /// a fresh Work `enc`; neither concern belongs to the HTML parser.
 #[async_trait]
 pub trait ChaoxingInventoryTransport: Send + Sync {
+    async fn fetch_chapter_inventory(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument>;
+
     async fn fetch_work_inventory(
         &self,
         context: &ProviderContext,
@@ -306,6 +312,10 @@ impl TaskInventoryCapability for ChaoxingTaskInventory {
         let route = ChaoxingCourseRoute::from_remote_course(course)?;
         let scope = route.parser_scope()?;
 
+        let chapter = self
+            .transport
+            .fetch_chapter_inventory(context, route)
+            .await?;
         let work = self.transport.fetch_work_inventory(context, route).await?;
         let exam = self.transport.fetch_exam_inventory(context, route).await?;
         let mut work_tasks = parse_work_inventory_entries(work.as_str(), &scope)?;
@@ -354,10 +364,12 @@ impl TaskInventoryCapability for ChaoxingTaskInventory {
                 "Chaoxing Work detail transport returned an unexpected task",
             ));
         }
-        let mut tasks = work_tasks
-            .into_iter()
-            .map(crate::inventory::ChaoxingParsedInventoryTask::into_task)
-            .collect::<Vec<_>>();
+        let mut tasks = parse_chapter_inventory(chapter.as_str(), &scope)?;
+        tasks.extend(
+            work_tasks
+                .into_iter()
+                .map(crate::inventory::ChaoxingParsedInventoryTask::into_task),
+        );
         tasks.extend(parse_exam_inventory(exam.as_str(), &scope)?);
         Ok(tasks)
     }
@@ -432,11 +444,14 @@ mod tests {
 
     const EXAM_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/exam/list-mixed.html");
+    const CHAPTER_MIXED: &str =
+        include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
     const WORK_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/list-mixed.html");
 
     #[derive(Debug, Default)]
     struct FixtureTransport {
+        chapter_calls: AtomicUsize,
         work_calls: AtomicUsize,
         exam_calls: AtomicUsize,
         work_detail_calls: AtomicUsize,
@@ -446,6 +461,18 @@ mod tests {
 
     #[async_trait]
     impl ChaoxingInventoryTransport for FixtureTransport {
+        async fn fetch_chapter_inventory(
+            &self,
+            _context: &ProviderContext,
+            route: ChaoxingCourseRoute<'_>,
+        ) -> ProviderResult<ChaoxingInventoryDocument> {
+            assert_eq!(route.course_id(), "100");
+            assert_eq!(route.class_id(), "200");
+            assert_eq!(route.cpi(), "300");
+            self.chapter_calls.fetch_add(1, Ordering::Relaxed);
+            ChaoxingInventoryDocument::try_new(CHAPTER_MIXED)
+        }
+
         async fn fetch_work_inventory(
             &self,
             _context: &ProviderContext,
@@ -496,7 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_combines_independent_work_and_exam_inventories() {
+    async fn capability_combines_independent_chapter_work_and_exam_inventories() {
         let transport = Arc::new(FixtureTransport::default());
         let inventory = ChaoxingTaskInventory::try_new(transport.clone()).unwrap();
         let tasks = inventory
@@ -504,7 +531,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(tasks.len(), 8);
+        assert_eq!(tasks.len(), 11);
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.source_type == SourceType::Chapter)
+                .count(),
+            3
+        );
         assert_eq!(
             tasks
                 .iter()
@@ -524,6 +558,7 @@ mod tests {
                 .iter()
                 .all(|task| task.course_remote_id.as_deref() == Some("course:100:200"))
         );
+        assert_eq!(transport.chapter_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_detail_calls.load(Ordering::Relaxed), 1);
@@ -569,6 +604,7 @@ mod tests {
         );
         assert_eq!(transport.work_calls.load(Ordering::Relaxed), 0);
         assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.chapter_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -584,6 +620,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.kind, ProviderErrorKind::Network);
+        assert_eq!(transport.chapter_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_detail_calls.load(Ordering::Relaxed), 0);

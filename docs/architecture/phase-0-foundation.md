@@ -1041,3 +1041,18 @@ time text independently, and maps `未开始` to `NotOpen` instead of the former
 vocabulary is still surfaced rather than guessed. Open/due/close timestamps are
 not populated from unverified relative or ambiguous labels, and this parser
 correction does not change the Provider's `Development` verification level.
+
+## Seventy-seventh Phase 0 slice
+
+Chaoxing TaskInventory now keeps Chapter as a third independent module beside
+Work and Exam. The parser ports the primary `Samueli924/chaoxing` chapter-tree
+shape: each `div.chapter_unit` child is bound by its `cur{knowledgeId}` identity,
+`clicktitle`, bounded `knowledgeJobCount`, and completion or unlock marker.
+Pending, completed and locked chapters map to separate normalized states; bad
+identities, duplicate chapters, invalid counts and conflicting markers fail
+closed. The native transport fetches the donor route
+`mooc2-ans/mycourse/studentcourse` with the scan-local course, class and cpi
+facts, using the existing Cookie-first bounded renewal behavior. Chapter, Work
+and Exam documents must all succeed before a combined inventory is returned.
+Fixtures and route tests remain offline evidence, so no execution capability or
+higher verification level is advertised.

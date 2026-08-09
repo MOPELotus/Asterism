@@ -20,6 +20,7 @@ use crate::{
 const COURSE_PAGE_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu";
 const COURSE_LIST_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata";
 const COURSE_INTERACTION_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction";
+const CHAPTER_LIST_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse";
 const COURSE_LIST_REFERER: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans";
 const EXAM_LIST_BASE: &str = "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
@@ -179,6 +180,16 @@ impl NativeChaoxingInventoryTransport {
             .into_inventory_document()
     }
 
+    async fn fetch_chapter_inventory_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        self.get_html(session, chapter_list_url(route)?)
+            .await?
+            .into_inventory_document()
+    }
+
     async fn fetch_exam_inventory_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -301,6 +312,21 @@ impl fmt::Debug for NativeChaoxingInventoryTransport {
 
 #[async_trait]
 impl ChaoxingInventoryTransport for NativeChaoxingInventoryTransport {
+    async fn fetch_chapter_inventory(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_chapter_inventory_once(&session, route).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_chapter_inventory_once(&session, route).await
+            }
+            result => result,
+        }
+    }
+
     async fn fetch_work_inventory(
         &self,
         context: &ProviderContext,
@@ -408,6 +434,18 @@ fn course_page_url(route: ChaoxingCourseRoute<'_>) -> ProviderResult<Url> {
 fn exam_list_url(route: ChaoxingCourseRoute<'_>) -> ProviderResult<Url> {
     build_url(
         EXAM_LIST_BASE,
+        &[
+            ("courseid", route.course_id()),
+            ("clazzid", route.class_id()),
+            ("cpi", route.cpi()),
+            ("ut", "s"),
+        ],
+    )
+}
+
+fn chapter_list_url(route: ChaoxingCourseRoute<'_>) -> ProviderResult<Url> {
+    build_url(
+        CHAPTER_LIST_BASE,
         &[
             ("courseid", route.course_id()),
             ("clazzid", route.class_id()),
@@ -770,6 +808,12 @@ mod tests {
         let exam_url = exam_list_url(route).unwrap();
         assert_eq!(exam_url.path(), "/exam-ans/mooc2/exam/exam-list");
         assert_eq!(query(&exam_url, "cpi").as_deref(), Some("300"));
+
+        let chapter_url = chapter_list_url(route).unwrap();
+        assert_eq!(chapter_url.path(), "/mooc2-ans/mycourse/studentcourse");
+        assert_eq!(query(&chapter_url, "courseid").as_deref(), Some("100"));
+        assert_eq!(query(&chapter_url, "clazzid").as_deref(), Some("200"));
+        assert_eq!(query(&chapter_url, "cpi").as_deref(), Some("300"));
 
         let work_url = discover_work_list_url(COURSE_PAGE, route).unwrap();
         assert_eq!(work_url.host_str(), Some("mooc1.chaoxing.com"));
