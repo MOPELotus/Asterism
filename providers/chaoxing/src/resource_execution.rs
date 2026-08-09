@@ -4,9 +4,10 @@ use asterism_domain::{RemoteState, TaskCapability};
 use asterism_provider_api::{
     CourseInventoryCapability, ExecutionOutcome, ExecutionRequest, ProgressSink, ProviderContext,
     ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderProgress,
-    ProviderResult, RemoteCourse, TaskExecutionCapability,
+    ProviderResult, RemoteCourse, RemoteProgress, TaskExecutionCapability, TaskProgressCapability,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
@@ -132,6 +133,22 @@ impl ChaoxingResourceExecution {
             .await?;
         locate_target(documents, route, request, remote_task_id)
     }
+
+    async fn resolve_target(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+    ) -> ProviderResult<ChaoxingImmediateResourceTarget> {
+        validate_context(context, &self.metadata)?;
+        let identity = ResourceIdentity::parse(remote_task_id)?;
+        let course = self.resolve_course(context, &identity).await?;
+        let route = ChaoxingCourseRoute::from_remote_course(&course)?;
+        let resource_request = self
+            .resolve_resource_request(context, route, &identity)
+            .await?;
+        self.fetch_target(context, route, &resource_request, remote_task_id)
+            .await
+    }
 }
 
 impl fmt::Debug for ChaoxingResourceExecution {
@@ -160,18 +177,7 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
         request: &ExecutionRequest,
         progress: &(dyn ProgressSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome> {
-        if context.provider_id != self.metadata.id {
-            return Err(ProviderError::new(
-                ProviderErrorKind::Internal,
-                "Chaoxing resource execution received a mismatched Provider context",
-            ));
-        }
-        if context.credential_refs.is_empty() {
-            return Err(ProviderError::new(
-                ProviderErrorKind::Authentication,
-                "Chaoxing resource execution requires an authenticated session",
-            ));
-        }
+        validate_context(context, &self.metadata)?;
         if request.requested_capabilities != [TaskCapability::ResourceExecution] {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
@@ -232,6 +238,40 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
             .await?;
         Ok(completed_outcome(target.kind(), false))
     }
+}
+
+#[async_trait]
+impl TaskProgressCapability for ChaoxingResourceExecution {
+    async fn read_progress(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+    ) -> ProviderResult<RemoteProgress> {
+        let target = self.resolve_target(context, remote_task_id).await?;
+        let completed = target.remote_state() == RemoteState::Completed;
+        Ok(RemoteProgress {
+            remote_state: target.remote_state(),
+            percent: Some(if completed { 100 } else { 0 }),
+            duration_seconds: None,
+            updated_at: Utc::now(),
+        })
+    }
+}
+
+fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
+    if context.provider_id != metadata.id {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing resource capability received a mismatched Provider context",
+        ));
+    }
+    if context.credential_refs.is_empty() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Chaoxing resource capability requires an authenticated session",
+        ));
+    }
+    Ok(())
 }
 
 fn locate_target(
@@ -528,6 +568,30 @@ mod tests {
         assert_eq!(fixture.resource_calls.load(Ordering::Relaxed), 2);
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 1);
         assert_eq!(progress.0.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn progress_read_refetches_remote_state_without_executing() {
+        let fixture = Arc::new(FixtureProvider::new(false));
+        let execution =
+            ChaoxingResourceExecution::try_new(fixture.clone(), fixture.clone(), fixture.clone())
+                .unwrap();
+        let pending = execution
+            .read_progress(&context(), "resource:100:200:4001:job-read")
+            .await
+            .unwrap();
+        assert_eq!(pending.remote_state, RemoteState::Pending);
+        assert_eq!(pending.percent, Some(0));
+        assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
+
+        fixture.completed_read.store(true, Ordering::Relaxed);
+        let completed = execution
+            .read_progress(&context(), "resource:100:200:4001:job-read")
+            .await
+            .unwrap();
+        assert_eq!(completed.remote_state, RemoteState::Completed);
+        assert_eq!(completed.percent, Some(100));
+        assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

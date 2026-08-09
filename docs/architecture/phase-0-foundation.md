@@ -1260,3 +1260,19 @@ pagination before storage access. Responses are marked `no-store` and contain
 only the Execution summary; progress, Attempt history and logs retain their
 separate bounded detail surfaces. `asterismctl execution list [--task ...]`
 uses the same OpenAPI-recorded operation rather than reading SQLite directly.
+
+## Eighty-ninth Phase 0 slice
+
+Chaoxing Document and Read resources now expose a read-only
+`TaskProgressRead` capability beside their existing native execution path.
+Progress reads rediscover the current course route, Chapter request and all
+seven bounded card slots, then locate the exact resource identity and normalize
+only its current remote state and percentage. They never call the completion
+endpoint and never persist the short-lived card token.
+
+Pending Document and Read tasks advertise both progress read and resource
+execution; already-completed resources retain progress read while dropping the
+mutable action. Video, Live and Chapter Work still advertise neither capability
+until their separate implementations exist. The Provider remains Development
+and disabled by default: fixture-backed remote-state reads establish a safe
+input for Core crash recovery, not real-account compatibility.

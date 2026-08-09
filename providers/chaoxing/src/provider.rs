@@ -78,7 +78,7 @@ fn compose_development_provider(
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),
         task_detail: None,
-        task_progress: None,
+        task_progress: Some(task_execution.clone()),
         task_execution: Some(task_execution),
         browser_bridge: None,
     })
@@ -150,6 +150,7 @@ mod tests {
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());
+        assert!(entry.task_progress.is_some());
         assert!(entry.task_execution.is_some());
         assert!(
             entry
@@ -162,6 +163,12 @@ mod tests {
                 .metadata
                 .capabilities
                 .contains(&ProviderCapability::ResourceExecution)
+        );
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::TaskProgressRead)
         );
         let mut registry = ProviderRegistry::default();
         registry.register(entry).unwrap();

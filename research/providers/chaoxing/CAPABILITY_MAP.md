@@ -15,7 +15,7 @@ Chapter card contains a Work-shaped assessment.
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
 | TaskDetail | agent skill | CxKitty, OCS | Reference | Work final URL and Exam entry/detail pages carry task-specific state |
-| TaskProgressRead | agent skill | CxKitty | Reference | Submitted/detail routes and score/result pages; normalized progress still needs fixtures |
+| TaskProgressRead | current Chapter cards | agent skill, CxKitty | Reference | Document/Read fresh-card state is offline-covered for recovery; Work/Exam normalized progress still needs fixtures |
 | QuestionInventory / QuestionParse | CxKitty | OCS, `chaoxing-exam` | Reference | Question IDs, types, options, hidden answers, and per-attempt QID changes |
 | SubmissionBuild / Execute | CxKitty | OCS, agent skill | Reference | Native/mobile form and Browser event paths differ; formal-assessment guard remains Core-owned |
 | SubmissionVerify | agent skill | `chaoxing-exam` | PortSource | Re-fetch final task page, verify server-visible answers/result rather than HTTP 200 or CSS |
@@ -82,3 +82,7 @@ policy and remains independently guarded.
   submits only a fresh zeroizing `jtoken`, then refetches all seven cards and
   accepts success only when the remote attachment is completed. Video, Live and
   Chapter Work deliberately advertise no execution capability yet.
+- Document and Read also advertise `ProgressRead`; the capability performs the
+  same bounded course/chapter/card rediscovery without invoking the completion
+  endpoint and returns only normalized remote state and percentage. This is the
+  safe remote-fact input for crash recovery, not live-account verification.

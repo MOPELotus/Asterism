@@ -334,11 +334,15 @@ fn parse_resource_attachment(
         opens_at: None,
         due_at: None,
         closes_at: None,
-        capabilities: if remote_state == RemoteState::Pending && matches!(kind, "document" | "read")
-        {
-            vec![TaskCapability::ResourceExecution]
-        } else {
-            Vec::new()
+        capabilities: match (kind, remote_state) {
+            ("document" | "read", RemoteState::Pending) => vec![
+                TaskCapability::ProgressRead,
+                TaskCapability::ResourceExecution,
+            ],
+            ("document" | "read", RemoteState::Completed) => {
+                vec![TaskCapability::ProgressRead]
+            }
+            _ => Vec::new(),
         },
         fingerprint: fingerprint(&normalized)?,
         normalized,
@@ -612,13 +616,19 @@ mod tests {
                 .iter()
                 .find(|task| task.remote_id.ends_with(":job-read"))
                 .map(|task| task.capabilities.as_slice()),
-            Some([TaskCapability::ResourceExecution].as_slice())
+            Some(
+                [
+                    TaskCapability::ProgressRead,
+                    TaskCapability::ResourceExecution,
+                ]
+                .as_slice()
+            )
         );
         assert!(
             tasks
                 .iter()
                 .find(|task| task.remote_id.ends_with(":job-document"))
-                .is_some_and(|task| task.capabilities.is_empty())
+                .is_some_and(|task| task.capabilities == [TaskCapability::ProgressRead])
         );
         let serialized = serde_json::to_string(&tasks).unwrap();
         for private in [
