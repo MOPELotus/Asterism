@@ -2,7 +2,8 @@ use std::{collections::BTreeSet, str::FromStr};
 
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerSource, ProviderId, Question, QuestionId,
-    QuestionSnapshotId, TaskId, Timestamp, UserId,
+    QuestionSnapshotId, SelectedAnswer, SubmissionDraft, SubmissionDraftId, SubmissionDraftItem,
+    SubmissionPayloadPreview, TaskId, Timestamp, UserId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -10,7 +11,7 @@ use sqlx::{Row, sqlite::SqliteRow};
 
 use crate::{
     AnswerCandidateRecord, AnswerCandidateRepository, Database, QuestionSnapshot,
-    QuestionSnapshotRepository, StorageError,
+    QuestionSnapshotRepository, StorageError, SubmissionDraftRepository,
 };
 
 const MAX_QUESTIONS_PER_SNAPSHOT: usize = 5_000;
@@ -18,6 +19,8 @@ const MAX_QUESTION_SNAPSHOT_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_PROVIDER_VERSION_BYTES: usize = 128;
 const MAX_CANDIDATES_PER_SNAPSHOT: usize = 20_000;
 const MAX_ANSWER_CANDIDATE_BYTES: usize = 16 * 1_024 * 1_024;
+const MAX_SUBMISSION_DRAFT_ITEMS: usize = 5_000;
+const MAX_SUBMISSION_PREVIEW_BYTES: usize = 8 * 1_024 * 1_024;
 
 #[derive(Clone, Debug)]
 pub struct SqliteQuestionSnapshotRepository {
@@ -316,6 +319,212 @@ impl AnswerCandidateRepository for SqliteQuestionSnapshotRepository {
     }
 }
 
+#[async_trait]
+impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
+    async fn save_submission_draft(&self, draft: &SubmissionDraft) -> Result<(), StorageError> {
+        draft.validate().map_err(|_| invalid_submission_draft())?;
+        let preview_json = serde_json::to_string(&draft.payload_preview)?;
+        if preview_json.is_empty() || preview_json.len() > MAX_SUBMISSION_PREVIEW_BYTES {
+            return Err(invalid_submission_draft());
+        }
+        let preview_bytes = preview_json.len();
+
+        let mut transaction = self.database.pool().begin().await?;
+        let snapshot_binding =
+            sqlx::query("SELECT task_id, provider_id FROM question_snapshots WHERE id = ?")
+                .bind(draft.question_snapshot_id.to_string())
+                .fetch_optional(&mut *transaction)
+                .await?;
+        let Some(snapshot_binding) = snapshot_binding else {
+            return Err(invalid_submission_draft());
+        };
+        if snapshot_binding.try_get::<String, _>("task_id")? != draft.task_id.to_string()
+            || snapshot_binding.try_get::<String, _>("provider_id")? != draft.provider_id.as_str()
+        {
+            return Err(invalid_submission_draft());
+        }
+
+        for item in &draft.items {
+            let binding = sqlx::query(
+                "SELECT question.question_json, candidate.source, candidate.candidate_json \
+                 FROM question_snapshot_items AS question \
+                 INNER JOIN answer_candidates AS candidate \
+                    ON candidate.question_snapshot_id = question.snapshot_id \
+                   AND candidate.question_id = question.question_id \
+                 WHERE question.snapshot_id = ? AND question.question_id = ? \
+                   AND candidate.id = ?",
+            )
+            .bind(draft.question_snapshot_id.to_string())
+            .bind(item.question.id.to_string())
+            .bind(item.selected.candidate_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some(binding) = binding else {
+                return Err(invalid_submission_draft());
+            };
+            let question: Question =
+                serde_json::from_str(binding.try_get::<&str, _>("question_json")?)?;
+            let candidate: AnswerCandidate =
+                serde_json::from_str(binding.try_get::<&str, _>("candidate_json")?)?;
+            let source = decode_answer_source(binding.try_get("source")?)?;
+            if question != item.question
+                || candidate.source != source
+                || candidate.question_id != item.selected.question_id
+                || candidate.answer != item.selected.answer
+                || candidate.source != item.selected.source
+                || candidate.confidence != item.selected.confidence
+            {
+                return Err(invalid_submission_draft());
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO submission_drafts \
+             (id, question_snapshot_id, task_id, provider_id, provider_version, \
+              payload_preview_json, preview_bytes, item_count, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(draft.id.to_string())
+        .bind(draft.question_snapshot_id.to_string())
+        .bind(draft.task_id.to_string())
+        .bind(draft.provider_id.as_str())
+        .bind(&draft.provider_version)
+        .bind(preview_json)
+        .bind(i64::try_from(preview_bytes).expect("bounded draft preview size fits i64"))
+        .bind(i64::try_from(draft.items.len()).expect("bounded draft item count fits i64"))
+        .bind(encode_timestamp(draft.created_at))
+        .execute(&mut *transaction)
+        .await?;
+
+        for item in &draft.items {
+            sqlx::query(
+                "INSERT INTO submission_draft_items \
+                 (draft_id, question_snapshot_id, question_id, answer_candidate_id, position) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(draft.id.to_string())
+            .bind(draft.question_snapshot_id.to_string())
+            .bind(item.question.id.to_string())
+            .bind(item.selected.candidate_id.to_string())
+            .bind(i64::from(item.question.position))
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn find_owned_submission_draft(
+        &self,
+        owner_id: UserId,
+        submission_draft_id: SubmissionDraftId,
+    ) -> Result<Option<SubmissionDraft>, StorageError> {
+        let row = sqlx::query(
+            "SELECT draft.id, draft.question_snapshot_id, draft.task_id, draft.provider_id, \
+                    draft.provider_version, draft.payload_preview_json, draft.preview_bytes, \
+                    draft.item_count, draft.created_at \
+             FROM submission_drafts AS draft \
+             INNER JOIN question_snapshots AS snapshot \
+                ON snapshot.id = draft.question_snapshot_id \
+             INNER JOIN tasks AS task ON task.id = snapshot.task_id \
+             INNER JOIN provider_accounts AS account \
+                ON account.id = task.provider_account_id \
+             WHERE account.owner_user_id = ? AND draft.id = ?",
+        )
+        .bind(owner_id.to_string())
+        .bind(submission_draft_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let question_snapshot_id =
+            parse_id::<QuestionSnapshotId>(row.try_get("question_snapshot_id")?)?;
+        let preview_json: &str = row.try_get("payload_preview_json")?;
+        let stored_preview_bytes = usize::try_from(row.try_get::<i64, _>("preview_bytes")?)
+            .map_err(|_| invalid_submission_draft())?;
+        let stored_item_count = usize::try_from(row.try_get::<i64, _>("item_count")?)
+            .map_err(|_| invalid_submission_draft())?;
+        if preview_json.len() != stored_preview_bytes
+            || stored_preview_bytes == 0
+            || stored_preview_bytes > MAX_SUBMISSION_PREVIEW_BYTES
+            || stored_item_count == 0
+            || stored_item_count > MAX_SUBMISSION_DRAFT_ITEMS
+        {
+            return Err(invalid_submission_draft());
+        }
+        let payload_preview: SubmissionPayloadPreview = serde_json::from_str(preview_json)?;
+        let item_rows = sqlx::query(
+            "SELECT draft_item.question_id, draft_item.answer_candidate_id, \
+                    draft_item.position, question.question_json, candidate.source, \
+                    candidate.candidate_json \
+             FROM submission_draft_items AS draft_item \
+             INNER JOIN question_snapshot_items AS question \
+                ON question.snapshot_id = draft_item.question_snapshot_id \
+               AND question.question_id = draft_item.question_id \
+             INNER JOIN answer_candidates AS candidate \
+                ON candidate.question_snapshot_id = draft_item.question_snapshot_id \
+               AND candidate.id = draft_item.answer_candidate_id \
+               AND candidate.question_id = draft_item.question_id \
+             WHERE draft_item.draft_id = ? ORDER BY draft_item.position",
+        )
+        .bind(submission_draft_id.to_string())
+        .fetch_all(self.database.pool())
+        .await?;
+        if item_rows.len() != stored_item_count {
+            return Err(invalid_submission_draft());
+        }
+
+        let mut items = Vec::with_capacity(item_rows.len());
+        for item_row in item_rows {
+            let question: Question =
+                serde_json::from_str(item_row.try_get::<&str, _>("question_json")?)?;
+            let question_id = parse_id::<QuestionId>(item_row.try_get("question_id")?)?;
+            let position = u32::try_from(item_row.try_get::<i64, _>("position")?)
+                .map_err(|_| invalid_submission_draft())?;
+            let candidate: AnswerCandidate =
+                serde_json::from_str(item_row.try_get::<&str, _>("candidate_json")?)?;
+            let source = decode_answer_source(item_row.try_get("source")?)?;
+            if question.id != question_id
+                || question.position != position
+                || candidate.question_id != question_id
+                || candidate.source != source
+                || question.validate().is_err()
+                || candidate.validate().is_err()
+            {
+                return Err(invalid_submission_draft());
+            }
+            items.push(SubmissionDraftItem {
+                question,
+                selected: SelectedAnswer {
+                    candidate_id: parse_id::<AnswerCandidateId>(
+                        item_row.try_get("answer_candidate_id")?,
+                    )?,
+                    question_id,
+                    answer: candidate.answer,
+                    source: candidate.source,
+                    confidence: candidate.confidence,
+                },
+            });
+        }
+
+        let draft = SubmissionDraft {
+            id: parse_id::<SubmissionDraftId>(row.try_get("id")?)?,
+            task_id: parse_id::<TaskId>(row.try_get("task_id")?)?,
+            question_snapshot_id,
+            provider_id: ProviderId::new(row.try_get::<String, _>("provider_id")?)
+                .map_err(|_| invalid_submission_draft())?,
+            provider_version: row.try_get("provider_version")?,
+            items,
+            payload_preview,
+            created_at: decode_timestamp(row.try_get("created_at")?)?,
+        };
+        draft.validate().map_err(|_| invalid_submission_draft())?;
+        Ok(Some(draft))
+    }
+}
+
 struct EncodedAnswerCandidate {
     id: AnswerCandidateId,
     question_id: QuestionId,
@@ -484,11 +693,17 @@ fn invalid_candidates() -> StorageError {
     )
 }
 
+fn invalid_submission_draft() -> StorageError {
+    StorageError::InvalidData(
+        "SubmissionDraft is invalid, foreign, or exceeds its bounds".to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use asterism_domain::{
         AnswerConfidence, NormalizedAnswer, QuestionAttachment, QuestionAttachmentKind,
-        QuestionKind, QuestionOption,
+        QuestionKind, QuestionOption, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
     };
     use chrono::Duration;
 
@@ -629,6 +844,66 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    #[tokio::test]
+    async fn submission_drafts_are_immutable_candidate_bound_and_owner_scoped() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let snapshot = fixture.snapshot("Draft question", fixture.now);
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        let candidate = Fixture::candidate(&snapshot, AnswerSource::Manual, fixture.now);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&candidate))
+            .await
+            .unwrap();
+        let draft = fixture.draft(&snapshot, &candidate);
+        repository.save_submission_draft(&draft).await.unwrap();
+
+        assert_eq!(
+            repository
+                .find_owned_submission_draft(fixture.owner, draft.id)
+                .await
+                .unwrap(),
+            Some(draft.clone())
+        );
+        assert!(
+            repository
+                .find_owned_submission_draft(UserId::new(), draft.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(repository.save_submission_draft(&draft).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn foreign_candidate_binding_leaves_no_partial_submission_draft() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let first = fixture.snapshot("First draft question", fixture.now);
+        let second = fixture.snapshot("Second draft question", fixture.now);
+        repository.save_question_snapshot(&first).await.unwrap();
+        repository.save_question_snapshot(&second).await.unwrap();
+        let first_candidate = Fixture::candidate(&first, AnswerSource::Manual, fixture.now);
+        let second_candidate = Fixture::candidate(&second, AnswerSource::Manual, fixture.now);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&first_candidate))
+            .await
+            .unwrap();
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&second_candidate))
+            .await
+            .unwrap();
+
+        let mut draft = fixture.draft(&second, &second_candidate);
+        draft.items[0].selected.candidate_id = first_candidate.id;
+        assert!(repository.save_submission_draft(&draft).await.is_err());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM submission_drafts")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     struct Fixture {
         database: Database,
         owner: UserId,
@@ -743,6 +1018,39 @@ mod tests {
                     provenance_sanitized: serde_json::json!({"resolver": "fixture"}),
                 },
                 created_at,
+            }
+        }
+
+        fn draft(
+            &self,
+            snapshot: &QuestionSnapshot,
+            candidate: &AnswerCandidateRecord,
+        ) -> SubmissionDraft {
+            SubmissionDraft {
+                id: SubmissionDraftId::new(),
+                task_id: snapshot.task_id,
+                question_snapshot_id: snapshot.id,
+                provider_id: snapshot.provider_id.clone(),
+                provider_version: "1.0.0-builder".to_owned(),
+                items: vec![SubmissionDraftItem {
+                    question: snapshot.questions[0].clone(),
+                    selected: SelectedAnswer {
+                        candidate_id: candidate.id,
+                        question_id: candidate.candidate.question_id,
+                        answer: candidate.candidate.answer.clone(),
+                        source: candidate.candidate.source,
+                        confidence: candidate.candidate.confidence,
+                    },
+                }],
+                payload_preview: SubmissionPayloadPreview {
+                    encoding: SubmissionPayloadEncoding::Form,
+                    format: "provider-alpha.work.v1".to_owned(),
+                    fields: vec![SubmissionPayloadFieldPreview {
+                        question_id: snapshot.questions[0].id,
+                        field_name: "answer[attempt-question-1]".to_owned(),
+                    }],
+                },
+                created_at: self.now,
             }
         }
     }

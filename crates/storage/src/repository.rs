@@ -8,8 +8,8 @@ use asterism_domain::{
     ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent,
     ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote,
     ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
-    Question, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, Task, TaskId,
-    Timestamp, User, UserId, WebSession, WebSessionId,
+    Question, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionDraft,
+    SubmissionDraftId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -116,6 +116,20 @@ pub trait AnswerCandidateRepository: Send + Sync {
         owner_id: UserId,
         question_snapshot_id: QuestionSnapshotId,
     ) -> Result<Vec<AnswerCandidateRecord>, StorageError>;
+}
+
+/// Immutable, owner-scoped submission draft persistence. Implementations must
+/// enforce that every selected Candidate and Question belongs to the draft's
+/// exact `QuestionSnapshot`.
+#[async_trait]
+pub trait SubmissionDraftRepository: Send + Sync {
+    async fn save_submission_draft(&self, draft: &SubmissionDraft) -> Result<(), StorageError>;
+
+    async fn find_owned_submission_draft(
+        &self,
+        owner_id: UserId,
+        submission_draft_id: SubmissionDraftId,
+    ) -> Result<Option<SubmissionDraft>, StorageError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

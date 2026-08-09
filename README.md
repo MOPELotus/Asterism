@@ -34,6 +34,7 @@ Phase 0 已建立并持续完善以下基础：
 - 绑定显式 QuestionSnapshot、仅接受 ProviderNative 来源且与执行/提交策略解耦的候选答案解析编排；
 - 使用 Task Read 权限、显式 Task/Snapshot 双重身份且不借用执行入口的 Provider-native 候选答案 HTTP/CLI 解析入口；
 - owner-scoped、再次核验 Task/Snapshot 绑定且不调用 Provider 的已持久化多来源候选答案 HTTP/CLI 读取入口；
+- 通过数据库复合外键绑定 QuestionSnapshot / Question / AnswerCandidate、整份校验后原子持久化且 owner-scoped 读取的不可变 SubmissionDraft；
 - Capability-based Provider API、Metadata 与 Registry，包括与远端执行解耦的题目发现、解析、Provider-native 候选答案解析和只读提交草稿构建槽位；
 - 课程发现到后续 capability 的短命、脱敏且不持久化路由上下文；
 - Account > Provider > Global 覆盖的 NetworkProfile 与集中 HTTP Client 构建；

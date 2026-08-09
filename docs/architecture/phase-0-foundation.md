@@ -1951,3 +1951,23 @@ counts as `TaskExecutionCapability`. It may only describe a draft preview for
 an explicit Question and selected-answer set; it grants no remote mutation or
 verification authority. Chaoxing advertises no SubmissionBuild implementation
 at this checkpoint, and draft persistence/orchestration remains a later slice.
+
+## One-hundred-and-twenty-ninth Phase 0 slice
+
+Storage now persists immutable `SubmissionDraft` records and reconstructs them
+through owner-scoped reads. Database composite foreign keys enforce the full
+Draft → QuestionSnapshot → Question → AnswerCandidate chain: a Candidate from
+another snapshot or Question cannot be attached even when every UUID is known.
+
+Before one transaction commits, Storage validates the complete Domain draft,
+the snapshot Task/Provider binding, exact normalized Question content and the
+selected Candidate's Question, answer, source and confidence. Any mismatch or
+duplicate leaves no partial draft or item rows. Drafts are capped at 5,000
+selected Questions and an 8 MiB structured preview, and their rows are never
+updated through the repository contract.
+
+Persisted items store only immutable identities and positions. Reads rebuild
+the full reviewable draft from the authoritative Question and Candidate rows,
+then validate it again; they do not persist or recover executable Provider
+payload values. This checkpoint adds no public build endpoint and performs no
+Provider call or remote mutation.
