@@ -8,9 +8,9 @@ use asterism_domain::{
     ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent,
     ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote,
     ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
-    Question, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionDraft,
-    SubmissionDraftId, SubmissionResult, SubmissionResultId, Task, TaskId, Timestamp, User, UserId,
-    WebSession, WebSessionId,
+    Question, QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken,
+    ServiceTokenId, SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
+    TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -103,6 +103,15 @@ pub struct AnswerCandidateRecord {
     pub created_at: Timestamp,
 }
 
+/// Direct, non-cache candidate evidence from one unambiguous matching Question
+/// in a prior immutable snapshot of the same owned Task.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PriorAnswerEvidence {
+    pub question_content_fingerprint: QuestionContentFingerprint,
+    pub source_question: Question,
+    pub source_candidate: AnswerCandidateRecord,
+}
+
 /// Transactional multi-source candidate persistence. Selection and submission
 /// are deliberately outside this repository boundary.
 #[async_trait]
@@ -117,6 +126,19 @@ pub trait AnswerCandidateRepository: Send + Sync {
         owner_id: UserId,
         question_snapshot_id: QuestionSnapshotId,
     ) -> Result<Vec<AnswerCandidateRecord>, StorageError>;
+}
+
+/// Read boundary for conservative `LocalCache` imports. Implementations must
+/// exclude the target snapshot, later snapshots, copied `LocalCache` candidates,
+/// foreign owners/tasks, and ambiguous fingerprints on either side.
+#[async_trait]
+pub trait AnswerCacheRepository: Send + Sync {
+    async fn list_owned_prior_answer_evidence(
+        &self,
+        owner_id: UserId,
+        task_id: TaskId,
+        target_question_snapshot_id: QuestionSnapshotId,
+    ) -> Result<Vec<PriorAnswerEvidence>, StorageError>;
 }
 
 /// Immutable, owner-scoped submission draft persistence. Implementations must

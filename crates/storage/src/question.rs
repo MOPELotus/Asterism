@@ -2,19 +2,19 @@ use std::{collections::BTreeSet, str::FromStr};
 
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerSource, ExecutionAttemptId, ExecutionId, ProviderId,
-    Question, QuestionId, QuestionSnapshotId, SelectedAnswer, SubmissionDraft, SubmissionDraftId,
-    SubmissionDraftItem, SubmissionPayloadPreview, SubmissionReceipt, SubmissionResult,
-    SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot, TaskId, Timestamp,
-    UserId,
+    Question, QuestionContentFingerprint, QuestionId, QuestionSnapshotId, SelectedAnswer,
+    SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadPreview,
+    SubmissionReceipt, SubmissionResult, SubmissionResultId, SubmissionResultStatus,
+    SubmissionVerificationSnapshot, TaskId, Timestamp, UserId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, sqlite::SqliteRow};
 
 use crate::{
-    AnswerCandidateRecord, AnswerCandidateRepository, Database, QuestionSnapshot,
-    QuestionSnapshotRepository, StorageError, SubmissionDraftRepository,
-    SubmissionResultRepository,
+    AnswerCacheRepository, AnswerCandidateRecord, AnswerCandidateRepository, Database,
+    PriorAnswerEvidence, QuestionSnapshot, QuestionSnapshotRepository, StorageError,
+    SubmissionDraftRepository, SubmissionResultRepository,
 };
 
 const MAX_QUESTIONS_PER_SNAPSHOT: usize = 5_000;
@@ -22,6 +22,7 @@ const MAX_QUESTION_SNAPSHOT_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_PROVIDER_VERSION_BYTES: usize = 128;
 const MAX_CANDIDATES_PER_SNAPSHOT: usize = 20_000;
 const MAX_ANSWER_CANDIDATE_BYTES: usize = 16 * 1_024 * 1_024;
+const MAX_PRIOR_ANSWER_EVIDENCE: usize = 20_000;
 const MAX_SUBMISSION_DRAFT_ITEMS: usize = 5_000;
 const MAX_SUBMISSION_PREVIEW_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_SUBMISSION_RECEIPT_BYTES: usize = 64 * 1_024;
@@ -82,14 +83,15 @@ impl QuestionSnapshotRepository for SqliteQuestionSnapshotRepository {
         for question in encoded.questions {
             sqlx::query(
                 "INSERT INTO question_snapshot_items \
-                 (snapshot_id, question_id, remote_question_id, position, question_json) \
-                 VALUES (?, ?, ?, ?, ?)",
+                 (snapshot_id, question_id, remote_question_id, position, question_json, \
+                  content_fingerprint) VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(snapshot.id.to_string())
             .bind(question.id.to_string())
             .bind(question.remote_id)
             .bind(i64::from(question.position))
             .bind(question.json)
+            .bind(question.content_fingerprint.as_str())
             .execute(&mut *transaction)
             .await?;
         }
@@ -159,7 +161,7 @@ async fn decode_question_snapshot(
     let stored_bytes =
         usize::try_from(row.try_get::<i64, _>("total_bytes")?).map_err(|_| invalid_snapshot())?;
     let item_rows = sqlx::query(
-        "SELECT question_id, remote_question_id, position, question_json \
+        "SELECT question_id, remote_question_id, position, question_json, content_fingerprint \
          FROM question_snapshot_items WHERE snapshot_id = ? ORDER BY position",
     )
     .bind(snapshot_id.to_string())
@@ -181,9 +183,17 @@ async fn decode_question_snapshot(
         let stored_remote_id: Option<String> = item.try_get("remote_question_id")?;
         let stored_position =
             u32::try_from(item.try_get::<i64, _>("position")?).map_err(|_| invalid_snapshot())?;
+        let stored_fingerprint = item
+            .try_get::<Option<&str>, _>("content_fingerprint")?
+            .map(QuestionContentFingerprint::from_str)
+            .transpose()
+            .map_err(|_| invalid_snapshot())?;
         if question.id != stored_id
             || question.remote_question_id != stored_remote_id
             || question.position != stored_position
+            || stored_fingerprint.as_ref().is_some_and(|fingerprint| {
+                question.content_fingerprint().as_ref() != Ok(fingerprint)
+            })
         {
             return Err(invalid_snapshot());
         }
@@ -204,6 +214,120 @@ async fn decode_question_snapshot(
     };
     validate_and_encode(&snapshot)?;
     Ok(snapshot)
+}
+
+#[async_trait]
+impl AnswerCacheRepository for SqliteQuestionSnapshotRepository {
+    async fn list_owned_prior_answer_evidence(
+        &self,
+        owner_id: UserId,
+        task_id: TaskId,
+        target_question_snapshot_id: QuestionSnapshotId,
+    ) -> Result<Vec<PriorAnswerEvidence>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT target_item.question_id AS target_question_id, \
+                    target_item.remote_question_id AS target_remote_question_id, \
+                    target_item.position AS target_position, \
+                    target_item.question_json AS target_question_json, \
+                    source_item.question_id, source_item.remote_question_id, \
+                    source_item.position, source_item.question_json, \
+                    source_item.content_fingerprint, source_snapshot.id AS source_snapshot_id, \
+                    candidate.id AS candidate_id, candidate.source, candidate.candidate_json, \
+                    candidate.created_at \
+             FROM question_snapshots AS target_snapshot \
+             INNER JOIN tasks AS task ON task.id = target_snapshot.task_id \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             INNER JOIN question_snapshot_items AS target_item \
+                ON target_item.snapshot_id = target_snapshot.id \
+             INNER JOIN question_snapshot_items AS source_item \
+                ON source_item.content_fingerprint = target_item.content_fingerprint \
+             INNER JOIN question_snapshots AS source_snapshot \
+                ON source_snapshot.id = source_item.snapshot_id \
+               AND source_snapshot.task_id = target_snapshot.task_id \
+             INNER JOIN answer_candidates AS candidate \
+                ON candidate.question_snapshot_id = source_item.snapshot_id \
+               AND candidate.question_id = source_item.question_id \
+             WHERE account.owner_user_id = ? AND target_snapshot.task_id = ? \
+               AND target_snapshot.id = ? AND target_item.content_fingerprint IS NOT NULL \
+               AND candidate.source <> 'local_cache' \
+               AND (source_snapshot.captured_at < target_snapshot.captured_at OR \
+                    (source_snapshot.captured_at = target_snapshot.captured_at \
+                     AND source_snapshot.id < target_snapshot.id)) \
+               AND (SELECT COUNT(*) FROM question_snapshot_items AS target_count \
+                    WHERE target_count.snapshot_id = target_snapshot.id \
+                      AND target_count.content_fingerprint = target_item.content_fingerprint) = 1 \
+               AND (SELECT COUNT(*) FROM question_snapshot_items AS source_count \
+                    WHERE source_count.snapshot_id = source_snapshot.id \
+                      AND source_count.content_fingerprint = source_item.content_fingerprint) = 1 \
+             ORDER BY target_item.position, source_snapshot.captured_at DESC, \
+                      source_snapshot.id DESC, candidate.created_at DESC, candidate.id DESC \
+             LIMIT ?",
+        )
+        .bind(owner_id.to_string())
+        .bind(task_id.to_string())
+        .bind(target_question_snapshot_id.to_string())
+        .bind(i64::try_from(MAX_PRIOR_ANSWER_EVIDENCE + 1).expect("evidence bound fits i64"))
+        .fetch_all(self.database.pool())
+        .await?;
+        if rows.len() > MAX_PRIOR_ANSWER_EVIDENCE {
+            return Err(invalid_candidates());
+        }
+
+        rows.iter().map(decode_prior_answer_evidence).collect()
+    }
+}
+
+fn decode_prior_answer_evidence(row: &SqliteRow) -> Result<PriorAnswerEvidence, StorageError> {
+    let fingerprint = QuestionContentFingerprint::from_str(row.try_get("content_fingerprint")?)
+        .map_err(|_| invalid_candidates())?;
+    let target_question: Question = serde_json::from_str(row.try_get("target_question_json")?)?;
+    let target_question_id = parse_id::<QuestionId>(row.try_get("target_question_id")?)?;
+    let target_remote_id: Option<String> = row.try_get("target_remote_question_id")?;
+    let target_position = u32::try_from(row.try_get::<i64, _>("target_position")?)
+        .map_err(|_| invalid_candidates())?;
+    if target_question.id != target_question_id
+        || target_question.remote_question_id != target_remote_id
+        || target_question.position != target_position
+        || target_question.validate().is_err()
+        || target_question.content_fingerprint().as_ref() != Ok(&fingerprint)
+    {
+        return Err(invalid_candidates());
+    }
+
+    let question: Question = serde_json::from_str(row.try_get("question_json")?)?;
+    let stored_question_id = parse_id::<QuestionId>(row.try_get("question_id")?)?;
+    let stored_remote_id: Option<String> = row.try_get("remote_question_id")?;
+    let stored_position =
+        u32::try_from(row.try_get::<i64, _>("position")?).map_err(|_| invalid_candidates())?;
+    if question.id != stored_question_id
+        || question.remote_question_id != stored_remote_id
+        || question.position != stored_position
+        || question.validate().is_err()
+        || question.content_fingerprint().as_ref() != Ok(&fingerprint)
+    {
+        return Err(invalid_candidates());
+    }
+
+    let source = decode_answer_source(row.try_get("source")?)?;
+    let candidate: AnswerCandidate = serde_json::from_str(row.try_get("candidate_json")?)?;
+    if source == AnswerSource::LocalCache
+        || candidate.source != source
+        || candidate.question_id != question.id
+        || candidate.validate().is_err()
+    {
+        return Err(invalid_candidates());
+    }
+    let source_snapshot_id = parse_id::<QuestionSnapshotId>(row.try_get("source_snapshot_id")?)?;
+    Ok(PriorAnswerEvidence {
+        question_content_fingerprint: fingerprint,
+        source_question: question,
+        source_candidate: AnswerCandidateRecord {
+            id: parse_id::<AnswerCandidateId>(row.try_get("candidate_id")?)?,
+            question_snapshot_id: source_snapshot_id,
+            candidate,
+            created_at: decode_timestamp(row.try_get("created_at")?)?,
+        },
+    })
 }
 
 #[async_trait]
@@ -849,6 +973,7 @@ struct EncodedQuestion {
     remote_id: Option<String>,
     position: u32,
     json: String,
+    content_fingerprint: QuestionContentFingerprint,
 }
 
 struct EncodedSnapshot {
@@ -895,6 +1020,9 @@ fn validate_and_encode(snapshot: &QuestionSnapshot) -> Result<EncodedSnapshot, S
             remote_id: question.remote_question_id.clone(),
             position: question.position,
             json,
+            content_fingerprint: question
+                .content_fingerprint()
+                .map_err(|_| invalid_snapshot())?,
         });
     }
     Ok(EncodedSnapshot {
@@ -1097,6 +1225,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn prior_answer_evidence_is_direct_unambiguous_and_owner_task_scoped() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let prior = fixture.snapshot("Stable question", fixture.now);
+        let mut target = fixture.snapshot("Stable question", fixture.now + Duration::seconds(1));
+        target.questions[0].remote_question_id = Some("fresh-attempt-question".to_owned());
+        repository.save_question_snapshot(&prior).await.unwrap();
+        repository.save_question_snapshot(&target).await.unwrap();
+
+        let direct = Fixture::candidate(
+            &prior,
+            AnswerSource::ProviderNative,
+            fixture.now + Duration::milliseconds(100),
+        );
+        let copied = Fixture::candidate(
+            &prior,
+            AnswerSource::LocalCache,
+            fixture.now + Duration::milliseconds(200),
+        );
+        repository
+            .save_answer_candidate_batch(&[direct.clone(), copied])
+            .await
+            .unwrap();
+
+        let evidence = repository
+            .list_owned_prior_answer_evidence(fixture.owner, fixture.task, target.id)
+            .await
+            .unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].source_question, prior.questions[0]);
+        assert_eq!(evidence[0].source_candidate, direct);
+        assert_eq!(
+            evidence[0].question_content_fingerprint,
+            target.questions[0].content_fingerprint().unwrap()
+        );
+        assert!(
+            repository
+                .list_owned_prior_answer_evidence(UserId::new(), fixture.task, target.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            repository
+                .list_owned_prior_answer_evidence(fixture.owner, TaskId::new(), target.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn prior_answer_evidence_skips_ambiguous_or_changed_questions() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let mut ambiguous_prior = fixture.snapshot("Duplicate question", fixture.now);
+        let mut duplicate = ambiguous_prior.questions[0].clone();
+        duplicate.id = QuestionId::new();
+        duplicate.remote_question_id = Some("attempt-question-2".to_owned());
+        duplicate.position = 2;
+        ambiguous_prior.questions.push(duplicate);
+        let mut matching_target =
+            fixture.snapshot("Duplicate question", fixture.now + Duration::seconds(1));
+        matching_target.questions[0].remote_question_id = Some("next-question-1".to_owned());
+        let changed_target =
+            fixture.snapshot("Changed question", fixture.now + Duration::seconds(2));
+        repository
+            .save_question_snapshot(&ambiguous_prior)
+            .await
+            .unwrap();
+        repository
+            .save_question_snapshot(&matching_target)
+            .await
+            .unwrap();
+        repository
+            .save_question_snapshot(&changed_target)
+            .await
+            .unwrap();
+        let candidate = Fixture::candidate(
+            &ambiguous_prior,
+            AnswerSource::Manual,
+            fixture.now + Duration::milliseconds(100),
+        );
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&candidate))
+            .await
+            .unwrap();
+
+        assert!(
+            repository
+                .list_owned_prior_answer_evidence(fixture.owner, fixture.task, matching_target.id,)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            repository
+                .list_owned_prior_answer_evidence(fixture.owner, fixture.task, changed_target.id,)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

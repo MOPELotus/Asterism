@@ -2199,3 +2199,22 @@ fingerprint is not sufficient authority by itself; storage and Core must still
 scope matches to one owned Task and reject duplicate fingerprints on either
 side before copying evidence. No candidate is queried, created or selected by
 this Domain-only checkpoint.
+
+## One-hundred-and-forty-second Phase 0 slice
+
+Storage now persists `QuestionContentFingerprint` beside every newly written
+Question snapshot item and verifies it against the decoded normalized Question
+on reads. Migration 27 leaves legacy rows nullable instead of inventing hashes
+for historical JSON; those rows safely remain ineligible until captured again.
+
+The independent `AnswerCacheRepository` returns only direct, non-LocalCache
+candidate evidence from earlier snapshots of the same owner-scoped Task. Its
+join requires an exact indexed fingerprint and excludes the target or later
+snapshot. Correlated counts require that fingerprint to occur exactly once in
+both the target and each source snapshot; decoded source and target Questions
+are then rehashed before any evidence crosses the storage boundary.
+
+The query is bounded, deterministically ordered and returns no foreign-owner or
+foreign-Task existence signal. This checkpoint does not create LocalCache
+candidates: source evidence remains immutable, copied candidates cannot recurse,
+and Core still owns the later import decision and provenance construction.
