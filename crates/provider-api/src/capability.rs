@@ -2,8 +2,9 @@ use std::{collections::BTreeMap, fmt};
 
 use asterism_domain::{
     AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, CourseId, LogLevel,
-    ProviderAccountId, ProviderId, Question, QuestionKind, RemoteState, SecretId, SessionKind,
-    SourceType, TaskCapability, TaskId, Timestamp, WaitingUserState,
+    ProviderAccountId, ProviderId, Question, QuestionKind, RemoteState, SecretId, SelectedAnswer,
+    SessionKind, SourceType, SubmissionPayloadPreview, TaskCapability, TaskId, Timestamp,
+    WaitingUserState,
 };
 use asterism_secrets::{CredentialBundle, CredentialField};
 use async_trait::async_trait;
@@ -122,6 +123,20 @@ pub trait AnswerResolveCapability: ProviderIdentity {
         remote_task_id: &str,
         questions: &[Question],
     ) -> ProviderResult<Vec<AnswerCandidate>>;
+}
+
+/// Builds a bounded, credential-free description of the payload shape for an
+/// explicit set of selected persisted candidates. This capability must not
+/// mutate remote state or return executable request material.
+#[async_trait]
+pub trait SubmissionBuildCapability: ProviderIdentity {
+    async fn build_submission_preview(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        questions: &[Question],
+        selected_answers: &[SelectedAnswer],
+    ) -> ProviderResult<SubmissionPayloadPreview>;
 }
 
 #[async_trait]

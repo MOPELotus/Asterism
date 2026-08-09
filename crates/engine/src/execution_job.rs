@@ -1877,6 +1877,7 @@ mod tests {
                     question_inventory: None,
                     question_parse: None,
                     answer_resolve: None,
+                    submission_build: None,
                     task_execution: Some(provider.clone()),
                     browser_bridge: None,
                 })

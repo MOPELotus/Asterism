@@ -372,6 +372,7 @@ mod tests {
                 question_inventory: None,
                 question_parse: None,
                 answer_resolve: None,
+                submission_build: None,
                 task_execution: None,
                 browser_bridge: None,
             })

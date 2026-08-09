@@ -509,6 +509,7 @@ mod tests {
             question_inventory: None,
             question_parse: None,
             answer_resolve: Some(resolver.clone()),
+            submission_build: None,
             task_execution: None,
             browser_bridge: None,
         };

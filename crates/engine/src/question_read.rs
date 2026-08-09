@@ -544,6 +544,7 @@ mod tests {
                 question_inventory: Some(capability.clone()),
                 question_parse: Some(capability.clone()),
                 answer_resolve: None,
+                submission_build: None,
                 task_execution: None,
                 browser_bridge: None,
             })

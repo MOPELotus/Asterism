@@ -6,7 +6,8 @@ use crate::{
     AnswerResolveCapability, AuthenticationCapability, BrowserBridgeCapability,
     CourseInventoryCapability, ProviderCapability, ProviderMetadata, ProviderRuntimeSettingsSchema,
     ProviderSettingsError, QuestionInventoryCapability, QuestionParseCapability,
-    TaskDetailCapability, TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
+    SubmissionBuildCapability, TaskDetailCapability, TaskExecutionCapability,
+    TaskInventoryCapability, TaskProgressCapability,
 };
 
 #[derive(Clone)]
@@ -21,6 +22,7 @@ pub struct ProviderEntry {
     pub question_inventory: Option<Arc<dyn QuestionInventoryCapability>>,
     pub question_parse: Option<Arc<dyn QuestionParseCapability>>,
     pub answer_resolve: Option<Arc<dyn AnswerResolveCapability>>,
+    pub submission_build: Option<Arc<dyn SubmissionBuildCapability>>,
     pub task_execution: Option<Arc<dyn TaskExecutionCapability>>,
     pub browser_bridge: Option<Arc<dyn BrowserBridgeCapability>>,
 }
@@ -39,6 +41,7 @@ impl std::fmt::Debug for ProviderEntry {
             .field("question_inventory", &self.question_inventory.is_some())
             .field("question_parse", &self.question_parse.is_some())
             .field("answer_resolve", &self.answer_resolve.is_some())
+            .field("submission_build", &self.submission_build.is_some())
             .field("task_execution", &self.task_execution.is_some())
             .field("browser_bridge", &self.browser_bridge.is_some())
             .finish()
@@ -58,6 +61,7 @@ impl ProviderEntry {
             question_inventory: None,
             question_parse: None,
             answer_resolve: None,
+            submission_build: None,
             task_execution: None,
             browser_bridge: None,
         }
@@ -121,6 +125,10 @@ impl ProviderEntry {
                 ProviderCapability::AnswerResolve,
                 self.answer_resolve.is_some(),
             ),
+            (
+                ProviderCapability::SubmissionBuild,
+                self.submission_build.is_some(),
+            ),
         ];
         for (capability, implemented) in checks {
             if self.metadata.advertises(capability) != implemented {
@@ -135,7 +143,6 @@ impl ProviderEntry {
 
         let execution_capabilities = [
             ProviderCapability::ResourceExecution,
-            ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
             ProviderCapability::SubmissionVerify,
             ProviderCapability::DurationRead,
@@ -210,6 +217,12 @@ impl ProviderEntry {
             (
                 "answer_resolve",
                 self.answer_resolve
+                    .as_ref()
+                    .map(|implementation| implementation.metadata()),
+            ),
+            (
+                "submission_build",
+                self.submission_build
                     .as_ref()
                     .map(|implementation| implementation.metadata()),
             ),
@@ -312,7 +325,10 @@ pub enum RegistryError {
 mod tests {
     use std::{collections::BTreeSet, sync::Arc};
 
-    use asterism_domain::{AnswerCandidate, ProviderId, Question, TaskId};
+    use asterism_domain::{
+        AnswerCandidate, ProviderId, Question, SelectedAnswer, SubmissionPayloadEncoding,
+        SubmissionPayloadPreview, TaskId,
+    };
     use async_trait::async_trait;
 
     use super::*;
@@ -370,6 +386,23 @@ mod tests {
             _questions: &[Question],
         ) -> ProviderResult<Vec<AnswerCandidate>> {
             Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl SubmissionBuildCapability for FakeQuestionRead {
+        async fn build_submission_preview(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+            _questions: &[Question],
+            _selected_answers: &[SelectedAnswer],
+        ) -> ProviderResult<SubmissionPayloadPreview> {
+            Ok(SubmissionPayloadPreview {
+                encoding: SubmissionPayloadEncoding::ProviderSpecific,
+                format: "fixture.v1".to_owned(),
+                fields: Vec::new(),
+            })
         }
     }
 
@@ -533,6 +566,23 @@ mod tests {
         });
         let mut entry = ProviderEntry::metadata_only(metadata);
         entry.answer_resolve = Some(implementation);
+        assert!(entry.task_execution.is_none());
+
+        let mut registry = ProviderRegistry::default();
+        registry.register(entry).unwrap();
+    }
+
+    #[test]
+    fn submission_build_is_independent_from_task_execution() {
+        let mut metadata = metadata();
+        metadata
+            .capabilities
+            .insert(ProviderCapability::SubmissionBuild);
+        let implementation = Arc::new(FakeQuestionRead {
+            metadata: metadata.clone(),
+        });
+        let mut entry = ProviderEntry::metadata_only(metadata);
+        entry.submission_build = Some(implementation);
         assert!(entry.task_execution.is_none());
 
         let mut registry = ProviderRegistry::default();

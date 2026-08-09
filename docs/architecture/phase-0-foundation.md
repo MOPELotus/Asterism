@@ -1932,3 +1932,22 @@ This GET performs no Provider call and remains distinct from Provider-native
 resolution. It returns the same stable Candidate record shape and `no-store`
 policy, providing an inspection boundary for later resolver/ranking work
 without selecting answers or creating a SubmissionDraft.
+
+## One-hundred-and-twenty-eighth Phase 0 slice
+
+Core Domain now defines a bounded `SubmissionDraft` whose items retain the
+normalized Question and one explicitly selected, persisted Candidate identity,
+source, confidence and answer. Unknown answers, foreign Question bindings,
+duplicate Candidates, invalid Questions and unbounded collections are rejected
+before a draft can cross a boundary.
+
+The Provider-specific payload preview is structured as an encoding, a bounded
+format identifier and Question-bound field names. It deliberately cannot carry
+an endpoint, headers, cookies, tokens, arbitrary JSON or executable field
+values. The selected normalized answer remains the sole value source.
+
+`SubmissionBuildCapability` is now an independent Registry slot and no longer
+counts as `TaskExecutionCapability`. It may only describe a draft preview for
+an explicit Question and selected-answer set; it grants no remote mutation or
+verification authority. Chaoxing advertises no SubmissionBuild implementation
+at this checkpoint, and draft persistence/orchestration remains a later slice.
