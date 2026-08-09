@@ -562,7 +562,10 @@ where
                 )
                 .await;
         }
-        let prepared = match self.prepare_provider_call(task, correlation_id).await? {
+        let prepared = match self
+            .prepare_provider_call(attempt.execution_id, task, correlation_id)
+            .await?
+        {
             Ok(prepared) => prepared,
             Err(failure) => {
                 return self
@@ -583,6 +586,7 @@ where
 
     async fn prepare_provider_call(
         &self,
+        execution_id: ExecutionId,
         task: &Task,
         correlation_id: &str,
     ) -> Result<Result<PreparedProviderCall, PreparedFailure>, ScheduledExecutionRunError> {
@@ -615,16 +619,39 @@ where
                 disposition: FailureDisposition::HumanRequired,
             }));
         }
-        let Some(capability) = self
-            .registry
-            .get(&account.provider_id)
-            .and_then(|entry| entry.task_execution.clone())
-        else {
+        let Some(entry) = self.registry.get(&account.provider_id) else {
             return Ok(Err(PreparedFailure {
                 error_class: ProviderErrorClass::UnsupportedTask,
                 disposition: FailureDisposition::Failed,
             }));
         };
+        let Some(capability) = entry.task_execution.clone() else {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::UnsupportedTask,
+                disposition: FailureDisposition::Failed,
+            }));
+        };
+        let Some(runtime_settings) = self
+            .executions
+            .find_execution_runtime_settings(execution_id)
+            .await?
+        else {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Internal,
+                disposition: FailureDisposition::Failed,
+            }));
+        };
+        if runtime_settings.provider_id != account.provider_id
+            || entry
+                .runtime_settings
+                .validate_resolved(&runtime_settings.resolved)
+                .is_err()
+        {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Internal,
+                disposition: FailureDisposition::Failed,
+            }));
+        }
         Ok(Ok(PreparedProviderCall {
             capability,
             context: ProviderContext {
@@ -638,6 +665,7 @@ where
                 remote_task_id: task.remote_id.clone(),
                 course_id: task.course_id,
                 requested_capabilities: capabilities,
+                runtime_settings: runtime_settings.resolved,
             },
         }))
     }
@@ -1196,16 +1224,19 @@ mod tests {
     };
 
     use asterism_domain::{
-        AssessmentClass, AuditActor, ProviderAccountId, ProviderId, RequestSource, TaskId, UserId,
+        AssessmentClass, AuditActor, ProviderAccountId, ProviderId, ProviderRuntimeSettingsId,
+        RequestSource, TaskId, UserId,
     };
     use asterism_provider_api::{
         ExecutionOutcome, ProviderCapability, ProviderEntry, ProviderIdentity, ProviderMetadata,
-        ProviderResult, RemoteProgress, TaskProgressCapability, VerificationLevel,
+        ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingDefinition,
+        ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, RemoteProgress,
+        TaskProgressCapability, VerificationLevel,
     };
     use asterism_storage::{
-        Database, ExecutionScheduleRequest, SqliteExecutionLeaseRepository,
-        SqliteExecutionRepository, SqliteProviderAccountRepository, SqliteSchedulerRepository,
-        SqliteTaskQueryRepository,
+        Database, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
+        ExecutionScheduleRequest, SqliteExecutionLeaseRepository, SqliteExecutionRepository,
+        SqliteProviderAccountRepository, SqliteSchedulerRepository, SqliteTaskQueryRepository,
     };
     use sqlx::Row;
 
@@ -1244,6 +1275,12 @@ mod tests {
             assert_eq!(
                 request.requested_capabilities,
                 [TaskCapability::ResourceExecution]
+            );
+            assert_eq!(
+                request
+                    .runtime_settings
+                    .integer("execution.max_concurrency"),
+                Some(3)
             );
             match self.behavior {
                 ProviderBehavior::Success => {
@@ -1426,6 +1463,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_uses_the_frozen_snapshot_after_provider_defaults_change() {
+        let fixture = Fixture::new(AssessmentClass::Routine, ProviderBehavior::Success).await;
+        let changed = asterism_provider_api::ProviderRuntimeSettingsPatch {
+            schema_version: 1,
+            values: std::collections::BTreeMap::from([(
+                "execution.max_concurrency".to_owned(),
+                ProviderSettingValue::Integer(8),
+            )]),
+        };
+        let now = fixture.now.to_rfc3339();
+        sqlx::query(
+            "INSERT INTO provider_runtime_settings \
+             (id, scope, provider_id, schema_version, revision, settings_json, created_at, updated_at) \
+             VALUES (?, 'provider', 'provider-alpha', 1, 1, ?, ?, ?)",
+        )
+        .bind(ProviderRuntimeSettingsId::new().to_string())
+        .bind(serde_json::to_string(&changed).unwrap())
+        .bind(&now)
+        .bind(&now)
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_frozen_settings_fail_before_provider_mutation() {
+        let fixture = Fixture::new(AssessmentClass::Routine, ProviderBehavior::Success).await;
+        sqlx::query("DELETE FROM execution_runtime_settings WHERE execution_id = ?")
+            .bind(fixture.execution_id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::Failed {
+                error_class: ProviderErrorClass::Internal,
+                ..
+            }
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn recovery_retries_only_after_remote_pending_is_confirmed() {
         let fixture = Fixture::recovering(ProviderBehavior::RecoveryPending).await;
         let outcome = fixture
@@ -1548,8 +1644,7 @@ mod tests {
             registry
                 .register(ProviderEntry {
                     metadata: provider.metadata.clone(),
-                    runtime_settings: asterism_provider_api::ProviderRuntimeSettingsSchema::default(
-                    ),
+                    runtime_settings: runtime_settings_schema(),
                     authentication: None,
                     course_inventory: None,
                     task_inventory: None,
@@ -1734,11 +1829,25 @@ mod tests {
             finished_at: None,
             created_at: now,
         };
+        let schema = runtime_settings_schema();
+        let (resolved, sources) = schema.resolve_with_sources(None, None, None).unwrap();
+        let runtime_settings = ExecutionRuntimeSettingsSnapshot {
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            resolved,
+            sources,
+            provider_revision: None,
+            provider_account_revision: None,
+            task_revision: None,
+            captured_at: now,
+        };
         SqliteExecutionRepository::new(database.clone())
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
                 billing: None,
-                runtime_settings: None,
+                runtime_settings: Some(ExecutionRuntimeSettingsResolution {
+                    snapshot: &runtime_settings,
+                    schema: &schema,
+                }),
                 expected_task_state: OrchestrationState::Ready,
                 idempotency_scope: "test",
                 idempotency_key: "execution",
@@ -1748,6 +1857,28 @@ mod tests {
             .await
             .unwrap();
         execution.id
+    }
+
+    fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
+        ProviderRuntimeSettingsSchema {
+            version: 1,
+            definitions: vec![ProviderSettingDefinition {
+                key: "execution.max_concurrency".to_owned(),
+                display_name: "Execution concurrency".to_owned(),
+                description: "Maximum concurrent Provider work.".to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: 8,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(3),
+                scopes: BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                    ProviderSettingScope::Task,
+                ]),
+            }],
+        }
     }
 
     fn provider_metadata() -> ProviderMetadata {

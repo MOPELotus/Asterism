@@ -251,6 +251,43 @@ impl ProviderRuntimeSettingsSchema {
             sources,
         ))
     }
+
+    /// Validates a complete settings snapshot before Provider execution.
+    ///
+    /// Unlike an override patch, a resolved snapshot must contain exactly one
+    /// value for every definition in this schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] when the snapshot is incomplete,
+    /// contains an unknown field, uses another schema version, or has an
+    /// out-of-range value.
+    pub fn validate_resolved(
+        &self,
+        resolved: &ResolvedProviderRuntimeSettings,
+    ) -> Result<(), ProviderSettingsError> {
+        self.validate()?;
+        if resolved.schema_version != self.version {
+            return Err(ProviderSettingsError::SchemaVersionMismatch);
+        }
+        for definition in &self.definitions {
+            let value = resolved.values.get(&definition.key).ok_or_else(|| {
+                ProviderSettingsError::MissingSetting {
+                    key: definition.key.clone(),
+                }
+            })?;
+            definition.kind.validate_value(&definition.key, value)?;
+        }
+        if let Some(key) = resolved.values.keys().find(|key| {
+            !self
+                .definitions
+                .iter()
+                .any(|definition| definition.key == **key)
+        }) {
+            return Err(ProviderSettingsError::UnknownSetting { key: key.clone() });
+        }
+        Ok(())
+    }
 }
 
 impl ProviderSettingKind {
@@ -345,6 +382,48 @@ pub struct ResolvedProviderRuntimeSettings {
     pub values: BTreeMap<String, ProviderSettingValue>,
 }
 
+impl ResolvedProviderRuntimeSettings {
+    #[must_use]
+    pub fn boolean(&self, key: &str) -> Option<bool> {
+        match self.values.get(key) {
+            Some(ProviderSettingValue::Boolean(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn integer(&self, key: &str) -> Option<i64> {
+        match self.values.get(key) {
+            Some(ProviderSettingValue::Integer(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn decimal_millis(&self, key: &str) -> Option<i64> {
+        match self.values.get(key) {
+            Some(ProviderSettingValue::DecimalMillis(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn duration_seconds(&self, key: &str) -> Option<u64> {
+        match self.values.get(key) {
+            Some(ProviderSettingValue::DurationSeconds(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn choice(&self, key: &str) -> Option<&str> {
+        match self.values.get(key) {
+            Some(ProviderSettingValue::Choice(value)) => Some(value),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ProviderSettingsError {
     #[error("provider runtime settings schema version must be positive")]
@@ -363,6 +442,8 @@ pub enum ProviderSettingsError {
     TooManyValues,
     #[error("provider runtime settings key `{key}` is unknown")]
     UnknownSetting { key: String },
+    #[error("resolved provider runtime settings key `{key}` is missing")]
+    MissingSetting { key: String },
     #[error("provider runtime settings key `{key}` does not support scope `{scope:?}`")]
     UnsupportedScope {
         key: String,
@@ -520,6 +601,35 @@ mod tests {
         let unknown = patch([("credential.cookie", ProviderSettingValue::Boolean(true))]);
         assert!(matches!(
             schema.validate_patch(ProviderSettingScope::Provider, &unknown),
+            Err(ProviderSettingsError::UnknownSetting { .. })
+        ));
+    }
+
+    #[test]
+    fn complete_snapshots_are_validated_and_expose_typed_readers() {
+        let schema = schema();
+        let resolved = schema.resolve(None, None, None).unwrap();
+        schema.validate_resolved(&resolved).unwrap();
+        assert_eq!(resolved.integer("video.max_concurrency"), Some(2));
+        assert_eq!(resolved.decimal_millis("video.playback_rate"), Some(1_000));
+        assert_eq!(resolved.boolean("video.max_concurrency"), None);
+        assert_eq!(resolved.duration_seconds("missing"), None);
+        assert_eq!(resolved.choice("missing"), None);
+
+        let mut missing = resolved.clone();
+        missing.values.remove("video.max_concurrency");
+        assert!(matches!(
+            schema.validate_resolved(&missing),
+            Err(ProviderSettingsError::MissingSetting { .. })
+        ));
+
+        let mut unknown = resolved;
+        unknown.values.insert(
+            "execution.unknown".to_owned(),
+            ProviderSettingValue::Boolean(true),
+        );
+        assert!(matches!(
+            schema.validate_resolved(&unknown),
             Err(ProviderSettingsError::UnknownSetting { .. })
         ));
     }

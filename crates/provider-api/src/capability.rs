@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+use crate::ResolvedProviderRuntimeSettings;
 use crate::{ProviderMetadata, ProviderResult};
 
 const MAX_ROUTE_CONTEXT_FIELDS: usize = 32;
@@ -340,6 +341,9 @@ pub struct ExecutionRequest {
     pub remote_task_id: String,
     pub course_id: Option<CourseId>,
     pub requested_capabilities: Vec<TaskCapability>,
+    /// Immutable Core-resolved settings captured when this Execution was
+    /// scheduled. Retries receive the same versioned values.
+    pub runtime_settings: ResolvedProviderRuntimeSettings,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

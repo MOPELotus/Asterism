@@ -699,6 +699,10 @@ mod tests {
             remote_task_id: remote_task_id.to_owned(),
             course_id: None,
             requested_capabilities: vec![TaskCapability::ResourceExecution],
+            runtime_settings: asterism_provider_api::ResolvedProviderRuntimeSettings {
+                schema_version: 1,
+                values: BTreeMap::new(),
+            },
         }
     }
 
