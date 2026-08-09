@@ -6,14 +6,15 @@ use asterism_domain::{
     SubmissionResultId, Task, TaskId, Timestamp,
 };
 use asterism_engine::{
-    BuildSubmissionDraftCommand, CreateManualAnswerCandidateCommand, ExecuteTaskCommand,
+    BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
+    ConservativeAnswerResolverService, CreateManualAnswerCandidateCommand, ExecuteTaskCommand,
     ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
     ManualAnswerCandidateError, ManualAnswerCandidateService, ProviderAnswerResolveError,
     ProviderAnswerResolveService, ProviderQuestionReadError, ProviderQuestionReadService,
     ProviderTaskDetailError, ProviderTaskDetailService, ProviderTaskProgressError,
     ProviderTaskProgressService, ReadTaskDetailCommand, ReadTaskProgressCommand,
-    ReadTaskQuestionsCommand, ResolveProviderAnswersCommand, SubmissionDraftBuildError,
-    SubmissionDraftBuildService,
+    ReadTaskQuestionsCommand, ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand,
+    SubmissionDraftBuildError, SubmissionDraftBuildService,
 };
 use asterism_provider_api::{ProviderErrorKind, RemoteProgress, RemoteTaskDetail};
 use asterism_storage::{
@@ -327,6 +328,26 @@ pub(super) async fn create_manual_answer_candidate(
         )
             .into_response(),
     ))
+}
+
+pub(super) async fn resolve_answer_candidates(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((task_id, snapshot_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
+    let plan = ConservativeAnswerResolverService::new(SqliteQuestionSnapshotRepository::new(
+        state.database,
+    ))
+    .resolve(ResolveAnswerCandidatesCommand {
+        owner_id,
+        task_id,
+        question_snapshot_id: snapshot_id,
+    })
+    .await
+    .map_err(map_conservative_answer_resolver_error)?;
+    Ok(crate::auth::no_store(Json(plan).into_response()))
 }
 
 pub(super) async fn build_submission_draft(
@@ -835,6 +856,20 @@ fn map_manual_answer_candidate_error(error: ManualAnswerCandidateError) -> ApiEr
             "the manual answer must be known, typed, bounded, and sanitized",
         ),
         ManualAnswerCandidateError::Storage(error) => ApiError::internal(error),
+    }
+}
+
+fn map_conservative_answer_resolver_error(error: ConservativeAnswerResolverError) -> ApiError {
+    match error {
+        ConservativeAnswerResolverError::QuestionSnapshotNotFound => {
+            ApiError::not_found("question_snapshot_not_found")
+        }
+        ConservativeAnswerResolverError::EvidenceInvalid
+        | ConservativeAnswerResolverError::ResolutionInvalid => {
+            tracing::warn!(%error, "persisted answer evidence is inconsistent");
+            ApiError::internal(error)
+        }
+        ConservativeAnswerResolverError::Storage(error) => ApiError::internal(error),
     }
 }
 

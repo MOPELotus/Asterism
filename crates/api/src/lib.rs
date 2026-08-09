@@ -258,6 +258,10 @@ fn task_routes() -> Router<ApiState> {
             get(task::list_answer_candidates).post(task::create_manual_answer_candidate),
         )
         .route(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-resolution",
+            get(task::resolve_answer_candidates),
+        )
+        .route(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts",
             post(task::build_submission_draft),
         )
@@ -823,6 +827,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-resolution".to_owned(),
+            answer_resolution_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts".to_owned(),
             submission_drafts_path(),
         );
@@ -1215,6 +1226,23 @@ fn normalized_answer_schema() -> Value {
             "additionalProperties": false
         }
     ]})
+}
+
+fn answer_resolution_path() -> Value {
+    json!({"get": {
+        "operationId": "resolveAnswerCandidates",
+        "description": "Derives a non-persisted source-neutral AnswerResolutionPlan from owner-scoped stored evidence; only unanimous known answers are selected.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Reviewable Selected, Conflict and Missing decisions without a persisted winner"},
+            "400": {"description": "Invalid Task or Question snapshot ID"},
+            "404": {"description": "Task-bound owner-scoped Question snapshot not found"}
+        }
+    }})
 }
 
 fn submission_drafts_path() -> Value {
@@ -3991,6 +4019,40 @@ mod tests {
         );
         assert_eq!(manual_body["candidate"]["confidence"], 7500);
 
+        let resolution_response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}/answer-resolution",
+                    snapshot.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolution_response.status(), StatusCode::OK);
+        assert_eq!(
+            resolution_response.headers()[header::CACHE_CONTROL],
+            "no-store"
+        );
+        let resolution_body = response_json(resolution_response).await;
+        assert_eq!(resolution_body["task_id"], task_id.to_string());
+        assert_eq!(
+            resolution_body["question_snapshot_id"],
+            snapshot.id.to_string()
+        );
+        assert_eq!(resolution_body["decisions"][0]["status"], "conflict");
+        assert_eq!(
+            resolution_body["decisions"][0]["considered_candidate_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(resolution_body["decisions"][0]["selected_candidate_id"].is_null());
+
         let response = app
             .clone()
             .oneshot(
@@ -4563,6 +4625,7 @@ mod tests {
             "/api/v1/tasks/{task_id}/questions",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-resolution",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}/results/{result_id}",
@@ -4607,6 +4670,11 @@ mod tests {
             document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates"]
                 ["post"]["operationId"],
             "createManualAnswerCandidate"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-resolution"]
+                ["get"]["operationId"],
+            "resolveAnswerCandidates"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts"]

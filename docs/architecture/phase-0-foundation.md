@@ -2146,3 +2146,21 @@ The resolver is read-only and does not call a Provider, mutate Candidate
 evidence, persist a winner, build a SubmissionDraft or schedule an Execution.
 Conflict and Missing decisions therefore remain explicit review requirements;
 an HTTP/CLI inspection surface remains a separate checkpoint.
+
+## One-hundred-and-thirty-ninth Phase 0 slice
+
+The conservative resolver now has an owner-scoped GET surface whose path
+contains both Task and immutable QuestionSnapshot identity. It uses Task Read
+authorization, returns the typed `AnswerResolutionPlan` with `no-store`, and
+maps a hidden owner or mismatched Task path to the same snapshot-not-found
+response without calling a Provider.
+
+OpenAPI exposes the read-only operation separately from Provider-native
+candidate discovery and Manual candidate creation. `asterismctl task
+answer-resolution <task-id> <snapshot-id>` maps the same exact binding so a
+reviewer can inspect Selected, Conflict and Missing decisions before supplying
+Candidate IDs to draft construction.
+
+The endpoint performs no write and the returned plan is not submission
+authority. It neither persists a winner nor implicitly builds or executes a
+SubmissionDraft; every Conflict or Missing decision remains visible.

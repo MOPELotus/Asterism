@@ -37,6 +37,7 @@ Phase 0 已建立并持续完善以下基础：
 - 固定 Manual 来源与 Core provenance、显式绑定 owner/Task/Snapshot/Question 且拒绝 Unknown 的手工候选答案 Core/HTTP/CLI 写入链；
 - 将 Selected、Conflict、Missing 明确分离且不能把未决状态伪装成已选答案的可审计 AnswerResolutionPlan 领域模型；
 - 仅在全部已知归一化答案达成共识时推荐候选、冲突与缺失保持未决且不持久化 winner 的来源中立 Core AnswerResolver；
+- 按显式 Task/Snapshot 只读生成保守 AnswerResolutionPlan 的 HTTP/OpenAPI/CLI 审阅入口；
 - 通过数据库复合外键绑定 QuestionSnapshot / Question / AnswerCandidate、整份校验后原子持久化且 owner-scoped 读取的不可变 SubmissionDraft；
 - 要求每题恰好一个显式已存候选、仅生成安全 Provider payload preview 且不触发远端写入的 SubmissionDraft Core 编排；
 - 使用 Task Read 权限和显式 Task/Snapshot/Candidate 身份构建草稿、按 Task/Snapshot/Draft 精确读取草稿的 HTTP/CLI 入口；
