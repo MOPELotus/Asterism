@@ -9,6 +9,7 @@ mod execution_job;
 mod execution_request;
 mod execution_worker;
 mod outbox;
+mod question_read;
 mod scan;
 mod scan_job;
 mod scan_worker;
@@ -47,6 +48,10 @@ pub use execution_worker::{
 };
 pub use outbox::{
     DeliveryError, DispatchConfig, DispatchError, DispatchReport, EventSink, OutboxDispatcher,
+};
+pub use question_read::{
+    ProviderQuestionReadError, ProviderQuestionReadResult, ProviderQuestionReadService,
+    ReadTaskQuestionsCommand,
 };
 pub use scan::{ProviderAccountScanner, ProviderScanError, ProviderScanService};
 pub use scan_job::{

@@ -1754,3 +1754,18 @@ context is explicitly skipped during serialization, as with course routing.
 Parsing receives the Core-owned local Task ID and one fresh reference and must
 return the normalized Domain `Question`; later Core orchestration will validate
 the complete question before persistence or answer resolution.
+
+## One-hundred-and-sixteenth Phase 0 slice
+
+Core now owns an owner-scoped, all-or-nothing Question read service. A stored
+Task must explicitly advertise both `QuestionInventory` and `QuestionParse`;
+Core then resolves the authenticated ProviderAccount and invokes only the two
+registered read slots with opaque credential references. Formal assessment
+tasks pass through the existing `Parse` guard, which permits reading without
+granting execution or submission authority.
+
+The complete reference set is bounded, deduplicated by remote identity and
+position, and sorted deterministically before parsing. Every returned Question
+must match the Core Task, fresh reference identity, position and non-unknown type
+hint, then pass Domain bounds and sanitization. Nothing is returned when any
+question fails, and no question or answer state is persisted by this slice.
