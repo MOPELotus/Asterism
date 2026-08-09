@@ -96,7 +96,7 @@ pub fn parse_chapter_inventory(
             opens_at: None,
             due_at: None,
             closes_at: None,
-            capabilities: Vec::new(),
+            capabilities: vec![asterism_domain::TaskCapability::ProgressRead],
             fingerprint: fingerprint(&normalized)?,
             normalized,
             raw_sanitized: json!({
@@ -217,6 +217,7 @@ mod tests {
             task.course_remote_id.as_deref() == Some("course:100:200")
                 && task.fingerprint.starts_with("v1:")
                 && task.fingerprint.len() == 67
+                && task.capabilities == [asterism_domain::TaskCapability::ProgressRead]
         }));
     }
 

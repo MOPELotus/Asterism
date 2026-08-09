@@ -200,6 +200,12 @@ therefore include their followed final-route state; Exam tasks currently retain
 the freshly parsed list state until a dedicated entry/detail fixture contract is
 available.
 
+`TaskProgressRead` preserves the same module split. Executable Resource tasks
+retain the targeted fresh-card lookup used for crash recovery. Chapter, Work and
+Exam tasks use exact Task rediscovery; `Completed` and `Pending` expose only
+binary 100/0 completion while all other remote states leave percentage absent.
+No duration or fractional score is inferred from list text.
+
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.
 - Browser visual selection is not proof of a saved answer. Hidden fields and the

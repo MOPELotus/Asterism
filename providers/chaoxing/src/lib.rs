@@ -17,6 +17,7 @@ mod runtime_settings;
 mod stored_session;
 mod task_detail;
 mod task_inventory;
+mod task_progress;
 
 pub use authentication::{
     ChaoxingAuthentication, ChaoxingAuthenticationTransport, NativeChaoxingAuthenticationTransport,
@@ -41,3 +42,4 @@ pub use task_inventory::{
     ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingTaskInventory,
     ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
 };
+pub use task_progress::ChaoxingTaskProgress;

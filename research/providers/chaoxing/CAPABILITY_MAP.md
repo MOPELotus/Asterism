@@ -15,7 +15,7 @@ Chapter card contains a Work-shaped assessment.
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
-| TaskProgressRead | current Chapter cards | agent skill, CxKitty | Reference | Document/Read fresh-card state is offline-covered for recovery; Work/Exam normalized progress still needs fixtures |
+| TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
 | QuestionInventory / QuestionParse | CxKitty | OCS, `chaoxing-exam` | Reference | Question IDs, types, options, hidden answers, and per-attempt QID changes |
 | SubmissionBuild / Execute | CxKitty | OCS, agent skill | Reference | Native/mobile form and Browser event paths differ; formal-assessment guard remains Core-owned |
 | SubmissionVerify | agent skill | `chaoxing-exam` | PortSource | Re-fetch final task page, verify server-visible answers/result rather than HTTP 200 or CSS |
@@ -98,3 +98,8 @@ policy and remains independently guarded.
   protocol drift, and the returned normalized detail contains no route context.
   Work therefore includes the existing followed detail-state check; Exam detail
   remains conservative list evidence until dedicated current fixtures exist.
+- Module-aware progress now keeps executable Resource recovery on its targeted
+  fresh-card path while Chapter, independent Work and Exam reuse exact Task
+  rediscovery. Completed/Pending become conservative 100/0 binary completion;
+  other states expose no invented percentage. These tasks advertise
+  `ProgressRead`, but the result remains offline fixture evidence only.

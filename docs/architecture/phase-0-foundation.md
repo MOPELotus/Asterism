@@ -1680,3 +1680,18 @@ every sanitized JSON region. Provider rate limits, temporary failures, remote
 changes, required user action and protocol drift retain distinct stable HTTP
 classifications. The read is not persisted as a scan snapshot and does not
 change local orchestration state.
+
+## One-hundred-and-eleventh Phase 0 slice
+
+Chaoxing progress reads now dispatch by stable task module instead of treating
+all tasks as Chapter resources. Executable Resource tasks retain the targeted
+course/chapter/card rediscovery used by execution recovery. Chapter, independent
+Work and Exam tasks reuse exact fresh `TaskDetail` rediscovery, including Work's
+followed final-route state.
+
+The latter modules advertise `ProgressRead` and expose only conservative binary
+completion: `Completed` is 100, `Pending` is 0, and every other state has no
+percentage. They never infer duration, score or partial progress from localized
+list text. Foreign identities and mismatched detail results fail as protocol
+drift, and all evidence remains offline-only until live-sanitized fixtures are
+recorded.

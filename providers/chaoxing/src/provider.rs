@@ -6,7 +6,7 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingResourceExecution,
-    ChaoxingSessionResolver, ChaoxingTaskDetail, ChaoxingTaskInventory,
+    ChaoxingSessionResolver, ChaoxingTaskDetail, ChaoxingTaskInventory, ChaoxingTaskProgress,
     NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
     StoredChaoxingSessionResolver, metadata::development_metadata,
     runtime_settings::runtime_settings_schema,
@@ -78,6 +78,10 @@ fn compose_development_provider(
         inventory_transport.clone(),
         inventory_transport,
     )?);
+    let task_progress = Arc::new(ChaoxingTaskProgress::try_new(
+        task_detail.clone(),
+        task_execution.clone(),
+    )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: runtime_settings_schema(),
@@ -85,7 +89,7 @@ fn compose_development_provider(
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),
         task_detail: Some(task_detail),
-        task_progress: Some(task_execution.clone()),
+        task_progress: Some(task_progress),
         task_execution: Some(task_execution),
         browser_bridge: None,
     })

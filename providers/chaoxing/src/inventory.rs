@@ -237,7 +237,7 @@ fn parse_inventory(
             opens_at: None,
             due_at: None,
             closes_at: None,
-            capabilities: Vec::new(),
+            capabilities: vec![asterism_domain::TaskCapability::ProgressRead],
             fingerprint: fingerprint(&normalized)?,
             normalized,
             raw_sanitized: json!({
@@ -547,6 +547,7 @@ mod tests {
         assert!(tasks.iter().all(|task| {
             task.source_type == SourceType::Exam
                 && task.assessment_class == AssessmentClass::Unknown
+                && task.capabilities == [asterism_domain::TaskCapability::ProgressRead]
                 && task.fingerprint.starts_with("v1:")
                 && task.fingerprint.len() == 67
         }));
@@ -568,11 +569,8 @@ mod tests {
     fn work_inventory_is_independent_from_chapter_tasks() {
         let tasks = parse_work_inventory(WORK_MIXED, &scope()).unwrap();
         assert_eq!(selected_facts(&tasks), expected(WORK_EXPECTED));
-        assert!(
-            tasks
-                .iter()
-                .all(|task| task.source_type == SourceType::Work)
-        );
+        assert!(tasks.iter().all(|task| task.source_type == SourceType::Work
+            && task.capabilities == [asterism_domain::TaskCapability::ProgressRead]));
     }
 
     #[test]

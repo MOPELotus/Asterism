@@ -888,6 +888,14 @@ mod tests {
                 .iter()
                 .all(|task| task.course_remote_id.as_deref() == Some("course:100:200"))
         );
+        assert!(tasks.iter().all(|task| {
+            !["chapter:", "work:", "exam:"]
+                .iter()
+                .any(|prefix| task.remote_id.starts_with(prefix))
+                || task
+                    .capabilities
+                    .contains(&asterism_domain::TaskCapability::ProgressRead)
+        }));
         assert_eq!(transport.chapter_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 1);
