@@ -2362,3 +2362,23 @@ native Development entry can now be composed around an injected stored-session
 resolver. Persistent credential resolution, renewal, daemon registration and
 live-account validation remain later gates, so this checkpoint does not raise
 the Provider verification level.
+
+## One-hundred-and-fiftieth Phase 0 slice
+
+WELearn can now compose its native Authentication and inventory transports
+around Core's `ProviderCredentialResolver`. The Provider requests only the
+Cookie purpose using the exact account ID, opaque credential references and
+correlation ID from `ProviderContext`; it never reads persistence directly.
+
+Resolution fails closed unless Core returns exactly one credential belonging to
+the requested account and one of the requested secret IDs. Its metadata must
+name the Cookie purpose, use Cookie or Composite session kind and remain
+unexpired. Invalid UTF-8, malformed Cookie fields, duplicates, unrelated
+credentials and authorization/not-found failures are reported as
+Authentication failures, while key/storage failures remain sanitized Internal
+errors. Plaintext is owned by Core's zeroizing resolved credential and copied
+only into the bounded redacted Cookie session used by the request.
+
+The resulting Development entry is registry-consistent and has no Capture
+dependency. Automatic password renewal, daemon opt-in registration and
+live-account validation remain separate gates.

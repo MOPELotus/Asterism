@@ -35,8 +35,11 @@ Set-Cookie values are collected in a bounded redacted jar. Only `sflep.com`,
 matching are checked before each request, and deletion removes any retained
 value. The final Cookie is accepted only after the Course-list endpoint returns
 a parseable authenticated response. Password and ImportedCookie continue
-through the common Authentication capability. Stored credential resolution,
-renewal, daemon registration and live-account validation remain pending.
+through the common Authentication capability. Stored Cookie reads now use only
+Core's provider-scoped resolver and require an exact account, requested secret
+reference, Cookie purpose, supported session kind and unexpired metadata before
+the native request. Renewal, daemon registration and live-account validation
+remain pending.
 
 ## Course and task inventory
 

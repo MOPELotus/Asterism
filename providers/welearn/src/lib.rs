@@ -12,6 +12,7 @@ mod metadata;
 mod native_authentication;
 mod native_http;
 mod provider;
+mod stored_session;
 mod task_inventory;
 
 pub use authentication::{
@@ -31,5 +32,7 @@ pub use native_http::NativeWellearnInventoryTransport;
 pub use provider::{
     build_development_provider, build_development_provider_native,
     build_development_provider_with_native_inventory,
+    build_development_provider_with_stored_session,
 };
+pub use stored_session::StoredWellearnSessionResolver;
 pub use task_inventory::{WellearnScoLeavesDocument, parse_task_inventory};

@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use asterism_networking::ResolvedNetworkProfile;
 use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
+use asterism_secrets::ProviderCredentialResolver;
 
 use crate::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCourseInventory,
     WellearnCourseInventoryTransport, WellearnSessionResolver, WellearnTaskInventory,
     WellearnTaskInventoryTransport, metadata::development_metadata,
     native_authentication::NativeWellearnAuthenticationTransport,
-    native_http::NativeWellearnInventoryTransport,
+    native_http::NativeWellearnInventoryTransport, stored_session::StoredWellearnSessionResolver,
 };
 
 /// Composes the complete development entry around injected authentication and
@@ -89,13 +90,33 @@ pub fn build_development_provider_native(
     build_development_provider_with_native_inventory(network, authentication, sessions)
 }
 
+/// Composes the fully native Development entry around Core's scoped stored
+/// credential resolver. This does not add automatic session renewal.
+///
+/// # Errors
+///
+/// Returns a sanitized Provider error if metadata or either shared HTTP client
+/// cannot be initialized.
+pub fn build_development_provider_with_stored_session(
+    network: &ResolvedNetworkProfile,
+    credentials: Arc<dyn ProviderCredentialResolver>,
+) -> ProviderResult<ProviderEntry> {
+    build_development_provider_native(
+        network,
+        Arc::new(StoredWellearnSessionResolver::new(credentials)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use asterism_networking::NetworkProfile;
     use asterism_provider_api::{
         ProviderContext, ProviderError, ProviderErrorKind, ProviderRegistry, RemoteCourse,
     };
-    use asterism_secrets::SecretString;
+    use asterism_secrets::{
+        ProviderCredentialResolution, ProviderCredentialResolver, ResolvedProviderCredential,
+        SecretStoreError, SecretString,
+    };
     use async_trait::async_trait;
 
     use super::*;
@@ -103,6 +124,19 @@ mod tests {
 
     #[derive(Debug)]
     struct UnusedBoundaries;
+
+    #[derive(Debug)]
+    struct UnusedCredentials;
+
+    #[async_trait]
+    impl ProviderCredentialResolver for UnusedCredentials {
+        async fn resolve_provider_credentials(
+            &self,
+            _request: ProviderCredentialResolution,
+        ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError> {
+            Err(SecretStoreError::NotFound)
+        }
+    }
 
     #[async_trait]
     impl WellearnAuthenticationTransport for UnusedBoundaries {
@@ -192,6 +226,12 @@ mod tests {
             build_development_provider_native(&network, Arc::new(UnusedBoundaries)).unwrap();
         let mut registry = ProviderRegistry::default();
         registry.register(native).unwrap();
+
+        let stored =
+            build_development_provider_with_stored_session(&network, Arc::new(UnusedCredentials))
+                .unwrap();
+        let mut registry = ProviderRegistry::default();
+        registry.register(stored).unwrap();
     }
 
     fn unused() -> ProviderError {
