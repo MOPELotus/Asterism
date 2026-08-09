@@ -3,9 +3,9 @@ use asterism_domain::{
     AttemptResult, AuditActor, AuthBootstrapClientEvent, AuthBootstrapSession,
     AuthBootstrapSessionId, AuthSession, AuthSessionId, CreditAccount, CreditReservation,
     CreditReservationId, CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId,
-    ExecutionId, ExecutionLease, ExecutionProgress, ExecutionState, OrchestrationState,
-    ProviderAccount, ProviderAccountId, ProviderErrorClass, ScheduleId, ServiceToken,
-    ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+    ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionState,
+    OrchestrationState, ProviderAccount, ProviderAccountId, ProviderErrorClass, ScheduleId,
+    ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -60,6 +60,12 @@ pub struct ExecutionDetail {
     pub attempts: Vec<ExecutionAttempt>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionLogPage {
+    pub items: Vec<ExecutionLogEvent>,
+    pub total: u64,
+}
+
 /// Owner-scoped read model for execution status surfaces.
 #[async_trait]
 pub trait ExecutionQueryRepository: Send + Sync {
@@ -68,6 +74,14 @@ pub trait ExecutionQueryRepository: Send + Sync {
         owner_id: UserId,
         execution_id: ExecutionId,
     ) -> Result<Option<ExecutionDetail>, StorageError>;
+
+    async fn list_owned_execution_logs(
+        &self,
+        owner_id: UserId,
+        execution_id: ExecutionId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Option<ExecutionLogPage>, StorageError>;
 }
 
 /// Owner-scoped persistence contract for Provider account management.

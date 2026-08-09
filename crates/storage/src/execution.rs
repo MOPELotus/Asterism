@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, Execution, ExecutionAttempt, ExecutionAttemptId,
-    ExecutionId, ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, OrchestrationState,
-    ScheduleId, TaskId, Timestamp, UserId,
+    ExecutionId, ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, LogLevel,
+    OrchestrationState, ScheduleId, TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_scheduler::ScheduledJobKind;
@@ -12,15 +12,17 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use sqlx::Row;
 
-use crate::ExecutionDetail;
 use crate::outbox::enqueue_in_transaction;
 use crate::{
     Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionProgressUpdate,
     ExecutionQueryRepository, ExecutionRepository, ExecutionScheduleOutcome,
     ExecutionScheduleRequest, StorageError,
 };
+use crate::{ExecutionDetail, ExecutionLogPage};
 
 const MAX_EXECUTION_ATTEMPTS: usize = 1_000;
+const MAX_EXECUTION_LOG_PAGE_SIZE: u32 = 200;
+const MAX_EXECUTION_LOG_OFFSET: u64 = 1_000_000;
 
 #[derive(Clone, Debug)]
 pub struct SqliteExecutionRepository {
@@ -312,6 +314,58 @@ impl ExecutionQueryRepository for SqliteExecutionRepository {
             execution,
             progress,
             attempts,
+        }))
+    }
+
+    async fn list_owned_execution_logs(
+        &self,
+        owner_id: UserId,
+        execution_id: ExecutionId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Option<ExecutionLogPage>, StorageError> {
+        if limit == 0 || limit > MAX_EXECUTION_LOG_PAGE_SIZE || offset > MAX_EXECUTION_LOG_OFFSET {
+            return Err(StorageError::InvalidData(
+                "execution log pagination is outside the supported range".to_owned(),
+            ));
+        }
+        let mut transaction = self.database.pool().begin().await?;
+        let owned: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM executions AS execution \
+             INNER JOIN tasks AS task ON task.id = execution.task_id \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             WHERE execution.id = ? AND account.owner_user_id = ?",
+        )
+        .bind(execution_id.to_string())
+        .bind(owner_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if owned != 1 {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM execution_logs WHERE execution_id = ?")
+                .bind(execution_id.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
+        let rows = sqlx::query(
+            "SELECT execution_id, attempt_id, timestamp, level, stage, message, \
+                    provider_trace_id, metadata_sanitized_json FROM execution_logs \
+             WHERE execution_id = ? ORDER BY timestamp ASC, id ASC LIMIT ? OFFSET ?",
+        )
+        .bind(execution_id.to_string())
+        .bind(i64::from(limit))
+        .bind(i64::try_from(offset).expect("validated execution log offset fits i64"))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let items = rows.iter().map(decode_log).collect::<Result<_, _>>()?;
+        transaction.commit().await?;
+        Ok(Some(ExecutionLogPage {
+            items,
+            total: u64::try_from(total).map_err(|_| {
+                StorageError::InvalidData("execution log count is invalid".to_owned())
+            })?,
         }))
     }
 }
@@ -1127,6 +1181,27 @@ fn decode_progress(row: &sqlx::sqlite::SqliteRow) -> Result<ExecutionProgress, S
     Ok(progress)
 }
 
+fn decode_log(row: &sqlx::sqlite::SqliteRow) -> Result<ExecutionLogEvent, StorageError> {
+    Ok(ExecutionLogEvent {
+        execution_id: ExecutionId::from_str(row.try_get("execution_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        attempt_id: row
+            .try_get::<Option<&str>, _>("attempt_id")?
+            .map(ExecutionAttemptId::from_str)
+            .transpose()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        timestamp: decode_timestamp(row.try_get("timestamp")?)?,
+        level: decode_enum(row.try_get("level")?)?,
+        stage: decode_enum(row.try_get("stage")?)?,
+        message: row.try_get("message")?,
+        provider_trace_id: row.try_get("provider_trace_id")?,
+        metadata_sanitized: row
+            .try_get::<Option<&str>, _>("metadata_sanitized_json")?
+            .map(serde_json::from_str)
+            .transpose()?,
+    })
+}
+
 fn enum_name(value: impl Serialize) -> Result<String, StorageError> {
     match serde_json::to_value(value)? {
         serde_json::Value::String(value) => Ok(value),
@@ -1399,13 +1474,23 @@ mod tests {
             ("succeeded".to_owned(), "trace-1".to_owned())
         );
 
+        assert_execution_read_models(repository, execution, &finished, &completed).await;
+    }
+
+    async fn assert_execution_read_models(
+        repository: &SqliteExecutionRepository,
+        execution: &Execution,
+        finished: &Execution,
+        completed: &ExecutionProgress,
+    ) {
+        let owner = execution.requested_by.unwrap();
         let detail = repository
-            .find_owned_execution_detail(execution.requested_by.unwrap(), execution.id)
+            .find_owned_execution_detail(owner, execution.id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(detail.execution, finished);
-        assert_eq!(detail.progress, Some(completed));
+        assert_eq!(&detail.execution, finished);
+        assert_eq!(detail.progress.as_ref(), Some(completed));
         assert_eq!(detail.attempts.len(), 1);
         assert_eq!(
             detail.attempts[0].provider_trace_id.as_deref(),
@@ -1414,6 +1499,27 @@ mod tests {
         assert!(
             repository
                 .find_owned_execution_detail(UserId::new(), execution.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let first_log = repository
+            .list_owned_execution_logs(owner, execution.id, 1, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_log.total, 2);
+        assert_eq!(first_log.items.len(), 1);
+        assert_eq!(first_log.items[0].stage, ExecutionStage::Preparing);
+        let final_log = repository
+            .list_owned_execution_logs(owner, execution.id, 1, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(final_log.items[0].stage, ExecutionStage::Completed);
+        assert!(
+            repository
+                .list_owned_execution_logs(UserId::new(), execution.id, 50, 0)
                 .await
                 .unwrap()
                 .is_none()

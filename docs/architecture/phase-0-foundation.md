@@ -1228,3 +1228,19 @@ including execution logs or Provider payloads. `asterismctl execution get`
 calls that same route using the existing `task_read` scope, and OpenAPI records
 the stable operation. Paginated log history and a live SSE/WS LogStream remain
 separate surfaces so detail reads cannot become unbounded polling payloads.
+
+## Eighty-seventh Phase 0 slice
+
+Execution log history now has a separate owner-scoped, bounded read surface.
+`GET /api/v1/executions/{execution_id}/logs` validates a 1-200 page size and a
+bounded offset, verifies ownership through Task and Provider account, and reads
+the total plus one page in a consistent SQLite transaction. Entries are ordered
+by timestamp and their internal log identity so pagination remains stable when
+multiple lifecycle records share a timestamp.
+
+Each decoded entry retains its typed level and stage, optional Attempt binding,
+sanitized Provider trace ID and `metadata_sanitized` value. Raw Provider
+payloads and internal row IDs are not exposed. `asterismctl execution logs`
+uses the same API and OpenAPI operation with explicit pagination. This endpoint
+is for bounded history and merged-record presentation; a live LogStream remains
+a separate SSE/WS slice rather than repeated full-history polling.

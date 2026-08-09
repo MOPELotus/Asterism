@@ -31,7 +31,7 @@ pub use repository::{
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, CreditRepository, ExecutionAttemptFinishRequest,
-    ExecutionAttemptStartRequest, ExecutionDetail, ExecutionLeaseRepository,
+    ExecutionAttemptStartRequest, ExecutionDetail, ExecutionLeaseRepository, ExecutionLogPage,
     ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionRepository,
     ExecutionScheduleOutcome, ExecutionScheduleRequest, OutboxRepository,
     ProviderAccountRepository, ProviderAccountRuntimeRepository, ScanScheduleRepository,

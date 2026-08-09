@@ -232,6 +232,14 @@ enum TaskCommand {
 enum ExecutionCommand {
     /// Get one Execution with current progress and Attempt history.
     Get { execution_id: String },
+    /// List one Execution's sanitized logs in chronological order.
+    Logs {
+        execution_id: String,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -723,6 +731,16 @@ async fn handle_execution(client: &ApiClient, command: ExecutionCommand) -> anyh
             let path = format!("/api/v1/executions/{execution_id}");
             client.get_authorized(&path, &token).await?
         }
+        ExecutionCommand::Logs {
+            execution_id,
+            limit,
+            offset,
+        } => {
+            let path = format!("/api/v1/executions/{execution_id}/logs");
+            client
+                .get_authorized_with_query(&path, &token, &LogListParameters { limit, offset })
+                .await?
+        }
     };
     write_json(&value)
 }
@@ -731,6 +749,12 @@ async fn handle_execution(client: &ApiClient, command: ExecutionCommand) -> anyh
 struct TaskListParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_account_id: Option<String>,
+    limit: u32,
+    offset: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct LogListParameters {
     limit: u32,
     offset: u64,
 }
@@ -857,6 +881,31 @@ mod tests {
             arguments.command,
             Command::Execution {
                 command: ExecutionCommand::Get { execution_id }
+            } if execution_id == "execution-id"
+        ));
+    }
+
+    #[test]
+    fn execution_logs_keep_pagination_explicit() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "execution",
+            "logs",
+            "execution-id",
+            "--limit",
+            "25",
+            "--offset",
+            "50",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Execution {
+                command: ExecutionCommand::Logs {
+                    execution_id,
+                    limit: 25,
+                    offset: 50,
+                }
             } if execution_id == "execution-id"
         ));
     }

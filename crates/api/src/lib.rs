@@ -126,6 +126,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/executions/{execution_id}",
             get(execution::get_execution),
         )
+        .route(
+            "/api/v1/executions/{execution_id}/logs",
+            get(execution::list_execution_logs),
+        )
         .route("/api/v1/service-tokens", post(auth::create_service_token))
         .route(
             "/api/v1/service-tokens/{token_id}",
@@ -597,6 +601,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/executions/{execution_id}/logs".to_owned(),
+            execution_logs_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/executions/{execution_id}".to_owned(),
             execution_detail_path(),
         );
@@ -634,6 +645,25 @@ fn execution_detail_path() -> Value {
         "responses": {
             "200": {"description": "Owner-scoped Execution with current progress and Attempt history"},
             "400": {"description": "Invalid Execution ID"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Insufficient permission"},
+            "404": {"description": "Execution not found for this owner"}
+        }
+    }})
+}
+
+fn execution_logs_path() -> Value {
+    json!({"get": {
+        "operationId": "listExecutionLogs",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "execution_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+            {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}
+        ],
+        "responses": {
+            "200": {"description": "Owner-scoped chronological Execution log page"},
+            "400": {"description": "Invalid Execution ID or pagination"},
             "401": {"description": "Authentication required"},
             "403": {"description": "Insufficient permission"},
             "404": {"description": "Execution not found for this owner"}
@@ -2687,6 +2717,24 @@ mod tests {
         assert!(detail["progress"].is_null());
         assert_eq!(detail["attempts"], json!([]));
 
+        let logs = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/executions/{execution_id}/logs?limit=10&offset=0"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logs.status(), StatusCode::OK);
+        let logs = response_json(logs).await;
+        assert_eq!(logs["total"], 0);
+        assert_eq!(logs["limit"], 10);
+        assert_eq!(logs["items"], json!([]));
+
         let replayed =
             post_task_execution(&app, &cookie, routine_task, Some("execute-document-1")).await;
         assert_eq!(replayed.status(), StatusCode::OK);
@@ -2910,6 +2958,7 @@ mod tests {
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/execute",
             "/api/v1/executions/{execution_id}",
+            "/api/v1/executions/{execution_id}/logs",
         ] {
             assert!(document["paths"].get(path).is_some(), "missing {path}");
         }
@@ -2924,6 +2973,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/executions/{execution_id}"]["get"]["operationId"],
             "getExecution"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/executions/{execution_id}/logs"]["get"]["operationId"],
+            "listExecutionLogs"
         );
         assert_eq!(
             document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/claim"]["post"]["security"]
