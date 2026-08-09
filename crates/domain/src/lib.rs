@@ -8,6 +8,7 @@ pub mod automation;
 pub mod credits;
 pub mod execution;
 pub mod id;
+pub mod question;
 pub mod task;
 pub mod user;
 
@@ -36,6 +37,11 @@ pub use execution::{
     ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, ProviderErrorClass, RequestSource,
 };
 pub use id::*;
+pub use question::{
+    AnswerCandidate, AnswerConfidence, AnswerConfidenceError, AnswerPair, AnswerSource,
+    NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind, QuestionKind,
+    QuestionOption, QuestionValidationError,
+};
 pub use task::{
     AssessmentClass, OrchestrationState, RemoteState, SourceType, Task, TaskCapability,
     TaskDiffKind, TaskSnapshot, classify_task_changes,

@@ -1724,3 +1724,19 @@ in the repository, but this phase does not expand them with Provider-specific
 recipes or interception logic. In particular, cidaren may progress through
 manual token import and non-Capture capabilities while its WeChat-assisted
 Capture path remains deferred and the Provider remains incomplete.
+
+## One-hundred-and-fourteenth Phase 0 slice
+
+The Domain now defines persistence-independent `Question` and
+`AnswerCandidate` contracts before any Provider-specific question parser is
+registered. Questions retain Task binding, optional attempt-local remote ID,
+type, one-based position, normalized stem, options and attachment facts without
+carrying fetch URLs, signatures or Provider submission payloads.
+
+Normalized answers distinguish selections, texts, booleans, pairs, ordering and
+composite structures. `AnswerSource` remains independent from Provider parsing,
+and optional confidence uses validated basis points instead of floating-point
+ambiguity. Domain validation bounds collection sizes and nesting, rejects
+duplicate option/answer identities and credential-shaped metadata, and prevents
+one Provider parser from smuggling raw secrets into later answer or submission
+layers.
