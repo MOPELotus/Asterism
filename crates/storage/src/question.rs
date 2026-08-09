@@ -1,17 +1,23 @@
 use std::{collections::BTreeSet, str::FromStr};
 
 use asterism_domain::{
-    ProviderId, Question, QuestionId, QuestionSnapshotId, TaskId, Timestamp, UserId,
+    AnswerCandidate, AnswerCandidateId, AnswerSource, ProviderId, Question, QuestionId,
+    QuestionSnapshotId, TaskId, Timestamp, UserId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::Row;
 
-use crate::{Database, QuestionSnapshot, QuestionSnapshotRepository, StorageError};
+use crate::{
+    AnswerCandidateRecord, AnswerCandidateRepository, Database, QuestionSnapshot,
+    QuestionSnapshotRepository, StorageError,
+};
 
 const MAX_QUESTIONS_PER_SNAPSHOT: usize = 5_000;
 const MAX_QUESTION_SNAPSHOT_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_PROVIDER_VERSION_BYTES: usize = 128;
+const MAX_CANDIDATES_PER_SNAPSHOT: usize = 20_000;
+const MAX_ANSWER_CANDIDATE_BYTES: usize = 16 * 1_024 * 1_024;
 
 #[derive(Clone, Debug)]
 pub struct SqliteQuestionSnapshotRepository {
@@ -161,6 +167,196 @@ impl QuestionSnapshotRepository for SqliteQuestionSnapshotRepository {
     }
 }
 
+#[async_trait]
+impl AnswerCandidateRepository for SqliteQuestionSnapshotRepository {
+    async fn save_answer_candidate_batch(
+        &self,
+        candidates: &[AnswerCandidateRecord],
+    ) -> Result<(), StorageError> {
+        let encoded = validate_and_encode_candidates(candidates)?;
+        let mut transaction = self.database.pool().begin().await?;
+        let question_ids = sqlx::query_scalar::<_, String>(
+            "SELECT question_id FROM question_snapshot_items WHERE snapshot_id = ?",
+        )
+        .bind(encoded.snapshot_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?
+        .into_iter()
+        .map(|value| parse_id::<QuestionId>(&value))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+        if encoded
+            .candidates
+            .iter()
+            .any(|candidate| !question_ids.contains(&candidate.question_id))
+        {
+            return Err(invalid_candidates());
+        }
+
+        let totals = sqlx::query(
+            "SELECT COUNT(*) AS candidate_count, \
+                    COALESCE(SUM(length(CAST(candidate_json AS BLOB))), 0) AS total_bytes \
+             FROM answer_candidates WHERE question_snapshot_id = ?",
+        )
+        .bind(encoded.snapshot_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let existing_count = usize::try_from(totals.try_get::<i64, _>("candidate_count")?)
+            .map_err(|_| invalid_candidates())?;
+        let existing_bytes = usize::try_from(totals.try_get::<i64, _>("total_bytes")?)
+            .map_err(|_| invalid_candidates())?;
+        if existing_count
+            .checked_add(encoded.candidates.len())
+            .is_none_or(|count| count > MAX_CANDIDATES_PER_SNAPSHOT)
+            || existing_bytes
+                .checked_add(encoded.total_bytes)
+                .is_none_or(|bytes| bytes > MAX_ANSWER_CANDIDATE_BYTES)
+        {
+            return Err(invalid_candidates());
+        }
+
+        for candidate in encoded.candidates {
+            sqlx::query(
+                "INSERT INTO answer_candidates \
+                 (id, question_snapshot_id, question_id, source, candidate_json, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(candidate.id.to_string())
+            .bind(encoded.snapshot_id.to_string())
+            .bind(candidate.question_id.to_string())
+            .bind(encode_answer_source(candidate.source))
+            .bind(candidate.json)
+            .bind(encode_timestamp(candidate.created_at))
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn list_owned_answer_candidates(
+        &self,
+        owner_id: UserId,
+        question_snapshot_id: QuestionSnapshotId,
+    ) -> Result<Vec<AnswerCandidateRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT candidate.id, candidate.source, candidate.candidate_json, \
+                    candidate.created_at \
+             FROM answer_candidates AS candidate \
+             INNER JOIN question_snapshots AS snapshot \
+                ON snapshot.id = candidate.question_snapshot_id \
+             INNER JOIN question_snapshot_items AS item \
+                ON item.snapshot_id = candidate.question_snapshot_id \
+               AND item.question_id = candidate.question_id \
+             INNER JOIN tasks AS task ON task.id = snapshot.task_id \
+             INNER JOIN provider_accounts AS account \
+                ON account.id = task.provider_account_id \
+             WHERE account.owner_user_id = ? AND candidate.question_snapshot_id = ? \
+             ORDER BY item.position, candidate.created_at, candidate.id",
+        )
+        .bind(owner_id.to_string())
+        .bind(question_snapshot_id.to_string())
+        .fetch_all(self.database.pool())
+        .await?;
+        if rows.len() > MAX_CANDIDATES_PER_SNAPSHOT {
+            return Err(invalid_candidates());
+        }
+
+        let mut total_bytes = 0usize;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            let json: &str = row.try_get("candidate_json")?;
+            total_bytes = total_bytes
+                .checked_add(json.len())
+                .filter(|bytes| *bytes <= MAX_ANSWER_CANDIDATE_BYTES)
+                .ok_or_else(invalid_candidates)?;
+            let candidate: AnswerCandidate = serde_json::from_str(json)?;
+            let source = decode_answer_source(row.try_get("source")?)?;
+            if candidate.source != source || candidate.validate().is_err() {
+                return Err(invalid_candidates());
+            }
+            records.push(AnswerCandidateRecord {
+                id: parse_id::<AnswerCandidateId>(row.try_get("id")?)?,
+                question_snapshot_id,
+                candidate,
+                created_at: decode_timestamp(row.try_get("created_at")?)?,
+            });
+        }
+        Ok(records)
+    }
+}
+
+struct EncodedAnswerCandidate {
+    id: AnswerCandidateId,
+    question_id: QuestionId,
+    source: AnswerSource,
+    json: String,
+    created_at: Timestamp,
+}
+
+struct EncodedAnswerCandidates {
+    snapshot_id: QuestionSnapshotId,
+    candidates: Vec<EncodedAnswerCandidate>,
+    total_bytes: usize,
+}
+
+fn validate_and_encode_candidates(
+    candidates: &[AnswerCandidateRecord],
+) -> Result<EncodedAnswerCandidates, StorageError> {
+    if candidates.is_empty() || candidates.len() > MAX_CANDIDATES_PER_SNAPSHOT {
+        return Err(invalid_candidates());
+    }
+    let snapshot_id = candidates[0].question_snapshot_id;
+    let mut ids = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    let mut encoded = Vec::with_capacity(candidates.len());
+    for record in candidates {
+        if record.question_snapshot_id != snapshot_id
+            || !ids.insert(record.id)
+            || record.candidate.validate().is_err()
+        {
+            return Err(invalid_candidates());
+        }
+        let json = serde_json::to_string(&record.candidate)?;
+        total_bytes = total_bytes
+            .checked_add(json.len())
+            .filter(|bytes| *bytes <= MAX_ANSWER_CANDIDATE_BYTES)
+            .ok_or_else(invalid_candidates)?;
+        encoded.push(EncodedAnswerCandidate {
+            id: record.id,
+            question_id: record.candidate.question_id,
+            source: record.candidate.source,
+            json,
+            created_at: record.created_at,
+        });
+    }
+    Ok(EncodedAnswerCandidates {
+        snapshot_id,
+        candidates: encoded,
+        total_bytes,
+    })
+}
+
+const fn encode_answer_source(source: AnswerSource) -> &'static str {
+    match source {
+        AnswerSource::Manual => "manual",
+        AnswerSource::LocalCache => "local_cache",
+        AnswerSource::ProviderNative => "provider_native",
+        AnswerSource::ExternalBank => "external_bank",
+        AnswerSource::Other => "other",
+    }
+}
+
+fn decode_answer_source(value: &str) -> Result<AnswerSource, StorageError> {
+    match value {
+        "manual" => Ok(AnswerSource::Manual),
+        "local_cache" => Ok(AnswerSource::LocalCache),
+        "provider_native" => Ok(AnswerSource::ProviderNative),
+        "external_bank" => Ok(AnswerSource::ExternalBank),
+        "other" => Ok(AnswerSource::Other),
+        _ => Err(invalid_candidates()),
+    }
+}
+
 struct EncodedQuestion {
     id: QuestionId,
     remote_id: Option<String>,
@@ -251,10 +447,17 @@ fn invalid_snapshot() -> StorageError {
     StorageError::InvalidData("Question snapshot is invalid or exceeds its bounds".to_owned())
 }
 
+fn invalid_candidates() -> StorageError {
+    StorageError::InvalidData(
+        "AnswerCandidate batch is invalid, foreign, or exceeds its bounds".to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use asterism_domain::{
-        QuestionAttachment, QuestionAttachmentKind, QuestionKind, QuestionOption,
+        AnswerConfidence, NormalizedAnswer, QuestionAttachment, QuestionAttachmentKind,
+        QuestionKind, QuestionOption,
     };
     use chrono::Duration;
 
@@ -306,6 +509,75 @@ mod tests {
                 .is_err()
         );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_snapshots")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn multi_source_candidates_round_trip_with_snapshot_ownership() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let snapshot = fixture.snapshot("Candidate question", fixture.now);
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        let first = Fixture::candidate(
+            &snapshot,
+            AnswerSource::ProviderNative,
+            fixture.now + Duration::seconds(1),
+        );
+        let second = Fixture::candidate(
+            &snapshot,
+            AnswerSource::ExternalBank,
+            fixture.now + Duration::seconds(2),
+        );
+        repository
+            .save_answer_candidate_batch(&[first.clone(), second.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .list_owned_answer_candidates(fixture.owner, snapshot.id)
+                .await
+                .unwrap(),
+            [first, second]
+        );
+        assert!(
+            repository
+                .list_owned_answer_candidates(UserId::new(), snapshot.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_or_unsanitized_candidates_leave_no_partial_batch() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let snapshot = fixture.snapshot("Candidate question", fixture.now);
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        let valid = Fixture::candidate(&snapshot, AnswerSource::Manual, fixture.now);
+        let mut foreign = Fixture::candidate(&snapshot, AnswerSource::LocalCache, fixture.now);
+        foreign.candidate.question_id = QuestionId::new();
+        assert!(
+            repository
+                .save_answer_candidate_batch(&[valid.clone(), foreign])
+                .await
+                .is_err()
+        );
+
+        let mut secret = valid;
+        secret.candidate.provenance_sanitized =
+            serde_json::json!({"access_token": "must-not-persist"});
+        assert!(
+            repository
+                .save_answer_candidate_batch(&[secret])
+                .await
+                .is_err()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM answer_candidates")
             .fetch_one(fixture.database.pool())
             .await
             .unwrap();
@@ -406,6 +678,26 @@ mod tests {
                     metadata_sanitized: serde_json::json!({"page_kind": "work_preview"}),
                     position: 1,
                 }],
+            }
+        }
+
+        fn candidate(
+            snapshot: &QuestionSnapshot,
+            source: AnswerSource,
+            created_at: Timestamp,
+        ) -> AnswerCandidateRecord {
+            AnswerCandidateRecord {
+                id: AnswerCandidateId::new(),
+                question_snapshot_id: snapshot.id,
+                candidate: AnswerCandidate {
+                    question_id: snapshot.questions[0].id,
+                    source,
+                    answer: NormalizedAnswer::Selections(vec!["A".to_owned()]),
+                    confidence: Some(AnswerConfidence::try_new(8_000).unwrap()),
+                    explanation: Some("Bounded candidate explanation".to_owned()),
+                    provenance_sanitized: serde_json::json!({"resolver": "fixture"}),
+                },
+                created_at,
             }
         }
     }

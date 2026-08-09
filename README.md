@@ -29,7 +29,7 @@ Phase 0 已建立并持续完善以下基础：
 
 - Rust 2024 workspace 与清晰的 crate 边界；
 - Task / Execution、Remote State / Orchestration State 等独立领域模型；
-- 有界且脱敏的 Question / AnswerCandidate 领域模型、独立 AnswerSource，以及按 Task/Provider 绑定并整批事务持久化的不可变 QuestionSnapshot；
+- 有界且脱敏的 Question / AnswerCandidate 领域模型、独立 AnswerSource、按 Task/Provider 绑定的不可变 QuestionSnapshot，以及按 Snapshot/Question 绑定并整批事务持久化的多来源候选答案；
 - owner-scoped、整批校验且只读的 Provider 题目发现/解析编排，以及成功后原子落盘并返回快照身份的 HTTP/CLI 读取入口；
 - Capability-based Provider API、Metadata 与 Registry，包括与远端执行解耦的题目发现、解析和 Provider-native 候选答案解析槽位；
 - 课程发现到后续 capability 的短命、脱敏且不持久化路由上下文；

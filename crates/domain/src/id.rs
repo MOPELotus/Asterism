@@ -60,6 +60,7 @@ entity_id!(TaskSnapshotId);
 entity_id!(TaskDiffId);
 entity_id!(QuestionId);
 entity_id!(QuestionSnapshotId);
+entity_id!(AnswerCandidateId);
 entity_id!(SubmissionDraftId);
 entity_id!(SubmissionResultId);
 entity_id!(ExecutionId);

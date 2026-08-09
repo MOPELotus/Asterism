@@ -1873,3 +1873,18 @@ external answer banks remain Core-side `AnswerSource` concerns and must not be
 forced through a learning-platform Provider or its credentials. Core binding,
 all-or-nothing candidate validation and persistence remain later checkpoints;
 Chaoxing advertises no answer-resolution capability in this slice.
+
+## One-hundred-and-twenty-fourth Phase 0 slice
+
+Storage now persists immutable multi-source `AnswerCandidate` records without
+selecting a winner. Each record has a stable ID and a composite foreign-key
+binding to one real Question inside one immutable `QuestionSnapshot`. Batches
+may mix Manual, LocalCache, ProviderNative, ExternalBank and Other sources, but
+a foreign Question, duplicate record, invalid normalized answer, unsanitized
+provenance or database conflict rolls back the entire batch.
+
+Owner-scoped reads join Candidate through QuestionSnapshot, Task and
+ProviderAccount. Cumulative storage is capped at 20,000 Candidates and 16 MiB
+per QuestionSnapshot, including across repeated batches. This is only the
+candidate evidence boundary: it does not rank candidates, create a
+SubmissionDraft, invoke a Provider execution slot or grant submission policy.

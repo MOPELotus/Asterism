@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AttemptResult, AuditActor, AuthBootstrapClientEvent, AuthBootstrapSession,
-    AuthBootstrapSessionId, AuthSession, AuthSessionId, CreditAccount, CreditReservation,
-    CreditReservationId, CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt,
-    ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
-    ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote, ProviderAccount,
-    ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
-    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User,
-    UserId, WebSession, WebSessionId,
+    AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor, AuthBootstrapClientEvent,
+    AuthBootstrapSession, AuthBootstrapSessionId, AuthSession, AuthSessionId, CreditAccount,
+    CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId, Execution,
+    ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent,
+    ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote,
+    ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
+    Question, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, Task, TaskId,
+    Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -84,6 +84,32 @@ pub trait QuestionSnapshotRepository: Send + Sync {
         owner_id: UserId,
         task_id: TaskId,
     ) -> Result<Option<QuestionSnapshot>, StorageError>;
+}
+
+/// One immutable candidate returned by a specific `AnswerSource` and bound to a
+/// Question inside an immutable `QuestionSnapshot`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnswerCandidateRecord {
+    pub id: AnswerCandidateId,
+    pub question_snapshot_id: QuestionSnapshotId,
+    pub candidate: AnswerCandidate,
+    pub created_at: Timestamp,
+}
+
+/// Transactional multi-source candidate persistence. Selection and submission
+/// are deliberately outside this repository boundary.
+#[async_trait]
+pub trait AnswerCandidateRepository: Send + Sync {
+    async fn save_answer_candidate_batch(
+        &self,
+        candidates: &[AnswerCandidateRecord],
+    ) -> Result<(), StorageError>;
+
+    async fn list_owned_answer_candidates(
+        &self,
+        owner_id: UserId,
+        question_snapshot_id: QuestionSnapshotId,
+    ) -> Result<Vec<AnswerCandidateRecord>, StorageError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
