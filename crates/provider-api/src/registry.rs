@@ -5,7 +5,8 @@ use asterism_domain::ProviderId;
 use crate::{
     AuthenticationCapability, BrowserBridgeCapability, CourseInventoryCapability,
     ProviderCapability, ProviderMetadata, ProviderRuntimeSettingsSchema, ProviderSettingsError,
-    TaskDetailCapability, TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
+    QuestionInventoryCapability, QuestionParseCapability, TaskDetailCapability,
+    TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
 };
 
 #[derive(Clone)]
@@ -17,6 +18,8 @@ pub struct ProviderEntry {
     pub task_inventory: Option<Arc<dyn TaskInventoryCapability>>,
     pub task_detail: Option<Arc<dyn TaskDetailCapability>>,
     pub task_progress: Option<Arc<dyn TaskProgressCapability>>,
+    pub question_inventory: Option<Arc<dyn QuestionInventoryCapability>>,
+    pub question_parse: Option<Arc<dyn QuestionParseCapability>>,
     pub task_execution: Option<Arc<dyn TaskExecutionCapability>>,
     pub browser_bridge: Option<Arc<dyn BrowserBridgeCapability>>,
 }
@@ -32,6 +35,8 @@ impl std::fmt::Debug for ProviderEntry {
             .field("task_inventory", &self.task_inventory.is_some())
             .field("task_detail", &self.task_detail.is_some())
             .field("task_progress", &self.task_progress.is_some())
+            .field("question_inventory", &self.question_inventory.is_some())
+            .field("question_parse", &self.question_parse.is_some())
             .field("task_execution", &self.task_execution.is_some())
             .field("browser_bridge", &self.browser_bridge.is_some())
             .finish()
@@ -48,6 +53,8 @@ impl ProviderEntry {
             task_inventory: None,
             task_detail: None,
             task_progress: None,
+            question_inventory: None,
+            question_parse: None,
             task_execution: None,
             browser_bridge: None,
         }
@@ -99,6 +106,14 @@ impl ProviderEntry {
                 ProviderCapability::TaskProgressRead,
                 self.task_progress.is_some(),
             ),
+            (
+                ProviderCapability::QuestionInventory,
+                self.question_inventory.is_some(),
+            ),
+            (
+                ProviderCapability::QuestionParse,
+                self.question_parse.is_some(),
+            ),
         ];
         for (capability, implemented) in checks {
             if self.metadata.advertises(capability) != implemented {
@@ -113,8 +128,6 @@ impl ProviderEntry {
 
         let execution_capabilities = [
             ProviderCapability::ResourceExecution,
-            ProviderCapability::QuestionInventory,
-            ProviderCapability::QuestionParse,
             ProviderCapability::AnswerResolve,
             ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
@@ -173,6 +186,18 @@ impl ProviderEntry {
             (
                 "task_progress",
                 self.task_progress
+                    .as_ref()
+                    .map(|implementation| implementation.metadata()),
+            ),
+            (
+                "question_inventory",
+                self.question_inventory
+                    .as_ref()
+                    .map(|implementation| implementation.metadata()),
+            ),
+            (
+                "question_parse",
+                self.question_parse
                     .as_ref()
                     .map(|implementation| implementation.metadata()),
             ),
@@ -275,15 +300,53 @@ pub enum RegistryError {
 mod tests {
     use std::{collections::BTreeSet, sync::Arc};
 
-    use asterism_domain::ProviderId;
+    use asterism_domain::{ProviderId, Question, TaskId};
     use async_trait::async_trait;
 
     use super::*;
-    use crate::{ProviderContext, ProviderResult, RemoteCourse, RemoteTask, VerificationLevel};
+    use crate::{
+        ProviderContext, ProviderResult, RemoteCourse, RemoteQuestionRef, RemoteTask,
+        VerificationLevel,
+    };
 
     #[derive(Debug)]
     struct OtherTaskInventory {
         metadata: ProviderMetadata,
+    }
+
+    #[derive(Debug)]
+    struct FakeQuestionRead {
+        metadata: ProviderMetadata,
+    }
+
+    impl crate::ProviderIdentity for FakeQuestionRead {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl QuestionInventoryCapability for FakeQuestionRead {
+        async fn list_question_refs(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+        ) -> ProviderResult<Vec<RemoteQuestionRef>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl QuestionParseCapability for FakeQuestionRead {
+        async fn parse_question(
+            &self,
+            _context: &ProviderContext,
+            _task_id: TaskId,
+            _remote_task_id: &str,
+            _question: &RemoteQuestionRef,
+        ) -> ProviderResult<Question> {
+            unreachable!("registry identity test does not invoke parsing")
+        }
     }
 
     impl crate::ProviderIdentity for OtherTaskInventory {
@@ -414,5 +477,24 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn question_read_capabilities_are_independent_from_task_execution() {
+        let mut metadata = metadata();
+        metadata.capabilities.extend([
+            ProviderCapability::QuestionInventory,
+            ProviderCapability::QuestionParse,
+        ]);
+        let implementation = Arc::new(FakeQuestionRead {
+            metadata: metadata.clone(),
+        });
+        let mut entry = ProviderEntry::metadata_only(metadata);
+        entry.question_inventory = Some(implementation.clone());
+        entry.question_parse = Some(implementation);
+        assert!(entry.task_execution.is_none());
+
+        let mut registry = ProviderRegistry::default();
+        registry.register(entry).unwrap();
     }
 }

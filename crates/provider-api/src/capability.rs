@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, fmt};
 
 use asterism_domain::{
     AssessmentClass, AuthMethod, AuthSessionId, CourseId, LogLevel, ProviderAccountId, ProviderId,
-    RemoteState, SecretId, SessionKind, SourceType, TaskCapability, TaskId, Timestamp,
-    WaitingUserState,
+    Question, QuestionKind, RemoteState, SecretId, SessionKind, SourceType, TaskCapability, TaskId,
+    Timestamp, WaitingUserState,
 };
 use asterism_secrets::{CredentialBundle, CredentialField};
 use async_trait::async_trait;
@@ -16,6 +16,9 @@ use crate::{ProviderMetadata, ProviderResult};
 const MAX_ROUTE_CONTEXT_FIELDS: usize = 32;
 const MAX_ROUTE_CONTEXT_KEY_BYTES: usize = 64;
 const MAX_ROUTE_CONTEXT_VALUE_BYTES: usize = 4_096;
+const MAX_REMOTE_QUESTION_ID_BYTES: usize = 512;
+const MAX_QUESTION_REF_METADATA_BYTES: usize = 64 * 1_024;
+const MAX_QUESTION_POSITION: u32 = 100_000;
 
 #[derive(Clone, Debug)]
 pub struct ProviderContext {
@@ -86,6 +89,26 @@ pub trait TaskProgressCapability: ProviderIdentity {
         context: &ProviderContext,
         remote_task_id: &str,
     ) -> ProviderResult<RemoteProgress>;
+}
+
+#[async_trait]
+pub trait QuestionInventoryCapability: ProviderIdentity {
+    async fn list_question_refs(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+    ) -> ProviderResult<Vec<RemoteQuestionRef>>;
+}
+
+#[async_trait]
+pub trait QuestionParseCapability: ProviderIdentity {
+    async fn parse_question(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        question: &RemoteQuestionRef,
+    ) -> ProviderResult<Question>;
 }
 
 #[async_trait]
@@ -327,6 +350,46 @@ pub struct RemoteTaskDetail {
     pub normalized_detail: serde_json::Value,
 }
 
+/// Bounded question identity discovered for one fresh task attempt. Ephemeral
+/// route facts can be consumed by the same Provider during parsing but never
+/// serialize across the Core boundary.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RemoteQuestionRef {
+    pub remote_id: String,
+    pub position: u32,
+    pub kind_hint: QuestionKind,
+    pub metadata_sanitized: serde_json::Value,
+    #[serde(skip)]
+    pub route_context: ProviderRouteContext,
+}
+
+impl RemoteQuestionRef {
+    /// Validates the bounded, sanitized question-discovery contract while
+    /// leaving ephemeral route context opaque and non-serialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RemoteQuestionRefError`] for malformed identity/position or
+    /// oversized, credential-shaped metadata.
+    pub fn validate(&self) -> Result<(), RemoteQuestionRefError> {
+        if self.remote_id.is_empty()
+            || self.remote_id.len() > MAX_REMOTE_QUESTION_ID_BYTES
+            || self.remote_id.trim() != self.remote_id
+            || self.remote_id.chars().any(char::is_control)
+            || self.position == 0
+            || self.position > MAX_QUESTION_POSITION
+            || serde_json::to_vec(&self.metadata_sanitized).map_or(true, |encoded| {
+                encoded.len() > MAX_QUESTION_REF_METADATA_BYTES
+            })
+            || contains_secret_key(&self.metadata_sanitized)
+        {
+            Err(RemoteQuestionRefError::Invalid)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RemoteProgress {
     pub remote_state: RemoteState,
@@ -429,6 +492,12 @@ pub enum ProviderExecutionLogError {
     Invalid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum RemoteQuestionRefError {
+    #[error("remote question reference is invalid, oversized, or not sanitized")]
+    Invalid,
+}
+
 #[cfg(test)]
 mod execution_log_tests {
     use super::*;
@@ -465,6 +534,44 @@ mod execution_log_tests {
         assert_eq!(
             oversized.validate(),
             Err(ProviderExecutionLogError::Invalid)
+        );
+    }
+}
+
+#[cfg(test)]
+mod question_ref_tests {
+    use super::*;
+
+    fn question_ref() -> RemoteQuestionRef {
+        RemoteQuestionRef {
+            remote_id: "question-1".to_owned(),
+            position: 1,
+            kind_hint: QuestionKind::SingleChoice,
+            metadata_sanitized: serde_json::json!({"provider_kind": "single"}),
+            route_context: ProviderRouteContext::try_from_pairs([(
+                "chaoxing.question-route".to_owned(),
+                "ephemeral-value".to_owned(),
+            )])
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn remote_question_reference_is_bounded_sanitized_and_hides_routes() {
+        let reference = question_ref();
+        assert_eq!(reference.validate(), Ok(()));
+        let encoded = serde_json::to_string(&reference).unwrap();
+        assert!(!encoded.contains("ephemeral-value"));
+
+        let mut secret = question_ref();
+        secret.metadata_sanitized = serde_json::json!({"session_secret": "forbidden"});
+        assert_eq!(secret.validate(), Err(RemoteQuestionRefError::Invalid));
+
+        let mut invalid_position = question_ref();
+        invalid_position.position = 0;
+        assert_eq!(
+            invalid_position.validate(),
+            Err(RemoteQuestionRefError::Invalid)
         );
     }
 }

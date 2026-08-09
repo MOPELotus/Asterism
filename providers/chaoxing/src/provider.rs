@@ -90,6 +90,8 @@ fn compose_development_provider(
         task_inventory: Some(task_inventory),
         task_detail: Some(task_detail),
         task_progress: Some(task_progress),
+        question_inventory: None,
+        question_parse: None,
         task_execution: Some(task_execution),
         browser_bridge: None,
     })

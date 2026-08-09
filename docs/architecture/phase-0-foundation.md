@@ -1740,3 +1740,17 @@ ambiguity. Domain validation bounds collection sizes and nesting, rejects
 duplicate option/answer identities and credential-shaped metadata, and prevents
 one Provider parser from smuggling raw secrets into later answer or submission
 layers.
+
+## One-hundred-and-fifteenth Phase 0 slice
+
+`QuestionInventory` and `QuestionParse` now have independent Provider trait and
+registry slots. Advertising either read capability no longer forces a Provider
+to attach `TaskExecutionCapability`, so question discovery/parsing cannot
+silently imply permission or implementation for remote mutation.
+
+Inventory returns bounded `RemoteQuestionRef` values with stable attempt-local
+identity, position, type hint and sanitized facts. Short-lived Provider route
+context is explicitly skipped during serialization, as with course routing.
+Parsing receives the Core-owned local Task ID and one fresh reference and must
+return the normalized Domain `Question`; later Core orchestration will validate
+the complete question before persistence or answer resolution.

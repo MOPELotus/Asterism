@@ -378,6 +378,8 @@ mod tests {
                 task_inventory: Some(inventory.clone()),
                 task_detail: None,
                 task_progress: None,
+                question_inventory: None,
+                question_parse: None,
                 task_execution: None,
                 browser_bridge: None,
             })
@@ -447,6 +449,8 @@ mod tests {
                 task_inventory: Some(inventory),
                 task_detail: None,
                 task_progress: None,
+                question_inventory: None,
+                question_parse: None,
                 task_execution: None,
                 browser_bridge: None,
             })
@@ -485,6 +489,8 @@ mod tests {
                 task_inventory: Some(inventory),
                 task_detail: None,
                 task_progress: None,
+                question_inventory: None,
+                question_parse: None,
                 task_execution: None,
                 browser_bridge: None,
             })
