@@ -257,6 +257,14 @@ fn task_routes() -> Router<ApiState> {
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
             get(task::list_answer_candidates),
         )
+        .route(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts",
+            post(task::build_submission_draft),
+        )
+        .route(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}",
+            get(task::get_submission_draft),
+        )
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
 }
 
@@ -811,6 +819,21 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts".to_owned(),
+            submission_drafts_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}"
+                .to_owned(),
+            submission_draft_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
@@ -1106,6 +1129,58 @@ fn answer_candidates_path() -> Value {
     }})
 }
 
+fn submission_drafts_path() -> Value {
+    json!({"post": {
+        "operationId": "buildSubmissionDraft",
+        "description": "Builds and atomically persists one non-executable draft from exactly one explicit persisted AnswerCandidate per Question.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+            "type": "object",
+            "required": ["answer_candidate_ids"],
+            "properties": {
+                "answer_candidate_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5000,
+                    "items": {"type": "string", "format": "uuid"}
+                }
+            },
+            "additionalProperties": false
+        }}}},
+        "responses": {
+            "201": {"description": "Complete persisted and reviewable SubmissionDraft"},
+            "400": {"description": "Invalid Task, snapshot, Candidate, request ID, or body"},
+            "404": {"description": "Task or owner-scoped Question snapshot not found"},
+            "409": {"description": "Capability, account, selection, policy, user action, or snapshot binding conflict"},
+            "429": {"description": "Provider rate limited"},
+            "502": {"description": "Provider returned an inconsistent payload preview"},
+            "503": {"description": "Provider temporarily unavailable"}
+        }
+    }})
+}
+
+fn submission_draft_path() -> Value {
+    json!({"get": {
+        "operationId": "getSubmissionDraft",
+        "description": "Reads one persisted owner-scoped SubmissionDraft with exact Task and QuestionSnapshot binding and no Provider call.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "draft_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Persisted bounded SubmissionDraft rebuilt from authoritative Question and Candidate records"},
+            "400": {"description": "Invalid Task, Question snapshot, or Submission draft ID"},
+            "404": {"description": "Task/Snapshot-bound owner-scoped SubmissionDraft not found"}
+        }
+    }})
+}
+
 fn auth_bootstrap_credential_schema() -> Value {
     json!({
         "type": "object",
@@ -1357,7 +1432,9 @@ mod tests {
     use asterism_domain::{
         AnswerCandidate, AnswerCandidateId, AnswerSource, AssessmentClass, AuthMethod, AuthState,
         NormalizedAnswer, ProviderId, Question, QuestionId, QuestionKind, QuestionSnapshotId,
-        RemoteState, SessionKind, SourceType, TaskId,
+        RemoteState, SelectedAnswer, SessionKind, SourceType, SubmissionDraft, SubmissionDraftId,
+        SubmissionDraftItem, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
+        SubmissionPayloadPreview, TaskId,
     };
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, CourseInventoryCapability, CredentialValidation,
@@ -1371,6 +1448,7 @@ mod tests {
     use asterism_storage::{
         AnswerCandidateRecord, AnswerCandidateRepository, QuestionSnapshot,
         QuestionSnapshotRepository, SecretKeyring, SqliteQuestionSnapshotRepository,
+        SubmissionDraftRepository,
     };
     use async_trait::async_trait;
     use axum::{
@@ -3613,7 +3691,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_answer_candidates_require_owner_task_and_snapshot_binding() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the integration test keeps the persisted Candidate and Draft ownership chain in one database fixture"
+    )]
+    async fn persisted_candidates_and_drafts_require_owner_task_and_snapshot_binding() {
         let (app, database) = test_app(false, None).await;
         let bootstrap = bootstrap(&app).await;
         let cookie = bootstrap.headers()[header::SET_COOKIE]
@@ -3680,6 +3762,33 @@ mod tests {
             }])
             .await
             .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: snapshot.id,
+            provider_id: snapshot.provider_id.clone(),
+            provider_version: "0.1.0-test".to_owned(),
+            items: vec![SubmissionDraftItem {
+                question: snapshot.questions[0].clone(),
+                selected: SelectedAnswer {
+                    candidate_id,
+                    question_id,
+                    answer: NormalizedAnswer::Boolean(true),
+                    source: AnswerSource::Manual,
+                    confidence: None,
+                },
+            }],
+            payload_preview: SubmissionPayloadPreview {
+                encoding: SubmissionPayloadEncoding::Form,
+                format: "provider-alpha.work.v1".to_owned(),
+                fields: vec![SubmissionPayloadFieldPreview {
+                    question_id,
+                    field_name: "answer[question-1]".to_owned(),
+                }],
+            },
+            created_at: now,
+        };
+        repository.save_submission_draft(&draft).await.unwrap();
 
         let response = app
             .clone()
@@ -3701,12 +3810,51 @@ mod tests {
         assert_eq!(body["candidates"][0]["id"], candidate_id.to_string());
         assert_eq!(body["candidates"][0]["candidate"]["source"], "manual");
 
+        let draft_response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}/submission-drafts/{}",
+                    snapshot.id, draft.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(draft_response.status(), StatusCode::OK);
+        assert_eq!(draft_response.headers()[header::CACHE_CONTROL], "no-store");
+        let draft_body = response_json(draft_response).await;
+        assert_eq!(draft_body["id"], draft.id.to_string());
+        assert_eq!(
+            draft_body["items"][0]["selected"]["candidate_id"],
+            candidate_id.to_string()
+        );
+
         let mismatched = app
+            .clone()
             .oneshot(
                 Request::get(format!(
                     "/api/v1/tasks/{}/question-snapshots/{}/answer-candidates",
                     TaskId::new(),
                     snapshot.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatched.status(), StatusCode::NOT_FOUND);
+
+        let mismatched_draft = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{}/question-snapshots/{}/submission-drafts/{}",
+                    TaskId::new(),
+                    snapshot.id,
+                    draft.id
                 ))
                 .header(header::COOKIE, cookie)
                 .body(Body::empty())
@@ -3714,7 +3862,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(mismatched.status(), StatusCode::NOT_FOUND);
+        assert_eq!(mismatched_draft.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -4176,6 +4324,8 @@ mod tests {
             "/api/v1/tasks/{task_id}/questions",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts",
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}",
             "/api/v1/tasks/{task_id}/execute",
             "/api/v1/credits/account",
             "/api/v1/credits/transactions",
@@ -4212,6 +4362,16 @@ mod tests {
             document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates"]
                 ["get"]["operationId"],
             "listAnswerCandidates"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts"]
+                ["post"]["operationId"],
+            "buildSubmissionDraft"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}"]
+                ["get"]["operationId"],
+            "getSubmissionDraft"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],

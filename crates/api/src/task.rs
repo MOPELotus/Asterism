@@ -2,20 +2,23 @@ use std::str::FromStr;
 
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, Execution, ProviderAccountId, ProviderId, Question,
-    QuestionSnapshotId, Task, TaskId, Timestamp,
+    QuestionSnapshotId, SubmissionDraftId, Task, TaskId, Timestamp,
 };
 use asterism_engine::{
-    ExecuteTaskCommand, ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
-    ProviderAnswerResolveError, ProviderAnswerResolveService, ProviderQuestionReadError,
-    ProviderQuestionReadService, ProviderTaskDetailError, ProviderTaskDetailService,
-    ProviderTaskProgressError, ProviderTaskProgressService, ReadTaskDetailCommand,
-    ReadTaskProgressCommand, ReadTaskQuestionsCommand, ResolveProviderAnswersCommand,
+    BuildSubmissionDraftCommand, ExecuteTaskCommand, ExecutionRequestError,
+    ExecutionRequestService, FormalAssessmentPolicy, ProviderAnswerResolveError,
+    ProviderAnswerResolveService, ProviderQuestionReadError, ProviderQuestionReadService,
+    ProviderTaskDetailError, ProviderTaskDetailService, ProviderTaskProgressError,
+    ProviderTaskProgressService, ReadTaskDetailCommand, ReadTaskProgressCommand,
+    ReadTaskQuestionsCommand, ResolveProviderAnswersCommand, SubmissionDraftBuildError,
+    SubmissionDraftBuildService,
 };
 use asterism_provider_api::{ProviderErrorKind, RemoteProgress, RemoteTaskDetail};
 use asterism_storage::{
     AnswerCandidateRepository, QuestionSnapshotRepository, SqliteExecutionRepository,
     SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
-    SqliteQuestionSnapshotRepository, SqliteTaskQueryRepository, TaskQueryRepository,
+    SqliteQuestionSnapshotRepository, SqliteTaskQueryRepository, SubmissionDraftRepository,
+    TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -270,6 +273,71 @@ pub(super) async fn list_answer_candidates(
         })
         .into_response(),
     ))
+}
+
+pub(super) async fn build_submission_draft(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((task_id, snapshot_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<BuildSubmissionDraftRequest>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
+    let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let answer_candidate_ids = request
+        .answer_candidate_ids
+        .iter()
+        .map(|candidate_id| {
+            AnswerCandidateId::from_str(candidate_id).map_err(|_| {
+                ApiError::bad_request(
+                    "invalid_answer_candidate_id",
+                    "an AnswerCandidate ID is invalid",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let submissions = SqliteQuestionSnapshotRepository::new(state.database.clone());
+    let result = SubmissionDraftBuildService::new(
+        state.providers,
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database),
+        submissions,
+    )
+    .build(BuildSubmissionDraftCommand {
+        owner_id,
+        task_id,
+        question_snapshot_id: snapshot_id,
+        answer_candidate_ids,
+        correlation_id: correlation_id.to_owned(),
+    })
+    .await
+    .map_err(map_submission_draft_build_error)?;
+    Ok(crate::auth::no_store(
+        (StatusCode::CREATED, Json(result.draft)).into_response(),
+    ))
+}
+
+pub(super) async fn get_submission_draft(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((task_id, snapshot_id, draft_id)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
+    let draft_id = SubmissionDraftId::from_str(&draft_id).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_submission_draft_id",
+            "Submission draft ID is invalid",
+        )
+    })?;
+    let draft = SqliteQuestionSnapshotRepository::new(state.database)
+        .find_owned_submission_draft(owner_id, draft_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|draft| draft.task_id == task_id && draft.question_snapshot_id == snapshot_id)
+        .ok_or_else(|| ApiError::not_found("submission_draft_not_found"))?;
+    Ok(crate::auth::no_store(Json(draft).into_response()))
 }
 
 pub(super) async fn execute_task(
@@ -670,6 +738,90 @@ fn map_provider_answer_resolve_error(error: ProviderAnswerResolveError) -> ApiEr
     }
 }
 
+fn map_submission_draft_build_error(error: SubmissionDraftBuildError) -> ApiError {
+    match error {
+        SubmissionDraftBuildError::TaskNotFound => ApiError::not_found("task_not_found"),
+        SubmissionDraftBuildError::QuestionSnapshotNotFound => {
+            ApiError::not_found("question_snapshot_not_found")
+        }
+        SubmissionDraftBuildError::TaskCapabilityUnavailable
+        | SubmissionDraftBuildError::CapabilityUnavailable(_) => ApiError::conflict(
+            "provider_submission_build_unavailable",
+            "the task does not expose submission draft construction",
+        ),
+        SubmissionDraftBuildError::QuestionSnapshotBindingInvalid => ApiError::conflict(
+            "question_snapshot_binding_invalid",
+            "the Question snapshot is not bound to this task and Provider",
+        ),
+        SubmissionDraftBuildError::SelectionInvalid
+        | SubmissionDraftBuildError::SelectionIncomplete => ApiError::conflict(
+            "submission_selection_invalid",
+            "every Question must select exactly one Candidate from this snapshot",
+        ),
+        SubmissionDraftBuildError::AccountNotAuthenticated => ApiError::conflict(
+            "provider_account_not_authenticated",
+            "the Provider account must be authenticated before building a draft",
+        ),
+        SubmissionDraftBuildError::ProviderNotRegistered(_) => ApiError::conflict(
+            "provider_not_registered",
+            "the task Provider is not registered",
+        ),
+        SubmissionDraftBuildError::InvalidCorrelationId => ApiError::bad_request(
+            "invalid_request_id",
+            "the request correlation ID is invalid",
+        ),
+        SubmissionDraftBuildError::ProviderPreviewInvalid => {
+            tracing::warn!(%error, "Provider returned invalid SubmissionDraft preview");
+            ApiError::bad_gateway(
+                "provider_submission_preview_invalid",
+                "the Provider returned an inconsistent submission preview",
+            )
+        }
+        SubmissionDraftBuildError::Assessment(_) => ApiError::conflict(
+            "formal_assessment_blocked",
+            "formal assessment draft construction is disabled by Core policy",
+        ),
+        SubmissionDraftBuildError::Provider(provider_error) => match provider_error.kind {
+            ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+                provider_error
+                    .retry_after_seconds
+                    .unwrap_or(60)
+                    .clamp(1, 86_400),
+            ),
+            ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+                tracing::warn!(error = %provider_error, "Provider submission build is temporarily unavailable");
+                ApiError::service_unavailable(
+                    "provider_unavailable",
+                    "the Provider is temporarily unavailable",
+                )
+            }
+            ProviderErrorKind::Authentication
+            | ProviderErrorKind::Authorization
+            | ProviderErrorKind::HumanRequired => ApiError::conflict(
+                "provider_action_required",
+                "the Provider requires authentication or user action",
+            ),
+            ProviderErrorKind::RemoteChanged => ApiError::conflict(
+                "task_remote_changed",
+                "the remote task no longer matches the stored task",
+            ),
+            ProviderErrorKind::UnsupportedTask => ApiError::conflict(
+                "provider_submission_build_unavailable",
+                "the Provider cannot build a draft for this task",
+            ),
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+                tracing::warn!(error = %provider_error, "Provider returned invalid SubmissionDraft preview");
+                ApiError::bad_gateway(
+                    "provider_submission_preview_invalid",
+                    "the Provider returned an inconsistent submission preview",
+                )
+            }
+            ProviderErrorKind::Internal => ApiError::internal(provider_error),
+        },
+        SubmissionDraftBuildError::Storage(error) => ApiError::internal(error),
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TaskListQuery {
@@ -732,6 +884,12 @@ struct AnswerCandidateResponse {
     id: AnswerCandidateId,
     candidate: AnswerCandidate,
     created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BuildSubmissionDraftRequest {
+    answer_candidate_ids: Vec<String>,
 }
 
 fn parse_task_question_snapshot_ids(

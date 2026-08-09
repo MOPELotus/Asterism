@@ -1991,3 +1991,23 @@ from Execute and Submit policy. The service creates no Execution, reserves no
 credit, calls no Task execution slot and cannot submit a remote answer. Chaoxing
 still advertises no SubmissionBuild implementation, and no public route is
 added in this checkpoint.
+
+## One-hundred-and-thirty-first Phase 0 slice
+
+Submission draft construction is exposed as POST on an explicit
+Task/QuestionSnapshot path. The request contains only persisted AnswerCandidate
+IDs, requires Task Read permission and the request correlation header, and
+returns the immutable draft with `201 Created` and `no-store`. The matching CLI
+command requires Task ID, Snapshot ID and at least one Candidate ID.
+
+A separate GET and CLI command read one persisted draft through the complete
+Task/QuestionSnapshot/SubmissionDraft path. Ownership is resolved in Storage
+and both route bindings are rechecked before any content is returned. Reading a
+draft performs no Provider call; building one still uses only the independent
+SubmissionBuild slot.
+
+OpenAPI describes both operations and their bounded request identity list.
+Neither route uses `/execute`, accepts raw answer or Provider payload values,
+creates an Execution, reserves credit, or permits remote submission. A Provider
+without SubmissionBuild, including Chaoxing at this checkpoint, returns a clear
+capability conflict before draft creation.

@@ -235,6 +235,19 @@ enum TaskCommand {
         task_id: String,
         snapshot_id: String,
     },
+    /// Build one reviewable draft from exactly one persisted Candidate per Question.
+    BuildSubmission {
+        task_id: String,
+        snapshot_id: String,
+        #[arg(required = true, num_args = 1..)]
+        candidate_ids: Vec<String>,
+    },
+    /// Read one persisted `SubmissionDraft` without calling the Provider.
+    SubmissionDraft {
+        task_id: String,
+        snapshot_id: String,
+        draft_id: String,
+    },
     /// Schedule one task through the shared idempotent Core Action.
     Execute {
         task_id: String,
@@ -761,6 +774,33 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
             );
             client.get_authorized(&path, &token).await?
         }
+        TaskCommand::BuildSubmission {
+            task_id,
+            snapshot_id,
+            candidate_ids,
+        } => {
+            let path = format!(
+                "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts"
+            );
+            client
+                .post_authorized(
+                    &path,
+                    &token,
+                    &json!({"answer_candidate_ids": candidate_ids}),
+                    StatusCode::CREATED,
+                )
+                .await?
+        }
+        TaskCommand::SubmissionDraft {
+            task_id,
+            snapshot_id,
+            draft_id,
+        } => {
+            let path = format!(
+                "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}"
+            );
+            client.get_authorized(&path, &token).await?
+        }
         TaskCommand::Execute {
             task_id,
             idempotency_key,
@@ -1023,6 +1063,57 @@ mod tests {
                     snapshot_id,
                 }
             } if task_id == "task-id" && snapshot_id == "snapshot-id"
+        ));
+    }
+
+    #[test]
+    fn task_submission_build_requires_snapshot_and_candidate_identities() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "build-submission",
+            "task-id",
+            "snapshot-id",
+            "candidate-a",
+            "candidate-b",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::BuildSubmission {
+                    task_id,
+                    snapshot_id,
+                    candidate_ids,
+                }
+            } if task_id == "task-id"
+                && snapshot_id == "snapshot-id"
+                && candidate_ids == ["candidate-a", "candidate-b"]
+        ));
+    }
+
+    #[test]
+    fn task_submission_draft_read_requires_all_three_identities() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "submission-draft",
+            "task-id",
+            "snapshot-id",
+            "draft-id",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::SubmissionDraft {
+                    task_id,
+                    snapshot_id,
+                    draft_id,
+                }
+            } if task_id == "task-id"
+                && snapshot_id == "snapshot-id"
+                && draft_id == "draft-id"
         ));
     }
 
