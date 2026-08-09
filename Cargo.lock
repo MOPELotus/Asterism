@@ -304,6 +304,7 @@ dependencies = [
  "asterism-auth",
  "asterism-domain",
  "asterism-events",
+ "asterism-provider-api",
  "asterism-scheduler",
  "asterism-secrets",
  "async-trait",

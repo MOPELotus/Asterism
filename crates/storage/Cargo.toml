@@ -11,6 +11,7 @@ repository.workspace = true
 asterism-auth = { path = "../auth" }
 asterism-domain = { path = "../domain" }
 asterism-events = { path = "../events" }
+asterism-provider-api = { path = "../provider-api" }
 asterism-scheduler = { path = "../scheduler" }
 asterism-secrets = { path = "../secrets" }
 async-trait.workspace = true

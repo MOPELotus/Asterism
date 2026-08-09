@@ -53,6 +53,7 @@ macro_rules! entity_id {
 
 entity_id!(UserId);
 entity_id!(ProviderAccountId);
+entity_id!(ProviderRuntimeSettingsId);
 entity_id!(CourseId);
 entity_id!(TaskId);
 entity_id!(TaskSnapshotId);

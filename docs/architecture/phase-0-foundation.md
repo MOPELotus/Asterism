@@ -1503,3 +1503,23 @@ merge boundary only: Core persistence, revision/audit writes, Master-only API
 surfaces and immutable Execution snapshots remain separate transactional
 slices. The current Chaoxing implementation advertises an empty schema until a
 corresponding execution capability actually consumes a concrete setting.
+
+## One-hundredth Phase 0 slice
+
+Core now persists validated Provider runtime-setting patches at Provider,
+ProviderAccount and Task scope. The SQLite model uses partial unique indexes for
+one active patch per exact target and composite foreign keys to bind Task to its
+real ProviderAccount and ProviderAccount to its real Provider ID. Cross-Provider
+or cross-account writes return target-not-found without creating a detached
+configuration. Account and Task settings cascade with their owning resources;
+the global Provider default remains independent.
+
+Writes run under one immediate transaction, require an expected revision, and
+advance a nonzero monotonic revision. Stale creates and updates return an
+explicit revision conflict. The Provider schema validates every patch before
+the transaction, while persisted JSON is capped at 64 KiB and separately bound
+to its schema version. Each successful create or replacement writes a sanitized
+Audit record in the same transaction containing only target identifiers,
+schema/revision and changed field keys—not setting values. Master-only API
+surfaces, effective-value/source reads and immutable Execution snapshots remain
+the next integration slices.

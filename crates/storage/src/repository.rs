@@ -5,8 +5,11 @@ use asterism_domain::{
     CreditReservationId, CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt,
     ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
     ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote, ProviderAccount,
-    ProviderAccountId, ProviderErrorClass, ScheduleId, ServiceToken, ServiceTokenId, Task, TaskId,
-    Timestamp, User, UserId, WebSession, WebSessionId,
+    ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, ScheduleId,
+    ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+};
+use asterism_provider_api::{
+    ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema, ProviderSettingScope,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -142,6 +145,84 @@ pub trait ProviderAccountRuntimeRepository: Send + Sync {
         &self,
         account_id: ProviderAccountId,
     ) -> Result<Option<ProviderAccount>, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderRuntimeSettingsTarget {
+    Provider {
+        provider_id: ProviderId,
+    },
+    ProviderAccount {
+        provider_id: ProviderId,
+        provider_account_id: ProviderAccountId,
+    },
+    Task {
+        provider_id: ProviderId,
+        provider_account_id: ProviderAccountId,
+        task_id: TaskId,
+    },
+}
+
+impl ProviderRuntimeSettingsTarget {
+    #[must_use]
+    pub const fn scope(&self) -> ProviderSettingScope {
+        match self {
+            Self::Provider { .. } => ProviderSettingScope::Provider,
+            Self::ProviderAccount { .. } => ProviderSettingScope::ProviderAccount,
+            Self::Task { .. } => ProviderSettingScope::Task,
+        }
+    }
+
+    #[must_use]
+    pub const fn provider_id(&self) -> &ProviderId {
+        match self {
+            Self::Provider { provider_id }
+            | Self::ProviderAccount { provider_id, .. }
+            | Self::Task { provider_id, .. } => provider_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderRuntimeSettingsRecord {
+    pub id: ProviderRuntimeSettingsId,
+    pub target: ProviderRuntimeSettingsTarget,
+    pub patch: ProviderRuntimeSettingsPatch,
+    pub revision: u32,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProviderRuntimeSettingsWriteRequest<'a> {
+    pub target: ProviderRuntimeSettingsTarget,
+    pub expected_revision: u32,
+    pub patch: &'a ProviderRuntimeSettingsPatch,
+    pub schema: &'a ProviderRuntimeSettingsSchema,
+    pub actor: AuditActor,
+    pub correlation_id: &'a str,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderRuntimeSettingsWriteOutcome {
+    Stored(ProviderRuntimeSettingsRecord),
+    TargetNotFound,
+    RevisionConflict,
+}
+
+/// Master-owned Provider runtime settings with optimistic concurrency.
+#[async_trait]
+pub trait ProviderRuntimeSettingsRepository: Send + Sync {
+    async fn find_provider_runtime_settings(
+        &self,
+        target: &ProviderRuntimeSettingsTarget,
+    ) -> Result<Option<ProviderRuntimeSettingsRecord>, StorageError>;
+
+    async fn write_provider_runtime_settings(
+        &self,
+        request: ProviderRuntimeSettingsWriteRequest<'_>,
+    ) -> Result<ProviderRuntimeSettingsWriteOutcome, StorageError>;
 }
 
 /// Owner-scoped observable Provider authentication attempts.
