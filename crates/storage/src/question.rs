@@ -6,7 +6,7 @@ use asterism_domain::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
-use sqlx::Row;
+use sqlx::{Row, sqlite::SqliteRow};
 
 use crate::{
     AnswerCandidateRecord, AnswerCandidateRepository, Database, QuestionSnapshot,
@@ -89,6 +89,31 @@ impl QuestionSnapshotRepository for SqliteQuestionSnapshotRepository {
         Ok(())
     }
 
+    async fn find_owned_question_snapshot(
+        &self,
+        owner_id: UserId,
+        question_snapshot_id: QuestionSnapshotId,
+    ) -> Result<Option<QuestionSnapshot>, StorageError> {
+        let row = sqlx::query(
+            "SELECT snapshot.id, snapshot.task_id, snapshot.provider_id, \
+                    snapshot.provider_version, snapshot.captured_at, \
+                    snapshot.question_count, snapshot.total_bytes \
+             FROM question_snapshots AS snapshot \
+             INNER JOIN tasks AS task ON task.id = snapshot.task_id \
+             INNER JOIN provider_accounts AS account \
+                ON account.id = task.provider_account_id \
+             WHERE account.owner_user_id = ? AND snapshot.id = ?",
+        )
+        .bind(owner_id.to_string())
+        .bind(question_snapshot_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        match row {
+            Some(row) => Ok(Some(decode_question_snapshot(&self.database, &row).await?)),
+            None => Ok(None),
+        }
+    }
+
     async fn find_latest_owned_question_snapshot(
         &self,
         owner_id: UserId,
@@ -109,62 +134,68 @@ impl QuestionSnapshotRepository for SqliteQuestionSnapshotRepository {
         .bind(task_id.to_string())
         .fetch_optional(self.database.pool())
         .await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-
-        let snapshot_id = parse_id::<QuestionSnapshotId>(row.try_get("id")?)?;
-        let stored_count = usize::try_from(row.try_get::<i64, _>("question_count")?)
-            .map_err(|_| invalid_snapshot())?;
-        let stored_bytes = usize::try_from(row.try_get::<i64, _>("total_bytes")?)
-            .map_err(|_| invalid_snapshot())?;
-        let item_rows = sqlx::query(
-            "SELECT question_id, remote_question_id, position, question_json \
-             FROM question_snapshot_items WHERE snapshot_id = ? ORDER BY position",
-        )
-        .bind(snapshot_id.to_string())
-        .fetch_all(self.database.pool())
-        .await?;
-        if item_rows.len() != stored_count || stored_count > MAX_QUESTIONS_PER_SNAPSHOT {
-            return Err(invalid_snapshot());
+        match row {
+            Some(row) => Ok(Some(decode_question_snapshot(&self.database, &row).await?)),
+            None => Ok(None),
         }
-
-        let mut total_bytes = 0usize;
-        let mut questions = Vec::with_capacity(item_rows.len());
-        for item in item_rows {
-            let json: &str = item.try_get("question_json")?;
-            total_bytes = total_bytes
-                .checked_add(json.len())
-                .ok_or_else(invalid_snapshot)?;
-            let question: Question = serde_json::from_str(json)?;
-            let stored_id = parse_id::<QuestionId>(item.try_get("question_id")?)?;
-            let stored_remote_id: Option<String> = item.try_get("remote_question_id")?;
-            let stored_position = u32::try_from(item.try_get::<i64, _>("position")?)
-                .map_err(|_| invalid_snapshot())?;
-            if question.id != stored_id
-                || question.remote_question_id != stored_remote_id
-                || question.position != stored_position
-            {
-                return Err(invalid_snapshot());
-            }
-            questions.push(question);
-        }
-        if total_bytes != stored_bytes || total_bytes > MAX_QUESTION_SNAPSHOT_BYTES {
-            return Err(invalid_snapshot());
-        }
-
-        let snapshot = QuestionSnapshot {
-            id: snapshot_id,
-            task_id: parse_id::<TaskId>(row.try_get("task_id")?)?,
-            provider_id: ProviderId::new(row.try_get::<String, _>("provider_id")?)
-                .map_err(|_| invalid_snapshot())?,
-            provider_version: row.try_get("provider_version")?,
-            captured_at: decode_timestamp(row.try_get("captured_at")?)?,
-            questions,
-        };
-        validate_and_encode(&snapshot)?;
-        Ok(Some(snapshot))
     }
+}
+
+async fn decode_question_snapshot(
+    database: &Database,
+    row: &SqliteRow,
+) -> Result<QuestionSnapshot, StorageError> {
+    let snapshot_id = parse_id::<QuestionSnapshotId>(row.try_get("id")?)?;
+    let stored_count = usize::try_from(row.try_get::<i64, _>("question_count")?)
+        .map_err(|_| invalid_snapshot())?;
+    let stored_bytes =
+        usize::try_from(row.try_get::<i64, _>("total_bytes")?).map_err(|_| invalid_snapshot())?;
+    let item_rows = sqlx::query(
+        "SELECT question_id, remote_question_id, position, question_json \
+         FROM question_snapshot_items WHERE snapshot_id = ? ORDER BY position",
+    )
+    .bind(snapshot_id.to_string())
+    .fetch_all(database.pool())
+    .await?;
+    if item_rows.len() != stored_count || stored_count > MAX_QUESTIONS_PER_SNAPSHOT {
+        return Err(invalid_snapshot());
+    }
+
+    let mut total_bytes = 0usize;
+    let mut questions = Vec::with_capacity(item_rows.len());
+    for item in item_rows {
+        let json: &str = item.try_get("question_json")?;
+        total_bytes = total_bytes
+            .checked_add(json.len())
+            .ok_or_else(invalid_snapshot)?;
+        let question: Question = serde_json::from_str(json)?;
+        let stored_id = parse_id::<QuestionId>(item.try_get("question_id")?)?;
+        let stored_remote_id: Option<String> = item.try_get("remote_question_id")?;
+        let stored_position =
+            u32::try_from(item.try_get::<i64, _>("position")?).map_err(|_| invalid_snapshot())?;
+        if question.id != stored_id
+            || question.remote_question_id != stored_remote_id
+            || question.position != stored_position
+        {
+            return Err(invalid_snapshot());
+        }
+        questions.push(question);
+    }
+    if total_bytes != stored_bytes || total_bytes > MAX_QUESTION_SNAPSHOT_BYTES {
+        return Err(invalid_snapshot());
+    }
+
+    let snapshot = QuestionSnapshot {
+        id: snapshot_id,
+        task_id: parse_id::<TaskId>(row.try_get("task_id")?)?,
+        provider_id: ProviderId::new(row.try_get::<String, _>("provider_id")?)
+            .map_err(|_| invalid_snapshot())?,
+        provider_version: row.try_get("provider_version")?,
+        captured_at: decode_timestamp(row.try_get("captured_at")?)?,
+        questions,
+    };
+    validate_and_encode(&snapshot)?;
+    Ok(snapshot)
 }
 
 #[async_trait]
@@ -478,9 +509,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(latest, second);
+        assert_eq!(
+            repository
+                .find_owned_question_snapshot(fixture.owner, first.id)
+                .await
+                .unwrap(),
+            Some(first.clone())
+        );
         assert!(
             repository
                 .find_latest_owned_question_snapshot(UserId::new(), fixture.task)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            repository
+                .find_owned_question_snapshot(UserId::new(), first.id)
                 .await
                 .unwrap()
                 .is_none()

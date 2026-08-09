@@ -1888,3 +1888,18 @@ ProviderAccount. Cumulative storage is capped at 20,000 Candidates and 16 MiB
 per QuestionSnapshot, including across repeated batches. This is only the
 candidate evidence boundary: it does not rank candidates, create a
 SubmissionDraft, invoke a Provider execution slot or grant submission policy.
+
+## One-hundred-and-twenty-fifth Phase 0 slice
+
+Core now orchestrates Provider-native answer resolution against one explicitly
+selected immutable `QuestionSnapshot`. Owner, Task, authenticated
+ProviderAccount and Provider identity must all match; Core never silently swaps
+in a newer snapshot. The Task must advertise `AnswerResolve`, and Registry must
+provide the independent answer-resolution slot before Provider code is called.
+
+Every returned Candidate must reference a Question in that snapshot, identify
+its source as `ProviderNative`, satisfy Domain validation and be unique within
+the bounded batch. Only the complete validated batch is persisted. Formal
+assessment policy treats Resolve as read-only like Parse, while Execute and
+Submit remain independently disabled. This checkpoint has no public API route
+and Chaoxing still advertises no answer-resolution implementation.

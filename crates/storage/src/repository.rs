@@ -79,6 +79,12 @@ pub trait QuestionSnapshotRepository: Send + Sync {
     async fn save_question_snapshot(&self, snapshot: &QuestionSnapshot)
     -> Result<(), StorageError>;
 
+    async fn find_owned_question_snapshot(
+        &self,
+        owner_id: UserId,
+        question_snapshot_id: QuestionSnapshotId,
+    ) -> Result<Option<QuestionSnapshot>, StorageError>;
+
     async fn find_latest_owned_question_snapshot(
         &self,
         owner_id: UserId,

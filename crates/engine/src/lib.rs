@@ -1,5 +1,6 @@
 //! Pure orchestration state machines and policy guards.
 
+mod answer_resolve;
 mod assessment;
 mod auth_bootstrap;
 mod auth_bootstrap_credential;
@@ -17,6 +18,10 @@ mod task_detail;
 mod task_progress;
 mod transition;
 
+pub use answer_resolve::{
+    ProviderAnswerResolveError, ProviderAnswerResolveResult, ProviderAnswerResolveService,
+    ResolveProviderAnswersCommand,
+};
 pub use assessment::{
     AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action,
 };

@@ -307,6 +307,20 @@ mod tests {
             Ok(())
         }
 
+        async fn find_owned_question_snapshot(
+            &self,
+            _owner_id: UserId,
+            question_snapshot_id: QuestionSnapshotId,
+        ) -> Result<Option<QuestionSnapshot>, StorageError> {
+            Ok(self
+                .snapshots
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|snapshot| snapshot.id == question_snapshot_id)
+                .cloned())
+        }
+
         async fn find_latest_owned_question_snapshot(
             &self,
             _owner_id: UserId,
