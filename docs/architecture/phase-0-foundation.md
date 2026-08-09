@@ -969,3 +969,22 @@ delayed refreshes carrying stale metadata fail with a version conflict and
 cannot overwrite a newer session or password.
 This is a generic persistence contract only; automatic Chaoxing retry remains a
 separate Provider transport slice.
+
+## Seventy-second Phase 0 slice
+
+Chaoxing now has a bounded Cookie-first renewal path which remains independent
+of Capture. Missing or locally expired Cookies and remote authentication
+responses may trigger one saved-password login, one root course-list Cookie
+validation, one compare-and-replace credential commit, and one replay of the
+whole inventory operation. Provider, account, full credential metadata and
+Secret versions remain bound throughout; striped per-account renewal locks stop
+same-process scans from issuing duplicate logins, while storage version
+conflicts prevent stale writers across processes. Captcha or SMS responses stop
+as typed human-required states, and no operation enters an unbounded retry loop.
+One bounded ten-minute cache, keyed by account, the original complete reference
+set and correlation ID, lets later Course/Work/Exam calls in that same scan use
+the newly committed Cookie even though their immutable context still carries
+the pre-renewal references; entries remain redacted and zeroize when evicted.
+The development factory can compose this resolver and renewer directly while
+sharing the same native authentication transport with session validation; it
+still does not register Chaoxing in the daemon or imply live verification.

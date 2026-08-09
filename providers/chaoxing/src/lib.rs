@@ -25,7 +25,7 @@ pub use inventory::{
 pub use native_http::{
     ChaoxingCookieSession, ChaoxingSessionResolver, NativeChaoxingInventoryTransport,
 };
-pub use provider::build_development_provider;
+pub use provider::{build_development_provider, build_development_provider_with_renewal};
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use task_inventory::{
     ChaoxingCourseRoute, ChaoxingInventoryDocument, ChaoxingInventoryTransport,

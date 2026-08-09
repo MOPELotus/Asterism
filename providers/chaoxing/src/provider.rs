@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use asterism_networking::ResolvedNetworkProfile;
 use asterism_provider_api::{ProviderEntry, ProviderResult};
+use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingSessionResolver,
     ChaoxingTaskInventory, NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
-    metadata::development_metadata,
+    StoredChaoxingSessionResolver, metadata::development_metadata,
 };
 
 /// Composes the complete development-level Chaoxing Provider around one Core
@@ -23,6 +24,36 @@ pub fn build_development_provider(
 ) -> ProviderResult<ProviderEntry> {
     let authentication_transport =
         Arc::new(NativeChaoxingAuthenticationTransport::try_new(network)?);
+    compose_development_provider(network, sessions, authentication_transport)
+}
+
+/// Composes the complete development Provider with Cookie-first automatic
+/// renewal around Core's scoped runtime credential boundaries.
+///
+/// # Errors
+///
+/// Returns a sanitized Provider error when metadata or either native HTTP
+/// client cannot be initialized.
+pub fn build_development_provider_with_renewal(
+    network: &ResolvedNetworkProfile,
+    resolver: Arc<dyn ProviderCredentialResolver>,
+    renewer: Arc<dyn ProviderCredentialRenewer>,
+) -> ProviderResult<ProviderEntry> {
+    let authentication_transport =
+        Arc::new(NativeChaoxingAuthenticationTransport::try_new(network)?);
+    let sessions = Arc::new(StoredChaoxingSessionResolver::with_renewal(
+        resolver,
+        renewer,
+        authentication_transport.clone(),
+    ));
+    compose_development_provider(network, sessions, authentication_transport)
+}
+
+fn compose_development_provider(
+    network: &ResolvedNetworkProfile,
+    sessions: Arc<dyn ChaoxingSessionResolver>,
+    authentication_transport: Arc<NativeChaoxingAuthenticationTransport>,
+) -> ProviderResult<ProviderEntry> {
     let inventory_transport = Arc::new(NativeChaoxingInventoryTransport::try_new(
         network,
         sessions.clone(),
@@ -51,6 +82,10 @@ pub fn build_development_provider(
 mod tests {
     use asterism_networking::NetworkProfile;
     use asterism_provider_api::{ProviderCapability, ProviderContext, ProviderRegistry};
+    use asterism_secrets::{
+        ProviderCredential, ProviderCredentialRenewal, ProviderCredentialResolution,
+        ResolvedProviderCredential, SecretStoreError,
+    };
     use async_trait::async_trait;
 
     use super::*;
@@ -58,6 +93,29 @@ mod tests {
 
     #[derive(Debug)]
     struct FixtureSessions;
+
+    #[derive(Debug)]
+    struct FixtureCredentials;
+
+    #[async_trait]
+    impl ProviderCredentialResolver for FixtureCredentials {
+        async fn resolve_provider_credentials(
+            &self,
+            _request: ProviderCredentialResolution,
+        ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError> {
+            Err(SecretStoreError::NotFound)
+        }
+    }
+
+    #[async_trait]
+    impl ProviderCredentialRenewer for FixtureCredentials {
+        async fn renew_provider_credentials(
+            &self,
+            _request: ProviderCredentialRenewal,
+        ) -> Result<Vec<ProviderCredential>, SecretStoreError> {
+            Err(SecretStoreError::NotFound)
+        }
+    }
 
     #[async_trait]
     impl ChaoxingSessionResolver for FixtureSessions {
@@ -74,6 +132,15 @@ mod tests {
         let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
             .expect("built-in network profile");
         let entry = build_development_provider(&network, Arc::new(FixtureSessions)).unwrap();
+        assert_registry_consistent(entry);
+        let credentials = Arc::new(FixtureCredentials);
+        let renewing =
+            build_development_provider_with_renewal(&network, credentials.clone(), credentials)
+                .unwrap();
+        assert_registry_consistent(renewing);
+    }
+
+    fn assert_registry_consistent(entry: ProviderEntry) {
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());

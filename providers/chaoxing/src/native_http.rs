@@ -88,6 +88,16 @@ pub trait ChaoxingSessionResolver: Send + Sync {
         &self,
         context: &ProviderContext,
     ) -> ProviderResult<ChaoxingCookieSession>;
+
+    async fn renew_session(
+        &self,
+        _context: &ProviderContext,
+    ) -> ProviderResult<ChaoxingCookieSession> {
+        Err(ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Chaoxing stored session cannot be renewed automatically",
+        ))
+    }
 }
 
 /// Native reqwest implementation of the Chaoxing Work/Exam inventory transport.
@@ -141,6 +151,62 @@ impl NativeChaoxingInventoryTransport {
     ) -> ProviderResult<SensitiveHtml> {
         fetch_course_list_html(&self.client, session, folder_id).await
     }
+
+    async fn session_for_operation(
+        &self,
+        context: &ProviderContext,
+    ) -> ProviderResult<(ChaoxingCookieSession, bool)> {
+        match self.sessions.resolve_session(context).await {
+            Ok(session) => Ok((session, false)),
+            Err(error) if error.kind == ProviderErrorKind::Authentication => {
+                Ok((self.sessions.renew_session(context).await?, true))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn fetch_work_inventory_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        let course_page = self.get_html(session, course_page_url(route)?).await?;
+        let work_url = discover_work_list_url(course_page.as_str(), route)?;
+        self.get_html(session, work_url)
+            .await?
+            .into_inventory_document()
+    }
+
+    async fn fetch_exam_inventory_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        self.get_html(session, exam_list_url(route)?)
+            .await?
+            .into_inventory_document()
+    }
+
+    async fn fetch_course_inventories_once(
+        &self,
+        session: &ChaoxingCookieSession,
+    ) -> ProviderResult<Vec<ChaoxingInventoryDocument>> {
+        let root = self.post_course_list(session, "0").await?;
+        let interaction = self
+            .get_html(session, static_url(COURSE_INTERACTION_BASE)?)
+            .await?;
+        let folder_ids = parse_course_folder_ids(interaction.as_str())?;
+        let mut documents = Vec::with_capacity(folder_ids.len() + 1);
+        documents.push(root.into_inventory_document()?);
+        for folder_id in folder_ids {
+            documents.push(
+                self.post_course_list(session, &folder_id)
+                    .await?
+                    .into_inventory_document()?,
+            );
+        }
+        Ok(documents)
+    }
 }
 
 impl fmt::Debug for NativeChaoxingInventoryTransport {
@@ -160,12 +226,14 @@ impl ChaoxingInventoryTransport for NativeChaoxingInventoryTransport {
         context: &ProviderContext,
         route: ChaoxingCourseRoute<'_>,
     ) -> ProviderResult<ChaoxingInventoryDocument> {
-        let session = self.sessions.resolve_session(context).await?;
-        let course_page = self.get_html(&session, course_page_url(route)?).await?;
-        let work_url = discover_work_list_url(course_page.as_str(), route)?;
-        self.get_html(&session, work_url)
-            .await?
-            .into_inventory_document()
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_work_inventory_once(&session, route).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_work_inventory_once(&session, route).await
+            }
+            result => result,
+        }
     }
 
     async fn fetch_exam_inventory(
@@ -173,10 +241,14 @@ impl ChaoxingInventoryTransport for NativeChaoxingInventoryTransport {
         context: &ProviderContext,
         route: ChaoxingCourseRoute<'_>,
     ) -> ProviderResult<ChaoxingInventoryDocument> {
-        let session = self.sessions.resolve_session(context).await?;
-        self.get_html(&session, exam_list_url(route)?)
-            .await?
-            .into_inventory_document()
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_exam_inventory_once(&session, route).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_exam_inventory_once(&session, route).await
+            }
+            result => result,
+        }
     }
 }
 
@@ -186,23 +258,19 @@ impl ChaoxingCourseInventoryTransport for NativeChaoxingInventoryTransport {
         &self,
         context: &ProviderContext,
     ) -> ProviderResult<Vec<ChaoxingInventoryDocument>> {
-        let session = self.sessions.resolve_session(context).await?;
-        let root = self.post_course_list(&session, "0").await?;
-        let interaction = self
-            .get_html(&session, static_url(COURSE_INTERACTION_BASE)?)
-            .await?;
-        let folder_ids = parse_course_folder_ids(interaction.as_str())?;
-        let mut documents = Vec::with_capacity(folder_ids.len() + 1);
-        documents.push(root.into_inventory_document()?);
-        for folder_id in folder_ids {
-            documents.push(
-                self.post_course_list(&session, &folder_id)
-                    .await?
-                    .into_inventory_document()?,
-            );
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_course_inventories_once(&session).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_course_inventories_once(&session).await
+            }
+            result => result,
         }
-        Ok(documents)
     }
+}
+
+fn should_renew_after(error: &ProviderError, already_renewed: bool) -> bool {
+    !already_renewed && error.kind == ProviderErrorKind::Authentication
 }
 
 pub(crate) struct SensitiveHtml(String);
@@ -676,6 +744,18 @@ mod tests {
         assert!(looks_like_login_location(
             "https://passport2.chaoxing.com/login?refer=safe"
         ));
+    }
+
+    #[test]
+    fn automatic_renewal_is_limited_to_one_authentication_failure() {
+        let authentication = ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "sanitized authentication failure",
+        );
+        let network = ProviderError::new(ProviderErrorKind::Network, "sanitized network failure");
+        assert!(should_renew_after(&authentication, false));
+        assert!(!should_renew_after(&authentication, true));
+        assert!(!should_renew_after(&network, false));
     }
 
     #[tokio::test]

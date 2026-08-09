@@ -31,8 +31,8 @@ use crate::{
 const LOGIN_URL: &str = "https://passport2.chaoxing.com/fanyalogin";
 const LOGIN_KEY: &[u8; 16] = b"u2oh6Vu^HWe4_AES";
 const MAX_LOGIN_RESPONSE_BYTES: usize = 64 * 1_024;
-const MAX_USERNAME_BYTES: usize = 512;
-const MAX_PASSWORD_BYTES: usize = 4 * 1_024;
+pub(crate) const MAX_USERNAME_BYTES: usize = 512;
+pub(crate) const MAX_PASSWORD_BYTES: usize = 4 * 1_024;
 const MAX_RESPONSE_COOKIES: usize = 128;
 const MAX_COOKIE_NAME_BYTES: usize = 256;
 const MAX_COOKIE_VALUE_BYTES: usize = 8 * 1_024;
@@ -224,8 +224,20 @@ impl AuthenticationCapability for ChaoxingAuthentication {
                 "Chaoxing session validation requires stored credentials",
             ));
         }
-        let session = self.sessions.resolve_session(context).await?;
-        self.transport.validate_cookie(&session).await?;
+        let (session, renewed) = match self.sessions.resolve_session(context).await {
+            Ok(session) => (session, false),
+            Err(error) if error.kind == ProviderErrorKind::Authentication => {
+                (self.sessions.renew_session(context).await?, true)
+            }
+            Err(error) => return Err(error),
+        };
+        match self.transport.validate_cookie(&session).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.transport.validate_cookie(&session).await?;
+            }
+            result => result?,
+        }
         Ok(valid_session(SessionKind::Cookie))
     }
 }
@@ -303,7 +315,7 @@ fn credential_text(credential: &CredentialBundle, purpose: SecretPurpose) -> Pro
     std::str::from_utf8(value.value.expose_secret()).map_err(|_| invalid_credential_shape())
 }
 
-fn validate_login_field(value: &str, maximum: usize, trim: bool) -> ProviderResult<()> {
+pub(crate) fn validate_login_field(value: &str, maximum: usize, trim: bool) -> ProviderResult<()> {
     if value.is_empty()
         || value.len() > maximum
         || value.chars().any(char::is_control)
@@ -314,7 +326,7 @@ fn validate_login_field(value: &str, maximum: usize, trim: bool) -> ProviderResu
     Ok(())
 }
 
-fn encrypt_login_field(value: &str) -> ProviderResult<SecretString> {
+pub(crate) fn encrypt_login_field(value: &str) -> ProviderResult<SecretString> {
     let mut ciphertext = cbc::Encryptor::<Aes128>::new(LOGIN_KEY.into(), LOGIN_KEY.into())
         .encrypt_padded_vec::<Pkcs7>(value.as_bytes());
     if ciphertext.is_empty() {
