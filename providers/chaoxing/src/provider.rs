@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use asterism_networking::ResolvedNetworkProfile;
-use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
+use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingResourceExecution,
     ChaoxingSessionResolver, ChaoxingTaskInventory, NativeChaoxingAuthenticationTransport,
     NativeChaoxingInventoryTransport, StoredChaoxingSessionResolver,
-    metadata::development_metadata,
+    metadata::development_metadata, runtime_settings::runtime_settings_schema,
 };
 
 /// Composes the complete development-level Chaoxing Provider around one Core
@@ -70,11 +70,12 @@ fn compose_development_provider(
     let task_execution = Arc::new(ChaoxingResourceExecution::try_new(
         course_inventory.clone(),
         inventory_transport.clone(),
+        inventory_transport.clone(),
         inventory_transport,
     )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
-        runtime_settings: ProviderRuntimeSettingsSchema::default(),
+        runtime_settings: runtime_settings_schema(),
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),
@@ -170,6 +171,15 @@ mod tests {
                 .metadata
                 .capabilities
                 .contains(&ProviderCapability::TaskProgressRead)
+        );
+        assert_eq!(entry.runtime_settings.version, 2);
+        assert_eq!(entry.runtime_settings.definitions.len(), 2);
+        assert!(
+            entry
+                .runtime_settings
+                .definitions
+                .iter()
+                .any(|definition| definition.key == "video.playback_rate")
         );
         let mut registry = ProviderRegistry::default();
         registry.register(entry).unwrap();

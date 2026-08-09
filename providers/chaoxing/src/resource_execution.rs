@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
 use asterism_domain::{LogLevel, RemoteState, TaskCapability};
 use asterism_provider_api::{
@@ -14,11 +14,13 @@ use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
     ChaoxingInventoryTransport,
     metadata::development_metadata,
-    parse_chapter_inventory,
+    parse_chapter_inventory, parse_chapter_resource_inventory,
     resource_inventory::{
         ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
-        locate_immediate_resource_target,
+        ChaoxingVideoResourceTarget, locate_immediate_resource_target,
+        locate_video_resource_target,
     },
+    runtime_settings::ChaoxingRuntimeSettings,
     task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
 };
 
@@ -33,11 +35,99 @@ pub(crate) trait ChaoxingImmediateResourceTransport: Send + Sync {
     ) -> ProviderResult<()>;
 }
 
+pub(crate) struct ChaoxingVideoStatus {
+    report_token: asterism_secrets::SecretString,
+    duration_seconds: u64,
+    play_time_seconds: u64,
+}
+
+impl ChaoxingVideoStatus {
+    pub(crate) fn try_new(
+        report_token: impl Into<String>,
+        duration_seconds: u64,
+        play_time_seconds: u64,
+    ) -> ProviderResult<Self> {
+        let report_token = report_token.into();
+        if report_token.is_empty()
+            || report_token.len() > 4 * 1_024
+            || report_token.chars().any(char::is_control)
+            || duration_seconds == 0
+            || duration_seconds > 24 * 60 * 60
+            || play_time_seconds > duration_seconds
+        {
+            return Err(protocol_drift("Chaoxing Video status is invalid"));
+        }
+        Ok(Self {
+            report_token: asterism_secrets::SecretString::new(report_token),
+            duration_seconds,
+            play_time_seconds,
+        })
+    }
+
+    pub(crate) fn report_token(&self) -> &asterism_secrets::SecretString {
+        &self.report_token
+    }
+
+    pub(crate) const fn duration_seconds(&self) -> u64 {
+        self.duration_seconds
+    }
+
+    pub(crate) const fn play_time_seconds(&self) -> u64 {
+        self.play_time_seconds
+    }
+}
+
+impl fmt::Debug for ChaoxingVideoStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingVideoStatus")
+            .field("report_token", &"[REDACTED]")
+            .field("duration_seconds", &self.duration_seconds)
+            .field("play_time_seconds", &self.play_time_seconds)
+            .finish()
+    }
+}
+
+#[async_trait]
+pub(crate) trait ChaoxingVideoTransport: Send + Sync {
+    async fn video_status(
+        &self,
+        context: &ProviderContext,
+        target: &ChaoxingVideoResourceTarget,
+    ) -> ProviderResult<ChaoxingVideoStatus>;
+
+    async fn report_video_progress(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        target: &ChaoxingVideoResourceTarget,
+        status: &ChaoxingVideoStatus,
+        playing_time_seconds: u64,
+    ) -> ProviderResult<bool>;
+}
+
+#[async_trait]
+trait ChaoxingVideoSleeper: Send + Sync {
+    async fn sleep(&self, duration: Duration);
+}
+
+#[derive(Debug)]
+struct TokioVideoSleeper;
+
+#[async_trait]
+impl ChaoxingVideoSleeper for TokioVideoSleeper {
+    async fn sleep(&self, duration: Duration) {
+        tokio::time::sleep(duration).await;
+    }
+}
+
 pub struct ChaoxingResourceExecution {
     metadata: ProviderMetadata,
     courses: Arc<dyn CourseInventoryCapability>,
     inventory: Arc<dyn ChaoxingInventoryTransport>,
     immediate: Arc<dyn ChaoxingImmediateResourceTransport>,
+    video: Arc<dyn ChaoxingVideoTransport>,
+    video_sleeper: Arc<dyn ChaoxingVideoSleeper>,
 }
 
 impl ChaoxingResourceExecution {
@@ -51,12 +141,15 @@ impl ChaoxingResourceExecution {
         courses: Arc<dyn CourseInventoryCapability>,
         inventory: Arc<dyn ChaoxingInventoryTransport>,
         immediate: Arc<dyn ChaoxingImmediateResourceTransport>,
+        video: Arc<dyn ChaoxingVideoTransport>,
     ) -> ProviderResult<Self> {
         Ok(Self {
             metadata: development_metadata()?,
             courses,
             inventory,
             immediate,
+            video,
+            video_sleeper: Arc::new(TokioVideoSleeper),
         })
     }
 
@@ -129,17 +222,40 @@ impl ChaoxingResourceExecution {
         remote_task_id: &str,
     ) -> ProviderResult<ChaoxingImmediateResourceTarget> {
         let documents = self
-            .inventory
-            .fetch_chapter_resource_inventories(context, route, std::slice::from_ref(request))
+            .fetch_resource_documents(context, route, request)
             .await?;
         locate_target(documents, route, request, remote_task_id)
     }
 
-    async fn resolve_target(
+    async fn fetch_video_target(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        request: &ChaoxingChapterResourceRequest,
+        remote_task_id: &str,
+    ) -> ProviderResult<ChaoxingVideoResourceTarget> {
+        let documents = self
+            .fetch_resource_documents(context, route, request)
+            .await?;
+        locate_video_target(documents, route, request, remote_task_id)
+    }
+
+    async fn fetch_resource_documents(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        request: &ChaoxingChapterResourceRequest,
+    ) -> ProviderResult<Vec<ChaoxingChapterResourceDocument>> {
+        self.inventory
+            .fetch_chapter_resource_inventories(context, route, std::slice::from_ref(request))
+            .await
+    }
+
+    async fn resolve_resource_progress(
         &self,
         context: &ProviderContext,
         remote_task_id: &str,
-    ) -> ProviderResult<ChaoxingImmediateResourceTarget> {
+    ) -> ProviderResult<RemoteProgress> {
         validate_context(context, &self.metadata)?;
         let identity = ResourceIdentity::parse(remote_task_id)?;
         let course = self.resolve_course(context, &identity).await?;
@@ -147,53 +263,39 @@ impl ChaoxingResourceExecution {
         let resource_request = self
             .resolve_resource_request(context, route, &identity)
             .await?;
-        self.fetch_target(context, route, &resource_request, remote_task_id)
-            .await
-    }
-}
-
-impl fmt::Debug for ChaoxingResourceExecution {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ChaoxingResourceExecution")
-            .field("metadata", &self.metadata)
-            .field("courses", &"configured")
-            .field("inventory", &"configured")
-            .field("immediate", &"configured")
-            .finish()
-    }
-}
-
-impl ProviderIdentity for ChaoxingResourceExecution {
-    fn metadata(&self) -> &ProviderMetadata {
-        &self.metadata
-    }
-}
-
-#[async_trait]
-impl TaskExecutionCapability for ChaoxingResourceExecution {
-    async fn execute(
-        &self,
-        context: &ProviderContext,
-        request: &ExecutionRequest,
-        events: &(dyn ExecutionEventSink + Send + Sync),
-    ) -> ProviderResult<ExecutionOutcome> {
-        validate_context(context, &self.metadata)?;
-        if request.requested_capabilities != [TaskCapability::ResourceExecution] {
+        let documents = self
+            .fetch_resource_documents(context, route, &resource_request)
+            .await?;
+        let (remote_state, kind) =
+            locate_resource_fact(&documents, route, &resource_request, remote_task_id)?;
+        if !matches!(
+            kind,
+            ExecutableResourceKind::Immediate | ExecutableResourceKind::Video
+        ) {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
-                "Chaoxing immediate execution accepts only ResourceExecution",
+                "Chaoxing resource kind does not expose progress",
             ));
         }
-        let identity = ResourceIdentity::parse(&request.remote_task_id)?;
-        let course = self.resolve_course(context, &identity).await?;
-        let route = ChaoxingCourseRoute::from_remote_course(&course)?;
-        let resource_request = self
-            .resolve_resource_request(context, route, &identity)
-            .await?;
-        let target = self
-            .fetch_target(context, route, &resource_request, &request.remote_task_id)
-            .await?;
+        let completed = remote_state == RemoteState::Completed;
+        Ok(RemoteProgress {
+            remote_state,
+            percent: Some(if completed { 100 } else { 0 }),
+            duration_seconds: None,
+            updated_at: Utc::now(),
+        })
+    }
+
+    async fn execute_immediate(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        resource_request: &ChaoxingChapterResourceRequest,
+        remote_task_id: &str,
+        documents: Vec<ChaoxingChapterResourceDocument>,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        let target = locate_target(documents, route, resource_request, remote_task_id)?;
         if target.remote_state() == RemoteState::Completed {
             events
                 .log(execution_log(
@@ -204,7 +306,6 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
                 .await?;
             return Ok(completed_outcome(target.kind(), true));
         }
-
         events
             .report(ProviderProgress {
                 percent: Some(0),
@@ -241,7 +342,7 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
             ))
             .await?;
         let verified = self
-            .fetch_target(context, route, &resource_request, &request.remote_task_id)
+            .fetch_target(context, route, resource_request, remote_task_id)
             .await?;
         if verified.kind() != target.kind() || verified.remote_state() != RemoteState::Completed {
             return Err(ProviderError::new(
@@ -263,15 +364,207 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
                 "resource_verified",
                 "远端资源完成状态已复核",
                 Some(serde_json::json!({
-                    "resource_kind": match target.kind() {
-                        ChaoxingImmediateResourceKind::Document => "document",
-                        ChaoxingImmediateResourceKind::Read => "read",
-                    },
+                    "resource_kind": resource_kind_name(target.kind()),
                     "verified": true,
                 })),
             ))
             .await?;
         Ok(completed_outcome(target.kind(), false))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the video call keeps its Execution, route, fresh target, settings and event boundaries explicit"
+    )]
+    async fn execute_video(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        resource_request: &ChaoxingChapterResourceRequest,
+        remote_task_id: &str,
+        target: &ChaoxingVideoResourceTarget,
+        settings: ChaoxingRuntimeSettings,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        if target.remote_state() == RemoteState::Completed {
+            events
+                .log(execution_log(
+                    "video_finalize",
+                    "视频已在远端完成，跳过重复上报",
+                    None,
+                ))
+                .await?;
+            return Ok(video_outcome(true));
+        }
+        let status = self.video.video_status(context, target).await?;
+        let duration = status.duration_seconds();
+        let mut playing_time = status
+            .play_time_seconds()
+            .max(target.initial_play_time_millis() / 1_000)
+            .min(duration);
+        events
+            .log(execution_log(
+                "video_execute",
+                "开始按冻结运行参数上报视频进度",
+                Some(serde_json::json!({
+                    "playback_rate_millis": settings.video_playback_rate_millis,
+                    "progress_interval_seconds": settings.video_progress_interval_seconds,
+                })),
+            ))
+            .await?;
+        loop {
+            if playing_time < duration {
+                let next = playing_time
+                    .saturating_add(settings.video_progress_interval_seconds)
+                    .min(duration);
+                self.video_sleeper
+                    .sleep(real_playback_duration(
+                        next - playing_time,
+                        settings.video_playback_rate_millis,
+                    )?)
+                    .await;
+                playing_time = next;
+            }
+            let passed = self
+                .video
+                .report_video_progress(context, route, target, &status, playing_time)
+                .await?;
+            let percent = video_percent(playing_time, duration);
+            events
+                .report(ProviderProgress {
+                    percent: Some(percent),
+                    stage: "video_execute".to_owned(),
+                    status_text: Some("视频进度已上报".to_owned()),
+                    completed_items: Some(u32::from(passed)),
+                    total_items: Some(1),
+                })
+                .await?;
+            if passed || playing_time == duration {
+                break;
+            }
+        }
+        events
+            .log(execution_log(
+                "video_verify",
+                "视频进度上报结束，开始复核远端任务状态",
+                None,
+            ))
+            .await?;
+        let verified = self
+            .fetch_video_target(context, route, resource_request, remote_task_id)
+            .await?;
+        if verified.remote_state() != RemoteState::Completed {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Video did not become completed after progress reporting",
+            ));
+        }
+        events
+            .report(ProviderProgress {
+                percent: Some(100),
+                stage: "video_verified".to_owned(),
+                status_text: Some("视频远端完成状态已复核".to_owned()),
+                completed_items: Some(1),
+                total_items: Some(1),
+            })
+            .await?;
+        events
+            .log(execution_log(
+                "video_verified",
+                "视频远端完成状态已复核",
+                Some(serde_json::json!({"resource_kind": "video", "verified": true})),
+            ))
+            .await?;
+        Ok(video_outcome(false))
+    }
+}
+
+impl fmt::Debug for ChaoxingResourceExecution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingResourceExecution")
+            .field("metadata", &self.metadata)
+            .field("courses", &"configured")
+            .field("inventory", &"configured")
+            .field("immediate", &"configured")
+            .field("video", &"configured")
+            .field("video_sleeper", &"configured")
+            .finish()
+    }
+}
+
+impl ProviderIdentity for ChaoxingResourceExecution {
+    fn metadata(&self) -> &ProviderMetadata {
+        &self.metadata
+    }
+}
+
+#[async_trait]
+impl TaskExecutionCapability for ChaoxingResourceExecution {
+    async fn execute(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        validate_context(context, &self.metadata)?;
+        if request.requested_capabilities != [TaskCapability::ResourceExecution] {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing resource execution accepts only ResourceExecution",
+            ));
+        }
+        let settings = ChaoxingRuntimeSettings::resolve(&request.runtime_settings)?;
+        let identity = ResourceIdentity::parse(&request.remote_task_id)?;
+        let course = self.resolve_course(context, &identity).await?;
+        let route = ChaoxingCourseRoute::from_remote_course(&course)?;
+        let resource_request = self
+            .resolve_resource_request(context, route, &identity)
+            .await?;
+        let documents = self
+            .fetch_resource_documents(context, route, &resource_request)
+            .await?;
+        let (_, kind) = locate_resource_fact(
+            &documents,
+            route,
+            &resource_request,
+            &request.remote_task_id,
+        )?;
+        match kind {
+            ExecutableResourceKind::Immediate => {
+                self.execute_immediate(
+                    context,
+                    route,
+                    &resource_request,
+                    &request.remote_task_id,
+                    documents,
+                    events,
+                )
+                .await
+            }
+            ExecutableResourceKind::Video => {
+                let target = locate_video_target(
+                    documents,
+                    route,
+                    &resource_request,
+                    &request.remote_task_id,
+                )?;
+                self.execute_video(
+                    context,
+                    route,
+                    &resource_request,
+                    &request.remote_task_id,
+                    &target,
+                    settings,
+                    events,
+                )
+                .await
+            }
+            ExecutableResourceKind::Unsupported => Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing resource kind has no execution path",
+            )),
+        }
     }
 }
 
@@ -296,14 +589,8 @@ impl TaskProgressCapability for ChaoxingResourceExecution {
         context: &ProviderContext,
         remote_task_id: &str,
     ) -> ProviderResult<RemoteProgress> {
-        let target = self.resolve_target(context, remote_task_id).await?;
-        let completed = target.remote_state() == RemoteState::Completed;
-        Ok(RemoteProgress {
-            remote_state: target.remote_state(),
-            percent: Some(if completed { 100 } else { 0 }),
-            duration_seconds: None,
-            updated_at: Utc::now(),
-        })
+        self.resolve_resource_progress(context, remote_task_id)
+            .await
     }
 }
 
@@ -363,6 +650,119 @@ fn locate_target(
         if found.replace(target).is_some() {
             return Err(protocol_drift(
                 "Chaoxing immediate execution found the task on multiple cards",
+            ));
+        }
+    }
+    found.ok_or_else(remote_resource_changed)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutableResourceKind {
+    Immediate,
+    Video,
+    Unsupported,
+}
+
+fn locate_resource_fact(
+    documents: &[ChaoxingChapterResourceDocument],
+    route: ChaoxingCourseRoute<'_>,
+    request: &ChaoxingChapterResourceRequest,
+    remote_task_id: &str,
+) -> ProviderResult<(RemoteState, ExecutableResourceKind)> {
+    if documents.len() != usize::from(CHAPTER_RESOURCE_CARD_COUNT) {
+        return Err(protocol_drift(
+            "Chaoxing resource lookup received an incomplete card set",
+        ));
+    }
+    let scope = route.parser_scope()?;
+    let mut indexed = BTreeMap::new();
+    for document in documents {
+        if document.knowledge_id() != request.knowledge_id()
+            || indexed.insert(document.card_index(), document).is_some()
+        {
+            return Err(protocol_drift(
+                "Chaoxing resource lookup received a foreign or duplicate card",
+            ));
+        }
+    }
+    let mut found = None;
+    for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+        let document = indexed
+            .remove(&card_index)
+            .ok_or_else(|| protocol_drift("Chaoxing resource lookup omitted a card"))?;
+        for task in parse_chapter_resource_inventory(
+            document.as_str(),
+            &scope,
+            request.knowledge_id(),
+            card_index,
+        )? {
+            if task.remote_id != remote_task_id {
+                continue;
+            }
+            let kind = match task
+                .normalized
+                .get("resource_kind")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("document" | "read") => ExecutableResourceKind::Immediate,
+                Some("video") => ExecutableResourceKind::Video,
+                Some(_) => ExecutableResourceKind::Unsupported,
+                None => {
+                    return Err(protocol_drift(
+                        "Chaoxing resource task has no normalized kind",
+                    ));
+                }
+            };
+            if found.replace((task.remote_state, kind)).is_some() {
+                return Err(protocol_drift(
+                    "Chaoxing resource lookup found the task on multiple cards",
+                ));
+            }
+        }
+    }
+    found.ok_or_else(remote_resource_changed)
+}
+
+fn locate_video_target(
+    documents: Vec<ChaoxingChapterResourceDocument>,
+    route: ChaoxingCourseRoute<'_>,
+    request: &ChaoxingChapterResourceRequest,
+    remote_task_id: &str,
+) -> ProviderResult<ChaoxingVideoResourceTarget> {
+    if documents.len() != usize::from(CHAPTER_RESOURCE_CARD_COUNT) {
+        return Err(protocol_drift(
+            "Chaoxing Video execution received an incomplete card set",
+        ));
+    }
+    let mut indexed = BTreeMap::new();
+    for document in documents {
+        if document.knowledge_id() != request.knowledge_id()
+            || indexed.insert(document.card_index(), document).is_some()
+        {
+            return Err(protocol_drift(
+                "Chaoxing Video execution received a foreign or duplicate card",
+            ));
+        }
+    }
+    let scope = route.parser_scope()?;
+    let mut found = None;
+    for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+        let document = indexed
+            .remove(&card_index)
+            .ok_or_else(|| protocol_drift("Chaoxing Video execution omitted a card"))?;
+        let Some(target) = locate_video_resource_target(
+            document.as_str(),
+            &scope,
+            request.knowledge_id(),
+            card_index,
+            remote_task_id,
+        )?
+        else {
+            continue;
+        };
+        if found.replace(target).is_some() {
+            return Err(protocol_drift(
+                "Chaoxing Video execution found the task on multiple cards",
             ));
         }
     }
@@ -430,6 +830,36 @@ fn completed_outcome(
     }
 }
 
+fn video_outcome(already_completed: bool) -> ExecutionOutcome {
+    ExecutionOutcome {
+        remote_state: RemoteState::Completed,
+        verified: true,
+        result_sanitized: serde_json::json!({
+            "schema": "chaoxing.video-result.v1",
+            "resource_kind": "video",
+            "already_completed": already_completed,
+            "verification": "fresh_card_state",
+        }),
+    }
+}
+
+fn real_playback_duration(
+    video_seconds: u64,
+    playback_rate_millis: u16,
+) -> ProviderResult<Duration> {
+    let milliseconds = video_seconds
+        .checked_mul(1_000_000)
+        .map(|value| value.div_ceil(u64::from(playback_rate_millis)))
+        .ok_or_else(|| protocol_drift("Chaoxing Video playback duration overflowed"))?;
+    Ok(Duration::from_millis(milliseconds))
+}
+
+fn video_percent(playing_time: u64, duration: u64) -> u8 {
+    u8::try_from(playing_time.saturating_mul(100) / duration)
+        .unwrap_or(100)
+        .min(100)
+}
+
 fn protocol_drift(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
 }
@@ -443,7 +873,10 @@ fn remote_resource_changed() -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     use asterism_domain::{ProviderAccountId, ProviderId, SecretId, TaskId};
     use asterism_provider_api::{ProviderRouteContext, RemoteCourse};
@@ -459,8 +892,11 @@ mod tests {
     struct FixtureProvider {
         metadata: ProviderMetadata,
         completed_read: AtomicBool,
+        completed_video: AtomicBool,
         resource_calls: AtomicUsize,
         execute_calls: AtomicUsize,
+        video_reports: Mutex<Vec<u64>>,
+        video_sleeps: Mutex<Vec<Duration>>,
     }
 
     impl FixtureProvider {
@@ -468,8 +904,11 @@ mod tests {
             Self {
                 metadata: development_metadata().unwrap(),
                 completed_read: AtomicBool::new(completed_read),
+                completed_video: AtomicBool::new(false),
                 resource_calls: AtomicUsize::new(0),
                 execute_calls: AtomicUsize::new(0),
+                video_reports: Mutex::new(Vec::new()),
+                video_sleeps: Mutex::new(Vec::new()),
             }
         }
     }
@@ -522,14 +961,19 @@ mod tests {
         ) -> ProviderResult<Vec<ChaoxingChapterResourceDocument>> {
             assert_eq!(requests.len(), 1);
             self.resource_calls.fetch_add(1, Ordering::Relaxed);
-            let first = if self.completed_read.load(Ordering::Relaxed) {
-                RESOURCE_MIXED.replace(
+            let mut first = RESOURCE_MIXED.to_owned();
+            if self.completed_read.load(Ordering::Relaxed) {
+                first = first.replace(
                     "\"jobid\":\"job-read\",\"isPassed\":false",
                     "\"jobid\":\"job-read\",\"isPassed\":true",
-                )
-            } else {
-                RESOURCE_MIXED.to_owned()
-            };
+                );
+            }
+            if self.completed_video.load(Ordering::Relaxed) {
+                first = first.replace(
+                    "\"jobid\":\"job-video\",\"isPassed\":false",
+                    "\"jobid\":\"job-video\",\"isPassed\":true",
+                );
+            }
             (0..CHAPTER_RESOURCE_CARD_COUNT)
                 .map(|card_index| {
                     ChaoxingChapterResourceDocument::for_request(
@@ -584,6 +1028,42 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ChaoxingVideoTransport for FixtureProvider {
+        async fn video_status(
+            &self,
+            _context: &ProviderContext,
+            target: &ChaoxingVideoResourceTarget,
+        ) -> ProviderResult<ChaoxingVideoStatus> {
+            assert_eq!(target.job_id(), "job-video");
+            ChaoxingVideoStatus::try_new("SAFE_REPORT_TOKEN", 135, 15)
+        }
+
+        async fn report_video_progress(
+            &self,
+            _context: &ProviderContext,
+            _route: ChaoxingCourseRoute<'_>,
+            _target: &ChaoxingVideoResourceTarget,
+            _status: &ChaoxingVideoStatus,
+            playing_time_seconds: u64,
+        ) -> ProviderResult<bool> {
+            self.video_reports
+                .lock()
+                .unwrap()
+                .push(playing_time_seconds);
+            let completed = playing_time_seconds == 135;
+            self.completed_video.store(completed, Ordering::Relaxed);
+            Ok(completed)
+        }
+    }
+
+    #[async_trait]
+    impl ChaoxingVideoSleeper for FixtureProvider {
+        async fn sleep(&self, duration: Duration) {
+            self.video_sleeps.lock().unwrap().push(duration);
+        }
+    }
+
     #[derive(Debug, Default)]
     struct RecordingEvents {
         progress: AtomicUsize,
@@ -607,9 +1087,13 @@ mod tests {
     #[tokio::test]
     async fn immediate_execution_refetches_and_verifies_the_remote_card() {
         let fixture = Arc::new(FixtureProvider::new(false));
-        let execution =
-            ChaoxingResourceExecution::try_new(fixture.clone(), fixture.clone(), fixture.clone())
-                .unwrap();
+        let execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
         let events = RecordingEvents::default();
         let outcome = execution
             .execute(
@@ -632,9 +1116,13 @@ mod tests {
     #[tokio::test]
     async fn progress_read_refetches_remote_state_without_executing() {
         let fixture = Arc::new(FixtureProvider::new(false));
-        let execution =
-            ChaoxingResourceExecution::try_new(fixture.clone(), fixture.clone(), fixture.clone())
-                .unwrap();
+        let execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
         let pending = execution
             .read_progress(&context(), "resource:100:200:4001:job-read")
             .await
@@ -642,6 +1130,13 @@ mod tests {
         assert_eq!(pending.remote_state, RemoteState::Pending);
         assert_eq!(pending.percent, Some(0));
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
+
+        let pending_video = execution
+            .read_progress(&context(), "resource:100:200:4001:job-video")
+            .await
+            .unwrap();
+        assert_eq!(pending_video.remote_state, RemoteState::Pending);
+        assert_eq!(pending_video.percent, Some(0));
 
         fixture.completed_read.store(true, Ordering::Relaxed);
         let completed = execution
@@ -654,11 +1149,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_document_is_idempotent_and_unsupported_video_fails_closed() {
+    async fn completed_document_is_idempotent() {
         let fixture = Arc::new(FixtureProvider::new(false));
-        let execution =
-            ChaoxingResourceExecution::try_new(fixture.clone(), fixture.clone(), fixture.clone())
-                .unwrap();
+        let execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
         let events = RecordingEvents::default();
         let completed = execution
             .execute(
@@ -671,17 +1170,41 @@ mod tests {
         assert_eq!(completed.result_sanitized["already_completed"], true);
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
         assert_eq!(events.logs.load(Ordering::Relaxed), 1);
+    }
 
-        let error = execution
+    #[tokio::test]
+    async fn video_execution_uses_frozen_speed_and_verifies_the_fresh_card() {
+        let fixture = Arc::new(FixtureProvider::new(false));
+        let mut execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        execution.video_sleeper = fixture.clone();
+        let events = RecordingEvents::default();
+        let outcome = execution
             .execute(
                 &context(),
-                &execution_request("resource:100:200:4001:job-video"),
+                &execution_request_with_speed("resource:100:200:4001:job-video", 1_500),
                 &events,
             )
             .await
-            .unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+            .unwrap();
+
+        assert_eq!(outcome.remote_state, RemoteState::Completed);
+        assert!(outcome.verified);
+        assert_eq!(outcome.result_sanitized["resource_kind"], "video");
+        assert_eq!(*fixture.video_reports.lock().unwrap(), [75_u64, 135_u64]);
+        assert_eq!(
+            *fixture.video_sleeps.lock().unwrap(),
+            [Duration::from_secs(40), Duration::from_secs(40)]
+        );
+        assert_eq!(fixture.resource_calls.load(Ordering::Relaxed), 2);
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(events.progress.load(Ordering::Relaxed), 3);
+        assert_eq!(events.logs.load(Ordering::Relaxed), 3);
     }
 
     fn context() -> ProviderContext {
@@ -699,10 +1222,27 @@ mod tests {
             remote_task_id: remote_task_id.to_owned(),
             course_id: None,
             requested_capabilities: vec![TaskCapability::ResourceExecution],
-            runtime_settings: asterism_provider_api::ResolvedProviderRuntimeSettings {
-                schema_version: 1,
-                values: BTreeMap::new(),
-            },
+            runtime_settings: crate::runtime_settings::runtime_settings_schema()
+                .resolve(None, None, None)
+                .unwrap(),
+        }
+    }
+
+    fn execution_request_with_speed(remote_task_id: &str, speed_millis: i64) -> ExecutionRequest {
+        let schema = crate::runtime_settings::runtime_settings_schema();
+        let task = asterism_provider_api::ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: BTreeMap::from([(
+                crate::runtime_settings::VIDEO_PLAYBACK_RATE_KEY.to_owned(),
+                asterism_provider_api::ProviderSettingValue::DecimalMillis(speed_millis),
+            )]),
+        };
+        ExecutionRequest {
+            task_id: TaskId::new(),
+            remote_task_id: remote_task_id.to_owned(),
+            course_id: None,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
         }
     }
 

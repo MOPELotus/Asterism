@@ -11,7 +11,7 @@ Chapter card contains a Work-shaped assessment.
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
-| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls, idempotence and fresh-card verification are offline-covered; Video, Live and Chapter Work remain pending |
+| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls plus signed interval-based Video progress, idempotence and fresh-card verification are offline-covered; Live and Chapter Work remain pending |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
 | TaskDetail | agent skill | CxKitty, OCS | Reference | Work final URL and Exam entry/detail pages carry task-specific state |
@@ -86,3 +86,9 @@ policy and remains independently guarded.
   same bounded course/chapter/card rediscovery without invoking the completion
   endpoint and returns only normalized remote state and percentage. This is the
   safe remote-fact input for crash recovery, not live-account verification.
+- Video execution now re-resolves fresh non-persisted Card metadata, obtains one
+  bounded status/dtoken response, reports monotonic intervals with the donor
+  signature, and accepts completion only after a fresh Card reports passed.
+  Playback rate and report interval come from the immutable Master-controlled
+  Execution settings snapshot. Captcha responses become `HumanRequired`; no
+  Capture or OCR path is part of this first implementation.

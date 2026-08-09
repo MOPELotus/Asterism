@@ -48,7 +48,8 @@ files cover normalized identity, source module and remote state. The detail
 fixtures cover the conservative Work redirect classification.
 The Chapter and Resource fixtures cover stable knowledge/job identity, locked
 and completed state, the exact resource type split, empty card slots, execution
-token redaction, immediate Document/Read routing, unsupported type rejection,
+token redaction, immediate Document/Read routing, Video object/report metadata,
+donor-compatible signature construction, bounded playback settings,
 idempotence and fresh-card result verification.
 
 ## Required live-sanitized fixture sets

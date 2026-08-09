@@ -1,14 +1,17 @@
 use std::{borrow::Cow, fmt, sync::Arc};
 
+use asterism_domain::HumanRequiredReason;
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{ProviderContext, ProviderError, ProviderErrorKind, ProviderResult};
 use asterism_secrets::SecretString;
 use async_trait::async_trait;
+use chrono::Utc;
 use reqwest::{
     Client, Response, StatusCode, Url,
     header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, REFERER, RETRY_AFTER},
 };
 use scraper::{Html, Selector};
+use serde::Deserialize;
 use zeroize::Zeroize;
 
 use crate::{
@@ -16,8 +19,13 @@ use crate::{
     ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingInventoryDocument,
     ChaoxingInventoryTransport, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
     classify_work_detail,
-    resource_execution::ChaoxingImmediateResourceTransport,
-    resource_inventory::{ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget},
+    resource_execution::{
+        ChaoxingImmediateResourceTransport, ChaoxingVideoStatus, ChaoxingVideoTransport,
+    },
+    resource_inventory::{
+        ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
+        ChaoxingVideoResourceTarget, ChaoxingVideoRt,
+    },
     task_inventory::{
         CHAPTER_RESOURCE_CARD_COUNT, MAX_RESOURCE_BATCH_DOCUMENT_BYTES,
         MAX_RESOURCE_CHAPTER_REQUESTS,
@@ -32,6 +40,10 @@ const CHAPTER_RESOURCE_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/knowled
 const CHAPTER_RESOURCE_VERSION: &str = "2025-0424-1038-3";
 const DOCUMENT_COMPLETE_BASE: &str = "https://mooc1.chaoxing.com/ananas/job/document";
 const READ_COMPLETE_BASE: &str = "https://mooc1.chaoxing.com/ananas/job/readv2";
+const VIDEO_STATUS_ORIGIN: &str = "https://mooc1.chaoxing.com";
+const VIDEO_REPORT_ORIGIN: &str = "https://mooc1.chaoxing.com";
+const VIDEO_REFERER: &str =
+    "https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2025-0725-1842";
 const COURSE_LIST_REFERER: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans";
 const EXAM_LIST_BASE: &str = "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
@@ -84,6 +96,19 @@ impl ChaoxingCookieSession {
 
     pub(crate) fn expose_secret(&self) -> &str {
         self.0.expose_secret()
+    }
+
+    fn cookie_value(&self, names: &[&str]) -> Option<&str> {
+        let mut values = self.0.expose_secret().split(';').filter_map(|field| {
+            let (name, value) = field.trim().split_once('=')?;
+            names
+                .iter()
+                .any(|expected| name.trim() == *expected)
+                .then(|| value.trim())
+                .filter(|value| !value.is_empty())
+        });
+        let value = values.next()?;
+        values.next().is_none().then_some(value)
     }
 }
 
@@ -353,6 +378,97 @@ impl NativeChaoxingInventoryTransport {
         Ok(())
     }
 
+    async fn video_status_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        target: &ChaoxingVideoResourceTarget,
+    ) -> ProviderResult<ChaoxingVideoStatus> {
+        let response = self
+            .client
+            .get(video_status_url(session, target)?)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "application/json,text/plain,*/*")
+            .header(REFERER, VIDEO_REFERER)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        validate_response_status(&response)?;
+        let body = read_response_body(response).await?;
+        let mut status: SensitiveVideoStatus = serde_json::from_str(body.as_str())
+            .map_err(|_| protocol_drift("Chaoxing Video status JSON is malformed"))?;
+        if status.status != "success" {
+            return Err(protocol_drift(
+                "Chaoxing Video status endpoint did not report success",
+            ));
+        }
+        ChaoxingVideoStatus::try_new(
+            std::mem::take(&mut status.dtoken),
+            status.duration,
+            status.play_time.unwrap_or_default(),
+        )
+    }
+
+    async fn report_video_progress_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+        target: &ChaoxingVideoResourceTarget,
+        status: &ChaoxingVideoStatus,
+        playing_time_seconds: u64,
+    ) -> ProviderResult<bool> {
+        let candidates = target.rt().map_or_else(
+            || vec![ChaoxingVideoRt::NineTenths, ChaoxingVideoRt::One],
+            |rt| vec![rt],
+        );
+        for rt in candidates {
+            let response = self
+                .client
+                .get(video_report_url(
+                    session,
+                    route,
+                    target,
+                    status,
+                    playing_time_seconds,
+                    rt,
+                )?)
+                .header(COOKIE, session.header_value()?)
+                .header(ACCEPT, "application/json,text/plain,*/*")
+                .header(REFERER, VIDEO_REFERER)
+                .send()
+                .await
+                .map_err(|error| classify_reqwest_error(&error))?;
+            if response.status() == StatusCode::FORBIDDEN {
+                match read_response_body(response).await {
+                    Ok(body)
+                        if body.as_str().contains("验证码")
+                            || body.as_str().contains("validate") =>
+                    {
+                        return Err(ProviderError::human_required(
+                            "Chaoxing Video progress requires an image captcha",
+                            HumanRequiredReason::ImageCaptcha,
+                        ));
+                    }
+                    Ok(_)
+                    | Err(ProviderError {
+                        kind: ProviderErrorKind::InvalidResponse,
+                        ..
+                    }) => {}
+                    Err(error) => return Err(error),
+                }
+                continue;
+            }
+            validate_response_status(&response)?;
+            let body = read_response_body(response).await?;
+            let report: VideoReportResponse = serde_json::from_str(body.as_str())
+                .map_err(|_| protocol_drift("Chaoxing Video report JSON is malformed"))?;
+            return Ok(report.is_passed);
+        }
+        Err(ProviderError::new(
+            ProviderErrorKind::Authorization,
+            "Chaoxing rejected every supported Video report mode",
+        ))
+    }
+
     async fn fetch_course_inventories_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -494,6 +610,53 @@ impl ChaoxingImmediateResourceTransport for NativeChaoxingInventoryTransport {
 }
 
 #[async_trait]
+impl ChaoxingVideoTransport for NativeChaoxingInventoryTransport {
+    async fn video_status(
+        &self,
+        context: &ProviderContext,
+        target: &ChaoxingVideoResourceTarget,
+    ) -> ProviderResult<ChaoxingVideoStatus> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.video_status_once(&session, target).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.video_status_once(&session, target).await
+            }
+            result => result,
+        }
+    }
+
+    async fn report_video_progress(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        target: &ChaoxingVideoResourceTarget,
+        status: &ChaoxingVideoStatus,
+        playing_time_seconds: u64,
+    ) -> ProviderResult<bool> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .report_video_progress_once(&session, route, target, status, playing_time_seconds)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                let refreshed = self.video_status_once(&session, target).await?;
+                self.report_video_progress_once(
+                    &session,
+                    route,
+                    target,
+                    &refreshed,
+                    playing_time_seconds,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
 impl ChaoxingCourseInventoryTransport for NativeChaoxingInventoryTransport {
     async fn fetch_course_inventories(
         &self,
@@ -515,6 +678,28 @@ fn should_renew_after(error: &ProviderError, already_renewed: bool) -> bool {
 }
 
 pub(crate) struct SensitiveHtml(String);
+
+#[derive(Deserialize)]
+struct SensitiveVideoStatus {
+    status: String,
+    dtoken: String,
+    duration: u64,
+    #[serde(default, rename = "playTime")]
+    play_time: Option<u64>,
+}
+
+impl Drop for SensitiveVideoStatus {
+    fn drop(&mut self) {
+        self.status.zeroize();
+        self.dtoken.zeroize();
+    }
+}
+
+#[derive(Deserialize)]
+struct VideoReportResponse {
+    #[serde(rename = "isPassed")]
+    is_passed: bool,
+}
 
 impl SensitiveHtml {
     pub(crate) fn as_str(&self) -> &str {
@@ -623,6 +808,102 @@ fn immediate_resource_url(
         ChaoxingImmediateResourceKind::Read => READ_COMPLETE_BASE,
     };
     build_url(base, &query)
+}
+
+fn video_status_url(
+    session: &ChaoxingCookieSession,
+    target: &ChaoxingVideoResourceTarget,
+) -> ProviderResult<Url> {
+    let mut url = static_url(VIDEO_STATUS_ORIGIN)?;
+    url.path_segments_mut()
+        .map_err(|()| static_route_error())?
+        .extend(["ananas", "status", target.object_id().expose_secret()]);
+    let fid = session.cookie_value(&["fid"]).unwrap_or("1024");
+    url.query_pairs_mut()
+        .append_pair("k", fid)
+        .append_pair("flag", "normal");
+    Ok(url)
+}
+
+fn video_report_url(
+    session: &ChaoxingCookieSession,
+    route: ChaoxingCourseRoute<'_>,
+    target: &ChaoxingVideoResourceTarget,
+    status: &ChaoxingVideoStatus,
+    playing_time_seconds: u64,
+    rt: ChaoxingVideoRt,
+) -> ProviderResult<Url> {
+    if playing_time_seconds > status.duration_seconds() {
+        return Err(protocol_drift(
+            "Chaoxing Video report exceeds the current duration",
+        ));
+    }
+    let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Chaoxing Video report requires an identity Cookie",
+        )
+    })?;
+    let duration_millis = status
+        .duration_seconds()
+        .checked_mul(1_000)
+        .ok_or_else(|| protocol_drift("Chaoxing Video duration overflowed"))?;
+    let playing_millis = playing_time_seconds
+        .checked_mul(1_000)
+        .ok_or_else(|| protocol_drift("Chaoxing Video progress overflowed"))?;
+    let mut signature_input = format!(
+        "[{}][{user_id}][{}][{}][{playing_millis}][d_yHJ!$pdA~5][{duration_millis}][0_{}]",
+        route.class_id(),
+        target.job_id(),
+        target.object_id().expose_secret(),
+        status.duration_seconds(),
+    );
+    let signature = format!("{:x}", md5::compute(signature_input.as_bytes()));
+    signature_input.zeroize();
+    let mut url = static_url(VIDEO_REPORT_ORIGIN)?;
+    url.path_segments_mut()
+        .map_err(|()| static_route_error())?
+        .extend([
+            "mooc-ans",
+            "multimedia",
+            "log",
+            "a",
+            route.cpi(),
+            status.report_token().expose_secret(),
+        ]);
+    let duration = status.duration_seconds().to_string();
+    let playing_time = playing_time_seconds.to_string();
+    let clip_time = format!("0_{duration}");
+    let timestamp = Utc::now().timestamp_millis().to_string();
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("clazzId", route.class_id())
+            .append_pair("playingTime", &playing_time)
+            .append_pair("duration", &duration)
+            .append_pair("clipTime", &clip_time)
+            .append_pair("objectId", target.object_id().expose_secret())
+            .append_pair("otherInfo", target.other_info().expose_secret())
+            .append_pair("courseId", route.course_id())
+            .append_pair("jobid", target.job_id())
+            .append_pair("userid", user_id)
+            .append_pair("isdrag", "3")
+            .append_pair("view", "pc")
+            .append_pair("enc", &signature)
+            .append_pair("dtype", "Video")
+            .append_pair("rt", rt.as_str())
+            .append_pair("_t", &timestamp);
+        if let Some(value) = target.face_capture_enc() {
+            query.append_pair("videoFaceCaptureEnc", value.expose_secret());
+        }
+        if let Some(value) = target.attendance_duration() {
+            query.append_pair("attDuration", value.expose_secret());
+        }
+        if let Some(value) = target.attendance_duration_enc() {
+            query.append_pair("attDurationEnc", value.expose_secret());
+        }
+    }
+    Ok(url)
 }
 
 fn build_url(base: &str, query: &[(&str, &str)]) -> ProviderResult<Url> {
@@ -952,6 +1233,10 @@ fn static_route_error() -> ProviderError {
     )
 }
 
+fn protocol_drift(message: impl Into<String>) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Write as _;
@@ -968,6 +1253,64 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
     const RESOURCE_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/resources/cards-mixed.html");
+
+    #[test]
+    fn video_routes_bind_identity_tokens_and_donor_signature() {
+        let session = ChaoxingCookieSession::try_new("_uid=777; fid=888; uf=SAFE_UF").unwrap();
+        let course = course();
+        let route = ChaoxingCourseRoute::from_remote_course(&course).unwrap();
+        let scope = route.parser_scope().unwrap();
+        let target = crate::resource_inventory::locate_video_resource_target(
+            RESOURCE_MIXED,
+            &scope,
+            "4001",
+            0,
+            "resource:100:200:4001:job-video",
+        )
+        .unwrap()
+        .unwrap();
+        let status_url = video_status_url(&session, &target).unwrap();
+        assert_eq!(status_url.path(), "/ananas/status/SAFE_VIDEO_OBJECT");
+        assert_eq!(query(&status_url, "k").as_deref(), Some("888"));
+        assert_eq!(query(&status_url, "flag").as_deref(), Some("normal"));
+
+        let status = ChaoxingVideoStatus::try_new("SAFE_DTOKEN", 135, 15).unwrap();
+        let report = video_report_url(
+            &session,
+            route,
+            &target,
+            &status,
+            75,
+            ChaoxingVideoRt::NineTenths,
+        )
+        .unwrap();
+        assert_eq!(report.path(), "/mooc-ans/multimedia/log/a/300/SAFE_DTOKEN");
+        for (key, expected) in [
+            ("clazzId", "200"),
+            ("playingTime", "75"),
+            ("duration", "135"),
+            ("clipTime", "0_135"),
+            ("objectId", "SAFE_VIDEO_OBJECT"),
+            ("otherInfo", "SAFE_VIDEO_REPORT-rt_d"),
+            ("courseId", "100"),
+            ("jobid", "job-video"),
+            ("userid", "777"),
+            ("isdrag", "3"),
+            ("view", "pc"),
+            ("dtype", "Video"),
+            ("rt", "0.9"),
+            ("enc", "58a0139ba4e5641ae6cce6a09524e6ac"),
+            ("videoFaceCaptureEnc", "SAFE_FACE_ENC"),
+            ("attDuration", "SAFE_ATTENDANCE"),
+            ("attDurationEnc", "SAFE_ATTENDANCE_ENC"),
+        ] {
+            assert_eq!(query(&report, key).as_deref(), Some(expected), "{key}");
+        }
+        assert!(query(&report, "_t").is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        }));
+        assert!(!report.as_str().contains("SAFE_UF"));
+    }
 
     #[test]
     fn routes_preserve_course_scope_and_discover_fresh_work_enc() {

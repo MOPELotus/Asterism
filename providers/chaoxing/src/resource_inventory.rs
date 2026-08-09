@@ -15,6 +15,7 @@ const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 const MAX_TITLE_BYTES: usize = 512;
 const MAX_CARD_INDEX: u8 = 6;
 const MAX_EPHEMERAL_TOKEN_BYTES: usize = 4 * 1_024;
+const MAX_VIDEO_PLAY_TIME_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChaoxingImmediateResourceKind {
@@ -27,6 +28,97 @@ pub(crate) struct ChaoxingImmediateResourceTarget {
     remote_state: RemoteState,
     job_id: String,
     token: Option<SecretString>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChaoxingVideoRt {
+    NineTenths,
+    One,
+}
+
+impl ChaoxingVideoRt {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NineTenths => "0.9",
+            Self::One => "1",
+        }
+    }
+}
+
+pub(crate) struct ChaoxingVideoResourceTarget {
+    remote_state: RemoteState,
+    job_id: String,
+    object_id: SecretString,
+    other_info: SecretString,
+    initial_play_time_millis: u64,
+    rt: Option<ChaoxingVideoRt>,
+    face_capture_enc: Option<SecretString>,
+    attendance_duration: Option<SecretString>,
+    attendance_duration_enc: Option<SecretString>,
+}
+
+impl ChaoxingVideoResourceTarget {
+    pub(crate) const fn remote_state(&self) -> RemoteState {
+        self.remote_state
+    }
+
+    pub(crate) fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
+    pub(crate) fn object_id(&self) -> &SecretString {
+        &self.object_id
+    }
+
+    pub(crate) fn other_info(&self) -> &SecretString {
+        &self.other_info
+    }
+
+    pub(crate) const fn initial_play_time_millis(&self) -> u64 {
+        self.initial_play_time_millis
+    }
+
+    pub(crate) const fn rt(&self) -> Option<ChaoxingVideoRt> {
+        self.rt
+    }
+
+    pub(crate) fn face_capture_enc(&self) -> Option<&SecretString> {
+        self.face_capture_enc.as_ref()
+    }
+
+    pub(crate) fn attendance_duration(&self) -> Option<&SecretString> {
+        self.attendance_duration.as_ref()
+    }
+
+    pub(crate) fn attendance_duration_enc(&self) -> Option<&SecretString> {
+        self.attendance_duration_enc.as_ref()
+    }
+}
+
+impl std::fmt::Debug for ChaoxingVideoResourceTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChaoxingVideoResourceTarget")
+            .field("remote_state", &self.remote_state)
+            .field("job_id", &"[REDACTED]")
+            .field("object_id", &"[REDACTED]")
+            .field("other_info", &"[REDACTED]")
+            .field("initial_play_time_millis", &self.initial_play_time_millis)
+            .field("rt", &self.rt)
+            .field(
+                "face_capture_enc",
+                &self.face_capture_enc.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "attendance_duration",
+                &self.attendance_duration.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "attendance_duration_enc",
+                &self.attendance_duration_enc.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 struct SensitiveCardRoot(Map<String, Value>);
@@ -227,6 +319,161 @@ pub(crate) fn locate_immediate_resource_target(
     Ok(found)
 }
 
+/// Locates one fresh Video target without persisting its report credentials.
+///
+/// # Errors
+///
+/// Returns a typed error for foreign identities, duplicate cards, malformed
+/// video metadata, or a task which is not a Video resource.
+pub(crate) fn locate_video_resource_target(
+    html: &str,
+    scope: &ChaoxingCourseScope,
+    knowledge_id: &str,
+    card_index: u8,
+    remote_task_id: &str,
+) -> ProviderResult<Option<ChaoxingVideoResourceTarget>> {
+    if html.is_empty() || html.len() > MAX_CARD_DOCUMENT_BYTES {
+        return Err(invalid_response(
+            "Chaoxing chapter card document is empty or exceeds the size limit",
+        ));
+    }
+    validate_component(knowledge_id, "knowledge identity")?;
+    if card_index > MAX_CARD_INDEX {
+        return Err(protocol_drift(
+            "Chaoxing chapter card index exceeds the donor range",
+        ));
+    }
+    let prefix = format!(
+        "resource:{}:{}:{knowledge_id}:",
+        scope.course_id(),
+        scope.class_id()
+    );
+    let expected_task_id = remote_task_id
+        .strip_prefix(&prefix)
+        .ok_or_else(|| protocol_drift("Chaoxing Video target is outside the current scope"))?;
+    validate_component(expected_task_id, "resource identity")?;
+    if html.contains("章节未开放") {
+        return Ok(None);
+    }
+    let Some(root) = parse_card_root(html)? else {
+        return Ok(None);
+    };
+    let mut found = None;
+    for attachment in card_attachments(root.as_map())? {
+        let Some(task) = parse_resource_attachment(attachment, scope, knowledge_id, card_index)?
+        else {
+            continue;
+        };
+        if task.remote_id != remote_task_id {
+            continue;
+        }
+        if found.is_some() {
+            return Err(protocol_drift(
+                "Chaoxing chapter card contains a duplicate Video target",
+            ));
+        }
+        if task.normalized.get("resource_kind").and_then(Value::as_str) != Some("video") {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing resource kind is not a Video task",
+            ));
+        }
+        let card = attachment
+            .as_object()
+            .ok_or_else(|| protocol_drift("Chaoxing chapter attachment is not an object"))?;
+        let property = optional_object(card, "property")?;
+        let job_id = optional_string(card, "jobid")?
+            .filter(|job_id| *job_id == expected_task_id)
+            .ok_or_else(|| protocol_drift("Chaoxing Video has no matching job identity"))?
+            .to_owned();
+        let object_id = required_ephemeral_string(card, "objectId", "Video object identity")?;
+        validate_component(object_id, "Video object identity")?;
+        let other_info = required_ephemeral_string(card, "otherInfo", "Video report context")?
+            .split('&')
+            .next()
+            .ok_or_else(|| protocol_drift("Chaoxing Video report context is empty"))?;
+        let initial_play_time_millis = optional_u64(card, "playTime")?.unwrap_or_default();
+        if initial_play_time_millis > MAX_VIDEO_PLAY_TIME_MILLIS {
+            return Err(protocol_drift(
+                "Chaoxing Video initial progress exceeds the safety limit",
+            ));
+        }
+        let rt = parse_video_rt(optional_string(property, "rt")?, other_info)?;
+        found = Some(ChaoxingVideoResourceTarget {
+            remote_state: task.remote_state,
+            job_id,
+            object_id: SecretString::new(object_id),
+            other_info: SecretString::new(other_info),
+            initial_play_time_millis,
+            rt,
+            face_capture_enc: optional_ephemeral_secret(card, "videoFaceCaptureEnc")?,
+            attendance_duration: optional_ephemeral_secret(card, "attDuration")?,
+            attendance_duration_enc: optional_ephemeral_secret(card, "attDurationEnc")?,
+        });
+    }
+    Ok(found)
+}
+
+fn required_ephemeral_string<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    label: &'static str,
+) -> ProviderResult<&'a str> {
+    optional_string(object, key)?
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_EPHEMERAL_TOKEN_BYTES
+                && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(|| protocol_drift(format!("Chaoxing {label} is missing or invalid")))
+}
+
+fn optional_ephemeral_secret(
+    object: &Map<String, Value>,
+    key: &str,
+) -> ProviderResult<Option<SecretString>> {
+    optional_string(object, key)?
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            if value.len() > MAX_EPHEMERAL_TOKEN_BYTES || value.chars().any(char::is_control) {
+                Err(protocol_drift(
+                    "Chaoxing Video optional report credential is invalid",
+                ))
+            } else {
+                Ok(SecretString::new(value))
+            }
+        })
+        .transpose()
+}
+
+fn optional_u64(object: &Map<String, Value>, key: &str) -> ProviderResult<Option<u64>> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| protocol_drift("Chaoxing Video progress field is invalid")),
+        Some(_) => Err(protocol_drift(
+            "Chaoxing Video progress field is not an integer",
+        )),
+    }
+}
+
+fn parse_video_rt(
+    value: Option<&str>,
+    other_info: &str,
+) -> ProviderResult<Option<ChaoxingVideoRt>> {
+    let value = value.filter(|value| !value.is_empty());
+    match value {
+        Some("0.9") => Ok(Some(ChaoxingVideoRt::NineTenths)),
+        Some("1") => Ok(Some(ChaoxingVideoRt::One)),
+        Some(_) => Err(protocol_drift("Chaoxing Video rt value is unsupported")),
+        None if other_info.contains("-rt_d") => Ok(Some(ChaoxingVideoRt::NineTenths)),
+        None if other_info.contains("-rt_1") => Ok(Some(ChaoxingVideoRt::One)),
+        None => Ok(None),
+    }
+}
+
 fn parse_card_root(html: &str) -> ProviderResult<Option<SensitiveCardRoot>> {
     let Some(object) = extract_marg_object(html)? else {
         return Ok(None);
@@ -335,11 +582,11 @@ fn parse_resource_attachment(
         due_at: None,
         closes_at: None,
         capabilities: match (kind, remote_state) {
-            ("document" | "read", RemoteState::Pending) => vec![
+            ("document" | "read" | "video", RemoteState::Pending) => vec![
                 TaskCapability::ProgressRead,
                 TaskCapability::ResourceExecution,
             ],
-            ("document" | "read", RemoteState::Completed) => {
+            ("document" | "read" | "video", RemoteState::Completed) => {
                 vec![TaskCapability::ProgressRead]
             }
             _ => Vec::new(),
@@ -573,7 +820,7 @@ fn fingerprint(normalized: &Value) -> ProviderResult<String> {
     Ok(format!("v1:{:x}", Sha256::digest(bytes)))
 }
 
-fn protocol_drift(message: &'static str) -> ProviderError {
+fn protocol_drift(message: impl Into<String>) -> ProviderError {
     ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
 }
 
@@ -627,6 +874,18 @@ mod tests {
         assert!(
             tasks
                 .iter()
+                .find(|task| task.remote_id.ends_with(":job-video"))
+                .is_some_and(|task| {
+                    task.capabilities
+                        == [
+                            TaskCapability::ProgressRead,
+                            TaskCapability::ResourceExecution,
+                        ]
+                })
+        );
+        assert!(
+            tasks
+                .iter()
                 .find(|task| task.remote_id.ends_with(":job-document"))
                 .is_some_and(|task| task.capabilities == [TaskCapability::ProgressRead])
         );
@@ -638,6 +897,9 @@ mod tests {
             "PRIVATE_OTHER",
             "PRIVATE_LIVE",
             "PRIVATE_READ_TOKEN",
+            "SAFE_VIDEO_OBJECT",
+            "SAFE_VIDEO_REPORT",
+            "SAFE_FACE_ENC",
         ] {
             assert!(!serialized.contains(private));
         }
@@ -785,6 +1047,53 @@ mod tests {
             )
             .unwrap()
             .is_none()
+        );
+    }
+
+    #[test]
+    fn video_locator_keeps_report_credentials_ephemeral_and_bounded() {
+        let video = locate_video_resource_target(
+            CARDS_MIXED,
+            &scope(),
+            "4001",
+            0,
+            "resource:100:200:4001:job-video",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(video.remote_state(), RemoteState::Pending);
+        assert_eq!(video.job_id(), "job-video");
+        assert_eq!(video.object_id().expose_secret(), "SAFE_VIDEO_OBJECT");
+        assert_eq!(video.other_info().expose_secret(), "SAFE_VIDEO_REPORT-rt_d");
+        assert_eq!(video.initial_play_time_millis(), 15_000);
+        assert_eq!(video.rt(), Some(ChaoxingVideoRt::NineTenths));
+        assert_eq!(
+            video.face_capture_enc().unwrap().expose_secret(),
+            "SAFE_FACE_ENC"
+        );
+        let debug = format!("{video:?}");
+        assert!(!debug.contains("SAFE_VIDEO_OBJECT"));
+        assert!(!debug.contains("SAFE_VIDEO_REPORT"));
+
+        assert!(
+            locate_video_resource_target(
+                &CARDS_MIXED.replace("\"objectId\":\"SAFE_VIDEO_OBJECT\"", "\"objectId\":null"),
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:job-video",
+            )
+            .is_err()
+        );
+        assert!(
+            locate_video_resource_target(
+                CARDS_MIXED,
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:job-read",
+            )
+            .is_err()
         );
     }
 

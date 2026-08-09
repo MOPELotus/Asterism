@@ -42,7 +42,7 @@ Phase 0 已建立并持续完善以下基础：
 - 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；
 - Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
-- Chaoxing 能力级上游审计、独立 Chapter / Resource / Work / Exam TaskInventory、Document / Read 原生执行与只读远端进度复核、有界 Work 详情状态复核、Cookie 自动续登与显式开发验证入口；
+- Chaoxing 能力级上游审计、独立 Chapter / Resource / Work / Exam TaskInventory、Document / Read / Video 原生执行与只读远端进度复核、有界 Work 详情状态复核、Cookie 自动续登与显式开发验证入口；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
 正在进行的工作以 [Phase 0 架构检查点](docs/architecture/phase-0-foundation.md) 为准。内部 API 在第二批 Provider 完成前仍可能发生不兼容变更。
@@ -196,7 +196,7 @@ Provider 执行期间只能通过 Core 注入的 `ExecutionEventSink` 上报进�
 
 周期扫描当前仅由 Master 通过 `provider-account schedule get <account-id>` 和 `provider-account schedule set <account-id> --interval-seconds <seconds>` 管理；添加 `--disabled` 可保留配置但停止物化任务。接口同时返回 Master 期望间隔、Provider 最小间隔和 Core 实际采用的间隔，普通用户第一阶段不展示也不能修改该设置，Provider 自身不创建独立 cron 或后台循环。
 
-Provider 技术运行参数属于 Master 后台控制面：可设置平台默认值，并按需对 ProviderAccount 或单个 Task 做更具体覆盖；视频并发/线程数、播放速度、章节及其他任务的周期巡查只是示例，实际字段由各 Provider 的版本化 schema 定义并受安全上限约束。Provider API 已提供布尔、整数、千分位定点小数、秒级时长与受限选项类型，以及 Provider / ProviderAccount / Task 作用域声明和逐字段覆盖解析；不接受自由字符串或任意 JSON。Core 已按三个作用域持久化校验后的局部覆盖，使用 optimistic revision 防止后台并发覆盖，并在同一事务写入不含配置值的 Audit。第一阶段普通用户不展示也不能修改这些参数。周期巡查仍必须统一进入 Core Scheduler，Provider 不得据此自行创建后台循环；Execution 调度事务已支持保存创建时解析的不可变设置快照和三层 revision，Core 执行 Action 的自动解析接入仍在进行中。
+Provider 技术运行参数属于 Master 后台控制面：可设置平台默认值，并按需对 ProviderAccount 或单个 Task 做更具体覆盖；视频并发/线程数、播放速度、章节及其他任务的周期巡查只是示例，实际字段由各 Provider 的版本化 schema 定义并受安全上限约束。Provider API 已提供布尔、整数、千分位定点小数、秒级时长与受限选项类型，以及 Provider / ProviderAccount / Task 作用域声明和逐字段覆盖解析；不接受自由字符串或任意 JSON。Core 已按三个作用域持久化校验后的局部覆盖，使用 optimistic revision 防止后台并发覆盖，并在同一事务写入不含配置值的 Audit。第一阶段普通用户不展示也不能修改这些参数。周期巡查仍必须统一进入 Core Scheduler，Provider 不得据此自行创建后台循环；标准 Core 执行 Action 会原子解析并冻结最终设置，Worker 只把该 Execution 的版本化快照传给 Provider，Retry 不受后台后续修改影响。`chaoxing` 已以受限 schema 消费视频倍速和进度上报间隔；视频并发和巡查默认值仍待接入 Core 调度语义。
 
 Master 控制面使用 `/api/v1/admin/providers/{provider_id}/runtime-settings`、`/api/v1/admin/provider-accounts/{account_id}/runtime-settings` 与 `/api/v1/admin/tasks/{task_id}/runtime-settings` 读取或替换各层覆盖；Provider schema 可从前一路径下的 `/schema` 读取。读取结果同时返回三层 override、最终解析值和逐字段来源。Provider 默认值仅允许 Master Web Session 管理；owner-bound `ProviderManage` 服务令牌只能管理其 owner 的账号和任务覆盖。
 

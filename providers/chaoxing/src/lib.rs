@@ -13,6 +13,7 @@ mod native_http;
 mod provider;
 mod resource_execution;
 mod resource_inventory;
+mod runtime_settings;
 mod stored_session;
 mod task_inventory;
 

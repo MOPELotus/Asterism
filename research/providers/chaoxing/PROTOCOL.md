@@ -109,6 +109,40 @@ Already-completed attachments are idempotent and make no mutation request.
 Video, Live and Chapter Work use different duration/question lifecycles and are
 not routed through this immediate path.
 
+## Video execution checkpoint
+
+The audited primary donor obtains fresh Video metadata from the Chapter Card,
+then reads the current media status before reporting progress:
+
+```text
+GET /ananas/status/{objectId}?k={fid}&flag=normal
+  -> status + dtoken + duration + optional playTime
+
+GET /mooc-ans/multimedia/log/a/{cpi}/{dtoken}
+  ?clazzId&playingTime&duration&clipTime&objectId&otherInfo
+  &courseId&jobid&userid&isdrag=3&view=pc&enc&dtype=Video&rt&_t
+```
+
+`enc` is the lowercase MD5 of the donor-observed ordered report tuple containing
+class, user, job, object, millisecond progress, the protocol constant,
+millisecond duration, and clip range. Asterism constructs this only inside the
+short-lived native transport. `objectId`, `otherInfo`, `dtoken`, face-capture and
+attendance fields remain redacted, zeroizing execution material and never enter
+Task snapshots, logs or results.
+
+The Core-owned Execution snapshot supplies a bounded playback rate from 1.0 to
+2.0 and a 30-90 second video-progress interval. Video time advances monotonically;
+the real wait for each interval is divided by the frozen playback rate. Retry
+starts from freshly reported server/Card progress, not from a persisted token.
+HTTP/JSON success is still provisional: the complete seven-card matrix is
+re-fetched and the exact stable resource identity must report `isPassed = true`.
+
+The donor includes automatic captcha solving. Asterism deliberately does not
+port that behavior in the deferred-Capture phase: a captcha/validation response
+becomes typed `HumanRequired(ImageCaptcha)` before any blind retry. The endpoint,
+signature, current Referer version and real account behavior remain live-test
+gates; this checkpoint is offline/native-boundary evidence only.
+
 ## WorkModule inventory
 
 The current browser route is:
