@@ -4,7 +4,10 @@ use asterism_domain::{Execution, ProviderAccountId, Task, TaskId};
 use asterism_engine::{
     ExecuteTaskCommand, ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
 };
-use asterism_storage::{SqliteExecutionRepository, SqliteTaskQueryRepository, TaskQueryRepository};
+use asterism_storage::{
+    SqliteExecutionRepository, SqliteProviderAccountRepository,
+    SqliteProviderRuntimeSettingsRepository, SqliteTaskQueryRepository, TaskQueryRepository,
+};
 use axum::{
     Extension, Json,
     extract::{Path, Query, State, rejection::QueryRejection},
@@ -90,7 +93,10 @@ pub(super) async fn execute_task(
     let correlation_id = required_header(&headers, "x-request-id", 128)?;
     let service = ExecutionRequestService::new(
         SqliteTaskQueryRepository::new(state.database.clone()),
-        SqliteExecutionRepository::new(state.database),
+        SqliteExecutionRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteProviderRuntimeSettingsRepository::new(state.database),
+        state.providers,
         FormalAssessmentPolicy::default(),
     );
     let result = service
@@ -167,6 +173,14 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
         ExecutionRequestError::IdempotencyConflict => ApiError::conflict(
             "idempotency_conflict",
             "the idempotency key is already bound to another execution request",
+        ),
+        ExecutionRequestError::ProviderRuntimeUnavailable => ApiError::conflict(
+            "provider_runtime_settings_unavailable",
+            "the registered Provider runtime settings are unavailable or incompatible",
+        ),
+        ExecutionRequestError::RuntimeSettingsConflict => ApiError::conflict(
+            "runtime_settings_revision_conflict",
+            "Provider runtime settings changed while the execution was being scheduled",
         ),
         ExecutionRequestError::Assessment(_) => ApiError::conflict(
             "formal_assessment_blocked",

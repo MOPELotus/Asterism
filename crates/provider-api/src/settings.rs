@@ -178,28 +178,78 @@ impl ProviderRuntimeSettingsSchema {
         account: Option<&ProviderRuntimeSettingsPatch>,
         task: Option<&ProviderRuntimeSettingsPatch>,
     ) -> Result<ResolvedProviderRuntimeSettings, ProviderSettingsError> {
+        self.resolve_with_sources(provider, account, task)
+            .map(|(resolved, _)| resolved)
+    }
+
+    /// Resolves settings together with the winning source of every field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] under the same conditions as
+    /// [`Self::resolve`].
+    pub fn resolve_with_sources(
+        &self,
+        provider: Option<&ProviderRuntimeSettingsPatch>,
+        account: Option<&ProviderRuntimeSettingsPatch>,
+        task: Option<&ProviderRuntimeSettingsPatch>,
+    ) -> Result<
+        (
+            ResolvedProviderRuntimeSettings,
+            BTreeMap<String, ProviderRuntimeSettingSource>,
+        ),
+        ProviderSettingsError,
+    > {
         self.validate()?;
         let mut values = self
             .definitions
             .iter()
             .map(|definition| (definition.key.clone(), definition.default.clone()))
             .collect::<BTreeMap<_, _>>();
+        let mut sources = self
+            .definitions
+            .iter()
+            .map(|definition| {
+                (
+                    definition.key.clone(),
+                    ProviderRuntimeSettingSource::SchemaDefault,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
 
-        for (scope, patch) in [
-            (ProviderSettingScope::Provider, provider),
-            (ProviderSettingScope::ProviderAccount, account),
-            (ProviderSettingScope::Task, task),
+        for (scope, source, patch) in [
+            (
+                ProviderSettingScope::Provider,
+                ProviderRuntimeSettingSource::Provider,
+                provider,
+            ),
+            (
+                ProviderSettingScope::ProviderAccount,
+                ProviderRuntimeSettingSource::ProviderAccount,
+                account,
+            ),
+            (
+                ProviderSettingScope::Task,
+                ProviderRuntimeSettingSource::Task,
+                task,
+            ),
         ] {
             if let Some(patch) = patch {
                 self.validate_patch(scope, patch)?;
-                values.extend(patch.values.clone());
+                for (key, value) in &patch.values {
+                    values.insert(key.clone(), value.clone());
+                    sources.insert(key.clone(), source);
+                }
             }
         }
 
-        Ok(ResolvedProviderRuntimeSettings {
-            schema_version: self.version,
-            values,
-        })
+        Ok((
+            ResolvedProviderRuntimeSettings {
+                schema_version: self.version,
+                values,
+            },
+            sources,
+        ))
     }
 }
 
@@ -420,17 +470,25 @@ mod tests {
         let task = patch([("video.max_concurrency", ProviderSettingValue::Integer(1))]);
 
         let resolved = schema
-            .resolve(Some(&provider), Some(&account), Some(&task))
+            .resolve_with_sources(Some(&provider), Some(&account), Some(&task))
             .unwrap();
 
-        assert_eq!(resolved.schema_version, 3);
+        assert_eq!(resolved.0.schema_version, 3);
         assert_eq!(
-            resolved.values["video.max_concurrency"],
+            resolved.0.values["video.max_concurrency"],
             ProviderSettingValue::Integer(1)
         );
         assert_eq!(
-            resolved.values["video.playback_rate"],
+            resolved.0.values["video.playback_rate"],
             ProviderSettingValue::DecimalMillis(1_500)
+        );
+        assert_eq!(
+            resolved.1["video.max_concurrency"],
+            ProviderRuntimeSettingSource::Task
+        );
+        assert_eq!(
+            resolved.1["video.playback_rate"],
+            ProviderRuntimeSettingSource::ProviderAccount
         );
     }
 

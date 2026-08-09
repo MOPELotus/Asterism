@@ -3,12 +3,13 @@ use std::{collections::BTreeMap, str::FromStr};
 use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, CreditReservationState, Execution, ExecutionAttempt,
     ExecutionAttemptId, ExecutionId, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
-    ExecutionState, LogLevel, OrchestrationState, ProviderId, ScheduleId, TaskId, Timestamp,
-    UserId,
+    ExecutionState, LogLevel, OrchestrationState, ProviderAccountId, ProviderId, ScheduleId,
+    TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
-    ProviderRuntimeSettingSource, ProviderSettingValue, ResolvedProviderRuntimeSettings,
+    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderSettingValue,
+    ResolvedProviderRuntimeSettings,
 };
 use asterism_scheduler::ScheduledJobKind;
 use async_trait::async_trait;
@@ -22,8 +23,8 @@ use crate::{
     Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
     ExecutionBillingReservation, ExecutionLogAppendRequest, ExecutionProgressUpdate,
     ExecutionQueryRepository, ExecutionRecoveryFinishRequest, ExecutionRepository,
-    ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome, ExecutionScheduleRequest,
-    StorageError,
+    ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome,
+    ExecutionScheduleRequest, StorageError,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage};
 
@@ -75,17 +76,13 @@ impl ExecutionRepository for SqliteExecutionRepository {
         validate_schedule_request(&request)?;
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
 
-        if let Some(row) = sqlx::query(
-            "SELECT id, task_id, requested_by, request_source, quote_id, state, scheduled_at, \
-                    started_at, finished_at, created_at \
-             FROM executions WHERE idempotency_scope = ? AND idempotency_key = ?",
+        if let Some(existing) = find_idempotent_execution_in_transaction(
+            &mut transaction,
+            request.idempotency_scope,
+            request.idempotency_key,
         )
-        .bind(request.idempotency_scope)
-        .bind(request.idempotency_key)
-        .fetch_optional(&mut *transaction)
         .await?
         {
-            let existing = decode_execution(&row)?;
             transaction.commit().await?;
             return if same_request(&existing, request.execution) {
                 Ok(ExecutionScheduleOutcome::Existing(existing))
@@ -94,28 +91,26 @@ impl ExecutionRepository for SqliteExecutionRepository {
             };
         }
 
-        let expected_task_state = enum_name(request.expected_task_state)?;
-        let task_update = sqlx::query(
-            "UPDATE tasks SET orchestration_state = 'scheduled', updated_at = ? \
-             WHERE id = ? AND orchestration_state = ?",
-        )
-        .bind(encode_timestamp(request.execution.created_at))
-        .bind(request.execution.task_id.to_string())
-        .bind(expected_task_state)
-        .execute(&mut *transaction)
-        .await?;
-        if task_update.rows_affected() != 1 {
+        if let Some(resolution) = request.runtime_settings
+            && !runtime_settings_match_current_layers(
+                &mut transaction,
+                request.execution.task_id,
+                request.execution.created_at,
+                &resolution,
+            )
+            .await?
+        {
+            transaction.rollback().await?;
+            return Ok(ExecutionScheduleOutcome::RuntimeSettingsConflict);
+        }
+
+        if !transition_task_to_scheduled(&mut transaction, &request).await? {
             transaction.rollback().await?;
             return Ok(ExecutionScheduleOutcome::TaskStateConflict);
         }
 
         if let Some(billing) = request.billing.as_ref() {
             insert_quote_and_reserve_balance(&mut transaction, billing).await?;
-        }
-
-        if let Some(snapshot) = request.runtime_settings {
-            validate_snapshot_task_binding(&mut transaction, request.execution.task_id, snapshot)
-                .await?;
         }
 
         let execution = request.execution;
@@ -140,8 +135,9 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .execute(&mut *transaction)
         .await?;
 
-        if let Some(snapshot) = request.runtime_settings {
-            insert_runtime_settings_snapshot(&mut transaction, execution.id, snapshot).await?;
+        if let Some(resolution) = request.runtime_settings {
+            insert_runtime_settings_snapshot(&mut transaction, execution.id, resolution.snapshot)
+                .await?;
         }
 
         if let Some(billing) = request.billing.as_ref() {
@@ -1428,9 +1424,11 @@ fn validate_schedule_request(request: &ExecutionScheduleRequest<'_>) -> Result<(
         }
         _ => false,
     };
-    let runtime_settings_valid = request
-        .runtime_settings
-        .is_none_or(|snapshot| valid_runtime_settings_snapshot(snapshot, execution.created_at));
+    let runtime_settings_valid = request.runtime_settings.is_none_or(|resolution| {
+        resolution.schema.validate().is_ok()
+            && valid_runtime_settings_snapshot(resolution.snapshot, execution.created_at)
+            && resolution.snapshot.resolved.schema_version == resolution.schema.version
+    });
     if execution.state != ExecutionState::Scheduled
         || execution.scheduled_at.is_none()
         || execution.started_at.is_some()
@@ -1518,25 +1516,154 @@ fn same_request(existing: &Execution, requested: &Execution) -> bool {
         && existing.quote_id == requested.quote_id
 }
 
-async fn validate_snapshot_task_binding(
+async fn transition_task_to_scheduled(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request: &ExecutionScheduleRequest<'_>,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "UPDATE tasks SET orchestration_state = 'scheduled', updated_at = ? \
+         WHERE id = ? AND orchestration_state = ?",
+    )
+    .bind(encode_timestamp(request.execution.created_at))
+    .bind(request.execution.task_id.to_string())
+    .bind(enum_name(request.expected_task_state)?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+async fn find_idempotent_execution_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    idempotency_scope: &str,
+    idempotency_key: &str,
+) -> Result<Option<Execution>, StorageError> {
+    sqlx::query(
+        "SELECT id, task_id, requested_by, request_source, quote_id, state, scheduled_at, \
+                started_at, finished_at, created_at FROM executions \
+         WHERE idempotency_scope = ? AND idempotency_key = ?",
+    )
+    .bind(idempotency_scope)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .as_ref()
+    .map(decode_execution)
+    .transpose()
+}
+
+async fn runtime_settings_match_current_layers(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     task_id: TaskId,
-    snapshot: &ExecutionRuntimeSettingsSnapshot,
-) -> Result<(), StorageError> {
-    let actual_provider_id: Option<String> = sqlx::query_scalar(
-        "SELECT account.provider_id FROM tasks AS task \
+    captured_at: Timestamp,
+    resolution: &ExecutionRuntimeSettingsResolution<'_>,
+) -> Result<bool, StorageError> {
+    let target: Option<(String, String)> = sqlx::query_as(
+        "SELECT task.provider_account_id, account.provider_id FROM tasks AS task \
          INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
          WHERE task.id = ?",
     )
     .bind(task_id.to_string())
     .fetch_optional(&mut **transaction)
     .await?;
-    if actual_provider_id.as_deref() != Some(snapshot.provider_id.as_str()) {
+    let Some((provider_account_id, actual_provider_id)) = target else {
+        return Err(StorageError::InvalidData(
+            "execution runtime settings Task binding is invalid".to_owned(),
+        ));
+    };
+    if actual_provider_id != resolution.snapshot.provider_id.as_str() {
         return Err(StorageError::InvalidData(
             "execution runtime settings Provider binding is invalid".to_owned(),
         ));
     }
-    Ok(())
+    let provider_account_id = ProviderAccountId::from_str(&provider_account_id)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let provider = find_runtime_settings_layer(
+        transaction,
+        "provider",
+        resolution.snapshot.provider_id.as_str(),
+    )
+    .await?;
+    let account = find_runtime_settings_layer(
+        transaction,
+        "provider_account",
+        &provider_account_id.to_string(),
+    )
+    .await?;
+    let task = find_runtime_settings_layer(transaction, "task", &task_id.to_string()).await?;
+    let Ok((resolved, sources)) = resolution.schema.resolve_with_sources(
+        provider.as_ref().map(|layer| &layer.patch),
+        account.as_ref().map(|layer| &layer.patch),
+        task.as_ref().map(|layer| &layer.patch),
+    ) else {
+        return Ok(false);
+    };
+    let current = ExecutionRuntimeSettingsSnapshot {
+        provider_id: resolution.snapshot.provider_id.clone(),
+        resolved,
+        sources,
+        provider_revision: provider.as_ref().map(|layer| layer.revision),
+        provider_account_revision: account.as_ref().map(|layer| layer.revision),
+        task_revision: task.as_ref().map(|layer| layer.revision),
+        captured_at,
+    };
+    Ok(current == *resolution.snapshot)
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeSettingsLayer {
+    patch: ProviderRuntimeSettingsPatch,
+    revision: u32,
+}
+
+async fn find_runtime_settings_layer(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    scope: &str,
+    target_id: &str,
+) -> Result<Option<RuntimeSettingsLayer>, StorageError> {
+    let (column, expected_scope) = match scope {
+        "provider" => ("provider_id", "provider"),
+        "provider_account" => ("provider_account_id", "provider_account"),
+        "task" => ("task_id", "task"),
+        _ => {
+            return Err(StorageError::InvalidData(
+                "execution runtime settings scope is invalid".to_owned(),
+            ));
+        }
+    };
+    let statement = format!(
+        "SELECT schema_version, revision, settings_json FROM provider_runtime_settings \
+         WHERE scope = ? AND {column} = ?"
+    );
+    let row = sqlx::query(&statement)
+        .bind(expected_scope)
+        .bind(target_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    row.as_ref().map(decode_runtime_settings_layer).transpose()
+}
+
+fn decode_runtime_settings_layer(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<RuntimeSettingsLayer, StorageError> {
+    let settings_json = row.try_get::<String, _>("settings_json")?;
+    if settings_json.len() > MAX_EXECUTION_SETTINGS_JSON_BYTES {
+        return Err(StorageError::InvalidData(
+            "persisted Provider runtime settings are too large".to_owned(),
+        ));
+    }
+    let patch: ProviderRuntimeSettingsPatch = serde_json::from_str(&settings_json)?;
+    let schema_version = u32::try_from(row.try_get::<i64, _>("schema_version")?)
+        .map_err(|_| StorageError::InvalidData("invalid settings schema version".to_owned()))?;
+    if patch.schema_version != schema_version {
+        return Err(StorageError::InvalidData(
+            "persisted Provider runtime settings schema binding is invalid".to_owned(),
+        ));
+    }
+    Ok(RuntimeSettingsLayer {
+        patch,
+        revision: u32::try_from(row.try_get::<i64, _>("revision")?)
+            .map_err(|_| StorageError::InvalidData("invalid settings revision".to_owned()))?,
+    })
 }
 
 async fn insert_runtime_settings_snapshot(
@@ -1647,12 +1774,12 @@ async fn insert_request_audit(
         "task_id": request.execution.task_id,
         "request_source": request.execution.request_source,
         "billing": billing,
-        "runtime_settings": request.runtime_settings.map(|snapshot| serde_json::json!({
-            "provider_id": snapshot.provider_id,
-            "schema_version": snapshot.resolved.schema_version,
-            "provider_revision": snapshot.provider_revision,
-            "provider_account_revision": snapshot.provider_account_revision,
-            "task_revision": snapshot.task_revision,
+        "runtime_settings": request.runtime_settings.map(|resolution| serde_json::json!({
+            "provider_id": resolution.snapshot.provider_id,
+            "schema_version": resolution.snapshot.resolved.schema_version,
+            "provider_revision": resolution.snapshot.provider_revision,
+            "provider_account_revision": resolution.snapshot.provider_account_revision,
+            "task_revision": resolution.snapshot.task_revision,
         })),
     });
     sqlx::query(
@@ -1895,9 +2022,15 @@ fn decode_optional_timestamp(value: Option<&str>) -> Result<Option<Timestamp>, S
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use asterism_domain::{
         CreditAmount, CreditReservation, CreditReservationId, PriceQuote, PriceQuoteId,
         ProviderAccountId, RequestSource, TaskId,
+    };
+    use asterism_provider_api::{
+        ProviderRuntimeSettingsSchema, ProviderSettingDefinition, ProviderSettingKind,
+        ProviderSettingScope,
     };
     use sqlx::Row;
 
@@ -1961,10 +2094,15 @@ mod tests {
         let repository = SqliteExecutionRepository::new(database.clone());
         let now = Utc::now();
         let execution = scheduled_execution(owner, task_id, now);
+        insert_provider_runtime_settings(&database, "test", 4).await;
+        let schema = runtime_settings_schema();
         let mut snapshot = runtime_settings_snapshot(now, "test", 4);
         let expected = snapshot.clone();
         let mut request = test_request(&execution, owner, "settings-snapshot");
-        request.runtime_settings = Some(&snapshot);
+        request.runtime_settings = Some(ExecutionRuntimeSettingsResolution {
+            snapshot: &snapshot,
+            schema: &schema,
+        });
 
         assert!(matches!(
             repository.schedule_execution(request).await.unwrap(),
@@ -2001,14 +2139,66 @@ mod tests {
         let repository = SqliteExecutionRepository::new(database.clone());
         let now = Utc::now();
         let execution = scheduled_execution(owner, task_id, now);
+        let schema = runtime_settings_schema();
         let snapshot = runtime_settings_snapshot(now, "other-provider", 4);
         let mut request = test_request(&execution, owner, "settings-wrong-provider");
-        request.runtime_settings = Some(&snapshot);
+        request.runtime_settings = Some(ExecutionRuntimeSettingsResolution {
+            snapshot: &snapshot,
+            schema: &schema,
+        });
 
         assert!(matches!(
             repository.schedule_execution(request).await,
             Err(StorageError::InvalidData(_))
         ));
+        let execution_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM executions")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        let task_state: String =
+            sqlx::query_scalar("SELECT orchestration_state FROM tasks WHERE id = ?")
+                .bind(task_id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(execution_count, 0);
+        assert_eq!(task_state, "ready");
+    }
+
+    #[tokio::test]
+    async fn scheduling_rejects_a_stale_resolution_without_partial_writes() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        insert_provider_runtime_settings(&database, "test", 4).await;
+        let schema = runtime_settings_schema();
+        let snapshot = runtime_settings_snapshot(now, "test", 4);
+        let replacement = ProviderRuntimeSettingsPatch {
+            schema_version: 2,
+            values: BTreeMap::from([(
+                "execution.max_concurrency".to_owned(),
+                ProviderSettingValue::Integer(5),
+            )]),
+        };
+        sqlx::query(
+            "UPDATE provider_runtime_settings SET revision = 8, settings_json = ? \
+             WHERE scope = 'provider' AND provider_id = 'test'",
+        )
+        .bind(serde_json::to_string(&replacement).unwrap())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let execution = scheduled_execution(owner, task_id, now);
+        let mut request = test_request(&execution, owner, "settings-stale");
+        request.runtime_settings = Some(ExecutionRuntimeSettingsResolution {
+            snapshot: &snapshot,
+            schema: &schema,
+        });
+
+        assert_eq!(
+            repository.schedule_execution(request).await.unwrap(),
+            ExecutionScheduleOutcome::RuntimeSettingsConflict
+        );
         let execution_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM executions")
             .fetch_one(database.pool())
             .await
@@ -2822,6 +3012,56 @@ mod tests {
             task_revision: None,
             captured_at,
         }
+    }
+
+    fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
+        ProviderRuntimeSettingsSchema {
+            version: 2,
+            definitions: vec![ProviderSettingDefinition {
+                key: "execution.max_concurrency".to_owned(),
+                display_name: "Execution concurrency".to_owned(),
+                description: "Maximum concurrent execution work.".to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: 8,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(2),
+                scopes: BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                    ProviderSettingScope::Task,
+                ]),
+            }],
+        }
+    }
+
+    async fn insert_provider_runtime_settings(
+        database: &Database,
+        provider_id: &str,
+        concurrency: i64,
+    ) {
+        let patch = ProviderRuntimeSettingsPatch {
+            schema_version: 2,
+            values: BTreeMap::from([(
+                "execution.max_concurrency".to_owned(),
+                ProviderSettingValue::Integer(concurrency),
+            )]),
+        };
+        let now = encode_timestamp(Utc::now());
+        sqlx::query(
+            "INSERT INTO provider_runtime_settings \
+             (id, scope, provider_id, schema_version, revision, settings_json, created_at, updated_at) \
+             VALUES (?, 'provider', ?, 2, 7, ?, ?, ?)",
+        )
+        .bind(asterism_domain::ProviderRuntimeSettingsId::new().to_string())
+        .bind(provider_id)
+        .bind(serde_json::to_string(&patch).unwrap())
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
     }
 
     async fn schedule_billed_execution(

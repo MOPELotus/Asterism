@@ -414,11 +414,17 @@ pub struct ExecutionRuntimeSettingsSnapshot {
     pub captured_at: Timestamp,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ExecutionRuntimeSettingsResolution<'a> {
+    pub snapshot: &'a ExecutionRuntimeSettingsSnapshot,
+    pub schema: &'a ProviderRuntimeSettingsSchema,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionScheduleRequest<'a> {
     pub execution: &'a Execution,
     pub billing: Option<ExecutionBillingReservation<'a>>,
-    pub runtime_settings: Option<&'a ExecutionRuntimeSettingsSnapshot>,
+    pub runtime_settings: Option<ExecutionRuntimeSettingsResolution<'a>>,
     pub expected_task_state: OrchestrationState,
     pub idempotency_scope: &'a str,
     pub idempotency_key: &'a str,
@@ -432,6 +438,7 @@ pub enum ExecutionScheduleOutcome {
     Existing(Execution),
     IdempotencyConflict,
     TaskStateConflict,
+    RuntimeSettingsConflict,
 }
 
 #[derive(Clone, Debug)]

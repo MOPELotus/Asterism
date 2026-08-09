@@ -212,9 +212,9 @@ async fn build_settings_response(
     } else {
         None
     };
-    let resolved = context
+    let (resolved, sources) = context
         .schema
-        .resolve(
+        .resolve_with_sources(
             provider.as_ref().map(|record| &record.patch),
             account.as_ref().map(|record| &record.patch),
             task.as_ref().map(|record| &record.patch),
@@ -225,12 +225,6 @@ async fn build_settings_response(
                 "a stored override no longer matches the registered Provider schema",
             )
         })?;
-    let sources = resolved_sources(
-        &context.schema,
-        provider.as_ref(),
-        account.as_ref(),
-        task.as_ref(),
-    );
     Ok(ProviderRuntimeSettingsResponse {
         provider_id: context.provider_id.clone(),
         provider_account_id: context.provider_account_id,
@@ -245,36 +239,6 @@ async fn build_settings_response(
         resolved,
         sources,
     })
-}
-
-fn resolved_sources(
-    schema: &ProviderRuntimeSettingsSchema,
-    provider: Option<&ProviderRuntimeSettingsRecord>,
-    account: Option<&ProviderRuntimeSettingsRecord>,
-    task: Option<&ProviderRuntimeSettingsRecord>,
-) -> BTreeMap<String, ProviderRuntimeSettingSource> {
-    let mut sources = schema
-        .definitions
-        .iter()
-        .map(|definition| {
-            (
-                definition.key.clone(),
-                ProviderRuntimeSettingSource::SchemaDefault,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    for (record, source) in [
-        (provider, ProviderRuntimeSettingSource::Provider),
-        (account, ProviderRuntimeSettingSource::ProviderAccount),
-        (task, ProviderRuntimeSettingSource::Task),
-    ] {
-        if let Some(record) = record {
-            for key in record.patch.values.keys() {
-                sources.insert(key.clone(), source);
-            }
-        }
-    }
-    sources
 }
 
 fn provider_context(state: &ApiState, provider_id: &str) -> Result<SettingsContext, ApiError> {

@@ -1350,10 +1350,17 @@ mod tests {
     }
 
     async fn settings_test_app() -> (Router, Database) {
+        let (app, database, _) = settings_test_app_with_events().await;
+        (app, database)
+    }
+
+    async fn settings_test_app_with_events() -> (Router, Database, EventBus) {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
-        let state = ApiState::new(database.clone(), Arc::new(settings_registry()), 3600, false);
-        (build_router(state), database)
+        let events = EventBus::new(16);
+        let state = ApiState::new(database.clone(), Arc::new(settings_registry()), 3600, false)
+            .with_event_bus(events.clone());
+        (build_router(state), database, events)
     }
 
     #[derive(Debug)]
@@ -2085,7 +2092,8 @@ mod tests {
               assessment_class, title, remote_state, orchestration_state, discovered_at, \
               updated_at, capabilities_json) \
              VALUES (?, ?, 'settings-api-task', 'settings-api-fingerprint', 'chapter', \
-                     'routine', 'Settings API task', 'pending', 'ready', ?, ?, '[]')",
+                     'routine', 'Settings API task', 'pending', 'ready', ?, ?, \
+                     '[\"resource_execution\"]')",
         )
         .bind(task_id.to_string())
         .bind(&account_id)
@@ -2121,9 +2129,10 @@ mod tests {
         assert_eq!(task["overrides"]["task"]["revision"], 1);
 
         let fetched = app
+            .clone()
             .oneshot(
                 Request::get(task_path)
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2131,6 +2140,24 @@ mod tests {
             .unwrap();
         assert_eq!(fetched.status(), StatusCode::OK);
         assert_eq!(response_json(fetched).await, task);
+
+        let execution =
+            post_task_execution(&app, &cookie, task_id, Some("settings-task-execution")).await;
+        assert_eq!(execution.status(), StatusCode::CREATED);
+        let execution = response_json(execution).await;
+        let execution_id = execution["execution"]["id"].as_str().unwrap();
+        let frozen: (String, String, Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT resolved_settings_json, sources_json, provider_revision, \
+                    provider_account_revision, task_revision \
+             FROM execution_runtime_settings WHERE execution_id = ?",
+        )
+        .bind(execution_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(frozen.0.contains("\"value\":1"));
+        assert!(frozen.1.contains("\"task\""));
+        assert_eq!((frozen.2, frozen.3, frozen.4), (Some(1), Some(1), Some(1)));
 
         let audit_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_records \
@@ -3364,6 +3391,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the integration test keeps execution authorization, idempotency and atomic side effects together"
+    )]
     async fn task_execution_action_is_atomic_idempotent_and_policy_guarded() {
         let (app, database, events, cookie, routine_task, other_task, formal_task, read_only_task) =
             execution_action_fixture().await;
@@ -3465,6 +3496,7 @@ mod tests {
 
         for (table, predicate) in [
             ("executions", "1 = 1"),
+            ("execution_runtime_settings", "schema_version = 2"),
             ("scheduled_jobs", "job_kind = 'execution'"),
             ("audit_records", "action = 'execution_requested'"),
             ("event_outbox", "event_type = 'execution_state_changed'"),
@@ -3476,6 +3508,23 @@ mod tests {
                     .unwrap();
             assert_eq!(count, 1, "unexpected row count in {table}");
         }
+        let frozen_settings: (String, String, Option<i64>, Option<i64>, Option<i64>) =
+            sqlx::query_as(
+                "SELECT resolved_settings_json, sources_json, provider_revision, \
+                        provider_account_revision, task_revision \
+                 FROM execution_runtime_settings WHERE execution_id = ?",
+            )
+            .bind(&execution_id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert!(frozen_settings.0.contains("execution.max_concurrency"));
+        assert!(frozen_settings.0.contains('2'));
+        assert!(frozen_settings.1.contains("schema_default"));
+        assert_eq!(
+            (frozen_settings.2, frozen_settings.3, frozen_settings.4),
+            (None, None, None)
+        );
     }
 
     async fn execution_action_fixture() -> (
@@ -3488,7 +3537,7 @@ mod tests {
         asterism_domain::TaskId,
         asterism_domain::TaskId,
     ) {
-        let (app, database, events) = test_app_with_events(false, None).await;
+        let (app, database, events) = settings_test_app_with_events().await;
         let bootstrap = bootstrap(&app).await;
         let cookie = bootstrap.headers()[header::SET_COOKIE]
             .to_str()

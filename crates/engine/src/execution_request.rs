@@ -1,9 +1,14 @@
+use std::sync::Arc;
+
 use asterism_domain::{
     AuditActor, Execution, ExecutionId, ExecutionState, OrchestrationState, RemoteState,
     RequestSource, Task, TaskCapability, TaskId, Timestamp, UserId,
 };
+use asterism_provider_api::{ProviderRegistry, ProviderRuntimeSettingsSchema};
 use asterism_storage::{
-    ExecutionRepository, ExecutionScheduleOutcome, ExecutionScheduleRequest, StorageError,
+    ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
+    ExecutionScheduleOutcome, ExecutionScheduleRequest, ProviderAccountRuntimeRepository,
+    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget, StorageError,
     TaskQueryRepository,
 };
 
@@ -30,26 +35,41 @@ pub struct ExecutionRequestResult {
 }
 
 #[derive(Clone, Debug)]
-pub struct ExecutionRequestService<Q, E> {
+pub struct ExecutionRequestService<Q, E, A, S> {
     tasks: Q,
     executions: E,
+    accounts: A,
+    settings: S,
+    providers: Arc<ProviderRegistry>,
     formal_policy: FormalAssessmentPolicy,
 }
 
-impl<Q, E> ExecutionRequestService<Q, E> {
-    pub const fn new(tasks: Q, executions: E, formal_policy: FormalAssessmentPolicy) -> Self {
+impl<Q, E, A, S> ExecutionRequestService<Q, E, A, S> {
+    pub fn new(
+        tasks: Q,
+        executions: E,
+        accounts: A,
+        settings: S,
+        providers: Arc<ProviderRegistry>,
+        formal_policy: FormalAssessmentPolicy,
+    ) -> Self {
         Self {
             tasks,
             executions,
+            accounts,
+            settings,
+            providers,
             formal_policy,
         }
     }
 }
 
-impl<Q, E> ExecutionRequestService<Q, E>
+impl<Q, E, A, S> ExecutionRequestService<Q, E, A, S>
 where
     Q: TaskQueryRepository,
     E: ExecutionRepository,
+    A: ProviderAccountRuntimeRepository,
+    S: ProviderRuntimeSettingsRepository,
 {
     /// Authorizes and schedules one owner-scoped Task execution. Scoped
     /// idempotency is checked before mutable Task state so a network replay can
@@ -88,6 +108,9 @@ where
             .await?
             .ok_or(ExecutionRequestError::TaskNotFound)?;
         validate_task(&task, self.formal_policy)?;
+        let (runtime_settings, runtime_settings_schema) = self
+            .resolve_runtime_settings(command.owner_id, &task, command.requested_at)
+            .await?;
         let mut execution = Execution {
             id: ExecutionId::new(),
             task_id: task.id,
@@ -111,7 +134,10 @@ where
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
                 billing: None,
-                runtime_settings: None,
+                runtime_settings: Some(ExecutionRuntimeSettingsResolution {
+                    snapshot: &runtime_settings,
+                    schema: &runtime_settings_schema,
+                }),
                 expected_task_state: task.orchestration_state,
                 idempotency_scope: &scope,
                 idempotency_key: &command.idempotency_key,
@@ -134,7 +160,75 @@ where
             ExecutionScheduleOutcome::TaskStateConflict => {
                 Err(ExecutionRequestError::TaskStateConflict)
             }
+            ExecutionScheduleOutcome::RuntimeSettingsConflict => {
+                Err(ExecutionRequestError::RuntimeSettingsConflict)
+            }
         }
+    }
+
+    async fn resolve_runtime_settings(
+        &self,
+        owner_id: UserId,
+        task: &Task,
+        captured_at: Timestamp,
+    ) -> Result<
+        (
+            ExecutionRuntimeSettingsSnapshot,
+            ProviderRuntimeSettingsSchema,
+        ),
+        ExecutionRequestError,
+    > {
+        let account = self
+            .accounts
+            .find_runtime_provider_account(task.provider_account_id)
+            .await?
+            .filter(|account| account.owner_id == owner_id)
+            .ok_or(ExecutionRequestError::TaskNotFound)?;
+        let schema = self
+            .providers
+            .get(&account.provider_id)
+            .map(|provider| provider.runtime_settings.clone())
+            .ok_or(ExecutionRequestError::ProviderRuntimeUnavailable)?;
+        let provider_settings = self
+            .settings
+            .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::Provider {
+                provider_id: account.provider_id.clone(),
+            })
+            .await?;
+        let account_settings = self
+            .settings
+            .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::ProviderAccount {
+                provider_id: account.provider_id.clone(),
+                provider_account_id: account.id,
+            })
+            .await?;
+        let task_settings = self
+            .settings
+            .find_provider_runtime_settings(&ProviderRuntimeSettingsTarget::Task {
+                provider_id: account.provider_id.clone(),
+                provider_account_id: account.id,
+                task_id: task.id,
+            })
+            .await?;
+        let (resolved, sources) = schema
+            .resolve_with_sources(
+                provider_settings.as_ref().map(|record| &record.patch),
+                account_settings.as_ref().map(|record| &record.patch),
+                task_settings.as_ref().map(|record| &record.patch),
+            )
+            .map_err(|_| ExecutionRequestError::ProviderRuntimeUnavailable)?;
+        Ok((
+            ExecutionRuntimeSettingsSnapshot {
+                provider_id: account.provider_id,
+                resolved,
+                sources,
+                provider_revision: provider_settings.as_ref().map(|record| record.revision),
+                provider_account_revision: account_settings.as_ref().map(|record| record.revision),
+                task_revision: task_settings.as_ref().map(|record| record.revision),
+                captured_at,
+            },
+            schema,
+        ))
     }
 }
 
@@ -197,6 +291,10 @@ pub enum ExecutionRequestError {
     UnsupportedTask,
     #[error("the idempotency key is already bound to another execution request")]
     IdempotencyConflict,
+    #[error("the registered Provider runtime settings are unavailable or incompatible")]
+    ProviderRuntimeUnavailable,
+    #[error("Provider runtime settings changed while the execution was being scheduled")]
+    RuntimeSettingsConflict,
     #[error(transparent)]
     Assessment(#[from] AssessmentGuardError),
     #[error(transparent)]
