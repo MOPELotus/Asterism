@@ -2127,3 +2127,22 @@ This is a transport- and persistence-independent contract only. It does not
 define source preference, overwrite candidate evidence, persist a winner,
 build a SubmissionDraft or authorize remote execution. The Core resolver that
 constructs conservative decisions remains a separate checkpoint.
+
+## One-hundred-and-thirty-eighth Phase 0 slice
+
+Core now derives an `AnswerResolutionPlan` from the owner-scoped Candidate set
+of one explicitly named immutable QuestionSnapshot. It rechecks the Task path,
+every Question identity and position, every Candidate snapshot/Question binding
+and all bounded candidate content before returning any decision.
+
+The default policy is conservative and source-neutral. Unknown answers are not
+eligible evidence. A Question is Selected only when every known normalized
+answer is exactly equal; differing answers always become Conflict regardless of
+source or confidence, and no known answer becomes Missing. Inside one consensus
+group, the representative Candidate is chosen deterministically by highest
+confidence, then newest observation and stable ID.
+
+The resolver is read-only and does not call a Provider, mutate Candidate
+evidence, persist a winner, build a SubmissionDraft or schedule an Execution.
+Conflict and Missing decisions therefore remain explicit review requirements;
+an HTTP/CLI inspection surface remains a separate checkpoint.

@@ -1,5 +1,6 @@
 //! Pure orchestration state machines and policy guards.
 
+mod answer_resolution;
 mod answer_resolve;
 mod assessment;
 mod auth_bootstrap;
@@ -20,6 +21,10 @@ mod task_detail;
 mod task_progress;
 mod transition;
 
+pub use answer_resolution::{
+    ConservativeAnswerResolverError, ConservativeAnswerResolverService,
+    ResolveAnswerCandidatesCommand,
+};
 pub use answer_resolve::{
     ProviderAnswerResolveError, ProviderAnswerResolveResult, ProviderAnswerResolveService,
     ResolveProviderAnswersCommand,
