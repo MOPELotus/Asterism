@@ -226,6 +226,30 @@ This checkpoint does not construct an Exam preview URL or start an assessment.
 Exam and Chapter Work remain offline parse modes until a current, safe read path
 is locked independently; no Capture behavior is introduced.
 
+## Native independent Work submission preview
+
+The primary donor's independent Work form names each per-question field as
+`answer{qid}` and `answertype{qid}` before posting through its remote submit
+path. Asterism currently uses only this bounded structural fact. For a freshly
+confirmed pending independent Work task, `SubmissionBuild` checks that every
+Question has exactly one selected stored answer, that each answer shape matches
+the supported Question kind, and that every remote QID can form a safe field
+name.
+
+The returned preview is deliberately non-executable: it contains no selected
+answer values, endpoint, `pyFlag`, Cookie, `enc`, token, header or arbitrary
+Provider JSON. Matching, Ordering, Composite and Unknown questions fail closed.
+No remote request is made, and `SubmissionExecute` and `SubmissionVerify` remain
+unregistered.
+
+Exam is not given the same capability. In the audited mobile donor, the
+readable attempt-local question/preview chain follows the mutating exam-start
+route and requires the resulting active attempt identity and `enc`; that path
+can also encounter exam-code, face or captcha gates. Asterism will not label
+that transition read-only. Exam question read/build therefore stays deferred to
+a later explicitly authorized mutation and human-interaction stage, without a
+Capture dependency in the first batch.
+
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.
 - The offline parser checkpoint keeps three donor modes distinct: CxKitty's

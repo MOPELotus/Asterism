@@ -2164,3 +2164,23 @@ Candidate IDs to draft construction.
 The endpoint performs no write and the returned plan is not submission
 authority. It neither persists a winner nor implicitly builds or executes a
 SubmissionDraft; every Conflict or Missing decision remains visible.
+
+## One-hundred-and-fortieth Phase 0 slice
+
+Chaoxing now implements `SubmissionBuild` for freshly confirmed pending
+independent Work tasks. The capability revalidates the complete Question and
+SelectedAnswer binding, permits only the supported Question/answer shapes, and
+uses the primary donor's bounded `answer{qid}` / `answertype{qid}` form naming
+to return a typed `chaoxing.work.form.v1` preview.
+
+The preview remains structurally incapable of submission: it contains no answer
+values, endpoint, `pyFlag`, Cookie, `enc`, token, header or arbitrary Provider
+JSON. It performs no network request and grants neither `SubmissionExecute` nor
+`SubmissionVerify`; unsupported complex question kinds fail closed.
+
+Exam is deliberately excluded. The audited mobile flow reaches attempt-local
+questions only after the mutating exam-start route yields an active attempt and
+`enc`, potentially behind exam-code, face or captcha checks. Asterism therefore
+does not claim a read-only Exam question path or borrow Work payload semantics;
+that path remains deferred to a later explicitly authorized mutation and
+human-interaction stage, with no first-batch Capture implementation.

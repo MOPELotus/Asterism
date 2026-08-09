@@ -6,8 +6,9 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingQuestionRead,
-    ChaoxingResourceExecution, ChaoxingSessionResolver, ChaoxingTaskDetail, ChaoxingTaskInventory,
-    ChaoxingTaskProgress, NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
+    ChaoxingResourceExecution, ChaoxingSessionResolver, ChaoxingSubmissionBuild,
+    ChaoxingTaskDetail, ChaoxingTaskInventory, ChaoxingTaskProgress,
+    NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
     StoredChaoxingSessionResolver, metadata::development_metadata,
     runtime_settings::runtime_settings_schema,
 };
@@ -87,6 +88,7 @@ fn compose_development_provider(
         task_detail.clone(),
         task_execution.clone(),
     )?);
+    let submission_build = Arc::new(ChaoxingSubmissionBuild::try_new()?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: runtime_settings_schema(),
@@ -98,7 +100,7 @@ fn compose_development_provider(
         question_inventory: Some(question_read.clone()),
         question_parse: Some(question_read),
         answer_resolve: None,
-        submission_build: None,
+        submission_build: Some(submission_build),
         submission_execute: None,
         submission_verify: None,
         task_execution: Some(task_execution),
@@ -175,6 +177,7 @@ mod tests {
         assert!(entry.task_progress.is_some());
         assert!(entry.question_inventory.is_some());
         assert!(entry.question_parse.is_some());
+        assert!(entry.submission_build.is_some());
         assert!(entry.task_execution.is_some());
         assert!(
             entry
@@ -211,6 +214,12 @@ mod tests {
                 .metadata
                 .capabilities
                 .contains(&ProviderCapability::QuestionParse)
+        );
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::SubmissionBuild)
         );
         assert!(entry.task_detail.is_some());
         assert_eq!(entry.runtime_settings.version, 4);

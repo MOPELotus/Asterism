@@ -923,6 +923,7 @@ mod tests {
                 ProviderCapability::QuestionInventory,
                 ProviderCapability::QuestionParse,
                 ProviderCapability::ResourceExecution,
+                ProviderCapability::SubmissionBuild,
             ])
         );
         assert!(inventory.metadata().capture_recipe_version.is_none());

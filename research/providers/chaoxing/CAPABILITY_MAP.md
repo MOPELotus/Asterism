@@ -17,7 +17,7 @@ Chapter card contains a Work-shaped assessment.
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
 | QuestionInventory / QuestionParse | OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work now has an offline-covered native fresh-page read and account/correlation/task-bound attempt cache; Chapter Work and Exam remain parse-only, and all live behavior is pending |
-| SubmissionBuild / Execute | CxKitty | OCS, agent skill | Reference | Native/mobile form and Browser event paths differ; formal-assessment guard remains Core-owned |
+| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work has a typed, value-free `answer{qid}` / `answertype{qid}` preview only; endpoint, global flags, values, Execute and Verify remain unwired; formal-assessment guard remains Core-owned |
 | SubmissionVerify | agent skill | `chaoxing-exam` | PortSource | Re-fetch final task page, verify server-visible answers/result rather than HTTP 200 or CSS |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
 | BrowserBridge | agent skill | OCS, `chaoxing-exam` | Reference | Needed if 2026 session binding prevents reliable native HTTP |
@@ -110,3 +110,8 @@ policy and remains independently guarded.
   account/correlation/task-bound process-local cache. HTML, route credentials
   and attempt-local QIDs are never persisted. Exam and Chapter Work remain
   parser-only because no equally safe current read-only native route is locked.
+- The same fresh pending independent Work state now advertises
+  `SubmissionBuild`. The capability validates the complete Question/selected
+  answer binding and returns only the donor-observed `answer{qid}` and
+  `answertype{qid}` field names. It returns no values, endpoint, `pyFlag`, token
+  or route material and grants neither Execute nor Verify.

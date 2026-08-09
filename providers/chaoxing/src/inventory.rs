@@ -285,6 +285,7 @@ pub(crate) fn apply_work_detail_state(
             TaskCapability::ProgressRead,
             TaskCapability::QuestionInventory,
             TaskCapability::QuestionParse,
+            TaskCapability::SubmissionBuild,
         ]
     } else {
         vec![TaskCapability::ProgressRead]
@@ -625,6 +626,7 @@ mod tests {
                 TaskCapability::ProgressRead,
                 TaskCapability::QuestionInventory,
                 TaskCapability::QuestionParse,
+                TaskCapability::SubmissionBuild,
             ]
         );
 
