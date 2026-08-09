@@ -2033,3 +2033,23 @@ one validated immutable draft and frozen runtime settings and returns only a
 receipt; Verify re-reads remote state and returns verification facts without
 repeating the mutation. No Provider implements these slots yet, no execution
 or result persistence is wired, and this checkpoint performs no remote write.
+
+## One-hundred-and-thirty-third Phase 0 slice
+
+Storage now persists immutable `SubmissionResult` records after validating the
+bounded receipt, verification snapshot and status relationship. Database
+composite foreign keys bind each Result to one real SubmissionDraft, Task,
+Execution and ExecutionAttempt; one attempt cannot claim multiple results, and
+an attempt from another Execution or Task cannot be attached.
+
+The repository also verifies every per-Question result fact against Questions
+selected by the bound draft. Foreign draft, snapshot, Provider, Question,
+Execution or Attempt identities roll back the complete write. Receipt storage
+is capped at 64 KiB and verification storage at 8 MiB, and neither boundary
+permits raw request material or arbitrary response JSON.
+
+Exact and latest-by-draft reads are owner-scoped through Draft → Snapshot →
+Task → ProviderAccount, reconstruct the typed Result and validate it again.
+This persistence contract does not create an Execution, invoke either Provider
+submission slot or change Task state; the later worker integration must supply
+the already active execution-attempt identity.

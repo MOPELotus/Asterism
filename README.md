@@ -38,6 +38,7 @@ Phase 0 已建立并持续完善以下基础：
 - 要求每题恰好一个显式已存候选、仅生成安全 Provider payload preview 且不触发远端写入的 SubmissionDraft Core 编排；
 - 使用 Task Read 权限和显式 Task/Snapshot/Candidate 身份构建草稿、按 Task/Snapshot/Draft 精确读取草稿的 HTTP/CLI 入口；
 - 不以远端回执代替验证的 SubmissionResult / VerificationSnapshot 领域模型，以及互相独立的 SubmissionExecute / SubmissionVerify Provider 槽位；
+- 通过数据库复合外键绑定 SubmissionDraft / Execution / ExecutionAttempt / Task、整份验证后不可变持久化且 owner-scoped 读取的 SubmissionResult；
 - Capability-based Provider API、Metadata 与 Registry，包括与远端执行解耦的题目发现、解析、Provider-native 候选答案解析和只读提交草稿构建槽位；
 - 课程发现到后续 capability 的短命、脱敏且不持久化路由上下文；
 - Account > Provider > Global 覆盖的 NetworkProfile 与集中 HTTP Client 构建；

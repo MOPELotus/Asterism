@@ -1,9 +1,11 @@
 use std::{collections::BTreeSet, str::FromStr};
 
 use asterism_domain::{
-    AnswerCandidate, AnswerCandidateId, AnswerSource, ProviderId, Question, QuestionId,
-    QuestionSnapshotId, SelectedAnswer, SubmissionDraft, SubmissionDraftId, SubmissionDraftItem,
-    SubmissionPayloadPreview, TaskId, Timestamp, UserId,
+    AnswerCandidate, AnswerCandidateId, AnswerSource, ExecutionAttemptId, ExecutionId, ProviderId,
+    Question, QuestionId, QuestionSnapshotId, SelectedAnswer, SubmissionDraft, SubmissionDraftId,
+    SubmissionDraftItem, SubmissionPayloadPreview, SubmissionReceipt, SubmissionResult,
+    SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot, TaskId, Timestamp,
+    UserId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -12,6 +14,7 @@ use sqlx::{Row, sqlite::SqliteRow};
 use crate::{
     AnswerCandidateRecord, AnswerCandidateRepository, Database, QuestionSnapshot,
     QuestionSnapshotRepository, StorageError, SubmissionDraftRepository,
+    SubmissionResultRepository,
 };
 
 const MAX_QUESTIONS_PER_SNAPSHOT: usize = 5_000;
@@ -21,6 +24,8 @@ const MAX_CANDIDATES_PER_SNAPSHOT: usize = 20_000;
 const MAX_ANSWER_CANDIDATE_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_SUBMISSION_DRAFT_ITEMS: usize = 5_000;
 const MAX_SUBMISSION_PREVIEW_BYTES: usize = 8 * 1_024 * 1_024;
+const MAX_SUBMISSION_RECEIPT_BYTES: usize = 64 * 1_024;
+const MAX_SUBMISSION_VERIFICATION_BYTES: usize = 8 * 1_024 * 1_024;
 
 #[derive(Clone, Debug)]
 pub struct SqliteQuestionSnapshotRepository {
@@ -525,6 +530,248 @@ impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
     }
 }
 
+#[async_trait]
+impl SubmissionResultRepository for SqliteQuestionSnapshotRepository {
+    async fn save_submission_result(&self, result: &SubmissionResult) -> Result<(), StorageError> {
+        result.validate().map_err(|_| invalid_submission_result())?;
+        let receipt_json = result
+            .receipt
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        if receipt_json.as_ref().is_some_and(|receipt| {
+            receipt.is_empty() || receipt.len() > MAX_SUBMISSION_RECEIPT_BYTES
+        }) {
+            return Err(invalid_submission_result());
+        }
+        let verification_json = serde_json::to_string(&result.verification)?;
+        if verification_json.is_empty()
+            || verification_json.len() > MAX_SUBMISSION_VERIFICATION_BYTES
+        {
+            return Err(invalid_submission_result());
+        }
+        let verification_bytes = verification_json.len();
+
+        let mut transaction = self.database.pool().begin().await?;
+        let draft_binding = sqlx::query(
+            "SELECT task_id, question_snapshot_id, provider_id \
+             FROM submission_drafts WHERE id = ?",
+        )
+        .bind(result.submission_draft_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(draft_binding) = draft_binding else {
+            return Err(invalid_submission_result());
+        };
+        if draft_binding.try_get::<String, _>("task_id")? != result.task_id.to_string()
+            || draft_binding.try_get::<String, _>("question_snapshot_id")?
+                != result.question_snapshot_id.to_string()
+            || draft_binding.try_get::<String, _>("provider_id")? != result.provider_id.as_str()
+        {
+            return Err(invalid_submission_result());
+        }
+        let draft_questions = sqlx::query_scalar::<_, String>(
+            "SELECT question_id FROM submission_draft_items WHERE draft_id = ?",
+        )
+        .bind(result.submission_draft_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?
+        .into_iter()
+        .map(|value| parse_id::<QuestionId>(&value))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+        if result
+            .verification
+            .questions
+            .iter()
+            .any(|question| !draft_questions.contains(&question.question_id))
+        {
+            return Err(invalid_submission_result());
+        }
+        let attempt_exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM executions AS execution \
+             INNER JOIN execution_attempts AS attempt \
+                ON attempt.execution_id = execution.id \
+             WHERE execution.id = ? AND execution.task_id = ? AND attempt.id = ?",
+        )
+        .bind(result.execution_id.to_string())
+        .bind(result.task_id.to_string())
+        .bind(result.execution_attempt_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if attempt_exists.is_none() {
+            return Err(invalid_submission_result());
+        }
+
+        sqlx::query(
+            "INSERT INTO submission_results \
+             (id, submission_draft_id, execution_id, execution_attempt_id, task_id, \
+              question_snapshot_id, provider_id, provider_version, status, receipt_json, \
+              receipt_bytes, verification_json, verification_bytes, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(result.id.to_string())
+        .bind(result.submission_draft_id.to_string())
+        .bind(result.execution_id.to_string())
+        .bind(result.execution_attempt_id.to_string())
+        .bind(result.task_id.to_string())
+        .bind(result.question_snapshot_id.to_string())
+        .bind(result.provider_id.as_str())
+        .bind(&result.provider_version)
+        .bind(encode_submission_result_status(result.status))
+        .bind(receipt_json.as_deref())
+        .bind(
+            receipt_json
+                .as_ref()
+                .map(|receipt| i64::try_from(receipt.len()).expect("bounded receipt fits i64")),
+        )
+        .bind(verification_json)
+        .bind(i64::try_from(verification_bytes).expect("bounded verification fits i64"))
+        .bind(encode_timestamp(result.created_at))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn find_owned_submission_result(
+        &self,
+        owner_id: UserId,
+        submission_result_id: SubmissionResultId,
+    ) -> Result<Option<SubmissionResult>, StorageError> {
+        let row = submission_result_query()
+            .bind(owner_id.to_string())
+            .bind(submission_result_id.to_string())
+            .fetch_optional(self.database.pool())
+            .await?;
+        match row {
+            Some(row) => Ok(Some(decode_submission_result(&self.database, &row).await?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn find_latest_owned_submission_result(
+        &self,
+        owner_id: UserId,
+        submission_draft_id: SubmissionDraftId,
+    ) -> Result<Option<SubmissionResult>, StorageError> {
+        let row = sqlx::query(
+            "SELECT result.* FROM submission_results AS result \
+             INNER JOIN submission_drafts AS draft \
+                ON draft.id = result.submission_draft_id \
+             INNER JOIN question_snapshots AS snapshot \
+                ON snapshot.id = draft.question_snapshot_id \
+             INNER JOIN tasks AS task ON task.id = snapshot.task_id \
+             INNER JOIN provider_accounts AS account \
+                ON account.id = task.provider_account_id \
+             WHERE account.owner_user_id = ? AND result.submission_draft_id = ? \
+             ORDER BY result.created_at DESC, result.id DESC LIMIT 1",
+        )
+        .bind(owner_id.to_string())
+        .bind(submission_draft_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        match row {
+            Some(row) => Ok(Some(decode_submission_result(&self.database, &row).await?)),
+            None => Ok(None),
+        }
+    }
+}
+
+fn submission_result_query()
+-> sqlx::query::Query<'static, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'static>> {
+    sqlx::query(
+        "SELECT result.* FROM submission_results AS result \
+         INNER JOIN submission_drafts AS draft ON draft.id = result.submission_draft_id \
+         INNER JOIN question_snapshots AS snapshot ON snapshot.id = draft.question_snapshot_id \
+         INNER JOIN tasks AS task ON task.id = snapshot.task_id \
+         INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+         WHERE account.owner_user_id = ? AND result.id = ?",
+    )
+}
+
+async fn decode_submission_result(
+    database: &Database,
+    row: &SqliteRow,
+) -> Result<SubmissionResult, StorageError> {
+    let receipt_json: Option<&str> = row.try_get("receipt_json")?;
+    let receipt_bytes = row
+        .try_get::<Option<i64>, _>("receipt_bytes")?
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| invalid_submission_result())?;
+    if receipt_json.map(str::len) != receipt_bytes
+        || receipt_bytes.is_some_and(|bytes| bytes == 0 || bytes > MAX_SUBMISSION_RECEIPT_BYTES)
+    {
+        return Err(invalid_submission_result());
+    }
+    let receipt = receipt_json
+        .map(serde_json::from_str::<SubmissionReceipt>)
+        .transpose()?;
+    let verification_json: &str = row.try_get("verification_json")?;
+    let verification_bytes = usize::try_from(row.try_get::<i64, _>("verification_bytes")?)
+        .map_err(|_| invalid_submission_result())?;
+    if verification_json.len() != verification_bytes
+        || verification_bytes == 0
+        || verification_bytes > MAX_SUBMISSION_VERIFICATION_BYTES
+    {
+        return Err(invalid_submission_result());
+    }
+    let verification: SubmissionVerificationSnapshot = serde_json::from_str(verification_json)?;
+    let result = SubmissionResult {
+        id: parse_id::<SubmissionResultId>(row.try_get("id")?)?,
+        submission_draft_id: parse_id::<SubmissionDraftId>(row.try_get("submission_draft_id")?)?,
+        execution_id: parse_id::<ExecutionId>(row.try_get("execution_id")?)?,
+        execution_attempt_id: parse_id::<ExecutionAttemptId>(row.try_get("execution_attempt_id")?)?,
+        task_id: parse_id::<TaskId>(row.try_get("task_id")?)?,
+        question_snapshot_id: parse_id::<QuestionSnapshotId>(row.try_get("question_snapshot_id")?)?,
+        provider_id: ProviderId::new(row.try_get::<String, _>("provider_id")?)
+            .map_err(|_| invalid_submission_result())?,
+        provider_version: row.try_get("provider_version")?,
+        status: decode_submission_result_status(row.try_get("status")?)?,
+        receipt,
+        verification,
+        created_at: decode_timestamp(row.try_get("created_at")?)?,
+    };
+    result.validate().map_err(|_| invalid_submission_result())?;
+    let draft_questions = sqlx::query_scalar::<_, String>(
+        "SELECT question_id FROM submission_draft_items WHERE draft_id = ?",
+    )
+    .bind(result.submission_draft_id.to_string())
+    .fetch_all(database.pool())
+    .await?
+    .into_iter()
+    .map(|value| parse_id::<QuestionId>(&value))
+    .collect::<Result<BTreeSet<_>, _>>()?;
+    if result
+        .verification
+        .questions
+        .iter()
+        .any(|question| !draft_questions.contains(&question.question_id))
+    {
+        return Err(invalid_submission_result());
+    }
+    Ok(result)
+}
+
+const fn encode_submission_result_status(status: SubmissionResultStatus) -> &'static str {
+    match status {
+        SubmissionResultStatus::Confirmed => "confirmed",
+        SubmissionResultStatus::Rejected => "rejected",
+        SubmissionResultStatus::ExecutionFailed => "execution_failed",
+        SubmissionResultStatus::Inconclusive => "inconclusive",
+    }
+}
+
+fn decode_submission_result_status(value: &str) -> Result<SubmissionResultStatus, StorageError> {
+    match value {
+        "confirmed" => Ok(SubmissionResultStatus::Confirmed),
+        "rejected" => Ok(SubmissionResultStatus::Rejected),
+        "execution_failed" => Ok(SubmissionResultStatus::ExecutionFailed),
+        "inconclusive" => Ok(SubmissionResultStatus::Inconclusive),
+        _ => Err(invalid_submission_result()),
+    }
+}
+
 struct EncodedAnswerCandidate {
     id: AnswerCandidateId,
     question_id: QuestionId,
@@ -699,11 +946,19 @@ fn invalid_submission_draft() -> StorageError {
     )
 }
 
+fn invalid_submission_result() -> StorageError {
+    StorageError::InvalidData(
+        "SubmissionResult is invalid, foreign, or exceeds its bounds".to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use asterism_domain::{
         AnswerConfidence, NormalizedAnswer, QuestionAttachment, QuestionAttachmentKind,
         QuestionKind, QuestionOption, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
+        SubmissionQuestionVerification, SubmissionQuestionVerificationStatus, SubmissionScore,
+        SubmissionVerificationStatus,
     };
     use chrono::Duration;
 
@@ -904,6 +1159,85 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    #[tokio::test]
+    async fn submission_results_bind_draft_execution_attempt_and_owner() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let snapshot = fixture.snapshot("Result question", fixture.now);
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        let candidate = Fixture::candidate(&snapshot, AnswerSource::Manual, fixture.now);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&candidate))
+            .await
+            .unwrap();
+        let draft = fixture.draft(&snapshot, &candidate);
+        repository.save_submission_draft(&draft).await.unwrap();
+        let (execution_id, attempt_id) = fixture.execution_attempt().await;
+        let result = fixture.result(&draft, execution_id, attempt_id);
+        repository.save_submission_result(&result).await.unwrap();
+
+        assert_eq!(
+            repository
+                .find_owned_submission_result(fixture.owner, result.id)
+                .await
+                .unwrap(),
+            Some(result.clone())
+        );
+        assert_eq!(
+            repository
+                .find_latest_owned_submission_result(fixture.owner, draft.id)
+                .await
+                .unwrap(),
+            Some(result.clone())
+        );
+        assert!(
+            repository
+                .find_owned_submission_result(UserId::new(), result.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(repository.save_submission_result(&result).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn foreign_attempt_or_question_leaves_no_partial_submission_result() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let snapshot = fixture.snapshot("Invalid result question", fixture.now);
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        let candidate = Fixture::candidate(&snapshot, AnswerSource::Manual, fixture.now);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&candidate))
+            .await
+            .unwrap();
+        let draft = fixture.draft(&snapshot, &candidate);
+        repository.save_submission_draft(&draft).await.unwrap();
+        let (execution_id, attempt_id) = fixture.execution_attempt().await;
+
+        let mut foreign_attempt = fixture.result(&draft, execution_id, attempt_id);
+        foreign_attempt.execution_attempt_id = ExecutionAttemptId::new();
+        assert!(
+            repository
+                .save_submission_result(&foreign_attempt)
+                .await
+                .is_err()
+        );
+        let mut foreign_question = fixture.result(&draft, execution_id, attempt_id);
+        foreign_question.verification.questions[0].question_id = QuestionId::new();
+        assert!(
+            repository
+                .save_submission_result(&foreign_question)
+                .await
+                .is_err()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM submission_results")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     struct Fixture {
         database: Database,
         owner: UserId,
@@ -1049,6 +1383,76 @@ mod tests {
                         question_id: snapshot.questions[0].id,
                         field_name: "answer[attempt-question-1]".to_owned(),
                     }],
+                },
+                created_at: self.now,
+            }
+        }
+
+        async fn execution_attempt(&self) -> (ExecutionId, ExecutionAttemptId) {
+            let execution_id = ExecutionId::new();
+            let attempt_id = ExecutionAttemptId::new();
+            let timestamp = encode_timestamp(self.now);
+            sqlx::query(
+                "INSERT INTO executions \
+                 (id, task_id, requested_by, request_source, state, started_at, created_at) \
+                 VALUES (?, ?, ?, 'api', 'running', ?, ?)",
+            )
+            .bind(execution_id.to_string())
+            .bind(self.task.to_string())
+            .bind(self.owner.to_string())
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(self.database.pool())
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO execution_attempts \
+                 (id, execution_id, attempt_no, started_at) VALUES (?, ?, 1, ?)",
+            )
+            .bind(attempt_id.to_string())
+            .bind(execution_id.to_string())
+            .bind(timestamp)
+            .execute(self.database.pool())
+            .await
+            .unwrap();
+            (execution_id, attempt_id)
+        }
+
+        fn result(
+            &self,
+            draft: &SubmissionDraft,
+            execution_id: ExecutionId,
+            execution_attempt_id: ExecutionAttemptId,
+        ) -> SubmissionResult {
+            SubmissionResult {
+                id: SubmissionResultId::new(),
+                submission_draft_id: draft.id,
+                execution_id,
+                execution_attempt_id,
+                task_id: draft.task_id,
+                question_snapshot_id: draft.question_snapshot_id,
+                provider_id: draft.provider_id.clone(),
+                provider_version: "1.0.0-submit".to_owned(),
+                status: SubmissionResultStatus::Confirmed,
+                receipt: Some(SubmissionReceipt {
+                    remote_status: "accepted".to_owned(),
+                    message_sanitized: None,
+                    provider_trace_id: Some("trace-1".to_owned()),
+                    received_at: self.now,
+                }),
+                verification: SubmissionVerificationSnapshot {
+                    status: SubmissionVerificationStatus::Confirmed,
+                    remote_state: Some(asterism_domain::RemoteState::Completed),
+                    score: Some(SubmissionScore {
+                        earned_milli_points: 100_000,
+                        possible_milli_points: 100_000,
+                    }),
+                    progress_percent: Some(100),
+                    questions: vec![SubmissionQuestionVerification {
+                        question_id: draft.items[0].question.id,
+                        status: SubmissionQuestionVerificationStatus::Confirmed,
+                    }],
+                    verified_at: self.now,
                 },
                 created_at: self.now,
             }

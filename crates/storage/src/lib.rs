@@ -46,8 +46,8 @@ pub use repository::{
     ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
     ProviderRuntimeSettingsWriteOutcome, ProviderRuntimeSettingsWriteRequest, QuestionSnapshot,
     QuestionSnapshotRepository, ScanScheduleRepository, SchedulerRepository, SessionRepository,
-    SubmissionDraftRepository, TaskPage, TaskQueryRepository, TaskRepository,
-    TaskRuntimeRepository, UserRepository,
+    SubmissionDraftRepository, SubmissionResultRepository, TaskPage, TaskQueryRepository,
+    TaskRepository, TaskRuntimeRepository, UserRepository,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

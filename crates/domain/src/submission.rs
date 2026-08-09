@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AnswerCandidateId, AnswerConfidence, AnswerSource, NormalizedAnswer, ProviderId, Question,
-    QuestionId, QuestionSnapshotId, RemoteState, SubmissionDraftId, SubmissionResultId, TaskId,
-    Timestamp,
+    AnswerCandidateId, AnswerConfidence, AnswerSource, ExecutionAttemptId, ExecutionId,
+    NormalizedAnswer, ProviderId, Question, QuestionId, QuestionSnapshotId, RemoteState,
+    SubmissionDraftId, SubmissionResultId, TaskId, Timestamp,
 };
 
 const MAX_DRAFT_ITEMS: usize = 5_000;
@@ -212,6 +212,8 @@ pub enum SubmissionResultStatus {
 pub struct SubmissionResult {
     pub id: SubmissionResultId,
     pub submission_draft_id: SubmissionDraftId,
+    pub execution_id: ExecutionId,
+    pub execution_attempt_id: ExecutionAttemptId,
     pub task_id: TaskId,
     pub question_snapshot_id: QuestionSnapshotId,
     pub provider_id: ProviderId,
@@ -498,6 +500,8 @@ mod tests {
         let mut result = SubmissionResult {
             id: SubmissionResultId::new(),
             submission_draft_id: draft.id,
+            execution_id: ExecutionId::new(),
+            execution_attempt_id: ExecutionAttemptId::new(),
             task_id: draft.task_id,
             question_snapshot_id: draft.question_snapshot_id,
             provider_id: draft.provider_id.clone(),
@@ -551,6 +555,8 @@ mod tests {
         let result = SubmissionResult {
             id: SubmissionResultId::new(),
             submission_draft_id: draft.id,
+            execution_id: ExecutionId::new(),
+            execution_attempt_id: ExecutionAttemptId::new(),
             task_id: draft.task_id,
             question_snapshot_id: draft.question_snapshot_id,
             provider_id: draft.provider_id.clone(),

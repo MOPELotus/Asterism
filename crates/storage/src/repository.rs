@@ -9,7 +9,8 @@ use asterism_domain::{
     ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote,
     ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
     Question, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionDraft,
-    SubmissionDraftId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+    SubmissionDraftId, SubmissionResult, SubmissionResultId, Task, TaskId, Timestamp, User, UserId,
+    WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -130,6 +131,25 @@ pub trait SubmissionDraftRepository: Send + Sync {
         owner_id: UserId,
         submission_draft_id: SubmissionDraftId,
     ) -> Result<Option<SubmissionDraft>, StorageError>;
+}
+
+/// Immutable, owner-scoped results bound to one real Execution attempt and
+/// one persisted `SubmissionDraft`.
+#[async_trait]
+pub trait SubmissionResultRepository: Send + Sync {
+    async fn save_submission_result(&self, result: &SubmissionResult) -> Result<(), StorageError>;
+
+    async fn find_owned_submission_result(
+        &self,
+        owner_id: UserId,
+        submission_result_id: SubmissionResultId,
+    ) -> Result<Option<SubmissionResult>, StorageError>;
+
+    async fn find_latest_owned_submission_result(
+        &self,
+        owner_id: UserId,
+        submission_draft_id: SubmissionDraftId,
+    ) -> Result<Option<SubmissionResult>, StorageError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
