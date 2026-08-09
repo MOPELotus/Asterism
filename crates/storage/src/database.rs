@@ -95,6 +95,12 @@ pub enum StorageError {
     LeaseLost,
     #[error("execution lease expiry must be in the future")]
     InvalidLeaseExpiry,
+    #[error("execution worker no longer owns both the scheduler claim and execution lease")]
+    ExecutionClaimLost,
+    #[error("execution or task state conflicts with the requested worker transition")]
+    ExecutionStateConflict,
+    #[error("execution attempt is missing, finished, or belongs to another execution")]
+    ExecutionAttemptNotActive,
     #[error("outbox claim is no longer owned by this worker")]
     OutboxClaimLost,
     #[error("outbox claim expiry must be in the future and its batch must be non-zero")]

@@ -1,10 +1,11 @@
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AuditActor, AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId,
-    AuthSession, AuthSessionId, CreditAccount, CreditReservation, CreditReservationId,
-    CreditTransactionId, Execution, ExecutionId, ExecutionLease, OrchestrationState,
-    ProviderAccount, ProviderAccountId, ServiceToken, ServiceTokenId, Task, TaskId, Timestamp,
-    User, UserId, WebSession, WebSessionId,
+    AttemptResult, AuditActor, AuthBootstrapClientEvent, AuthBootstrapSession,
+    AuthBootstrapSessionId, AuthSession, AuthSessionId, CreditAccount, CreditReservation,
+    CreditReservationId, CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId,
+    ExecutionId, ExecutionLease, ExecutionProgress, ExecutionState, OrchestrationState,
+    ProviderAccount, ProviderAccountId, ProviderErrorClass, ScheduleId, ServiceToken,
+    ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -278,6 +279,38 @@ pub enum ExecutionScheduleOutcome {
     TaskStateConflict,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExecutionAttemptStartRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub at: Timestamp,
+    pub correlation_id: &'a str,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionProgressUpdate<'a> {
+    pub progress: &'a ExecutionProgress,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionAttemptFinishRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub final_state: ExecutionState,
+    pub result: AttemptResult,
+    pub error_class: Option<ProviderErrorClass>,
+    pub provider_trace_id: Option<&'a str>,
+    pub retry_at: Option<Timestamp>,
+    pub progress: &'a ExecutionProgress,
+    pub at: Timestamp,
+    pub correlation_id: &'a str,
+}
+
 /// Atomic execution request boundary. Creating the execution, moving the task
 /// to `scheduled`, enqueuing the scheduler job, and recording audit/outbox
 /// entries either all commit or all roll back.
@@ -292,6 +325,21 @@ pub trait ExecutionRepository: Send + Sync {
         &self,
         execution_id: ExecutionId,
     ) -> Result<Option<Execution>, StorageError>;
+
+    async fn start_attempt(
+        &self,
+        request: ExecutionAttemptStartRequest<'_>,
+    ) -> Result<ExecutionAttempt, StorageError>;
+
+    async fn update_progress(
+        &self,
+        request: ExecutionProgressUpdate<'_>,
+    ) -> Result<bool, StorageError>;
+
+    async fn finish_attempt(
+        &self,
+        request: ExecutionAttemptFinishRequest<'_>,
+    ) -> Result<Execution, StorageError>;
 }
 
 #[async_trait]

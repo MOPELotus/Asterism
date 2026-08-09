@@ -1132,3 +1132,22 @@ Existing databases migrate without fabricating keys for historical rows. This
 slice establishes the request-side transaction boundary only: worker-owned
 Attempt, Progress, terminal-state persistence and Provider dispatch remain the
 next Core execution slices.
+
+## Eighty-second Phase 0 slice
+
+Execution workers now persist a lease- and Scheduler-claim-bound Attempt
+lifecycle. Starting an Attempt atomically moves both Execution and Task to
+`Running`, creates the numbered Attempt, initializes Progress, writes sanitized
+audit/log entries, and appends durable state/progress events. Repeating the
+same start while the live worker still owns the unfinished Attempt is
+idempotent.
+
+Progress updates require the live Execution lease and a running Execution;
+older or same-timestamp updates do not overwrite newer state or duplicate
+events. Attempt completion updates Attempt, Execution, Task, Progress and the
+claimed Scheduler job, releases the Execution lease, writes audit/log/outbox
+records, and optionally enqueues the uniquely numbered Retry job in one
+immediate transaction. Success additionally requires verified completed
+progress, while failed, human-required and retry states retain a typed Provider
+error class. Provider dispatch and lease renewal during long-running calls are
+the next Engine slice.

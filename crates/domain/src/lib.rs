@@ -32,8 +32,8 @@ pub use credits::{
     CreditTransaction, CreditTransactionType, PriceQuote,
 };
 pub use execution::{
-    Execution, ExecutionAttempt, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
-    ExecutionStage, ExecutionState, LogLevel, RequestSource,
+    AttemptResult, Execution, ExecutionAttempt, ExecutionLease, ExecutionLogEvent,
+    ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, ProviderErrorClass, RequestSource,
 };
 pub use id::*;
 pub use task::{
