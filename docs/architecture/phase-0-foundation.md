@@ -1448,3 +1448,20 @@ visible. RetryWaiting, Recovering and HumanRequired are deliberately not
 settled because the remote outcome is not yet final. Recovery success reaches
 the same commit path through the shared finish transaction; uncertain recovery
 continues preserving the reserve for later reconciliation.
+
+## Ninety-seventh Phase 0 slice
+
+Provider scan-schedule reads and writes now use the Master runtime-settings
+authorization boundary instead of ordinary owner account management. A Web
+session must resolve `ManageSystem`, which is granted to Master but not User or
+Operator roles. Automation uses an owner-bound service token with the explicit
+`ProviderManage` scope; read-only Provider tokens cannot inspect these settings.
+The existing owner binding remains in force, and OpenAPI now identifies both
+scan-schedule operations as Master-managed surfaces.
+
+This is the first enforcement step for the runtime-settings control plane.
+Provider defaults, optional ProviderAccount settings and Task overrides still
+require a versioned schema and persistence model; until those exist, Core keeps
+only the already bounded scan-schedule field rather than accepting arbitrary
+Provider JSON. Ordinary account, authentication, Task and Execution surfaces
+retain their existing owner permissions.

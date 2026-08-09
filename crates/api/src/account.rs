@@ -396,7 +396,7 @@ pub(super) async fn get_scan_schedule(
     Extension(auth): Extension<AuthContext>,
     Path(account_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let owner_id = auth.require_account_read()?;
+    let owner_id = auth.require_provider_settings_manage()?;
     let account_id = parse_account_id(&account_id)?;
     let account = SqliteProviderAccountRepository::new(state.database.clone())
         .find_provider_account(owner_id, account_id)
@@ -428,7 +428,7 @@ pub(super) async fn configure_scan_schedule(
     headers: HeaderMap,
     payload: Result<Json<ConfigureScanScheduleRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let owner_id = auth.require_account_manage()?;
+    let owner_id = auth.require_provider_settings_manage()?;
     let account_id = parse_account_id(&account_id)?;
     let request = api_json(payload)?;
     let account = SqliteProviderAccountRepository::new(state.database.clone())

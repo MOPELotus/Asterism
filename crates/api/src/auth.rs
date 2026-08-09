@@ -115,6 +115,20 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn require_provider_settings_manage(&self) -> Result<UserId, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } if principal.has(Permission::ManageSystem) => {
+                Ok(principal.user_id)
+            }
+            AuthIdentity::Service(token)
+                if token.scopes.contains(&ServiceScope::ProviderManage) =>
+            {
+                token.owner_user_id.ok_or_else(ApiError::forbidden)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
     pub(super) fn require_task_read(&self) -> Result<UserId, ApiError> {
         match &self.identity {
             AuthIdentity::Web { principal, .. } if principal.has(Permission::ReadOwnTasks) => {
@@ -650,6 +664,7 @@ impl Drop for CreateServiceTokenResponse {
 
 #[cfg(test)]
 mod tests {
+    use asterism_domain::Role;
     use axum::http::HeaderMap;
 
     use super::*;
@@ -687,5 +702,54 @@ mod tests {
         let debug = format!("{request:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("correct-horse-battery-staple"));
+    }
+
+    #[test]
+    fn provider_runtime_settings_are_master_only_for_web_users() {
+        let owner_id = UserId::new();
+        for role in [Role::User, Role::Operator] {
+            let auth = AuthContext {
+                identity: AuthIdentity::Web {
+                    session_id: WebSessionId::new(),
+                    principal: Principal::from_roles(owner_id, [role], []),
+                },
+            };
+            assert!(auth.require_provider_settings_manage().is_err());
+        }
+        let master = AuthContext {
+            identity: AuthIdentity::Web {
+                session_id: WebSessionId::new(),
+                principal: Principal::from_roles(owner_id, [Role::Master], []),
+            },
+        };
+        assert_eq!(master.require_provider_settings_manage().unwrap(), owner_id);
+    }
+
+    #[test]
+    fn provider_manage_service_scope_is_required_for_settings_automation() {
+        let owner_id = UserId::new();
+        let service = |scopes| AuthContext {
+            identity: AuthIdentity::Service(ServiceToken {
+                id: ServiceTokenId::new(),
+                owner_user_id: Some(owner_id),
+                name: "settings-test".to_owned(),
+                scopes,
+                created_at: Utc::now(),
+                expires_at: None,
+                revoked_at: None,
+                last_used_at: None,
+            }),
+        };
+        assert!(
+            service(BTreeSet::from([ServiceScope::ProviderRead]))
+                .require_provider_settings_manage()
+                .is_err()
+        );
+        assert_eq!(
+            service(BTreeSet::from([ServiceScope::ProviderManage]))
+                .require_provider_settings_manage()
+                .unwrap(),
+            owner_id
+        );
     }
 }

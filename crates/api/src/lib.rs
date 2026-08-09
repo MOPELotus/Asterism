@@ -458,14 +458,14 @@ async fn openapi() -> Json<Value> {
                     "operationId": "getProviderAccountScanSchedule",
                     "security": [{"cookieAuth": []}, {"bearerAuth": []}],
                     "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-                    "responses": {"200": {"description": "Owner-scoped scan schedule"}, "404": {"description": "Account or scan schedule not found"}}
+                    "responses": {"200": {"description": "Master-managed owner-scoped scan schedule"}, "403": {"description": "Master Provider settings permission required"}, "404": {"description": "Account or scan schedule not found"}}
                 },
                 "put": {
                     "operationId": "configureProviderAccountScanSchedule",
                     "security": [{"cookieAuth": []}, {"bearerAuth": []}],
                     "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
                     "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfigureScanSchedule"}}}},
-                    "responses": {"200": {"description": "Scan schedule configured with the Provider floor"}, "400": {"description": "Invalid interval"}, "404": {"description": "Provider account not found"}, "409": {"description": "Provider is not registered"}}
+                    "responses": {"200": {"description": "Master scan schedule configured with the Provider floor"}, "400": {"description": "Invalid interval"}, "403": {"description": "Master Provider settings permission required"}, "404": {"description": "Provider account not found"}, "409": {"description": "Provider is not registered"}}
                 }
             },
             "/api/v1/tasks": {"get": {
