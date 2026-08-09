@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, Execution, ProviderAccountId, ProviderId, Question,
-    QuestionSnapshotId, SubmissionDraftId, Task, TaskId, Timestamp,
+    QuestionSnapshotId, SubmissionDraftId, SubmissionResultId, Task, TaskId, Timestamp,
 };
 use asterism_engine::{
     BuildSubmissionDraftCommand, ExecuteTaskCommand, ExecutionRequestError,
@@ -18,7 +18,7 @@ use asterism_storage::{
     AnswerCandidateRepository, QuestionSnapshotRepository, SqliteExecutionRepository,
     SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
     SqliteQuestionSnapshotRepository, SqliteTaskQueryRepository, SubmissionDraftRepository,
-    TaskQueryRepository,
+    SubmissionResultRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -338,6 +338,38 @@ pub(super) async fn get_submission_draft(
         .filter(|draft| draft.task_id == task_id && draft.question_snapshot_id == snapshot_id)
         .ok_or_else(|| ApiError::not_found("submission_draft_not_found"))?;
     Ok(crate::auth::no_store(Json(draft).into_response()))
+}
+
+pub(super) async fn get_submission_result(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((task_id, snapshot_id, draft_id, result_id)): Path<(String, String, String, String)>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
+    let draft_id = SubmissionDraftId::from_str(&draft_id).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_submission_draft_id",
+            "Submission draft ID is invalid",
+        )
+    })?;
+    let result_id = SubmissionResultId::from_str(&result_id).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_submission_result_id",
+            "Submission result ID is invalid",
+        )
+    })?;
+    let result = SqliteQuestionSnapshotRepository::new(state.database)
+        .find_owned_submission_result(owner_id, result_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|result| {
+            result.task_id == task_id
+                && result.question_snapshot_id == snapshot_id
+                && result.submission_draft_id == draft_id
+        })
+        .ok_or_else(|| ApiError::not_found("submission_result_not_found"))?;
+    Ok(crate::auth::no_store(Json(result).into_response()))
 }
 
 pub(super) async fn execute_task(

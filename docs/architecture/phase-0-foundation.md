@@ -2053,3 +2053,20 @@ Task → ProviderAccount, reconstruct the typed Result and validate it again.
 This persistence contract does not create an Execution, invoke either Provider
 submission slot or change Task state; the later worker integration must supply
 the already active execution-attempt identity.
+
+## One-hundred-and-thirty-fourth Phase 0 slice
+
+Persisted Submission results now have an owner-scoped GET and CLI read surface
+whose path carries Task, QuestionSnapshot, SubmissionDraft and SubmissionResult
+identities. Storage resolves ownership first, and the API rechecks all three
+parent bindings before returning the typed receipt and verification snapshot.
+
+The response is `no-store` and performs no Provider call. A mismatched Draft or
+Task path is indistinguishable from a missing Result even if the Result UUID is
+valid. OpenAPI describes the complete route and makes the distinction between
+receipt and verification visible to future generated clients.
+
+This checkpoint intentionally exposes no Result creation endpoint and no
+submission execution endpoint. Results can only originate from the internal
+repository boundary that requires a real ExecutionAttempt; remote mutation and
+formal-assessment submission policy remain unwired.

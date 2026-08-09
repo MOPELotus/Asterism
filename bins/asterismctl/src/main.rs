@@ -248,6 +248,13 @@ enum TaskCommand {
         snapshot_id: String,
         draft_id: String,
     },
+    /// Read one persisted verified `SubmissionResult` without calling the Provider.
+    SubmissionResult {
+        task_id: String,
+        snapshot_id: String,
+        draft_id: String,
+        result_id: String,
+    },
     /// Schedule one task through the shared idempotent Core Action.
     Execute {
         task_id: String,
@@ -720,6 +727,10 @@ struct PutProviderCredentialField<'a> {
     value: &'a str,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the CLI keeps every Task subcommand mapped to its explicit versioned HTTP path in one auditable dispatch"
+)]
 async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result<()> {
     let token = service_token_from_process()?;
     let value = match command {
@@ -798,6 +809,17 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
         } => {
             let path = format!(
                 "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}"
+            );
+            client.get_authorized(&path, &token).await?
+        }
+        TaskCommand::SubmissionResult {
+            task_id,
+            snapshot_id,
+            draft_id,
+            result_id,
+        } => {
+            let path = format!(
+                "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}/results/{result_id}"
             );
             client.get_authorized(&path, &token).await?
         }
@@ -1114,6 +1136,34 @@ mod tests {
             } if task_id == "task-id"
                 && snapshot_id == "snapshot-id"
                 && draft_id == "draft-id"
+        ));
+    }
+
+    #[test]
+    fn task_submission_result_read_requires_the_complete_binding() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "submission-result",
+            "task-id",
+            "snapshot-id",
+            "draft-id",
+            "result-id",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::SubmissionResult {
+                    task_id,
+                    snapshot_id,
+                    draft_id,
+                    result_id,
+                }
+            } if task_id == "task-id"
+                && snapshot_id == "snapshot-id"
+                && draft_id == "draft-id"
+                && result_id == "result-id"
         ));
     }
 

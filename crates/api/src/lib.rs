@@ -265,6 +265,10 @@ fn task_routes() -> Router<ApiState> {
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}",
             get(task::get_submission_draft),
         )
+        .route(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}/results/{result_id}",
+            get(task::get_submission_result),
+        )
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
 }
 
@@ -834,6 +838,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}/results/{result_id}".to_owned(),
+            submission_result_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
@@ -1181,6 +1192,25 @@ fn submission_draft_path() -> Value {
     }})
 }
 
+fn submission_result_path() -> Value {
+    json!({"get": {
+        "operationId": "getSubmissionResult",
+        "description": "Reads one persisted owner-scoped SubmissionResult with exact Task, QuestionSnapshot and SubmissionDraft bindings and no Provider call.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "draft_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "result_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Persisted bounded SubmissionResult with receipt and independent verification snapshot"},
+            "400": {"description": "Invalid Task, Question snapshot, Submission draft, or Submission result ID"},
+            "404": {"description": "Fully bound owner-scoped SubmissionResult not found"}
+        }
+    }})
+}
+
 fn auth_bootstrap_credential_schema() -> Value {
     json!({
         "type": "object",
@@ -1431,10 +1461,13 @@ mod tests {
 
     use asterism_domain::{
         AnswerCandidate, AnswerCandidateId, AnswerSource, AssessmentClass, AuthMethod, AuthState,
-        NormalizedAnswer, ProviderId, Question, QuestionId, QuestionKind, QuestionSnapshotId,
-        RemoteState, SelectedAnswer, SessionKind, SourceType, SubmissionDraft, SubmissionDraftId,
-        SubmissionDraftItem, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
-        SubmissionPayloadPreview, TaskId,
+        ExecutionAttemptId, ExecutionId, NormalizedAnswer, ProviderId, Question, QuestionId,
+        QuestionKind, QuestionSnapshotId, RemoteState, SelectedAnswer, SessionKind, SourceType,
+        SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadEncoding,
+        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, SubmissionQuestionVerification,
+        SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult,
+        SubmissionResultId, SubmissionResultStatus, SubmissionScore,
+        SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId,
     };
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, CourseInventoryCapability, CredentialValidation,
@@ -1448,7 +1481,7 @@ mod tests {
     use asterism_storage::{
         AnswerCandidateRecord, AnswerCandidateRepository, QuestionSnapshot,
         QuestionSnapshotRepository, SecretKeyring, SqliteQuestionSnapshotRepository,
-        SubmissionDraftRepository,
+        SubmissionDraftRepository, SubmissionResultRepository,
     };
     use async_trait::async_trait;
     use axum::{
@@ -3745,7 +3778,7 @@ mod tests {
                 position: 1,
             }],
         };
-        let repository = SqliteQuestionSnapshotRepository::new(database);
+        let repository = SqliteQuestionSnapshotRepository::new(database.clone());
         repository.save_question_snapshot(&snapshot).await.unwrap();
         let candidate_id = AnswerCandidateId::new();
         repository
@@ -3791,6 +3824,63 @@ mod tests {
             created_at: now,
         };
         repository.save_submission_draft(&draft).await.unwrap();
+        let execution_id = ExecutionId::new();
+        let execution_attempt_id = ExecutionAttemptId::new();
+        sqlx::query(
+            "INSERT INTO executions \
+             (id, task_id, request_source, state, started_at, created_at) \
+             VALUES (?, ?, 'api', 'running', ?, ?)",
+        )
+        .bind(execution_id.to_string())
+        .bind(task_id.to_string())
+        .bind(&now_text)
+        .bind(&now_text)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO execution_attempts \
+             (id, execution_id, attempt_no, started_at) VALUES (?, ?, 1, ?)",
+        )
+        .bind(execution_attempt_id.to_string())
+        .bind(execution_id.to_string())
+        .bind(&now_text)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let result = SubmissionResult {
+            id: SubmissionResultId::new(),
+            submission_draft_id: draft.id,
+            execution_id,
+            execution_attempt_id,
+            task_id,
+            question_snapshot_id: snapshot.id,
+            provider_id: snapshot.provider_id.clone(),
+            provider_version: "0.1.0-test".to_owned(),
+            status: SubmissionResultStatus::Confirmed,
+            receipt: Some(SubmissionReceipt {
+                remote_status: "accepted".to_owned(),
+                message_sanitized: None,
+                provider_trace_id: Some("trace-api-test".to_owned()),
+                received_at: now,
+            }),
+            verification: SubmissionVerificationSnapshot {
+                status: SubmissionVerificationStatus::Confirmed,
+                remote_state: Some(RemoteState::Completed),
+                score: Some(SubmissionScore {
+                    earned_milli_points: 1_000,
+                    possible_milli_points: 1_000,
+                }),
+                progress_percent: Some(100),
+                questions: vec![SubmissionQuestionVerification {
+                    question_id,
+                    status: SubmissionQuestionVerificationStatus::Confirmed,
+                }],
+                verified_at: now,
+            },
+            created_at: now,
+        };
+        repository.save_submission_result(&result).await.unwrap();
 
         let response = app
             .clone()
@@ -3834,6 +3924,26 @@ mod tests {
             candidate_id.to_string()
         );
 
+        let result_response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}/submission-drafts/{}/results/{}",
+                    snapshot.id, draft.id, result.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result_response.status(), StatusCode::OK);
+        assert_eq!(result_response.headers()[header::CACHE_CONTROL], "no-store");
+        let result_body = response_json(result_response).await;
+        assert_eq!(result_body["id"], result.id.to_string());
+        assert_eq!(result_body["status"], "confirmed");
+        assert_eq!(result_body["verification"]["status"], "confirmed");
+
         let mismatched = app
             .clone()
             .oneshot(
@@ -3849,6 +3959,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(mismatched.status(), StatusCode::NOT_FOUND);
+
+        let mismatched_result = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}/submission-drafts/{}/results/{}",
+                    snapshot.id,
+                    SubmissionDraftId::new(),
+                    result.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatched_result.status(), StatusCode::NOT_FOUND);
 
         let mismatched_draft = app
             .oneshot(
@@ -4328,6 +4455,7 @@ mod tests {
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}",
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}/results/{result_id}",
             "/api/v1/tasks/{task_id}/execute",
             "/api/v1/credits/account",
             "/api/v1/credits/transactions",
@@ -4374,6 +4502,11 @@ mod tests {
             document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}"]
                 ["get"]["operationId"],
             "getSubmissionDraft"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}/results/{result_id}"]
+                ["get"]["operationId"],
+            "getSubmissionResult"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],
