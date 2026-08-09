@@ -322,6 +322,12 @@ pub struct ExecutionAttemptFinishRequest<'a> {
 /// entries either all commit or all roll back.
 #[async_trait]
 pub trait ExecutionRepository: Send + Sync {
+    async fn find_idempotent_execution(
+        &self,
+        idempotency_scope: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<Execution>, StorageError>;
+
     async fn schedule_execution(
         &self,
         request: ExecutionScheduleRequest<'_>,

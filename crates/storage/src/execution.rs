@@ -31,6 +31,25 @@ impl SqliteExecutionRepository {
 
 #[async_trait]
 impl ExecutionRepository for SqliteExecutionRepository {
+    async fn find_idempotent_execution(
+        &self,
+        idempotency_scope: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<Execution>, StorageError> {
+        validate_idempotency_tokens(idempotency_scope, idempotency_key)?;
+        sqlx::query(
+            "SELECT id, task_id, requested_by, request_source, quote_id, state, scheduled_at, \
+                    started_at, finished_at, created_at FROM executions \
+             WHERE idempotency_scope = ? AND idempotency_key = ?",
+        )
+        .bind(idempotency_scope)
+        .bind(idempotency_key)
+        .fetch_optional(self.database.pool())
+        .await?
+        .map(|row| decode_execution(&row))
+        .transpose()
+    }
+
     async fn schedule_execution(
         &self,
         request: ExecutionScheduleRequest<'_>,
@@ -902,10 +921,25 @@ fn validate_schedule_request(request: &ExecutionScheduleRequest<'_>) -> Result<(
     Ok(())
 }
 
+fn validate_idempotency_tokens(scope: &str, key: &str) -> Result<(), StorageError> {
+    let valid = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 256
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+    };
+    if valid(scope) && valid(key) {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(
+            "execution idempotency tokens are invalid".to_owned(),
+        ))
+    }
+}
+
 fn same_request(existing: &Execution, requested: &Execution) -> bool {
     existing.task_id == requested.task_id
         && existing.requested_by == requested.requested_by
-        && existing.request_source == requested.request_source
         && existing.quote_id == requested.quote_id
 }
 

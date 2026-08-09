@@ -2,8 +2,8 @@ use std::{collections::BTreeSet, fmt, net::SocketAddr, str::FromStr};
 
 use asterism_auth::{Argon2idPasswordService, OpaqueTokenService, Principal};
 use asterism_domain::{
-    AuditActor, Permission, ServiceScope, ServiceToken, ServiceTokenId, Timestamp, User, UserId,
-    UserStatus, WebSession, WebSessionId,
+    AuditActor, Permission, RequestSource, ServiceScope, ServiceToken, ServiceTokenId, Timestamp,
+    User, UserId, UserStatus, WebSession, WebSessionId,
 };
 use asterism_secrets::{SecretActor, SecretString};
 use asterism_storage::{
@@ -122,6 +122,27 @@ impl AuthContext {
             }
             AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::TaskRead) => {
                 token.owner_user_id.ok_or_else(ApiError::forbidden)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
+    pub(super) fn require_task_execute(&self) -> Result<(UserId, RequestSource), ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. }
+                if principal.has(Permission::ExecuteOwnTasks)
+                    || principal.has(Permission::ExecuteAnyTask) =>
+            {
+                Ok((principal.user_id, RequestSource::WebUi))
+            }
+            AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::TaskExecute) => {
+                let owner_id = token.owner_user_id.ok_or_else(ApiError::forbidden)?;
+                let source = if token.scopes.contains(&ServiceScope::TaskCommandProxy) {
+                    RequestSource::Yunzai
+                } else {
+                    RequestSource::Cli
+                };
+                Ok((owner_id, source))
             }
             AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
         }

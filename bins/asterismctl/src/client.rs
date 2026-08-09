@@ -91,6 +91,19 @@ impl ApiClient {
         send_json(request, StatusCode::OK).await
     }
 
+    pub async fn post_authorized_idempotent(
+        &self,
+        path: &str,
+        token: &SecretString,
+        idempotency_key: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let request = self
+            .request(Method::POST, path)?
+            .bearer_auth(token.expose_secret())
+            .header("idempotency-key", idempotency_key);
+        send_json_with_statuses(request, &[StatusCode::OK, StatusCode::CREATED]).await
+    }
+
     pub async fn put_authorized(
         &self,
         path: &str,
@@ -265,6 +278,23 @@ where
         .await
         .context("failed to request the Asterism API")?;
     if response.status() != expected {
+        return Err(api_error(response).await);
+    }
+    deserialize_response(response).await
+}
+
+async fn send_json_with_statuses<T>(
+    request: RequestBuilder,
+    expected: &[StatusCode],
+) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    let response = request
+        .send()
+        .await
+        .context("failed to request the Asterism API")?;
+    if !expected.contains(&response.status()) {
         return Err(api_error(response).await);
     }
     deserialize_response(response).await

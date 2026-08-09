@@ -1,12 +1,17 @@
 use std::str::FromStr;
 
-use asterism_domain::{ProviderAccountId, Task, TaskId};
-use asterism_storage::{SqliteTaskQueryRepository, TaskQueryRepository};
+use asterism_domain::{Execution, ProviderAccountId, Task, TaskId};
+use asterism_engine::{
+    ExecuteTaskCommand, ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
+};
+use asterism_storage::{SqliteExecutionRepository, SqliteTaskQueryRepository, TaskQueryRepository};
 use axum::{
     Extension, Json,
     extract::{Path, Query, State, rejection::QueryRejection},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{ApiError, ApiState, auth::AuthContext};
@@ -14,6 +19,7 @@ use crate::{ApiError, ApiState, auth::AuthContext};
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_OFFSET: u64 = 1_000_000;
+const IDEMPOTENCY_KEY: &str = "idempotency-key";
 
 pub(super) async fn list_tasks(
     State(state): State<ApiState>,
@@ -71,6 +77,107 @@ pub(super) async fn get_task(
     Ok(crate::auth::no_store(Json(task).into_response()))
 }
 
+pub(super) async fn execute_task(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (owner_id, request_source) = auth.require_task_execute()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let idempotency_key = required_header(&headers, IDEMPOTENCY_KEY, 256)?;
+    let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let service = ExecutionRequestService::new(
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteExecutionRepository::new(state.database),
+        FormalAssessmentPolicy::default(),
+    );
+    let result = service
+        .execute(ExecuteTaskCommand {
+            owner_id,
+            task_id,
+            request_source,
+            actor: auth.audit_actor(),
+            idempotency_key: idempotency_key.to_owned(),
+            correlation_id: correlation_id.to_owned(),
+            requested_at: Utc::now(),
+        })
+        .await
+        .map_err(map_execution_request_error)?;
+    let status = if result.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok(crate::auth::no_store(
+        (
+            status,
+            Json(ExecuteTaskResponse {
+                execution: result.execution,
+                created: result.created,
+            }),
+        )
+            .into_response(),
+    ))
+}
+
+fn required_header<'a>(
+    headers: &'a HeaderMap,
+    name: &'static str,
+    max_bytes: usize,
+) -> Result<&'a str, ApiError> {
+    let value = headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "missing_required_header",
+                format!("the {name} header is required"),
+            )
+        })?;
+    if value.is_empty()
+        || value.len() > max_bytes
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return Err(ApiError::bad_request(
+            "invalid_required_header",
+            format!("the {name} header is invalid"),
+        ));
+    }
+    Ok(value)
+}
+
+fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
+    match error {
+        ExecutionRequestError::TaskNotFound => ApiError::not_found("task_not_found"),
+        ExecutionRequestError::TaskStateConflict => ApiError::conflict(
+            "task_state_conflict",
+            "the task orchestration state is not executable or changed concurrently",
+        ),
+        ExecutionRequestError::RemoteStateNotExecutable => ApiError::conflict(
+            "task_remote_state_not_executable",
+            "the current remote task state is not executable",
+        ),
+        ExecutionRequestError::UnsupportedTask => ApiError::conflict(
+            "task_execution_unsupported",
+            "the task advertises no executable Provider capability",
+        ),
+        ExecutionRequestError::IdempotencyConflict => ApiError::conflict(
+            "idempotency_conflict",
+            "the idempotency key is already bound to another execution request",
+        ),
+        ExecutionRequestError::Assessment(_) => ApiError::conflict(
+            "formal_assessment_blocked",
+            "formal assessment execution is disabled by Core policy",
+        ),
+        ExecutionRequestError::Transition(_) | ExecutionRequestError::Storage(_) => {
+            ApiError::internal(error)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TaskListQuery {
@@ -85,6 +192,12 @@ struct TaskPageResponse {
     limit: u32,
     offset: u64,
     items: Vec<Task>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ExecuteTaskResponse {
+    execution: Execution,
+    created: bool,
 }
 
 fn parse_provider_account_id(value: &str) -> Result<ProviderAccountId, ApiError> {

@@ -120,6 +120,7 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
+        .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
         .route("/api/v1/service-tokens", post(auth::create_service_token))
         .route(
             "/api/v1/service-tokens/{token_id}",
@@ -591,6 +592,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/execute".to_owned(),
+            task_execute_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/auth-bootstrap/sessions/{session_id}/credential".to_owned(),
             auth_bootstrap_credential_path(),
         );
@@ -602,6 +610,26 @@ async fn openapi() -> Json<Value> {
             auth_bootstrap_credential_schema(),
         );
     Json(document)
+}
+
+fn task_execute_path() -> Value {
+    json!({"post": {
+        "operationId": "executeTask",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 256}}
+        ],
+        "responses": {
+            "200": {"description": "Idempotent replay of an existing Execution"},
+            "201": {"description": "Execution scheduled atomically"},
+            "400": {"description": "Invalid task ID or idempotency key"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Insufficient permission"},
+            "404": {"description": "Task not found for this owner"},
+            "409": {"description": "Task state, capability, assessment policy, or idempotency conflict"}
+        }
+    }})
 }
 
 fn auth_bootstrap_credential_schema() -> Value {
@@ -2600,6 +2628,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_execution_action_is_atomic_idempotent_and_policy_guarded() {
+        let (app, database, cookie, routine_task, other_task, formal_task, read_only_task) =
+            execution_action_fixture().await;
+
+        let created =
+            post_task_execution(&app, &cookie, routine_task, Some("execute-document-1")).await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
+        let created = response_json(created).await;
+        assert_eq!(created["created"], true);
+        assert_eq!(created["execution"]["request_source"], "web_ui");
+        let execution_id = created["execution"]["id"].clone();
+
+        let replayed =
+            post_task_execution(&app, &cookie, routine_task, Some("execute-document-1")).await;
+        assert_eq!(replayed.status(), StatusCode::OK);
+        let replayed = response_json(replayed).await;
+        assert_eq!(replayed["created"], false);
+        assert_eq!(replayed["execution"]["id"], execution_id);
+
+        let conflict =
+            post_task_execution(&app, &cookie, other_task, Some("execute-document-1")).await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let conflict: ErrorResponse =
+            serde_json::from_value(response_json(conflict).await).unwrap();
+        assert_eq!(conflict.error.code, "idempotency_conflict");
+
+        let blocked =
+            post_task_execution(&app, &cookie, formal_task, Some("formal-document-1")).await;
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
+        let blocked: ErrorResponse = serde_json::from_value(response_json(blocked).await).unwrap();
+        assert_eq!(blocked.error.code, "formal_assessment_blocked");
+
+        let unsupported =
+            post_task_execution(&app, &cookie, read_only_task, Some("read-only-1")).await;
+        assert_eq!(unsupported.status(), StatusCode::CONFLICT);
+        let unsupported: ErrorResponse =
+            serde_json::from_value(response_json(unsupported).await).unwrap();
+        assert_eq!(unsupported.error.code, "task_execution_unsupported");
+
+        let missing_key = post_task_execution(&app, &cookie, routine_task, None).await;
+        assert_eq!(missing_key.status(), StatusCode::BAD_REQUEST);
+
+        for (table, predicate) in [
+            ("executions", "1 = 1"),
+            ("scheduled_jobs", "job_kind = 'execution'"),
+            ("audit_records", "action = 'execution_requested'"),
+            ("event_outbox", "event_type = 'execution_state_changed'"),
+        ] {
+            let count: i64 =
+                sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"))
+                    .fetch_one(database.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(count, 1, "unexpected row count in {table}");
+        }
+    }
+
+    async fn execution_action_fixture() -> (
+        Router,
+        Database,
+        String,
+        asterism_domain::TaskId,
+        asterism_domain::TaskId,
+        asterism_domain::TaskId,
+        asterism_domain::TaskId,
+    ) {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/provider-accounts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"provider_id":"provider-alpha","display_name":"primary"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let account = response_json(account).await;
+        let account_id = account["id"].as_str().unwrap();
+        let routine_task = asterism_domain::TaskId::new();
+        let other_task = asterism_domain::TaskId::new();
+        let formal_task = asterism_domain::TaskId::new();
+        let read_only_task = asterism_domain::TaskId::new();
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+        for (task_id, assessment, capabilities) in [
+            (routine_task, "routine", "[\"resource_execution\"]"),
+            (other_task, "routine", "[\"resource_execution\"]"),
+            (formal_task, "formal", "[\"resource_execution\"]"),
+            (read_only_task, "routine", "[\"progress_read\"]"),
+        ] {
+            sqlx::query(
+                "INSERT INTO tasks \
+                 (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+                  assessment_class, title, remote_state, orchestration_state, discovered_at, \
+                  updated_at, capabilities_json) \
+                 VALUES (?, ?, ?, ?, 'resource', ?, 'document', 'pending', 'ready', ?, ?, ?)",
+            )
+            .bind(task_id.to_string())
+            .bind(account_id)
+            .bind(format!("remote-{task_id}"))
+            .bind(format!("fingerprint-{task_id}"))
+            .bind(assessment)
+            .bind(&now)
+            .bind(&now)
+            .bind(capabilities)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        (
+            app,
+            database,
+            cookie,
+            routine_task,
+            other_task,
+            formal_task,
+            read_only_task,
+        )
+    }
+
+    async fn post_task_execution(
+        app: &Router,
+        cookie: &str,
+        task_id: asterism_domain::TaskId,
+        idempotency_key: Option<&str>,
+    ) -> Response {
+        let mut request = Request::post(format!("/api/v1/tasks/{task_id}/execute"))
+            .header(header::COOKIE, cookie)
+            .header("x-request-id", format!("request-{task_id}"));
+        if let Some(idempotency_key) = idempotency_key {
+            request = request.header("idempotency-key", idempotency_key);
+        }
+        app.clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
     async fn malformed_auth_json_uses_the_stable_error_model() {
         let app = test_router().await;
         let response = app
@@ -2683,12 +2862,17 @@ mod tests {
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
+            "/api/v1/tasks/{task_id}/execute",
         ] {
             assert!(document["paths"].get(path).is_some(), "missing {path}");
         }
         assert_eq!(
             document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
             "bearer"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],
+            "executeTask"
         );
         assert_eq!(
             document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/claim"]["post"]["security"]

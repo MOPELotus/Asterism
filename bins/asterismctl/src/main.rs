@@ -214,6 +214,13 @@ enum TaskCommand {
     },
     /// Get one task by ID.
     Get { task_id: String },
+    /// Schedule one task through the shared idempotent Core Action.
+    Execute {
+        task_id: String,
+        /// Stable caller-provided key. Reuse it when retrying the same request.
+        #[arg(long)]
+        idempotency_key: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -684,6 +691,15 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
             let path = format!("/api/v1/tasks/{task_id}");
             client.get_authorized(&path, &token).await?
         }
+        TaskCommand::Execute {
+            task_id,
+            idempotency_key,
+        } => {
+            let path = format!("/api/v1/tasks/{task_id}/execute");
+            client
+                .post_authorized_idempotent(&path, &token, &idempotency_key)
+                .await?
+        }
     };
     write_json(&value)
 }
@@ -785,6 +801,29 @@ mod tests {
                 command: ProviderAccountCommand::Scan { account_id }
             } if account_id == "account-id"
         ));
+    }
+
+    #[test]
+    fn task_execute_requires_an_explicit_reusable_idempotency_key() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "execute",
+            "task-id",
+            "--idempotency-key",
+            "manual-run-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::Execute {
+                    task_id,
+                    idempotency_key,
+                }
+            } if task_id == "task-id" && idempotency_key == "manual-run-1"
+        ));
+        assert!(Arguments::try_parse_from(["asterismctl", "task", "execute", "task-id"]).is_err());
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod auth_bootstrap_credential;
 mod auth_session;
 mod credential;
 mod execution_job;
+mod execution_request;
 mod outbox;
 mod scan;
 mod scan_job;
@@ -33,6 +34,9 @@ pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredent
 pub use execution_job::{
     ExecutionRunnerConfig, ScheduledExecutionOutcome, ScheduledExecutionRunError,
     ScheduledExecutionRunner,
+};
+pub use execution_request::{
+    ExecuteTaskCommand, ExecutionRequestError, ExecutionRequestResult, ExecutionRequestService,
 };
 pub use outbox::{
     DeliveryError, DispatchConfig, DispatchError, DispatchReport, EventSink, OutboxDispatcher,

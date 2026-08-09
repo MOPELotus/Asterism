@@ -1171,3 +1171,22 @@ failure classes. Formal assessment execution and submission remain disabled by
 default and stop before the Provider mutation. SQLite-backed tests cover
 verified success, numbered retry and the formal-assessment guard. Daemon worker
 lifecycle and user-facing execution actions remain following slices.
+
+## Eighty-fourth Phase 0 slice
+
+Task execution now enters through one owner-scoped Core Action shared by HTTP,
+CLI and future interaction surfaces. `POST /api/v1/tasks/{task_id}/execute` requires a
+bounded `Idempotency-Key`; the Engine checks the owner scope before mutable Task
+state so a transport retry still returns the original Execution after the first
+request changed the Task to `Scheduled`. Reusing that key for another Task fails
+closed, while the atomic repository remains the final concurrency boundary.
+
+Only action capabilities (`ResourceExecution`, `SubmissionExecute`,
+`DurationReport`, `Discussion`, or `Practice`) may be scheduled. Read,
+inventory, parsing, resolution, build, verification, and BrowserBridge flags do
+not imply executable behavior. Remote terminal states, invalid orchestration
+states and formal assessments are rejected before any job is created. Web
+Sessions are recorded as `WebUi`; scoped service tokens are recorded as `Cli`
+or `Yunzai` without accepting a caller-supplied owner or source. The OpenAPI
+document and `asterismctl task execute --idempotency-key` expose the same
+contract. Daemon claim-loop integration remains the next slice.
