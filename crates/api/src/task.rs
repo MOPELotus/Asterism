@@ -1,10 +1,11 @@
 use std::str::FromStr;
 
-use asterism_domain::{Execution, ProviderAccountId, ProviderId, Task, TaskId};
+use asterism_domain::{Execution, ProviderAccountId, ProviderId, Question, Task, TaskId};
 use asterism_engine::{
     ExecuteTaskCommand, ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
-    ProviderTaskDetailError, ProviderTaskDetailService, ProviderTaskProgressError,
-    ProviderTaskProgressService, ReadTaskDetailCommand, ReadTaskProgressCommand,
+    ProviderQuestionReadError, ProviderQuestionReadService, ProviderTaskDetailError,
+    ProviderTaskDetailService, ProviderTaskProgressError, ProviderTaskProgressService,
+    ReadTaskDetailCommand, ReadTaskProgressCommand, ReadTaskQuestionsCommand,
 };
 use asterism_provider_api::{ProviderErrorKind, RemoteProgress, RemoteTaskDetail};
 use asterism_storage::{
@@ -144,6 +145,39 @@ pub(super) async fn get_task_progress(
             provider_id: result.provider_id,
             provider_version: result.provider_version,
             progress: result.progress,
+        })
+        .into_response(),
+    ))
+}
+
+pub(super) async fn get_task_questions(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let result = ProviderQuestionReadService::new(
+        state.providers,
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database),
+    )
+    .read(ReadTaskQuestionsCommand {
+        owner_id,
+        task_id,
+        correlation_id: correlation_id.to_owned(),
+    })
+    .await
+    .map_err(map_task_questions_error)?;
+    Ok(crate::auth::no_store(
+        Json(TaskQuestionsResponse {
+            task_id: result.task_id,
+            provider_id: result.provider_id,
+            provider_version: result.provider_version,
+            questions: result.questions,
         })
         .into_response(),
     ))
@@ -396,6 +430,78 @@ fn map_task_progress_error(error: ProviderTaskProgressError) -> ApiError {
     }
 }
 
+fn map_task_questions_error(error: ProviderQuestionReadError) -> ApiError {
+    match error {
+        ProviderQuestionReadError::TaskNotFound => ApiError::not_found("task_not_found"),
+        ProviderQuestionReadError::TaskCapabilityUnavailable
+        | ProviderQuestionReadError::CapabilityUnavailable(_) => ApiError::conflict(
+            "task_questions_unavailable",
+            "the task does not expose a complete Question read pipeline",
+        ),
+        ProviderQuestionReadError::AccountNotAuthenticated => ApiError::conflict(
+            "provider_account_not_authenticated",
+            "the Provider account must be authenticated before reading task Questions",
+        ),
+        ProviderQuestionReadError::ProviderNotRegistered(_) => ApiError::conflict(
+            "provider_not_registered",
+            "the task Provider is not registered",
+        ),
+        ProviderQuestionReadError::InvalidCorrelationId => ApiError::bad_request(
+            "invalid_request_id",
+            "the request correlation ID is invalid",
+        ),
+        ProviderQuestionReadError::ProviderResponseInvalid => {
+            tracing::warn!(%error, "Provider returned invalid Questions");
+            ApiError::bad_gateway(
+                "provider_task_questions_invalid",
+                "the Provider returned inconsistent task Questions",
+            )
+        }
+        ProviderQuestionReadError::Assessment(_) => ApiError::conflict(
+            "formal_assessment_blocked",
+            "formal assessment Question reading is disabled by Core policy",
+        ),
+        ProviderQuestionReadError::Provider(provider_error) => match provider_error.kind {
+            ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+                provider_error
+                    .retry_after_seconds
+                    .unwrap_or(60)
+                    .clamp(1, 86_400),
+            ),
+            ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+                tracing::warn!(error = %provider_error, "Provider Questions are temporarily unavailable");
+                ApiError::service_unavailable(
+                    "provider_unavailable",
+                    "the Provider is temporarily unavailable",
+                )
+            }
+            ProviderErrorKind::Authentication
+            | ProviderErrorKind::Authorization
+            | ProviderErrorKind::HumanRequired => ApiError::conflict(
+                "provider_action_required",
+                "the Provider requires authentication or user action",
+            ),
+            ProviderErrorKind::RemoteChanged => ApiError::conflict(
+                "task_remote_changed",
+                "the remote task no longer matches the stored task",
+            ),
+            ProviderErrorKind::UnsupportedTask => ApiError::conflict(
+                "task_questions_unavailable",
+                "the Provider cannot read Questions for this task",
+            ),
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+                tracing::warn!(error = %provider_error, "Provider returned invalid Questions");
+                ApiError::bad_gateway(
+                    "provider_task_questions_invalid",
+                    "the Provider returned inconsistent task Questions",
+                )
+            }
+            ProviderErrorKind::Internal => ApiError::internal(provider_error),
+        },
+        ProviderQuestionReadError::Storage(error) => ApiError::internal(error),
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TaskListQuery {
@@ -432,6 +538,14 @@ struct TaskProgressResponse {
     provider_id: ProviderId,
     provider_version: String,
     progress: RemoteProgress,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct TaskQuestionsResponse {
+    task_id: TaskId,
+    provider_id: ProviderId,
+    provider_version: String,
+    questions: Vec<Question>,
 }
 
 fn parse_provider_account_id(value: &str) -> Result<ProviderAccountId, ApiError> {

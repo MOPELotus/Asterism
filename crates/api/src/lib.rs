@@ -139,14 +139,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             get(account::get_scan_schedule).put(account::configure_scan_schedule),
         )
-        .route("/api/v1/tasks", get(task::list_tasks))
-        .route("/api/v1/tasks/{task_id}", get(task::get_task))
-        .route("/api/v1/tasks/{task_id}/detail", get(task::get_task_detail))
-        .route(
-            "/api/v1/tasks/{task_id}/progress",
-            get(task::get_task_progress),
-        )
-        .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
+        .merge(task_routes())
         .merge(runtime_settings_routes())
         .merge(credit_routes())
         .merge(execution_routes())
@@ -241,6 +234,22 @@ fn execution_routes() -> Router<ApiState> {
             "/api/v1/executions/{execution_id}/stream",
             get(execution::stream_execution),
         )
+}
+
+fn task_routes() -> Router<ApiState> {
+    Router::new()
+        .route("/api/v1/tasks", get(task::list_tasks))
+        .route("/api/v1/tasks/{task_id}", get(task::get_task))
+        .route("/api/v1/tasks/{task_id}/detail", get(task::get_task_detail))
+        .route(
+            "/api/v1/tasks/{task_id}/progress",
+            get(task::get_task_progress),
+        )
+        .route(
+            "/api/v1/tasks/{task_id}/questions",
+            get(task::get_task_questions),
+        )
+        .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
 }
 
 async fn health(State(state): State<ApiState>) -> Result<Json<HealthResponse>, ApiError> {
@@ -772,6 +781,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/questions".to_owned(),
+            task_questions_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
@@ -1004,6 +1020,26 @@ fn task_progress_path() -> Value {
             "409": {"description": "Task/Provider capability, account, user action, or remote binding conflict"},
             "429": {"description": "Provider rate limited"},
             "502": {"description": "Provider returned inconsistent progress"},
+            "503": {"description": "Provider temporarily unavailable"}
+        }
+    }})
+}
+
+fn task_questions_path() -> Value {
+    json!({"get": {
+        "operationId": "getTaskQuestions",
+        "description": "Discovers and parses one fresh complete Question set; no partial set is returned or persisted.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Fresh bounded, sanitized and deterministically ordered Provider Questions"},
+            "400": {"description": "Invalid Task or request ID"},
+            "404": {"description": "Task not found"},
+            "409": {"description": "Task/Provider capability, account, policy, user action, or remote binding conflict"},
+            "429": {"description": "Provider rate limited"},
+            "502": {"description": "Provider returned inconsistent Questions"},
             "503": {"description": "Provider temporarily unavailable"}
         }
     }})
@@ -3521,6 +3557,7 @@ mod tests {
         for path in [
             "/api/v1/tasks/not-a-task/detail",
             "/api/v1/tasks/not-a-task/progress",
+            "/api/v1/tasks/not-a-task/questions",
         ] {
             let response = app
                 .clone()
@@ -3963,6 +4000,7 @@ mod tests {
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/detail",
             "/api/v1/tasks/{task_id}/progress",
+            "/api/v1/tasks/{task_id}/questions",
             "/api/v1/tasks/{task_id}/execute",
             "/api/v1/credits/account",
             "/api/v1/credits/transactions",
@@ -3985,6 +4023,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/progress"]["get"]["operationId"],
             "getTaskProgress"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/questions"]["get"]["operationId"],
+            "getTaskQuestions"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],

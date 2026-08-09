@@ -1769,3 +1769,17 @@ position, and sorted deterministically before parsing. Every returned Question
 must match the Core Task, fresh reference identity, position and non-unknown type
 hint, then pass Domain bounds and sanitization. Nothing is returned when any
 question fails, and no question or answer state is persisted by this slice.
+
+## One-hundred-and-seventeenth Phase 0 slice
+
+The complete fresh Question read is now exposed as owner-scoped
+`GET /api/v1/tasks/{task_id}/questions` and `asterismctl task questions`. Both
+surfaces require Task Read permission and preserve the Core service's
+all-or-nothing result; HTTP responses are `no-store`, and Provider failures use
+the stable rate-limit, availability, user-action, remote-change, capability and
+invalid-response error classes already shared by fresh Task reads.
+
+The route is documented in the generated OpenAPI surface and rejects malformed
+Task IDs before any Provider access. It remains a read-only inspection boundary:
+no Question persistence, answer lookup, draft creation or submission authority
+is implied by this API.
