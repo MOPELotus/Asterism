@@ -19,9 +19,9 @@ use zeroize::Zeroize;
 use crate::metadata::development_metadata;
 
 const MAX_LOGIN_RESPONSE_BYTES: usize = 64 * 1_024;
-const MAX_PASSWORD_BYTES: usize = 4 * 1_024;
+pub(crate) const MAX_PASSWORD_BYTES: usize = 4 * 1_024;
 const MAX_LOGIN_REDIRECT_BYTES: usize = 8 * 1_024;
-const MAX_USERNAME_BYTES: usize = 512;
+pub(crate) const MAX_USERNAME_BYTES: usize = 512;
 const MAX_COOKIE_BYTES: usize = 64 * 1_024;
 const MAX_COOKIE_FIELDS: usize = 128;
 const MAX_COOKIE_NAME_BYTES: usize = 256;
@@ -100,6 +100,16 @@ pub trait WellearnSessionResolver: Send + Sync {
         &self,
         context: &ProviderContext,
     ) -> ProviderResult<WellearnCookieSession>;
+
+    async fn renew_session(
+        &self,
+        _context: &ProviderContext,
+    ) -> ProviderResult<WellearnCookieSession> {
+        Err(ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "WELearn stored session cannot be renewed automatically",
+        ))
+    }
 }
 
 /// `WELearn` Password and `ImportedCookie` authentication orchestration.
@@ -209,8 +219,20 @@ impl AuthenticationCapability for WellearnAuthentication {
                 "WELearn session validation requires stored credentials",
             ));
         }
-        let session = self.sessions.resolve_session(context).await?;
-        self.transport.validate_cookie(&session).await?;
+        let (session, renewed) = match self.sessions.resolve_session(context).await {
+            Ok(session) => (session, false),
+            Err(error) if error.kind == ProviderErrorKind::Authentication => {
+                (self.sessions.renew_session(context).await?, true)
+            }
+            Err(error) => return Err(error),
+        };
+        match self.transport.validate_cookie(&session).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.transport.validate_cookie(&session).await?;
+            }
+            result => result?,
+        }
         Ok(valid_session(SessionKind::Cookie))
     }
 }
@@ -287,7 +309,7 @@ fn credential_text(credential: &CredentialBundle, purpose: SecretPurpose) -> Pro
     std::str::from_utf8(field.value.expose_secret()).map_err(|_| invalid_credential_shape())
 }
 
-fn validate_login_field(value: &str, maximum: usize, trim: bool) -> ProviderResult<()> {
+pub(crate) fn validate_login_field(value: &str, maximum: usize, trim: bool) -> ProviderResult<()> {
     if value.is_empty()
         || value.len() > maximum
         || value.chars().any(char::is_control)
@@ -634,6 +656,57 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct FixtureRenewingSessions {
+        renewals: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WellearnSessionResolver for FixtureRenewingSessions {
+        async fn resolve_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<WellearnCookieSession> {
+            WellearnCookieSession::try_new("session=OLD")
+        }
+
+        async fn renew_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<WellearnCookieSession> {
+            self.renewals.fetch_add(1, Ordering::SeqCst);
+            WellearnCookieSession::try_new("session=NEW")
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RejectOldTransport {
+        validations: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WellearnAuthenticationTransport for RejectOldTransport {
+        async fn exchange_password(
+            &self,
+            _username: &SecretString,
+            _password: &SecretString,
+        ) -> ProviderResult<WellearnCookieSession> {
+            unreachable!("session validation does not exchange a password directly")
+        }
+
+        async fn validate_cookie(&self, session: &WellearnCookieSession) -> ProviderResult<()> {
+            self.validations.fetch_add(1, Ordering::SeqCst);
+            if session.expose_secret() == "session=OLD" {
+                Err(ProviderError::new(
+                    ProviderErrorKind::Authentication,
+                    "fixture old session expired",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     #[test]
     fn password_encoding_matches_the_audited_form_algorithm() {
         let cipher = encode_password_at("test-password", 1_760_000_000_123).unwrap();
@@ -769,6 +842,21 @@ mod tests {
             .unwrap();
         assert_eq!(status.kind, SessionKind::Cookie);
         assert_eq!(transport.validations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stored_session_validation_renews_once_after_authentication_failure() {
+        let transport = Arc::new(RejectOldTransport::default());
+        let sessions = Arc::new(FixtureRenewingSessions::default());
+        let authentication =
+            WellearnAuthentication::try_new(transport.clone(), sessions.clone()).unwrap();
+        let status = authentication
+            .validate_session(&provider_context())
+            .await
+            .unwrap();
+        assert_eq!(status.kind, SessionKind::Cookie);
+        assert_eq!(transport.validations.load(Ordering::SeqCst), 2);
+        assert_eq!(sessions.renewals.load(Ordering::SeqCst), 1);
     }
 
     fn auth_context() -> ProviderAuthContext {

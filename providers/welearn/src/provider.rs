@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use asterism_networking::ResolvedNetworkProfile;
 use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
-use asterism_secrets::ProviderCredentialResolver;
+use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCourseInventory,
@@ -107,6 +107,27 @@ pub fn build_development_provider_with_stored_session(
     )
 }
 
+/// Composes the fully native Development entry with Cookie-first automatic
+/// renewal through Core's scoped compare-and-replace credential boundary.
+///
+/// # Errors
+///
+/// Returns a sanitized Provider error if metadata or either shared HTTP client
+/// cannot be initialized.
+pub fn build_development_provider_with_renewal(
+    network: &ResolvedNetworkProfile,
+    resolver: Arc<dyn ProviderCredentialResolver>,
+    renewer: Arc<dyn ProviderCredentialRenewer>,
+) -> ProviderResult<ProviderEntry> {
+    let authentication = Arc::new(NativeWellearnAuthenticationTransport::try_new(network)?);
+    let sessions = Arc::new(StoredWellearnSessionResolver::with_renewal(
+        resolver,
+        renewer,
+        authentication.clone(),
+    ));
+    build_development_provider_with_native_inventory(network, authentication, sessions)
+}
+
 #[cfg(test)]
 mod tests {
     use asterism_networking::NetworkProfile;
@@ -114,6 +135,7 @@ mod tests {
         ProviderContext, ProviderError, ProviderErrorKind, ProviderRegistry, RemoteCourse,
     };
     use asterism_secrets::{
+        ProviderCredential, ProviderCredentialRenewal, ProviderCredentialRenewer,
         ProviderCredentialResolution, ProviderCredentialResolver, ResolvedProviderCredential,
         SecretStoreError, SecretString,
     };
@@ -134,6 +156,16 @@ mod tests {
             &self,
             _request: ProviderCredentialResolution,
         ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError> {
+            Err(SecretStoreError::NotFound)
+        }
+    }
+
+    #[async_trait]
+    impl ProviderCredentialRenewer for UnusedCredentials {
+        async fn renew_provider_credentials(
+            &self,
+            _request: ProviderCredentialRenewal,
+        ) -> Result<Vec<ProviderCredential>, SecretStoreError> {
             Err(SecretStoreError::NotFound)
         }
     }
@@ -232,6 +264,13 @@ mod tests {
                 .unwrap();
         let mut registry = ProviderRegistry::default();
         registry.register(stored).unwrap();
+
+        let credentials = Arc::new(UnusedCredentials);
+        let renewing =
+            build_development_provider_with_renewal(&network, credentials.clone(), credentials)
+                .unwrap();
+        let mut registry = ProviderRegistry::default();
+        registry.register(renewing).unwrap();
     }
 
     fn unused() -> ProviderError {

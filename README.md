@@ -62,7 +62,7 @@ Phase 0 已建立并持续完善以下基础：
 - Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
 - Chaoxing 能力级上游审计、独立 Chapter / Resource / Work / Exam TaskInventory、按稳定身份重新发现并经 Core 校验的 TaskDetail / Progress API 与 CLI、四类任务的模块化只读进度复核、明确区分 Chapter Work 与独立 Work / Exam 的题面离线解析、仅在新鲜详情确认可作答后开放的独立 Work 原生题目读取与无值 SubmissionBuild 预览、Document / Read / Video 原生执行、有界 Work 详情状态复核、Cookie 自动续登与显式开发验证入口；
-- WELearn clean-room 上游审计、Password / ImportedCookie 认证编排与有界 Course / Task inventory capability，验证码/短信正确进入 HumanRequired，完成状态、可见性和未确认单位的 donor 时长事实保持独立；Password/OIDC 手动重定向、限定域 Cookie 收集、Core 持久会话解析和 Course / Unit / SCO 已接原生边界，并提供默认关闭的 daemon 开发注册入口；renewal 与真实账号验证仍待完成；
+- WELearn clean-room 上游审计、Password / ImportedCookie 认证编排与有界 Course / Task inventory capability，验证码/短信正确进入 HumanRequired，完成状态、可见性和未确认单位的 donor 时长事实保持独立；Password/OIDC 手动重定向、限定域 Cookie 收集、Core 持久会话解析与原子自动续登、Course / Unit / SCO 原生读取均已接入，并提供默认关闭的 daemon 开发注册入口；真实账号验证仍待完成；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
 正在进行的工作以 [Phase 0 架构检查点](docs/architecture/phase-0-foundation.md) 为准。内部 API 在第二批 Provider 完成前仍可能发生不兼容变更。
@@ -152,7 +152,7 @@ cargo run -p asterismd
 
 `asterismd` 默认监听 `127.0.0.1:8068`，并在当前目录使用 `asterism.db`。配置按 `CLI > 环境变量 > 配置文件 > 默认值` 合并；可复制 `asterism.example.toml` 为本地 `asterism.toml`，也可通过 `--config` 或 `ASTERISM_CONFIG` 指定文件。服务端变量包括 `ASTERISM_BIND`、`ASTERISM_DATABASE_URL`、`ASTERISM_SESSION_TTL_SECONDS` 和 `ASTERISM_SECURE_COOKIES`；统一调度器使用 `ASTERISM_SCHEDULER_*` 对应 `[scheduler]` 字段，并可由 `--scheduler-*` 参数覆盖。`execution_concurrency_limit` 是部署级全局硬上限，Provider/账号的后台设置只能在该上限内进一步收紧。普通配置文件不得保存凭据或其他 Secret。
 
-Chaoxing 与 WELearn 仍处于 `Development` 且默认不注册。仅在本地真实账号验证时，才可分别通过 `[providers].enable_development_chaoxing = true` / `[providers].enable_development_welearn = true`、`ASTERISM_ENABLE_DEVELOPMENT_CHAOXING=true` / `ASTERISM_ENABLE_DEVELOPMENT_WELEARN=true` 或 `--enable-development-chaoxing` / `--enable-development-welearn` 显式启用；启用任一平台时必须同时配置 SecretStore keyring。这些开关只开放验证入口，不代表 Supported/Verified，也不会启用 Capture。WELearn 当前不会自动 renewal，失效 Cookie 需要重新认证或导入。
+Chaoxing 与 WELearn 仍处于 `Development` 且默认不注册。仅在本地真实账号验证时，才可分别通过 `[providers].enable_development_chaoxing = true` / `[providers].enable_development_welearn = true`、`ASTERISM_ENABLE_DEVELOPMENT_CHAOXING=true` / `ASTERISM_ENABLE_DEVELOPMENT_WELEARN=true` 或 `--enable-development-chaoxing` / `--enable-development-welearn` 显式启用；启用任一平台时必须同时配置 SecretStore keyring。这些开关只开放验证入口，不代表 Supported/Verified，也不会启用 Capture。WELearn 仅能续登由原生 Password 登录形成的完整 Composite 凭据；单独导入的 Cookie 失效后仍需重新认证或导入。
 
 启用后可通过 CLI 完成 Password → Cookie → 扫描的开发验证。先创建账号并启动认证会话，再把返回的 ID 代入后续命令：
 

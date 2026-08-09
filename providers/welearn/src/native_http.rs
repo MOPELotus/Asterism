@@ -69,56 +69,30 @@ impl NativeWellearnInventoryTransport {
             .map_err(|error| classify_reqwest_error(&error))?;
         read_inventory_response(response, expected_content).await
     }
-}
 
-impl fmt::Debug for NativeWellearnInventoryTransport {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("NativeWellearnInventoryTransport")
-            .field("client", &"configured")
-            .field("sessions", &"configured")
-            .finish()
-    }
-}
-
-#[async_trait]
-impl WellearnCourseInventoryTransport for NativeWellearnInventoryTransport {
-    async fn fetch_courses(
+    async fn session_for_operation(
         &self,
         context: &ProviderContext,
-    ) -> ProviderResult<WellearnInventoryDocument> {
-        let session = self.sessions.resolve_session(context).await?;
-        fetch_course_inventory_document(&self.client, &session).await
+    ) -> ProviderResult<(crate::WellearnCookieSession, bool)> {
+        match self.sessions.resolve_session(context).await {
+            Ok(session) => Ok((session, false)),
+            Err(error) if error.kind == ProviderErrorKind::Authentication => {
+                Ok((self.sessions.renew_session(context).await?, true))
+            }
+            Err(error) => Err(error),
+        }
     }
-}
 
-pub(crate) async fn fetch_course_inventory_document(
-    client: &Client,
-    session: &crate::WellearnCookieSession,
-) -> ProviderResult<WellearnInventoryDocument> {
-    let response = client
-        .get(static_url(COURSE_LIST_URL)?)
-        .header(COOKIE, session.expose_secret())
-        .header(REFERER, COURSE_INDEX_REFERER)
-        .send()
-        .await
-        .map_err(|error| classify_reqwest_error(&error))?;
-    read_inventory_response(response, ResponseContent::Json).await
-}
-
-#[async_trait]
-impl WellearnTaskInventoryTransport for NativeWellearnInventoryTransport {
-    async fn fetch_tasks(
+    async fn fetch_tasks_once(
         &self,
-        context: &ProviderContext,
+        session: &crate::WellearnCookieSession,
         course: &RemoteCourse,
     ) -> ProviderResult<WellearnTaskInventoryDocuments> {
         let course_id = course_id_from_remote(course)?;
         let course_url = course_info_url(&course_id)?;
-        let session = self.sessions.resolve_session(context).await?;
         let course_page = self
             .send_get_with_session(
-                &session,
+                session,
                 course_url.clone(),
                 COURSE_INDEX_REFERER,
                 ResponseContent::Html,
@@ -151,7 +125,7 @@ impl WellearnTaskInventoryTransport for NativeWellearnInventoryTransport {
             let leaves_url = sco_leaves_url(&route, unit_index)?;
             let document = self
                 .send_get_with_session(
-                    &session,
+                    session,
                     leaves_url,
                     course_url.as_str(),
                     ResponseContent::Json,
@@ -166,6 +140,65 @@ impl WellearnTaskInventoryTransport for NativeWellearnInventoryTransport {
     }
 }
 
+impl fmt::Debug for NativeWellearnInventoryTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeWellearnInventoryTransport")
+            .field("client", &"configured")
+            .field("sessions", &"configured")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl WellearnCourseInventoryTransport for NativeWellearnInventoryTransport {
+    async fn fetch_courses(
+        &self,
+        context: &ProviderContext,
+    ) -> ProviderResult<WellearnInventoryDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match fetch_course_inventory_document(&self.client, &session).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                fetch_course_inventory_document(&self.client, &session).await
+            }
+            result => result,
+        }
+    }
+}
+
+pub(crate) async fn fetch_course_inventory_document(
+    client: &Client,
+    session: &crate::WellearnCookieSession,
+) -> ProviderResult<WellearnInventoryDocument> {
+    let response = client
+        .get(static_url(COURSE_LIST_URL)?)
+        .header(COOKIE, session.expose_secret())
+        .header(REFERER, COURSE_INDEX_REFERER)
+        .send()
+        .await
+        .map_err(|error| classify_reqwest_error(&error))?;
+    read_inventory_response(response, ResponseContent::Json).await
+}
+
+#[async_trait]
+impl WellearnTaskInventoryTransport for NativeWellearnInventoryTransport {
+    async fn fetch_tasks(
+        &self,
+        context: &ProviderContext,
+        course: &RemoteCourse,
+    ) -> ProviderResult<WellearnTaskInventoryDocuments> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_tasks_once(&session, course).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_tasks_once(&session, course).await
+            }
+            result => result,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ResponseContent {
     Html,
@@ -176,7 +209,8 @@ async fn read_inventory_response(
     mut response: Response,
     expected_content: ResponseContent,
 ) -> ProviderResult<WellearnInventoryDocument> {
-    validate_response_head(&response, expected_content)?;
+    validate_response_head(&response)?;
+    let content_type_result = validate_response_content_type(&response, expected_content);
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -206,7 +240,7 @@ async fn read_inventory_response(
             ));
         }
     };
-    if matches!(expected_content, ResponseContent::Html) && looks_like_login_document(&document) {
+    if looks_like_login_document(&document) {
         let mut document = document;
         document.zeroize();
         return Err(ProviderError::new(
@@ -214,13 +248,15 @@ async fn read_inventory_response(
             "WELearn returned a login page for the current session",
         ));
     }
+    if let Err(error) = content_type_result {
+        let mut document = document;
+        document.zeroize();
+        return Err(error);
+    }
     WellearnInventoryDocument::try_new(document)
 }
 
-fn validate_response_head(
-    response: &Response,
-    expected_content: ResponseContent,
-) -> ProviderResult<()> {
+fn validate_response_head(response: &Response) -> ProviderResult<()> {
     validate_status(response.status(), response.headers())?;
     if response
         .content_length()
@@ -228,6 +264,13 @@ fn validate_response_head(
     {
         return Err(oversized_response());
     }
+    Ok(())
+}
+
+fn validate_response_content_type(
+    response: &Response,
+    expected_content: ResponseContent,
+) -> ProviderResult<()> {
     let Some(content_type) = response.headers().get(CONTENT_TYPE) else {
         return Ok(());
     };
@@ -382,12 +425,20 @@ fn static_route_error() -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use asterism_networking::NetworkProfile;
 
     use super::*;
 
     #[derive(Debug)]
     struct UnusedSessions;
+
+    #[derive(Debug, Default)]
+    struct RenewingSessions {
+        renewals: AtomicUsize,
+    }
 
     #[async_trait]
     impl WellearnSessionResolver for UnusedSessions {
@@ -402,6 +453,27 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl WellearnSessionResolver for RenewingSessions {
+        async fn resolve_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<crate::WellearnCookieSession> {
+            Err(ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "fixture stored session expired",
+            ))
+        }
+
+        async fn renew_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<crate::WellearnCookieSession> {
+            self.renewals.fetch_add(1, Ordering::SeqCst);
+            crate::WellearnCookieSession::try_new("session=RENEWED")
+        }
+    }
+
     #[test]
     fn native_transport_uses_the_shared_non_redirecting_client() {
         let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
@@ -409,6 +481,27 @@ mod tests {
         let transport =
             NativeWellearnInventoryTransport::try_new(&network, Arc::new(UnusedSessions)).unwrap();
         assert!(format!("{transport:?}").contains("configured"));
+    }
+
+    #[tokio::test]
+    async fn operation_session_renews_only_an_authentication_failure() {
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .expect("built-in network profile");
+        let sessions = Arc::new(RenewingSessions::default());
+        let transport =
+            NativeWellearnInventoryTransport::try_new(&network, sessions.clone()).unwrap();
+        let (session, renewed) = transport
+            .session_for_operation(&ProviderContext {
+                provider_id: asterism_domain::ProviderId::new("welearn").unwrap(),
+                account_id: asterism_domain::ProviderAccountId::new(),
+                credential_refs: vec![asterism_domain::SecretId::new()],
+                correlation_id: "welearn-renewal-test".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert!(renewed);
+        assert_eq!(session.expose_secret(), "session=RENEWED");
+        assert_eq!(sessions.renewals.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -470,5 +563,56 @@ mod tests {
         assert!(!looks_like_login_document(
             "<script>const message='login account pwd';</script>"
         ));
+    }
+
+    #[tokio::test]
+    async fn json_reader_distinguishes_a_login_page_from_unexpected_html() {
+        let login = fixture_response(
+            "text/html",
+            "<form action='/login'><input name='account'><input name='pwd'></form>",
+        )
+        .await;
+        let error = read_inventory_response(login, ResponseContent::Json)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Authentication);
+
+        let unrelated = fixture_response("text/html", "<html><p>maintenance</p></html>").await;
+        let error = read_inventory_response(unrelated, ResponseContent::Json)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+    }
+
+    async fn fixture_response(content_type: &'static str, body: &'static str) -> Response {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let mut request = [0_u8; 1_024];
+            let mut received = Vec::new();
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut request).unwrap();
+                assert!(count > 0, "fixture client closed before request headers");
+                received.extend_from_slice(&request[..count]);
+                assert!(received.len() <= 16 * 1_024, "fixture request is bounded");
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let response = Client::new()
+            .get(format!("http://{address}/fixture"))
+            .send()
+            .await
+            .unwrap();
+        server.join().unwrap();
+        response
     }
 }

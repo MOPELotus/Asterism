@@ -31,7 +31,7 @@ pub use native_authentication::NativeWellearnAuthenticationTransport;
 pub use native_http::NativeWellearnInventoryTransport;
 pub use provider::{
     build_development_provider, build_development_provider_native,
-    build_development_provider_with_native_inventory,
+    build_development_provider_with_native_inventory, build_development_provider_with_renewal,
     build_development_provider_with_stored_session,
 };
 pub use stored_session::StoredWellearnSessionResolver;

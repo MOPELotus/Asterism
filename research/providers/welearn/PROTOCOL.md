@@ -38,8 +38,19 @@ a parseable authenticated response. Password and ImportedCookie continue
 through the common Authentication capability. Stored Cookie reads now use only
 Core's provider-scoped resolver and require an exact account, requested secret
 reference, Cookie purpose, supported session kind and unexpired metadata before
-the native request. Renewal, daemon registration and live-account validation
-remain pending.
+the native request.
+
+When a stored Composite session fails specifically as Authentication, renewal
+resolves exactly one username, password and Cookie created by native Password
+login. It repeats the bounded SSO exchange, validates the new Cookie with a
+Course-list read, then submits the complete replacement through Core's atomic
+compare-and-replace boundary. Per-account locks and an operation-bound bounded
+cache prevent duplicate renewal inside the same operation. Authentication and
+inventory retry at most once; a Task scan restarts from its Course page so a
+partial Unit/SCO set is never returned. Network, rate-limit, protocol and
+ordinary invalid-response failures do not trigger login. ImportedCookie has no
+password material and therefore cannot renew. Daemon registration is explicit;
+live-account validation remains pending.
 
 ## Course and task inventory
 

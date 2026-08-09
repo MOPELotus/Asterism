@@ -2402,3 +2402,28 @@ This makes the native WELearn authentication and Course/Task scan path reachable
 for intentional local validation. It is not a live verification result:
 automatic renewal is still absent, expired sessions fail authentication, and no
 verification level is raised.
+
+## One-hundred-and-fifty-second Phase 0 slice
+
+WELearn stored Composite sessions can now renew through Core's scoped resolver
+and compare-and-replace boundary. Renewal requires exactly one username,
+password and Cookie from the requested account and secret-reference set; every
+credential must be unexpired, use Composite session kind and originate from
+NativeProviderLogin. Duplicate IDs/purposes, incomplete bundles, imported
+Cookie-only sessions and stale metadata fail before login.
+
+The bounded Password/OIDC exchange validates its fresh Cookie with an
+authenticated Course-list read before Core atomically replaces the complete
+credential set. Renewal is serialized across a fixed per-account lock pool and
+cached only for the same account, credential references and operation
+correlation, with both TTL and entry bounds. Plaintext inputs, old/new Cookies
+and login bodies retain the existing redaction and zeroization boundaries.
+
+Authentication, Course inventory and Task inventory retry only an explicit
+Authentication failure, at most once. Task inventory restarts the complete
+Course-page → Unit → SCO sequence after renewal, preserving its all-or-nothing
+contract. A bounded `200 text/html` response is inspected for structural login
+form markers before Content-Type rejection, while unrelated HTML remains an
+InvalidResponse and cannot trigger credential use. The daemon now composes this
+renewing resolver by default whenever its WELearn Development opt-in is enabled.
+This remains offline/native-boundary evidence, not live verification.

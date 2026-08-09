@@ -3,7 +3,7 @@
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
 | Authentication | Fanyuchang 2026 | Reference | Native Password/OIDC manual redirects, scoped Cookie collection and typed captcha/SMS outcomes are offline/native-boundary covered; live pending |
-| Stored session validation | Fanyuchang 2026 | Reference | Core-scoped Cookie resolution plus native Course-list validation exist; renewal and live validation remain pending, and Cookie presence alone is never accepted |
+| Stored session validation | Fanyuchang 2026 | Reference | Core-scoped Cookie resolution, authenticated Course-list validation and atomic Password/Composite renewal are native-boundary covered; live pending |
 | CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Native authenticated `authCourse.aspx?action=gmc` read is implemented behind shared NetworkProfile; live pending |
 | TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Native Course page → `courseunits` → one `scoLeaves` response per Unit is implemented all-or-nothing; live pending |
 | TaskProgressRead | YZBRH | Reference | Fresh CMI and SCO facts; completion and progress are distinct |
@@ -33,5 +33,6 @@ non-redirecting native Password/OIDC and Course/Task HTTP transports now exist.
 Stored credential resolution now validates exact account/reference/purpose,
 session kind, expiry and UTF-8 shape before constructing a Cookie session.
 Daemon registration is available only through an explicit disabled-by-default
-development flag and requires a configured SecretStore. Renewal and all live
-validation remain pending.
+development flag and requires a configured SecretStore. Password/Composite
+renewal uses Core compare-and-replace and retries one read operation only after
+an Authentication failure. All live validation remains pending.

@@ -17,7 +17,7 @@ use asterism_events::EventBus;
 use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
 use asterism_provider_api::ProviderRegistry;
 use asterism_provider_chaoxing::build_development_provider_with_renewal;
-use asterism_provider_welearn::build_development_provider_with_stored_session;
+use asterism_provider_welearn::build_development_provider_with_renewal as build_welearn_with_renewal;
 use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
 use asterism_storage::{
@@ -363,7 +363,7 @@ fn build_provider_registry(
         ));
         let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
             .context("failed to resolve the development WELearn network profile")?;
-        let entry = build_development_provider_with_stored_session(&network, runtime)
+        let entry = build_welearn_with_renewal(&network, runtime.clone(), runtime)
             .context("failed to build the development WELearn Provider")?;
         registry
             .register(entry)

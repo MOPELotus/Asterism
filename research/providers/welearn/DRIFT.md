@@ -12,6 +12,7 @@
 | Heartbeat semantics drift | Donors send the long action name at fixed intervals | Make interval a Master-controlled Provider default with per-task override, bounded by Provider safety limits |
 | Completion can be forged independently of duration | Donor has direct completed/progress/score payloads | Exclude that path; read, preserve, mutate narrowly and verify with fresh CMI |
 | Session challenge appears after password failures | Current donor reports captcha/SMS branches | Stop retries and classify `HumanRequired`; Capture remains deferred for batch one |
+| Expired sessions return either redirects or `200` login HTML | Donors and web stacks vary in expiry presentation | Detect only structural login pages, renew a native Composite once, restart the complete read and never retry other error kinds as authentication |
 
 ## Live-validation gate
 
