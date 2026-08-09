@@ -9,6 +9,7 @@ mod course_inventory;
 mod inventory;
 mod metadata;
 mod native_http;
+mod provider;
 mod stored_session;
 mod task_inventory;
 
@@ -24,6 +25,7 @@ pub use inventory::{
 pub use native_http::{
     ChaoxingCookieSession, ChaoxingSessionResolver, NativeChaoxingInventoryTransport,
 };
+pub use provider::build_development_provider;
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use task_inventory::{
     ChaoxingCourseRoute, ChaoxingInventoryDocument, ChaoxingInventoryTransport,

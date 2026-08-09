@@ -947,3 +947,13 @@ malformed, stale, wrong-Provider or incompletely bound credentials fail closed;
 storage and decryption failures remain sanitized internal errors. Saved
 username and password fields are retained for the separate auto-renew slice but
 are never logged, returned by APIs, or used for an unbounded retry loop.
+
+## Seventieth Phase 0 slice
+
+The Chaoxing crate now has one explicit development factory which composes its
+Password/ImportedCookie authentication, course inventory, and independent Work
+and Exam inventory capabilities around the same Core session resolver and
+resolved network policy. A registry validation test prevents advertised
+metadata from drifting away from attached capability slots. The factory does
+not register itself in `asterismd`, perform network calls during construction,
+or change the Provider's `Development` verification level.

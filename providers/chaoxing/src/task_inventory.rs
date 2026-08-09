@@ -125,9 +125,8 @@ pub trait ChaoxingInventoryTransport: Send + Sync {
     ) -> ProviderResult<ChaoxingInventoryDocument>;
 }
 
-/// Development-level Chaoxing task inventory capability. It is intentionally
-/// not registered by this crate until course discovery and a live transport are
-/// both present.
+/// Development-level Chaoxing task inventory capability. Daemon registration
+/// remains a separate composition-root decision until live verification.
 pub struct ChaoxingTaskInventory {
     metadata: ProviderMetadata,
     transport: Arc<dyn ChaoxingInventoryTransport>,
