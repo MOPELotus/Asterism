@@ -6,6 +6,7 @@ mod auth_bootstrap;
 mod credit;
 mod execution;
 mod rate_limit;
+mod runtime_settings;
 mod task;
 
 use std::sync::Arc;
@@ -141,6 +142,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
+        .merge(runtime_settings_routes())
         .merge(credit_routes())
         .merge(execution_routes())
         .route("/api/v1/service-tokens", post(auth::create_service_token))
@@ -193,6 +195,29 @@ fn credit_routes() -> Router<ApiState> {
         .route(
             "/api/v1/credits/reservations",
             get(credit::list_credit_reservations),
+        )
+}
+
+fn runtime_settings_routes() -> Router<ApiState> {
+    Router::new()
+        .route(
+            "/api/v1/admin/providers/{provider_id}/runtime-settings/schema",
+            get(runtime_settings::get_provider_runtime_settings_schema),
+        )
+        .route(
+            "/api/v1/admin/providers/{provider_id}/runtime-settings",
+            get(runtime_settings::get_provider_runtime_settings)
+                .put(runtime_settings::put_provider_runtime_settings),
+        )
+        .route(
+            "/api/v1/admin/provider-accounts/{account_id}/runtime-settings",
+            get(runtime_settings::get_account_runtime_settings)
+                .put(runtime_settings::put_account_runtime_settings),
+        )
+        .route(
+            "/api/v1/admin/tasks/{task_id}/runtime-settings",
+            get(runtime_settings::get_task_runtime_settings)
+                .put(runtime_settings::put_task_runtime_settings),
         )
 }
 
@@ -644,6 +669,41 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert("/api/v1/executions".to_owned(), execution_list_path());
+    for (path, value) in [
+        (
+            "/api/v1/admin/providers/{provider_id}/runtime-settings/schema",
+            runtime_settings_schema_path(),
+        ),
+        (
+            "/api/v1/admin/providers/{provider_id}/runtime-settings",
+            runtime_settings_path(
+                "getProviderRuntimeSettings",
+                "putProviderRuntimeSettings",
+                "provider_id",
+            ),
+        ),
+        (
+            "/api/v1/admin/provider-accounts/{account_id}/runtime-settings",
+            runtime_settings_path(
+                "getProviderAccountRuntimeSettings",
+                "putProviderAccountRuntimeSettings",
+                "account_id",
+            ),
+        ),
+        (
+            "/api/v1/admin/tasks/{task_id}/runtime-settings",
+            runtime_settings_path(
+                "getTaskRuntimeSettings",
+                "putTaskRuntimeSettings",
+                "task_id",
+            ),
+        ),
+    ] {
+        document["paths"]
+            .as_object_mut()
+            .expect("static OpenAPI paths object")
+            .insert(path.to_owned(), value);
+    }
     document["paths"]
         .as_object_mut()
         .expect("static OpenAPI paths object")
@@ -723,6 +783,64 @@ fn credit_account_path() -> Value {
             "403": {"description": "ReadOwnCredits or CreditRead is required"}
         }
     }})
+}
+
+fn runtime_settings_schema_path() -> Value {
+    json!({"get": {
+        "operationId": "getProviderRuntimeSettingsSchema",
+        "description": "Master-only registered Provider runtime settings schema; not exposed through ordinary Provider metadata.",
+        "security": [{"cookieAuth": []}],
+        "parameters": [{"name": "provider_id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+            "200": {"description": "Versioned bounded Provider runtime settings schema"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "ManageSystem is required"},
+            "404": {"description": "Provider is not registered"}
+        }
+    }})
+}
+
+fn runtime_settings_path(get_operation: &str, put_operation: &str, path_parameter: &str) -> Value {
+    json!({
+        "get": {
+            "operationId": get_operation,
+            "description": "Master-managed settings layers, effective values and per-field sources.",
+            "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+            "parameters": [{"name": path_parameter, "in": "path", "required": true, "schema": {"type": "string"}}],
+            "responses": {
+                "200": {"description": "Schema, stored overrides, resolved values and source map"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "Master or owner-bound ProviderManage authorization is required"},
+                "404": {"description": "Settings target is not available to this identity"},
+                "409": {"description": "A stored override uses an incompatible Provider schema"}
+            }
+        },
+        "put": {
+            "operationId": put_operation,
+            "description": "Validates and atomically replaces one settings override using optimistic revision control.",
+            "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+            "parameters": [{"name": path_parameter, "in": "path", "required": true, "schema": {"type": "string"}}],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                "type": "object",
+                "required": ["expected_revision", "schema_version", "values"],
+                "properties": {
+                    "expected_revision": {"type": "integer", "minimum": 0},
+                    "schema_version": {"type": "integer", "minimum": 1},
+                    "values": {"type": "object"}
+                },
+                "additionalProperties": false
+            }}}},
+            "responses": {
+                "200": {"description": "Existing override replaced"},
+                "201": {"description": "First override created"},
+                "400": {"description": "Patch does not match the registered Provider schema"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "Master or owner-bound ProviderManage authorization is required"},
+                "404": {"description": "Settings target is not available to this identity"},
+                "409": {"description": "Expected revision is stale"}
+            }
+        }
+    })
 }
 
 fn credit_page_path(operation_id: &str, description: &str) -> Value {
@@ -1088,8 +1206,9 @@ mod tests {
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, CourseInventoryCapability, CredentialValidation,
         ProviderAuthContext, ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity,
-        ProviderMetadata, ProviderResult, RemoteCourse, RemoteTask, SessionStatus,
-        TaskInventoryCapability, VerificationLevel,
+        ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingDefinition,
+        ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask,
+        SessionStatus, TaskInventoryCapability, VerificationLevel,
     };
     use asterism_secrets::{CredentialBundle, SecretKey};
     use asterism_storage::SecretKeyring;
@@ -1191,6 +1310,50 @@ mod tests {
             })
             .unwrap();
         registry
+    }
+
+    fn settings_registry() -> ProviderRegistry {
+        let metadata = ProviderMetadata {
+            id: asterism_domain::ProviderId::new("provider-alpha").unwrap(),
+            display_name: "provider-alpha".to_owned(),
+            implementation_version: "0.1.0".to_owned(),
+            verification: VerificationLevel::Development,
+            scan_min_interval_seconds: None,
+            capture_recipe_version: None,
+            capabilities: BTreeSet::new(),
+            auth_methods: BTreeSet::new(),
+            session_kinds: BTreeSet::new(),
+        };
+        let mut entry = ProviderEntry::metadata_only(metadata);
+        entry.runtime_settings = ProviderRuntimeSettingsSchema {
+            version: 2,
+            definitions: vec![ProviderSettingDefinition {
+                key: "execution.max_concurrency".to_owned(),
+                display_name: "Execution concurrency".to_owned(),
+                description: "Maximum concurrent execution work.".to_owned(),
+                kind: ProviderSettingKind::Integer {
+                    minimum: 1,
+                    maximum: 8,
+                    step: 1,
+                },
+                default: ProviderSettingValue::Integer(2),
+                scopes: BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                    ProviderSettingScope::Task,
+                ]),
+            }],
+        };
+        let mut registry = ProviderRegistry::default();
+        registry.register(entry).unwrap();
+        registry
+    }
+
+    async fn settings_test_app() -> (Router, Database) {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let state = ApiState::new(database.clone(), Arc::new(settings_registry()), 3600, false);
+        (build_router(state), database)
     }
 
     #[derive(Debug)]
@@ -1800,6 +1963,183 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audit_count, 2);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the integration test follows Provider, account and Task settings as one hierarchy"
+    )]
+    async fn master_runtime_settings_are_revisioned_and_resolved_by_scope() {
+        let (app, database) = settings_test_app().await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let schema = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/admin/providers/provider-alpha/runtime-settings/schema")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(schema.status(), StatusCode::OK);
+        let schema = response_json(schema).await;
+        assert_eq!(schema["schema"]["version"], 2);
+        assert_eq!(
+            schema["schema"]["definitions"][0]["key"],
+            "execution.max_concurrency"
+        );
+
+        let provider_path = "/api/v1/admin/providers/provider-alpha/runtime-settings";
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::put(provider_path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"expected_revision":0,"schema_version":2,"values":{"execution.max_concurrency":{"type":"integer","value":9}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let provider = app
+            .clone()
+            .oneshot(
+                Request::put(provider_path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-request-id", "settings-provider-create")
+                    .body(Body::from(
+                        r#"{"expected_revision":0,"schema_version":2,"values":{"execution.max_concurrency":{"type":"integer","value":4}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.status(), StatusCode::CREATED);
+        let provider = response_json(provider).await;
+        assert_eq!(provider["overrides"]["provider"]["revision"], 1);
+        assert_eq!(
+            provider["resolved"]["values"]["execution.max_concurrency"]["value"],
+            4
+        );
+        assert_eq!(provider["sources"]["execution.max_concurrency"], "provider");
+
+        let stale = app
+            .clone()
+            .oneshot(
+                Request::put(provider_path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"expected_revision":0,"schema_version":2,"values":{"execution.max_concurrency":{"type":"integer","value":5}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let account_path = format!("/api/v1/admin/provider-accounts/{account_id}/runtime-settings");
+        let account = app
+            .clone()
+            .oneshot(
+                Request::put(&account_path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"expected_revision":0,"schema_version":2,"values":{"execution.max_concurrency":{"type":"integer","value":3}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(account.status(), StatusCode::CREATED);
+        let account = response_json(account).await;
+        assert_eq!(
+            account["resolved"]["values"]["execution.max_concurrency"]["value"],
+            3
+        );
+        assert_eq!(
+            account["sources"]["execution.max_concurrency"],
+            "provider_account"
+        );
+
+        let task_id = asterism_domain::TaskId::new();
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+              assessment_class, title, remote_state, orchestration_state, discovered_at, \
+              updated_at, capabilities_json) \
+             VALUES (?, ?, 'settings-api-task', 'settings-api-fingerprint', 'chapter', \
+                     'routine', 'Settings API task', 'pending', 'ready', ?, ?, '[]')",
+        )
+        .bind(task_id.to_string())
+        .bind(&account_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let task_path = format!("/api/v1/admin/tasks/{task_id}/runtime-settings");
+        let task = app
+            .clone()
+            .oneshot(
+                Request::put(&task_path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"expected_revision":0,"schema_version":2,"values":{"execution.max_concurrency":{"type":"integer","value":1}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(task.status(), StatusCode::CREATED);
+        let task = response_json(task).await;
+        assert_eq!(task["target_scope"], "task");
+        assert_eq!(
+            task["resolved"]["values"]["execution.max_concurrency"]["value"],
+            1
+        );
+        assert_eq!(task["sources"]["execution.max_concurrency"], "task");
+        assert_eq!(task["overrides"]["provider"]["revision"], 1);
+        assert_eq!(task["overrides"]["provider_account"]["revision"], 1);
+        assert_eq!(task["overrides"]["task"]["revision"], 1);
+
+        let fetched = app
+            .oneshot(
+                Request::get(task_path)
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        assert_eq!(response_json(fetched).await, task);
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records \
+             WHERE action = 'provider_runtime_settings_configured'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 3);
     }
 
     #[tokio::test]
@@ -3376,6 +3716,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the route integrity test keeps the complete versioned API surface together"
+    )]
     async fn openapi_describes_every_authentication_route() {
         let response = test_router()
             .await
@@ -3411,6 +3755,10 @@ mod tests {
             "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}",
             "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/credentials",
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
+            "/api/v1/admin/providers/{provider_id}/runtime-settings/schema",
+            "/api/v1/admin/providers/{provider_id}/runtime-settings",
+            "/api/v1/admin/provider-accounts/{account_id}/runtime-settings",
+            "/api/v1/admin/tasks/{task_id}/runtime-settings",
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/execute",
@@ -3459,6 +3807,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/credits/reservations"]["get"]["operationId"],
             "listOwnCreditReservations"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/admin/tasks/{task_id}/runtime-settings"]["put"]["operationId"],
+            "putTaskRuntimeSettings"
         );
         assert_eq!(
             document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/claim"]["post"]["security"]

@@ -1523,3 +1523,24 @@ Audit record in the same transaction containing only target identifiers,
 schema/revision and changed field keys—not setting values. Master-only API
 surfaces, effective-value/source reads and immutable Execution snapshots remain
 the next integration slices.
+
+## One-hundred-and-first Phase 0 slice
+
+The internal API now exposes a dedicated administrative runtime-settings
+control plane. A Master Web session can read the registered schema, configure a
+global Provider default, configure any ProviderAccount override and configure a
+specific Task override. An owner-bound service token with `ProviderManage` may
+automate only its owner's account and Task overrides; it cannot read or mutate
+the system-wide Provider default. User and Operator Web roles remain rejected,
+and the ordinary Provider, account and Task responses do not contain technical
+settings or their schema.
+
+Each PUT carries the exact schema version and expected stored revision. Invalid
+or out-of-range typed values fail before persistence, first writes return 201,
+stale revisions return 409, and inaccessible targets remain indistinguishable
+from missing ones. Each GET returns the Provider schema, all applicable stored
+layers, the resolved values and a per-field source map identifying schema
+default, Provider, ProviderAccount or Task. Scan-schedule administration now
+uses the same authority model, so a Master is system-wide while automation
+remains owner-bound. Execution creation still needs the next transactional
+slice to freeze these resolved settings and layer revisions into the run.

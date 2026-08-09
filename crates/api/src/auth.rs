@@ -42,6 +42,25 @@ enum AuthIdentity {
     Service(ServiceToken),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ProviderSettingsAuthority {
+    System,
+    Owner(UserId),
+}
+
+impl ProviderSettingsAuthority {
+    pub(super) fn permits_owner(self, owner_id: UserId) -> bool {
+        match self {
+            Self::System => true,
+            Self::Owner(required_owner_id) => required_owner_id == owner_id,
+        }
+    }
+
+    pub(super) const fn is_system(self) -> bool {
+        matches!(self, Self::System)
+    }
+}
+
 impl AuthContext {
     fn require(
         &self,
@@ -115,15 +134,20 @@ impl AuthContext {
         }
     }
 
-    pub(super) fn require_provider_settings_manage(&self) -> Result<UserId, ApiError> {
+    pub(super) fn require_provider_settings_manage(
+        &self,
+    ) -> Result<ProviderSettingsAuthority, ApiError> {
         match &self.identity {
             AuthIdentity::Web { principal, .. } if principal.has(Permission::ManageSystem) => {
-                Ok(principal.user_id)
+                Ok(ProviderSettingsAuthority::System)
             }
             AuthIdentity::Service(token)
                 if token.scopes.contains(&ServiceScope::ProviderManage) =>
             {
-                token.owner_user_id.ok_or_else(ApiError::forbidden)
+                token
+                    .owner_user_id
+                    .map(ProviderSettingsAuthority::Owner)
+                    .ok_or_else(ApiError::forbidden)
             }
             AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
         }
@@ -734,7 +758,10 @@ mod tests {
                 principal: Principal::from_roles(owner_id, [Role::Master], []),
             },
         };
-        assert_eq!(master.require_provider_settings_manage().unwrap(), owner_id);
+        assert_eq!(
+            master.require_provider_settings_manage().unwrap(),
+            ProviderSettingsAuthority::System
+        );
     }
 
     #[test]
@@ -761,7 +788,10 @@ mod tests {
             service(BTreeSet::from([ServiceScope::ProviderManage]))
                 .require_provider_settings_manage()
                 .unwrap(),
-            owner_id
+            ProviderSettingsAuthority::Owner(owner_id)
         );
+        let other_owner_id = UserId::new();
+        assert!(ProviderSettingsAuthority::System.permits_owner(other_owner_id));
+        assert!(!ProviderSettingsAuthority::Owner(owner_id).permits_owner(other_owner_id));
     }
 }

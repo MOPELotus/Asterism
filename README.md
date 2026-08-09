@@ -198,6 +198,8 @@ Provider 执行期间只能通过 Core 注入的 `ExecutionEventSink` 上报进�
 
 Provider 技术运行参数属于 Master 后台控制面：可设置平台默认值，并按需对 ProviderAccount 或单个 Task 做更具体覆盖；视频并发/线程数、播放速度、章节及其他任务的周期巡查只是示例，实际字段由各 Provider 的版本化 schema 定义并受安全上限约束。Provider API 已提供布尔、整数、千分位定点小数、秒级时长与受限选项类型，以及 Provider / ProviderAccount / Task 作用域声明和逐字段覆盖解析；不接受自由字符串或任意 JSON。Core 已按三个作用域持久化校验后的局部覆盖，使用 optimistic revision 防止后台并发覆盖，并在同一事务写入不含配置值的 Audit。第一阶段普通用户不展示也不能修改这些参数。周期巡查仍必须统一进入 Core Scheduler，Provider 不得据此自行创建后台循环；Execution 使用创建时解析并固定的配置 revision，后台后续修改不影响正在运行的任务。
 
+Master 控制面使用 `/api/v1/admin/providers/{provider_id}/runtime-settings`、`/api/v1/admin/provider-accounts/{account_id}/runtime-settings` 与 `/api/v1/admin/tasks/{task_id}/runtime-settings` 读取或替换各层覆盖；Provider schema 可从前一路径下的 `/schema` 读取。读取结果同时返回三层 override、最终解析值和逐字段来源。Provider 默认值仅允许 Master Web Session 管理；owner-bound `ProviderManage` 服务令牌只能管理其 owner 的账号和任务覆盖。
+
 Credits 读面使用 `GET /api/v1/credits/account`、`GET /api/v1/credits/transactions` 和 `GET /api/v1/credits/reservations`。后两者采用显式 `limit` / `offset` 分页；Reservation 响应同时返回执行当时固定的 PriceQuote 与 `pricing_revision`。这些接口只允许 `ReadOwnCredits` Web 用户或 owner-bound `CreditRead` 服务令牌读取自己的数据，不提供扣点、调价或任意结算入口。
 
 也可以直接访问：

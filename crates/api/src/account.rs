@@ -16,9 +16,9 @@ use asterism_secrets::{
     SecretStoreError, SecretValue,
 };
 use asterism_storage::{
-    AuthSessionRepository, ProviderAccountRepository, ScanScheduleRepository,
-    SqliteAuthSessionRepository, SqliteProviderAccountRepository, SqliteProviderScanRepository,
-    SqliteSchedulerRepository, StorageError,
+    AuthSessionRepository, ProviderAccountRepository, ProviderAccountRuntimeRepository,
+    ScanScheduleRepository, SqliteAuthSessionRepository, SqliteProviderAccountRepository,
+    SqliteProviderScanRepository, SqliteSchedulerRepository, StorageError,
 };
 use axum::{
     Extension, Json,
@@ -396,12 +396,14 @@ pub(super) async fn get_scan_schedule(
     Extension(auth): Extension<AuthContext>,
     Path(account_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let owner_id = auth.require_provider_settings_manage()?;
+    let authority = auth.require_provider_settings_manage()?;
     let account_id = parse_account_id(&account_id)?;
-    let account = SqliteProviderAccountRepository::new(state.database.clone())
-        .find_provider_account(owner_id, account_id)
+    let accounts = SqliteProviderAccountRepository::new(state.database.clone());
+    let account = accounts
+        .find_runtime_provider_account(account_id)
         .await
         .map_err(ApiError::internal)?
+        .filter(|account| authority.permits_owner(account.owner_id))
         .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
     let schedule = SqliteSchedulerRepository::new(state.database.clone())
         .find_scan_schedule(account_id)
@@ -428,13 +430,15 @@ pub(super) async fn configure_scan_schedule(
     headers: HeaderMap,
     payload: Result<Json<ConfigureScanScheduleRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let owner_id = auth.require_provider_settings_manage()?;
+    let authority = auth.require_provider_settings_manage()?;
     let account_id = parse_account_id(&account_id)?;
     let request = api_json(payload)?;
-    let account = SqliteProviderAccountRepository::new(state.database.clone())
-        .find_provider_account(owner_id, account_id)
+    let accounts = SqliteProviderAccountRepository::new(state.database.clone());
+    let account = accounts
+        .find_runtime_provider_account(account_id)
         .await
         .map_err(ApiError::internal)?
+        .filter(|account| authority.permits_owner(account.owner_id))
         .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
     let provider = state.providers.get(&account.provider_id).ok_or_else(|| {
         ApiError::conflict(
@@ -481,7 +485,12 @@ pub(super) async fn configure_scan_schedule(
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ApiError::internal("request ID middleware did not provide an ID"))?;
     let stored = repository
-        .upsert_scan_schedule_for_owner(owner_id, &schedule, auth.audit_actor(), correlation_id)
+        .upsert_scan_schedule_for_owner(
+            account.owner_id,
+            &schedule,
+            auth.audit_actor(),
+            correlation_id,
+        )
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
