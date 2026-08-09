@@ -1211,3 +1211,20 @@ Execution tick before closing SQLite, so dropping a Provider future does not
 become the normal shutdown path. Filtered claim, worker tick and dual-loop
 lifecycle tests remain offline evidence and do not change Provider verification
 status.
+
+## Eighty-sixth Phase 0 slice
+
+Execution status now has an owner-scoped read model for API, CLI and future UI
+surfaces. `GET /api/v1/executions/{execution_id}` joins ownership through the
+Execution's Task and Provider account, returning not-found for both absent and
+foreign IDs. A single SQLite read transaction returns the Execution, its latest
+structured `ExecutionProgress`, and Attempt history ordered by `attempt_no`;
+history is bounded and every stored numeric or enum value is validated while
+decoding.
+
+The response exposes typed state, stage, percentage, current item, item counts,
+Attempt result, Provider error class and sanitized Provider trace ID without
+including execution logs or Provider payloads. `asterismctl execution get`
+calls that same route using the existing `task_read` scope, and OpenAPI records
+the stable operation. Paginated log history and a live SSE/WS LogStream remain
+separate surfaces so detail reads cannot become unbounded polling payloads.

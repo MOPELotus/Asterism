@@ -3,6 +3,7 @@
 mod account;
 mod auth;
 mod auth_bootstrap;
+mod execution;
 mod rate_limit;
 mod task;
 
@@ -121,6 +122,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
+        .route(
+            "/api/v1/executions/{execution_id}",
+            get(execution::get_execution),
+        )
         .route("/api/v1/service-tokens", post(auth::create_service_token))
         .route(
             "/api/v1/service-tokens/{token_id}",
@@ -592,6 +597,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/executions/{execution_id}".to_owned(),
+            execution_detail_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
@@ -610,6 +622,23 @@ async fn openapi() -> Json<Value> {
             auth_bootstrap_credential_schema(),
         );
     Json(document)
+}
+
+fn execution_detail_path() -> Value {
+    json!({"get": {
+        "operationId": "getExecution",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "execution_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Owner-scoped Execution with current progress and Attempt history"},
+            "400": {"description": "Invalid Execution ID"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Insufficient permission"},
+            "404": {"description": "Execution not found for this owner"}
+        }
+    }})
 }
 
 fn task_execute_path() -> Value {
@@ -2639,7 +2668,24 @@ mod tests {
         let created = response_json(created).await;
         assert_eq!(created["created"], true);
         assert_eq!(created["execution"]["request_source"], "web_ui");
-        let execution_id = created["execution"]["id"].clone();
+        let execution_id = created["execution"]["id"].as_str().unwrap().to_owned();
+
+        let detail = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/executions/{execution_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::OK);
+        assert_eq!(detail.headers()[header::CACHE_CONTROL], "no-store");
+        let detail = response_json(detail).await;
+        assert_eq!(detail["execution"]["id"], execution_id);
+        assert!(detail["progress"].is_null());
+        assert_eq!(detail["attempts"], json!([]));
 
         let replayed =
             post_task_execution(&app, &cookie, routine_task, Some("execute-document-1")).await;
@@ -2863,6 +2909,7 @@ mod tests {
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/execute",
+            "/api/v1/executions/{execution_id}",
         ] {
             assert!(document["paths"].get(path).is_some(), "missing {path}");
         }
@@ -2873,6 +2920,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],
             "executeTask"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/executions/{execution_id}"]["get"]["operationId"],
+            "getExecution"
         );
         assert_eq!(
             document["paths"]["/api/v1/auth-bootstrap/sessions/{session_id}/claim"]["post"]["security"]

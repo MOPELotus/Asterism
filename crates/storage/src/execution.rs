@@ -12,11 +12,15 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use sqlx::Row;
 
+use crate::ExecutionDetail;
 use crate::outbox::enqueue_in_transaction;
 use crate::{
     Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionProgressUpdate,
-    ExecutionRepository, ExecutionScheduleOutcome, ExecutionScheduleRequest, StorageError,
+    ExecutionQueryRepository, ExecutionRepository, ExecutionScheduleOutcome,
+    ExecutionScheduleRequest, StorageError,
 };
+
+const MAX_EXECUTION_ATTEMPTS: usize = 1_000;
 
 #[derive(Clone, Debug)]
 pub struct SqliteExecutionRepository {
@@ -245,6 +249,70 @@ impl ExecutionRepository for SqliteExecutionRepository {
         record_attempt_finished(&mut transaction, &request).await?;
         transaction.commit().await?;
         Ok(execution)
+    }
+}
+
+#[async_trait]
+impl ExecutionQueryRepository for SqliteExecutionRepository {
+    async fn find_owned_execution_detail(
+        &self,
+        owner_id: UserId,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionDetail>, StorageError> {
+        let mut transaction = self.database.pool().begin().await?;
+        let execution = sqlx::query(
+            "SELECT execution.id, execution.task_id, execution.requested_by, \
+                    execution.request_source, execution.quote_id, execution.state, \
+                    execution.scheduled_at, execution.started_at, execution.finished_at, \
+                    execution.created_at \
+             FROM executions AS execution \
+             INNER JOIN tasks AS task ON task.id = execution.task_id \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             WHERE execution.id = ? AND account.owner_user_id = ?",
+        )
+        .bind(execution_id.to_string())
+        .bind(owner_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(|row| decode_execution(&row))
+        .transpose()?;
+        let Some(execution) = execution else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let progress = sqlx::query(
+            "SELECT execution_id, percent, stage, status_text, current_item, completed_items, \
+                    total_items, updated_at FROM execution_progress WHERE execution_id = ?",
+        )
+        .bind(execution_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(|row| decode_progress(&row))
+        .transpose()?;
+        let attempt_rows = sqlx::query(
+            "SELECT id, execution_id, attempt_no, started_at, finished_at, result, error_class, \
+                    provider_trace_id FROM execution_attempts WHERE execution_id = ? \
+             ORDER BY attempt_no ASC LIMIT ?",
+        )
+        .bind(execution_id.to_string())
+        .bind(i64::try_from(MAX_EXECUTION_ATTEMPTS + 1).expect("attempt limit fits i64"))
+        .fetch_all(&mut *transaction)
+        .await?;
+        if attempt_rows.len() > MAX_EXECUTION_ATTEMPTS {
+            return Err(StorageError::InvalidData(
+                "execution attempt history exceeds the supported bound".to_owned(),
+            ));
+        }
+        let attempts = attempt_rows
+            .iter()
+            .map(decode_attempt)
+            .collect::<Result<_, _>>()?;
+        transaction.commit().await?;
+        Ok(Some(ExecutionDetail {
+            execution,
+            progress,
+            attempts,
+        }))
     }
 }
 
@@ -1022,6 +1090,43 @@ fn decode_attempt(row: &sqlx::sqlite::SqliteRow) -> Result<ExecutionAttempt, Sto
     })
 }
 
+fn decode_progress(row: &sqlx::sqlite::SqliteRow) -> Result<ExecutionProgress, StorageError> {
+    let percent = row
+        .try_get::<Option<i64>, _>("percent")?
+        .map(u8::try_from)
+        .transpose()
+        .map_err(|_| StorageError::InvalidData("execution percent does not fit u8".to_owned()))?;
+    let completed_items = row
+        .try_get::<Option<i64>, _>("completed_items")?
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| {
+            StorageError::InvalidData("completed execution items do not fit u32".to_owned())
+        })?;
+    let total_items = row
+        .try_get::<Option<i64>, _>("total_items")?
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| {
+            StorageError::InvalidData("total execution items do not fit u32".to_owned())
+        })?;
+    let progress = ExecutionProgress {
+        execution_id: ExecutionId::from_str(row.try_get("execution_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        percent,
+        stage: decode_enum(row.try_get("stage")?)?,
+        status_text: row.try_get("status_text")?,
+        current_item: row.try_get("current_item")?,
+        completed_items,
+        total_items,
+        updated_at: decode_timestamp(row.try_get("updated_at")?)?,
+    };
+    progress
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    Ok(progress)
+}
+
 fn enum_name(value: impl Serialize) -> Result<String, StorageError> {
     match serde_json::to_value(value)? {
         serde_json::Value::String(value) => Ok(value),
@@ -1292,6 +1397,26 @@ mod tests {
         assert_eq!(
             attempt_state,
             ("succeeded".to_owned(), "trace-1".to_owned())
+        );
+
+        let detail = repository
+            .find_owned_execution_detail(execution.requested_by.unwrap(), execution.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.execution, finished);
+        assert_eq!(detail.progress, Some(completed));
+        assert_eq!(detail.attempts.len(), 1);
+        assert_eq!(
+            detail.attempts[0].provider_trace_id.as_deref(),
+            Some("trace-1")
+        );
+        assert!(
+            repository
+                .find_owned_execution_detail(UserId::new(), execution.id)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

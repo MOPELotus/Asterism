@@ -63,6 +63,11 @@ enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    /// Inspect owner-scoped execution state and progress.
+    Execution {
+        #[command(subcommand)]
+        command: ExecutionCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -221,6 +226,12 @@ enum TaskCommand {
         #[arg(long)]
         idempotency_key: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExecutionCommand {
+    /// Get one Execution with current progress and Attempt history.
+    Get { execution_id: String },
 }
 
 #[derive(Debug, Args)]
@@ -457,6 +468,7 @@ async fn main() -> anyhow::Result<()> {
             write_json(&value)
         }
         Command::Task { command } => handle_task(&client, command).await,
+        Command::Execution { command } => handle_execution(&client, command).await,
     }
 }
 
@@ -704,6 +716,17 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
     write_json(&value)
 }
 
+async fn handle_execution(client: &ApiClient, command: ExecutionCommand) -> anyhow::Result<()> {
+    let token = service_token_from_process()?;
+    let value = match command {
+        ExecutionCommand::Get { execution_id } => {
+            let path = format!("/api/v1/executions/{execution_id}");
+            client.get_authorized(&path, &token).await?
+        }
+    };
+    write_json(&value)
+}
+
 #[derive(Debug, Serialize)]
 struct TaskListParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -824,6 +847,18 @@ mod tests {
             } if task_id == "task-id" && idempotency_key == "manual-run-1"
         ));
         assert!(Arguments::try_parse_from(["asterismctl", "task", "execute", "task-id"]).is_err());
+    }
+
+    #[test]
+    fn execution_get_is_a_distinct_owner_scoped_surface() {
+        let arguments =
+            Arguments::try_parse_from(["asterismctl", "execution", "get", "execution-id"]).unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Execution {
+                command: ExecutionCommand::Get { execution_id }
+            } if execution_id == "execution-id"
+        ));
     }
 
     #[test]

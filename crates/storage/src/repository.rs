@@ -53,6 +53,23 @@ pub trait TaskRuntimeRepository: Send + Sync {
     async fn find_runtime_task(&self, task_id: TaskId) -> Result<Option<Task>, StorageError>;
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionDetail {
+    pub execution: Execution,
+    pub progress: Option<ExecutionProgress>,
+    pub attempts: Vec<ExecutionAttempt>,
+}
+
+/// Owner-scoped read model for execution status surfaces.
+#[async_trait]
+pub trait ExecutionQueryRepository: Send + Sync {
+    async fn find_owned_execution_detail(
+        &self,
+        owner_id: UserId,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionDetail>, StorageError>;
+}
+
 /// Owner-scoped persistence contract for Provider account management.
 #[async_trait]
 pub trait ProviderAccountRepository: Send + Sync {
