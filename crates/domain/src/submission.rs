@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AnswerCandidateId, AnswerConfidence, AnswerSource, NormalizedAnswer, ProviderId, Question,
-    QuestionId, QuestionSnapshotId, SubmissionDraftId, TaskId, Timestamp,
+    QuestionId, QuestionSnapshotId, RemoteState, SubmissionDraftId, SubmissionResultId, TaskId,
+    Timestamp,
 };
 
 const MAX_DRAFT_ITEMS: usize = 5_000;
@@ -12,6 +13,10 @@ const MAX_PREVIEW_FIELDS: usize = 20_000;
 const MAX_PROVIDER_VERSION_BYTES: usize = 128;
 const MAX_PREVIEW_FORMAT_BYTES: usize = 128;
 const MAX_PREVIEW_FIELD_NAME_BYTES: usize = 256;
+const MAX_RECEIPT_STATUS_BYTES: usize = 128;
+const MAX_RECEIPT_MESSAGE_BYTES: usize = 2_048;
+const MAX_PROVIDER_TRACE_ID_BYTES: usize = 256;
+const MAX_SCORE_MILLI_POINTS: u64 = 1_000_000_000_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +74,222 @@ pub struct SubmissionDraft {
     pub items: Vec<SubmissionDraftItem>,
     pub payload_preview: SubmissionPayloadPreview,
     pub created_at: Timestamp,
+}
+
+/// Bounded acknowledgement facts returned by the remote mutation. Raw response
+/// bodies, headers and request material are intentionally excluded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmissionReceipt {
+    pub remote_status: String,
+    pub message_sanitized: Option<String>,
+    pub provider_trace_id: Option<String>,
+    pub received_at: Timestamp,
+}
+
+impl SubmissionReceipt {
+    /// Validates bounded, credential-free acknowledgement facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmissionResultValidationError::InvalidReceipt`] for
+    /// malformed or unbounded receipt data.
+    pub fn validate(&self) -> Result<(), SubmissionResultValidationError> {
+        if !valid_text(&self.remote_status, MAX_RECEIPT_STATUS_BYTES)
+            || self
+                .message_sanitized
+                .as_deref()
+                .is_some_and(|value| !valid_text(value, MAX_RECEIPT_MESSAGE_BYTES))
+            || self
+                .provider_trace_id
+                .as_deref()
+                .is_some_and(|value| !valid_text(value, MAX_PROVIDER_TRACE_ID_BYTES))
+        {
+            Err(SubmissionResultValidationError::InvalidReceipt)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionVerificationStatus {
+    Confirmed,
+    Rejected,
+    Pending,
+    Inconclusive,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionQuestionVerificationStatus {
+    Confirmed,
+    Rejected,
+    Unverified,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmissionQuestionVerification {
+    pub question_id: QuestionId,
+    pub status: SubmissionQuestionVerificationStatus,
+}
+
+/// Score represented in thousandths of one point to avoid floating-point
+/// ambiguity across Providers.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmissionScore {
+    pub earned_milli_points: u64,
+    pub possible_milli_points: u64,
+}
+
+impl SubmissionScore {
+    /// Validates the fixed-point score range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmissionResultValidationError::InvalidVerification`] when
+    /// the maximum is zero or earned/possible points exceed their bounds.
+    pub const fn validate(self) -> Result<(), SubmissionResultValidationError> {
+        if self.possible_milli_points == 0
+            || self.possible_milli_points > MAX_SCORE_MILLI_POINTS
+            || self.earned_milli_points > self.possible_milli_points
+        {
+            Err(SubmissionResultValidationError::InvalidVerification)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmissionVerificationSnapshot {
+    pub status: SubmissionVerificationStatus,
+    pub remote_state: Option<RemoteState>,
+    pub score: Option<SubmissionScore>,
+    pub progress_percent: Option<u8>,
+    pub questions: Vec<SubmissionQuestionVerification>,
+    pub verified_at: Timestamp,
+}
+
+impl SubmissionVerificationSnapshot {
+    /// Validates bounded remote state, score, progress and per-Question facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmissionResultValidationError::InvalidVerification`] for
+    /// duplicate Questions or malformed and unbounded facts.
+    pub fn validate(&self) -> Result<(), SubmissionResultValidationError> {
+        if self.progress_percent.is_some_and(|progress| progress > 100)
+            || self.questions.len() > MAX_DRAFT_ITEMS
+            || self.score.is_some_and(|score| score.validate().is_err())
+        {
+            return Err(SubmissionResultValidationError::InvalidVerification);
+        }
+        let mut question_ids = BTreeSet::new();
+        if self
+            .questions
+            .iter()
+            .any(|question| !question_ids.insert(question.question_id))
+        {
+            return Err(SubmissionResultValidationError::InvalidVerification);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionResultStatus {
+    Confirmed,
+    Rejected,
+    ExecutionFailed,
+    Inconclusive,
+}
+
+/// A submission result is complete only when a distinct verification snapshot
+/// supports its status. Receipt presence alone never implies success.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmissionResult {
+    pub id: SubmissionResultId,
+    pub submission_draft_id: SubmissionDraftId,
+    pub task_id: TaskId,
+    pub question_snapshot_id: QuestionSnapshotId,
+    pub provider_id: ProviderId,
+    pub provider_version: String,
+    pub status: SubmissionResultStatus,
+    pub receipt: Option<SubmissionReceipt>,
+    pub verification: SubmissionVerificationSnapshot,
+    pub created_at: Timestamp,
+}
+
+impl SubmissionResult {
+    /// Validates result fields and requires status to agree with verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmissionResultValidationError`] for malformed receipt or
+    /// verification data and for a result status unsupported by verification.
+    pub fn validate(&self) -> Result<(), SubmissionResultValidationError> {
+        if !valid_text(&self.provider_version, MAX_PROVIDER_VERSION_BYTES) {
+            return Err(SubmissionResultValidationError::InvalidResult);
+        }
+        if let Some(receipt) = &self.receipt {
+            receipt.validate()?;
+        }
+        self.verification.validate()?;
+        let status_matches_verification = matches!(
+            (self.status, self.verification.status),
+            (
+                SubmissionResultStatus::Confirmed,
+                SubmissionVerificationStatus::Confirmed
+            ) | (
+                SubmissionResultStatus::Rejected,
+                SubmissionVerificationStatus::Rejected
+            ) | (
+                SubmissionResultStatus::ExecutionFailed | SubmissionResultStatus::Inconclusive,
+                SubmissionVerificationStatus::Inconclusive | SubmissionVerificationStatus::Pending
+            )
+        );
+        if !status_matches_verification {
+            return Err(SubmissionResultValidationError::StatusMismatch);
+        }
+        Ok(())
+    }
+
+    /// Validates this result against one immutable source draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmissionResultValidationError::DraftBindingInvalid`] when
+    /// identities or per-Question verification facts are foreign to the draft,
+    /// in addition to errors returned by [`Self::validate`].
+    pub fn validate_for_draft(
+        &self,
+        draft: &SubmissionDraft,
+    ) -> Result<(), SubmissionResultValidationError> {
+        self.validate()?;
+        if self.submission_draft_id != draft.id
+            || self.task_id != draft.task_id
+            || self.question_snapshot_id != draft.question_snapshot_id
+            || self.provider_id != draft.provider_id
+        {
+            return Err(SubmissionResultValidationError::DraftBindingInvalid);
+        }
+        let draft_questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.id)
+            .collect::<BTreeSet<_>>();
+        if self
+            .verification
+            .questions
+            .iter()
+            .any(|question| !draft_questions.contains(&question.question_id))
+        {
+            return Err(SubmissionResultValidationError::DraftBindingInvalid);
+        }
+        Ok(())
+    }
 }
 
 impl SubmissionDraft {
@@ -173,6 +394,20 @@ pub enum SubmissionDraftValidationError {
     InvalidPayloadPreview,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SubmissionResultValidationError {
+    #[error("submission result identity or Provider version is invalid")]
+    InvalidResult,
+    #[error("submission receipt is malformed or unbounded")]
+    InvalidReceipt,
+    #[error("submission verification snapshot is malformed or unbounded")]
+    InvalidVerification,
+    #[error("submission result status is unsupported by its verification snapshot")]
+    StatusMismatch,
+    #[error("submission result is not bound to its draft Questions and identities")]
+    DraftBindingInvalid,
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -254,6 +489,89 @@ mod tests {
         assert_eq!(
             sensitive.validate(),
             Err(SubmissionDraftValidationError::InvalidPayloadPreview)
+        );
+    }
+
+    #[test]
+    fn result_requires_distinct_matching_verification_not_just_a_receipt() {
+        let draft = draft();
+        let mut result = SubmissionResult {
+            id: SubmissionResultId::new(),
+            submission_draft_id: draft.id,
+            task_id: draft.task_id,
+            question_snapshot_id: draft.question_snapshot_id,
+            provider_id: draft.provider_id.clone(),
+            provider_version: "0.1.0".to_owned(),
+            status: SubmissionResultStatus::Confirmed,
+            receipt: Some(SubmissionReceipt {
+                remote_status: "accepted".to_owned(),
+                message_sanitized: Some("request accepted".to_owned()),
+                provider_trace_id: Some("trace-1".to_owned()),
+                received_at: Utc::now(),
+            }),
+            verification: SubmissionVerificationSnapshot {
+                status: SubmissionVerificationStatus::Confirmed,
+                remote_state: Some(RemoteState::Completed),
+                score: Some(SubmissionScore {
+                    earned_milli_points: 90_000,
+                    possible_milli_points: 100_000,
+                }),
+                progress_percent: Some(100),
+                questions: vec![SubmissionQuestionVerification {
+                    question_id: draft.items[0].question.id,
+                    status: SubmissionQuestionVerificationStatus::Confirmed,
+                }],
+                verified_at: Utc::now(),
+            },
+            created_at: Utc::now(),
+        };
+        assert_eq!(result.validate_for_draft(&draft), Ok(()));
+
+        result.verification.status = SubmissionVerificationStatus::Inconclusive;
+        assert_eq!(
+            result.validate_for_draft(&draft),
+            Err(SubmissionResultValidationError::StatusMismatch)
+        );
+    }
+
+    #[test]
+    fn result_rejects_foreign_question_verification_and_invalid_score() {
+        let draft = draft();
+        let mut verification = SubmissionVerificationSnapshot {
+            status: SubmissionVerificationStatus::Inconclusive,
+            remote_state: None,
+            score: None,
+            progress_percent: None,
+            questions: vec![SubmissionQuestionVerification {
+                question_id: QuestionId::new(),
+                status: SubmissionQuestionVerificationStatus::Unverified,
+            }],
+            verified_at: Utc::now(),
+        };
+        let result = SubmissionResult {
+            id: SubmissionResultId::new(),
+            submission_draft_id: draft.id,
+            task_id: draft.task_id,
+            question_snapshot_id: draft.question_snapshot_id,
+            provider_id: draft.provider_id.clone(),
+            provider_version: "0.1.0".to_owned(),
+            status: SubmissionResultStatus::Inconclusive,
+            receipt: None,
+            verification: verification.clone(),
+            created_at: Utc::now(),
+        };
+        assert_eq!(
+            result.validate_for_draft(&draft),
+            Err(SubmissionResultValidationError::DraftBindingInvalid)
+        );
+
+        verification.score = Some(SubmissionScore {
+            earned_milli_points: 2,
+            possible_milli_points: 1,
+        });
+        assert_eq!(
+            verification.validate(),
+            Err(SubmissionResultValidationError::InvalidVerification)
         );
     }
 }

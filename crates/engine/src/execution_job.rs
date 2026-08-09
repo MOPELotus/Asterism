@@ -1878,6 +1878,8 @@ mod tests {
                     question_parse: None,
                     answer_resolve: None,
                     submission_build: None,
+                    submission_execute: None,
+                    submission_verify: None,
                     task_execution: Some(provider.clone()),
                     browser_bridge: None,
                 })

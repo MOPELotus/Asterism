@@ -2011,3 +2011,25 @@ Neither route uses `/execute`, accepts raw answer or Provider payload values,
 creates an Execution, reserves credit, or permits remote submission. A Provider
 without SubmissionBuild, including Chaoxing at this checkpoint, returns a clear
 capability conflict before draft creation.
+
+## One-hundred-and-thirty-second Phase 0 slice
+
+Core Domain now separates a bounded remote `SubmissionReceipt` from a
+`SubmissionVerificationSnapshot` and final `SubmissionResult`. Receipts retain
+only a status label, optional sanitized message, optional trace identity and
+timestamp; raw response bodies, headers, request material and arbitrary JSON
+are excluded.
+
+Verification can record a confirmed, rejected, pending or inconclusive state,
+bounded fixed-point score, progress, remote Task state and unique per-Question
+facts. A Result marked confirmed or rejected must be supported by the matching
+verification state. Receipt presence alone can never satisfy validation, and
+all result, draft, Task, Snapshot, Provider and Question identities can be
+validated together.
+
+Provider Registry now gives SubmissionExecute and SubmissionVerify separate
+slots from each other and from generic TaskExecutionCapability. Execute accepts
+one validated immutable draft and frozen runtime settings and returns only a
+receipt; Verify re-reads remote state and returns verification facts without
+repeating the mutation. No Provider implements these slots yet, no execution
+or result persistence is wired, and this checkpoint performs no remote write.

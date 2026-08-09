@@ -382,6 +382,8 @@ mod tests {
                 question_parse: None,
                 answer_resolve: None,
                 submission_build: None,
+                submission_execute: None,
+                submission_verify: None,
                 task_execution: None,
                 browser_bridge: None,
             })
@@ -455,6 +457,8 @@ mod tests {
                 question_parse: None,
                 answer_resolve: None,
                 submission_build: None,
+                submission_execute: None,
+                submission_verify: None,
                 task_execution: None,
                 browser_bridge: None,
             })
@@ -497,6 +501,8 @@ mod tests {
                 question_parse: None,
                 answer_resolve: None,
                 submission_build: None,
+                submission_execute: None,
+                submission_verify: None,
                 task_execution: None,
                 browser_bridge: None,
             })

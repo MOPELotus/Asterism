@@ -6,8 +6,8 @@ use crate::{
     AnswerResolveCapability, AuthenticationCapability, BrowserBridgeCapability,
     CourseInventoryCapability, ProviderCapability, ProviderMetadata, ProviderRuntimeSettingsSchema,
     ProviderSettingsError, QuestionInventoryCapability, QuestionParseCapability,
-    SubmissionBuildCapability, TaskDetailCapability, TaskExecutionCapability,
-    TaskInventoryCapability, TaskProgressCapability,
+    SubmissionBuildCapability, SubmissionExecuteCapability, SubmissionVerifyCapability,
+    TaskDetailCapability, TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
 };
 
 #[derive(Clone)]
@@ -23,6 +23,8 @@ pub struct ProviderEntry {
     pub question_parse: Option<Arc<dyn QuestionParseCapability>>,
     pub answer_resolve: Option<Arc<dyn AnswerResolveCapability>>,
     pub submission_build: Option<Arc<dyn SubmissionBuildCapability>>,
+    pub submission_execute: Option<Arc<dyn SubmissionExecuteCapability>>,
+    pub submission_verify: Option<Arc<dyn SubmissionVerifyCapability>>,
     pub task_execution: Option<Arc<dyn TaskExecutionCapability>>,
     pub browser_bridge: Option<Arc<dyn BrowserBridgeCapability>>,
 }
@@ -42,6 +44,8 @@ impl std::fmt::Debug for ProviderEntry {
             .field("question_parse", &self.question_parse.is_some())
             .field("answer_resolve", &self.answer_resolve.is_some())
             .field("submission_build", &self.submission_build.is_some())
+            .field("submission_execute", &self.submission_execute.is_some())
+            .field("submission_verify", &self.submission_verify.is_some())
             .field("task_execution", &self.task_execution.is_some())
             .field("browser_bridge", &self.browser_bridge.is_some())
             .finish()
@@ -62,11 +66,17 @@ impl ProviderEntry {
             question_parse: None,
             answer_resolve: None,
             submission_build: None,
+            submission_execute: None,
+            submission_verify: None,
             task_execution: None,
             browser_bridge: None,
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the registry keeps the complete capability-to-slot integrity matrix in one auditable validation path"
+    )]
     fn validate(&self) -> Result<(), RegistryError> {
         self.runtime_settings.validate().map_err(|source| {
             RegistryError::InvalidRuntimeSettingsSchema {
@@ -129,6 +139,14 @@ impl ProviderEntry {
                 ProviderCapability::SubmissionBuild,
                 self.submission_build.is_some(),
             ),
+            (
+                ProviderCapability::SubmissionExecute,
+                self.submission_execute.is_some(),
+            ),
+            (
+                ProviderCapability::SubmissionVerify,
+                self.submission_verify.is_some(),
+            ),
         ];
         for (capability, implemented) in checks {
             if self.metadata.advertises(capability) != implemented {
@@ -143,8 +161,6 @@ impl ProviderEntry {
 
         let execution_capabilities = [
             ProviderCapability::ResourceExecution,
-            ProviderCapability::SubmissionExecute,
-            ProviderCapability::SubmissionVerify,
             ProviderCapability::DurationRead,
             ProviderCapability::DurationReport,
             ProviderCapability::Discussion,
@@ -223,6 +239,18 @@ impl ProviderEntry {
             (
                 "submission_build",
                 self.submission_build
+                    .as_ref()
+                    .map(|implementation| implementation.metadata()),
+            ),
+            (
+                "submission_execute",
+                self.submission_execute
+                    .as_ref()
+                    .map(|implementation| implementation.metadata()),
+            ),
+            (
+                "submission_verify",
+                self.submission_verify
                     .as_ref()
                     .map(|implementation| implementation.metadata()),
             ),
@@ -326,8 +354,9 @@ mod tests {
     use std::{collections::BTreeSet, sync::Arc};
 
     use asterism_domain::{
-        AnswerCandidate, ProviderId, Question, SelectedAnswer, SubmissionPayloadEncoding,
-        SubmissionPayloadPreview, TaskId,
+        AnswerCandidate, ProviderId, Question, SelectedAnswer, SubmissionDraft,
+        SubmissionPayloadEncoding, SubmissionPayloadPreview, SubmissionReceipt,
+        SubmissionVerificationSnapshot, TaskId,
     };
     use async_trait::async_trait;
 
@@ -403,6 +432,33 @@ mod tests {
                 format: "fixture.v1".to_owned(),
                 fields: Vec::new(),
             })
+        }
+    }
+
+    #[async_trait]
+    impl SubmissionExecuteCapability for FakeQuestionRead {
+        async fn execute_submission(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+            _draft: &SubmissionDraft,
+            _runtime_settings: &crate::ResolvedProviderRuntimeSettings,
+            _events: &(dyn crate::ExecutionEventSink + Send + Sync),
+        ) -> ProviderResult<SubmissionReceipt> {
+            unreachable!("registry identity test does not invoke submission")
+        }
+    }
+
+    #[async_trait]
+    impl SubmissionVerifyCapability for FakeQuestionRead {
+        async fn verify_submission(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+            _draft: &SubmissionDraft,
+            _receipt: Option<&SubmissionReceipt>,
+        ) -> ProviderResult<SubmissionVerificationSnapshot> {
+            unreachable!("registry identity test does not invoke verification")
         }
     }
 
@@ -587,5 +643,34 @@ mod tests {
 
         let mut registry = ProviderRegistry::default();
         registry.register(entry).unwrap();
+    }
+
+    #[test]
+    fn submission_execute_and_verify_have_independent_slots() {
+        let mut execute_metadata = metadata();
+        execute_metadata
+            .capabilities
+            .insert(ProviderCapability::SubmissionExecute);
+        let execute = Arc::new(FakeQuestionRead {
+            metadata: execute_metadata.clone(),
+        });
+        let mut execute_entry = ProviderEntry::metadata_only(execute_metadata);
+        execute_entry.submission_execute = Some(execute);
+        assert!(execute_entry.task_execution.is_none());
+        assert!(execute_entry.submission_verify.is_none());
+        ProviderRegistry::default().register(execute_entry).unwrap();
+
+        let mut verify_metadata = metadata();
+        verify_metadata
+            .capabilities
+            .insert(ProviderCapability::SubmissionVerify);
+        let verify = Arc::new(FakeQuestionRead {
+            metadata: verify_metadata.clone(),
+        });
+        let mut verify_entry = ProviderEntry::metadata_only(verify_metadata);
+        verify_entry.submission_verify = Some(verify);
+        assert!(verify_entry.task_execution.is_none());
+        assert!(verify_entry.submission_execute.is_none());
+        ProviderRegistry::default().register(verify_entry).unwrap();
     }
 }

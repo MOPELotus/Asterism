@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, fmt};
 use asterism_domain::{
     AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, CourseId, LogLevel,
     ProviderAccountId, ProviderId, Question, QuestionKind, RemoteState, SecretId, SelectedAnswer,
-    SessionKind, SourceType, SubmissionPayloadPreview, TaskCapability, TaskId, Timestamp,
-    WaitingUserState,
+    SessionKind, SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
+    SubmissionVerificationSnapshot, TaskCapability, TaskId, Timestamp, WaitingUserState,
 };
 use asterism_secrets::{CredentialBundle, CredentialField};
 use async_trait::async_trait;
@@ -137,6 +137,34 @@ pub trait SubmissionBuildCapability: ProviderIdentity {
         questions: &[Question],
         selected_answers: &[SelectedAnswer],
     ) -> ProviderResult<SubmissionPayloadPreview>;
+}
+
+/// Performs only the remote mutation represented by one validated immutable
+/// draft. Verification remains a separate capability and a receipt alone never
+/// marks the Task complete.
+#[async_trait]
+pub trait SubmissionExecuteCapability: ProviderIdentity {
+    async fn execute_submission(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<SubmissionReceipt>;
+}
+
+/// Re-reads remote state after submission and returns bounded verification
+/// facts. It must not issue or repeat the submission mutation.
+#[async_trait]
+pub trait SubmissionVerifyCapability: ProviderIdentity {
+    async fn verify_submission(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        receipt: Option<&SubmissionReceipt>,
+    ) -> ProviderResult<SubmissionVerificationSnapshot>;
 }
 
 #[async_trait]

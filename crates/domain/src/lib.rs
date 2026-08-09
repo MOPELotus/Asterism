@@ -46,6 +46,9 @@ pub use question::{
 pub use submission::{
     SelectedAnswer, SubmissionDraft, SubmissionDraftItem, SubmissionDraftValidationError,
     SubmissionPayloadEncoding, SubmissionPayloadFieldPreview, SubmissionPayloadPreview,
+    SubmissionQuestionVerification, SubmissionQuestionVerificationStatus, SubmissionReceipt,
+    SubmissionResult, SubmissionResultStatus, SubmissionResultValidationError, SubmissionScore,
+    SubmissionVerificationSnapshot, SubmissionVerificationStatus,
 };
 pub use task::{
     AssessmentClass, OrchestrationState, RemoteState, SourceType, Task, TaskCapability,
