@@ -194,7 +194,9 @@ Task 仍只能由 Provider 扫描链路写入；读取和执行则统一通过 o
 
 Provider 执行期间只能通过 Core 注入的 `ExecutionEventSink` 上报进度或诊断日志，不能直接写数据库或实时连接。诊断日志由 Core 生成时间和标准阶段，并再次校验当前 Attempt、Execution lease、单行文本、Provider trace、8 KiB 脱敏 metadata 与敏感字段名；每个 Attempt 最多接受 1000 条 Provider 日志。日志历史行和 `ExecutionLogged` Outbox 事件在同一事务提交，Provider payload、Cookie、Token 和 Password 不属于该接口的合法输入。
 
-周期扫描通过 `provider-account schedule get <account-id>` 和 `provider-account schedule set <account-id> --interval-seconds <seconds>` 管理；添加 `--disabled` 可保留配置但停止物化任务。接口同时返回用户期望间隔、Provider 最小间隔和 Core 实际采用的间隔，Provider 自身不创建独立 cron 或后台循环。
+周期扫描当前仅由 Master 通过 `provider-account schedule get <account-id>` 和 `provider-account schedule set <account-id> --interval-seconds <seconds>` 管理；添加 `--disabled` 可保留配置但停止物化任务。接口同时返回 Master 期望间隔、Provider 最小间隔和 Core 实际采用的间隔，普通用户第一阶段不展示也不能修改该设置，Provider 自身不创建独立 cron 或后台循环。
+
+Provider 技术运行参数属于 Master 后台控制面：可设置平台默认值，并按需对 ProviderAccount 或单个 Task 做更具体覆盖；视频并发/线程数、播放速度、章节及其他任务的周期巡查只是示例，实际字段由各 Provider 的版本化 schema 定义并受安全上限约束。第一阶段普通用户不展示也不能修改这些参数。周期巡查仍必须统一进入 Core Scheduler，Provider 不得据此自行创建后台循环；Execution 使用创建时解析并固定的配置 revision，后台后续修改不影响正在运行的任务。
 
 也可以直接访问：
 

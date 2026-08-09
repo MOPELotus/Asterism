@@ -24,7 +24,25 @@ The model intentionally keeps these pairs separate:
 | `RemoteState` | `OrchestrationState` |
 | `AuthMethod` | `SessionKind` |
 | `AutomationPlan` | discovered remote `Task` |
+| Master-owned Provider runtime settings | user-facing AutomationPlan policy |
 | available credit | reserved credit and immutable transactions |
+
+Provider runtime tuning is an administrator control plane, not a bag of fields
+on `AutomationPlan`. Master-managed settings resolve from Core-safe defaults to
+Provider defaults, optional ProviderAccount overrides and finally a single Task
+override. This covers provider-specific execution and discovery parameters such
+as bounded concurrency, playback speed and periodic task discovery intervals;
+those examples do not limit the extensible setting set to one provider or one
+capability.
+
+Providers own a bounded, versioned settings schema and safety validation. Core
+owns scope resolution, permissions, revisioning, audit and persistence, and an
+Execution retains the resolved immutable settings snapshot. Scheduler remains
+the sole owner of recurring discovery: a Provider setting cannot create an
+independent cron or background loop. During the first product surface, these
+technical settings and per-Task overrides are visible and mutable only to
+Master; ordinary users receive task, approval, execution, result and billing
+surfaces without this administration panel.
 
 ## Storage baseline
 
