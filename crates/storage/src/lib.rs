@@ -9,6 +9,7 @@ mod lease;
 mod outbox;
 mod provider_account;
 mod provider_runtime_settings;
+mod question;
 mod recovery;
 mod repository;
 mod scan;
@@ -27,6 +28,7 @@ pub use lease::{LeaseAcquireOutcome, SqliteExecutionLeaseRepository};
 pub use outbox::{FailureDisposition, OutboxHealth, OutboxRecord, SqliteOutboxRepository};
 pub use provider_account::SqliteProviderAccountRepository;
 pub use provider_runtime_settings::SqliteProviderRuntimeSettingsRepository;
+pub use question::SqliteQuestionSnapshotRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
     AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
@@ -42,9 +44,9 @@ pub use repository::{
     OutboxRepository, ProviderAccountRepository, ProviderAccountRuntimeRepository,
     ProviderRuntimeSettingsRecord, ProviderRuntimeSettingsRepository,
     ProviderRuntimeSettingsTarget, ProviderRuntimeSettingsWriteOutcome,
-    ProviderRuntimeSettingsWriteRequest, ScanScheduleRepository, SchedulerRepository,
-    SessionRepository, TaskPage, TaskQueryRepository, TaskRepository, TaskRuntimeRepository,
-    UserRepository,
+    ProviderRuntimeSettingsWriteRequest, QuestionSnapshot, QuestionSnapshotRepository,
+    ScanScheduleRepository, SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository,
+    TaskRepository, TaskRuntimeRepository, UserRepository,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

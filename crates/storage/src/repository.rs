@@ -7,8 +7,9 @@ use asterism_domain::{
     CreditReservationId, CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt,
     ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
     ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote, ProviderAccount,
-    ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, ScheduleId,
-    ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+    ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
+    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User,
+    UserId, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -58,6 +59,31 @@ pub trait TaskQueryRepository: Send + Sync {
 #[async_trait]
 pub trait TaskRuntimeRepository: Send + Sync {
     async fn find_runtime_task(&self, task_id: TaskId) -> Result<Option<Task>, StorageError>;
+}
+
+/// One immutable, complete Question parse captured from a single fresh Provider
+/// read. Provider route material and answers are intentionally absent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuestionSnapshot {
+    pub id: QuestionSnapshotId,
+    pub task_id: TaskId,
+    pub provider_id: ProviderId,
+    pub provider_version: String,
+    pub captured_at: Timestamp,
+    pub questions: Vec<Question>,
+}
+
+/// Transactional Question snapshot persistence and owner-scoped latest read.
+#[async_trait]
+pub trait QuestionSnapshotRepository: Send + Sync {
+    async fn save_question_snapshot(&self, snapshot: &QuestionSnapshot)
+    -> Result<(), StorageError>;
+
+    async fn find_latest_owned_question_snapshot(
+        &self,
+        owner_id: UserId,
+        task_id: TaskId,
+    ) -> Result<Option<QuestionSnapshot>, StorageError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

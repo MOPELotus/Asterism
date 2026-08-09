@@ -1830,3 +1830,18 @@ stable Task identity. It is removed after the final Question and never persists
 HTML, route credentials, form tokens or attempt-local question IDs. Exam and
 Chapter Work remain parse-only because this slice does not guess an Exam route,
 start an assessment, add Capture behavior or claim live-account verification.
+
+## One-hundred-and-twenty-first Phase 0 slice
+
+Storage now defines immutable `QuestionSnapshot` records independently from
+answer resolution and submission. Each snapshot is bound to an existing Task
+and its actual Provider, contains one complete normalized Question set and is
+written with all items in one SQLite transaction. Owner-scoped latest reads
+join through the Task's ProviderAccount and revalidate persisted Question IDs,
+positions, remote identities, Domain bounds and parent counts.
+
+The schema caps each snapshot at 5,000 Questions and 16 MiB of serialized Domain
+data. HTML, Provider route context, credentials, answers and submission payloads
+have no storage columns. This slice exposes the repository boundary but does
+not yet make every fresh Question API read mutate storage; Core orchestration
+will connect that explicit commit point separately.
