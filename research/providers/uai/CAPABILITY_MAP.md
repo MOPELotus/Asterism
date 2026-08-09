@@ -3,7 +3,7 @@
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
 | Authentication | AutoFinish + UnipusHelperPro | Reference | Password/ImportedToken orchestration, strict login-envelope classification and atomic openid/JWT CompositeSession are offline-covered; native transport pending |
-| Stored session validation | User-info and Course-list reads | FromScratch | Injected account-bound resolver and JWT validation boundary implemented; Core storage/native read/renewal pending |
+| Stored session validation | User-info and Course-list reads | FromScratch | Core provider-scoped resolver accepts only exact unexpired native Composite or manual JWT session metadata; native read/renewal pending |
 | CourseInventory | AutoFinish + UnipusHelperPro | Reference | Fixture-only Course → CourseResource flattening implemented; native read pending |
 | TaskInventory | AutoFinish + UnipusHelperPro | Reference | Fixture-only nested Course JSON → Unit/Section/Node/Group parser implemented; native read pending |
 | TaskProgressRead | Both backend donors | Reference | Per-Unit `course_progress` exposes independent Group state; parser pending |
@@ -27,6 +27,8 @@ The current crate advertises only injected Authentication. It:
    `HumanRequired`, and validates Password or strict ImportedToken input;
 5. stores openid/JWT together as one encrypted ProviderCompositeSession while
    retaining username/password only for future explicit renewal;
-6. drops class, instance, content, answer and unknown fields;
-7. makes no native-network, progress, completion, duration, execution,
+6. resolves only the account/reference-bound CompositeSession purpose and
+   rejects mismatched origin, kind, expiry, identity or storage shape;
+7. drops class, instance, content, answer and unknown fields;
+8. makes no native-network, progress, completion, duration, execution,
    submission, BrowserBridge or Capture claim.

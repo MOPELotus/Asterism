@@ -7,6 +7,7 @@
 mod authentication;
 mod course_inventory;
 mod metadata;
+mod stored_session;
 mod task_inventory;
 
 pub use authentication::{
@@ -15,4 +16,5 @@ pub use authentication::{
 };
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
 pub use metadata::development_metadata;
+pub use stored_session::StoredUaiSessionResolver;
 pub use task_inventory::parse_task_inventory;

@@ -2495,3 +2495,23 @@ renewal remain absent. Metadata therefore adds only Authentication plus
 Password/ImportedToken and Jwt/Composite session declarations; Course/Task
 parsers remain offline helpers rather than advertised registry slots. This is
 offline orchestration evidence, not live authentication.
+
+## One-hundred-and-fifty-sixth Phase 0 slice
+
+The UAI stored-session boundary now uses Core's provider-scoped credential
+resolver rather than an abstract test-only source. Each operation requests only
+the referenced ProviderCompositeSession purpose, then verifies exact account,
+secret-reference, purpose, expiry and lifecycle metadata before parsing any
+plaintext.
+
+Two origins are accepted deliberately: ManualImport paired with Jwt metadata,
+or NativeProviderLogin paired with Composite metadata. Wrong origin/kind pairs,
+duplicates, unrelated secret IDs, foreign accounts, expired values and
+malformed composite JSON all fail as Authentication. Storage, key and
+ciphertext-authentication failures remain sanitized Internal errors.
+
+The resolver exposes only the bounded redacted openid/JWT session needed by the
+injected validation transport. It does not resolve username/password or perform
+renewal, and native HTTP remains absent. This closes the Core resolution side of
+session validation without claiming live validity, expiry recovery or native
+login compatibility.

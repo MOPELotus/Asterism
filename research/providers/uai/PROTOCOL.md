@@ -30,7 +30,12 @@ Password success produces username + password + one encrypted
 ProviderCompositeSession replacement so openid/JWT cannot be committed or
 renewed separately. Debug output redacts both. Injected session validation
 resolves an account-bound composite and validates the JWT through the transport;
-native HTTP, expiry extraction and automatic renewal remain pending.
+the concrete Core adapter requests only `ProviderCompositeSession`, verifies
+the exact account/reference/purpose/expiry tuple, and accepts only
+NativeProviderLogin+Composite or ManualImport+Jwt metadata. Storage/key failures
+remain sanitized Internal errors while missing or stale credentials are
+Authentication errors. Native HTTP, JWT expiry extraction and automatic renewal
+remain pending.
 
 ## Course resource and tree
 
