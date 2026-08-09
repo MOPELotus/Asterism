@@ -103,6 +103,12 @@ CLI / WebUI / Asterism-Plugin
 
 第一批不会以 Demo 或功能残缺的 MVP 作为完成状态。Provider 的研究来源、采用方式、许可证和真实验证情况会记录在 [UPSTREAMS.md](UPSTREAMS.md)。
 
+当前开发顺序只推进第一批中不依赖 Capture 的 Native HTTP、手工
+Credential/Session Import 与离线 Fixture 能力。必须启动本地 Capture、浏览器抓取
+或系统代理才能完成的 Provider 路径明确延后；对应验收项保持未完成，也不会因此
+提前标记 Provider 为 `Verified`。仓库中已有的通用 Capture 基座保留，但不在这一
+阶段继续扩展平台专用链路。
+
 WebUI 采用 framework-first 原则，但不为复用而强行套用框架。默认直接复用 Refine v5 与 shadcn/ui 的 Layout、CRUD、DataTable、Form、Auth 和 Theme 基础设施，只调整 Asterism Theme / Branding 并实现必要的领域工作流；现成组件明显不适用时允许最小必要自定义，不进行缺少明确 UX 缺陷依据的主动重设计、美化或像素级循环。
 
 ## 快速开始

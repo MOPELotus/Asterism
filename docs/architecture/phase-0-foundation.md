@@ -1710,3 +1710,17 @@ boundary. Missing task/provider capabilities, remote changes, user action, rate
 limits, temporary failures and malformed Provider results receive distinct
 stable API classifications, and the read neither persists a scan snapshot nor
 changes orchestration state.
+
+## One-hundred-and-thirteenth Phase 0 slice
+
+The active first-batch delivery order now explicitly excludes Provider work
+which requires a local Capture runtime, browser traffic capture or system proxy.
+Native HTTP, manual credential/session import and offline fixture work continue;
+Capture-dependent authentication, diagnostics and live validation remain open
+acceptance items and cannot contribute to a `Verified` claim.
+
+The already implemented generic Capture pairing and credential boundaries stay
+in the repository, but this phase does not expand them with Provider-specific
+recipes or interception logic. In particular, cidaren may progress through
+manual token import and non-Capture capabilities while its WeChat-assisted
+Capture path remains deferred and the Provider remains incomplete.
