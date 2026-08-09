@@ -1,9 +1,9 @@
 use std::str::FromStr;
 
 use asterism_domain::{
-    AttemptResult, AuditActor, AuditRecordId, Execution, ExecutionAttempt, ExecutionAttemptId,
-    ExecutionId, ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, LogLevel,
-    OrchestrationState, ScheduleId, TaskId, Timestamp, UserId,
+    AttemptResult, AuditActor, AuditRecordId, CreditReservationState, Execution, ExecutionAttempt,
+    ExecutionAttemptId, ExecutionId, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
+    ExecutionState, LogLevel, OrchestrationState, ScheduleId, TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_scheduler::ScheduledJobKind;
@@ -15,9 +15,9 @@ use sqlx::Row;
 use crate::outbox::enqueue_in_transaction;
 use crate::{
     Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
-    ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionQueryRepository,
-    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionScheduleOutcome,
-    ExecutionScheduleRequest, StorageError,
+    ExecutionBillingReservation, ExecutionLogAppendRequest, ExecutionProgressUpdate,
+    ExecutionQueryRepository, ExecutionRecoveryFinishRequest, ExecutionRepository,
+    ExecutionScheduleOutcome, ExecutionScheduleRequest, StorageError,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage};
 
@@ -102,6 +102,10 @@ impl ExecutionRepository for SqliteExecutionRepository {
             return Ok(ExecutionScheduleOutcome::TaskStateConflict);
         }
 
+        if let Some(billing) = request.billing.as_ref() {
+            insert_quote_and_reserve_balance(&mut transaction, billing).await?;
+        }
+
         let execution = request.execution;
         sqlx::query(
             "INSERT INTO executions \
@@ -123,6 +127,10 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .bind(request.idempotency_key)
         .execute(&mut *transaction)
         .await?;
+
+        if let Some(billing) = request.billing.as_ref() {
+            insert_credit_reservation(&mut transaction, billing, request.correlation_id).await?;
+        }
 
         let job_id = ScheduleId::new();
         let job_kind = ScheduledJobKind::Execution {
@@ -1350,6 +1358,27 @@ fn validate_schedule_request(request: &ExecutionScheduleRequest<'_>) -> Result<(
             && value.trim() == value
             && !value.chars().any(char::is_control)
     };
+    let billing_valid = match (&request.billing, execution.quote_id) {
+        (None, None) => true,
+        (Some(billing), Some(quote_id)) => {
+            let quote = billing.quote;
+            let reservation = billing.reservation;
+            quote.id == quote_id
+                && quote.task_id == execution.task_id
+                && quote.created_at <= execution.created_at
+                && valid_bounded_text(&quote.pricing_revision, 128)
+                && valid_bounded_text(&quote.reason, 2_048)
+                && i64::try_from(quote.amount.value()).is_ok()
+                && execution.requested_by == Some(reservation.user_id)
+                && reservation.quote_id == quote.id
+                && reservation.execution_id == execution.id
+                && reservation.amount == quote.amount
+                && reservation.state == CreditReservationState::Reserved
+                && reservation.created_at == execution.created_at
+                && reservation.updated_at == reservation.created_at
+        }
+        _ => false,
+    };
     if execution.state != ExecutionState::Scheduled
         || execution.scheduled_at.is_none()
         || execution.started_at.is_some()
@@ -1361,12 +1390,20 @@ fn validate_schedule_request(request: &ExecutionScheduleRequest<'_>) -> Result<(
         || !token_valid(request.idempotency_key)
         || !token_valid(request.correlation_id)
         || request.expected_task_state == OrchestrationState::Scheduled
+        || !billing_valid
     {
         return Err(StorageError::InvalidData(
             "execution schedule request is invalid".to_owned(),
         ));
     }
     Ok(())
+}
+
+fn valid_bounded_text(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 fn validate_idempotency_tokens(scope: &str, key: &str) -> Result<(), StorageError> {
@@ -1399,9 +1436,17 @@ async fn insert_request_audit(
         AuditActor::User(id) => ("user", id.to_string()),
         AuditActor::ServiceToken(id) => ("service_token", id.to_string()),
     };
+    let billing = request.billing.as_ref().map(|billing| {
+        serde_json::json!({
+            "quote_id": billing.quote.id,
+            "quoted_amount": billing.quote.amount,
+            "pricing_revision": billing.quote.pricing_revision,
+        })
+    });
     let metadata = serde_json::json!({
         "task_id": request.execution.task_id,
         "request_source": request.execution.request_source,
+        "billing": billing,
     });
     sqlx::query(
         "INSERT INTO audit_records \
@@ -1419,6 +1464,89 @@ async fn insert_request_audit(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+async fn insert_quote_and_reserve_balance(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    billing: &ExecutionBillingReservation<'_>,
+) -> Result<(), StorageError> {
+    let quote = billing.quote;
+    let reservation = billing.reservation;
+    let amount =
+        i64::try_from(quote.amount.value()).map_err(|_| StorageError::CreditAmountOutOfRange)?;
+    sqlx::query(
+        "INSERT INTO price_quotes (id, task_id, amount, pricing_revision, reason, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(quote.id.to_string())
+    .bind(quote.task_id.to_string())
+    .bind(amount)
+    .bind(&quote.pricing_revision)
+    .bind(&quote.reason)
+    .bind(encode_timestamp(quote.created_at))
+    .execute(&mut **transaction)
+    .await?;
+    let timestamp = encode_timestamp(reservation.created_at);
+    sqlx::query(
+        "INSERT INTO credit_accounts (user_id, available, reserved, updated_at) \
+         VALUES (?, 0, 0, ?) ON CONFLICT(user_id) DO NOTHING",
+    )
+    .bind(reservation.user_id.to_string())
+    .bind(&timestamp)
+    .execute(&mut **transaction)
+    .await?;
+    let balance_update = sqlx::query(
+        "UPDATE credit_accounts SET available = available - ?, reserved = reserved + ?, \
+             updated_at = ? WHERE user_id = ? AND available >= ?",
+    )
+    .bind(amount)
+    .bind(amount)
+    .bind(&timestamp)
+    .bind(reservation.user_id.to_string())
+    .bind(amount)
+    .execute(&mut **transaction)
+    .await?;
+    if balance_update.rows_affected() != 1 {
+        return Err(StorageError::InsufficientCredits);
+    }
+    Ok(())
+}
+
+async fn insert_credit_reservation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    billing: &ExecutionBillingReservation<'_>,
+    correlation_id: &str,
+) -> Result<(), StorageError> {
+    let reservation = billing.reservation;
+    let amount = i64::try_from(reservation.amount.value())
+        .map_err(|_| StorageError::CreditAmountOutOfRange)?;
+    sqlx::query(
+        "INSERT INTO credit_reservations \
+         (id, user_id, quote_id, execution_id, amount, state, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?)",
+    )
+    .bind(reservation.id.to_string())
+    .bind(reservation.user_id.to_string())
+    .bind(reservation.quote_id.to_string())
+    .bind(reservation.execution_id.to_string())
+    .bind(amount)
+    .bind(encode_timestamp(reservation.created_at))
+    .bind(encode_timestamp(reservation.updated_at))
+    .execute(&mut **transaction)
+    .await?;
+    enqueue_in_transaction(
+        transaction,
+        &EventEnvelope::at(
+            correlation_id,
+            DomainEvent::CreditReserved {
+                user_id: reservation.user_id,
+                execution_id: reservation.execution_id,
+                amount: reservation.amount,
+            },
+            reservation.created_at,
+        ),
+    )
+    .await
 }
 
 fn decode_execution(row: &sqlx::sqlite::SqliteRow) -> Result<Execution, StorageError> {
@@ -1560,7 +1688,10 @@ fn decode_optional_timestamp(value: Option<&str>) -> Result<Option<Timestamp>, S
 
 #[cfg(test)]
 mod tests {
-    use asterism_domain::{ProviderAccountId, RequestSource, TaskId};
+    use asterism_domain::{
+        CreditAmount, CreditReservation, CreditReservationId, PriceQuote, PriceQuoteId,
+        ProviderAccountId, RequestSource, TaskId,
+    };
     use sqlx::Row;
 
     use super::*;
@@ -1573,6 +1704,7 @@ mod tests {
         let execution = scheduled_execution(owner, task_id, now);
         let request = || ExecutionScheduleRequest {
             execution: &execution,
+            billing: None,
             expected_task_state: OrchestrationState::Ready,
             idempotency_scope: "user:test-owner",
             idempotency_key: "request-1",
@@ -1613,6 +1745,208 @@ mod tests {
                 .get("count");
             assert_eq!(count, 1, "unexpected row count in {table}");
         }
+    }
+
+    #[tokio::test]
+    async fn billed_scheduling_reserves_credit_atomically_and_replays_without_mutation() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        insert_credit_account(&database, owner, 100, now).await;
+        let mut execution = scheduled_execution(owner, task_id, now);
+        let quote = PriceQuote {
+            id: PriceQuoteId::new(),
+            task_id,
+            amount: CreditAmount::new(30),
+            pricing_revision: "catalog-2026-08".to_owned(),
+            reason: "resource execution".to_owned(),
+            created_at: now,
+        };
+        execution.quote_id = Some(quote.id);
+        let reservation = CreditReservation {
+            id: CreditReservationId::new(),
+            user_id: owner,
+            quote_id: quote.id,
+            execution_id: execution.id,
+            amount: quote.amount,
+            state: CreditReservationState::Reserved,
+            created_at: now,
+            updated_at: now,
+        };
+        let request = || billed_request(&execution, &quote, &reservation, owner, "billed-request");
+
+        assert_eq!(
+            repository.schedule_execution(request()).await.unwrap(),
+            ExecutionScheduleOutcome::Created(execution.clone())
+        );
+        assert_eq!(
+            repository.schedule_execution(request()).await.unwrap(),
+            ExecutionScheduleOutcome::Existing(execution.clone())
+        );
+
+        let balance: (i64, i64) =
+            sqlx::query_as("SELECT available, reserved FROM credit_accounts WHERE user_id = ?")
+                .bind(owner.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(balance, (70, 30));
+        for (table, expected) in [
+            ("price_quotes", 1_i64),
+            ("credit_reservations", 1),
+            ("executions", 1),
+            ("scheduled_jobs", 1),
+            ("audit_records", 1),
+            ("event_outbox", 2),
+        ] {
+            let count: i64 = sqlx::query(&format!("SELECT COUNT(*) AS count FROM {table}"))
+                .fetch_one(database.pool())
+                .await
+                .unwrap()
+                .get("count");
+            assert_eq!(count, expected, "unexpected row count in {table}");
+        }
+        let event_types: Vec<String> =
+            sqlx::query_scalar("SELECT event_type FROM event_outbox ORDER BY event_type")
+                .fetch_all(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            event_types,
+            vec!["credit_reserved", "execution_state_changed"]
+        );
+        let audit_metadata: String =
+            sqlx::query_scalar("SELECT metadata_sanitized_json FROM audit_records")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert!(audit_metadata.contains(&quote.id.to_string()));
+        assert!(audit_metadata.contains("catalog-2026-08"));
+    }
+
+    #[tokio::test]
+    async fn insufficient_credit_rolls_back_the_entire_schedule_request() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        insert_credit_account(&database, owner, 10, now).await;
+        let mut execution = scheduled_execution(owner, task_id, now);
+        let quote = PriceQuote {
+            id: PriceQuoteId::new(),
+            task_id,
+            amount: CreditAmount::new(30),
+            pricing_revision: "catalog-2026-08".to_owned(),
+            reason: "resource execution".to_owned(),
+            created_at: now,
+        };
+        execution.quote_id = Some(quote.id);
+        let reservation = CreditReservation {
+            id: CreditReservationId::new(),
+            user_id: owner,
+            quote_id: quote.id,
+            execution_id: execution.id,
+            amount: quote.amount,
+            state: CreditReservationState::Reserved,
+            created_at: now,
+            updated_at: now,
+        };
+
+        assert!(matches!(
+            repository
+                .schedule_execution(billed_request(
+                    &execution,
+                    &quote,
+                    &reservation,
+                    owner,
+                    "insufficient-request",
+                ))
+                .await,
+            Err(StorageError::InsufficientCredits)
+        ));
+        let task_state: String =
+            sqlx::query_scalar("SELECT orchestration_state FROM tasks WHERE id = ?")
+                .bind(task_id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(task_state, "ready");
+        let balance: (i64, i64) =
+            sqlx::query_as("SELECT available, reserved FROM credit_accounts WHERE user_id = ?")
+                .bind(owner.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(balance, (10, 0));
+        for table in [
+            "price_quotes",
+            "credit_reservations",
+            "executions",
+            "scheduled_jobs",
+            "audit_records",
+            "event_outbox",
+        ] {
+            let count: i64 = sqlx::query(&format!("SELECT COUNT(*) AS count FROM {table}"))
+                .fetch_one(database.pool())
+                .await
+                .unwrap()
+                .get("count");
+            assert_eq!(count, 0, "unexpected row count in {table}");
+        }
+    }
+
+    #[tokio::test]
+    async fn covered_zero_cost_scheduling_creates_an_auditable_reservation() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let mut execution = scheduled_execution(owner, task_id, now);
+        let quote = PriceQuote {
+            id: PriceQuoteId::new(),
+            task_id,
+            amount: CreditAmount::ZERO,
+            pricing_revision: "entitlement-2026-08".to_owned(),
+            reason: "covered by active package".to_owned(),
+            created_at: now,
+        };
+        execution.quote_id = Some(quote.id);
+        let reservation = CreditReservation {
+            id: CreditReservationId::new(),
+            user_id: owner,
+            quote_id: quote.id,
+            execution_id: execution.id,
+            amount: quote.amount,
+            state: CreditReservationState::Reserved,
+            created_at: now,
+            updated_at: now,
+        };
+
+        assert!(matches!(
+            repository
+                .schedule_execution(billed_request(
+                    &execution,
+                    &quote,
+                    &reservation,
+                    owner,
+                    "covered-request",
+                ))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::Created(_)
+        ));
+        let balance: (i64, i64) =
+            sqlx::query_as("SELECT available, reserved FROM credit_accounts WHERE user_id = ?")
+                .bind(owner.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(balance, (0, 0));
+        let reservation_state: String =
+            sqlx::query_scalar("SELECT state FROM credit_reservations WHERE execution_id = ?")
+                .bind(execution.id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(reservation_state, "reserved");
     }
 
     #[tokio::test]
@@ -1980,11 +2314,30 @@ mod tests {
     ) -> ExecutionScheduleRequest<'a> {
         ExecutionScheduleRequest {
             execution,
+            billing: None,
             expected_task_state: OrchestrationState::Ready,
             idempotency_scope: "user:test-owner",
             idempotency_key,
             actor: AuditActor::User(owner),
             correlation_id: "correlation-1",
+        }
+    }
+
+    fn billed_request<'a>(
+        execution: &'a Execution,
+        quote: &'a PriceQuote,
+        reservation: &'a CreditReservation,
+        owner: UserId,
+        idempotency_key: &'a str,
+    ) -> ExecutionScheduleRequest<'a> {
+        ExecutionScheduleRequest {
+            execution,
+            billing: Some(ExecutionBillingReservation { quote, reservation }),
+            expected_task_state: OrchestrationState::Ready,
+            idempotency_scope: "user:test-owner",
+            idempotency_key,
+            actor: AuditActor::User(owner),
+            correlation_id: "correlation-billing",
         }
     }
 
@@ -2010,6 +2363,24 @@ mod tests {
         insert_user(&database, owner).await;
         let task_id = insert_task(&database, ProviderAccountId::new(), owner).await;
         (database, owner, task_id)
+    }
+
+    async fn insert_credit_account(
+        database: &Database,
+        owner: UserId,
+        available: i64,
+        now: Timestamp,
+    ) {
+        sqlx::query(
+            "INSERT INTO credit_accounts (user_id, available, reserved, updated_at) \
+             VALUES (?, ?, 0, ?)",
+        )
+        .bind(owner.to_string())
+        .bind(available)
+        .bind(encode_timestamp(now))
+        .execute(database.pool())
+        .await
+        .unwrap();
     }
 
     async fn claim_execution(

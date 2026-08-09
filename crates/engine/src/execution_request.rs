@@ -110,6 +110,7 @@ where
             .executions
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
+                billing: None,
                 expected_task_state: task.orchestration_state,
                 idempotency_scope: &scope,
                 idempotency_key: &command.idempotency_key,

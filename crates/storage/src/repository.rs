@@ -4,7 +4,7 @@ use asterism_domain::{
     AuthBootstrapSessionId, AuthSession, AuthSessionId, CreditAccount, CreditReservation,
     CreditReservationId, CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId,
     ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
-    ExecutionState, LogLevel, OrchestrationState, ProviderAccount, ProviderAccountId,
+    ExecutionState, LogLevel, OrchestrationState, PriceQuote, ProviderAccount, ProviderAccountId,
     ProviderErrorClass, ScheduleId, ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User,
     UserId, WebSession, WebSessionId,
 };
@@ -314,8 +314,15 @@ pub trait ExecutionLeaseRepository: Send + Sync {
 }
 
 #[derive(Clone, Debug)]
+pub struct ExecutionBillingReservation<'a> {
+    pub quote: &'a PriceQuote,
+    pub reservation: &'a CreditReservation,
+}
+
+#[derive(Clone, Debug)]
 pub struct ExecutionScheduleRequest<'a> {
     pub execution: &'a Execution,
+    pub billing: Option<ExecutionBillingReservation<'a>>,
     pub expected_task_state: OrchestrationState,
     pub idempotency_scope: &'a str,
     pub idempotency_key: &'a str,
@@ -391,9 +398,10 @@ pub struct ExecutionRecoveryFinishRequest<'a> {
     pub correlation_id: &'a str,
 }
 
-/// Atomic execution request boundary. Creating the execution, moving the task
-/// to `scheduled`, enqueuing the scheduler job, and recording audit/outbox
-/// entries either all commit or all roll back.
+/// Atomic execution request boundary. Creating the optional immutable quote and
+/// reservation, moving the task to `scheduled`, creating the execution,
+/// enqueuing the scheduler job, and recording audit/outbox entries either all
+/// commit or all roll back.
 #[async_trait]
 pub trait ExecutionRepository: Send + Sync {
     async fn find_idempotent_execution(

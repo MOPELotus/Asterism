@@ -1387,3 +1387,25 @@ outbox state. This hardens the standalone ledger primitive first; creating the
 Quote, reserving credit and scheduling the Execution in one Core transaction,
 plus settling it in the worker's terminal transaction, remain the next billing
 integration slices.
+
+## Ninety-fifth Phase 0 slice
+
+Execution scheduling now accepts an optional, already-resolved billing bundle
+and commits its immutable PriceQuote and active CreditReservation in the same
+immediate transaction as the Task state transition, Execution, Scheduler job,
+request audit and durable events. The bundle must bind exactly to the requested
+User, Task and Execution; its amount, revision and reason are bounded before
+persistence. A dangling Execution quote or a reservation without the matching
+Execution quote is rejected before any write.
+
+Balance reservation happens before a job can become visible. Insufficient
+credit therefore rolls back the Task transition, Quote, balance mutation and
+all execution-side rows together. Idempotency replay returns the original
+Execution before any billing mutation, so one request cannot reserve twice.
+Zero-cost entitlement coverage still creates a Quote, Reservation, audit
+attribution and `CreditReserved` event, while lazily materializing the user's
+zero-balance account. Current API execution requests explicitly use the
+unbilled path until Pricing and Entitlement resolution is connected; Core does
+not invent a price or hard-code a role bypass. Commit on verified success and
+release on terminal failure/cancellation remain the next worker-transaction
+slice, while recovery and HumanRequired continue preserving active reserves.

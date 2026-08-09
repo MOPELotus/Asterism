@@ -37,7 +37,7 @@ Phase 0 已建立并持续完善以下基础：
 - SQLite migration、WAL 策略、事务仓储和并发测试；
 - 版本化任务指纹、脱敏扫描快照、类型化差异与事务化扫描入库；
 - 幂等执行请求、执行租约、周期扫描物化、隔离认领的 worker 与事务化 Event Outbox；
-- 点数 grant / reserve / commit / release 流程与不可变流水；
+- 点数 grant / reserve / commit / release 流程、不可变流水，以及 Quote + Reserve + Execution 原子调度边界；
 - SecretStore 抽象、Argon2id 密码、服务端 Session、scoped Service Token 与登录限速；
 - 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；
 - Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；

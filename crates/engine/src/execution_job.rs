@@ -1735,6 +1735,7 @@ mod tests {
         SqliteExecutionRepository::new(database.clone())
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
+                billing: None,
                 expected_task_state: OrchestrationState::Ready,
                 idempotency_scope: "test",
                 idempotency_key: "execution",
