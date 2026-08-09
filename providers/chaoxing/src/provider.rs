@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use asterism_networking::ResolvedNetworkProfile;
-use asterism_provider_api::{ProviderEntry, ProviderResult};
+use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
@@ -74,6 +74,7 @@ fn compose_development_provider(
     )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
+        runtime_settings: ProviderRuntimeSettingsSchema::default(),
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),

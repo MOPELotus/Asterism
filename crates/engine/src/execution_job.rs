@@ -1548,6 +1548,8 @@ mod tests {
             registry
                 .register(ProviderEntry {
                     metadata: provider.metadata.clone(),
+                    runtime_settings: asterism_provider_api::ProviderRuntimeSettingsSchema::default(
+                    ),
                     authentication: None,
                     course_inventory: None,
                     task_inventory: None,

@@ -368,6 +368,7 @@ mod tests {
         registry
             .register(ProviderEntry {
                 metadata,
+                runtime_settings: asterism_provider_api::ProviderRuntimeSettingsSchema::default(),
                 authentication: None,
                 course_inventory: Some(inventory.clone()),
                 task_inventory: Some(inventory.clone()),
@@ -436,6 +437,7 @@ mod tests {
         registry
             .register(ProviderEntry {
                 metadata,
+                runtime_settings: asterism_provider_api::ProviderRuntimeSettingsSchema::default(),
                 authentication: None,
                 course_inventory: Some(inventory.clone()),
                 task_inventory: Some(inventory),
@@ -473,6 +475,7 @@ mod tests {
         registry
             .register(ProviderEntry {
                 metadata,
+                runtime_settings: asterism_provider_api::ProviderRuntimeSettingsSchema::default(),
                 authentication: None,
                 course_inventory: Some(inventory.clone()),
                 task_inventory: Some(inventory),

@@ -4,13 +4,14 @@ use asterism_domain::ProviderId;
 
 use crate::{
     AuthenticationCapability, BrowserBridgeCapability, CourseInventoryCapability,
-    ProviderCapability, ProviderMetadata, TaskDetailCapability, TaskExecutionCapability,
-    TaskInventoryCapability, TaskProgressCapability,
+    ProviderCapability, ProviderMetadata, ProviderRuntimeSettingsSchema, ProviderSettingsError,
+    TaskDetailCapability, TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
 };
 
 #[derive(Clone)]
 pub struct ProviderEntry {
     pub metadata: ProviderMetadata,
+    pub runtime_settings: ProviderRuntimeSettingsSchema,
     pub authentication: Option<Arc<dyn AuthenticationCapability>>,
     pub course_inventory: Option<Arc<dyn CourseInventoryCapability>>,
     pub task_inventory: Option<Arc<dyn TaskInventoryCapability>>,
@@ -25,6 +26,7 @@ impl std::fmt::Debug for ProviderEntry {
         formatter
             .debug_struct("ProviderEntry")
             .field("metadata", &self.metadata)
+            .field("runtime_settings", &self.runtime_settings)
             .field("authentication", &self.authentication.is_some())
             .field("course_inventory", &self.course_inventory.is_some())
             .field("task_inventory", &self.task_inventory.is_some())
@@ -40,6 +42,7 @@ impl ProviderEntry {
     pub fn metadata_only(metadata: ProviderMetadata) -> Self {
         Self {
             metadata,
+            runtime_settings: ProviderRuntimeSettingsSchema::default(),
             authentication: None,
             course_inventory: None,
             task_inventory: None,
@@ -51,6 +54,12 @@ impl ProviderEntry {
     }
 
     fn validate(&self) -> Result<(), RegistryError> {
+        self.runtime_settings.validate().map_err(|source| {
+            RegistryError::InvalidRuntimeSettingsSchema {
+                provider_id: self.metadata.id.clone(),
+                source,
+            }
+        })?;
         if self
             .metadata
             .scan_min_interval_seconds
@@ -254,6 +263,12 @@ pub enum RegistryError {
     InvalidScanMinimum { provider_id: ProviderId },
     #[error("provider `{provider_id}` declares an invalid Capture recipe contract")]
     InvalidCaptureRecipe { provider_id: ProviderId },
+    #[error("provider `{provider_id}` declares an invalid runtime settings schema")]
+    InvalidRuntimeSettingsSchema {
+        provider_id: ProviderId,
+        #[source]
+        source: ProviderSettingsError,
+    },
 }
 
 #[cfg(test)]
@@ -332,6 +347,18 @@ mod tests {
         assert!(matches!(
             registry.register(ProviderEntry::metadata_only(metadata)),
             Err(RegistryError::InvalidScanMinimum { .. })
+        ));
+    }
+
+    #[test]
+    fn registry_rejects_invalid_runtime_settings_schema() {
+        let mut entry = ProviderEntry::metadata_only(metadata());
+        entry.runtime_settings.version = 0;
+        let mut registry = ProviderRegistry::default();
+
+        assert!(matches!(
+            registry.register(entry),
+            Err(RegistryError::InvalidRuntimeSettingsSchema { .. })
         ));
     }
 

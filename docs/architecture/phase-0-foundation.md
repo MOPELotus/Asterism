@@ -1483,3 +1483,23 @@ returning a detached quote. Web access requires `ReadOwnCredits`; automation
 requires an owner-bound `CreditRead` service token. The routes do not expose
 another user's ledger and do not add grant, adjustment, pricing or arbitrary
 settlement controls.
+
+## Ninety-ninth Phase 0 slice
+
+The Provider contract now owns a bounded, versioned runtime-settings schema
+without adding those technical controls to ordinary Provider metadata. A field
+declares its stable key, display text, constrained value kind, safe default and
+the Provider, ProviderAccount or Task scopes where a Master override is valid.
+Supported values are limited to booleans, bounded stepped integers, thousandth
+fixed-point decimals, bounded stepped durations and closed choices; arbitrary
+strings and credential-shaped free-form JSON are not part of the contract.
+
+Registry admission rejects unversioned, duplicate, malformed or unbounded
+schemas before a Provider becomes available. Resolution starts from each safe
+Provider default and applies validated Provider, ProviderAccount and Task
+patches field by field in increasing specificity, requiring an exact schema
+version at every layer. This slice establishes the validation and deterministic
+merge boundary only: Core persistence, revision/audit writes, Master-only API
+surfaces and immutable Execution snapshots remain separate transactional
+slices. The current Chaoxing implementation advertises an empty schema until a
+corresponding execution capability actually consumes a concrete setting.
