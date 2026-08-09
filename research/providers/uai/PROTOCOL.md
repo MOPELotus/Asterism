@@ -34,8 +34,12 @@ the concrete Core adapter requests only `ProviderCompositeSession`, verifies
 the exact account/reference/purpose/expiry tuple, and accepts only
 NativeProviderLogin+Composite or ManualImport+Jwt metadata. Storage/key failures
 remain sanitized Internal errors while missing or stale credentials are
-Authentication errors. Native HTTP, JWT expiry extraction and automatic renewal
-remain pending.
+Authentication errors. The native transport now uses the shared non-redirecting
+HTTPS client, posts the exact JSON login shape, passes JWT directly as a
+sensitive `Authorization` header and validates it with a bounded user-info
+read. It classifies status before reading, requires JSON media types and valid
+UTF-8, caps bodies at 64 KiB and never retains returned user profile fields.
+JWT expiry extraction and automatic renewal remain pending.
 
 ## Course resource and tree
 

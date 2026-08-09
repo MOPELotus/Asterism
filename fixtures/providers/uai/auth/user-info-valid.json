@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "value": {
+    "userInfo": {
+      "appUserId": 42,
+      "ssoId": "synthetic-sso-id",
+      "displayName": "Synthetic User"
+    }
+  }
+}

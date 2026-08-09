@@ -2515,3 +2515,23 @@ injected validation transport. It does not resolve username/password or perform
 renewal, and native HTTP remains absent. This closes the Core resolution side of
 session validation without claiming live validity, expiry recovery or native
 login compatibility.
+
+## One-hundred-and-fifty-seventh Phase 0 slice
+
+UAI now has a concrete native Authentication transport built from the shared
+resolved network policy and its non-redirecting HTTPS client. Password exchange
+posts the audited JSON fields to the fixed SSO route, classifies HTTP status and
+JSON media type before consuming a bounded UTF-8 body, then reuses the typed
+success/rejection/slider classifier. The returned JWT is placed directly in a
+sensitive `Authorization` header, without an inferred Bearer prefix.
+
+Session validation performs only the audited user-info read and requires both
+bounded `appUserId` and `ssoId` identity markers without retaining the profile
+document. Login and user-info responses share a 64 KiB limit; rate limits,
+authentication rejection, route drift, provider outages and malformed bodies
+remain distinct sanitized errors, while body buffers are zeroized after use.
+
+This makes Password exchange and stored/imported JWT validation concrete at the
+native HTTP boundary, but does not register UAI in the daemon or claim live
+compatibility. Password renewal, native Course/Task/progress reads, duration,
+execution, BrowserBridge and Capture remain separate slices.

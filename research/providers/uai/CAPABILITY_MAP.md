@@ -2,8 +2,8 @@
 
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
-| Authentication | AutoFinish + UnipusHelperPro | Reference | Password/ImportedToken orchestration, strict login-envelope classification and atomic openid/JWT CompositeSession are offline-covered; native transport pending |
-| Stored session validation | User-info and Course-list reads | FromScratch | Core provider-scoped resolver accepts only exact unexpired native Composite or manual JWT session metadata; native read/renewal pending |
+| Authentication | AutoFinish + UnipusHelperPro | Reference | Password/ImportedToken orchestration, strict login-envelope classification, native Password exchange and atomic openid/JWT CompositeSession are offline/native-boundary covered |
+| Stored session validation | User-info and Course-list reads | FromScratch | Core provider-scoped resolver accepts only exact unexpired native Composite or manual JWT metadata; bounded native user-info JWT validation is implemented, renewal pending |
 | CourseInventory | AutoFinish + UnipusHelperPro | Reference | Fixture-only Course → CourseResource flattening implemented; native read pending |
 | TaskInventory | AutoFinish + UnipusHelperPro | Reference | Fixture-only nested Course JSON → Unit/Section/Node/Group parser implemented; native read pending |
 | TaskProgressRead | Both backend donors | Reference | Per-Unit `course_progress` exposes independent Group state; parser pending |
@@ -30,5 +30,6 @@ The current crate advertises only injected Authentication. It:
 6. resolves only the account/reference-bound CompositeSession purpose and
    rejects mismatched origin, kind, expiry, identity or storage shape;
 7. drops class, instance, content, answer and unknown fields;
-8. makes no native-network, progress, completion, duration, execution,
-   submission, BrowserBridge or Capture claim.
+8. implements only native Password exchange and user-info JWT validation; it
+   makes no native inventory, progress, completion, duration, execution,
+   submission, renewal, BrowserBridge or Capture claim.

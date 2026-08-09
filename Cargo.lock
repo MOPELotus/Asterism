@@ -283,10 +283,12 @@ name = "asterism-provider-uai"
 version = "0.1.0"
 dependencies = [
  "asterism-domain",
+ "asterism-networking",
  "asterism-provider-api",
  "asterism-secrets",
  "async-trait",
  "chrono",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

@@ -8,7 +8,7 @@ use asterism_provider_api::{
 
 pub(crate) const PROVIDER_ID: &str = "uai";
 
-/// Returns metadata for the parser-only Development checkpoint.
+/// Returns metadata for the Authentication-only Development checkpoint.
 ///
 /// # Errors
 ///
@@ -37,7 +37,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metadata_advertises_only_injected_authentication() {
+    fn metadata_advertises_only_authentication() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
