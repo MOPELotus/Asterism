@@ -25,6 +25,13 @@
     "title": "单元测验四",
     "source_type": "exam",
     "assessment_class": "unknown",
+    "remote_state": "not_open"
+  },
+  {
+    "remote_id": "exam:100:200:exam-5",
+    "title": "单元测验五",
+    "source_type": "exam",
+    "assessment_class": "unknown",
     "remote_state": "unknown"
   }
 ]

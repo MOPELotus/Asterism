@@ -1030,3 +1030,14 @@ Script/style template keywords are removed before visible status
 classification. Fixture and route-boundary coverage do not replace the pending
 same-account browser comparison, so Provider verification remains
 `Development`.
+
+## Seventy-sixth Phase 0 slice
+
+The Chaoxing Exam inventory regression set now includes the donor-observed
+`ul.nav > li[data]` shape with an unclassified status span and a separate `.fr`
+time label. Status extraction prefers the explicit status element, retains the
+time text independently, and maps `未开始` to `NotOpen` instead of the former
+`Unknown`. A separate synthetic unknown state remains in the fixture so new
+vocabulary is still surfaced rather than guessed. Open/due/close timestamps are
+not populated from unverified relative or ambiguous labels, and this parser
+correction does not change the Provider's `Development` verification level.

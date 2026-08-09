@@ -363,10 +363,18 @@ fn extract_title(row: ElementRef<'_>, source_type: SourceType) -> ProviderResult
 
 fn extract_status_text(row: ElementRef<'_>) -> Option<String> {
     let status_selector = selector(".exam-status, .work-status, .task-status, .status");
-    row.select(&status_selector).find_map(|node| {
-        let text = normalize_evidence(&node.text().collect::<Vec<_>>().join(" "));
-        (!text.is_empty()).then_some(text)
-    })
+    row.select(&status_selector)
+        .find_map(normalized_node_text)
+        .or_else(|| {
+            let unclassified_status = selector("span:not(.fr)");
+            row.select(&unclassified_status)
+                .find_map(normalized_node_text)
+        })
+}
+
+fn normalized_node_text(node: ElementRef<'_>) -> Option<String> {
+    let text = normalize_evidence(&node.text().collect::<Vec<_>>().join(" "));
+    (!text.is_empty()).then_some(text)
 }
 
 fn extract_time_text(row: ElementRef<'_>) -> Option<String> {
@@ -386,7 +394,7 @@ fn classify_list_state(status: &str) -> RemoteState {
         RemoteState::InProgress
     } else if contains_any(status, &["待做", "未交"]) {
         RemoteState::Pending
-    } else if contains_any(status, &["尚未开放", "未开放"]) {
+    } else if contains_any(status, &["尚未开放", "未开放", "未开始"]) {
         RemoteState::NotOpen
     } else {
         RemoteState::Unknown
@@ -530,6 +538,18 @@ mod tests {
                 && task.fingerprint.starts_with("v1:")
                 && task.fingerprint.len() == 67
         }));
+        let not_open = tasks
+            .iter()
+            .find(|task| task.remote_id.ends_with(":exam-4"))
+            .unwrap();
+        assert_eq!(not_open.remote_state, RemoteState::NotOpen);
+        assert_eq!(not_open.normalized["status_text"], "未开始");
+        assert_eq!(not_open.normalized["time_text"], "开放时间待验证");
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task.remote_state == RemoteState::Unknown)
+        );
     }
 
     #[test]

@@ -504,7 +504,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(tasks.len(), 7);
+        assert_eq!(tasks.len(), 8);
         assert_eq!(
             tasks
                 .iter()
@@ -517,7 +517,7 @@ mod tests {
                 .iter()
                 .filter(|task| task.source_type == SourceType::Exam)
                 .count(),
-            4
+            5
         );
         assert!(
             tasks
