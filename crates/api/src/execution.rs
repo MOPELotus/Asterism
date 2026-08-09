@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use asterism_domain::{
-    Execution, ExecutionAttempt, ExecutionId, ExecutionLogEvent, ExecutionProgress,
+    Execution, ExecutionAttempt, ExecutionId, ExecutionLogEvent, ExecutionProgress, TaskId,
 };
 use asterism_storage::{ExecutionQueryRepository, SqliteExecutionRepository};
 use axum::{
@@ -16,6 +16,50 @@ use crate::{ApiError, ApiState, auth::AuthContext};
 const DEFAULT_LOG_PAGE_SIZE: u32 = 50;
 const MAX_LOG_PAGE_SIZE: u32 = 200;
 const MAX_LOG_OFFSET: u64 = 1_000_000;
+const DEFAULT_EXECUTION_PAGE_SIZE: u32 = 50;
+const MAX_EXECUTION_PAGE_SIZE: u32 = 200;
+const MAX_EXECUTION_OFFSET: u64 = 1_000_000;
+
+pub(super) async fn list_executions(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    query: Result<Query<ExecutionListQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let query = query.map(|Query(query)| query).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_execution_query",
+            "execution query parameters have an invalid format",
+        )
+    })?;
+    let task_id = query
+        .task_id
+        .as_deref()
+        .map(TaskId::from_str)
+        .transpose()
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let limit = query.limit.unwrap_or(DEFAULT_EXECUTION_PAGE_SIZE);
+    let offset = query.offset.unwrap_or_default();
+    if limit == 0 || limit > MAX_EXECUTION_PAGE_SIZE || offset > MAX_EXECUTION_OFFSET {
+        return Err(ApiError::bad_request(
+            "invalid_execution_pagination",
+            "execution limit must be 1-200 and offset must not exceed 1000000",
+        ));
+    }
+    let page = SqliteExecutionRepository::new(state.database)
+        .list_owned_executions(owner_id, task_id, limit, offset)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(crate::auth::no_store(
+        Json(ExecutionPageResponse {
+            total: page.total,
+            limit,
+            offset,
+            items: page.items,
+        })
+        .into_response(),
+    ))
+}
 
 pub(super) async fn get_execution(
     State(state): State<ApiState>,
@@ -84,6 +128,22 @@ struct ExecutionDetailResponse {
     execution: Execution,
     progress: Option<ExecutionProgress>,
     attempts: Vec<ExecutionAttempt>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExecutionListQuery {
+    task_id: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ExecutionPageResponse {
+    total: u64,
+    limit: u32,
+    offset: u64,
+    items: Vec<Execution>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]

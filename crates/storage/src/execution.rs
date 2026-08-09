@@ -18,9 +18,11 @@ use crate::{
     ExecutionQueryRepository, ExecutionRepository, ExecutionScheduleOutcome,
     ExecutionScheduleRequest, StorageError,
 };
-use crate::{ExecutionDetail, ExecutionLogPage};
+use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage};
 
 const MAX_EXECUTION_ATTEMPTS: usize = 1_000;
+const MAX_EXECUTION_PAGE_SIZE: u32 = 200;
+const MAX_EXECUTION_OFFSET: u64 = 1_000_000;
 const MAX_EXECUTION_LOG_PAGE_SIZE: u32 = 200;
 const MAX_EXECUTION_LOG_OFFSET: u64 = 1_000_000;
 
@@ -256,6 +258,58 @@ impl ExecutionRepository for SqliteExecutionRepository {
 
 #[async_trait]
 impl ExecutionQueryRepository for SqliteExecutionRepository {
+    async fn list_owned_executions(
+        &self,
+        owner_id: UserId,
+        task_id: Option<TaskId>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<ExecutionPage, StorageError> {
+        if limit == 0 || limit > MAX_EXECUTION_PAGE_SIZE || offset > MAX_EXECUTION_OFFSET {
+            return Err(StorageError::InvalidData(
+                "execution pagination is outside the supported range".to_owned(),
+            ));
+        }
+        let task_id = task_id.map(|task_id| task_id.to_string());
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM executions AS execution \
+             INNER JOIN tasks AS task ON task.id = execution.task_id \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             WHERE account.owner_user_id = ? AND (? IS NULL OR execution.task_id = ?)",
+        )
+        .bind(owner_id.to_string())
+        .bind(&task_id)
+        .bind(&task_id)
+        .fetch_one(self.database.pool())
+        .await?;
+        let rows = sqlx::query(
+            "SELECT execution.id, execution.task_id, execution.requested_by, \
+                    execution.request_source, execution.quote_id, execution.state, \
+                    execution.scheduled_at, execution.started_at, execution.finished_at, \
+                    execution.created_at FROM executions AS execution \
+             INNER JOIN tasks AS task ON task.id = execution.task_id \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             WHERE account.owner_user_id = ? AND (? IS NULL OR execution.task_id = ?) \
+             ORDER BY execution.created_at DESC, execution.id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(owner_id.to_string())
+        .bind(&task_id)
+        .bind(&task_id)
+        .bind(i64::from(limit))
+        .bind(i64::try_from(offset).expect("validated execution offset fits i64"))
+        .fetch_all(self.database.pool())
+        .await?;
+        let items = rows
+            .iter()
+            .map(decode_execution)
+            .collect::<Result<_, _>>()?;
+        Ok(ExecutionPage {
+            items,
+            total: u64::try_from(total)
+                .map_err(|_| StorageError::InvalidData("execution count is invalid".to_owned()))?,
+        })
+    }
+
     async fn find_owned_execution_detail(
         &self,
         owner_id: UserId,
@@ -1496,6 +1550,24 @@ mod tests {
             detail.attempts[0].provider_trace_id.as_deref(),
             Some("trace-1")
         );
+        let page = repository
+            .list_owned_executions(owner, None, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items, vec![finished.clone()]);
+        let task_page = repository
+            .list_owned_executions(owner, Some(execution.task_id), 1, 0)
+            .await
+            .unwrap();
+        assert_eq!(task_page.total, 1);
+        assert_eq!(task_page.items, vec![finished.clone()]);
+        let foreign_page = repository
+            .list_owned_executions(UserId::new(), None, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(foreign_page.total, 0);
+        assert!(foreign_page.items.is_empty());
         assert!(
             repository
                 .find_owned_execution_detail(UserId::new(), execution.id)

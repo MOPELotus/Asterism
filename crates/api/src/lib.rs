@@ -122,14 +122,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
-        .route(
-            "/api/v1/executions/{execution_id}",
-            get(execution::get_execution),
-        )
-        .route(
-            "/api/v1/executions/{execution_id}/logs",
-            get(execution::list_execution_logs),
-        )
+        .merge(execution_routes())
         .route("/api/v1/service-tokens", post(auth::create_service_token))
         .route(
             "/api/v1/service-tokens/{token_id}",
@@ -168,6 +161,19 @@ pub fn build_router(state: ApiState) -> Router {
         .layer(PropagateRequestIdLayer::new(X_REQUEST_ID.clone()))
         .layer(SetRequestIdLayer::new(X_REQUEST_ID, MakeRequestUuid))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
+}
+
+fn execution_routes() -> Router<ApiState> {
+    Router::new()
+        .route("/api/v1/executions", get(execution::list_executions))
+        .route(
+            "/api/v1/executions/{execution_id}",
+            get(execution::get_execution),
+        )
+        .route(
+            "/api/v1/executions/{execution_id}/logs",
+            get(execution::list_execution_logs),
+        )
 }
 
 async fn health(State(state): State<ApiState>) -> Result<Json<HealthResponse>, ApiError> {
@@ -600,6 +606,10 @@ async fn openapi() -> Json<Value> {
     document["paths"]
         .as_object_mut()
         .expect("static OpenAPI paths object")
+        .insert("/api/v1/executions".to_owned(), execution_list_path());
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
         .insert(
             "/api/v1/executions/{execution_id}/logs".to_owned(),
             execution_logs_path(),
@@ -648,6 +658,24 @@ fn execution_detail_path() -> Value {
             "401": {"description": "Authentication required"},
             "403": {"description": "Insufficient permission"},
             "404": {"description": "Execution not found for this owner"}
+        }
+    }})
+}
+
+fn execution_list_path() -> Value {
+    json!({"get": {
+        "operationId": "listExecutions",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "query", "schema": {"type": "string", "format": "uuid"}},
+            {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+            {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}
+        ],
+        "responses": {
+            "200": {"description": "Owner-scoped Execution page, optionally filtered by Task"},
+            "400": {"description": "Invalid Task ID or pagination"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Insufficient permission"}
         }
     }})
 }
@@ -2700,6 +2728,25 @@ mod tests {
         assert_eq!(created["execution"]["request_source"], "web_ui");
         let execution_id = created["execution"]["id"].as_str().unwrap().to_owned();
 
+        let execution_page = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/executions?task_id={routine_task}&limit=10&offset=0"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(execution_page.status(), StatusCode::OK);
+        assert_eq!(execution_page.headers()[header::CACHE_CONTROL], "no-store");
+        let execution_page = response_json(execution_page).await;
+        assert_eq!(execution_page["total"], 1);
+        assert_eq!(execution_page["limit"], 10);
+        assert_eq!(execution_page["items"][0]["id"], execution_id);
+
         let detail = app
             .clone()
             .oneshot(
@@ -2957,6 +3004,7 @@ mod tests {
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/execute",
+            "/api/v1/executions",
             "/api/v1/executions/{execution_id}",
             "/api/v1/executions/{execution_id}/logs",
         ] {
@@ -2969,6 +3017,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],
             "executeTask"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/executions"]["get"]["operationId"],
+            "listExecutions"
         );
         assert_eq!(
             document["paths"]["/api/v1/executions/{execution_id}"]["get"]["operationId"],

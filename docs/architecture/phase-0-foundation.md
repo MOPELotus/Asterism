@@ -1244,3 +1244,19 @@ payloads and internal row IDs are not exposed. `asterismctl execution logs`
 uses the same API and OpenAPI operation with explicit pagination. This endpoint
 is for bounded history and merged-record presentation; a live LogStream remains
 a separate SSE/WS slice rather than repeated full-history polling.
+
+## Eighty-eighth Phase 0 slice
+
+Execution history now has an owner-scoped list surface for CLI and the planned
+WebUI Executions page. `GET /api/v1/executions` joins ownership through each
+Execution's Task and Provider account, optionally filters by `task_id`, and
+returns a bounded 1-200 page plus the owner-filtered total. Results use stable
+newest-first ordering by creation time and Execution identity, while absent
+filters never broaden access beyond the authenticated owner.
+
+The SQLite read model validates offsets before converting them for SQL, and the
+HTTP layer rejects malformed Task IDs, unknown query fields and out-of-range
+pagination before storage access. Responses are marked `no-store` and contain
+only the Execution summary; progress, Attempt history and logs retain their
+separate bounded detail surfaces. `asterismctl execution list [--task ...]`
+uses the same OpenAPI-recorded operation rather than reading SQLite directly.

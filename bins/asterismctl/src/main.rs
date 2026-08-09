@@ -230,6 +230,15 @@ enum TaskCommand {
 
 #[derive(Debug, Subcommand)]
 enum ExecutionCommand {
+    /// List owner-scoped Executions, optionally filtered by Task.
+    List {
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
     /// Get one Execution with current progress and Attempt history.
     Get { execution_id: String },
     /// List one Execution's sanitized logs in chronological order.
@@ -727,6 +736,23 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
 async fn handle_execution(client: &ApiClient, command: ExecutionCommand) -> anyhow::Result<()> {
     let token = service_token_from_process()?;
     let value = match command {
+        ExecutionCommand::List {
+            task,
+            limit,
+            offset,
+        } => {
+            client
+                .get_authorized_with_query(
+                    "/api/v1/executions",
+                    &token,
+                    &ExecutionListParameters {
+                        task_id: task,
+                        limit,
+                        offset,
+                    },
+                )
+                .await?
+        }
         ExecutionCommand::Get { execution_id } => {
             let path = format!("/api/v1/executions/{execution_id}");
             client.get_authorized(&path, &token).await?
@@ -749,6 +775,14 @@ async fn handle_execution(client: &ApiClient, command: ExecutionCommand) -> anyh
 struct TaskListParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_account_id: Option<String>,
+    limit: u32,
+    offset: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutionListParameters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
     limit: u32,
     offset: u64,
 }
@@ -882,6 +916,32 @@ mod tests {
             Command::Execution {
                 command: ExecutionCommand::Get { execution_id }
             } if execution_id == "execution-id"
+        ));
+    }
+
+    #[test]
+    fn execution_list_keeps_task_filter_and_pagination_explicit() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "execution",
+            "list",
+            "--task",
+            "task-id",
+            "--limit",
+            "25",
+            "--offset",
+            "50",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Execution {
+                command: ExecutionCommand::List {
+                    task: Some(task),
+                    limit: 25,
+                    offset: 50,
+                }
+            } if task == "task-id"
         ));
     }
 

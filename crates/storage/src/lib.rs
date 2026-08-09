@@ -32,7 +32,7 @@ pub use repository::{
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, CreditRepository, ExecutionAttemptFinishRequest,
     ExecutionAttemptStartRequest, ExecutionDetail, ExecutionLeaseRepository, ExecutionLogPage,
-    ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionRepository,
+    ExecutionPage, ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionRepository,
     ExecutionScheduleOutcome, ExecutionScheduleRequest, OutboxRepository,
     ProviderAccountRepository, ProviderAccountRuntimeRepository, ScanScheduleRepository,
     SchedulerRepository, SessionRepository, TaskPage, TaskQueryRepository, TaskRepository,

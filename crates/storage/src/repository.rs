@@ -60,6 +60,12 @@ pub struct ExecutionDetail {
     pub attempts: Vec<ExecutionAttempt>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionPage {
+    pub items: Vec<Execution>,
+    pub total: u64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutionLogPage {
     pub items: Vec<ExecutionLogEvent>,
@@ -69,6 +75,14 @@ pub struct ExecutionLogPage {
 /// Owner-scoped read model for execution status surfaces.
 #[async_trait]
 pub trait ExecutionQueryRepository: Send + Sync {
+    async fn list_owned_executions(
+        &self,
+        owner_id: UserId,
+        task_id: Option<TaskId>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<ExecutionPage, StorageError>;
+
     async fn find_owned_execution_detail(
         &self,
         owner_id: UserId,
