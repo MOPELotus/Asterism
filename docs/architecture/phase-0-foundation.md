@@ -1367,3 +1367,23 @@ now reports bounded submit, verify, verified and already-completed lifecycle
 messages through this sink without exposing route facts, completion tokens or
 raw responses. This is fixture-backed observability and does not change the
 Provider's Development verification status.
+
+## Ninety-fourth Phase 0 slice
+
+Credit reservations now fail closed unless their User, PriceQuote, Execution,
+Task and amount form one exact persisted chain. Reservation verifies that the
+Execution was requested by the same User, references the same Quote, and shares
+the Quote's Task and immutable amount before moving any available balance. A
+new unique Quote index prevents one Quote from funding multiple reservations,
+while the existing unique Execution constraint continues to prevent multiple
+reservations for one run.
+
+Settlement revalidates the same chain instead of trusting historical foreign
+keys alone. Commit is permitted only after the bound Execution has reached
+Succeeded; release refuses a succeeded Execution, preventing an accidental
+refund after verified completion. Corrupted or cross-bound legacy rows stop as
+a credit invariant failure without changing reservation, balance, ledger or
+outbox state. This hardens the standalone ledger primitive first; creating the
+Quote, reserving credit and scheduling the Execution in one Core transaction,
+plus settling it in the worker's terminal transaction, remain the next billing
+integration slices.

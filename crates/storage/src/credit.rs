@@ -99,7 +99,8 @@ impl CreditRepository for SqliteCreditRepository {
         }
         let amount = encode_amount(reservation.amount)?;
         let timestamp = encode_timestamp(reservation.created_at);
-        let mut transaction = self.database.pool().begin().await?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        validate_reservation_binding(&mut transaction, reservation).await?;
         let balance_update = sqlx::query(
             "UPDATE credit_accounts SET \
                  available = available - ?, reserved = reserved + ?, updated_at = ? \
@@ -155,6 +156,9 @@ impl CreditRepository for SqliteCreditRepository {
     ) -> Result<CreditAccount, StorageError> {
         let mut transaction = self.database.pool().begin().await?;
         let reservation = active_reservation(&mut transaction, reservation_id).await?;
+        if reservation.execution_state != "succeeded" {
+            return Err(StorageError::CreditInvariant);
+        }
         let timestamp = encode_timestamp(at);
         let changed = sqlx::query(
             "UPDATE credit_reservations SET state = 'committed', updated_at = ? \
@@ -219,6 +223,9 @@ impl CreditRepository for SqliteCreditRepository {
     ) -> Result<CreditAccount, StorageError> {
         let mut transaction = self.database.pool().begin().await?;
         let reservation = active_reservation(&mut transaction, reservation_id).await?;
+        if reservation.execution_state == "succeeded" {
+            return Err(StorageError::CreditInvariant);
+        }
         let timestamp = encode_timestamp(at);
         let changed = sqlx::query(
             "UPDATE credit_reservations SET state = 'released', updated_at = ? \
@@ -271,6 +278,43 @@ struct ActiveReservation {
     amount: i64,
     execution_id: ExecutionId,
     task_id: TaskId,
+    execution_state: String,
+}
+
+async fn validate_reservation_binding(
+    transaction: &mut Transaction<'_, Sqlite>,
+    reservation: &CreditReservation,
+) -> Result<(), StorageError> {
+    let row = sqlx::query(
+        "SELECT quote.task_id AS quote_task_id, quote.amount AS quote_amount, \
+                execution.task_id AS execution_task_id, execution.requested_by, \
+                execution.quote_id AS execution_quote_id \
+         FROM price_quotes AS quote \
+         INNER JOIN executions AS execution ON execution.id = ? \
+         WHERE quote.id = ?",
+    )
+    .bind(reservation.execution_id.to_string())
+    .bind(reservation.quote_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StorageError::CreditInvariant)?;
+    let requested_by = row
+        .try_get::<Option<&str>, _>("requested_by")?
+        .map(parse_id)
+        .transpose()?;
+    let execution_quote_id = row
+        .try_get::<Option<&str>, _>("execution_quote_id")?
+        .map(parse_id)
+        .transpose()?;
+    if parse_id::<TaskId>(row.try_get("quote_task_id")?)?
+        != parse_id::<TaskId>(row.try_get("execution_task_id")?)?
+        || decode_amount(row.try_get("quote_amount")?)? != reservation.amount.value()
+        || requested_by != Some(reservation.user_id)
+        || execution_quote_id != Some(reservation.quote_id)
+    {
+        return Err(StorageError::CreditInvariant);
+    }
+    Ok(())
 }
 
 async fn active_reservation(
@@ -278,20 +322,46 @@ async fn active_reservation(
     reservation_id: CreditReservationId,
 ) -> Result<ActiveReservation, StorageError> {
     let row = sqlx::query(
-        "SELECT r.user_id, r.amount, r.execution_id, e.task_id \
+        "SELECT r.user_id, r.amount, r.execution_id, r.quote_id, e.task_id, \
+                e.requested_by, e.quote_id AS execution_quote_id, e.state AS execution_state, \
+                q.task_id AS quote_task_id, q.amount AS quote_amount \
          FROM credit_reservations r \
          JOIN executions e ON e.id = r.execution_id \
+         JOIN price_quotes q ON q.id = r.quote_id \
          WHERE r.id = ? AND r.state = 'reserved'",
     )
     .bind(reservation_id.to_string())
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(StorageError::ReservationNotActive)?;
+    let user_id = parse_id(row.try_get("user_id")?)?;
+    let amount: i64 = row.try_get("amount")?;
+    let execution_id = parse_id(row.try_get("execution_id")?)?;
+    let quote_id: asterism_domain::PriceQuoteId = parse_id(row.try_get("quote_id")?)?;
+    let task_id = parse_id(row.try_get("task_id")?)?;
+    let requested_by = row
+        .try_get::<Option<&str>, _>("requested_by")?
+        .map(parse_id)
+        .transpose()?;
+    let execution_quote_id = row
+        .try_get::<Option<&str>, _>("execution_quote_id")?
+        .map(parse_id)
+        .transpose()?;
+    let quote_task_id: TaskId = parse_id(row.try_get("quote_task_id")?)?;
+    let quote_amount: i64 = row.try_get("quote_amount")?;
+    if requested_by != Some(user_id)
+        || execution_quote_id != Some(quote_id)
+        || quote_task_id != task_id
+        || quote_amount != amount
+    {
+        return Err(StorageError::CreditInvariant);
+    }
     Ok(ActiveReservation {
-        user_id: parse_id(row.try_get("user_id")?)?,
-        amount: row.try_get("amount")?,
-        execution_id: parse_id(row.try_get("execution_id")?)?,
-        task_id: parse_id(row.try_get("task_id")?)?,
+        user_id,
+        amount,
+        execution_id,
+        task_id,
+        execution_state: row.try_get("execution_state")?,
     })
 }
 
@@ -505,6 +575,7 @@ mod tests {
             .unwrap();
         let committed = scenario.reservation(0);
         scenario.repository.reserve(&committed).await.unwrap();
+        scenario.set_execution_state(0, "succeeded").await;
         let account = scenario
             .repository
             .commit(committed.id, CreditTransactionId::new(), scenario.now)
@@ -524,6 +595,7 @@ mod tests {
 
         let released = scenario.reservation(1);
         scenario.repository.reserve(&released).await.unwrap();
+        scenario.set_execution_state(1, "failed").await;
         let account = scenario
             .repository
             .release(released.id, scenario.now)
@@ -540,5 +612,93 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(ledger_sum, 120);
+    }
+
+    #[tokio::test]
+    async fn reservation_rejects_cross_execution_quote_and_amount_mismatch() {
+        let scenario = scenario().await;
+        scenario
+            .repository
+            .grant(&CreditGrant {
+                transaction_id: CreditTransactionId::new(),
+                user_id: scenario.user_id,
+                operator_id: scenario.operator_id,
+                amount: CreditAmount::new(200),
+                reason: "initial".to_owned(),
+                created_at: scenario.now,
+            })
+            .await
+            .unwrap();
+
+        let mut cross_bound = scenario.reservation(0);
+        cross_bound.execution_id = scenario.execution_ids[1];
+        assert!(matches!(
+            scenario.repository.reserve(&cross_bound).await,
+            Err(StorageError::CreditInvariant)
+        ));
+
+        let mut wrong_amount = scenario.reservation(0);
+        wrong_amount.amount = CreditAmount::new(79);
+        assert!(matches!(
+            scenario.repository.reserve(&wrong_amount).await,
+            Err(StorageError::CreditInvariant)
+        ));
+
+        let account = scenario
+            .repository
+            .account(scenario.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (account.available.value(), account.reserved.value()),
+            (200, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn settlement_requires_the_matching_execution_outcome() {
+        let scenario = scenario().await;
+        scenario
+            .repository
+            .grant(&CreditGrant {
+                transaction_id: CreditTransactionId::new(),
+                user_id: scenario.user_id,
+                operator_id: scenario.operator_id,
+                amount: CreditAmount::new(100),
+                reason: "initial".to_owned(),
+                created_at: scenario.now,
+            })
+            .await
+            .unwrap();
+        let reservation = scenario.reservation(0);
+        scenario.repository.reserve(&reservation).await.unwrap();
+
+        assert!(matches!(
+            scenario
+                .repository
+                .commit(reservation.id, CreditTransactionId::new(), scenario.now)
+                .await,
+            Err(StorageError::CreditInvariant)
+        ));
+        scenario.set_execution_state(0, "succeeded").await;
+        assert!(matches!(
+            scenario
+                .repository
+                .release(reservation.id, scenario.now)
+                .await,
+            Err(StorageError::CreditInvariant)
+        ));
+    }
+
+    impl Scenario {
+        async fn set_execution_state(&self, index: usize, state: &str) {
+            sqlx::query("UPDATE executions SET state = ? WHERE id = ?")
+                .bind(state)
+                .bind(self.execution_ids[index].to_string())
+                .execute(self.repository.database.pool())
+                .await
+                .unwrap();
+        }
     }
 }
