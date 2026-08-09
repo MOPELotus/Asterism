@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use asterism_domain::{
-    AssessmentClass, AuthMethod, AuthSessionId, CourseId, ProviderAccountId, ProviderId,
+    AssessmentClass, AuthMethod, AuthSessionId, CourseId, LogLevel, ProviderAccountId, ProviderId,
     RemoteState, SecretId, SessionKind, SourceType, TaskCapability, TaskId, Timestamp,
     WaitingUserState,
 };
@@ -93,7 +93,7 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         &self,
         context: &ProviderContext,
         request: &ExecutionRequest,
-        progress: &(dyn ProgressSink + Send + Sync),
+        events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome>;
 }
 
@@ -107,8 +107,10 @@ pub trait BrowserBridgeCapability: ProviderIdentity {
 }
 
 #[async_trait]
-pub trait ProgressSink {
+pub trait ExecutionEventSink {
     async fn report(&self, update: ProviderProgress) -> ProviderResult<()>;
+
+    async fn log(&self, event: ProviderExecutionLog) -> ProviderResult<()>;
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -347,6 +349,120 @@ pub struct ProviderProgress {
     pub status_text: Option<String>,
     pub completed_items: Option<u32>,
     pub total_items: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ProviderExecutionLog {
+    pub level: LogLevel,
+    pub stage: String,
+    pub message: String,
+    pub provider_trace_id: Option<String>,
+    pub metadata_sanitized: Option<serde_json::Value>,
+}
+
+impl ProviderExecutionLog {
+    /// Validates the bounded, sanitized Provider-to-Core log contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderExecutionLogError`] for oversized or control-bearing
+    /// text, oversized metadata, or a credential-shaped metadata key.
+    pub fn validate(&self) -> Result<(), ProviderExecutionLogError> {
+        let valid_text = |value: &str, maximum: usize| {
+            !value.is_empty()
+                && value.len() <= maximum
+                && value.trim() == value
+                && !value.chars().any(char::is_control)
+        };
+        if !valid_text(&self.stage, 64)
+            || !valid_text(&self.message, 2_048)
+            || self
+                .provider_trace_id
+                .as_deref()
+                .is_some_and(|value| !valid_text(value, 256))
+            || self.metadata_sanitized.as_ref().is_some_and(|value| {
+                serde_json::to_vec(value).map_or(true, |encoded| encoded.len() > 8 * 1_024)
+                    || contains_secret_key(value)
+            })
+        {
+            Err(ProviderExecutionLogError::Invalid)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn contains_secret_key(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            let normalized: String = key
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .flat_map(char::to_lowercase)
+                .collect();
+            matches!(
+                normalized.as_str(),
+                "cookie"
+                    | "authorization"
+                    | "password"
+                    | "accesstoken"
+                    | "refreshtoken"
+                    | "sessionsecret"
+                    | "clientsecret"
+            ) || contains_secret_key(value)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(contains_secret_key),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ProviderExecutionLogError {
+    #[error("Provider execution log is oversized or not sanitized")]
+    Invalid,
+}
+
+#[cfg(test)]
+mod execution_log_tests {
+    use super::*;
+
+    fn valid_log() -> ProviderExecutionLog {
+        ProviderExecutionLog {
+            level: LogLevel::Info,
+            stage: "resource_verify".to_owned(),
+            message: "remote completion verified".to_owned(),
+            provider_trace_id: Some("trace-safe".to_owned()),
+            metadata_sanitized: Some(serde_json::json!({"verified": true})),
+        }
+    }
+
+    #[test]
+    fn provider_execution_log_is_bounded_and_rejects_secret_keys() {
+        assert!(valid_log().validate().is_ok());
+
+        let mut secret = valid_log();
+        secret.metadata_sanitized = Some(serde_json::json!({
+            "nested": {"access_token": "must-not-enter-log-stream"}
+        }));
+        assert_eq!(secret.validate(), Err(ProviderExecutionLogError::Invalid));
+
+        let mut multiline = valid_log();
+        multiline.message = "forged\nlog line".to_owned();
+        assert_eq!(
+            multiline.validate(),
+            Err(ProviderExecutionLogError::Invalid)
+        );
+
+        let mut oversized = valid_log();
+        oversized.message = "x".repeat(2_049);
+        assert_eq!(
+            oversized.validate(),
+            Err(ProviderExecutionLogError::Invalid)
+        );
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

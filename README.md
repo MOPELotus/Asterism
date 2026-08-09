@@ -192,6 +192,8 @@ Provider Account 的 owner 始终由认证身份决定，CLI 和 API 都不接�
 
 Task 仍只能由 Provider 扫描链路写入；读取和执行则统一通过 owner-scoped Core Action。远端账户完成认证且对应 Provider 已注册 inventory capability 后，可运行 `provider-account scan <account-id>`；`task list` 支持 `--account`、`--limit` 和 `--offset`。`task execute <task-id> --idempotency-key <key>` 会原子创建并调度 Execution；调用方重试同一语义请求时必须复用该 key，Core 会返回原 Execution，跨任务复用则拒绝。`execution list` 按创建时间稳定分页列出同一 owner 的 Execution，并可用 `--task` 缩小到单个 Task；`execution get <execution-id>` 返回当前结构化进度和按尝试序号排列的 Attempt 历史，`execution logs` 按稳定时间顺序分页读取脱敏日志。`GET /api/v1/executions/{execution_id}/stream` 提供 `snapshot` 起始帧以及该 Execution 的实时状态、进度和结构化日志事件；它不提供持久事件重放，收到 `resync` 或重新连接时应重新读取 detail，并按需读取 logs。不存在或属于其他 owner 的 ID 均不会泄露。正式测评默认在创建 Scheduler Job 前拦截。返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。
 
+Provider 执行期间只能通过 Core 注入的 `ExecutionEventSink` 上报进度或诊断日志，不能直接写数据库或实时连接。诊断日志由 Core 生成时间和标准阶段，并再次校验当前 Attempt、Execution lease、单行文本、Provider trace、8 KiB 脱敏 metadata 与敏感字段名；每个 Attempt 最多接受 1000 条 Provider 日志。日志历史行和 `ExecutionLogged` Outbox 事件在同一事务提交，Provider payload、Cookie、Token 和 Password 不属于该接口的合法输入。
+
 周期扫描通过 `provider-account schedule get <account-id>` 和 `provider-account schedule set <account-id> --interval-seconds <seconds>` 管理；添加 `--disabled` 可保留配置但停止物化任务。接口同时返回用户期望间隔、Provider 最小间隔和 Core 实际采用的间隔，Provider 自身不创建独立 cron 或后台循环。
 
 也可以直接访问：

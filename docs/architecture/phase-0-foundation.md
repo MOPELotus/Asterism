@@ -1345,3 +1345,25 @@ unbounded log dump; reconnect and lag recovery continue through the paginated
 log API. Provider-authored intermediate diagnostic logs need an explicit
 validated sink before they can use this path; this slice streams only logs
 already owned and sanitized by Core lifecycle persistence.
+
+## Ninety-third Phase 0 slice
+
+The task-execution Provider contract now receives one Core-owned
+`ExecutionEventSink` for both normalized progress and intermediate structured
+logs. Provider logs carry a Core log level, Provider-local stage label, bounded
+single-line message, optional trace ID and optional sanitized metadata. The
+contract rejects control-bearing or oversized text, metadata above eight KiB,
+and recursively normalized credential-shaped keys before Engine stage mapping.
+The SQLite repository repeats these checks as the final persistence boundary.
+
+Appending a Provider log requires the current worker's live Execution lease, a
+matching unfinished Attempt whose Execution is still Running, and fewer than
+1000 existing log rows for that Attempt. Core supplies the timestamp and maps
+the Provider stage to `ExecutionStage`; the history row and `ExecutionLogged`
+outbox envelope commit together in one immediate transaction. Sink persistence
+failure propagates through the Provider call instead of silently presenting an
+unrecorded diagnostic as delivered. The Chaoxing Document/Read implementation
+now reports bounded submit, verify, verified and already-completed lifecycle
+messages through this sink without exposing route facts, completion tokens or
+raw responses. This is fixture-backed observability and does not change the
+Provider's Development verification status.

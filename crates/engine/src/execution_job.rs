@@ -12,18 +12,18 @@ use asterism_domain::{
     RemoteState, Task, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
-    ExecutionRequest as ProviderExecutionRequest, ProgressSink, ProviderContext, ProviderError,
-    ProviderErrorKind, ProviderProgress, ProviderRegistry, TaskExecutionCapability,
-    TaskProgressCapability,
+    ExecutionEventSink, ExecutionRequest as ProviderExecutionRequest, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderExecutionLog, ProviderProgress, ProviderRegistry,
+    TaskExecutionCapability, TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
 };
 use asterism_storage::{
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionLeaseRepository,
-    ExecutionProgressUpdate, ExecutionRecoveryFinishRequest, ExecutionRepository,
-    LeaseAcquireOutcome, ProviderAccountRuntimeRepository, SchedulerRepository, StorageError,
-    TaskRuntimeRepository,
+    ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionRecoveryFinishRequest,
+    ExecutionRepository, LeaseAcquireOutcome, ProviderAccountRuntimeRepository,
+    SchedulerRepository, StorageError, TaskRuntimeRepository,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -651,9 +651,10 @@ where
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
         let now = attempt.started_at;
         let claim_lost = Arc::new(AtomicBool::new(false));
-        let sink = PersistedProgressSink {
+        let sink = PersistedExecutionEventSink {
             executions: &self.executions,
             execution_id: attempt.execution_id,
+            attempt_id: attempt.id,
             worker_id: claimed_worker(job)?,
             correlation_id,
             claim_lost: Arc::clone(&claim_lost),
@@ -868,16 +869,17 @@ struct PreparedFailure {
     disposition: FailureDisposition,
 }
 
-struct PersistedProgressSink<'a, E> {
+struct PersistedExecutionEventSink<'a, E> {
     executions: &'a E,
     execution_id: ExecutionId,
+    attempt_id: asterism_domain::ExecutionAttemptId,
     worker_id: &'a str,
     correlation_id: &'a str,
     claim_lost: Arc<AtomicBool>,
 }
 
 #[async_trait]
-impl<E: ExecutionRepository> ProgressSink for PersistedProgressSink<'_, E> {
+impl<E: ExecutionRepository> ExecutionEventSink for PersistedExecutionEventSink<'_, E> {
     async fn report(&self, update: ProviderProgress) -> Result<(), ProviderError> {
         let progress = ExecutionProgress {
             execution_id: self.execution_id,
@@ -907,11 +909,48 @@ impl<E: ExecutionRepository> ProgressSink for PersistedProgressSink<'_, E> {
                 )
             })
     }
+
+    async fn log(&self, event: ProviderExecutionLog) -> Result<(), ProviderError> {
+        event.validate().map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Provider execution log was rejected by Core",
+            )
+        })?;
+        let stage = map_provider_stage(&event.stage);
+        self.executions
+            .append_log(ExecutionLogAppendRequest {
+                execution_id: self.execution_id,
+                attempt_id: self.attempt_id,
+                worker_id: self.worker_id,
+                at: Utc::now(),
+                level: event.level,
+                stage,
+                message: &event.message,
+                provider_trace_id: event.provider_trace_id.as_deref(),
+                metadata_sanitized: event.metadata_sanitized.as_ref(),
+                correlation_id: self.correlation_id,
+            })
+            .await
+            .map_err(|error| {
+                if matches!(error, StorageError::ExecutionClaimLost) {
+                    self.claim_lost.store(true, Ordering::Release);
+                }
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "Core could not persist Provider execution log",
+                )
+            })
+    }
 }
 
 fn map_provider_stage(stage: &str) -> ExecutionStage {
     let stage = stage.to_ascii_lowercase();
-    if stage.contains("verify") {
+    if stage.contains("complete") {
+        ExecutionStage::Completed
+    } else if stage.contains("final") {
+        ExecutionStage::Finalizing
+    } else if stage.contains("verify") {
         ExecutionStage::Verifying
     } else if stage.contains("submit") {
         ExecutionStage::Submitting
@@ -1199,7 +1238,7 @@ mod tests {
             &self,
             _context: &ProviderContext,
             request: &ProviderExecutionRequest,
-            progress: &(dyn ProgressSink + Send + Sync),
+            events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<ExecutionOutcome> {
             *self.calls.lock().unwrap() += 1;
             assert_eq!(
@@ -1208,13 +1247,22 @@ mod tests {
             );
             match self.behavior {
                 ProviderBehavior::Success => {
-                    progress
+                    events
                         .report(ProviderProgress {
                             percent: Some(50),
                             stage: "resource_execute".to_owned(),
                             status_text: Some("safe progress".to_owned()),
                             completed_items: Some(1),
                             total_items: Some(2),
+                        })
+                        .await?;
+                    events
+                        .log(ProviderExecutionLog {
+                            level: asterism_domain::LogLevel::Info,
+                            stage: "resource_verify".to_owned(),
+                            message: "safe provider diagnostic".to_owned(),
+                            provider_trace_id: Some("trace-safe".to_owned()),
+                            metadata_sanitized: Some(serde_json::json!({"verified": true})),
                         })
                         .await?;
                     Ok(ExecutionOutcome {
@@ -1280,6 +1328,30 @@ mod tests {
         assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
         let state = fixture.persisted_state().await;
         assert_eq!(state, ("succeeded".to_owned(), "succeeded".to_owned(), 100));
+        let provider_log: (String, String, String, String) = sqlx::query_as(
+            "SELECT level, stage, message, metadata_sanitized_json FROM execution_logs \
+             WHERE message = 'safe provider diagnostic'",
+        )
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            provider_log,
+            (
+                "info".to_owned(),
+                "verifying".to_owned(),
+                "safe provider diagnostic".to_owned(),
+                r#"{"verified":true}"#.to_owned(),
+            )
+        );
+        let live_log: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM event_outbox WHERE event_type = 'execution_logged' \
+             AND payload_json LIKE '%safe provider diagnostic%'",
+        )
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(live_log, 1);
     }
 
     #[tokio::test]

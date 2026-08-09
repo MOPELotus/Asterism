@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use asterism_domain::{RemoteState, TaskCapability};
+use asterism_domain::{LogLevel, RemoteState, TaskCapability};
 use asterism_provider_api::{
-    CourseInventoryCapability, ExecutionOutcome, ExecutionRequest, ProgressSink, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderProgress,
-    ProviderResult, RemoteCourse, RemoteProgress, TaskExecutionCapability, TaskProgressCapability,
+    CourseInventoryCapability, ExecutionEventSink, ExecutionOutcome, ExecutionRequest,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog, ProviderIdentity,
+    ProviderMetadata, ProviderProgress, ProviderResult, RemoteCourse, RemoteProgress,
+    TaskExecutionCapability, TaskProgressCapability,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -175,7 +176,7 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
         &self,
         context: &ProviderContext,
         request: &ExecutionRequest,
-        progress: &(dyn ProgressSink + Send + Sync),
+        events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome> {
         validate_context(context, &self.metadata)?;
         if request.requested_capabilities != [TaskCapability::ResourceExecution] {
@@ -194,10 +195,17 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
             .fetch_target(context, route, &resource_request, &request.remote_task_id)
             .await?;
         if target.remote_state() == RemoteState::Completed {
+            events
+                .log(execution_log(
+                    "resource_finalize",
+                    "资源已在远端完成，跳过重复提交",
+                    None,
+                ))
+                .await?;
             return Ok(completed_outcome(target.kind(), true));
         }
 
-        progress
+        events
             .report(ProviderProgress {
                 percent: Some(0),
                 stage: "resource_execute".to_owned(),
@@ -206,10 +214,17 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
                 total_items: Some(1),
             })
             .await?;
+        events
+            .log(execution_log(
+                "resource_execute",
+                "开始提交资源完成请求",
+                None,
+            ))
+            .await?;
         self.immediate
             .complete_immediate_resource(context, route, resource_request.knowledge_id(), &target)
             .await?;
-        progress
+        events
             .report(ProviderProgress {
                 percent: Some(90),
                 stage: "resource_verify".to_owned(),
@@ -217,6 +232,13 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
                 completed_items: Some(0),
                 total_items: Some(1),
             })
+            .await?;
+        events
+            .log(execution_log(
+                "resource_verify",
+                "资源完成请求已返回，开始复核远端状态",
+                None,
+            ))
             .await?;
         let verified = self
             .fetch_target(context, route, &resource_request, &request.remote_task_id)
@@ -227,7 +249,7 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
                 "Chaoxing resource did not become completed after execution",
             ));
         }
-        progress
+        events
             .report(ProviderProgress {
                 percent: Some(100),
                 stage: "resource_verified".to_owned(),
@@ -236,7 +258,34 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
                 total_items: Some(1),
             })
             .await?;
+        events
+            .log(execution_log(
+                "resource_verified",
+                "远端资源完成状态已复核",
+                Some(serde_json::json!({
+                    "resource_kind": match target.kind() {
+                        ChaoxingImmediateResourceKind::Document => "document",
+                        ChaoxingImmediateResourceKind::Read => "read",
+                    },
+                    "verified": true,
+                })),
+            ))
+            .await?;
         Ok(completed_outcome(target.kind(), false))
+    }
+}
+
+fn execution_log(
+    stage: &str,
+    message: &str,
+    metadata_sanitized: Option<serde_json::Value>,
+) -> ProviderExecutionLog {
+    ProviderExecutionLog {
+        level: LogLevel::Info,
+        stage: stage.to_owned(),
+        message: message.to_owned(),
+        provider_trace_id: None,
+        metadata_sanitized,
     }
 }
 
@@ -536,12 +585,21 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct RecordingProgress(AtomicUsize);
+    struct RecordingEvents {
+        progress: AtomicUsize,
+        logs: AtomicUsize,
+    }
 
     #[async_trait]
-    impl ProgressSink for RecordingProgress {
+    impl ExecutionEventSink for RecordingEvents {
         async fn report(&self, _update: ProviderProgress) -> ProviderResult<()> {
-            self.0.fetch_add(1, Ordering::Relaxed);
+            self.progress.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn log(&self, event: ProviderExecutionLog) -> ProviderResult<()> {
+            event.validate().unwrap();
+            self.logs.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
     }
@@ -552,12 +610,12 @@ mod tests {
         let execution =
             ChaoxingResourceExecution::try_new(fixture.clone(), fixture.clone(), fixture.clone())
                 .unwrap();
-        let progress = RecordingProgress::default();
+        let events = RecordingEvents::default();
         let outcome = execution
             .execute(
                 &context(),
                 &execution_request("resource:100:200:4001:job-read"),
-                &progress,
+                &events,
             )
             .await
             .unwrap();
@@ -567,7 +625,8 @@ mod tests {
         assert_eq!(outcome.result_sanitized["resource_kind"], "read");
         assert_eq!(fixture.resource_calls.load(Ordering::Relaxed), 2);
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(progress.0.load(Ordering::Relaxed), 3);
+        assert_eq!(events.progress.load(Ordering::Relaxed), 3);
+        assert_eq!(events.logs.load(Ordering::Relaxed), 3);
     }
 
     #[tokio::test]
@@ -600,23 +659,24 @@ mod tests {
         let execution =
             ChaoxingResourceExecution::try_new(fixture.clone(), fixture.clone(), fixture.clone())
                 .unwrap();
-        let progress = RecordingProgress::default();
+        let events = RecordingEvents::default();
         let completed = execution
             .execute(
                 &context(),
                 &execution_request("resource:100:200:4001:job-document"),
-                &progress,
+                &events,
             )
             .await
             .unwrap();
         assert_eq!(completed.result_sanitized["already_completed"], true);
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(events.logs.load(Ordering::Relaxed), 1);
 
         let error = execution
             .execute(
                 &context(),
                 &execution_request("resource:100:200:4001:job-video"),
-                &progress,
+                &events,
             )
             .await
             .unwrap_err();

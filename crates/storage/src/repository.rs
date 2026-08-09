@@ -3,9 +3,10 @@ use asterism_domain::{
     AttemptResult, AuditActor, AuthBootstrapClientEvent, AuthBootstrapSession,
     AuthBootstrapSessionId, AuthSession, AuthSessionId, CreditAccount, CreditReservation,
     CreditReservationId, CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId,
-    ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionState,
-    OrchestrationState, ProviderAccount, ProviderAccountId, ProviderErrorClass, ScheduleId,
-    ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+    ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
+    ExecutionState, LogLevel, OrchestrationState, ProviderAccount, ProviderAccountId,
+    ProviderErrorClass, ScheduleId, ServiceToken, ServiceTokenId, Task, TaskId, Timestamp, User,
+    UserId, WebSession, WebSessionId,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -347,6 +348,20 @@ pub struct ExecutionProgressUpdate<'a> {
 }
 
 #[derive(Clone, Debug)]
+pub struct ExecutionLogAppendRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub worker_id: &'a str,
+    pub at: Timestamp,
+    pub level: LogLevel,
+    pub stage: ExecutionStage,
+    pub message: &'a str,
+    pub provider_trace_id: Option<&'a str>,
+    pub metadata_sanitized: Option<&'a serde_json::Value>,
+    pub correlation_id: &'a str,
+}
+
+#[derive(Clone, Debug)]
 pub struct ExecutionAttemptFinishRequest<'a> {
     pub execution_id: ExecutionId,
     pub attempt_id: ExecutionAttemptId,
@@ -406,6 +421,8 @@ pub trait ExecutionRepository: Send + Sync {
         &self,
         request: ExecutionProgressUpdate<'_>,
     ) -> Result<bool, StorageError>;
+
+    async fn append_log(&self, request: ExecutionLogAppendRequest<'_>) -> Result<(), StorageError>;
 
     async fn finish_attempt(
         &self,

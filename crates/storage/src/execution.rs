@@ -14,9 +14,10 @@ use sqlx::Row;
 
 use crate::outbox::enqueue_in_transaction;
 use crate::{
-    Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionProgressUpdate,
-    ExecutionQueryRepository, ExecutionRecoveryFinishRequest, ExecutionRepository,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, StorageError,
+    Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
+    ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionQueryRepository,
+    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionScheduleOutcome,
+    ExecutionScheduleRequest, StorageError,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage};
 
@@ -25,6 +26,8 @@ const MAX_EXECUTION_PAGE_SIZE: u32 = 200;
 const MAX_EXECUTION_OFFSET: u64 = 1_000_000;
 const MAX_EXECUTION_LOG_PAGE_SIZE: u32 = 200;
 const MAX_EXECUTION_LOG_OFFSET: u64 = 1_000_000;
+const MAX_PROVIDER_LOGS_PER_ATTEMPT: i64 = 1_000;
+const MAX_EXECUTION_LOG_METADATA_BYTES: usize = 8 * 1_024;
 
 #[derive(Clone, Debug)]
 pub struct SqliteExecutionRepository {
@@ -227,6 +230,60 @@ impl ExecutionRepository for SqliteExecutionRepository {
         }
         transaction.commit().await?;
         Ok(changed)
+    }
+
+    async fn append_log(&self, request: ExecutionLogAppendRequest<'_>) -> Result<(), StorageError> {
+        validate_log_append_request(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_execution_lease(
+            &mut transaction,
+            request.execution_id,
+            request.worker_id,
+            request.at,
+        )
+        .await?;
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM execution_attempts AS attempt \
+             INNER JOIN executions AS execution ON execution.id = attempt.execution_id \
+             WHERE attempt.id = ? AND attempt.execution_id = ? \
+               AND attempt.finished_at IS NULL AND attempt.started_at <= ? \
+               AND execution.state = 'running'",
+        )
+        .bind(request.attempt_id.to_string())
+        .bind(request.execution_id.to_string())
+        .bind(encode_timestamp(request.at))
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active != 1 {
+            return Err(StorageError::ExecutionAttemptNotActive);
+        }
+        let log_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM execution_logs WHERE attempt_id = ?")
+                .bind(request.attempt_id.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if log_count >= MAX_PROVIDER_LOGS_PER_ATTEMPT {
+            return Err(StorageError::InvalidData(
+                "Provider execution log count exceeds the supported bound".to_owned(),
+            ));
+        }
+        insert_execution_log(
+            &mut transaction,
+            ExecutionLogInsert {
+                execution_id: request.execution_id,
+                attempt_id: Some(request.attempt_id),
+                at: request.at,
+                level: request.level,
+                stage: request.stage,
+                message: request.message,
+                provider_trace_id: request.provider_trace_id,
+                metadata_sanitized: request.metadata_sanitized,
+            },
+            request.correlation_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     async fn finish_attempt(
@@ -629,6 +686,7 @@ async fn record_attempt_started(
             stage: ExecutionStage::Preparing,
             message: "execution attempt started",
             provider_trace_id: None,
+            metadata_sanitized: None,
         },
         request.correlation_id,
     )
@@ -789,6 +847,7 @@ async fn record_attempt_finished(
             stage: request.progress.stage,
             message: log_message,
             provider_trace_id: request.provider_trace_id,
+            metadata_sanitized: None,
         },
         request.correlation_id,
     )
@@ -1147,6 +1206,7 @@ struct ExecutionLogInsert<'a> {
     stage: ExecutionStage,
     message: &'a str,
     provider_trace_id: Option<&'a str>,
+    metadata_sanitized: Option<&'a serde_json::Value>,
 }
 
 async fn insert_execution_log(
@@ -1162,12 +1222,12 @@ async fn insert_execution_log(
         stage: record.stage,
         message: record.message.to_owned(),
         provider_trace_id: record.provider_trace_id.map(str::to_owned),
-        metadata_sanitized: None,
+        metadata_sanitized: record.metadata_sanitized.cloned(),
     };
     sqlx::query(
         "INSERT INTO execution_logs \
-         (id, execution_id, attempt_id, timestamp, level, stage, message, provider_trace_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, execution_id, attempt_id, timestamp, level, stage, message, provider_trace_id, \
+          metadata_sanitized_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(uuid::Uuid::now_v7().to_string())
     .bind(record.execution_id.to_string())
@@ -1177,6 +1237,12 @@ async fn insert_execution_log(
     .bind(enum_name(record.stage)?)
     .bind(record.message)
     .bind(record.provider_trace_id)
+    .bind(
+        record
+            .metadata_sanitized
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
     .execute(&mut **transaction)
     .await?;
     enqueue_in_transaction(
@@ -1188,6 +1254,61 @@ async fn insert_execution_log(
         ),
     )
     .await
+}
+
+fn validate_log_append_request(
+    request: &ExecutionLogAppendRequest<'_>,
+) -> Result<(), StorageError> {
+    validate_worker_token(request.worker_id, request.correlation_id)?;
+    if !valid_log_text(request.message, 2_048)
+        || request
+            .provider_trace_id
+            .is_some_and(|value| !valid_log_text(value, 256))
+        || request.metadata_sanitized.is_some_and(|value| {
+            serde_json::to_vec(value).map_or(true, |encoded| {
+                encoded.len() > MAX_EXECUTION_LOG_METADATA_BYTES
+            }) || contains_log_secret_key(value)
+        })
+    {
+        return Err(StorageError::InvalidData(
+            "Provider execution log is oversized or not sanitized".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_log_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+fn contains_log_secret_key(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            let normalized: String = key
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .flat_map(char::to_lowercase)
+                .collect();
+            matches!(
+                normalized.as_str(),
+                "cookie"
+                    | "authorization"
+                    | "password"
+                    | "accesstoken"
+                    | "refreshtoken"
+                    | "sessionsecret"
+                    | "clientsecret"
+            ) || contains_log_secret_key(value)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(contains_log_secret_key),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
 }
 
 async fn enqueue_state_event(
@@ -1554,6 +1675,32 @@ mod tests {
                 .unwrap(),
             attempt
         );
+
+        let secret_metadata = serde_json::json!({"password": "must-not-be-persisted"});
+        assert!(matches!(
+            repository
+                .append_log(ExecutionLogAppendRequest {
+                    execution_id: execution.id,
+                    attempt_id: attempt.id,
+                    worker_id: "worker-a",
+                    at: started_at,
+                    level: LogLevel::Info,
+                    stage: ExecutionStage::Executing,
+                    message: "provider diagnostic",
+                    provider_trace_id: None,
+                    metadata_sanitized: Some(&secret_metadata),
+                    correlation_id: "execution-worker-flow",
+                })
+                .await,
+            Err(StorageError::InvalidData(_))
+        ));
+        let log_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM execution_logs WHERE execution_id = ?")
+                .bind(execution.id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(log_count, 1);
 
         assert_progress_claim_and_idempotency(&repository, execution.id, now).await;
         finish_successfully(&repository, &database, &execution, job_id, &attempt, now).await;
