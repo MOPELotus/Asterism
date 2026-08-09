@@ -511,12 +511,9 @@ fn validate_login_redirect(mut value: String) -> ProviderResult<WellearnLoginRed
     if value.starts_with('/') && !value.starts_with("//") {
         value.insert_str(0, "https://sso.sflep.com/idsvr");
     }
-    let url = match Url::parse(&value) {
-        Ok(url) => url,
-        Err(_) => {
-            value.zeroize();
-            return Err(invalid_login_response());
-        }
+    let Ok(url) = Url::parse(&value) else {
+        value.zeroize();
+        return Err(invalid_login_response());
     };
     let valid = url.scheme() == "https"
         && url.host_str() == Some("sso.sflep.com")
