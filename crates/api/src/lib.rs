@@ -253,6 +253,10 @@ fn task_routes() -> Router<ApiState> {
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
             post(task::resolve_provider_answer_candidates),
         )
+        .route(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
+            get(task::list_answer_candidates),
+        )
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
 }
 
@@ -800,6 +804,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates".to_owned(),
+            answer_candidates_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
@@ -1078,6 +1089,23 @@ fn provider_answer_candidates_path() -> Value {
     }})
 }
 
+fn answer_candidates_path() -> Value {
+    json!({"get": {
+        "operationId": "listAnswerCandidates",
+        "description": "Reads persisted multi-source AnswerCandidates for one owner-scoped Task/QuestionSnapshot binding without calling a Provider.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Persisted bounded AnswerCandidates ordered by Question and observation time"},
+            "400": {"description": "Invalid Task or Question snapshot ID"},
+            "404": {"description": "Task-bound owner-scoped Question snapshot not found"}
+        }
+    }})
+}
+
 fn auth_bootstrap_credential_schema() -> Value {
     json!({
         "type": "object",
@@ -1327,7 +1355,9 @@ mod tests {
     };
 
     use asterism_domain::{
-        AssessmentClass, AuthMethod, AuthState, RemoteState, SessionKind, SourceType,
+        AnswerCandidate, AnswerCandidateId, AnswerSource, AssessmentClass, AuthMethod, AuthState,
+        NormalizedAnswer, ProviderId, Question, QuestionId, QuestionKind, QuestionSnapshotId,
+        RemoteState, SessionKind, SourceType, TaskId,
     };
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, CourseInventoryCapability, CredentialValidation,
@@ -1338,7 +1368,10 @@ mod tests {
         TaskInventoryCapability, VerificationLevel,
     };
     use asterism_secrets::{CredentialBundle, SecretKey};
-    use asterism_storage::SecretKeyring;
+    use asterism_storage::{
+        AnswerCandidateRecord, AnswerCandidateRepository, QuestionSnapshot,
+        QuestionSnapshotRepository, SecretKeyring, SqliteQuestionSnapshotRepository,
+    };
     use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
@@ -3579,6 +3612,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persisted_answer_candidates_require_owner_task_and_snapshot_binding() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let task_id = TaskId::new();
+        let now = Utc::now();
+        let now_text = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+              assessment_class, title, remote_state, orchestration_state, discovered_at, \
+              updated_at, capabilities_json) \
+             VALUES (?, ?, 'answer-task', 'fingerprint-answer', 'work', 'routine', \
+                     'answer work', 'pending', 'ready', ?, ?, '[]')",
+        )
+        .bind(task_id.to_string())
+        .bind(account_id)
+        .bind(&now_text)
+        .bind(&now_text)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let question_id = QuestionId::new();
+        let snapshot = QuestionSnapshot {
+            id: QuestionSnapshotId::new(),
+            task_id,
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            provider_version: "0.1.0-test".to_owned(),
+            captured_at: now,
+            questions: vec![Question {
+                id: question_id,
+                task_id,
+                remote_question_id: Some("question-1".to_owned()),
+                kind: QuestionKind::TrueFalse,
+                stem: "A bounded fixture question".to_owned(),
+                options: Vec::new(),
+                attachments: Vec::new(),
+                metadata_sanitized: json!({}),
+                position: 1,
+            }],
+        };
+        let repository = SqliteQuestionSnapshotRepository::new(database);
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        let candidate_id = AnswerCandidateId::new();
+        repository
+            .save_answer_candidate_batch(&[AnswerCandidateRecord {
+                id: candidate_id,
+                question_snapshot_id: snapshot.id,
+                candidate: AnswerCandidate {
+                    question_id,
+                    source: AnswerSource::Manual,
+                    answer: NormalizedAnswer::Boolean(true),
+                    confidence: None,
+                    explanation: None,
+                    provenance_sanitized: json!({"input": "fixture"}),
+                },
+                created_at: now,
+            }])
+            .await
+            .unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}/answer-candidates",
+                    snapshot.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = response_json(response).await;
+        assert_eq!(body["question_snapshot_id"], snapshot.id.to_string());
+        assert_eq!(body["candidates"][0]["id"], candidate_id.to_string());
+        assert_eq!(body["candidates"][0]["candidate"]["source"], "manual");
+
+        let mismatched = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{}/question-snapshots/{}/answer-candidates",
+                    TaskId::new(),
+                    snapshot.id
+                ))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatched.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn task_provider_reads_reject_invalid_task_ids_before_provider_access() {
         let (app, _) = test_app(false, None).await;
         let bootstrap = bootstrap(&app).await;
@@ -4036,6 +4174,7 @@ mod tests {
             "/api/v1/tasks/{task_id}/progress",
             "/api/v1/tasks/{task_id}/questions",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
             "/api/v1/tasks/{task_id}/execute",
             "/api/v1/credits/account",
             "/api/v1/credits/transactions",
@@ -4067,6 +4206,11 @@ mod tests {
             document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates"]
                 ["post"]["operationId"],
             "resolveProviderAnswerCandidates"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates"]
+                ["get"]["operationId"],
+            "listAnswerCandidates"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/execute"]["post"]["operationId"],

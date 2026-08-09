@@ -230,6 +230,11 @@ enum TaskCommand {
         task_id: String,
         snapshot_id: String,
     },
+    /// Read persisted multi-source candidates for one Question snapshot.
+    AnswerCandidates {
+        task_id: String,
+        snapshot_id: String,
+    },
     /// Schedule one task through the shared idempotent Core Action.
     Execute {
         task_id: String,
@@ -747,6 +752,15 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
             );
             client.post_authorized_empty(&path, &token).await?
         }
+        TaskCommand::AnswerCandidates {
+            task_id,
+            snapshot_id,
+        } => {
+            let path = format!(
+                "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates"
+            );
+            client.get_authorized(&path, &token).await?
+        }
         TaskCommand::Execute {
             task_id,
             idempotency_key,
@@ -984,6 +998,27 @@ mod tests {
             arguments.command,
             Command::Task {
                 command: TaskCommand::ResolveAnswers {
+                    task_id,
+                    snapshot_id,
+                }
+            } if task_id == "task-id" && snapshot_id == "snapshot-id"
+        ));
+    }
+
+    #[test]
+    fn task_answer_candidates_read_requires_an_explicit_snapshot() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "answer-candidates",
+            "task-id",
+            "snapshot-id",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::AnswerCandidates {
                     task_id,
                     snapshot_id,
                 }

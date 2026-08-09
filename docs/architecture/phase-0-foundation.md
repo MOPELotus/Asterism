@@ -1918,3 +1918,17 @@ new evidence; it deliberately does not use the Task execution route, accept an
 answer payload, build a draft or grant any Submission capability. Providers
 without `AnswerResolve`, including Chaoxing at this checkpoint, fail before a
 Provider call.
+
+## One-hundred-and-twenty-seventh Phase 0 slice
+
+Persisted multi-source Candidates now have a separate owner-scoped HTTP/CLI
+read surface. It resolves the exact QuestionSnapshot through Task and
+ProviderAccount ownership, rechecks that the Task ID in the route matches the
+snapshot, and only then loads Candidates in deterministic Question-position
+and observation order. A foreign or mismatched snapshot is indistinguishable
+from a missing one.
+
+This GET performs no Provider call and remains distinct from Provider-native
+resolution. It returns the same stable Candidate record shape and `no-store`
+policy, providing an inspection boundary for later resolver/ranking work
+without selecting answers or creating a SubmissionDraft.

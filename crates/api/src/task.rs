@@ -13,9 +13,9 @@ use asterism_engine::{
 };
 use asterism_provider_api::{ProviderErrorKind, RemoteProgress, RemoteTaskDetail};
 use asterism_storage::{
-    SqliteExecutionRepository, SqliteProviderAccountRepository,
-    SqliteProviderRuntimeSettingsRepository, SqliteQuestionSnapshotRepository,
-    SqliteTaskQueryRepository, TaskQueryRepository,
+    AnswerCandidateRepository, QuestionSnapshotRepository, SqliteExecutionRepository,
+    SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
+    SqliteQuestionSnapshotRepository, SqliteTaskQueryRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -198,14 +198,7 @@ pub(super) async fn resolve_provider_answer_candidates(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let owner_id = auth.require_task_read()?;
-    let task_id = TaskId::from_str(&task_id)
-        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
-    let snapshot_id = QuestionSnapshotId::from_str(&snapshot_id).map_err(|_| {
-        ApiError::bad_request(
-            "invalid_question_snapshot_id",
-            "Question snapshot ID is invalid",
-        )
-    })?;
+    let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
     let correlation_id = required_header(&headers, "x-request-id", 128)?;
     let answers = SqliteQuestionSnapshotRepository::new(state.database.clone());
     let result = ProviderAnswerResolveService::new(
@@ -223,13 +216,50 @@ pub(super) async fn resolve_provider_answer_candidates(
     .await
     .map_err(map_provider_answer_resolve_error)?;
     Ok(crate::auth::no_store(
-        Json(ProviderAnswerCandidatesResponse {
+        Json(AnswerCandidatesResponse {
             task_id: result.task_id,
             question_snapshot_id: result.question_snapshot_id,
             provider_id: result.provider_id,
             provider_version: result.provider_version,
             candidates: result
                 .candidates
+                .into_iter()
+                .map(|record| AnswerCandidateResponse {
+                    id: record.id,
+                    candidate: record.candidate,
+                    created_at: record.created_at,
+                })
+                .collect(),
+        })
+        .into_response(),
+    ))
+}
+
+pub(super) async fn list_answer_candidates(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((task_id, snapshot_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
+    let answers = SqliteQuestionSnapshotRepository::new(state.database);
+    let snapshot = answers
+        .find_owned_question_snapshot(owner_id, snapshot_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|snapshot| snapshot.task_id == task_id)
+        .ok_or_else(|| ApiError::not_found("question_snapshot_not_found"))?;
+    let candidates = answers
+        .list_owned_answer_candidates(owner_id, snapshot_id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(crate::auth::no_store(
+        Json(AnswerCandidatesResponse {
+            task_id,
+            question_snapshot_id: snapshot.id,
+            provider_id: snapshot.provider_id,
+            provider_version: snapshot.provider_version,
+            candidates: candidates
                 .into_iter()
                 .map(|record| AnswerCandidateResponse {
                     id: record.id,
@@ -689,7 +719,7 @@ struct TaskQuestionsResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-struct ProviderAnswerCandidatesResponse {
+struct AnswerCandidatesResponse {
     task_id: TaskId,
     question_snapshot_id: QuestionSnapshotId,
     provider_id: ProviderId,
@@ -702,6 +732,21 @@ struct AnswerCandidateResponse {
     id: AnswerCandidateId,
     candidate: AnswerCandidate,
     created_at: Timestamp,
+}
+
+fn parse_task_question_snapshot_ids(
+    task_id: &str,
+    snapshot_id: &str,
+) -> Result<(TaskId, QuestionSnapshotId), ApiError> {
+    let task_id = TaskId::from_str(task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let snapshot_id = QuestionSnapshotId::from_str(snapshot_id).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_question_snapshot_id",
+            "Question snapshot ID is invalid",
+        )
+    })?;
+    Ok((task_id, snapshot_id))
 }
 
 fn parse_provider_account_id(value: &str) -> Result<ProviderAccountId, ApiError> {
