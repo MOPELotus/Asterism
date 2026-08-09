@@ -2089,3 +2089,22 @@ Creation persists one immutable candidate through the existing transactional
 repository. It does not call a Provider, select a winning answer, build a
 SubmissionDraft, create an Execution or submit anything remotely. HTTP and CLI
 transport remain a separate checkpoint.
+
+## One-hundred-and-thirty-sixth Phase 0 slice
+
+The existing owner-scoped AnswerCandidate collection now accepts POST for one
+Manual candidate while retaining GET for persisted multi-source evidence. The
+request contains only an explicit Question identity, a typed NormalizedAnswer
+and optional confidence/explanation. It cannot specify AnswerSource,
+provenance, Provider payload material or a remote endpoint.
+
+The HTTP handler uses Task Read authorization, parses every path and Question
+identity, applies the 0-10,000 confidence bound and delegates all ownership and
+snapshot binding to the Core Manual service. Success returns the immutable
+candidate with `201` and `no-store`; malformed JSON or candidate data is a
+stable bad request and hidden owner/binding mismatches remain not found.
+
+`asterismctl task add-manual-answer` maps the same complete identity chain and
+parses its `--answer` argument into the Domain NormalizedAnswer type before it
+can send a request. This surface appends evidence only: it performs no Provider
+call, candidate selection, draft build, Execution scheduling or remote submit.

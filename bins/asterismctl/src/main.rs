@@ -4,7 +4,7 @@ mod input;
 use std::collections::BTreeSet;
 
 use anyhow::Context;
-use asterism_domain::{AuthMethod, ServiceScope, SessionKind};
+use asterism_domain::{AuthMethod, NormalizedAnswer, ServiceScope, SessionKind};
 use asterism_secrets::{CredentialAcquisition, SecretPurpose};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use reqwest::StatusCode;
@@ -234,6 +234,20 @@ enum TaskCommand {
     AnswerCandidates {
         task_id: String,
         snapshot_id: String,
+    },
+    /// Persist one Core-attributed Manual candidate for a Question.
+    AddManualAnswer {
+        task_id: String,
+        snapshot_id: String,
+        question_id: String,
+        /// A typed `NormalizedAnswer` JSON value, for example {"type":"boolean","value":true}.
+        #[arg(long)]
+        answer: String,
+        /// Optional confidence from 0 to 10000 basis points.
+        #[arg(long)]
+        confidence_basis_points: Option<u16>,
+        #[arg(long)]
+        explanation: Option<String>,
     },
     /// Build one reviewable draft from exactly one persisted Candidate per Question.
     BuildSubmission {
@@ -785,6 +799,33 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
             );
             client.get_authorized(&path, &token).await?
         }
+        TaskCommand::AddManualAnswer {
+            task_id,
+            snapshot_id,
+            question_id,
+            answer,
+            confidence_basis_points,
+            explanation,
+        } => {
+            let answer = serde_json::from_str::<NormalizedAnswer>(&answer)
+                .context("manual answer must be a valid NormalizedAnswer JSON value")?;
+            let path = format!(
+                "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates"
+            );
+            client
+                .post_authorized(
+                    &path,
+                    &token,
+                    &json!({
+                        "question_id": question_id,
+                        "answer": answer,
+                        "confidence_basis_points": confidence_basis_points,
+                        "explanation": explanation
+                    }),
+                    StatusCode::CREATED,
+                )
+                .await?
+        }
         TaskCommand::BuildSubmission {
             task_id,
             snapshot_id,
@@ -1085,6 +1126,39 @@ mod tests {
                     snapshot_id,
                 }
             } if task_id == "task-id" && snapshot_id == "snapshot-id"
+        ));
+    }
+
+    #[test]
+    fn task_manual_answer_keeps_binding_and_typed_payload_explicit() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "add-manual-answer",
+            "task-id",
+            "snapshot-id",
+            "question-id",
+            "--answer",
+            r#"{"type":"boolean","value":true}"#,
+            "--confidence-basis-points",
+            "8500",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::AddManualAnswer {
+                    task_id,
+                    snapshot_id,
+                    question_id,
+                    answer,
+                    confidence_basis_points: Some(8500),
+                    explanation: None,
+                }
+            } if task_id == "task-id"
+                && snapshot_id == "snapshot-id"
+                && question_id == "question-id"
+                && answer == r#"{"type":"boolean","value":true}"#
         ));
     }
 

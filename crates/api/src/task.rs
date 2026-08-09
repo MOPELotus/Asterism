@@ -1,12 +1,14 @@
 use std::str::FromStr;
 
 use asterism_domain::{
-    AnswerCandidate, AnswerCandidateId, Execution, ProviderAccountId, ProviderId, Question,
-    QuestionSnapshotId, SubmissionDraftId, SubmissionResultId, Task, TaskId, Timestamp,
+    AnswerCandidate, AnswerCandidateId, AnswerConfidence, Execution, NormalizedAnswer,
+    ProviderAccountId, ProviderId, Question, QuestionId, QuestionSnapshotId, SubmissionDraftId,
+    SubmissionResultId, Task, TaskId, Timestamp,
 };
 use asterism_engine::{
-    BuildSubmissionDraftCommand, ExecuteTaskCommand, ExecutionRequestError,
-    ExecutionRequestService, FormalAssessmentPolicy, ProviderAnswerResolveError,
+    BuildSubmissionDraftCommand, CreateManualAnswerCandidateCommand, ExecuteTaskCommand,
+    ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
+    ManualAnswerCandidateError, ManualAnswerCandidateService, ProviderAnswerResolveError,
     ProviderAnswerResolveService, ProviderQuestionReadError, ProviderQuestionReadService,
     ProviderTaskDetailError, ProviderTaskDetailService, ProviderTaskProgressError,
     ProviderTaskProgressService, ReadTaskDetailCommand, ReadTaskProgressCommand,
@@ -22,7 +24,7 @@ use asterism_storage::{
 };
 use axum::{
     Extension, Json,
-    extract::{Path, Query, State, rejection::QueryRejection},
+    extract::{Path, Query, State, rejection::JsonRejection, rejection::QueryRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -272,6 +274,58 @@ pub(super) async fn list_answer_candidates(
                 .collect(),
         })
         .into_response(),
+    ))
+}
+
+pub(super) async fn create_manual_answer_candidate(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((task_id, snapshot_id)): Path<(String, String)>,
+    payload: Result<Json<CreateManualAnswerCandidateRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
+    let request = payload.map(|Json(request)| request).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_json",
+            "the request body must be valid JSON with the expected fields",
+        )
+    })?;
+    let question_id = QuestionId::from_str(&request.question_id)
+        .map_err(|_| ApiError::bad_request("invalid_question_id", "Question ID is invalid"))?;
+    let confidence = request
+        .confidence_basis_points
+        .map(AnswerConfidence::try_new)
+        .transpose()
+        .map_err(|_| {
+            ApiError::bad_request(
+                "invalid_answer_confidence",
+                "answer confidence must be between 0 and 10000 basis points",
+            )
+        })?;
+    let record =
+        ManualAnswerCandidateService::new(SqliteQuestionSnapshotRepository::new(state.database))
+            .create(CreateManualAnswerCandidateCommand {
+                owner_id,
+                task_id,
+                question_snapshot_id: snapshot_id,
+                question_id,
+                answer: request.answer,
+                confidence,
+                explanation: request.explanation,
+            })
+            .await
+            .map_err(map_manual_answer_candidate_error)?;
+    Ok(crate::auth::no_store(
+        (
+            StatusCode::CREATED,
+            Json(AnswerCandidateResponse {
+                id: record.id,
+                candidate: record.candidate,
+                created_at: record.created_at,
+            }),
+        )
+            .into_response(),
     ))
 }
 
@@ -770,6 +824,20 @@ fn map_provider_answer_resolve_error(error: ProviderAnswerResolveError) -> ApiEr
     }
 }
 
+fn map_manual_answer_candidate_error(error: ManualAnswerCandidateError) -> ApiError {
+    match error {
+        ManualAnswerCandidateError::QuestionSnapshotNotFound => {
+            ApiError::not_found("question_snapshot_not_found")
+        }
+        ManualAnswerCandidateError::QuestionNotFound => ApiError::not_found("question_not_found"),
+        ManualAnswerCandidateError::InvalidCandidate => ApiError::bad_request(
+            "invalid_manual_answer_candidate",
+            "the manual answer must be known, typed, bounded, and sanitized",
+        ),
+        ManualAnswerCandidateError::Storage(error) => ApiError::internal(error),
+    }
+}
+
 fn map_submission_draft_build_error(error: SubmissionDraftBuildError) -> ApiError {
     match error {
         SubmissionDraftBuildError::TaskNotFound => ApiError::not_found("task_not_found"),
@@ -916,6 +984,15 @@ struct AnswerCandidateResponse {
     id: AnswerCandidateId,
     candidate: AnswerCandidate,
     created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CreateManualAnswerCandidateRequest {
+    question_id: String,
+    answer: NormalizedAnswer,
+    confidence_basis_points: Option<u16>,
+    explanation: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

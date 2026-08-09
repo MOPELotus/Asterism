@@ -255,7 +255,7 @@ fn task_routes() -> Router<ApiState> {
         )
         .route(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
-            get(task::list_answer_candidates),
+            get(task::list_answer_candidates).post(task::create_manual_answer_candidate),
         )
         .route(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts",
@@ -862,6 +862,10 @@ async fn openapi() -> Json<Value> {
             "SubmitAuthBootstrapCredential".to_owned(),
             auth_bootstrap_credential_schema(),
         );
+    document["components"]["schemas"]
+        .as_object_mut()
+        .expect("static OpenAPI schemas object")
+        .insert("NormalizedAnswer".to_owned(), normalized_answer_schema());
     Json(document)
 }
 
@@ -1124,20 +1128,93 @@ fn provider_answer_candidates_path() -> Value {
 }
 
 fn answer_candidates_path() -> Value {
-    json!({"get": {
-        "operationId": "listAnswerCandidates",
-        "description": "Reads persisted multi-source AnswerCandidates for one owner-scoped Task/QuestionSnapshot binding without calling a Provider.",
-        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
-        "parameters": [
-            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-            {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
-        ],
-        "responses": {
-            "200": {"description": "Persisted bounded AnswerCandidates ordered by Question and observation time"},
-            "400": {"description": "Invalid Task or Question snapshot ID"},
-            "404": {"description": "Task-bound owner-scoped Question snapshot not found"}
+    json!({
+        "get": {
+            "operationId": "listAnswerCandidates",
+            "description": "Reads persisted multi-source AnswerCandidates for one owner-scoped Task/QuestionSnapshot binding without calling a Provider.",
+            "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+            "parameters": [
+                {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+            ],
+            "responses": {
+                "200": {"description": "Persisted bounded AnswerCandidates ordered by Question and observation time"},
+                "400": {"description": "Invalid Task or Question snapshot ID"},
+                "404": {"description": "Task-bound owner-scoped Question snapshot not found"}
+            }
+        },
+        "post": {
+            "operationId": "createManualAnswerCandidate",
+            "description": "Creates one Core-attributed Manual AnswerCandidate for an explicit owner-scoped Task, QuestionSnapshot and Question without calling a Provider.",
+            "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+            "parameters": [
+                {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+            ],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                "type": "object",
+                "required": ["question_id", "answer"],
+                "properties": {
+                    "question_id": {"type": "string", "format": "uuid"},
+                    "answer": {"$ref": "#/components/schemas/NormalizedAnswer"},
+                    "confidence_basis_points": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000},
+                    "explanation": {"type": ["string", "null"], "minLength": 1, "maxLength": 65536}
+                },
+                "additionalProperties": false
+            }}}},
+            "responses": {
+                "201": {"description": "One immutable Core-attributed Manual AnswerCandidate"},
+                "400": {"description": "Invalid JSON, identity, confidence, or normalized answer"},
+                "404": {"description": "Task-bound owner-scoped Question snapshot or Question not found"}
+            }
         }
-    }})
+    })
+}
+
+fn normalized_answer_schema() -> Value {
+    json!({"oneOf": [
+        {
+            "type": "object",
+            "required": ["type", "value"],
+            "properties": {
+                "type": {"type": "string", "enum": ["selections", "texts", "ordering"]},
+                "value": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"type": "string", "minLength": 1}}
+            },
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "required": ["type", "value"],
+            "properties": {
+                "type": {"const": "boolean"},
+                "value": {"type": "boolean"}
+            },
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "required": ["type", "value"],
+            "properties": {
+                "type": {"const": "pairs"},
+                "value": {"type": "array", "minItems": 1, "maxItems": 256, "items": {
+                    "type": "object",
+                    "required": ["left", "right"],
+                    "properties": {"left": {"type": "string", "minLength": 1}, "right": {"type": "string", "minLength": 1}},
+                    "additionalProperties": false
+                }}
+            },
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "required": ["type", "value"],
+            "properties": {
+                "type": {"const": "composite"},
+                "value": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/components/schemas/NormalizedAnswer"}}
+            },
+            "additionalProperties": false
+        }
+    ]})
 }
 
 fn submission_drafts_path() -> Value {
@@ -3882,6 +3959,38 @@ mod tests {
         };
         repository.save_submission_result(&result).await.unwrap();
 
+        let manual_response = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}/answer-candidates",
+                    snapshot.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "question_id": question_id,
+                        "answer": {"type": "boolean", "value": false},
+                        "confidence_basis_points": 7500,
+                        "explanation": "Reviewed manually"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(manual_response.status(), StatusCode::CREATED);
+        assert_eq!(manual_response.headers()[header::CACHE_CONTROL], "no-store");
+        let manual_body = response_json(manual_response).await;
+        assert_eq!(manual_body["candidate"]["source"], "manual");
+        assert_eq!(
+            manual_body["candidate"]["provenance_sanitized"],
+            json!({"origin": "manual_input"})
+        );
+        assert_eq!(manual_body["candidate"]["confidence"], 7500);
+
         let response = app
             .clone()
             .oneshot(
@@ -3901,6 +4010,7 @@ mod tests {
         assert_eq!(body["question_snapshot_id"], snapshot.id.to_string());
         assert_eq!(body["candidates"][0]["id"], candidate_id.to_string());
         assert_eq!(body["candidates"][0]["candidate"]["source"], "manual");
+        assert_eq!(body["candidates"].as_array().unwrap().len(), 2);
 
         let draft_response = app
             .clone()
@@ -4492,6 +4602,11 @@ mod tests {
             document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates"]
                 ["get"]["operationId"],
             "listAnswerCandidates"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates"]
+                ["post"]["operationId"],
+            "createManualAnswerCandidate"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts"]
