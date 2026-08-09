@@ -2238,3 +2238,22 @@ import after its candidate is stored creates no duplicate. This remains an
 evidence-only operation: it calls no Provider, does not select an answer, build
 a draft, create an Execution or submit remotely. HTTP and CLI exposure remain a
 separate checkpoint.
+
+## One-hundred-and-forty-fourth Phase 0 slice
+
+The LocalCache importer now has an owner-scoped POST surface at the explicit
+Task/QuestionSnapshot path and a matching `asterismctl task
+import-local-answers <task-id> <snapshot-id>` command. The request has no body,
+source selector, fingerprint, answer or provenance input; those facts remain
+derived by Storage and Core.
+
+The response is `no-store` and returns only candidates newly imported by that
+call. A repeat after successful persistence returns an empty candidate set with
+200, while a hidden owner or mismatched Task path remains indistinguishable from
+a missing snapshot. OpenAPI exposes this separately from Manual creation,
+Provider-native resolution and the read-only candidate collection.
+
+This transport performs no Provider call and does not chain into
+AnswerResolution, SubmissionDraft construction, Execution scheduling or remote
+submission. The caller must explicitly inspect the combined candidate set and
+resolution plan after import.

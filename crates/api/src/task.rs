@@ -9,6 +9,7 @@ use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
     ConservativeAnswerResolverService, CreateManualAnswerCandidateCommand, ExecuteTaskCommand,
     ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
+    ImportLocalAnswerCandidatesCommand, LocalAnswerCacheError, LocalAnswerCacheService,
     ManualAnswerCandidateError, ManualAnswerCandidateService, ProviderAnswerResolveError,
     ProviderAnswerResolveService, ProviderQuestionReadError, ProviderQuestionReadService,
     ProviderTaskDetailError, ProviderTaskDetailService, ProviderTaskProgressError,
@@ -327,6 +328,39 @@ pub(super) async fn create_manual_answer_candidate(
             }),
         )
             .into_response(),
+    ))
+}
+
+pub(super) async fn import_local_answer_candidates(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((task_id, snapshot_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
+    let candidates =
+        LocalAnswerCacheService::new(SqliteQuestionSnapshotRepository::new(state.database))
+            .import(ImportLocalAnswerCandidatesCommand {
+                owner_id,
+                task_id,
+                question_snapshot_id: snapshot_id,
+            })
+            .await
+            .map_err(map_local_answer_cache_error)?;
+    Ok(crate::auth::no_store(
+        Json(LocalAnswerCacheImportResponse {
+            task_id,
+            question_snapshot_id: snapshot_id,
+            candidates: candidates
+                .into_iter()
+                .map(|record| AnswerCandidateResponse {
+                    id: record.id,
+                    candidate: record.candidate,
+                    created_at: record.created_at,
+                })
+                .collect(),
+        })
+        .into_response(),
     ))
 }
 
@@ -859,6 +893,19 @@ fn map_manual_answer_candidate_error(error: ManualAnswerCandidateError) -> ApiEr
     }
 }
 
+fn map_local_answer_cache_error(error: LocalAnswerCacheError) -> ApiError {
+    match error {
+        LocalAnswerCacheError::QuestionSnapshotNotFound => {
+            ApiError::not_found("question_snapshot_not_found")
+        }
+        LocalAnswerCacheError::EvidenceInvalid => {
+            tracing::warn!(%error, "persisted local answer cache evidence is inconsistent");
+            ApiError::internal(error)
+        }
+        LocalAnswerCacheError::Storage(error) => ApiError::internal(error),
+    }
+}
+
 fn map_conservative_answer_resolver_error(error: ConservativeAnswerResolverError) -> ApiError {
     match error {
         ConservativeAnswerResolverError::QuestionSnapshotNotFound => {
@@ -1019,6 +1066,13 @@ struct AnswerCandidateResponse {
     id: AnswerCandidateId,
     candidate: AnswerCandidate,
     created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct LocalAnswerCacheImportResponse {
+    task_id: TaskId,
+    question_snapshot_id: QuestionSnapshotId,
+    candidates: Vec<AnswerCandidateResponse>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

@@ -258,6 +258,10 @@ fn task_routes() -> Router<ApiState> {
             get(task::list_answer_candidates).post(task::create_manual_answer_candidate),
         )
         .route(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache",
+            post(task::import_local_answer_candidates),
+        )
+        .route(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-resolution",
             get(task::resolve_answer_candidates),
         )
@@ -827,6 +831,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache".to_owned(),
+            local_answer_cache_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-resolution".to_owned(),
             answer_resolution_path(),
         );
@@ -1180,6 +1191,24 @@ fn answer_candidates_path() -> Value {
             }
         }
     })
+}
+
+fn local_answer_cache_path() -> Value {
+    json!({"post": {
+        "operationId": "importLocalAnswerCandidates",
+        "description": "Imports direct candidates from exact, unambiguous earlier Question matches in the same owner-scoped Task. Core fixes LocalCache attribution; no Provider is called and no answer is selected.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Newly imported immutable LocalCache candidates; an empty collection is an idempotent success"},
+            "400": {"description": "Invalid Task or Question snapshot ID"},
+            "404": {"description": "Task-bound owner-scoped Question snapshot not found"},
+            "500": {"description": "Persisted cache evidence violated its validated binding"}
+        }
+    }})
 }
 
 fn normalized_answer_schema() -> Value {
@@ -1594,7 +1623,7 @@ mod tests {
         extract::ConnectInfo,
         http::{Request, header},
     };
-    use chrono::{SecondsFormat, Utc};
+    use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
     use tower::ServiceExt;
 
     use super::*;
@@ -3884,6 +3913,38 @@ mod tests {
             }],
         };
         let repository = SqliteQuestionSnapshotRepository::new(database.clone());
+        let mut prior_question = snapshot.questions[0].clone();
+        prior_question.id = QuestionId::new();
+        prior_question.remote_question_id = Some("prior-question-1".to_owned());
+        prior_question.position = 9;
+        let prior_snapshot = QuestionSnapshot {
+            id: QuestionSnapshotId::new(),
+            task_id,
+            provider_id: snapshot.provider_id.clone(),
+            provider_version: "0.1.0-test".to_owned(),
+            captured_at: now - ChronoDuration::seconds(1),
+            questions: vec![prior_question],
+        };
+        repository
+            .save_question_snapshot(&prior_snapshot)
+            .await
+            .unwrap();
+        repository
+            .save_answer_candidate_batch(&[AnswerCandidateRecord {
+                id: AnswerCandidateId::new(),
+                question_snapshot_id: prior_snapshot.id,
+                candidate: AnswerCandidate {
+                    question_id: prior_snapshot.questions[0].id,
+                    source: AnswerSource::ProviderNative,
+                    answer: NormalizedAnswer::Boolean(true),
+                    confidence: None,
+                    explanation: None,
+                    provenance_sanitized: json!({"resolver": "fixture"}),
+                },
+                created_at: prior_snapshot.captured_at,
+            }])
+            .await
+            .unwrap();
         repository.save_question_snapshot(&snapshot).await.unwrap();
         let candidate_id = AnswerCandidateId::new();
         repository
@@ -4053,6 +4114,55 @@ mod tests {
         );
         assert!(resolution_body["decisions"][0]["selected_candidate_id"].is_null());
 
+        let cache_response = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}/answer-candidates/import-local-cache",
+                    snapshot.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cache_response.status(), StatusCode::OK);
+        assert_eq!(cache_response.headers()[header::CACHE_CONTROL], "no-store");
+        let cache_body = response_json(cache_response).await;
+        assert_eq!(cache_body["task_id"], task_id.to_string());
+        assert_eq!(cache_body["question_snapshot_id"], snapshot.id.to_string());
+        assert_eq!(cache_body["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            cache_body["candidates"][0]["candidate"]["source"],
+            "local_cache"
+        );
+        assert_eq!(
+            cache_body["candidates"][0]["candidate"]["provenance_sanitized"]["origin"],
+            "prior_question_snapshot"
+        );
+
+        let cache_retry = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}/answer-candidates/import-local-cache",
+                    snapshot.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cache_retry.status(), StatusCode::OK);
+        assert!(
+            response_json(cache_retry).await["candidates"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
         let response = app
             .clone()
             .oneshot(
@@ -4072,7 +4182,7 @@ mod tests {
         assert_eq!(body["question_snapshot_id"], snapshot.id.to_string());
         assert_eq!(body["candidates"][0]["id"], candidate_id.to_string());
         assert_eq!(body["candidates"][0]["candidate"]["source"], "manual");
-        assert_eq!(body["candidates"].as_array().unwrap().len(), 2);
+        assert_eq!(body["candidates"].as_array().unwrap().len(), 3);
 
         let draft_response = app
             .clone()
@@ -4625,6 +4735,7 @@ mod tests {
             "/api/v1/tasks/{task_id}/questions",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-resolution",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/submission-drafts/{draft_id}",
@@ -4670,6 +4781,11 @@ mod tests {
             document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates"]
                 ["post"]["operationId"],
             "createManualAnswerCandidate"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache"]
+                ["post"]["operationId"],
+            "importLocalAnswerCandidates"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-resolution"]

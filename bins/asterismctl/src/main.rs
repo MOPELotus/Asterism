@@ -249,6 +249,11 @@ enum TaskCommand {
         #[arg(long)]
         explanation: Option<String>,
     },
+    /// Import exact, unambiguous prior Question evidence as `LocalCache` candidates.
+    ImportLocalAnswers {
+        task_id: String,
+        snapshot_id: String,
+    },
     /// Derive a conservative, non-persisted selection plan from stored candidates.
     AnswerResolution {
         task_id: String,
@@ -831,6 +836,15 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
                 )
                 .await?
         }
+        TaskCommand::ImportLocalAnswers {
+            task_id,
+            snapshot_id,
+        } => {
+            let path = format!(
+                "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache"
+            );
+            client.post_authorized_empty(&path, &token).await?
+        }
         TaskCommand::AnswerResolution {
             task_id,
             snapshot_id,
@@ -1173,6 +1187,27 @@ mod tests {
                 && snapshot_id == "snapshot-id"
                 && question_id == "question-id"
                 && answer == r#"{"type":"boolean","value":true}"#
+        ));
+    }
+
+    #[test]
+    fn task_local_answer_import_requires_an_explicit_snapshot() {
+        let arguments = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "import-local-answers",
+            "task-id",
+            "snapshot-id",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::ImportLocalAnswers {
+                    task_id,
+                    snapshot_id,
+                }
+            } if task_id == "task-id" && snapshot_id == "snapshot-id"
         ));
     }
 
