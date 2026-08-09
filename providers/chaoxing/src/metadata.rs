@@ -6,7 +6,7 @@ use asterism_provider_api::{
     VerificationLevel,
 };
 
-const PROVIDER_ID: &str = "chaoxing";
+pub(crate) const PROVIDER_ID: &str = "chaoxing";
 
 pub(crate) fn development_metadata() -> ProviderResult<ProviderMetadata> {
     Ok(ProviderMetadata {

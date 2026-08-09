@@ -153,6 +153,7 @@ pub struct ResolvedProviderCredential {
 pub struct ProviderCredentialResolution {
     pub provider_account_id: ProviderAccountId,
     pub credential_refs: Vec<SecretId>,
+    pub purposes: Vec<SecretPurpose>,
     pub correlation_id: String,
 }
 

@@ -933,6 +933,17 @@ Provider runtime credential access now uses a Provider-scoped Core resolver
 instead of exposing storage or owner lookup to Provider implementations. The
 SQLite adapter resolves only an authenticated account whose Provider ID and
 complete opaque credential-reference set match the runtime request, decrypts
-inside one transaction, returns redacted and zeroizing values, and records an
-audit entry for every resolved field. This reusable boundary is independent of
-Capture and does not make any Provider live or verified by itself.
+inside one transaction, decrypts only explicitly requested credential purposes,
+returns redacted and zeroizing values, and records an audit entry for every
+resolved field. This reusable boundary is independent of Capture and does not
+make any Provider live or verified by itself.
+
+## Sixty-ninth Phase 0 slice
+
+Chaoxing's runtime session resolver now consumes the Provider-scoped Core
+credential boundary and selects exactly one non-expired Cookie or Composite
+Cookie field for native authentication and inventory requests. Missing,
+malformed, stale, wrong-Provider or incompletely bound credentials fail closed;
+storage and decryption failures remain sanitized internal errors. Saved
+username and password fields are retained for the separate auto-renew slice but
+are never logged, returned by APIs, or used for an unbounded retry loop.
