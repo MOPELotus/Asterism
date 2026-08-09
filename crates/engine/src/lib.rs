@@ -10,6 +10,7 @@ mod credential;
 mod execution_job;
 mod execution_request;
 mod execution_worker;
+mod local_answer_cache;
 mod manual_answer;
 mod outbox;
 mod question_read;
@@ -57,6 +58,9 @@ pub use execution_request::{
 pub use execution_worker::{
     ExecutionSchedulerConfig, ExecutionSchedulerTickReport, ExecutionSchedulerWorker,
     ExecutionSchedulerWorkerError,
+};
+pub use local_answer_cache::{
+    ImportLocalAnswerCandidatesCommand, LocalAnswerCacheError, LocalAnswerCacheService,
 };
 pub use manual_answer::{
     CreateManualAnswerCandidateCommand, ManualAnswerCandidateError, ManualAnswerCandidateService,

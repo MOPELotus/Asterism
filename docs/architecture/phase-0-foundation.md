@@ -2218,3 +2218,23 @@ The query is bounded, deterministically ordered and returns no foreign-owner or
 foreign-Task existence signal. This checkpoint does not create LocalCache
 candidates: source evidence remains immutable, copied candidates cannot recurse,
 and Core still owns the later import decision and provenance construction.
+
+## One-hundred-and-forty-third Phase 0 slice
+
+Core now imports eligible prior evidence into one explicitly named, owner-scoped
+QuestionSnapshot as new `LocalCache` candidates. It revalidates the current
+Task/Snapshot/Question set, every source Question/fingerprint/Candidate binding,
+and rejects any evidence row that violates the storage ambiguity contract.
+
+Imported candidates are rebound to the current Question ID. Core fixes their
+source and bounded provenance, including the immutable source snapshot,
+Question, direct Candidate, original source and content fingerprint identities;
+callers cannot supply or impersonate these facts. Confidence is preserved but
+the source explanation is replaced with a Core-owned cache marker.
+
+Unknown answers, answer shapes incompatible with the current normalized
+Question, and Matching/Composite/Unknown kinds are skipped. Repeating the same
+import after its candidate is stored creates no duplicate. This remains an
+evidence-only operation: it calls no Provider, does not select an answer, build
+a draft, create an Execution or submit remotely. HTTP and CLI exposure remain a
+separate checkpoint.
