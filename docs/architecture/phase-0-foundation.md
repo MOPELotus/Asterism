@@ -1565,3 +1565,86 @@ lifecycle validation before returning it. Request Audit includes only Provider,
 schema and revision attribution, never setting keys or values. Legacy and
 explicitly unconfigured internal callers may still omit a snapshot; connecting
 the standard Core execution Action to the settings resolver is the next slice.
+
+## One-hundred-and-third Phase 0 slice
+
+The standard owner-scoped Task execution Action now resolves the registered
+Provider through the Task's actual ProviderAccount, loads the three applicable
+runtime-setting layers and passes their final values, sources and revisions to
+the atomic scheduling boundary. Callers cannot supply or omit this snapshot.
+
+The SQLite transaction re-reads every layer and compares the exact schema,
+patch contents and revision before creating an Execution. A concurrent Master
+write therefore returns a conflict without changing Task state, reserving
+credit, inserting an Execution or exposing a Scheduler job. Idempotent replay
+continues to return the original Execution and its original settings snapshot.
+
+## One-hundred-and-fourth Phase 0 slice
+
+The task-execution Provider request now carries the immutable, versioned
+runtime-settings snapshot selected for that Execution. Worker dispatch reloads
+it by Execution ID, rechecks the Provider binding and validates the complete
+value set against the currently registered schema before any remote mutation.
+Missing or incompatible settings fail closed as an internal execution failure.
+
+Retries reuse the same snapshot even after a Master changes Provider, account
+or Task overrides. Providers receive typed read-only accessors rather than a
+database handle or arbitrary JSON, preserving Core ownership of persistence,
+scope resolution and audit.
+
+## One-hundred-and-fifth Phase 0 slice
+
+Chaoxing Video cards now use a native task-level execution path derived from
+the audited `Samueli924/chaoxing` flow. Each attempt rediscovers fresh card
+metadata, loads bounded media status, emits monotonic signed progress reports
+after real waits and accepts success only after a complete fresh Card scan marks
+the same stable resource passed. Playback rate and report interval come from
+the frozen Master settings snapshot.
+
+Object IDs, report tokens, `otherInfo`, face/attendance fields and signature
+inputs remain short-lived zeroizing execution material. Captcha responses stop
+as typed `HumanRequired(ImageCaptcha)`; the deferred-Capture phase adds neither
+OCR nor donor automatic solving. This is offline fixture and transport-boundary
+evidence only, so Chaoxing remains disabled by default and `Development`.
+
+## One-hundred-and-sixth Phase 0 slice
+
+Provider setting definitions can now attach one optional portable Core behavior
+without surrendering control of their key, label or safety range. Registry
+validation rejects duplicate behaviors, incompatible kinds, unsupported scopes
+and concurrency limits above Core hard caps. Schemas without a behavior retain
+conservative scheduling defaults.
+
+This contract prevents the Scheduler from matching names such as
+`chaoxing_video_threads`. The first behaviors describe Provider execution
+concurrency and ProviderAccount execution concurrency; the resolved values are
+read from each immutable Execution snapshot.
+
+## One-hundred-and-seventh Phase 0 slice
+
+The Execution worker now claims and polls a bounded batch concurrently. Before
+a Provider execution or recovery request reaches the network, one atomic
+in-process admission controller checks Global, Provider and ProviderAccount
+counts together. Waiting executions keep both Scheduler claims and Execution
+leases alive, and dropping the guard releases all three counters together.
+
+The deployment-wide global ceiling is a typed Scheduler configuration field;
+Provider and account values cannot bypass it. Chaoxing declares separate
+Provider-only and account-overridable concurrency settings. Both default to one
+until real concurrent account behavior is verified; the account field may be
+overridden for one ProviderAccount or one Task and remains frozen per Execution.
+
+## One-hundred-and-eighth Phase 0 slice
+
+The portable behavior contract now also supports a bounded ProviderAccount scan
+interval. It must be a duration available at exactly Provider and
+ProviderAccount scope, between one minute and seven days; Task overrides are
+rejected because account inventory is the scheduling unit. The Provider still
+cannot create a timer or background loop.
+
+When Master configures an account Scan Schedule without an explicit interval,
+Core resolves the current Provider default and account override, applies the
+Provider metadata floor, then persists and audits the resulting Schedule through
+the existing unified Scheduler. An explicit interval continues to override that
+configuration operation. Chaoxing declares a 300-second to 24-hour range with
+an 1800-second schema default; ordinary users do not receive this field.
