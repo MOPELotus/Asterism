@@ -223,6 +223,8 @@ enum TaskCommand {
     Detail { task_id: String },
     /// Read one task's current normalized Provider progress.
     Progress { task_id: String },
+    /// Read one task's current normalized Provider learning duration.
+    Duration { task_id: String },
     /// Discover and parse one task's complete current Provider Question set.
     Questions { task_id: String },
     /// Resolve Provider-native candidates for one immutable Question snapshot.
@@ -787,6 +789,10 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
             let path = format!("/api/v1/tasks/{task_id}/progress");
             client.get_authorized(&path, &token).await?
         }
+        TaskCommand::Duration { task_id } => {
+            let path = format!("/api/v1/tasks/{task_id}/duration");
+            client.get_authorized(&path, &token).await?
+        }
         TaskCommand::Questions { task_id } => {
             let path = format!("/api/v1/tasks/{task_id}/questions");
             client.get_authorized(&path, &token).await?
@@ -1099,6 +1105,18 @@ mod tests {
             arguments.command,
             Command::Task {
                 command: TaskCommand::Progress { task_id }
+            } if task_id == "task-id"
+        ));
+    }
+
+    #[test]
+    fn task_duration_is_a_distinct_fresh_provider_read() {
+        let arguments =
+            Arguments::try_parse_from(["asterismctl", "task", "duration", "task-id"]).unwrap();
+        assert!(matches!(
+            arguments.command,
+            Command::Task {
+                command: TaskCommand::Duration { task_id }
             } if task_id == "task-id"
         ));
     }

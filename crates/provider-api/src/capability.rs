@@ -92,6 +92,17 @@ pub trait TaskProgressCapability: ProviderIdentity {
     ) -> ProviderResult<RemoteProgress>;
 }
 
+/// Reads normalized learning duration without mutating remote state. This is
+/// deliberately independent from progress and duration reporting.
+#[async_trait]
+pub trait DurationReadCapability: ProviderIdentity {
+    async fn read_duration(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+    ) -> ProviderResult<RemoteDuration>;
+}
+
 #[async_trait]
 pub trait QuestionInventoryCapability: ProviderIdentity {
     async fn list_question_refs(
@@ -451,6 +462,12 @@ pub struct RemoteProgress {
     pub remote_state: RemoteState,
     pub percent: Option<u8>,
     pub duration_seconds: Option<u64>,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoteDuration {
+    pub duration_seconds: u64,
     pub updated_at: Timestamp,
 }
 

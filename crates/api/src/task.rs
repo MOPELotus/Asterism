@@ -12,12 +12,13 @@ use asterism_engine::{
     ImportLocalAnswerCandidatesCommand, LocalAnswerCacheError, LocalAnswerCacheService,
     ManualAnswerCandidateError, ManualAnswerCandidateService, ProviderAnswerResolveError,
     ProviderAnswerResolveService, ProviderQuestionReadError, ProviderQuestionReadService,
-    ProviderTaskDetailError, ProviderTaskDetailService, ProviderTaskProgressError,
-    ProviderTaskProgressService, ReadTaskDetailCommand, ReadTaskProgressCommand,
+    ProviderTaskDetailError, ProviderTaskDetailService, ProviderTaskDurationError,
+    ProviderTaskDurationService, ProviderTaskProgressError, ProviderTaskProgressService,
+    ReadTaskDetailCommand, ReadTaskDurationCommand, ReadTaskProgressCommand,
     ReadTaskQuestionsCommand, ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand,
     SubmissionDraftBuildError, SubmissionDraftBuildService,
 };
-use asterism_provider_api::{ProviderErrorKind, RemoteProgress, RemoteTaskDetail};
+use asterism_provider_api::{ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail};
 use asterism_storage::{
     AnswerCandidateRepository, QuestionSnapshotRepository, SqliteExecutionRepository,
     SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
@@ -157,6 +158,39 @@ pub(super) async fn get_task_progress(
             provider_id: result.provider_id,
             provider_version: result.provider_version,
             progress: result.progress,
+        })
+        .into_response(),
+    ))
+}
+
+pub(super) async fn get_task_duration(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let result = ProviderTaskDurationService::new(
+        state.providers,
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database),
+    )
+    .read(ReadTaskDurationCommand {
+        owner_id,
+        task_id,
+        correlation_id: correlation_id.to_owned(),
+    })
+    .await
+    .map_err(map_task_duration_error)?;
+    Ok(crate::auth::no_store(
+        Json(TaskDurationResponse {
+            task_id: result.task_id,
+            provider_id: result.provider_id,
+            provider_version: result.provider_version,
+            duration: result.duration,
         })
         .into_response(),
     ))
@@ -728,6 +762,67 @@ fn map_task_progress_error(error: ProviderTaskProgressError) -> ApiError {
     }
 }
 
+fn map_task_duration_error(error: ProviderTaskDurationError) -> ApiError {
+    match error {
+        ProviderTaskDurationError::TaskNotFound => ApiError::not_found("task_not_found"),
+        ProviderTaskDurationError::TaskCapabilityUnavailable
+        | ProviderTaskDurationError::CapabilityUnavailable(_) => ApiError::conflict(
+            "task_duration_unavailable",
+            "the task does not expose readable remote duration",
+        ),
+        ProviderTaskDurationError::AccountNotAuthenticated => ApiError::conflict(
+            "provider_account_not_authenticated",
+            "the Provider account must be authenticated before reading task duration",
+        ),
+        ProviderTaskDurationError::ProviderNotRegistered(_) => ApiError::conflict(
+            "provider_not_registered",
+            "the task Provider is not registered",
+        ),
+        ProviderTaskDurationError::InvalidCorrelationId => ApiError::bad_request(
+            "invalid_request_id",
+            "the request correlation ID is invalid",
+        ),
+        ProviderTaskDurationError::Provider(provider_error) => match provider_error.kind {
+            ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+                provider_error
+                    .retry_after_seconds
+                    .unwrap_or(60)
+                    .clamp(1, 86_400),
+            ),
+            ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+                tracing::warn!(error = %provider_error, "Provider Task duration is temporarily unavailable");
+                ApiError::service_unavailable(
+                    "provider_unavailable",
+                    "the Provider is temporarily unavailable",
+                )
+            }
+            ProviderErrorKind::Authentication
+            | ProviderErrorKind::Authorization
+            | ProviderErrorKind::HumanRequired => ApiError::conflict(
+                "provider_action_required",
+                "the Provider requires authentication or user action",
+            ),
+            ProviderErrorKind::RemoteChanged => ApiError::conflict(
+                "task_remote_changed",
+                "the remote task no longer matches the stored task",
+            ),
+            ProviderErrorKind::UnsupportedTask => ApiError::conflict(
+                "task_duration_unavailable",
+                "the Provider cannot read duration for this task",
+            ),
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+                tracing::warn!(error = %provider_error, "Provider returned invalid Task duration");
+                ApiError::bad_gateway(
+                    "provider_task_duration_invalid",
+                    "the Provider returned inconsistent task duration",
+                )
+            }
+            ProviderErrorKind::Internal => ApiError::internal(provider_error),
+        },
+        ProviderTaskDurationError::Storage(error) => ApiError::internal(error),
+    }
+}
+
 fn map_task_questions_error(error: ProviderQuestionReadError) -> ApiError {
     match error {
         ProviderQuestionReadError::TaskNotFound => ApiError::not_found("task_not_found"),
@@ -1040,6 +1135,14 @@ struct TaskProgressResponse {
     provider_id: ProviderId,
     provider_version: String,
     progress: RemoteProgress,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskDurationResponse {
+    task_id: TaskId,
+    provider_id: ProviderId,
+    provider_version: String,
+    duration: RemoteDuration,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

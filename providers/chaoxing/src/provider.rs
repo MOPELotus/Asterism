@@ -97,6 +97,7 @@ fn compose_development_provider(
         task_inventory: Some(task_inventory),
         task_detail: Some(task_detail),
         task_progress: Some(task_progress),
+        duration_read: None,
         question_inventory: Some(question_read.clone()),
         question_parse: Some(question_read),
         answer_resolve: None,

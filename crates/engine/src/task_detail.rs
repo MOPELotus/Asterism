@@ -471,6 +471,7 @@ mod tests {
                 task_inventory: None,
                 task_detail: Some(capability),
                 task_progress: None,
+                duration_read: None,
                 question_inventory: None,
                 question_parse: None,
                 answer_resolve: None,

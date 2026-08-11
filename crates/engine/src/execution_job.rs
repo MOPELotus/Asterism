@@ -1874,6 +1874,7 @@ mod tests {
                     task_inventory: None,
                     task_detail: None,
                     task_progress: Some(provider.clone()),
+                    duration_read: None,
                     question_inventory: None,
                     question_parse: None,
                     answer_resolve: None,

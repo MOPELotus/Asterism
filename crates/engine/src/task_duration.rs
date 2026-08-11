@@ -1,34 +1,34 @@
 use std::sync::Arc;
 
 use asterism_domain::{AuthState, ProviderId, TaskCapability, TaskId, UserId};
-use asterism_provider_api::{ProviderContext, ProviderError, ProviderRegistry, RemoteProgress};
+use asterism_provider_api::{ProviderContext, ProviderError, ProviderRegistry, RemoteDuration};
 use asterism_storage::{ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository};
 
 const MAX_CORRELATION_ID_BYTES: usize = 128;
 
 #[derive(Clone, Debug)]
-pub struct ReadTaskProgressCommand {
+pub struct ReadTaskDurationCommand {
     pub owner_id: UserId,
     pub task_id: TaskId,
     pub correlation_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProviderTaskProgressResult {
+pub struct ProviderTaskDurationResult {
     pub task_id: TaskId,
     pub provider_id: ProviderId,
     pub provider_version: String,
-    pub progress: RemoteProgress,
+    pub duration: RemoteDuration,
 }
 
 #[derive(Clone, Debug)]
-pub struct ProviderTaskProgressService<Q, A> {
+pub struct ProviderTaskDurationService<Q, A> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
 }
 
-impl<Q, A> ProviderTaskProgressService<Q, A> {
+impl<Q, A> ProviderTaskDurationService<Q, A> {
     pub const fn new(registry: Arc<ProviderRegistry>, tasks: Q, accounts: A) -> Self {
         Self {
             registry,
@@ -38,51 +38,51 @@ impl<Q, A> ProviderTaskProgressService<Q, A> {
     }
 }
 
-impl<Q, A> ProviderTaskProgressService<Q, A>
+impl<Q, A> ProviderTaskDurationService<Q, A>
 where
     Q: TaskQueryRepository,
     A: ProviderAccountRuntimeRepository,
 {
-    /// Reads fresh remote progress for one owner-scoped Task. The persisted
-    /// Task must explicitly advertise `ProgressRead`; Core never probes an
-    /// undeclared task capability.
+    /// Reads fresh normalized learning duration for one owner-scoped Task.
+    /// The persisted Task must explicitly advertise `DurationRead`; Core never
+    /// probes this capability through progress or execution slots.
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderTaskProgressError`] when ownership, account state,
-    /// task or Provider capability, Provider I/O, or response validation fails.
+    /// Returns [`ProviderTaskDurationError`] when ownership, account state,
+    /// task or Provider capability, Provider I/O, or storage access fails.
     pub async fn read(
         &self,
-        command: ReadTaskProgressCommand,
-    ) -> Result<ProviderTaskProgressResult, ProviderTaskProgressError> {
+        command: ReadTaskDurationCommand,
+    ) -> Result<ProviderTaskDurationResult, ProviderTaskDurationError> {
         if !valid_correlation_id(&command.correlation_id) {
-            return Err(ProviderTaskProgressError::InvalidCorrelationId);
+            return Err(ProviderTaskDurationError::InvalidCorrelationId);
         }
         let task = self
             .tasks
             .find_owned_task(command.owner_id, command.task_id)
             .await?
-            .ok_or(ProviderTaskProgressError::TaskNotFound)?;
-        if !task.capabilities.contains(&TaskCapability::ProgressRead) {
-            return Err(ProviderTaskProgressError::TaskCapabilityUnavailable);
+            .ok_or(ProviderTaskDurationError::TaskNotFound)?;
+        if !task.capabilities.contains(&TaskCapability::DurationRead) {
+            return Err(ProviderTaskDurationError::TaskCapabilityUnavailable);
         }
         let account = self
             .accounts
             .find_runtime_provider_account(task.provider_account_id)
             .await?
             .filter(|account| account.owner_id == command.owner_id)
-            .ok_or(ProviderTaskProgressError::TaskNotFound)?;
+            .ok_or(ProviderTaskDurationError::TaskNotFound)?;
         if !matches!(account.auth_state, AuthState::Authenticated) {
-            return Err(ProviderTaskProgressError::AccountNotAuthenticated);
+            return Err(ProviderTaskDurationError::AccountNotAuthenticated);
         }
         let entry = self.registry.get(&account.provider_id).ok_or_else(|| {
-            ProviderTaskProgressError::ProviderNotRegistered(account.provider_id.clone())
+            ProviderTaskDurationError::ProviderNotRegistered(account.provider_id.clone())
         })?;
-        let capability = entry.task_progress.as_ref().ok_or_else(|| {
-            ProviderTaskProgressError::CapabilityUnavailable(account.provider_id.clone())
+        let capability = entry.duration_read.as_ref().ok_or_else(|| {
+            ProviderTaskDurationError::CapabilityUnavailable(account.provider_id.clone())
         })?;
-        let progress = capability
-            .read_progress(
+        let duration = capability
+            .read_duration(
                 &ProviderContext {
                     provider_id: account.provider_id.clone(),
                     account_id: account.id,
@@ -92,14 +92,11 @@ where
                 &task.remote_id,
             )
             .await?;
-        if progress.percent.is_some_and(|percent| percent > 100) {
-            return Err(ProviderTaskProgressError::ProviderResponseInvalid);
-        }
-        Ok(ProviderTaskProgressResult {
+        Ok(ProviderTaskDurationResult {
             task_id: task.id,
             provider_id: account.provider_id,
             provider_version: entry.metadata.implementation_version.clone(),
-            progress,
+            duration,
         })
     }
 }
@@ -112,21 +109,19 @@ fn valid_correlation_id(value: &str) -> bool {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ProviderTaskProgressError {
+pub enum ProviderTaskDurationError {
     #[error("task was not found")]
     TaskNotFound,
-    #[error("task does not advertise ProgressRead")]
+    #[error("task does not advertise DurationRead")]
     TaskCapabilityUnavailable,
     #[error("Provider account is not authenticated")]
     AccountNotAuthenticated,
     #[error("provider `{0}` is not registered")]
     ProviderNotRegistered(ProviderId),
-    #[error("provider `{0}` exposes no Task Progress capability")]
+    #[error("provider `{0}` exposes no Duration Read capability")]
     CapabilityUnavailable(ProviderId),
-    #[error("task progress correlation id is invalid")]
+    #[error("task duration correlation id is invalid")]
     InvalidCorrelationId,
-    #[error("Provider returned invalid Task progress")]
-    ProviderResponseInvalid,
     #[error(transparent)]
     Provider(#[from] ProviderError),
     #[error(transparent)]
@@ -139,11 +134,11 @@ mod tests {
 
     use asterism_domain::{
         AssessmentClass, OrchestrationState, ProviderAccount, ProviderAccountId, RemoteState,
-        SourceType, Task, UserId,
+        SourceType, Task,
     };
     use asterism_provider_api::{
-        ProviderCapability, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
-        ProviderRuntimeSettingsSchema, TaskProgressCapability, VerificationLevel,
+        DurationReadCapability, ProviderCapability, ProviderEntry, ProviderIdentity,
+        ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema, VerificationLevel,
     };
     use asterism_storage::TaskPage;
     use async_trait::async_trait;
@@ -200,106 +195,88 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct FakeTaskProgress {
+    struct FakeDurationRead {
         metadata: ProviderMetadata,
-        progress: Mutex<RemoteProgress>,
         calls: Mutex<Vec<(ProviderContext, String)>>,
     }
 
-    impl ProviderIdentity for FakeTaskProgress {
+    impl ProviderIdentity for FakeDurationRead {
         fn metadata(&self) -> &ProviderMetadata {
             &self.metadata
         }
     }
 
     #[async_trait]
-    impl TaskProgressCapability for FakeTaskProgress {
-        async fn read_progress(
+    impl DurationReadCapability for FakeDurationRead {
+        async fn read_duration(
             &self,
             context: &ProviderContext,
             remote_task_id: &str,
-        ) -> ProviderResult<RemoteProgress> {
+        ) -> ProviderResult<RemoteDuration> {
             self.calls
                 .lock()
                 .unwrap()
                 .push((context.clone(), remote_task_id.to_owned()));
-            Ok(self.progress.lock().unwrap().clone())
+            Ok(RemoteDuration {
+                duration_seconds: 445,
+                updated_at: Utc::now(),
+            })
         }
     }
 
     #[tokio::test]
-    async fn progress_is_owner_scoped_and_passes_only_opaque_credentials() {
-        let fixture = fixture(true, 75);
+    async fn duration_is_owner_scoped_and_passes_only_opaque_credentials() {
+        let fixture = fixture(true);
         let result = fixture
             .service
-            .read(ReadTaskProgressCommand {
+            .read(ReadTaskDurationCommand {
                 owner_id: fixture.owner_id,
                 task_id: fixture.task_id,
-                correlation_id: "progress-request-1".to_owned(),
+                correlation_id: "duration-request-1".to_owned(),
             })
             .await
             .unwrap();
 
-        assert_eq!(result.progress.percent, Some(75));
+        assert_eq!(result.duration.duration_seconds, 445);
         let calls = fixture.capability.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0.credential_refs.len(), 1);
-        assert_eq!(calls[0].0.correlation_id, "progress-request-1");
-        assert_eq!(calls[0].1, "work:100:200:work-1");
+        assert_eq!(calls[0].1, "group:2001:unit-1:group-1");
     }
 
     #[tokio::test]
-    async fn undeclared_or_foreign_task_never_reaches_provider() {
-        let fixture = fixture(false, 50);
-        assert!(matches!(
-            fixture
-                .service
-                .read(ReadTaskProgressCommand {
-                    owner_id: fixture.owner_id,
-                    task_id: fixture.task_id,
-                    correlation_id: "progress-request-2".to_owned(),
-                })
-                .await,
-            Err(ProviderTaskProgressError::TaskCapabilityUnavailable)
-        ));
-        assert!(matches!(
-            fixture
-                .service
-                .read(ReadTaskProgressCommand {
-                    owner_id: UserId::new(),
-                    task_id: fixture.task_id,
-                    correlation_id: "progress-request-3".to_owned(),
-                })
-                .await,
-            Err(ProviderTaskProgressError::TaskNotFound)
-        ));
+    async fn undeclared_foreign_or_invalid_requests_never_reach_provider() {
+        let fixture = fixture(false);
+        for command in [
+            ReadTaskDurationCommand {
+                owner_id: fixture.owner_id,
+                task_id: fixture.task_id,
+                correlation_id: "duration-request-2".to_owned(),
+            },
+            ReadTaskDurationCommand {
+                owner_id: UserId::new(),
+                task_id: fixture.task_id,
+                correlation_id: "duration-request-3".to_owned(),
+            },
+            ReadTaskDurationCommand {
+                owner_id: fixture.owner_id,
+                task_id: fixture.task_id,
+                correlation_id: " invalid".to_owned(),
+            },
+        ] {
+            assert!(fixture.service.read(command).await.is_err());
+        }
         assert!(fixture.capability.calls.lock().unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn invalid_provider_percentage_fails_at_core_boundary() {
-        let fixture = fixture(true, 101);
-        assert!(matches!(
-            fixture
-                .service
-                .read(ReadTaskProgressCommand {
-                    owner_id: fixture.owner_id,
-                    task_id: fixture.task_id,
-                    correlation_id: "progress-request-4".to_owned(),
-                })
-                .await,
-            Err(ProviderTaskProgressError::ProviderResponseInvalid)
-        ));
-    }
-
     struct Fixture {
-        service: ProviderTaskProgressService<FakeTaskRepository, FakeAccountRepository>,
+        service: ProviderTaskDurationService<FakeTaskRepository, FakeAccountRepository>,
         owner_id: UserId,
         task_id: TaskId,
-        capability: Arc<FakeTaskProgress>,
+        capability: Arc<FakeDurationRead>,
     }
 
-    fn fixture(advertises_progress: bool, percent: u8) -> Fixture {
+    fn fixture(advertises_duration: bool) -> Fixture {
         let owner_id = UserId::new();
         let account_id = ProviderAccountId::new();
         let provider_id = ProviderId::new("provider-alpha").unwrap();
@@ -308,10 +285,10 @@ mod tests {
             id: TaskId::new(),
             provider_account_id: account_id,
             course_id: None,
-            remote_id: "work:100:200:work-1".to_owned(),
-            source_type: SourceType::Work,
-            assessment_class: AssessmentClass::Unknown,
-            title: "work".to_owned(),
+            remote_id: "group:2001:unit-1:group-1".to_owned(),
+            source_type: SourceType::Resource,
+            assessment_class: AssessmentClass::Routine,
+            title: "group".to_owned(),
             remote_state: RemoteState::Pending,
             orchestration_state: OrchestrationState::Ready,
             opens_at: None,
@@ -320,8 +297,8 @@ mod tests {
             discovered_at: now,
             updated_at: now,
             latest_snapshot_id: None,
-            capabilities: if advertises_progress {
-                vec![TaskCapability::ProgressRead]
+            capabilities: if advertises_duration {
+                vec![TaskCapability::DurationRead]
             } else {
                 Vec::new()
             },
@@ -345,18 +322,12 @@ mod tests {
             verification: VerificationLevel::Development,
             scan_min_interval_seconds: None,
             capture_recipe_version: None,
-            capabilities: BTreeSet::from([ProviderCapability::TaskProgressRead]),
+            capabilities: BTreeSet::from([ProviderCapability::DurationRead]),
             auth_methods: BTreeSet::new(),
             session_kinds: BTreeSet::new(),
         };
-        let capability = Arc::new(FakeTaskProgress {
+        let capability = Arc::new(FakeDurationRead {
             metadata,
-            progress: Mutex::new(RemoteProgress {
-                remote_state: RemoteState::InProgress,
-                percent: Some(percent),
-                duration_seconds: None,
-                updated_at: now,
-            }),
             calls: Mutex::new(Vec::new()),
         });
         let mut registry = ProviderRegistry::default();
@@ -368,8 +339,8 @@ mod tests {
                 course_inventory: None,
                 task_inventory: None,
                 task_detail: None,
-                task_progress: Some(capability.clone()),
-                duration_read: None,
+                task_progress: None,
+                duration_read: Some(capability.clone()),
                 question_inventory: None,
                 question_parse: None,
                 answer_resolve: None,
@@ -380,7 +351,7 @@ mod tests {
                 browser_bridge: None,
             })
             .unwrap();
-        let service = ProviderTaskProgressService::new(
+        let service = ProviderTaskDurationService::new(
             Arc::new(registry),
             FakeTaskRepository {
                 owner_id,

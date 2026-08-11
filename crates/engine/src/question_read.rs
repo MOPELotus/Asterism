@@ -541,6 +541,7 @@ mod tests {
                 task_inventory: None,
                 task_detail: None,
                 task_progress: None,
+                duration_read: None,
                 question_inventory: Some(capability.clone()),
                 question_parse: Some(capability.clone()),
                 answer_resolve: None,

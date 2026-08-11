@@ -2638,3 +2638,21 @@ Factory and daemon tests require the metadata and populated registry slots to
 agree and prove UAI can be enabled independently. No runtime settings,
 DurationRead/Report, execution, BrowserBridge or Capture slot is inferred, and
 this composition checkpoint does not claim live compatibility.
+
+## One-hundred-and-sixty-third Phase 0 slice
+
+`DurationRead` now has its own Provider registry slot and typed
+`RemoteDuration` result instead of borrowing the mutation-oriented
+TaskExecution capability. `DurationReport` remains on the execution boundary;
+advertising or implementing either one never implies the other.
+
+Core exposes one owner-scoped read service and `GET
+/api/v1/tasks/{task_id}/duration`, mirrored by `asterismctl task duration`.
+The service requires the persisted Task to advertise DurationRead, verifies
+owner/account/authentication binding, passes only opaque credential references
+and a bounded correlation ID, and never creates an Execution or invokes a
+progress/reporting slot.
+
+Registry, Engine, API/OpenAPI and CLI tests prove the capability stays separate
+from progress and remote mutation. Providers still need their own normalized
+seconds evidence before populating this slot.

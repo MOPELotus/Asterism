@@ -246,6 +246,10 @@ fn task_routes() -> Router<ApiState> {
             get(task::get_task_progress),
         )
         .route(
+            "/api/v1/tasks/{task_id}/duration",
+            get(task::get_task_duration),
+        )
+        .route(
             "/api/v1/tasks/{task_id}/questions",
             get(task::get_task_questions),
         )
@@ -809,6 +813,13 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/duration".to_owned(),
+            task_duration_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/questions".to_owned(),
             task_questions_path(),
         );
@@ -1103,6 +1114,26 @@ fn task_progress_path() -> Value {
             "409": {"description": "Task/Provider capability, account, user action, or remote binding conflict"},
             "429": {"description": "Provider rate limited"},
             "502": {"description": "Provider returned inconsistent progress"},
+            "503": {"description": "Provider temporarily unavailable"}
+        }
+    }})
+}
+
+fn task_duration_path() -> Value {
+    json!({"get": {
+        "operationId": "getTaskDuration",
+        "description": "Reads normalized learning duration through the independent read-only DurationRead capability; this never reports or mutates duration.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Fresh bounded Provider Task duration in seconds"},
+            "400": {"description": "Invalid Task or request ID"},
+            "404": {"description": "Task not found"},
+            "409": {"description": "Task/Provider capability, account, user action, or remote binding conflict"},
+            "429": {"description": "Provider rate limited"},
+            "502": {"description": "Provider returned inconsistent duration"},
             "503": {"description": "Provider temporarily unavailable"}
         }
     }})
@@ -1728,6 +1759,7 @@ mod tests {
                 task_inventory: Some(inventory),
                 task_detail: None,
                 task_progress: None,
+                duration_read: None,
                 question_inventory: None,
                 question_parse: None,
                 answer_resolve: None,
@@ -4289,6 +4321,7 @@ mod tests {
         for path in [
             "/api/v1/tasks/not-a-task/detail",
             "/api/v1/tasks/not-a-task/progress",
+            "/api/v1/tasks/not-a-task/duration",
             "/api/v1/tasks/not-a-task/questions",
         ] {
             let response = app
@@ -4732,6 +4765,7 @@ mod tests {
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/detail",
             "/api/v1/tasks/{task_id}/progress",
+            "/api/v1/tasks/{task_id}/duration",
             "/api/v1/tasks/{task_id}/questions",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates",
@@ -4762,6 +4796,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/progress"]["get"]["operationId"],
             "getTaskProgress"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/duration"]["get"]["operationId"],
+            "getTaskDuration"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/questions"]["get"]["operationId"],

@@ -41,6 +41,7 @@ pub fn build_development_provider(
         task_inventory: Some(task_inventory),
         task_detail: None,
         task_progress: Some(task_progress),
+        duration_read: None,
         question_inventory: None,
         question_parse: None,
         answer_resolve: None,

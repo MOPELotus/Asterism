@@ -4,10 +4,11 @@ use asterism_domain::ProviderId;
 
 use crate::{
     AnswerResolveCapability, AuthenticationCapability, BrowserBridgeCapability,
-    CourseInventoryCapability, ProviderCapability, ProviderMetadata, ProviderRuntimeSettingsSchema,
-    ProviderSettingsError, QuestionInventoryCapability, QuestionParseCapability,
-    SubmissionBuildCapability, SubmissionExecuteCapability, SubmissionVerifyCapability,
-    TaskDetailCapability, TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
+    CourseInventoryCapability, DurationReadCapability, ProviderCapability, ProviderMetadata,
+    ProviderRuntimeSettingsSchema, ProviderSettingsError, QuestionInventoryCapability,
+    QuestionParseCapability, SubmissionBuildCapability, SubmissionExecuteCapability,
+    SubmissionVerifyCapability, TaskDetailCapability, TaskExecutionCapability,
+    TaskInventoryCapability, TaskProgressCapability,
 };
 
 #[derive(Clone)]
@@ -19,6 +20,7 @@ pub struct ProviderEntry {
     pub task_inventory: Option<Arc<dyn TaskInventoryCapability>>,
     pub task_detail: Option<Arc<dyn TaskDetailCapability>>,
     pub task_progress: Option<Arc<dyn TaskProgressCapability>>,
+    pub duration_read: Option<Arc<dyn DurationReadCapability>>,
     pub question_inventory: Option<Arc<dyn QuestionInventoryCapability>>,
     pub question_parse: Option<Arc<dyn QuestionParseCapability>>,
     pub answer_resolve: Option<Arc<dyn AnswerResolveCapability>>,
@@ -40,6 +42,7 @@ impl std::fmt::Debug for ProviderEntry {
             .field("task_inventory", &self.task_inventory.is_some())
             .field("task_detail", &self.task_detail.is_some())
             .field("task_progress", &self.task_progress.is_some())
+            .field("duration_read", &self.duration_read.is_some())
             .field("question_inventory", &self.question_inventory.is_some())
             .field("question_parse", &self.question_parse.is_some())
             .field("answer_resolve", &self.answer_resolve.is_some())
@@ -62,6 +65,7 @@ impl ProviderEntry {
             task_inventory: None,
             task_detail: None,
             task_progress: None,
+            duration_read: None,
             question_inventory: None,
             question_parse: None,
             answer_resolve: None,
@@ -124,6 +128,10 @@ impl ProviderEntry {
                 self.task_progress.is_some(),
             ),
             (
+                ProviderCapability::DurationRead,
+                self.duration_read.is_some(),
+            ),
+            (
                 ProviderCapability::QuestionInventory,
                 self.question_inventory.is_some(),
             ),
@@ -161,7 +169,6 @@ impl ProviderEntry {
 
         let execution_capabilities = [
             ProviderCapability::ResourceExecution,
-            ProviderCapability::DurationRead,
             ProviderCapability::DurationReport,
             ProviderCapability::Discussion,
             ProviderCapability::Practice,
@@ -215,6 +222,12 @@ impl ProviderEntry {
             (
                 "task_progress",
                 self.task_progress
+                    .as_ref()
+                    .map(|implementation| implementation.metadata()),
+            ),
+            (
+                "duration_read",
+                self.duration_read
                     .as_ref()
                     .map(|implementation| implementation.metadata()),
             ),
