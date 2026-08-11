@@ -81,10 +81,9 @@ fn finalize_operations(document: &mut Value) {
             let Some(operation) = path_item.get_mut(method).and_then(Value::as_object_mut) else {
                 continue;
             };
-            let success_schema = operation
-                .get("operationId")
-                .and_then(Value::as_str)
-                .and_then(success::schema_for);
+            let operation_id = operation.get("operationId").and_then(Value::as_str);
+            let success_schema = operation_id.and_then(success::schema_for);
+            let is_execution_stream = operation_id == Some("streamExecution");
             let responses = operation
                 .get_mut("responses")
                 .and_then(Value::as_object_mut)
@@ -126,6 +125,15 @@ fn finalize_operations(document: &mut Value) {
                         json!({
                             "application/json": {
                                 "schema": {"$ref": format!("#/components/schemas/{schema}")}
+                            }
+                        }),
+                    );
+                } else if status.starts_with('2') && status != "204" && is_execution_stream {
+                    response.insert(
+                        "content".to_owned(),
+                        json!({
+                            "text/event-stream": {
+                                "schema": {"type": "string"}
                             }
                         }),
                     );
@@ -267,20 +275,33 @@ fn validate_responses(operation: &Map<String, Value>, label: &str, failures: &mu
         if status == "204" && response.contains_key("content") {
             failures.push(format!("{label} response 204 must not declare content"));
         }
-        if status.starts_with('2')
-            && status != "204"
-            && let Some(expected_schema) = operation
-                .get("operationId")
+        if status.starts_with('2') && status != "204" {
+            let operation_id = operation.get("operationId").and_then(Value::as_str);
+            if let Some(expected_schema) = operation_id.and_then(success::schema_for) {
+                let expected_reference = format!("#/components/schemas/{expected_schema}");
+                if nested_value(response, &["content", "application/json", "schema", "$ref"])
+                    .and_then(Value::as_str)
+                    != Some(expected_reference.as_str())
+                {
+                    failures.push(format!(
+                        "{label} response {status} does not use {expected_schema}"
+                    ));
+                }
+            } else if operation_id == Some("streamExecution") {
+                if nested_value(
+                    response,
+                    &["content", "text/event-stream", "schema", "type"],
+                )
                 .and_then(Value::as_str)
-                .and_then(success::schema_for)
-        {
-            let expected_reference = format!("#/components/schemas/{expected_schema}");
-            if nested_value(response, &["content", "application/json", "schema", "$ref"])
-                .and_then(Value::as_str)
-                != Some(expected_reference.as_str())
-            {
+                    != Some("string")
+                {
+                    failures.push(format!(
+                        "{label} response {status} does not declare text/event-stream"
+                    ));
+                }
+            } else if !operation_id.is_some_and(success::is_deferred_capture_operation) {
                 failures.push(format!(
-                    "{label} response {status} does not use {expected_schema}"
+                    "{label} response {status} has no typed success content"
                 ));
             }
         }

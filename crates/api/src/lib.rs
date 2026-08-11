@@ -1308,6 +1308,14 @@ fn normalized_answer_schema() -> Value {
                 "value": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/components/schemas/NormalizedAnswer"}}
             },
             "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+                "type": {"const": "unknown"}
+            },
+            "additionalProperties": false
         }
     ]})
 }

@@ -11,6 +11,7 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("createProviderAccount", "ProviderAccountResponse"),
     ("getProviderAccount", "ProviderAccountResponse"),
     ("updateProviderAccount", "ProviderAccountResponse"),
+    ("scanProviderAccount", "ProviderScanReport"),
     (
         "replaceProviderAccountCredentials",
         "PutProviderCredentialsResponse",
@@ -58,17 +59,51 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("getTaskDetail", "TaskDetailResponse"),
     ("getTaskProgress", "TaskProgressResponse"),
     ("getTaskDuration", "TaskDurationResponse"),
+    ("getTaskQuestions", "TaskQuestionsResponse"),
+    (
+        "resolveProviderAnswerCandidates",
+        "AnswerCandidatesResponse",
+    ),
+    ("listAnswerCandidates", "AnswerCandidatesResponse"),
+    ("createManualAnswerCandidate", "AnswerCandidateResponse"),
+    (
+        "importLocalAnswerCandidates",
+        "LocalAnswerCacheImportResponse",
+    ),
+    ("resolveAnswerCandidates", "AnswerResolutionPlan"),
+    ("buildSubmissionDraft", "SubmissionDraft"),
+    ("getSubmissionDraft", "SubmissionDraft"),
+    ("getSubmissionResult", "SubmissionResult"),
     ("executeTask", "ExecuteTaskResponse"),
+    ("getOwnCreditAccount", "CreditAccount"),
+    ("listOwnCreditTransactions", "CreditTransactionPageResponse"),
+    ("listOwnCreditReservations", "CreditReservationPageResponse"),
     ("listExecutions", "ExecutionPageResponse"),
     ("getExecution", "ExecutionDetailResponse"),
     ("listExecutionLogs", "ExecutionLogPageResponse"),
     ("createServiceToken", "CreateServiceTokenResponse"),
 ];
 
+#[cfg(test)]
+const DEFERRED_CAPTURE_OPERATIONS: &[&str] = &[
+    "createAuthBootstrapSession",
+    "getAuthBootstrapSession",
+    "cancelAuthBootstrapSession",
+    "claimAuthBootstrapSession",
+    "submitAuthBootstrapCredential",
+    "recordAuthBootstrapEvent",
+    "pollAuthBootstrapStream",
+];
+
 pub(super) fn schema_for(operation_id: &str) -> Option<&'static str> {
     JSON_SUCCESS_SCHEMAS
         .iter()
         .find_map(|(operation, schema)| (*operation == operation_id).then_some(*schema))
+}
+
+#[cfg(test)]
+pub(super) fn is_deferred_capture_operation(operation_id: &str) -> bool {
+    DEFERRED_CAPTURE_OPERATIONS.contains(&operation_id)
 }
 
 pub(super) fn register(schemas: &mut Map<String, Value>) {
@@ -298,6 +333,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             "ProviderAccountListResponse",
             list_response("ProviderAccountResponse"),
         ),
+        ("ProviderScanReport", provider_scan_report_schema()),
         (
             "SessionStatus",
             object(
@@ -505,6 +541,69 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             "TaskDurationResponse",
             provider_task_read_response("duration", "RemoteDuration"),
         ),
+        ("QuestionAttachment", question_attachment_schema()),
+        ("QuestionOption", question_option_schema()),
+        ("Question", question_schema()),
+        ("TaskQuestionsResponse", task_questions_response_schema()),
+        ("AnswerCandidate", answer_candidate_schema()),
+        (
+            "AnswerCandidateResponse",
+            object(
+                &["id", "candidate", "created_at"],
+                json!({
+                    "id": uuid(),
+                    "candidate": schema_ref("AnswerCandidate"),
+                    "created_at": timestamp()
+                }),
+            ),
+        ),
+        (
+            "AnswerCandidatesResponse",
+            answer_candidates_response_schema(),
+        ),
+        (
+            "LocalAnswerCacheImportResponse",
+            local_answer_cache_import_response_schema(),
+        ),
+        (
+            "AnswerResolutionDecision",
+            answer_resolution_decision_schema(),
+        ),
+        ("AnswerResolutionPlan", answer_resolution_plan_schema()),
+        ("SelectedAnswer", selected_answer_schema()),
+        (
+            "SubmissionPayloadPreview",
+            submission_payload_preview_schema(),
+        ),
+        ("SubmissionDraft", submission_draft_schema()),
+        ("SubmissionReceipt", submission_receipt_schema()),
+        (
+            "SubmissionVerificationSnapshot",
+            submission_verification_schema(),
+        ),
+        ("SubmissionResult", submission_result_schema()),
+        ("CreditAccount", credit_account_schema()),
+        ("PriceQuote", price_quote_schema()),
+        ("CreditReservation", credit_reservation_schema()),
+        ("CreditTransaction", credit_transaction_schema()),
+        (
+            "CreditReservationDetailResponse",
+            object(
+                &["reservation", "quote"],
+                json!({
+                    "reservation": schema_ref("CreditReservation"),
+                    "quote": schema_ref("PriceQuote")
+                }),
+            ),
+        ),
+        (
+            "CreditTransactionPageResponse",
+            page_response("CreditTransaction"),
+        ),
+        (
+            "CreditReservationPageResponse",
+            page_response("CreditReservationDetailResponse"),
+        ),
         ("Execution", execution_schema()),
         ("ExecutionAttempt", execution_attempt_schema()),
         ("ExecutionProgress", execution_progress_schema()),
@@ -533,6 +632,433 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             page_response("ExecutionLogEvent"),
         ),
     ]
+}
+
+fn provider_scan_report_schema() -> Value {
+    object(
+        &[
+            "courses_seen",
+            "tasks_created",
+            "tasks_updated",
+            "tasks_unchanged",
+            "task_changes",
+        ],
+        json!({
+            "courses_seen": unsigned_integer(),
+            "tasks_created": unsigned_integer(),
+            "tasks_updated": unsigned_integer(),
+            "tasks_unchanged": unsigned_integer(),
+            "task_changes": {
+                "type": "array",
+                "items": object(&["task_id", "changes"], json!({
+                    "task_id": uuid(),
+                    "changes": {
+                        "type": "array",
+                        "items": string_enum(&["created", "metadata_changed", "content_changed", "deadline_changed", "opened", "closed", "reopened", "completed_externally", "removed"])
+                    }
+                }))
+            }
+        }),
+    )
+}
+
+fn credit_account_schema() -> Value {
+    object(
+        &["user_id", "available", "reserved"],
+        json!({
+            "user_id": uuid(),
+            "available": unsigned_integer(),
+            "reserved": unsigned_integer()
+        }),
+    )
+}
+
+fn price_quote_schema() -> Value {
+    object(
+        &[
+            "id",
+            "task_id",
+            "amount",
+            "pricing_revision",
+            "reason",
+            "created_at",
+        ],
+        json!({
+            "id": uuid(),
+            "task_id": uuid(),
+            "amount": unsigned_integer(),
+            "pricing_revision": string(),
+            "reason": string(),
+            "created_at": timestamp()
+        }),
+    )
+}
+
+fn credit_reservation_schema() -> Value {
+    object(
+        &[
+            "id",
+            "user_id",
+            "quote_id",
+            "execution_id",
+            "amount",
+            "state",
+            "created_at",
+            "updated_at",
+        ],
+        json!({
+            "id": uuid(),
+            "user_id": uuid(),
+            "quote_id": uuid(),
+            "execution_id": uuid(),
+            "amount": unsigned_integer(),
+            "state": string_enum(&["reserved", "committed", "released"]),
+            "created_at": timestamp(),
+            "updated_at": timestamp()
+        }),
+    )
+}
+
+fn credit_transaction_schema() -> Value {
+    object(
+        &[
+            "id",
+            "user_id",
+            "amount",
+            "transaction_type",
+            "task_id",
+            "execution_id",
+            "operator_id",
+            "reason",
+            "created_at",
+        ],
+        json!({
+            "id": uuid(),
+            "user_id": uuid(),
+            "amount": integer(),
+            "transaction_type": string_enum(&["master_grant", "task_execution", "task_refund", "manual_adjustment"]),
+            "task_id": nullable_uuid(),
+            "execution_id": nullable_uuid(),
+            "operator_id": nullable_uuid(),
+            "reason": string(),
+            "created_at": timestamp()
+        }),
+    )
+}
+
+fn question_attachment_schema() -> Value {
+    object(
+        &["kind", "remote_id", "label", "metadata_sanitized"],
+        json!({
+            "kind": string_enum(&["image", "audio", "video", "file", "formula", "other"]),
+            "remote_id": nullable_string(),
+            "label": nullable_string(),
+            "metadata_sanitized": {}
+        }),
+    )
+}
+
+fn question_option_schema() -> Value {
+    object(
+        &["id", "content", "attachments", "metadata_sanitized"],
+        json!({
+            "id": string(),
+            "content": nullable_string(),
+            "attachments": {"type": "array", "items": schema_ref("QuestionAttachment")},
+            "metadata_sanitized": {}
+        }),
+    )
+}
+
+fn question_schema() -> Value {
+    object(
+        &[
+            "id",
+            "task_id",
+            "remote_question_id",
+            "kind",
+            "stem",
+            "options",
+            "attachments",
+            "metadata_sanitized",
+            "position",
+        ],
+        json!({
+            "id": uuid(),
+            "task_id": uuid(),
+            "remote_question_id": nullable_string(),
+            "kind": string_enum(&["single_choice", "multiple_choice", "true_false", "fill_blank", "short_answer", "matching", "ordering", "composite", "unknown"]),
+            "stem": string(),
+            "options": {"type": "array", "items": schema_ref("QuestionOption")},
+            "attachments": {"type": "array", "items": schema_ref("QuestionAttachment")},
+            "metadata_sanitized": {},
+            "position": {"type": "integer", "minimum": 1}
+        }),
+    )
+}
+
+fn task_questions_response_schema() -> Value {
+    object(
+        &[
+            "snapshot_id",
+            "task_id",
+            "provider_id",
+            "provider_version",
+            "captured_at",
+            "questions",
+        ],
+        json!({
+            "snapshot_id": uuid(),
+            "task_id": uuid(),
+            "provider_id": provider_id(),
+            "provider_version": string(),
+            "captured_at": timestamp(),
+            "questions": {"type": "array", "items": schema_ref("Question")}
+        }),
+    )
+}
+
+fn answer_candidate_schema() -> Value {
+    object(
+        &[
+            "question_id",
+            "source",
+            "answer",
+            "confidence",
+            "explanation",
+            "provenance_sanitized",
+        ],
+        json!({
+            "question_id": uuid(),
+            "source": answer_source(),
+            "answer": schema_ref("NormalizedAnswer"),
+            "confidence": {"type": ["integer", "null"], "minimum": 0, "maximum": 10_000},
+            "explanation": nullable_string(),
+            "provenance_sanitized": {}
+        }),
+    )
+}
+
+fn answer_candidates_response_schema() -> Value {
+    object(
+        &[
+            "task_id",
+            "question_snapshot_id",
+            "provider_id",
+            "provider_version",
+            "candidates",
+        ],
+        json!({
+            "task_id": uuid(),
+            "question_snapshot_id": uuid(),
+            "provider_id": provider_id(),
+            "provider_version": string(),
+            "candidates": {"type": "array", "items": schema_ref("AnswerCandidateResponse")}
+        }),
+    )
+}
+
+fn local_answer_cache_import_response_schema() -> Value {
+    object(
+        &["task_id", "question_snapshot_id", "candidates"],
+        json!({
+            "task_id": uuid(),
+            "question_snapshot_id": uuid(),
+            "candidates": {"type": "array", "items": schema_ref("AnswerCandidateResponse")}
+        }),
+    )
+}
+
+fn answer_resolution_decision_schema() -> Value {
+    object(
+        &[
+            "question_id",
+            "status",
+            "considered_candidate_ids",
+            "selected_candidate_id",
+            "selected_answer",
+        ],
+        json!({
+            "question_id": uuid(),
+            "status": string_enum(&["selected", "conflict", "missing"]),
+            "considered_candidate_ids": {"type": "array", "items": uuid()},
+            "selected_candidate_id": nullable_uuid(),
+            "selected_answer": nullable_schema_ref("NormalizedAnswer")
+        }),
+    )
+}
+
+fn answer_resolution_plan_schema() -> Value {
+    object(
+        &["task_id", "question_snapshot_id", "decisions"],
+        json!({
+            "task_id": uuid(),
+            "question_snapshot_id": uuid(),
+            "decisions": {"type": "array", "items": schema_ref("AnswerResolutionDecision")}
+        }),
+    )
+}
+
+fn selected_answer_schema() -> Value {
+    object(
+        &[
+            "candidate_id",
+            "question_id",
+            "answer",
+            "source",
+            "confidence",
+        ],
+        json!({
+            "candidate_id": uuid(),
+            "question_id": uuid(),
+            "answer": schema_ref("NormalizedAnswer"),
+            "source": answer_source(),
+            "confidence": {"type": ["integer", "null"], "minimum": 0, "maximum": 10_000}
+        }),
+    )
+}
+
+fn submission_payload_preview_schema() -> Value {
+    object(
+        &["encoding", "format", "fields"],
+        json!({
+            "encoding": string_enum(&["form", "json", "query", "provider_specific"]),
+            "format": string(),
+            "fields": {
+                "type": "array",
+                "items": object(&["question_id", "field_name"], json!({
+                    "question_id": uuid(),
+                    "field_name": string()
+                }))
+            }
+        }),
+    )
+}
+
+fn submission_draft_schema() -> Value {
+    object(
+        &[
+            "id",
+            "task_id",
+            "question_snapshot_id",
+            "provider_id",
+            "provider_version",
+            "items",
+            "payload_preview",
+            "created_at",
+        ],
+        json!({
+            "id": uuid(),
+            "task_id": uuid(),
+            "question_snapshot_id": uuid(),
+            "provider_id": provider_id(),
+            "provider_version": string(),
+            "items": {
+                "type": "array",
+                "items": object(&["question", "selected"], json!({
+                    "question": schema_ref("Question"),
+                    "selected": schema_ref("SelectedAnswer")
+                }))
+            },
+            "payload_preview": schema_ref("SubmissionPayloadPreview"),
+            "created_at": timestamp()
+        }),
+    )
+}
+
+fn submission_receipt_schema() -> Value {
+    object(
+        &[
+            "remote_status",
+            "message_sanitized",
+            "provider_trace_id",
+            "received_at",
+        ],
+        json!({
+            "remote_status": string(),
+            "message_sanitized": nullable_string(),
+            "provider_trace_id": nullable_string(),
+            "received_at": timestamp()
+        }),
+    )
+}
+
+fn submission_verification_schema() -> Value {
+    object(
+        &[
+            "status",
+            "remote_state",
+            "score",
+            "progress_percent",
+            "questions",
+            "verified_at",
+        ],
+        json!({
+            "status": string_enum(&["confirmed", "rejected", "pending", "inconclusive"]),
+            "remote_state": nullable_string_enum(&["unknown", "not_open", "pending", "in_progress", "completed", "expired", "removed"]),
+            "score": {
+                "oneOf": [
+                    object(&["earned_milli_points", "possible_milli_points"], json!({
+                        "earned_milli_points": unsigned_integer(),
+                        "possible_milli_points": unsigned_integer()
+                    })),
+                    {"type": "null"}
+                ]
+            },
+            "progress_percent": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+            "questions": {
+                "type": "array",
+                "items": object(&["question_id", "status"], json!({
+                    "question_id": uuid(),
+                    "status": string_enum(&["confirmed", "rejected", "unverified"])
+                }))
+            },
+            "verified_at": timestamp()
+        }),
+    )
+}
+
+fn submission_result_schema() -> Value {
+    object(
+        &[
+            "id",
+            "submission_draft_id",
+            "execution_id",
+            "execution_attempt_id",
+            "task_id",
+            "question_snapshot_id",
+            "provider_id",
+            "provider_version",
+            "status",
+            "receipt",
+            "verification",
+            "created_at",
+        ],
+        json!({
+            "id": uuid(),
+            "submission_draft_id": uuid(),
+            "execution_id": uuid(),
+            "execution_attempt_id": uuid(),
+            "task_id": uuid(),
+            "question_snapshot_id": uuid(),
+            "provider_id": provider_id(),
+            "provider_version": string(),
+            "status": string_enum(&["confirmed", "rejected", "execution_failed", "inconclusive"]),
+            "receipt": nullable_schema_ref("SubmissionReceipt"),
+            "verification": schema_ref("SubmissionVerificationSnapshot"),
+            "created_at": timestamp()
+        }),
+    )
+}
+
+fn answer_source() -> Value {
+    string_enum(&[
+        "manual",
+        "local_cache",
+        "provider_native",
+        "external_bank",
+        "other",
+    ])
 }
 
 fn provider_setting_value_schema() -> Value {
