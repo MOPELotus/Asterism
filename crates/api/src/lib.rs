@@ -325,11 +325,23 @@ async fn list_providers(
     }))
 }
 
+async fn openapi() -> Json<Value> {
+    Json(openapi_document())
+}
+
+/// Builds the deterministic `OpenAPI` document consumed by the HTTP route and
+/// offline client-generation tooling.
+///
+/// # Panics
+///
+/// Panics when the statically assembled document no longer has the expected
+/// `paths` or `components.schemas` object shape.
+#[must_use]
 #[allow(
     clippy::too_many_lines,
     reason = "the declarative OpenAPI document is kept together for route/schema integrity"
 )]
-async fn openapi() -> Json<Value> {
+pub fn openapi_document() -> Value {
     let mut document = json!({
         "openapi": "3.1.0",
         "info": {
@@ -901,7 +913,7 @@ async fn openapi() -> Json<Value> {
         .expect("static OpenAPI schemas object")
         .insert("NormalizedAnswer".to_owned(), normalized_answer_schema());
     openapi_contract::finalize(&mut document);
-    Json(document)
+    document
 }
 
 fn credit_account_path() -> Value {

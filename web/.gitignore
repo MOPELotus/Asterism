@@ -1,0 +1,3 @@
+.openapi/
+node_modules/
+src/api/generated/

@@ -1,0 +1,21 @@
+{
+  "name": "@asterism/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "pregenerate:api": "cargo run --manifest-path ../Cargo.toml -q -p asterism-api --example export_openapi -- .openapi/asterism.json",
+    "generate:api": "openapi-ts -i .openapi/asterism.json -o src/api/generated",
+    "typecheck:api": "tsc -p tsconfig.api.json"
+  },
+  "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
+    "typescript": "6.0.3"
+  },
+  "overrides": {
+    "js-yaml": "4.3.1"
+  }
+}

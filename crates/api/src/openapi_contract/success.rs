@@ -1,0 +1,1008 @@
+use serde_json::{Map, Value, json};
+
+const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
+    ("health", "HealthResponse"),
+    ("systemHealth", "HealthResponse"),
+    ("bootstrapMaster", "LoginResponse"),
+    ("login", "LoginResponse"),
+    ("currentIdentity", "IdentityResponse"),
+    ("listProviders", "ProviderMetadataListResponse"),
+    ("listProviderAccounts", "ProviderAccountListResponse"),
+    ("createProviderAccount", "ProviderAccountResponse"),
+    ("getProviderAccount", "ProviderAccountResponse"),
+    ("updateProviderAccount", "ProviderAccountResponse"),
+    (
+        "replaceProviderAccountCredentials",
+        "PutProviderCredentialsResponse",
+    ),
+    (
+        "beginProviderAccountAuthSession",
+        "AuthSessionBeginResponse",
+    ),
+    ("getLatestProviderAccountAuthSession", "AuthSession"),
+    ("getProviderAccountAuthSession", "AuthSession"),
+    ("cancelProviderAccountAuthSession", "AuthSession"),
+    (
+        "submitProviderAccountAuthSessionCredentials",
+        "PutAuthSessionCredentialsResponse",
+    ),
+    ("getProviderAccountScanSchedule", "ScanScheduleResponse"),
+    (
+        "configureProviderAccountScanSchedule",
+        "ScanScheduleResponse",
+    ),
+    (
+        "getProviderRuntimeSettingsSchema",
+        "ProviderRuntimeSettingsSchemaResponse",
+    ),
+    (
+        "getProviderRuntimeSettings",
+        "ProviderRuntimeSettingsResponse",
+    ),
+    (
+        "putProviderRuntimeSettings",
+        "ProviderRuntimeSettingsResponse",
+    ),
+    (
+        "getProviderAccountRuntimeSettings",
+        "ProviderRuntimeSettingsResponse",
+    ),
+    (
+        "putProviderAccountRuntimeSettings",
+        "ProviderRuntimeSettingsResponse",
+    ),
+    ("getTaskRuntimeSettings", "ProviderRuntimeSettingsResponse"),
+    ("putTaskRuntimeSettings", "ProviderRuntimeSettingsResponse"),
+    ("listTasks", "TaskPageResponse"),
+    ("getTask", "Task"),
+    ("getTaskDetail", "TaskDetailResponse"),
+    ("getTaskProgress", "TaskProgressResponse"),
+    ("getTaskDuration", "TaskDurationResponse"),
+    ("executeTask", "ExecuteTaskResponse"),
+    ("listExecutions", "ExecutionPageResponse"),
+    ("getExecution", "ExecutionDetailResponse"),
+    ("listExecutionLogs", "ExecutionLogPageResponse"),
+    ("createServiceToken", "CreateServiceTokenResponse"),
+];
+
+pub(super) fn schema_for(operation_id: &str) -> Option<&'static str> {
+    JSON_SUCCESS_SCHEMAS
+        .iter()
+        .find_map(|(operation, schema)| (*operation == operation_id).then_some(*schema))
+}
+
+pub(super) fn register(schemas: &mut Map<String, Value>) {
+    for (name, schema) in schemas_for_client() {
+        schemas.insert(name.to_owned(), schema);
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "wire schemas remain auditable beside their operation mapping"
+)]
+fn schemas_for_client() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "HealthResponse",
+            object(
+                &[
+                    "service",
+                    "version",
+                    "status",
+                    "database",
+                    "schema_version",
+                    "registered_providers",
+                    "outbox_pending",
+                    "outbox_dead_letter",
+                    "secret_store_configured",
+                ],
+                json!({
+                    "service": string(),
+                    "version": string(),
+                    "status": string(),
+                    "database": string(),
+                    "schema_version": integer(),
+                    "registered_providers": unsigned_integer(),
+                    "outbox_pending": unsigned_integer(),
+                    "outbox_dead_letter": unsigned_integer(),
+                    "secret_store_configured": {"type": "boolean"}
+                }),
+            ),
+        ),
+        (
+            "Role",
+            json!({"type": "string", "enum": ["master", "operator", "user"]}),
+        ),
+        (
+            "UserSummary",
+            object(
+                &["id", "username", "roles"],
+                json!({
+                    "id": uuid(),
+                    "username": string(),
+                    "roles": {"type": "array", "items": schema_ref("Role")}
+                }),
+            ),
+        ),
+        (
+            "LoginResponse",
+            object(
+                &["user", "expires_at"],
+                json!({"user": schema_ref("UserSummary"), "expires_at": timestamp()}),
+            ),
+        ),
+        (
+            "IdentityResponse",
+            object(
+                &["identity_type", "user_id", "service_token_id", "scopes"],
+                json!({
+                    "identity_type": {"type": "string", "enum": ["web_session", "service_token"]},
+                    "user_id": nullable_uuid(),
+                    "service_token_id": nullable_uuid(),
+                    "scopes": {"type": "array", "uniqueItems": true, "items": schema_ref("ServiceScope")}
+                }),
+            ),
+        ),
+        (
+            "ServiceToken",
+            object(
+                &[
+                    "id",
+                    "owner_user_id",
+                    "name",
+                    "scopes",
+                    "created_at",
+                    "expires_at",
+                    "revoked_at",
+                    "last_used_at",
+                ],
+                json!({
+                    "id": uuid(),
+                    "owner_user_id": nullable_uuid(),
+                    "name": string(),
+                    "scopes": {"type": "array", "uniqueItems": true, "items": schema_ref("ServiceScope")},
+                    "created_at": timestamp(),
+                    "expires_at": nullable_timestamp(),
+                    "revoked_at": nullable_timestamp(),
+                    "last_used_at": nullable_timestamp()
+                }),
+            ),
+        ),
+        (
+            "CreateServiceTokenResponse",
+            object(
+                &["token", "metadata"],
+                json!({
+                    "token": {"type": "string", "minLength": 1, "readOnly": true},
+                    "metadata": schema_ref("ServiceToken")
+                }),
+            ),
+        ),
+        (
+            "VerificationLevel",
+            string_enum(&[
+                "development",
+                "experimental",
+                "community_verified",
+                "verified",
+                "broken",
+            ]),
+        ),
+        (
+            "ProviderCapability",
+            string_enum(&[
+                "authentication",
+                "course_inventory",
+                "task_inventory",
+                "task_detail",
+                "task_progress_read",
+                "resource_execution",
+                "execution_verify",
+                "question_inventory",
+                "question_parse",
+                "answer_resolve",
+                "submission_build",
+                "submission_execute",
+                "submission_verify",
+                "duration_read",
+                "duration_report",
+                "discussion",
+                "practice",
+                "browser_bridge",
+            ]),
+        ),
+        (
+            "AuthMethod",
+            string_enum(&[
+                "password",
+                "qr_code",
+                "external_browser_oauth",
+                "assisted_session",
+                "imported_cookie",
+                "imported_token",
+            ]),
+        ),
+        (
+            "SessionKind",
+            string_enum(&[
+                "cookie",
+                "bearer_token",
+                "jwt",
+                "composite",
+                "provider_specific",
+            ]),
+        ),
+        (
+            "ProviderMetadata",
+            object(
+                &[
+                    "id",
+                    "display_name",
+                    "implementation_version",
+                    "verification",
+                    "scan_min_interval_seconds",
+                    "capture_recipe_version",
+                    "capabilities",
+                    "auth_methods",
+                    "session_kinds",
+                ],
+                json!({
+                    "id": provider_id(),
+                    "display_name": string(),
+                    "implementation_version": string(),
+                    "verification": schema_ref("VerificationLevel"),
+                    "scan_min_interval_seconds": nullable_unsigned_integer(),
+                    "capture_recipe_version": nullable_unsigned_integer(),
+                    "capabilities": {"type": "array", "uniqueItems": true, "items": schema_ref("ProviderCapability")},
+                    "auth_methods": {"type": "array", "uniqueItems": true, "items": schema_ref("AuthMethod")},
+                    "session_kinds": {"type": "array", "uniqueItems": true, "items": schema_ref("SessionKind")}
+                }),
+            ),
+        ),
+        (
+            "ProviderMetadataListResponse",
+            list_response("ProviderMetadata"),
+        ),
+        ("AuthState", auth_state_schema()),
+        (
+            "ProviderAccountResponse",
+            object(
+                &[
+                    "id",
+                    "owner_id",
+                    "provider_id",
+                    "display_name",
+                    "tenant",
+                    "auth_state",
+                    "network_profile_id",
+                    "credential_count",
+                    "created_at",
+                    "updated_at",
+                ],
+                json!({
+                    "id": uuid(),
+                    "owner_id": uuid(),
+                    "provider_id": provider_id(),
+                    "display_name": string(),
+                    "tenant": nullable_string(),
+                    "auth_state": schema_ref("AuthState"),
+                    "network_profile_id": nullable_string(),
+                    "credential_count": unsigned_integer(),
+                    "created_at": timestamp(),
+                    "updated_at": timestamp()
+                }),
+            ),
+        ),
+        (
+            "ProviderAccountListResponse",
+            list_response("ProviderAccountResponse"),
+        ),
+        (
+            "SessionStatus",
+            object(
+                &["valid", "kind", "expires_at", "account_hint"],
+                json!({
+                    "valid": {"type": "boolean"},
+                    "kind": schema_ref("SessionKind"),
+                    "expires_at": nullable_timestamp(),
+                    "account_hint": nullable_string()
+                }),
+            ),
+        ),
+        (
+            "AuthSession",
+            object(
+                &[
+                    "id",
+                    "owner_user_id",
+                    "provider_account_id",
+                    "method",
+                    "state",
+                    "created_at",
+                    "updated_at",
+                    "expires_at",
+                    "revision",
+                ],
+                json!({
+                    "id": uuid(),
+                    "owner_user_id": uuid(),
+                    "provider_account_id": uuid(),
+                    "method": schema_ref("AuthMethod"),
+                    "state": schema_ref("AuthState"),
+                    "created_at": timestamp(),
+                    "updated_at": timestamp(),
+                    "expires_at": timestamp(),
+                    "revision": unsigned_integer()
+                }),
+            ),
+        ),
+        (
+            "AuthChallenge",
+            object(
+                &[
+                    "session_id",
+                    "method",
+                    "waiting_for",
+                    "user_action",
+                    "expires_at",
+                ],
+                json!({
+                    "session_id": uuid(),
+                    "method": schema_ref("AuthMethod"),
+                    "waiting_for": string_enum(&["credential_input", "qr_scan", "qr_confirm", "browser_callback", "sms_code", "session_import"]),
+                    "user_action": nullable_string(),
+                    "expires_at": nullable_timestamp()
+                }),
+            ),
+        ),
+        (
+            "AuthSessionBeginResponse",
+            object(
+                &["session", "challenge"],
+                json!({"session": schema_ref("AuthSession"), "challenge": schema_ref("AuthChallenge")}),
+            ),
+        ),
+        (
+            "PutProviderCredentialsResponse",
+            object(
+                &["credential_count", "status"],
+                json!({"credential_count": unsigned_integer(), "status": schema_ref("SessionStatus")}),
+            ),
+        ),
+        (
+            "PutAuthSessionCredentialsResponse",
+            object(
+                &["session", "credential_count", "status"],
+                json!({
+                    "session": schema_ref("AuthSession"),
+                    "credential_count": unsigned_integer(),
+                    "status": schema_ref("SessionStatus")
+                }),
+            ),
+        ),
+        (
+            "ScanScheduleResponse",
+            object(
+                &[
+                    "id",
+                    "provider_account_id",
+                    "desired_interval_seconds",
+                    "effective_interval_seconds",
+                    "provider_min_interval_seconds",
+                    "next_run_at",
+                    "enabled",
+                    "created_at",
+                    "updated_at",
+                ],
+                json!({
+                    "id": uuid(),
+                    "provider_account_id": uuid(),
+                    "desired_interval_seconds": unsigned_integer(),
+                    "effective_interval_seconds": unsigned_integer(),
+                    "provider_min_interval_seconds": nullable_unsigned_integer(),
+                    "next_run_at": timestamp(),
+                    "enabled": {"type": "boolean"},
+                    "created_at": timestamp(),
+                    "updated_at": timestamp()
+                }),
+            ),
+        ),
+        ("ProviderSettingValue", provider_setting_value_schema()),
+        ("ProviderSettingKind", provider_setting_kind_schema()),
+        (
+            "ProviderSettingDefinition",
+            provider_setting_definition_schema(),
+        ),
+        (
+            "ProviderRuntimeSettingsSchema",
+            object(
+                &["version", "definitions"],
+                json!({
+                    "version": {"type": "integer", "minimum": 1},
+                    "definitions": {"type": "array", "items": schema_ref("ProviderSettingDefinition")}
+                }),
+            ),
+        ),
+        (
+            "ProviderRuntimeSettingsSchemaResponse",
+            object(
+                &["provider_id", "schema"],
+                json!({
+                    "provider_id": provider_id(),
+                    "schema": schema_ref("ProviderRuntimeSettingsSchema")
+                }),
+            ),
+        ),
+        ("ProviderRuntimeSettingsPatch", runtime_settings_values()),
+        ("ResolvedProviderRuntimeSettings", runtime_settings_values()),
+        (
+            "ProviderRuntimeSettingsOverride",
+            object(
+                &["id", "patch", "revision", "created_at", "updated_at"],
+                json!({
+                    "id": uuid(),
+                    "patch": schema_ref("ProviderRuntimeSettingsPatch"),
+                    "revision": unsigned_integer(),
+                    "created_at": timestamp(),
+                    "updated_at": timestamp()
+                }),
+            ),
+        ),
+        (
+            "ProviderRuntimeSettingsLayers",
+            object(
+                &["provider", "provider_account", "task"],
+                json!({
+                    "provider": nullable_schema_ref("ProviderRuntimeSettingsOverride"),
+                    "provider_account": nullable_schema_ref("ProviderRuntimeSettingsOverride"),
+                    "task": nullable_schema_ref("ProviderRuntimeSettingsOverride")
+                }),
+            ),
+        ),
+        (
+            "ProviderRuntimeSettingsResponse",
+            provider_runtime_settings_response_schema(),
+        ),
+        ("Task", task_schema()),
+        ("TaskPageResponse", page_response("Task")),
+        ("RemoteTask", remote_task_schema()),
+        (
+            "RemoteTaskDetail",
+            object(
+                &["task", "normalized_detail"],
+                json!({"task": schema_ref("RemoteTask"), "normalized_detail": {}}),
+            ),
+        ),
+        (
+            "RemoteProgress",
+            object(
+                &["remote_state", "percent", "duration_seconds", "updated_at"],
+                json!({
+                    "remote_state": remote_state(),
+                    "percent": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+                    "duration_seconds": nullable_unsigned_integer(),
+                    "updated_at": timestamp()
+                }),
+            ),
+        ),
+        (
+            "RemoteDuration",
+            object(
+                &["duration_seconds", "updated_at"],
+                json!({"duration_seconds": unsigned_integer(), "updated_at": timestamp()}),
+            ),
+        ),
+        (
+            "TaskDetailResponse",
+            provider_task_read_response("detail", "RemoteTaskDetail"),
+        ),
+        (
+            "TaskProgressResponse",
+            provider_task_read_response("progress", "RemoteProgress"),
+        ),
+        (
+            "TaskDurationResponse",
+            provider_task_read_response("duration", "RemoteDuration"),
+        ),
+        ("Execution", execution_schema()),
+        ("ExecutionAttempt", execution_attempt_schema()),
+        ("ExecutionProgress", execution_progress_schema()),
+        ("ExecutionLogEvent", execution_log_schema()),
+        (
+            "ExecuteTaskResponse",
+            object(
+                &["execution", "created"],
+                json!({"execution": schema_ref("Execution"), "created": {"type": "boolean"}}),
+            ),
+        ),
+        ("ExecutionPageResponse", page_response("Execution")),
+        (
+            "ExecutionDetailResponse",
+            object(
+                &["execution", "progress", "attempts"],
+                json!({
+                    "execution": schema_ref("Execution"),
+                    "progress": {"oneOf": [schema_ref("ExecutionProgress"), {"type": "null"}]},
+                    "attempts": {"type": "array", "items": schema_ref("ExecutionAttempt")}
+                }),
+            ),
+        ),
+        (
+            "ExecutionLogPageResponse",
+            page_response("ExecutionLogEvent"),
+        ),
+    ]
+}
+
+fn provider_setting_value_schema() -> Value {
+    json!({
+        "oneOf": [
+            object(&["type", "value"], json!({"type": {"const": "boolean"}, "value": {"type": "boolean"}})),
+            object(&["type", "value"], json!({"type": {"const": "integer"}, "value": integer()})),
+            object(&["type", "value"], json!({"type": {"const": "decimal_millis"}, "value": integer()})),
+            object(&["type", "value"], json!({"type": {"const": "duration_seconds"}, "value": unsigned_integer()})),
+            object(&["type", "value"], json!({"type": {"const": "choice"}, "value": string()}))
+        ]
+    })
+}
+
+fn provider_setting_kind_schema() -> Value {
+    json!({
+        "oneOf": [
+            object(&["type"], json!({"type": {"const": "boolean"}})),
+            bounded_numeric_setting_kind("integer"),
+            bounded_numeric_setting_kind("decimal_millis"),
+            bounded_numeric_setting_kind("duration_seconds"),
+            object(&["type", "options"], json!({
+                "type": {"const": "choice"},
+                "options": {"type": "array", "uniqueItems": true, "items": string()}
+            }))
+        ]
+    })
+}
+
+fn bounded_numeric_setting_kind(kind: &str) -> Value {
+    object(
+        &["type", "minimum", "maximum", "step"],
+        json!({
+            "type": {"const": kind},
+            "minimum": integer(),
+            "maximum": integer(),
+            "step": unsigned_integer()
+        }),
+    )
+}
+
+fn provider_setting_definition_schema() -> Value {
+    object(
+        &[
+            "key",
+            "display_name",
+            "description",
+            "kind",
+            "default",
+            "scopes",
+        ],
+        json!({
+            "key": string(),
+            "display_name": string(),
+            "description": string(),
+            "kind": schema_ref("ProviderSettingKind"),
+            "default": schema_ref("ProviderSettingValue"),
+            "scopes": {"type": "array", "uniqueItems": true, "items": string_enum(&["provider", "provider_account", "task"])},
+            "core_behavior": string_enum(&["provider_execution_concurrency", "account_execution_concurrency", "account_scan_interval"])
+        }),
+    )
+}
+
+fn runtime_settings_values() -> Value {
+    object(
+        &["schema_version", "values"],
+        json!({
+            "schema_version": {"type": "integer", "minimum": 1},
+            "values": {"type": "object", "additionalProperties": schema_ref("ProviderSettingValue")}
+        }),
+    )
+}
+
+fn provider_runtime_settings_response_schema() -> Value {
+    object(
+        &[
+            "provider_id",
+            "provider_account_id",
+            "task_id",
+            "target_scope",
+            "schema",
+            "overrides",
+            "resolved",
+            "sources",
+        ],
+        json!({
+            "provider_id": provider_id(),
+            "provider_account_id": nullable_uuid(),
+            "task_id": nullable_uuid(),
+            "target_scope": string_enum(&["provider", "provider_account", "task"]),
+            "schema": schema_ref("ProviderRuntimeSettingsSchema"),
+            "overrides": schema_ref("ProviderRuntimeSettingsLayers"),
+            "resolved": schema_ref("ResolvedProviderRuntimeSettings"),
+            "sources": {"type": "object", "additionalProperties": string_enum(&["schema_default", "provider", "provider_account", "task"])}
+        }),
+    )
+}
+
+fn remote_task_schema() -> Value {
+    object(
+        &[
+            "remote_id",
+            "course_remote_id",
+            "title",
+            "source_type",
+            "assessment_class",
+            "remote_state",
+            "opens_at",
+            "due_at",
+            "closes_at",
+            "capabilities",
+            "fingerprint",
+            "normalized",
+            "raw_sanitized",
+        ],
+        json!({
+            "remote_id": string(),
+            "course_remote_id": nullable_string(),
+            "title": string(),
+            "source_type": source_type(),
+            "assessment_class": assessment_class(),
+            "remote_state": remote_state(),
+            "opens_at": nullable_timestamp(),
+            "due_at": nullable_timestamp(),
+            "closes_at": nullable_timestamp(),
+            "capabilities": {"type": "array", "items": task_capability()},
+            "fingerprint": string(),
+            "normalized": {},
+            "raw_sanitized": {}
+        }),
+    )
+}
+
+fn provider_task_read_response(field: &str, value_schema: &str) -> Value {
+    let properties = Map::from_iter([
+        ("task_id".to_owned(), uuid()),
+        ("provider_id".to_owned(), provider_id()),
+        ("provider_version".to_owned(), string()),
+        (field.to_owned(), schema_ref(value_schema)),
+    ]);
+    object(
+        &["task_id", "provider_id", "provider_version", field],
+        Value::Object(properties),
+    )
+}
+
+fn task_schema() -> Value {
+    object(
+        &[
+            "id",
+            "provider_account_id",
+            "course_id",
+            "remote_id",
+            "source_type",
+            "assessment_class",
+            "title",
+            "remote_state",
+            "orchestration_state",
+            "opens_at",
+            "due_at",
+            "closes_at",
+            "discovered_at",
+            "updated_at",
+            "latest_snapshot_id",
+            "capabilities",
+        ],
+        json!({
+            "id": uuid(),
+            "provider_account_id": uuid(),
+            "course_id": nullable_uuid(),
+            "remote_id": string(),
+            "source_type": source_type(),
+            "assessment_class": assessment_class(),
+            "title": string(),
+            "remote_state": remote_state(),
+            "orchestration_state": string_enum(&["discovered", "ready", "waiting_approval", "scheduled", "credit_blocked", "human_required", "running", "recovering", "retry_waiting", "succeeded", "failed", "cancelled", "ignored"]),
+            "opens_at": nullable_timestamp(),
+            "due_at": nullable_timestamp(),
+            "closes_at": nullable_timestamp(),
+            "discovered_at": timestamp(),
+            "updated_at": timestamp(),
+            "latest_snapshot_id": nullable_uuid(),
+            "capabilities": {"type": "array", "items": task_capability()}
+        }),
+    )
+}
+
+fn execution_schema() -> Value {
+    object(
+        &[
+            "id",
+            "task_id",
+            "submission_draft_id",
+            "requested_by",
+            "request_source",
+            "quote_id",
+            "state",
+            "scheduled_at",
+            "started_at",
+            "finished_at",
+            "created_at",
+        ],
+        json!({
+            "id": uuid(),
+            "task_id": uuid(),
+            "submission_draft_id": nullable_uuid(),
+            "requested_by": nullable_uuid(),
+            "request_source": string_enum(&["scheduler", "web_ui", "yunzai", "cli", "system"]),
+            "quote_id": nullable_uuid(),
+            "state": string_enum(&["requested", "scheduled", "running", "recovering", "retry_waiting", "human_required", "succeeded", "failed", "cancelled"]),
+            "scheduled_at": nullable_timestamp(),
+            "started_at": nullable_timestamp(),
+            "finished_at": nullable_timestamp(),
+            "created_at": timestamp()
+        }),
+    )
+}
+
+fn execution_attempt_schema() -> Value {
+    object(
+        &[
+            "id",
+            "execution_id",
+            "attempt_no",
+            "started_at",
+            "finished_at",
+            "result",
+            "error_class",
+            "provider_trace_id",
+        ],
+        json!({
+            "id": uuid(),
+            "execution_id": uuid(),
+            "attempt_no": unsigned_integer(),
+            "started_at": timestamp(),
+            "finished_at": nullable_timestamp(),
+            "result": nullable_string_enum(&["succeeded", "failed", "cancelled"]),
+            "error_class": nullable_string_enum(&["authentication", "authorization", "rate_limited", "network", "provider_unavailable", "protocol_drift", "invalid_remote_state", "unsupported_task", "human_required", "internal"]),
+            "provider_trace_id": nullable_string()
+        }),
+    )
+}
+
+fn execution_progress_schema() -> Value {
+    object(
+        &[
+            "execution_id",
+            "percent",
+            "stage",
+            "status_text",
+            "current_item",
+            "completed_items",
+            "total_items",
+            "updated_at",
+        ],
+        json!({
+            "execution_id": uuid(),
+            "percent": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+            "stage": execution_stage(),
+            "status_text": nullable_string(),
+            "current_item": nullable_string(),
+            "completed_items": nullable_unsigned_integer(),
+            "total_items": nullable_unsigned_integer(),
+            "updated_at": timestamp()
+        }),
+    )
+}
+
+fn execution_log_schema() -> Value {
+    object(
+        &[
+            "execution_id",
+            "attempt_id",
+            "timestamp",
+            "level",
+            "stage",
+            "message",
+            "provider_trace_id",
+            "metadata_sanitized",
+        ],
+        json!({
+            "execution_id": uuid(),
+            "attempt_id": nullable_uuid(),
+            "timestamp": timestamp(),
+            "level": string_enum(&["trace", "debug", "info", "warn", "error"]),
+            "stage": execution_stage(),
+            "message": string(),
+            "provider_trace_id": nullable_string(),
+            "metadata_sanitized": {}
+        }),
+    )
+}
+
+fn auth_state_schema() -> Value {
+    let unit_states = [
+        "idle",
+        "starting",
+        "exchanging_credential",
+        "validating_credential",
+        "authenticated",
+        "refreshing",
+        "expired",
+        "auth_failed",
+        "provider_unavailable",
+        "client_update_required",
+        "cancelled",
+    ];
+    json!({
+        "oneOf": [
+            object(&["state"], json!({"state": string_enum(&unit_states)})),
+            object(&["state", "detail"], json!({
+                "state": {"const": "waiting_user"},
+                "detail": string_enum(&["credential_input", "qr_scan", "qr_confirm", "browser_callback", "sms_code", "session_import"])
+            })),
+            object(&["state", "detail"], json!({
+                "state": {"const": "human_required"},
+                "detail": string_enum(&["auth_required", "session_expired", "qr_required", "sms_verification", "image_captcha", "browser_callback_required", "session_import_required", "user_confirmation", "browser_required", "unsupported_task", "remote_changed", "manual_intervention"])
+            }))
+        ]
+    })
+}
+
+fn execution_stage() -> Value {
+    string_enum(&[
+        "preparing",
+        "refreshing_remote_state",
+        "authenticating",
+        "scanning",
+        "fetching_detail",
+        "executing",
+        "submitting",
+        "reporting_duration",
+        "verifying",
+        "finalizing",
+        "completed",
+    ])
+}
+
+fn list_response(item_schema: &str) -> Value {
+    object(
+        &["total", "items"],
+        json!({
+            "total": unsigned_integer(),
+            "items": {"type": "array", "items": schema_ref(item_schema)}
+        }),
+    )
+}
+
+fn page_response(item_schema: &str) -> Value {
+    object(
+        &["total", "limit", "offset", "items"],
+        json!({
+            "total": unsigned_integer(),
+            "limit": unsigned_integer(),
+            "offset": unsigned_integer(),
+            "items": {"type": "array", "items": schema_ref(item_schema)}
+        }),
+    )
+}
+
+fn object(required: &[&str], properties: Value) -> Value {
+    let mut schema = json!({
+        "type": "object",
+        "required": required,
+        "properties": {},
+        "additionalProperties": false
+    });
+    schema["properties"] = properties;
+    schema
+}
+
+fn schema_ref(name: &str) -> Value {
+    json!({"$ref": format!("#/components/schemas/{name}")})
+}
+
+fn nullable_schema_ref(name: &str) -> Value {
+    json!({"oneOf": [schema_ref(name), {"type": "null"}]})
+}
+
+fn source_type() -> Value {
+    string_enum(&[
+        "chapter",
+        "work",
+        "exam",
+        "resource",
+        "practice",
+        "discussion",
+        "other",
+    ])
+}
+
+fn assessment_class() -> Value {
+    string_enum(&["routine", "unknown", "formal"])
+}
+
+fn remote_state() -> Value {
+    string_enum(&[
+        "unknown",
+        "not_open",
+        "pending",
+        "in_progress",
+        "completed",
+        "expired",
+        "removed",
+    ])
+}
+
+fn task_capability() -> Value {
+    string_enum(&[
+        "progress_read",
+        "resource_execution",
+        "execution_verify",
+        "question_inventory",
+        "question_parse",
+        "answer_resolve",
+        "submission_build",
+        "submission_execute",
+        "submission_verify",
+        "duration_read",
+        "duration_report",
+        "discussion",
+        "practice",
+        "browser_bridge",
+    ])
+}
+
+fn string() -> Value {
+    json!({"type": "string"})
+}
+
+fn nullable_string() -> Value {
+    json!({"type": ["string", "null"]})
+}
+
+fn string_enum(values: &[&str]) -> Value {
+    json!({"type": "string", "enum": values})
+}
+
+fn nullable_string_enum(values: &[&str]) -> Value {
+    json!({"type": ["string", "null"], "enum": values.iter().copied().map(Some).chain(std::iter::once(None)).collect::<Vec<_>>()})
+}
+
+fn integer() -> Value {
+    json!({"type": "integer", "format": "int64"})
+}
+
+fn unsigned_integer() -> Value {
+    json!({"type": "integer", "format": "int64", "minimum": 0})
+}
+
+fn nullable_unsigned_integer() -> Value {
+    json!({"type": ["integer", "null"], "format": "int64", "minimum": 0})
+}
+
+fn uuid() -> Value {
+    json!({"type": "string", "format": "uuid"})
+}
+
+fn nullable_uuid() -> Value {
+    json!({"type": ["string", "null"], "format": "uuid"})
+}
+
+fn timestamp() -> Value {
+    json!({"type": "string", "format": "date-time"})
+}
+
+fn nullable_timestamp() -> Value {
+    json!({"type": ["string", "null"], "format": "date-time"})
+}
+
+fn provider_id() -> Value {
+    json!({"type": "string", "pattern": "^[a-z0-9-]{1,64}$"})
+}
