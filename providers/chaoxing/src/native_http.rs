@@ -17,8 +17,10 @@ use zeroize::Zeroize;
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
     ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingInventoryDocument,
-    ChaoxingInventoryTransport, ChaoxingQuestionTransport, ChaoxingWorkDetailRequest,
-    ChaoxingWorkDetailState, classify_work_detail,
+    ChaoxingInventoryTransport, ChaoxingQuestionTransport, ChaoxingSubmissionPlan,
+    ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
+    ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
+    ChaoxingWorkVerificationRoute, classify_work_detail, parse_submission_receipt,
     resource_execution::{
         ChaoxingImmediateResourceTransport, ChaoxingVideoStatus, ChaoxingVideoTransport,
     },
@@ -26,6 +28,7 @@ use crate::{
         ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
         ChaoxingVideoResourceTarget, ChaoxingVideoRt,
     },
+    submission_support::ChaoxingSubmissionForm,
     task_inventory::{
         CHAPTER_RESOURCE_CARD_COUNT, MAX_RESOURCE_BATCH_DOCUMENT_BYTES,
         MAX_RESOURCE_CHAPTER_REQUESTS,
@@ -48,6 +51,7 @@ const COURSE_LIST_REFERER: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visi
 const EXAM_LIST_BASE: &str = "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const WORK_LIST_PATH: &str = "/mooc2/work/list";
+const WORK_SUBMISSION_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/work/addStudentWorkNew";
 const MAX_COOKIE_BYTES: usize = 64 * 1_024;
 const MAX_HTML_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_COURSE_FOLDERS: usize = 256;
@@ -382,6 +386,68 @@ impl NativeChaoxingInventoryTransport {
         document.into_inventory_document()
     }
 
+    async fn prepare_work_submission_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        request: ChaoxingWorkDetailRequest<'_>,
+        plan: &ChaoxingSubmissionPlan,
+    ) -> ProviderResult<(Url, ChaoxingSubmissionForm)> {
+        let (url, document) = self.fetch_work_page(session, request).await?;
+        if !is_readable_work_question_url(&url) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Work is no longer on a submittable editor route",
+            ));
+        }
+        let identity =
+            crate::submission_support::WorkSubmissionIdentity::parse(request.remote_task_id())?;
+        let form = ChaoxingSubmissionForm::parse(document.as_str(), identity, plan)?;
+        Ok((url, form))
+    }
+
+    async fn post_work_submission_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        referer: &Url,
+        form: &ChaoxingSubmissionForm,
+    ) -> ProviderResult<asterism_domain::SubmissionReceipt> {
+        let response = self
+            .client
+            .post(static_url(WORK_SUBMISSION_BASE)?)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
+            .header(REFERER, referer.as_str())
+            .header("x-requested-with", "XMLHttpRequest")
+            .form(form.fields())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        validate_response_status(&response)?;
+        let body = read_response_body(response).await?;
+        parse_submission_receipt(body.as_str())
+    }
+
+    async fn fetch_work_verification_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        request: ChaoxingWorkDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingWorkVerificationDocument> {
+        let (url, document) = self.fetch_work_page(session, request).await?;
+        let path = url.path().to_ascii_lowercase();
+        let route = if path.ends_with("/work/dowork") {
+            ChaoxingWorkVerificationRoute::Editor
+        } else if path.ends_with("/work/prompt") {
+            ChaoxingWorkVerificationRoute::Prompt
+        } else if path.ends_with("/work/view") {
+            ChaoxingWorkVerificationRoute::View
+        } else {
+            return Err(protocol_drift(
+                "Chaoxing Work verification ended on an unsupported route",
+            ));
+        };
+        ChaoxingWorkVerificationDocument::try_new(route, document.into_string())
+    }
+
     async fn complete_immediate_resource_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -636,6 +702,49 @@ impl ChaoxingQuestionTransport for NativeChaoxingInventoryTransport {
 }
 
 #[async_trait]
+impl ChaoxingSubmissionTransport for NativeChaoxingInventoryTransport {
+    async fn submit_work(
+        &self,
+        context: &ProviderContext,
+        request: ChaoxingWorkDetailRequest<'_>,
+        plan: &ChaoxingSubmissionPlan,
+    ) -> ProviderResult<asterism_domain::SubmissionReceipt> {
+        let (mut session, renewed) = self.session_for_operation(context).await?;
+        let prepared = match self
+            .prepare_work_submission_once(&session, request, plan)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                session = self.sessions.renew_session(context).await?;
+                self.prepare_work_submission_once(&session, request, plan)
+                    .await?
+            }
+            result => result?,
+        };
+        self.post_work_submission_once(&session, &prepared.0, &prepared.1)
+            .await
+    }
+}
+
+#[async_trait]
+impl ChaoxingSubmissionVerificationTransport for NativeChaoxingInventoryTransport {
+    async fn fetch_work_verification(
+        &self,
+        context: &ProviderContext,
+        request: ChaoxingWorkDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingWorkVerificationDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_work_verification_once(&session, request).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_work_verification_once(&session, request).await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
 impl ChaoxingImmediateResourceTransport for NativeChaoxingInventoryTransport {
     async fn complete_immediate_resource(
         &self,
@@ -758,6 +867,10 @@ impl SensitiveHtml {
 
     fn into_inventory_document(mut self) -> ProviderResult<ChaoxingInventoryDocument> {
         ChaoxingInventoryDocument::try_new(std::mem::take(&mut self.0))
+    }
+
+    fn into_string(mut self) -> String {
+        std::mem::take(&mut self.0)
     }
 }
 

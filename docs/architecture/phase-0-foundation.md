@@ -2821,3 +2821,31 @@ Completed or explicitly Unknown completion state, because a verified duration
 change must not invent or require a completion value. Any ambiguous duration
 mutation still goes directly to HumanRequired and cannot be automatically
 retried or recovered through TaskProgress.
+
+## One-hundred-and-seventieth Phase 0 slice
+
+Chaoxing independent Work now composes the first Provider-specific consumer of
+Core's separate submission slots. A freshly confirmed pending Work advertises
+Build, Execute and Verify together, while Exam and Chapter Work remain outside
+this path. Build stays value-free; the executable subset is deliberately
+limited to single-choice, multiple-choice and true/false answers whose option
+and Provider type codes have an unambiguous donor encoding.
+
+Execute revalidates the immutable Draft and expected preview, rediscovers the
+current Course and Work route, and requires a fresh allowlisted editor with the
+same complete Question/type set. It forwards only a fixed bounded set of hidden
+form fields, drops unknown and stale answer values, adds the Draft-derived
+answers and final-submit flag, and calls `addStudentWorkNew` exactly once. The
+bounded success JSON becomes only an accepted Receipt. Session renewal may
+repeat a known-failed editor GET but never a mutation with an ambiguous result;
+challenge, expiry, authentication and protocol branches remain typed.
+
+Verify independently rediscovers the same Work and can run with no Receipt after
+a crash or ambiguous POST. Editor and submission-prompt pages remain Pending.
+Only an allowlisted result view with a complete unique QID/type set and an exact
+server-visible answer match for every Draft item returns Confirmed/Completed;
+mismatches are Rejected and incomplete facts are Inconclusive. Synthetic
+fixtures and capability tests cover form allowlisting, acknowledgement-only
+semantics, independent slots, no-Receipt recovery and exact answer readback.
+No live compatibility or verification-level promotion is claimed, and Capture
+is not part of this slice.

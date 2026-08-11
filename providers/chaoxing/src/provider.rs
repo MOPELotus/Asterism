@@ -7,8 +7,8 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 use crate::{
     ChaoxingAuthentication, ChaoxingCourseInventory, ChaoxingQuestionRead,
     ChaoxingResourceExecution, ChaoxingSessionResolver, ChaoxingSubmissionBuild,
-    ChaoxingTaskDetail, ChaoxingTaskInventory, ChaoxingTaskProgress,
-    NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
+    ChaoxingSubmissionExecute, ChaoxingSubmissionVerify, ChaoxingTaskDetail, ChaoxingTaskInventory,
+    ChaoxingTaskProgress, NativeChaoxingAuthenticationTransport, NativeChaoxingInventoryTransport,
     StoredChaoxingSessionResolver, metadata::development_metadata,
     runtime_settings::runtime_settings_schema,
 };
@@ -82,13 +82,23 @@ fn compose_development_provider(
         course_inventory.clone(),
         inventory_transport.clone(),
         inventory_transport.clone(),
-        inventory_transport,
+        inventory_transport.clone(),
     )?);
     let task_progress = Arc::new(ChaoxingTaskProgress::try_new(
         task_detail.clone(),
         task_execution.clone(),
     )?);
     let submission_build = Arc::new(ChaoxingSubmissionBuild::try_new()?);
+    let submission_execute = Arc::new(ChaoxingSubmissionExecute::try_new(
+        course_inventory.clone(),
+        inventory_transport.clone(),
+        inventory_transport.clone(),
+    )?);
+    let submission_verify = Arc::new(ChaoxingSubmissionVerify::try_new(
+        course_inventory.clone(),
+        inventory_transport.clone(),
+        inventory_transport,
+    )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: runtime_settings_schema(),
@@ -102,8 +112,8 @@ fn compose_development_provider(
         question_parse: Some(question_read),
         answer_resolve: None,
         submission_build: Some(submission_build),
-        submission_execute: None,
-        submission_verify: None,
+        submission_execute: Some(submission_execute),
+        submission_verify: Some(submission_verify),
         task_execution: Some(task_execution),
         browser_bridge: None,
     })
@@ -222,6 +232,20 @@ mod tests {
                 .capabilities
                 .contains(&ProviderCapability::SubmissionBuild)
         );
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::SubmissionExecute)
+        );
+        assert!(
+            entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::SubmissionVerify)
+        );
+        assert!(entry.submission_execute.is_some());
+        assert!(entry.submission_verify.is_some());
         assert!(entry.task_detail.is_some());
         assert_eq!(entry.runtime_settings.version, 4);
         assert_eq!(entry.runtime_settings.definitions.len(), 5);

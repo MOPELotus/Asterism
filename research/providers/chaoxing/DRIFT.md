@@ -12,6 +12,9 @@
 | Browser DOM handlers change | OCS and agent donors use different current page modes | Fixture each supported page mode and fail closed on unknown form structure |
 | Formal assessment ambiguity | Exam is a source module, not an assessment nature | Inventory is allowed; automatic submission remains independently policy-gated |
 | Card version or execution token changes | Primary donor currently sends card version `2025-0424-1038-3`; immediate resources use `jtoken`, while Video uses `objectId` plus a status `dtoken` and MD5 report signature | Re-fetch before every execution, never persist token/version-derived routes, and require fresh-card completion verification |
+| Work final-submit form changes | The primary donor copies current editor fields, while older mobile donors name a fixed but different parameter set | Parse a fresh editor, forward only the audited bounded allowlist, bind course/class and the exact Question/type set, and fail closed if required attempt material changes |
+| Work acknowledgement is mistaken for completion | Donors log `status=true` as success, while current task pages may remain on prompt/waiting states | Persist only a Receipt, then independently re-discover the Work; prompt/editor remain Pending and only exact server-visible result answers confirm completion |
+| Result-page answer DOM changes | OCS and browser donors distinguish `.mark_answer`/`我的答案` from editable hidden inputs and CSS selection state | Require an allowlisted view route, complete unique QID set and bounded per-Question answer grammar; missing result facts stay Inconclusive instead of inferring from CSS or list text |
 
 ## Live-validation gate
 

@@ -26,6 +26,9 @@ fixtures/providers/chaoxing/
     detail-editor.html
     detail-submitted.html
     detail-closed.html
+    submission-editor.html
+    submission-prompt.html
+    submission-view.html
   exam/
     list-empty-script-keywords.html
     list-mixed.html
@@ -66,6 +69,14 @@ Chapter Work and is not an independent Work transport fixture. The independent
 Work preview fixture also exercises the registered native Question reader after
 strict route acquisition; it remains synthetic parser/transport-boundary
 evidence rather than a live response.
+
+The three submission fixtures are donor-compatible synthetic shapes rather
+than captured responses. They cover strict editor identity/type matching,
+allowlisted hidden-field forwarding, removal of stale answer values, a bounded
+JSON acknowledgement that remains only a Receipt, prompt-as-Pending semantics,
+and exact server-visible answer comparison on the result view. They contain no
+real token, answer, route or account fact and do not prove the endpoint works
+against the current live platform.
 
 ## Required live-sanitized fixture sets
 

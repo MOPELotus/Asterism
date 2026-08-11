@@ -17,8 +17,8 @@ Chapter card contains a Work-shaped assessment.
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
 | QuestionInventory / QuestionParse | OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work now has an offline-covered native fresh-page read and account/correlation/task-bound attempt cache; Chapter Work and Exam remain parse-only, and all live behavior is pending |
-| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work has a typed, value-free `answer{qid}` / `answertype{qid}` preview only; endpoint, global flags, values, Execute and Verify remain unwired; formal-assessment guard remains Core-owned |
-| SubmissionVerify | agent skill | `chaoxing-exam` | PortSource | Re-fetch final task page, verify server-visible answers/result rather than HTTP 200 or CSS |
+| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work rebuilds choice/true-false values from an immutable Draft, reopens one fresh editor, forwards only audited form fields and POSTs `addStudentWorkNew` once; the JSON success flag is only a Receipt, never completion |
+| SubmissionVerify | agent skill | `chaoxing-exam`, OCS | PortSource | Independent read-only slot re-discovers the same Work without requiring a Receipt; editor/prompt remain Pending and only a result view whose server-visible per-Question answers exactly match the Draft becomes Confirmed |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
 | BrowserBridge | agent skill | OCS, `chaoxing-exam` | Reference | Needed if 2026 session binding prevents reliable native HTTP |
 
@@ -111,7 +111,13 @@ policy and remains independently guarded.
   and attempt-local QIDs are never persisted. Exam and Chapter Work remain
   parser-only because no equally safe current read-only native route is locked.
 - The same fresh pending independent Work state now advertises
-  `SubmissionBuild`. The capability validates the complete Question/selected
-  answer binding and returns only the donor-observed `answer{qid}` and
-  `answertype{qid}` field names. It returns no values, endpoint, `pyFlag`, token
-  or route material and grants neither Execute nor Verify.
+  `SubmissionBuild`, `SubmissionExecute` and `SubmissionVerify` together for
+  the native subset. Build remains value-free. Execute currently accepts only
+  single-choice, multiple-choice and true/false Questions with unambiguous
+  donor encodings, rechecks the complete immutable Draft and fresh Work route,
+  extracts only an allowlisted bounded form from the editor and performs one
+  POST without mutation retry. Verify is a separate read-only rediscovery and
+  can recover without a Receipt; prompt/editor pages never claim success, and
+  a result view must expose the exact submitted answer for every Draft
+  Question. This is synthetic/offline evidence only and does not raise the
+  Provider above Development.

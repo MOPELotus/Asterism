@@ -226,21 +226,52 @@ This checkpoint does not construct an Exam preview URL or start an assessment.
 Exam and Chapter Work remain offline parse modes until a current, safe read path
 is locked independently; no Capture behavior is introduced.
 
-## Native independent Work submission preview
+## Native independent Work submission
 
-The primary donor's independent Work form names each per-question field as
-`answer{qid}` and `answertype{qid}` before posting through its remote submit
-path. Asterism currently uses only this bounded structural fact. For a freshly
-confirmed pending independent Work task, `SubmissionBuild` checks that every
-Question has exactly one selected stored answer, that each answer shape matches
-the supported Question kind, and that every remote QID can form a safe field
-name.
+The primary donor names every answer field `answer{qid}` and every type field
+`answertype{qid}`, builds `answerwqbid`, sets an empty `pyFlag` for final submit,
+and POSTs `https://mooc1.chaoxing.com/mooc-ans/work/addStudentWorkNew`. The older
+mobile donor confirms the same answer/type grammar but exposes a different
+global parameter set. Asterism therefore does not persist or blindly copy an
+executable donor payload.
 
-The returned preview is deliberately non-executable: it contains no selected
-answer values, endpoint, `pyFlag`, Cookie, `enc`, token, header or arbitrary
-Provider JSON. Matching, Ordering, Composite and Unknown questions fail closed.
-No remote request is made, and `SubmissionExecute` and `SubmissionVerify` remain
-unregistered.
+`SubmissionBuild` remains credential-free and value-free. It accepts only
+single-choice, multiple-choice and true/false Questions whose remote option
+identities have the unambiguous donor grammar. It validates the complete
+Question/SelectedAnswer binding and returns only the two expected field names
+per Question. Fill-blank, short-answer and complex shapes fail closed until a
+current live fixture proves their exact multi-blank/editor encoding.
+
+`SubmissionExecute` reloads that immutable Draft, rebuilds the expected preview,
+rediscovers the current Course and Work inventory, and follows the fresh Work
+route to an allowlisted `/work/dowork` editor. The editor must expose the exact
+same QID/type set, matching course/class identity, question count and required
+attempt material. Only a fixed audited set of hidden fields is forwarded;
+unknown fields and all existing `answer*` values are discarded before the
+Draft answers, `answerwqbid` and final-submit `pyFlag` are added.
+
+The POST occurs once. Authentication may be renewed only while the preceding
+editor GET is known to have failed; no error after the mutation request causes a
+second POST. A bounded `{status:true}` JSON response becomes an `accepted`
+`SubmissionReceipt` with no route token or answer data. It is never completion.
+Captcha and face/browser challenges are typed `HumanRequired`; expiry and
+deletion become `RemoteChanged`; malformed or unknown responses fail closed.
+
+`SubmissionVerify` is an independent read-only slot and does not need a Receipt,
+which lets Core recover an ambiguous submit. It rediscovers the same Course and
+Work and follows the current detail route. `/work/dowork` is Pending. A
+`/work/prompt` page with submission/waiting evidence is also Pending because it
+does not expose the submitted values. Only an allowlisted `/work/view` result
+whose complete unique QID/type set exposes `我的答案` and exactly matches every
+Draft answer becomes Confirmed with remote Completed. A complete mismatch is
+Rejected; incomplete result facts are Inconclusive. CSS selection state, list
+text, HTTP 200 and the acknowledgement JSON never substitute for this readback.
+
+These contracts are covered by explicitly synthetic donor-compatible fixtures
+and capability-level tests, including recovery verification with no Receipt.
+They are native/offline evidence only; the Provider remains Development and no
+live submission claim is made before the planned WebUI/Asterism-Plugin-assisted
+account validation.
 
 Exam is not given the same capability. In the audited mobile donor, the
 readable attempt-local question/preview chain follows the mutating exam-start
@@ -289,3 +320,9 @@ are streamed into a 4 MiB bounded, zeroizing owner. This is an offline-verified
 implementation checkpoint only. No claim is made yet that the current `uf`
 Cookie survives reqwest's TLS fingerprint or that the live course page exposes
 the Work iframe without browser interaction.
+
+The same transport now keeps Work submission preparation and mutation separate:
+it may renew and repeat only the read-only editor acquisition, then sends one
+form POST with the final editor URL as Referer. Verification uses only the
+existing bounded redirect reader and classifies the final editor/prompt/view
+route before handing a zeroizing document to the strict result parser.

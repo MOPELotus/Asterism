@@ -133,21 +133,20 @@ impl SubmissionBuildCapability for ChaoxingSubmissionBuild {
 fn validate_answer_shape(question: &Question, answer: &NormalizedAnswer) -> ProviderResult<()> {
     match (question.kind, answer) {
         (QuestionKind::SingleChoice, NormalizedAnswer::Selections(values))
-            if values.len() == 1 && selections_exist(question, values) =>
+            if values.len() == 1 && executable_selections_exist(question, values) =>
         {
             Ok(())
         }
         (QuestionKind::MultipleChoice, NormalizedAnswer::Selections(values))
-            if selections_exist(question, values) =>
+            if executable_selections_exist(question, values) =>
         {
             Ok(())
         }
-        (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_))
-        | (QuestionKind::FillBlank | QuestionKind::ShortAnswer, NormalizedAnswer::Texts(_)) => {
-            Ok(())
-        }
+        (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_)) => Ok(()),
         (
-            QuestionKind::Matching
+            QuestionKind::FillBlank
+            | QuestionKind::ShortAnswer
+            | QuestionKind::Matching
             | QuestionKind::Ordering
             | QuestionKind::Composite
             | QuestionKind::Unknown,
@@ -172,6 +171,15 @@ fn selections_exist(question: &Question, values: &[String]) -> bool {
         && values
             .iter()
             .all(|value| option_ids.contains(value.as_str()))
+}
+
+fn executable_selections_exist(question: &Question, values: &[String]) -> bool {
+    let distinct = values.iter().collect::<BTreeSet<_>>();
+    distinct.len() == values.len()
+        && values
+            .iter()
+            .all(|value| value.len() == 1 && value.bytes().all(|byte| byte.is_ascii_uppercase()))
+        && selections_exist(question, values)
 }
 
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
@@ -237,11 +245,27 @@ mod tests {
     #[tokio::test]
     async fn independent_work_preview_is_typed_bounded_and_value_free() {
         let task_id = TaskId::new();
-        let questions = parse_work_preview_question_page(WORK_PREVIEW)
+        let mut questions = parse_work_preview_question_page(WORK_PREVIEW)
             .unwrap()
             .iter()
             .map(|question| question.to_question(task_id).unwrap())
             .collect::<Vec<_>>();
+        questions[1].kind = QuestionKind::MultipleChoice;
+        questions[1].options = vec![
+            asterism_domain::QuestionOption {
+                id: "A".to_owned(),
+                content: Some("First".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({}),
+            },
+            asterism_domain::QuestionOption {
+                id: "C".to_owned(),
+                content: Some("Third".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({}),
+            },
+        ];
+        questions[1].metadata_sanitized["provider_type_code"] = serde_json::json!(1);
         let selected = vec![
             selection(
                 questions[0].id,
@@ -249,7 +273,7 @@ mod tests {
             ),
             selection(
                 questions[1].id,
-                NormalizedAnswer::Texts(vec!["bounded manual answer".to_owned()]),
+                NormalizedAnswer::Selections(vec!["A".to_owned(), "C".to_owned()]),
             ),
         ];
         let preview = ChaoxingSubmissionBuild::try_new()
@@ -264,7 +288,7 @@ mod tests {
         assert_eq!(preview.fields[0].field_name, "answerwork-preview-q-1");
         assert_eq!(preview.fields[1].field_name, "answertypework-preview-q-1");
         let encoded = serde_json::to_string(&preview).unwrap();
-        assert!(!encoded.contains("bounded manual answer"));
+        assert!(!encoded.contains("First"));
         assert!(!encoded.contains("addStudentWorkNew"));
         assert!(!encoded.contains("pyFlag"));
     }

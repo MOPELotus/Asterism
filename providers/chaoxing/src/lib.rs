@@ -18,6 +18,11 @@ mod resource_inventory;
 mod runtime_settings;
 mod stored_session;
 mod submission_build;
+mod submission_execute;
+#[cfg(test)]
+mod submission_integration_tests;
+mod submission_support;
+mod submission_verify;
 mod task_detail;
 mod task_inventory;
 mod task_progress;
@@ -45,6 +50,12 @@ pub use resource_execution::ChaoxingResourceExecution;
 pub use resource_inventory::parse_chapter_resource_inventory;
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use submission_build::ChaoxingSubmissionBuild;
+pub use submission_execute::{ChaoxingSubmissionExecute, ChaoxingSubmissionTransport};
+pub use submission_support::{
+    ChaoxingSubmissionPlan, ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute,
+    parse_submission_receipt, parse_verification_snapshot,
+};
+pub use submission_verify::{ChaoxingSubmissionVerificationTransport, ChaoxingSubmissionVerify};
 pub use task_detail::ChaoxingTaskDetail;
 pub use task_inventory::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
