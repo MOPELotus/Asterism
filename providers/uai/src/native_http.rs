@@ -10,13 +10,14 @@ use reqwest::{
     Client, Response, StatusCode, Url,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER},
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     UaiAnswerDocument, UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport,
     UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument, UaiJwtSession,
-    UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
-    UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiProgressDocument,
+    UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport, UaiSessionResolver,
+    UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
     UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiVerificationDocument,
     UaiVerificationTransport,
     annotator::generate_annotator_token,
@@ -24,7 +25,7 @@ use crate::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
         required_remote_component,
     },
-    parse_course_context, parse_submission_receipt,
+    parse_course_context, parse_group_progress, parse_submission_receipt,
     submission_verify::validate_verification_course_binding,
     user_identity::parse_user_identity,
 };
@@ -351,12 +352,12 @@ impl NativeUaiInventoryTransport {
             .await?,
         )?;
         let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
-        let mut body = build_submission_body(
+        let body = Zeroizing::new(build_submission_body(
             route.course_instance_id(),
             session.expose_open_id(),
             &group_id,
             plan,
-        )?;
+        )?);
         let annotator = generate_annotator_token(session.expose_open_id())?;
         let mut annotator_header =
             HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
@@ -377,12 +378,92 @@ impl NativeUaiInventoryTransport {
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error));
-        body.zeroize();
         let response = response?;
         let document = UaiSubmissionResponseDocument::try_new(
             read_json_response(response, ResponseRoute::Submission).await?,
         )?;
         parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
+    }
+
+    async fn complete_preset_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "preset completion Course-resource ID",
+        )?;
+        let group_id = required_remote_component(
+            Some(&serde_json::Value::String(group_id.to_owned())),
+            "preset completion Group ID",
+        )?;
+        let unit_id = required_remote_component(
+            Some(&serde_json::Value::String(unit_id.to_owned())),
+            "preset completion Unit ID",
+        )?;
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let progress_response = self
+            .client
+            .get(course_progress_url(
+                route.course_instance_id(),
+                &unit_id,
+                session.expose_open_id(),
+            )?)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .header("x-annotator-auth-token", annotator_header.clone())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let progress = UaiProgressDocument::try_new(
+            read_json_response(progress_response, ResponseRoute::Progress).await?,
+        )?;
+        if validate_preset_progress_target(progress.as_str(), &unit_id, &group_id)? {
+            return Ok(UaiPresetCompletionResult::AlreadyCompleted);
+        }
+
+        let body = Zeroizing::new(build_preset_submission_body(
+            route.course_instance_id(),
+            session.expose_open_id(),
+            &group_id,
+        )?);
+        let response = self
+            .client
+            .post(submission_url()?)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .body(body.as_bytes().to_vec())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error));
+        let response = response?;
+        let document = UaiSubmissionResponseDocument::try_new(
+            read_json_response(response, ResponseRoute::Submission).await?,
+        )?;
+        parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
+            .map(UaiPresetCompletionResult::Submitted)
     }
 
     async fn fetch_verification_with_session(
@@ -595,6 +676,30 @@ impl UaiSubmissionTransport for NativeUaiInventoryTransport {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 let session = self.sessions.renew_session(context).await?;
                 self.submit_with_session(&session, course_resource_id, group_id, plan)
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
+impl UaiPresetCompletionTransport for NativeUaiInventoryTransport {
+    async fn complete_preset(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .complete_preset_with_session(&session, course_resource_id, unit_id, group_id)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.complete_preset_with_session(&session, course_resource_id, unit_id, group_id)
                     .await
             }
             result => result,
@@ -986,6 +1091,41 @@ fn build_submission_body(
     .map_err(|_| static_submission_error())
 }
 
+fn build_preset_submission_body(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+) -> ProviderResult<String> {
+    serde_json::to_string(&serde_json::json!({
+        "quesDatas": [],
+        "groupId": group_id,
+        "isCompleted": [],
+        "thirdPartyJudges": "[]",
+        "submitType": 2,
+        "hideLoading": true,
+        "associationGroupId": "",
+        "courseId": course_instance_id,
+        "openId": open_id,
+        "version": "default",
+    }))
+    .map_err(|_| static_submission_error())
+}
+
+fn validate_preset_progress_target(
+    document: &str,
+    expected_unit_id: &str,
+    expected_group_id: &str,
+) -> ProviderResult<bool> {
+    let snapshot = parse_group_progress(document, expected_unit_id, expected_group_id)?;
+    if !matches!(snapshot.tab_type(), Some("text" | "video")) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI preset completion requires a fresh text or video progress leaf",
+        ));
+    }
+    Ok(snapshot.is_completed())
+}
+
 fn static_submission_error() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
@@ -1045,6 +1185,8 @@ mod tests {
     use asterism_networking::NetworkProfile;
 
     use super::*;
+
+    const PROGRESS: &str = include_str!("../../../fixtures/providers/uai/progress/unit-mixed.json");
 
     #[derive(Debug)]
     struct FixtureSessions;
@@ -1260,6 +1402,36 @@ mod tests {
         assert_eq!(judges[0]["value"], "A,B");
         assert_eq!(judges[0]["question_type"], "multichoice");
         assert_eq!(judges[0]["reply_type"], "objective");
+    }
+
+    #[test]
+    fn preset_submission_body_matches_current_and_mit_donors() {
+        let body =
+            build_preset_submission_body("course-v2:synthetic+rw", "synthetic-open-id", "group-1")
+                .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["quesDatas"], serde_json::json!([]));
+        assert_eq!(body["groupId"], "group-1");
+        assert_eq!(body["isCompleted"], serde_json::json!([]));
+        assert_eq!(body["thirdPartyJudges"], "[]");
+        assert_eq!(body["submitType"], 2);
+        assert_eq!(body["hideLoading"], true);
+        assert_eq!(body["associationGroupId"], "");
+        assert_eq!(body["courseId"], "course-v2:synthetic+rw");
+        assert_eq!(body["openId"], "synthetic-open-id");
+        assert_eq!(body["version"], "default");
+        assert_eq!(body.as_object().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn preset_preflight_requires_fresh_text_or_video_leaf() {
+        assert!(validate_preset_progress_target(PROGRESS, "unit-1", "group-1").unwrap());
+        assert!(!validate_preset_progress_target(PROGRESS, "unit-1", "group-2").unwrap());
+        assert!(validate_preset_progress_target(PROGRESS, "other-unit", "group-1").is_err());
+        assert!(validate_preset_progress_target(PROGRESS, "unit-1", "missing").is_err());
+        let task = PROGRESS.replacen("\"tab_type\": \"text\"", "\"tab_type\": \"task\"", 1);
+        assert!(validate_preset_progress_target(&task, "unit-1", "group-1").is_err());
     }
 
     fn provider_context() -> ProviderContext {

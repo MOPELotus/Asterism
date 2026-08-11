@@ -17,7 +17,7 @@ fixtures/providers/uai/
   progress/unit-mixed.json
   duration/unit-mixed.json
   questions/content-multiple-choice.json
-  questions/answer-multiple-choice.json
+  answers/standard-multiple-choice.json
   submissions/accepted.json
   submissions/verified.json
 ```
@@ -27,9 +27,10 @@ openid/JWT parsing, bounded user-info identity validation, Course →
 CourseResource flattening, paired point counts, fresh detail binding, redacted
 Course-instance routing, the outer/nested Course-tree envelope,
 Unit/Section/Micro/Group identity separation, bounded task type/question count,
-versioned Task fingerprints, identity-bound per-Unit flags plus
-raw progress duration, and exact CourseResource/Unit/Group-bound learning
-seconds. Inline negative tests cover malformed/extra composite
+versioned Task fingerprints, identity-bound per-Unit flags plus raw progress
+duration and bounded text/video tab type, and exact
+CourseResource/Unit/Group-bound learning seconds. Inline negative tests cover
+malformed/extra composite
 fields, duplicate
 resources/groups, misbound details/contexts, unknown roles and impossible point
 totals, plus duplicate duration nodes and missing/negative/overflow seconds.
@@ -85,12 +86,13 @@ field names, placeholder identities and response/result codes.
 - Study-record duration seconds require one exact unique CourseResource/Unit/Group binding.
 - Content and standard answers remain independent fresh documents; neither may be reused as submission evidence.
 - Decrypted byte owners zeroize on parse success and failure; raw parsed JSON owners redact Debug output and recursively zeroize nested string values after normalization.
+- Executable answer-bearing and preset request JSON uses a zeroizing owner on every local success, error and cancellation path.
 - Question snapshots remain bound to the exact stable CourseResource/Unit/Group Task and cannot build a draft for another route.
 - Submission previews contain no selected answer values or executable provider payload.
 - Only one-question `single-choice`, `multichoice` and `short_answer` Groups advertise execute/verify.
 - Submission execution requires a positive numeric native instance ID and rejects arbitrary read-only Question identities before transport.
 - Codes `600001` and `600002` never produce a receipt and never trigger an implicit mutation retry.
 - Ambiguous mutation transport failures return after exactly one Provider attempt.
-- Preset no-Question completion remains unregistered until it has durable at-most-once attempt state and progress-only recovery; a synthetic body alone is not acceptance evidence.
+- Preset no-Question completion uses the five base labels only as candidates, requires a fresh exact Unit/Group `tab_type=text|video` leaf, skips already-completed leaves, emits the exact empty `submitType=2` body at most once, and requires Core progress-only verification/recovery; its receipt and synthetic body are never completion evidence.
 - Verification requires the receipt version and an exact fresh Course/Group/question/submitted-answer readback.
 - Missing receipts are Inconclusive; receipts alone never confirm success, score, progress or completion.

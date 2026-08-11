@@ -7,11 +7,12 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 use crate::{
     NativeUaiAuthenticationTransport, NativeUaiInventoryTransport, StoredUaiSessionResolver,
     UaiAnswerResolve, UaiAnswerTransport, UaiAuthentication, UaiAuthenticationTransport,
-    UaiCourseInventory, UaiCourseInventoryTransport, UaiDurationTransport, UaiProgressTransport,
-    UaiQuestionRead, UaiQuestionTransport, UaiSessionResolver, UaiSubmissionBuild,
-    UaiSubmissionExecute, UaiSubmissionTransport, UaiSubmissionVerify, UaiTaskDetail,
-    UaiTaskDuration, UaiTaskInventory, UaiTaskInventoryTransport, UaiTaskProgress,
-    UaiVerificationTransport, metadata::development_metadata,
+    UaiCourseInventory, UaiCourseInventoryTransport, UaiDurationTransport,
+    UaiPresetCompletionTransport, UaiProgressTransport, UaiQuestionRead, UaiQuestionTransport,
+    UaiResourceExecution, UaiSessionResolver, UaiSubmissionBuild, UaiSubmissionExecute,
+    UaiSubmissionTransport, UaiSubmissionVerify, UaiTaskDetail, UaiTaskDuration, UaiTaskInventory,
+    UaiTaskInventoryTransport, UaiTaskProgress, UaiVerificationTransport,
+    metadata::development_metadata,
 };
 
 /// Injected read and mutation boundaries used by the UAI Development entry.
@@ -28,16 +29,22 @@ pub struct UaiDevelopmentTransports {
 /// Injected mutation and verification boundaries kept together so neither
 /// half of the UAI submission protocol is accidentally omitted.
 pub struct UaiSubmissionTransports {
+    preset: Arc<dyn UaiPresetCompletionTransport>,
     execute: Arc<dyn UaiSubmissionTransport>,
     verify: Arc<dyn UaiVerificationTransport>,
 }
 
 impl UaiSubmissionTransports {
     pub fn new(
+        preset: Arc<dyn UaiPresetCompletionTransport>,
         execute: Arc<dyn UaiSubmissionTransport>,
         verify: Arc<dyn UaiVerificationTransport>,
     ) -> Self {
-        Self { execute, verify }
+        Self {
+            preset,
+            execute,
+            verify,
+        }
     }
 }
 
@@ -122,6 +129,10 @@ pub fn build_development_provider(
         task_detail.clone(),
         transports.submission.verify,
     )?);
+    let resource_execution = Arc::new(UaiResourceExecution::try_new(
+        task_detail.clone(),
+        transports.submission.preset,
+    )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: ProviderRuntimeSettingsSchema::default(),
@@ -137,7 +148,7 @@ pub fn build_development_provider(
         submission_build: Some(submission_build),
         submission_execute: Some(submission_execute),
         submission_verify: Some(submission_verify),
-        task_execution: None,
+        task_execution: Some(resource_execution),
         browser_bridge: None,
     })
 }
@@ -169,7 +180,7 @@ pub fn build_development_provider_with_native_inventory(
             inventory.clone(),
             inventory.clone(),
             inventory.clone(),
-            UaiSubmissionTransports::new(inventory.clone(), inventory),
+            UaiSubmissionTransports::new(inventory.clone(), inventory.clone(), inventory),
         ),
     )
 }
@@ -310,7 +321,7 @@ mod tests {
         assert!(entry.submission_build.is_some());
         assert!(entry.submission_execute.is_some());
         assert!(entry.submission_verify.is_some());
-        assert!(entry.task_execution.is_none());
+        assert!(entry.task_execution.is_some());
         assert!(entry.browser_bridge.is_none());
         assert!(entry.runtime_settings.definitions.is_empty());
         for capability in [
@@ -320,6 +331,8 @@ mod tests {
             ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
             ProviderCapability::DurationRead,
+            ProviderCapability::ResourceExecution,
+            ProviderCapability::ExecutionVerify,
             ProviderCapability::QuestionInventory,
             ProviderCapability::QuestionParse,
             ProviderCapability::AnswerResolve,

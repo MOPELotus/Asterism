@@ -193,6 +193,8 @@ Parsed decrypted content, standard-answer and user-module JSON trees likewise
 recursively zeroize all owned string values when normalization ends, including
 ignored remote fields. Only the explicitly normalized Question or answer facts
 cross the parser boundary; debug formatting for the raw JSON owner is redacted.
+Executable answer-bearing and preset request JSON is also held by a zeroizing
+owner across encoding, header construction, transport failure and cancellation.
 
 Asterism now implements QuestionInventory/QuestionParse, AnswerResolve,
 SubmissionBuild, SubmissionExecute and SubmissionVerify as independent
@@ -218,10 +220,12 @@ replaying the POST.
 
 The native mutation client intentionally does not inherit an SSO browser cookie.
 It sends the account-bound JWT and annotator token, but the frozen donors run
-their POST through cookie-bearing sessions and therefore do not yet prove that
-this clean-client authentication combination is live-compatible. The Provider
-remains Development; no browser cookie will be persisted or added without a
-separately authorized sanitized mutation audit.
+their POST through cookie-bearing sessions. The current Rust donor additionally
+imports `u-openid`, `x-csrftoken`, app/platform and school headers from a browser
+session. These sources therefore do not yet prove that the clean-client
+JWT-plus-annotator combination is live-compatible. The Provider remains
+Development; no browser cookie or extra browser header will be persisted or
+added without a separately authorized sanitized mutation audit.
 
 Verification requires that accepted receipt and reads only the exact
 `{groupId}-{submitVersion}` user-module route after refreshing the Course
@@ -236,12 +240,27 @@ Unsupported or unsafe types still fail closed; empty answers, synthetic uploads
 and discussion side effects are not portable defaults. This remains synthetic
 offline coverage and is not a live compatibility claim.
 
-The donors also complete preset study Groups such as `rich-text-read`,
-`text-learn`, `vocabulary` and `video-point-read` with `quesDatas=[]`,
-`isCompleted=[]`, `thirdPartyJudges="[]"` and `submitType=2`, followed by fresh
-progress reads. That operation has no Question/SelectedAnswer pair, so it cannot
-be represented by the current non-empty `SubmissionDraft`. Registering it as
-ordinary ResourceExecution would allow generic retry/crash re-entry without a
-durable receipt or verify-only path. Asterism therefore keeps the shape audited
-but unimplemented until the shared mutation-recovery contract can express it;
-no idempotency assumption is made.
+The MIT and current Rust donors complete pure-study Groups with
+`quesDatas=[]`, `isCompleted=[]`, `thirdPartyJudges="[]"` and `submitType=2`,
+followed by fresh progress reads. The current donor chooses that body only for
+fresh progress leaves whose `tab_type` is exactly `text` or `video`. The older
+donors agree that `rich-text-read`, `text-learn`, `vocabulary`, `input` and
+`video-point-read` are the five preset `base` labels. However, the Apache
+donor's active generic preset path inserts `instanceId=0` placeholder question
+rows, so it is not treated as evidence for the empty body. The operation has no
+Question/SelectedAnswer pair and remains separate from the submission-draft
+protocol.
+
+Asterism registers ResourceExecution only for a non-empty set containing those
+five audited labels and marks every such Task with ExecutionVerify plus
+ProgressRead. Before mutation the native transport refreshes Course detail and
+the exact Unit progress document, requires the exact Group leaf and
+`tab_type=text|video`, and skips the POST if all three completion flags are
+already `1`. Otherwise it sends the empty body once, validates an accepted
+version acknowledgement, and returns an explicitly unverified outcome. Core
+persists the mutation attempt before the call, accepts success only from the
+existing exact Group progress reader, and uses that reader alone after
+ambiguous transport failure, worker interruption or pending readback. The POST
+is never replayed and neither its receipt nor a duration observation is
+completion evidence. Discussion, exit-ticket, oral, upload, `tab_type=task`
+and mixed unknown modes do not inherit this path.

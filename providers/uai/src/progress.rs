@@ -61,6 +61,7 @@ pub struct UaiGroupProgressSnapshot {
     pass2: u8,
     perm: u8,
     duration_raw: Option<u64>,
+    tab_type: Option<String>,
 }
 
 impl UaiGroupProgressSnapshot {
@@ -78,6 +79,10 @@ impl UaiGroupProgressSnapshot {
 
     pub const fn duration_raw(&self) -> Option<u64> {
         self.duration_raw
+    }
+
+    pub fn tab_type(&self) -> Option<&str> {
+        self.tab_type.as_deref()
     }
 
     pub const fn is_completed(&self) -> bool {
@@ -230,6 +235,18 @@ pub fn parse_group_progress(
                     .ok_or_else(|| protocol_drift("UAI Group duration is not unsigned"))
             })
             .transpose()?,
+        tab_type: leaf
+            .get("tab_type")
+            .map(|value| {
+                let value = value
+                    .as_str()
+                    .ok_or_else(|| protocol_drift("UAI progress tab type is not text"))?;
+                required_remote_component(
+                    Some(&Value::String(value.to_owned())),
+                    "progress tab type",
+                )
+            })
+            .transpose()?,
     })
 }
 
@@ -335,6 +352,7 @@ mod tests {
         let completed = parse_group_progress(PROGRESS, "unit-1", "group-1").unwrap();
         assert!(completed.is_completed());
         assert_eq!(completed.duration_raw(), Some(17));
+        assert_eq!(completed.tab_type(), Some("text"));
 
         let incomplete = parse_group_progress(PROGRESS, "unit-1", "group-2").unwrap();
         assert!(!incomplete.is_completed());
@@ -342,6 +360,7 @@ mod tests {
         assert_eq!(incomplete.pass2(), 0);
         assert_eq!(incomplete.perm(), 1);
         assert_eq!(incomplete.duration_raw(), Some(9));
+        assert_eq!(incomplete.tab_type(), Some("video"));
     }
 
     #[test]
@@ -349,6 +368,14 @@ mod tests {
         assert!(
             parse_group_progress(
                 &PROGRESS.replacen("\"code\": 0,", "\"message\": \"success\",", 1),
+                "unit-1",
+                "group-1",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_group_progress(
+                &PROGRESS.replacen("\"tab_type\": \"text\"", "\"tab_type\": 1", 1),
                 "unit-1",
                 "group-1",
             )

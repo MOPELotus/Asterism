@@ -9,7 +9,7 @@ use crate::course_inventory::{
     UaiCourseContext, course_resource_id_from_remote, invalid_response, protocol_drift,
     required_remote_component, required_text,
 };
-use crate::question::supports_question_read;
+use crate::{question::supports_question_read, resource_execution::supports_preset_execution};
 
 const MAX_TREE_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_NESTED_COURSE_BYTES: usize = 4 * 1_024 * 1_024;
@@ -197,6 +197,12 @@ fn build_task(
     let task_types = task_types(object.get("base"))?;
     let question_count = question_count(object.get("question_num"))?;
     let mut capabilities = vec![TaskCapability::ProgressRead, TaskCapability::DurationRead];
+    if supports_preset_execution(&task_types) {
+        capabilities.extend([
+            TaskCapability::ResourceExecution,
+            TaskCapability::ExecutionVerify,
+        ]);
+    }
     if supports_question_read(&task_types, question_count) {
         capabilities.extend([
             TaskCapability::QuestionInventory,
@@ -335,7 +341,12 @@ mod tests {
         assert_eq!(tasks[0].remote_state, RemoteState::Unknown);
         assert_eq!(
             tasks[0].capabilities,
-            vec![TaskCapability::ProgressRead, TaskCapability::DurationRead]
+            vec![
+                TaskCapability::ProgressRead,
+                TaskCapability::DurationRead,
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ]
         );
         assert_eq!(tasks[0].normalized["unit"]["id"], "unit-1");
         assert_eq!(tasks[0].normalized["section"]["id"], "section-1");
@@ -455,6 +466,48 @@ mod tests {
             !tasks[1]
                 .capabilities
                 .contains(&TaskCapability::SubmissionVerify)
+        );
+    }
+
+    #[test]
+    fn only_audited_preset_groups_advertise_verified_resource_execution() {
+        let course = parse_course_inventory(COURSES).unwrap().remove(0);
+        let context = parse_course_context(&course, DETAIL).unwrap();
+        let tasks = parse_task_inventory(&course, &context, TREE).unwrap();
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ResourceExecution)
+        );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ExecutionVerify)
+        );
+        assert!(
+            tasks[1]
+                .capabilities
+                .contains(&TaskCapability::ResourceExecution)
+        );
+        assert!(
+            tasks[1]
+                .capabilities
+                .contains(&TaskCapability::ExecutionVerify)
+        );
+
+        let unsupported = TREE
+            .replace("rich-text-read", "discussion")
+            .replace("vocabulary,input", "single-choice");
+        let tasks = parse_task_inventory(&course, &context, &unsupported).unwrap();
+        assert!(
+            !tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ResourceExecution)
+        );
+        assert!(
+            !tasks[1]
+                .capabilities
+                .contains(&TaskCapability::ResourceExecution)
         );
     }
 }

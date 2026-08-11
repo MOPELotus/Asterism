@@ -15,7 +15,7 @@
 | SubmissionBuild | Both backend donors | Reference | Credential-free and answer-value-free immutable preview is offline covered; no executable body is retained in the draft |
 | SubmissionExecute | Both backend donors | Reference | Exact `newExploration/submit` mapping is enabled only for one-question simple Groups; `600001`/`600002` remain typed retry responses and never become receipts |
 | SubmissionVerify | UnipusHelperPro | Reference | Exact receipt-versioned fresh user-module readback independently binds Course/Group/version/question/submitted state and answer; missing receipts are Inconclusive without a guessed route |
-| ResourceExecution | Both backend donors | Reference | Empty `submitType=2` preset completion is statically audited, but remains unregistered until Core can durably recover a no-Question mutation without resubmitting; it never counts as duration completion |
+| ResourceExecution / ExecutionVerify | UnipusAI + UnipusHelperPro + Asterism Core | Reference | Five agreed pure-study base labels identify candidates, but mutation additionally requires a fresh exact `tab_type=text|video` progress leaf; the exact empty `submitType=2` body runs once and Core uses fresh TaskProgressRead for success and verify-only recovery, never duration inference or POST replay |
 | DurationReport | AutoPlayer | Reference | Current evidence is page residence and interaction, not a confirmed public HTTP reporter; deferred |
 | Result verification | Fresh tree/progress/duration reads | FromScratch | Require independent readback after any future mutation |
 | BrowserBridge | AutoPlayer | Reference | Possible duration compatibility path, but first-batch Capture-dependent work is deferred |
@@ -24,7 +24,8 @@
 
 The current crate advertises Authentication, CourseInventory, TaskInventory,
 TaskDetail, TaskProgressRead, DurationRead, QuestionInventory/QuestionParse,
-AnswerResolve and the three independent submission capabilities. It:
+AnswerResolve, verified ResourceExecution and the three independent submission
+capabilities. It:
 
 1. parses a bounded authenticated Course list and flattens each CourseResource
    into a stable `RemoteCourse`;
@@ -64,8 +65,12 @@ AnswerResolve and the three independent submission capabilities. It:
     independently verifies that exact version through a fresh user-module read;
 17. confirms only exact submitted-answer equality, returns Inconclusive when no
     version receipt exists, and never infers score, progress or completion;
-18. composes these capabilities into an independently opted-in daemon
+18. submits the exact empty preset body only for `rich-text-read`, `text-learn`,
+    `vocabulary`, `input` and `video-point-read`; the Provider returns an
+    unverified acknowledgement only after fresh progress rebinds the candidate
+    to a `text` or `video` leaf, while Core confirms completion with the existing
+    exact Group progress reader and recovers without repeating the mutation;
+19. composes these capabilities into an independently opted-in daemon
     Development entry that still requires the configured SecretStore;
-19. retains progress-route Group duration without assigning a unit and makes no
-    DurationReport, general TaskExecution, BrowserBridge, Capture or live
-    compatibility claim.
+20. retains progress-route Group duration without assigning a unit and makes no
+    DurationReport, BrowserBridge, Capture or live compatibility claim.
