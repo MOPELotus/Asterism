@@ -22,8 +22,12 @@ const MAX_REMOTE_QUESTION_ID_BYTES: usize = 512;
 const MAX_ANSWER_CHILDREN: usize = 256;
 const MAX_ANSWER_VALUES_PER_CHILD: usize = 256;
 const MAX_QUESTIONS_PER_SUBMISSION: usize = 5_000;
+const MAX_JUDGE_TYPE_BYTES: usize = 128;
 const MAX_SUBMISSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
 const MAX_SUBMISSION_VERSION_BYTES: usize = 128;
+
+#[cfg(test)]
+type UaiSubmissionFixture<'a> = (&'a str, &'a str, Vec<Vec<String>>, Vec<(&'a str, &'a str)>);
 
 /// Redacted ownership wrapper for one bounded UAI submit acknowledgement.
 pub struct UaiSubmissionResponseDocument(String);
@@ -140,6 +144,13 @@ pub struct UaiSubmissionQuestionPlan {
     remote_question_id: String,
     task_type: String,
     answer_children: Vec<Vec<String>>,
+    judges: Vec<UaiSubmissionJudgePlan>,
+}
+
+/// One bounded native judge descriptor aligned with one answer child.
+pub struct UaiSubmissionJudgePlan {
+    question_type: String,
+    reply_type: String,
 }
 
 impl UaiSubmissionQuestionPlan {
@@ -147,6 +158,7 @@ impl UaiSubmissionQuestionPlan {
         item: &asterism_domain::SubmissionDraftItem,
         task_type: &str,
         expected_position: u32,
+        require_current_judges: bool,
     ) -> ProviderResult<Self> {
         if item.question.position != expected_position {
             return Err(invalid_input(
@@ -192,6 +204,12 @@ impl UaiSubmissionQuestionPlan {
                 "UAI submission execution has an invalid bounded answer shape",
             ));
         }
+        let judges = submission_judges(
+            item,
+            task_type,
+            answer_children.len(),
+            require_current_judges,
+        )?;
         let expected_kind = question_kind(task_type).ok_or_else(|| {
             unsupported("UAI submission execution does not support this Group task type")
         })?;
@@ -217,6 +235,7 @@ impl UaiSubmissionQuestionPlan {
             remote_question_id,
             task_type: task_type.to_owned(),
             answer_children,
+            judges,
         })
     }
 
@@ -233,6 +252,39 @@ impl UaiSubmissionQuestionPlan {
     #[must_use]
     pub fn answer_children(&self) -> &[Vec<String>] {
         &self.answer_children
+    }
+
+    #[must_use]
+    pub fn judges(&self) -> &[UaiSubmissionJudgePlan] {
+        &self.judges
+    }
+}
+
+impl UaiSubmissionJudgePlan {
+    #[must_use]
+    pub fn question_type(&self) -> &str {
+        &self.question_type
+    }
+
+    #[must_use]
+    pub fn reply_type(&self) -> &str {
+        &self.reply_type
+    }
+}
+
+impl fmt::Debug for UaiSubmissionJudgePlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiSubmissionJudgePlan")
+            .field("content", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for UaiSubmissionJudgePlan {
+    fn drop(&mut self) {
+        self.question_type.zeroize();
+        self.reply_type.zeroize();
     }
 }
 
@@ -292,7 +344,12 @@ impl UaiSubmissionPlan {
                 let expected_position = u32::try_from(index + 1).map_err(|_| {
                     invalid_input("UAI submission execution Question position exceeds the limit")
                 })?;
-                UaiSubmissionQuestionPlan::from_draft_item(item, task_type, expected_position)
+                UaiSubmissionQuestionPlan::from_draft_item(
+                    item,
+                    task_type,
+                    expected_position,
+                    draft.items.len() > 1,
+                )
             })
             .collect::<ProviderResult<Vec<_>>>()?;
         Ok(Self { questions })
@@ -309,30 +366,100 @@ impl UaiSubmissionPlan {
         task_type: &str,
         answer_children: Vec<Vec<String>>,
     ) -> Self {
+        let judges = (0..answer_children.len())
+            .map(|_| UaiSubmissionJudgePlan {
+                question_type: task_type.replace('_', "-"),
+                reply_type: "objective".to_owned(),
+            })
+            .collect();
         Self {
             questions: vec![UaiSubmissionQuestionPlan {
                 remote_question_id: remote_question_id.to_owned(),
                 task_type: task_type.to_owned(),
                 answer_children,
+                judges,
             }],
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn fixture_multiple(questions: Vec<(&str, &str, Vec<Vec<String>>)>) -> Self {
+    pub(crate) fn fixture_multiple(questions: Vec<UaiSubmissionFixture<'_>>) -> Self {
         Self {
             questions: questions
                 .into_iter()
-                .map(
-                    |(remote_question_id, task_type, answer_children)| UaiSubmissionQuestionPlan {
+                .map(|(remote_question_id, task_type, answer_children, judges)| {
+                    UaiSubmissionQuestionPlan {
                         remote_question_id: remote_question_id.to_owned(),
                         task_type: task_type.to_owned(),
                         answer_children,
-                    },
-                )
+                        judges: judges
+                            .into_iter()
+                            .map(|(question_type, reply_type)| UaiSubmissionJudgePlan {
+                                question_type: question_type.to_owned(),
+                                reply_type: reply_type.to_owned(),
+                            })
+                            .collect(),
+                    }
+                })
                 .collect(),
         }
     }
+}
+
+fn submission_judges(
+    item: &asterism_domain::SubmissionDraftItem,
+    task_type: &str,
+    expected_children: usize,
+    require_current_judges: bool,
+) -> ProviderResult<Vec<UaiSubmissionJudgePlan>> {
+    if !require_current_judges {
+        return Ok((0..expected_children)
+            .map(|_| UaiSubmissionJudgePlan {
+                question_type: task_type.replace('_', "-"),
+                reply_type: "objective".to_owned(),
+            })
+            .collect());
+    }
+    let judges = item
+        .question
+        .metadata_sanitized
+        .get("judge_types")
+        .and_then(serde_json::Value::as_array)
+        .filter(|values| values.len() == expected_children)
+        .ok_or_else(|| {
+            unsupported("UAI multi-Question submission requires exact current child judge metadata")
+        })?;
+    judges
+        .iter()
+        .map(|value| {
+            let value = value
+                .as_object()
+                .filter(|value| value.len() == 2)
+                .ok_or_else(|| unsupported("UAI submission child judge metadata is malformed"))?;
+            let question_type = value
+                .get("question_type")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| valid_judge_type(value))
+                .ok_or_else(|| unsupported("UAI submission child Question type is invalid"))?;
+            let reply_type = value
+                .get("reply_type")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| valid_judge_type(value))
+                .ok_or_else(|| unsupported("UAI submission child reply type is invalid"))?;
+            Ok(UaiSubmissionJudgePlan {
+                question_type: question_type.to_owned(),
+                reply_type: reply_type.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn valid_judge_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_JUDGE_TYPE_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 impl fmt::Debug for UaiSubmissionPlan {
@@ -975,6 +1102,48 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn multiple_question_missing_current_judge_metadata_fails_before_mutation() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::multiple()), transport.clone())
+                .unwrap();
+        let mut draft = multiple_draft().await;
+        draft.items[1].question.metadata_sanitized["judge_types"] = serde_json::Value::Null;
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        let selected = draft
+            .items
+            .iter()
+            .map(|item| item.selected.clone())
+            .collect::<Vec<_>>();
+        draft.payload_preview = UaiSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &questions,
+                &selected,
+            )
+            .await
+            .unwrap();
+        let error = capability
+            .execute_submission(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &draft,
+                &runtime_settings(),
+                &NoopEvents,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
         assert!(transport.calls.lock().unwrap().is_empty());
     }
 

@@ -1076,8 +1076,10 @@ fn build_submission_body(
                 "contextVersion": context_version,
                 "answerVersion": answer_version,
             }));
-        let judge_type = question.task_type().replace('_', "-");
-        for values in question.answer_children() {
+        if question.judges().len() != question.answer_children().len() {
+            return Err(static_submission_error());
+        }
+        for (values, judge) in question.answer_children().iter().zip(question.judges()) {
             is_completed.push(true);
             judges
                 .as_value_mut()
@@ -1085,8 +1087,8 @@ fn build_submission_body(
                 .ok_or_else(static_submission_error)?
                 .push(serde_json::json!({
                     "value": values.join(","),
-                    "question_type": judge_type.as_str(),
-                    "reply_type": "objective",
+                    "question_type": judge.question_type(),
+                    "reply_type": judge.reply_type(),
                     "versions": {
                         "course": 0,
                         "group": 1,
@@ -1444,11 +1446,13 @@ mod tests {
                 "1001",
                 "multichoice",
                 vec![vec!["A".to_owned(), "B".to_owned()]],
+                vec![("basic", "multichoice")],
             ),
             (
                 "1002",
                 "short_answer",
                 vec![vec!["first".to_owned()], vec!["second".to_owned()]],
+                vec![("basic", "text-area"), ("basic", "text-area")],
             ),
         ]);
         let body = build_submission_body(
@@ -1474,8 +1478,10 @@ mod tests {
         let judges: serde_json::Value =
             serde_json::from_str(body["thirdPartyJudges"].as_str().unwrap()).unwrap();
         assert_eq!(judges.as_array().unwrap().len(), 3);
-        assert_eq!(judges[0]["question_type"], "multichoice");
-        assert_eq!(judges[1]["question_type"], "short-answer");
+        assert_eq!(judges[0]["question_type"], "basic");
+        assert_eq!(judges[0]["reply_type"], "multichoice");
+        assert_eq!(judges[1]["question_type"], "basic");
+        assert_eq!(judges[1]["reply_type"], "text-area");
         assert_eq!(judges[2]["value"], "second");
     }
 

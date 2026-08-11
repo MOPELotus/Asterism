@@ -36,5 +36,6 @@ ordered `quesDatas` row per native module and flatten child completion/judge
 rows in the same order. Their client-authored auxiliary fields differ: the
 current donor uses a minimal `1/1` context/answer version pair, whereas the MIT
 multi builder uses `1/0` plus fabricated course-answer score maps. Asterism
-records the common ordered contract, uses the current minimal multi body, never
-copies or fabricates score maps, and retains Development verification.
+records the common ordered contract, uses the current minimal multi body with
+content-derived per-child judge labels, never copies or fabricates score maps,
+and retains Development verification.

@@ -67,7 +67,7 @@ pub use resource_execution::{
 pub use stored_session::StoredUaiSessionResolver;
 pub use submission_build::UaiSubmissionBuild;
 pub use submission_execute::{
-    UaiSubmissionExecute, UaiSubmissionPlan, UaiSubmissionQuestionPlan,
+    UaiSubmissionExecute, UaiSubmissionJudgePlan, UaiSubmissionPlan, UaiSubmissionQuestionPlan,
     UaiSubmissionResponseDocument, UaiSubmissionTransport, parse_submission_receipt,
 };
 pub use submission_verify::{

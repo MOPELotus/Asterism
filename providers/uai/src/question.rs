@@ -28,6 +28,8 @@ const MAX_ACTIVE_QUESTION_ATTEMPTS: usize = 128;
 const QUESTION_ATTEMPT_TTL: Duration = Duration::from_mins(5);
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
+const MAX_JUDGE_TYPE_BYTES: usize = 128;
+const MAX_QUESTION_CHILDREN: usize = 256;
 
 /// Redacted ownership wrapper for one encrypted UAI content response.
 pub struct UaiQuestionDocument(String);
@@ -410,6 +412,7 @@ fn parse_question_entry(
     valid_question_identity(&remote_id)?;
     let stem = question_stem(content)?;
     let options = question_options(content)?;
+    let judge_types = current_judge_types(content)?;
     let kind = question_kind(task_type);
     if matches!(
         kind,
@@ -430,6 +433,7 @@ fn parse_question_entry(
             "schema": "uai.encrypted-question.v1",
             "task_type": task_type,
             "remote_task_id": remote_task_id,
+            "judge_types": judge_types,
         }),
     };
     question.to_question(TaskId::new())?;
@@ -529,6 +533,59 @@ fn question_options(content: &Map<String, Value>) -> ProviderResult<Vec<Question
         }
     }
     Ok(options)
+}
+
+fn current_judge_types(content: &Map<String, Value>) -> ProviderResult<Option<Vec<Value>>> {
+    let Some(children) = content.get("children") else {
+        return Ok(None);
+    };
+    let children = children
+        .as_array()
+        .ok_or_else(|| protocol_drift("UAI Question children field is not an array"))?;
+    if children.is_empty() || children.len() > MAX_QUESTION_CHILDREN {
+        return Ok(None);
+    }
+    let module_type = optional_judge_type(content.get("type"))?;
+    let mut result = Vec::with_capacity(children.len());
+    for child in children {
+        let child = child
+            .as_object()
+            .ok_or_else(|| protocol_drift("UAI Question children contains a non-object"))?;
+        let Some(question_type) =
+            optional_judge_type(child.get("type"))?.or_else(|| module_type.clone())
+        else {
+            return Ok(None);
+        };
+        let reply_type =
+            optional_judge_type(child.get("replyType"))?.unwrap_or_else(|| "text-area".to_owned());
+        result.push(json!({
+            "question_type": question_type,
+            "reply_type": reply_type,
+        }));
+    }
+    Ok(Some(result))
+}
+
+fn optional_judge_type(value: Option<&Value>) -> ProviderResult<Option<String>> {
+    value
+        .map(|value| {
+            bounded_judge_type(value)
+                .ok_or_else(|| protocol_drift("UAI Question child judge type is invalid"))
+        })
+        .transpose()
+}
+
+fn bounded_judge_type(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_JUDGE_TYPE_BYTES
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+        .map(str::to_owned)
 }
 
 fn remote_identity(value: &Value) -> Option<String> {
@@ -895,10 +952,21 @@ mod tests {
         assert_eq!(questions[0].remote_id, "1001");
         assert_eq!(questions[0].position, 1);
         assert_eq!(questions[0].kind, QuestionKind::MultipleChoice);
+        assert_eq!(
+            questions[0].metadata_sanitized["judge_types"][0],
+            json!({"question_type": "basic", "reply_type": "multichoice"})
+        );
         assert_eq!(questions[1].remote_id, "1002");
         assert_eq!(questions[1].position, 2);
         assert_eq!(questions[1].kind, QuestionKind::ShortAnswer);
         assert!(questions[1].options.is_empty());
+        assert_eq!(
+            questions[1].metadata_sanitized["judge_types"],
+            json!([
+                {"question_type": "basic", "reply_type": "text-area"},
+                {"question_type": "basic", "reply_type": "text-area"},
+            ])
+        );
     }
 
     #[test]
@@ -994,6 +1062,32 @@ mod tests {
                 "group:2001:unit-1:group-questions",
                 &["video-point-read".to_owned()],
                 Some(1),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unsafe_current_judge_type_fails_closed() {
+        assert!(
+            parse_question_entry(
+                &json!({
+                    "id": "1001",
+                    "content": serde_json::to_string(&json!({
+                        "type": "unsafe/type",
+                        "stem": "Synthetic prompt",
+                        "children": [{
+                            "options": [
+                                {"name": "A", "text": "Alpha"},
+                                {"name": "B", "text": "Beta"},
+                            ]
+                        }],
+                    }))
+                    .unwrap(),
+                }),
+                1,
+                "multichoice",
+                "group:2001:unit-1:group-questions",
             )
             .is_err()
         );

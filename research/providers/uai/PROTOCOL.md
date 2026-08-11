@@ -215,10 +215,14 @@ The execution boundary additionally requires the explicit unique positive
 numeric answer-entry instance ID used by the donors for every module; arbitrary
 strings remain read-only and cannot reach the POST. The native body is
 constructed only inside the execution boundary and preserves module order,
-per-module answer children and globally flattened completion/judge order. The
-single-module compatibility body retains version fields `0/0`; multi-module
-bodies use the current Rust donor's minimal `1/1` version shape rather than
-fabricating the MIT donor's client-authored score maps. A code-`0`,
+per-module answer children and globally flattened completion/judge order. For
+multi-module bodies it additionally requires the bounded child/module `type`
+and child `replyType` facts retained by the answer-free parser, using the
+current donor's exact per-child judge labels instead of guessing them from the
+Group `base`. The single-module compatibility body retains the MIT minimal
+`0/0` version and base/objective judge mapping; multi-module bodies use the
+current Rust donor's coherent minimal `1/1` plus content-derived judge shape
+rather than fabricating the MIT donor's client-authored score maps. A code-`0`,
 version-bearing response becomes an accepted receipt; `600001` and `600002`
 become typed retry state without a receipt, and the mutation is not implicitly
 repeated. A Network failure from the mutation boundary is likewise returned

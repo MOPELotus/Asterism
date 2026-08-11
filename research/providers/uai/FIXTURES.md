@@ -39,7 +39,8 @@ resources/groups, misbound details/contexts, unknown roles and impossible point
 totals, plus duplicate duration nodes and missing/negative/overflow seconds.
 The encrypted question/answer fixtures additionally cover bounded `unipus.`
 framing, separate decryptions, exact Group/question binding, a mixed ordered
-two-module simple Group and removal of key material. Their synthetic native
+two-module simple Group with bounded per-child `type`/`replyType` judge labels,
+and removal of key material. Their synthetic native
 instance identities are positive numeric, matching the mutation shape
 independently observed in the donors. Submission fixtures cover one accepted
 version receipt plus single- and multi-module exact receipt-versioned
@@ -96,6 +97,7 @@ field names, placeholder identities and response/result codes.
 - Submission previews contain no selected answer values or executable provider payload.
 - Only bounded positive `single-choice`, `multichoice` and `short_answer` Groups with one shared type or exact one-type-per-Question cardinality advertise execute/verify.
 - Multi-Question execution preserves draft positions, native module identities, per-module children and flattened judge/completion order; fresh count/type drift fails before mutation.
+- Multi-Question execution requires one bounded content-derived current-donor judge descriptor per answer child and never substitutes the Group `base` when that exact metadata is absent.
 - Submission execution requires a positive numeric native instance ID and rejects arbitrary read-only Question identities before transport.
 - Codes `600001` and `600002` never produce a receipt and never trigger an implicit mutation retry.
 - Ambiguous mutation transport failures return after exactly one Provider attempt.

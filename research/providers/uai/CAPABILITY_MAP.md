@@ -13,7 +13,7 @@
 | QuestionInventory / QuestionParse | AutoFinish | Reference | Fresh encrypted content read, bounded framing/decryption and typed single-choice, multiple-choice and short-answer parsing are offline/native-boundary covered |
 | AnswerResolve | Both backend donors | Reference | A separate fresh encrypted standard-answer read is independently bound to the same Group/question snapshot; ciphertext, keys and route context are not returned |
 | SubmissionBuild | Both backend donors | Reference | Credential-free and answer-value-free immutable preview is offline covered; no executable body is retained in the draft |
-| SubmissionExecute | Both backend donors + current Rust donor | Reference | Exact `newExploration/submit` mapping accepts bounded ordered simple Groups with one homogeneous type or one type per Question; every positive numeric module identity and answer stays position-bound, while `600001`/`600002` remain typed retry responses and never become receipts |
+| SubmissionExecute | Both backend donors + current Rust donor | Reference | Exact `newExploration/submit` mapping accepts bounded ordered simple Groups with one homogeneous type or one type per Question; every positive numeric module identity, answer and multi-module content-derived child judge descriptor stays position-bound, while `600001`/`600002` remain typed retry responses and never become receipts |
 | SubmissionVerify | UnipusHelperPro | Reference | Exact receipt-versioned fresh user-module readback independently binds Course/Group/version plus the complete ordered Question set, submitted states and answers; missing receipts are Inconclusive without a guessed route |
 | ResourceExecution / ExecutionVerify | UnipusAI + UnipusHelperPro + Asterism Core | Reference | Five agreed pure-study base labels identify candidates, but mutation additionally requires a fresh exact `tab_type=text|video` progress leaf; the exact empty `submitType=2` body runs once and Core uses fresh TaskProgressRead for success and verify-only recovery, never duration inference or POST replay |
 | DurationReport | AutoPlayer | Reference | Current evidence is page residence and interaction, not a confirmed public HTTP reporter; deferred |
@@ -60,6 +60,8 @@ capabilities. It:
     submission body inside the execution boundary for a bounded ordered set of
     `single-choice`, `multichoice` and `short_answer` Questions, each with its
     donor-audited positive numeric instance identity and exact positional type;
+    multi-module execution additionally requires exact bounded content-derived
+    child judge labels and never guesses them from the Group base;
 16. accepts only a successful version-bearing submit response as a receipt,
     returns ambiguous transport failures after one mutation attempt, and
     independently verifies that exact version through a fresh user-module read;
