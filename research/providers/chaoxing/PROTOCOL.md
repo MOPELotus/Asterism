@@ -137,11 +137,12 @@ starts from freshly reported server/Card progress, not from a persisted token.
 HTTP/JSON success is still provisional: the complete seven-card matrix is
 re-fetched and the exact stable resource identity must report `isPassed = true`.
 
-The donor includes automatic captcha solving. Asterism deliberately does not
-port that behavior in the deferred-Capture phase: a captcha/validation response
-becomes typed `HumanRequired(ImageCaptcha)` before any blind retry. The endpoint,
-signature, current Referer version and real account behavior remain live-test
-gates; this checkpoint is offline/native-boundary evidence only.
+The donor includes automatic captcha solving. The current Native HTTP boundary
+turns a captcha/validation response into typed `HumanRequired(ImageCaptcha)`
+before any blind retry; the donor solver and a bounded Capture/BrowserBridge
+handoff are active first-batch work. The endpoint, signature, current Referer
+version and real account behavior remain live-test gates; this checkpoint is
+offline/native-boundary evidence only.
 
 ## WorkModule inventory
 
@@ -222,9 +223,11 @@ attempt and `QuestionParse` must consume matching references in the same Core
 read. The cache has a hard capacity, is removed after the final Question, and
 never persists HTML, entry URLs, `enc`, form tokens or attempt-local QIDs.
 
-This checkpoint does not construct an Exam preview URL or start an assessment.
-Exam and Chapter Work remain offline parse modes until a current, safe read path
-is locked independently; no Capture behavior is introduced.
+This checkpoint does not yet construct an Exam preview URL or start an
+assessment. Exam and Chapter Work remain offline parse modes only as the current
+implementation status; their donor-observed start/mutation flow and bounded
+Capture/BrowserBridge gates are active next work. They must not be represented
+as read-only when the platform requires an attempt-start mutation.
 
 ## Native independent Work submission
 
@@ -273,13 +276,14 @@ They are native/offline evidence only; the Provider remains Development and no
 live submission claim is made before the planned WebUI/Asterism-Plugin-assisted
 account validation.
 
-Exam is not given the same capability. In the audited mobile donor, the
+Exam is not given Work's payload semantics. In the audited mobile donor, the
 readable attempt-local question/preview chain follows the mutating exam-start
 route and requires the resulting active attempt identity and `enc`; that path
-can also encounter exam-code, face or captcha gates. Asterism will not label
-that transition read-only. Exam question read/build therefore stays deferred to
-a later explicitly authorized mutation and human-interaction stage, without a
-Capture dependency in the first batch.
+can also encounter exam-code, face or captcha gates. Asterism will implement the
+start mutation, attempt binding, Question/Answer/Submission lifecycle and the
+needed Capture/BrowserBridge or human-interaction handoff as a separate first-
+batch capability family. The start receipt is not proof of completion, and an
+ambiguous non-idempotent start/submit is never blindly replayed.
 
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.

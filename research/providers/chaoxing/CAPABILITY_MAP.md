@@ -7,7 +7,7 @@ Chapter card contains a Work-shaped assessment.
 | Asterism capability | Primary source | Secondary source | Planned use | Current evidence |
 |---|---|---|---|---|
 | Authentication / Password | `Samueli924/chaoxing` | CxKitty | PortSource | AES-CBC `fanyalogin`, derived Composite credential and Cookie revalidation are offline-covered; live validation pending |
-| Authentication / QR | CxKitty | None | Reference | QR creation and polling chain is statically complete but old |
+| Authentication / QR | CxKitty | BrowserBridge capture | Reference | QR creation and polling chain is statically complete but old; current browser/session fallback is required first-batch work |
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
@@ -20,7 +20,7 @@ Chapter card contains a Work-shaped assessment.
 | SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work rebuilds choice/true-false values from an immutable Draft, reopens one fresh editor, forwards only audited form fields and POSTs `addStudentWorkNew` once; the JSON success flag is only a Receipt, never completion |
 | SubmissionVerify | agent skill | `chaoxing-exam`, OCS | PortSource | Independent read-only slot re-discovers the same Work without requiring a Receipt; editor/prompt remain Pending and only a result view whose server-visible per-Question answers exactly match the Draft becomes Confirmed |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
-| BrowserBridge | agent skill | OCS, `chaoxing-exam` | Reference | Needed if 2026 session binding prevents reliable native HTTP |
+| BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
 
 ## Required Asterism separations
 
@@ -47,9 +47,12 @@ policy and remains independently guarded.
 1. Add sanitized HTML fixture contracts for Work and Exam lists.
 2. Implement deterministic Work/Exam inventory parsers and state mapping.
 3. Implement the authenticated transport with Native HTTP first.
-4. Live-test whether Cookie requests satisfy current `uf` and fingerprint rules.
-5. Route only the affected capability through BrowserBridge if Native HTTP is
-   unreliable; do not move the entire Provider into a browser runtime.
+4. Implement bounded BrowserBridge/Capture recipes for QR, session binding and
+   the donor-observed captcha/face/browser gates; live-test which routes require
+   them when accounts become available.
+5. Route only the affected capability through BrowserBridge when Native HTTP is
+   incomplete or unreliable; do not move unrelated capabilities into a browser
+   runtime.
 6. Add detail, question, submission, and remote-result verification only after
    inventory identity and status are stable.
 
@@ -80,8 +83,9 @@ policy and remains independently guarded.
 - Pending Document and Read cards now advertise task-level `ResourceExecution`.
   The execution capability rediscovers the current course/cpi and Chapter card,
   submits only a fresh zeroizing `jtoken`, then refetches all seven cards and
-  accepts success only when the remote attachment is completed. Video, Live and
-  Chapter Work deliberately advertise no execution capability yet.
+  accepts success only when the remote attachment is completed. Live and
+  Chapter Work execution remain current audited implementation gaps; the
+  completed native Document/Read/Video slice is not a Provider stopping point.
 - Document and Read also advertise `ProgressRead`; the capability performs the
   same bounded course/chapter/card rediscovery without invoking the completion
   endpoint and returns only normalized remote state and percentage. This is the
@@ -90,8 +94,9 @@ policy and remains independently guarded.
   bounded status/dtoken response, reports monotonic intervals with the donor
   signature, and accepts completion only after a fresh Card reports passed.
   Playback rate and report interval come from the immutable Master-controlled
-  Execution settings snapshot. Captcha responses become `HumanRequired`; no
-  Capture or OCR path is part of this first implementation.
+  Execution settings snapshot. The native boundary stops captcha responses as
+  typed `HumanRequired` before blind retry; the audited solver and bounded
+  Capture/BrowserBridge fallback remain active first-batch work.
 - Task detail now parses the stable remote identity, rediscovers the exact
   current course and runs one complete fresh Task inventory for that course.
   Missing courses/tasks become `RemoteChanged`, duplicate identities fail as
@@ -108,8 +113,10 @@ policy and remains independently guarded.
   rediscovers the course and Work entry, accepts only the final `/work/dowork`
   route, parses one bounded page and shares it through a five-minute
   account/correlation/task-bound process-local cache. HTML, route credentials
-  and attempt-local QIDs are never persisted. Exam and Chapter Work remain
-  parser-only because no equally safe current read-only native route is locked.
+  and attempt-local QIDs are never persisted. Exam and Chapter Work currently
+  remain parser-only; their donor-observed attempt-start/mutation and
+  Capture/BrowserBridge lifecycles are required next capabilities rather than a
+  read-only-policy exclusion.
 - The same fresh pending independent Work state now advertises
   `SubmissionBuild`, `SubmissionExecute` and `SubmissionVerify` together for
   the native subset. Build remains value-free. Execute currently accepts only
@@ -121,3 +128,12 @@ policy and remains independently guarded.
   a result view must expose the exact submitted answer for every Draft
   Question. This is synthetic/offline evidence only and does not raise the
   Provider above Development.
+
+## Completion boundary
+
+Chaoxing is complete only when all audited donor abilities—including Chapter
+Work, Exam detail/question/answer/submission, Live, QR, captcha/face handling
+and required BrowserBridge/Capture fallbacks—have code and all currently
+executable verification. A native or parser milestone may be reported but does
+not stop development. Immutable Drafts, exact attempt binding, receipt/readback
+separation and no ambiguous mutation replay remain mandatory.

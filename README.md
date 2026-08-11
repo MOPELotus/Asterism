@@ -8,6 +8,12 @@
 
 Asterism 是一个基于 Rust 的多平台学习任务聚合与调度服务。它将不同平台的课程、任务、进度和执行能力归一到统一的领域模型中，并由同一套 Core 为 CLI、WebUI 和 Asterism-Plugin 提供能力。
 
+项目的核心目标是聚合并自动化学习平台中机械、重复、低价值且占用大量时间的操作，
+尽可能完整复用和迁移成熟上游已经实现的能力，把用户时间从平台操作中释放出来。
+用户是否启用某项能力属于产品调用与授权问题；Provider 是否准确实现 donor 已知能力属于
+协议和工程问题，两者严格分离。Provider 不替用户做价值判断，也不因为能力会修改
+completion/progress/score、自动答题或提交、需要浏览器/Capture，或者实现复杂而裁剪能力。
+
 项目不以“接口返回成功”作为 Provider 已受支持的标准。一个 Provider 只有在能力覆盖、状态映射、错误分类、Fixture、真实账号验证和运行记录均达到要求后，才会被标记为可用。
 
 > [!IMPORTANT]
@@ -15,12 +21,13 @@ Asterism 是一个基于 Rust 的多平台学习任务聚合与调度服务。�
 
 ## 设计目标
 
+- 坚持 upstream-first：上游有可靠能力证据就审计、语义映射并完整迁移，不增加主观价值筛选步骤；
 - 以统一模型聚合多平台课程、任务、进度和截止时间；
 - 将远端任务事实与本地调度、审批、重试和执行状态严格分离；
 - 通过 Capability 模型描述 Provider 的真实能力，而不是伪造统一接口；
 - 支持自动执行、延迟审批、手动审批和仅通知等策略；
 - 以事务化点数、调度、执行租约和 Event Outbox 保证关键状态一致性；
-- 为敏感凭据、正式测评、浏览器自动化和公网部署设置明确安全边界；
+- 为敏感凭据、非幂等 mutation、浏览器自动化和公网部署设置明确可靠性与安全边界；
 - 第一批 Provider 完成后立即准备 OpenAPI Client Generation，并建设正式 WebUI 与 Asterism-Plugin；第二批完成后再冻结兼容基线。
 
 ## 当前进度
@@ -48,7 +55,8 @@ Phase 0 已建立并持续完善以下基础：
 - 不以远端回执代替验证的 SubmissionResult / VerificationSnapshot 领域模型，以及互相独立的 SubmissionExecute / SubmissionVerify Provider 槽位；
 - 通过数据库复合外键绑定 SubmissionDraft / Execution / ExecutionAttempt / Task、整份验证后不可变持久化且 owner-scoped 读取的 SubmissionResult；
 - 将一个不可变 SubmissionDraft 最多冻结到一个 Execution、先持久化有界 Attempt Receipt 再独立 Verify，并在任何歧义或 Pending 后只验证而绝不重提的 Submission worker；
-- 以 `ExecutionVerify` 显式标记无 SubmissionDraft 的非幂等 TaskExecution：每个 Execution 最多调用一次远端变更，随后必须 fresh `TaskProgress` 确认完成；只有该契约与独立 Submission 契约可从无法安全细分的 `Unknown` 启动，返回歧义、Pending 或崩溃统一进入无重放路径的验证恢复；已知 Completed 只复核、不写入；
+- 将调用方显式选择的可执行 Capability 子集规范化并冻结到 `Execution.requested_capabilities`，幂等重放必须匹配同一子集，Worker 不会因 Task 同时广告其他写入能力而顺带执行；
+- 以 `ExecutionVerify` 标记至少一个具有目标验证路径的非幂等 TaskExecution action，并由 Provider 按冻结 action 决定是否需要 `verify_execution`：每个 Execution 最多调用一次远端变更，随后按同一设置和目标 fresh rebind 验证；返回歧义、未达目标或崩溃统一进入无重放路径的验证恢复；已知 Completed 只复核、不写入；
 - 按 Task / QuestionSnapshot / SubmissionDraft / SubmissionResult 完整身份链读取不可变题目、草稿和验证结果的 owner-scoped HTTP 审计入口，以及现有 Draft/Result CLI 入口；
 - Capability-based Provider API、Metadata 与 Registry，包括与远端执行解耦的题目发现、解析、Provider-native 候选答案解析和只读提交草稿构建槽位；
 - 课程发现到后续 capability 的短命、脱敏且不持久化路由上下文；
@@ -62,13 +70,13 @@ Phase 0 已建立并持续完善以下基础：
 - 点数 grant / reserve / commit / release 流程、不可变流水，以及 Quote + Reserve + Execution 原子调度边界；
 - SecretStore 抽象、Argon2id 密码、服务端 Session、scoped Service Token 与登录限速；
 - password/hash 永不出管理边界、带 revision 冲突检测和最后活跃 Master 保护的用户管理 API，以及按权限全局/owner 隔离的脱敏 Audit 查询；Service Token 增加仅返回元数据的分页管理面，owner-bound 管理令牌只能列出、派生和撤销同一 owner 的令牌；
-- 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；OpenAPI 统一声明稳定错误响应、`X-Request-ID` 与限流 `Retry-After`，并以契约测试校验 operationId、路径参数、请求体、响应及本地 `$ref` 的客户端生成完整性；除明确后置的 Capture/Bootstrap 外，健康/认证、Provider 管理与 scan report、Master 分层运行设置、credit、任务/执行/SSE、题目/候选/解析计划及 Submission Draft/Result 等主管理面均已声明强类型成功响应，并由离线 Rust 导出、固定版本 Hey API SDK 生成、关键类型断言和 strict TypeScript 编译组成 CI 闭环；
+- 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；OpenAPI 统一声明稳定错误响应、`X-Request-ID` 与限流 `Retry-After`，并以契约测试校验 operationId、路径参数、请求体、响应及本地 `$ref` 的客户端生成完整性；健康/认证、Provider 管理与 scan report、Master 分层运行设置、credit、任务/执行/SSE、题目/候选/解析计划及 Submission Draft/Result 等主管理面已声明强类型成功响应，并由离线 Rust 导出、固定版本 Hey API SDK 生成、关键类型断言和 strict TypeScript 编译组成 CI 闭环；Capture/Bootstrap 的完整强类型客户端契约同属当前实现范围，不再作为后置例外；
 - Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
-- Chaoxing 能力级上游审计、独立 Chapter / Resource / Work / Exam TaskInventory、按稳定身份重新发现并经 Core 校验的 TaskDetail / Progress API 与 CLI、四类任务的模块化只读进度复核、明确区分 Chapter Work 与独立 Work / Exam 的题面离线解析、独立 Work 原生题目读取与无值 SubmissionBuild，以及限定单选/多选/判断的单次原生 SubmissionExecute 和逐题服务端答案 SubmissionVerify；提交 JSON 仅形成 Receipt，prompt/editor 不算完成，歧义恢复不重提；Document / Read / Video 原生执行、有界 Work 详情状态复核、Cookie 自动续登与显式开发验证入口均保持 Development、等待后续真实账号只读/授权写入验证；
-- WELearn clean-room 上游审计、Password / ImportedCookie 认证编排与有界 Course / Task inventory capability，验证码/短信正确进入 HumanRequired，完成状态、可见性和未确认单位的 donor 时长事实保持独立；Password/OIDC 手动重定向、限定域 Cookie 收集、Core 持久会话解析与原子自动续登、Course / Unit / SCO 原生读取、按稳定身份完整重扫的 fresh `TaskDetail` 及只读 CMI `TaskProgressRead` 均已接入，并提供默认关闭的 daemon 开发注册入口；独立 `DurationReport` 以 Master 平台默认和账号/任务覆盖参数执行真实等待、CMI heartbeat 和 preserve-and-finalize，fresh readback 必须证明 raw time 已变化且 completion/progress/score/success 未漂移；Engine 按报时目标判定成功，任何不确定写入直接进入 HumanRequired 且不重试；CMI 时间仍按原始事实保留、不换算秒数，真实账号验证仍待完成；
-- UAI clean-room 上游审计、Password / ImportedToken 认证编排、Core scoped 持久会话解析与原子自动续登，以及 CourseResource / Unit / Section / Micro / Group 有界解析；原生 Password JSON 登录、只读 user-info JWT 校验、Course/Task inventory、fresh `TaskDetail`、per-Unit `TaskProgressRead`、独立 `DurationRead` 与 answer-free `QuestionInventory` / `QuestionParse` 已复用共享网络策略，并组合为默认关闭、要求 SecretStore 的 daemon Development 注册入口；题面读取重绑 fresh CourseResource/Group，以敏感 header 获取有界 encrypted content，严格解开 `unipus.` AES-ECB/嵌套 JSON 后只保留题干、选项和身份，短生命周期 attempt cache 不持久化密文或路由材料；目前仅为 donor 形状明确的 single-choice、multichoice、short_answer Group 开放，其他题型失败关闭；TaskDetail 重读 fresh CourseResource/tree，Progress 则重新绑定 fresh detail，时长读取用 fresh user identity 绑定 CourseResource / Unit / Group 后只接受 study-record 接口明确以秒计的 duration；Group 任务保留有界 task type/question count 和版本化指纹，openid/JWT 作为一个 CompositeSession 替换，ManualImport JWT 不可自动续期，滑块验证码进入 HumanRequired；Group 仅在 pass/pass2/perm 均为 1 时完成，progress 原始 duration 仍不换算秒数；标准答案、DurationReport 与执行尚未接入；
-- Cidaren 已建立 ImportedToken → Core scoped stored `UserToken` → bounded `Student/Main` validation/selected Course → signed complete `ClassTask/PageTask` + bounded `StudyTask/List` → Course / class learning / class test / ordinary study Task → fresh TaskDetail / TaskProgressRead 的原生只读边界；班级任务稳定身份使用 `release_id`，普通学习单元使用 `course_id + list_id`，详情与进度读取均重扫对应端点并拒绝消失的任务，`task_id=-1` 只作 fresh observation，进度、完成、过期、访问标记、分数和 raw time 独立保留；当前声明 Authentication、CourseInventory、TaskInventory、TaskDetail、TaskProgressRead，微信 OAuth/Capture、Duration、答案、执行和真实账号验证均未接入；
+- Chaoxing 能力级上游审计、独立 Chapter / Resource / Work / Exam TaskInventory、按稳定身份重新发现并经 Core 校验的 TaskDetail / Progress API 与 CLI、四类任务的模块化只读进度复核、明确区分 Chapter Work 与独立 Work / Exam 的题面离线解析、独立 Work 原生题目读取与无值 SubmissionBuild，以及限定单选/多选/判断的单次原生 SubmissionExecute 和逐题服务端答案 SubmissionVerify；提交 JSON 仅形成 Receipt，prompt/editor 不算完成，歧义恢复不重提；Document / Read / Video 原生执行、有界 Work 详情状态复核、Cookie 自动续登与显式开发验证入口均保持 Development；Chapter Work、Exam detail/question/answer/submission、Live、QR、BrowserBridge/Capture fallback 及其他 donor 已知能力继续纳入当前开发，真实账号只读/另行授权写入验证仍待完成；
+- WELearn clean-room 已覆盖三个 pinned donor 当前可复现的协议能力：Password/OIDC、ImportedCookie 与 Capture-assisted Cookie 认证，Core 持久会话解析/续登，Course/Unit/SCO inventory、fresh TaskDetail/CMI Progress、canonical DurationRead，fixed/random DurationReport，以及直接 `start -> setscoinfo -> save` completion/progress/score ResourceExecution；ResourceExecution 使用冻结设置重算同一目标并 fresh CMI 验证 exact completion/progress/score，DurationReport 保持独立的 preservation/time-change 验证且歧义写入不重放；平台/账号/任务级共十二项运行设置已接入。验证码/短信在没有 donor solver 协议证据时保持 typed HumanRequired，而不是能力政策裁剪；剩余为真实账号端到端与脱敏 live fixture 验证；
+- UAI clean-room 上游审计、Password / ImportedToken 认证编排、Core scoped 持久会话解析与原子自动续登，以及 CourseResource / Unit / Section / Micro / Group 有界解析；原生 Password JSON 登录、只读 user-info JWT 校验、Course/Task inventory、fresh `TaskDetail`、per-Unit `TaskProgressRead`、独立 `DurationRead` 与 answer-free `QuestionInventory` / `QuestionParse` 已复用共享网络策略，并组合为默认关闭、要求 SecretStore 的 daemon Development 注册入口；题面读取重绑 fresh CourseResource/Group，以敏感 header 获取有界 encrypted content，严格解开 `unipus.` AES-ECB/嵌套 JSON 后只保留题干、选项和身份，短生命周期 attempt cache 不持久化密文或路由材料；当前已覆盖 donor 形状明确的 single-choice、multichoice、short_answer Group，其他已审计题型与标准答案/提交继续按真实协议补齐；TaskDetail、Progress、DurationRead 保持 fresh identity binding；DurationReport、page residence/interaction、BrowserBridge/Capture compatibility 与其他 donor 能力继续处于当前实现范围；
+- Cidaren 已建立 ImportedToken → Core scoped stored `UserToken` → bounded `Student/Main` validation/selected Course → signed complete `ClassTask/PageTask` + bounded `StudyTask/List` → Course / class learning / class test / ordinary study Task → fresh TaskDetail / TaskProgressRead 的原生边界；班级任务稳定身份使用 `release_id`，普通学习单元使用 `course_id + list_id`，详情与进度读取均重扫对应端点并拒绝消失的任务，`task_id=-1` 只作 fresh observation，进度、完成、过期、访问标记、分数和 raw time 独立保留；Capture bootstrap、当前 `jv=99` HKDF/AES-GCM crypto context、Question/Answer、Start/Verify/Submit/Skip/ChoseWord、SubmissionVerify、Duration、微信 OAuth/Browser 行为与其他 Easy_Cidaren donor 能力全部继续纳入当前实现，不再以原生只读里程碑结束；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
 正在进行的工作以 [Phase 0 架构检查点](docs/architecture/phase-0-foundation.md) 为准。内部 API 在第二批 Provider 完成前仍可能发生不兼容变更。
@@ -89,7 +97,7 @@ CLI / WebUI / Asterism-Plugin
               │
        Provider capabilities
               │
- Native HTTP / BrowserBridge
+ Native HTTP / BrowserBridge / Capture
               │
       External platforms
 ```
@@ -174,7 +182,7 @@ cargo run -p asterismctl -- provider-account scan <account-id>
 
 SecretStore keyring 只从进程环境读取，不接受 TOML 或 CLI 参数。`ASTERISM_SECRET_ACTIVE_KEY_ID` 指定活动 key ID，`ASTERISM_SECRET_KEYS` 使用逗号分隔的 `<key-id>=<base64-encoded-32-byte-key>`；两者必须同时提供。轮换时保留旧 key 并添加新 key，再切换活动 ID；确认所有密文已轮换前不要移除旧 key。`/health` 的 `secret_store_configured` 只报告是否已配置，不返回 key ID 或 key material。
 
-统一 Scheduler worker 默认启用，每 5 秒分别执行一次有界 Scan tick 与 Execution tick；默认每次最多领取一个 Scan Job，Execution worker 固定串行领取一个 `execution`、`retry` 或 `recovery` Job，避免长任务的后续预领取 claim 在等待时过期。每个 Execution tick 会先扫描失去租约的 Running Execution，原子转入 Recovering 并创建只读远端复核任务；普通资源执行只有远端完成才收口成功，明确 Pending 才可重新执行，无法判断则要求人工处理。声明 `ExecutionVerify` 的非幂等 TaskExecution 以已持久化 Attempt 为最多一次边界，执行后必须 fresh progress 确认，任何错误、Pending 或崩溃都只调度验证恢复而不创建写入 Retry。独立提交执行始终按冻结 Draft 调用一次 Submit、持久化回执、再调用 Verify；Submit 后的网络歧义、Pending、崩溃或重启只会反复调用 Verify，永远不会由 Recovery 或 Retry 重放提交。only-DurationReport 以时长证据而非完成状态作为目标，任何不确定写入直接要求人工处理且不会自动重跑。claim TTL 与 Execution lease 默认均为 300 秒，运行期间会一起续租。独立 Outbox dispatcher 每 250 毫秒领取最多 128 条已提交领域事件并派发到有界进程内实时总线；没有在线订阅者不会让已持久化事件无限重试，后续连接以查询快照重新同步。停止 `asterismd` 时会终止 SSE、停止新 tick，等待当前 Scan、Execution 或 Outbox 派发返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
+统一 Scheduler worker 默认启用，每 5 秒分别执行一次有界 Scan tick 与 Execution tick；默认每次最多领取一个 Scan Job，Execution worker 固定串行领取一个 `execution`、`retry` 或 `recovery` Job，避免长任务的后续预领取 claim 在等待时过期。每个 Execution tick 会先扫描失去租约的 Running Execution，原子转入 Recovering 并创建只读远端复核任务；普通资源执行只有远端完成才收口成功，明确 Pending 才可重新执行，无法判断则要求人工处理。调用方必须提交非空、唯一的可执行 Capability 子集，Core 将其规范化并冻结到 Execution，Provider 与 Recovery 全程只接收该子集。声明 `ExecutionVerify` 的 Task 可由 Provider 将 goal-bound verification 精确绑定到其中一个所选 action；需要验证的非幂等 action 以已持久化 Attempt 为最多一次边界，执行后必须 fresh rebind 同一目标，任何错误、未达目标或崩溃都只调度验证恢复而不创建写入 Retry。独立提交执行始终按冻结 Draft 调用一次 Submit、持久化回执、再调用 Verify；Submit 后的网络歧义、Pending、崩溃或重启只会反复调用 Verify，永远不会由 Recovery 或 Retry 重放提交。only-DurationReport 以时长证据而非完成状态作为目标，任何不确定写入直接要求人工处理且不会自动重跑。claim TTL 与 Execution lease 默认均为 300 秒，运行期间会一起续租。独立 Outbox dispatcher 每 250 毫秒领取最多 128 条已提交领域事件并派发到有界进程内实时总线；没有在线订阅者不会让已持久化事件无限重试，后续连接以查询快照重新同步。停止 `asterismd` 时会终止 SSE、停止新 tick，等待当前 Scan、Execution 或 Outbox 派发返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
 
 另开一个终端检查服务：
 
@@ -198,7 +206,7 @@ cargo run -p asterismctl -- provider-account create --provider provider-alpha --
 cargo run -p asterismctl -- provider-account list
 cargo run -p asterismctl -- provider-account schedule set <account-id> --interval-seconds 900
 cargo run -p asterismctl -- task list --limit 50
-cargo run -p asterismctl -- task execute <task-id> --idempotency-key manual-run-1
+cargo run -p asterismctl -- task execute <task-id> --capability resource_execution --idempotency-key manual-run-1
 cargo run -p asterismctl -- execution list --limit 50
 cargo run -p asterismctl -- execution get <execution-id>
 cargo run -p asterismctl -- execution logs <execution-id> --limit 50 --offset 0
@@ -223,7 +231,7 @@ cargo run -p asterism-capture -- \
 
 Provider Account 的 owner 始终由认证身份决定，CLI 和 API 都不接受调用方指定 `owner_id`。`--provider` 必须使用小写 canonical `ProviderId`；账号展示名属于本地用户数据，不作为项目内的平台名称或标识。
 
-Task 仍只能由 Provider 扫描链路写入；读取和执行则统一通过 owner-scoped Core Action。远端账户完成认证且对应 Provider 已注册 inventory capability 后，可运行 `provider-account scan <account-id>`；`task list` 支持 `--account`、`--limit` 和 `--offset`。`task progress <task-id>` 与 `task duration <task-id>` 分别走独立的只读 capability 和 API，读取时长不会创建 Execution、上报时长或改变远端状态。`task execute <task-id> --idempotency-key <key>` 会原子创建并调度 Execution；独立提交任务还必须传入 `--submission-draft <draft-id>`，Core 会冻结 Draft 与 Execution 的绑定并拒绝同一 Draft 通过新幂等键重复调度。等待人工批准的 Task 不能再用 execute 绕过批准：CLI/API/WebUI 共用 `approve`、`cancel`、`delay --until <rfc3339>` 与 `ignore` 动作，并要求调用方为每个语义请求提供可重用的幂等 key。批准只回到 Ready，正式测评写入仍受独立 Core policy 阻止；延迟只移动尚未领取的 Scheduled Execution 与 Job；取消拒绝已领取、Running 或 Recovering 的远端工作，避免本地假取消。调用方重试同一语义请求时必须复用原 key 和原 Draft/动作参数，Core 会返回原结果，跨任务、换 Draft 或换动作复用则拒绝。`execution list` 按创建时间稳定分页列出同一 owner 的 Execution，并可用 `--task` 缩小到单个 Task；`execution get <execution-id>` 返回当前结构化进度和按尝试序号排列的 Attempt 历史，`execution logs` 按稳定时间顺序分页读取脱敏日志。`GET /api/v1/executions/{execution_id}/stream` 提供 `snapshot` 起始帧以及该 Execution 的实时状态、进度和结构化日志事件；它不提供持久事件重放，收到 `resync` 或重新连接时应重新读取 detail，并按需读取 logs。不存在或属于其他 owner 的 ID 均不会泄露。正式测评默认在创建 Scheduler Job 前拦截。返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。
+Task 仍只能由 Provider 扫描链路写入；读取和执行则统一通过 owner-scoped Core Action。远端账户完成认证且对应 Provider 已注册 inventory capability 后，可运行 `provider-account scan <account-id>`；`task list` 支持 `--account`、`--limit` 和 `--offset`。`task progress <task-id>` 与 `task duration <task-id>` 分别走独立的只读 capability 和 API，读取时长不会创建 Execution、上报时长或改变远端状态。`task execute <task-id> --capability <action> --idempotency-key <key>` 会原子创建并调度 Execution，`--capability` 可重复并冻结本次明确选择的 action；独立提交任务选择 `submission_execute` 后还必须传入 `--submission-draft <draft-id>`，Core 会冻结 Draft 与 Execution 的绑定并拒绝同一 Draft 通过新幂等键重复调度。等待人工批准的 Task 不能再用 execute 绕过批准：CLI/API/WebUI 共用 `approve`、`cancel`、`delay --until <rfc3339>` 与 `ignore` 动作，并要求调用方为每个语义请求提供可重用的幂等 key。批准只回到 Ready，正式测评写入仍受独立 Core policy 阻止；延迟只移动尚未领取的 Scheduled Execution 与 Job；取消拒绝已领取、Running 或 Recovering 的远端工作，避免本地假取消。调用方重试同一语义请求时必须复用原 key 和原 capability/Draft/动作参数，Core 会返回原结果，跨任务、换 capability、换 Draft 或换动作复用则拒绝。`execution list` 按创建时间稳定分页列出同一 owner 的 Execution，并可用 `--task` 缩小到单个 Task；`execution get <execution-id>` 返回当前结构化进度和按尝试序号排列的 Attempt 历史，`execution logs` 按稳定时间顺序分页读取脱敏日志。`GET /api/v1/executions/{execution_id}/stream` 提供 `snapshot` 起始帧以及该 Execution 的实时状态、进度和结构化日志事件；它不提供持久事件重放，收到 `resync` 或重新连接时应重新读取 detail，并按需读取 logs。不存在或属于其他 owner 的 ID 均不会泄露。正式测评默认在创建 Scheduler Job 前拦截。返回值始终分别保留远端状态、编排状态、来源模块与任务性质，不从其中任一字段推断另一字段。
 
 Provider 执行期间只能通过 Core 注入的 `ExecutionEventSink` 上报进度或诊断日志，不能直接写数据库或实时连接。诊断日志由 Core 生成时间和标准阶段，并再次校验当前 Attempt、Execution lease、单行文本、Provider trace、8 KiB 脱敏 metadata 与敏感字段名；每个 Attempt 最多接受 1000 条 Provider 日志。日志历史行和 `ExecutionLogged` Outbox 事件在同一事务提交，Provider payload、Cookie、Token 和 Password 不属于该接口的合法输入。
 

@@ -826,8 +826,9 @@ Network behavior is isolated behind a Chaoxing transport contract. Response
 bodies are bounded, redacted in diagnostics, and zeroized on drop; a future
 adapter must resolve credentials through Core and discover a fresh Work `enc`.
 The capability metadata remains `Development`, advertises only TaskInventory,
-has no Capture recipe, and is not registered until CourseInventory and a
-live-tested transport exist.
+and at this historical checkpoint had no Capture recipe. The missing transport,
+CourseInventory and Provider-specific Capture/BrowserBridge recipe remained
+required implementation work before a complete Provider claim.
 
 ## Sixty-first Phase 0 slice
 
@@ -921,15 +922,16 @@ authentication state machine preserves a supplied reason such as
 manual intervention; older Providers which omit the reason retain the safe
 fallback behavior.
 
-This enables first-batch native authentication to stop accurately on captcha,
-SMS, browser or confirmation gates without implementing Capture or automated
-challenge solving. The reason is diagnostic state only and does not broaden
-Provider authority or expose response bodies.
+This enables a native authentication boundary to stop accurately on captcha,
+SMS, browser or confirmation gates before any blind retry. The reason is
+diagnostic state only and does not broaden Provider authority or expose response
+bodies; it is also the typed handoff into a separately bounded first-batch
+Capture/BrowserBridge or automated donor-compatible challenge path.
 
 ## Sixty-seventh Phase 0 slice
 
-Chaoxing now implements development-level Password and ImportedCookie
-authentication without Capture. Password fields use the donor-compatible
+Chaoxing now implements development-level native Password and ImportedCookie
+authentication. Password fields use the donor-compatible
 AES-128-CBC/PKCS#7 login encoding, and the native transport accepts only bounded
 JSON plus bounded `Set-Cookie` pairs. Successful login is provisional until the
 derived Cookie passes the authenticated root course-list request.
@@ -1089,7 +1091,8 @@ submission material such as `enc`, `jtoken`, `mid`, `otherInfo` and defaults.
 Synthetic donor-shaped fixtures cover state, type, string-brace and redaction
 behavior. Native card transport, integration into TaskInventory and every
 resource execution capability remain separate work, so this slice makes no
-live-support or verification claim and requires no Capture path.
+live-support or verification claim. The parser itself requires no Capture, but
+that does not exclude Capture/BrowserBridge paths required by later donor flows.
 
 ## Seventy-ninth Phase 0 slice
 
@@ -1110,8 +1113,9 @@ source semantics, while donor `workid` attachments remain Chapter tasks and are
 not merged with independent Work inventory. Chapter, Resource, Work, Work
 detail and Exam acquisition must all complete before Core receives a snapshot.
 The route and matrix tests are offline evidence only: no resource execution
-capability, Capture dependency, live-account verification or higher Provider
-verification level is claimed.
+capability, live-account verification or higher Provider verification level is
+claimed. This native inventory slice does not by itself establish whether its
+live session requires a BrowserBridge/Capture fallback.
 
 ## Eightieth Phase 0 slice
 
@@ -1132,8 +1136,8 @@ reports completed. A task already completed on the first fresh read is
 idempotent and performs no mutation. Video, Live, Chapter Work, independent
 Work and Exam do not borrow this path and advertise no newly implemented
 execution capability. Provider-to-Core execution dispatch and live-account
-behavior remain unverified, so Chaoxing stays `Development`; no Capture path is
-introduced.
+behavior remain unverified, so Chaoxing stays `Development`; the missing
+Capture/BrowserBridge compatibility path remains active separate work.
 
 ## Eighty-first Phase 0 slice
 
@@ -1603,9 +1607,11 @@ the frozen Master settings snapshot.
 
 Object IDs, report tokens, `otherInfo`, face/attendance fields and signature
 inputs remain short-lived zeroizing execution material. Captcha responses stop
-as typed `HumanRequired(ImageCaptcha)`; the deferred-Capture phase adds neither
-OCR nor donor automatic solving. This is offline fixture and transport-boundary
-evidence only, so Chaoxing remains disabled by default and `Development`.
+at this native boundary as typed `HumanRequired(ImageCaptcha)` before any blind
+retry. The audited donor solver and Capture/BrowserBridge compatibility route
+remain active first-batch work rather than a deferred phase. This is offline
+fixture and transport-boundary evidence only, so Chaoxing remains disabled by
+default and `Development`.
 
 ## One-hundred-and-sixth Phase 0 slice
 
@@ -1713,17 +1719,18 @@ changes orchestration state.
 
 ## One-hundred-and-thirteenth Phase 0 slice
 
-The active first-batch delivery order now explicitly excludes Provider work
-which requires a local Capture runtime, browser traffic capture or system proxy.
-Native HTTP, manual credential/session import and offline fixture work continue;
-Capture-dependent authentication, diagnostics and live validation remain open
-acceptance items and cannot contribute to a `Verified` claim.
+The first-batch delivery order prefers Native Rust HTTP, but explicitly includes
+Provider work that requires a local Capture runtime, browser traffic capture,
+browser storage/runtime state, dynamic crypto context, local authentication
+assistance or a system proxy. This is an engineering priority order only:
+Native HTTP, BrowserBridge and Capture are all current implementation scope.
 
-The already implemented generic Capture pairing and credential boundaries stay
-in the repository, but this phase does not expand them with Provider-specific
-recipes or interception logic. In particular, cidaren may progress through
-manual token import and non-Capture capabilities while its WeChat-assisted
-Capture path remains deferred and the Provider remains incomplete.
+The generic Capture pairing and credential boundaries must be expanded with the
+Provider-specific recipes and interception logic required by audited donor
+behavior. In particular, cidaren's WeChat-assisted Capture path, runtime crypto
+context and resulting question/submission abilities continue after the existing
+ImportedToken checkpoint. They remain subject to owner/account binding,
+zeroization, bounded capture and fail-closed drift handling.
 
 ## One-hundred-and-fourteenth Phase 0 slice
 
@@ -1811,9 +1818,11 @@ independent course Work inventory. Independent Work and Exam use the current OCS
 metadata preserve this distinction so later native transport cannot route an
 independent Work Task through Chapter attachment credentials.
 
-All supported page modes remain parse-only and answer-free at this checkpoint.
-The correction adds no remote execution, Capture dependency, hidden-answer
-reading or submission behavior.
+All supported page modes remain parse-only and answer-free at this historical
+checkpoint. The correction itself adds no remote execution or submission
+behavior; those audited paths and any required Capture/BrowserBridge dependency
+remain active later capabilities, while hidden donor answer behavior is handled
+only through a distinct `AnswerResolve` contract.
 
 ## One-hundred-and-twentieth Phase 0 slice
 
@@ -2178,12 +2187,13 @@ values, endpoint, `pyFlag`, Cookie, `enc`, token, header or arbitrary Provider
 JSON. It performs no network request and grants neither `SubmissionExecute` nor
 `SubmissionVerify`; unsupported complex question kinds fail closed.
 
-Exam is deliberately excluded. The audited mobile flow reaches attempt-local
-questions only after the mutating exam-start route yields an active attempt and
-`enc`, potentially behind exam-code, face or captcha checks. Asterism therefore
-does not claim a read-only Exam question path or borrow Work payload semantics;
-that path remains deferred to a later explicitly authorized mutation and
-human-interaction stage, with no first-batch Capture implementation.
+Exam remains semantically separate from Work. The audited mobile flow reaches
+attempt-local questions only after the mutating exam-start route yields an
+active attempt and `enc`, potentially behind exam-code, face or captcha checks.
+Asterism must implement that explicit start/attempt lifecycle and its
+Capture/BrowserBridge or human-interaction gates rather than claim a fictitious
+read-only path or borrow Work payload semantics. Mutation authorization,
+receipt/verification separation and no ambiguous replay remain mandatory.
 
 ## One-hundred-and-forty-first Phase 0 slice
 
@@ -2275,9 +2285,10 @@ unknown completion stays `Unknown`, a hidden Unit forces `NotOpen`, and duration
 alone never implies completion.
 
 The new metadata remains `Development` with no advertised runtime slots,
-authentication methods or session kinds. This checkpoint performs no HTTP,
-authentication, CMI mutation, execution, duration reporting or Capture work and
-is not evidence of current live WELearn compatibility.
+authentication methods or session kinds. This historical checkpoint had not yet
+implemented HTTP, authentication, CMI mutation, execution, duration reporting
+or Capture; every audited donor ability remained an active implementation gap,
+and the checkpoint was not evidence of current live WELearn compatibility.
 
 ## One-hundred-and-forty-sixth Phase 0 slice
 
@@ -2379,9 +2390,10 @@ Authentication failures, while key/storage failures remain sanitized Internal
 errors. Plaintext is owned by Core's zeroizing resolved credential and copied
 only into the bounded redacted Cookie session used by the request.
 
-The resulting Development entry is registry-consistent and has no Capture
-dependency. Automatic password renewal, daemon opt-in registration and
-live-account validation remain separate gates.
+The resulting Development entry is registry-consistent and its current native
+path has no Capture dependency. Automatic password renewal, daemon opt-in
+registration, Capture/browser compatibility and live-account validation remain
+separate active gates rather than Provider completion exclusions.
 
 ## One-hundred-and-fifty-first Phase 0 slice
 
@@ -2444,8 +2456,9 @@ donors nor a live sanitized fixture establishes one reliable time unit and
 grammar, `duration_seconds` is deliberately unset.
 
 Metadata and the registry-consistent Development entry now advertise and wire
-`TaskProgressRead`; execution, heartbeat, finalize, duration reporting and
-Capture remain absent. Synthetic fixtures and negative tests cover identity
+`TaskProgressRead`; this historical checkpoint had not yet implemented
+execution, heartbeat, finalize, duration reporting or Capture, which remained
+active audited gaps. Synthetic fixtures and negative tests cover identity
 binding, bounded nested parsing, independent facts and fail-closed drift. This
 checkpoint is offline/native-boundary evidence only and does not raise WELearn's
 verification level.
@@ -2469,10 +2482,11 @@ separate normalized facts.
 
 Synthetic fixtures and negative tests cover numeric/string resource IDs,
 duplicate identities, impossible point totals, misbound details/contexts,
-unknown roles and route-data exclusion. Metadata deliberately advertises no
-runtime capability: authentication, native transport, progress, completion,
-duration, execution, submission, BrowserBridge and Capture all remain absent.
-This is fixture-only evidence and not live UAI compatibility.
+unknown roles and route-data exclusion. At this historical parser checkpoint,
+metadata advertised no runtime capability; authentication, native transport,
+progress, completion, duration, execution, submission, BrowserBridge and
+Capture were all still active implementation gaps. This is fixture-only evidence
+and not live UAI compatibility.
 
 ## One-hundred-and-fifty-fifth Phase 0 slice
 
@@ -2489,9 +2503,10 @@ while code `1506` becomes an image/slider `HumanRequired` state. Response
 messages, open IDs, JWTs and serialized composite values remain redacted and
 zeroized across their owning boundaries.
 
-An injected account-bound resolver also supports stored-session validation, but
-native HTTP, Core persistence wiring, JWT expiry/recovery and automatic Password
-renewal remain absent. Metadata therefore adds only Authentication plus
+An injected account-bound resolver also supports stored-session validation; at
+this historical checkpoint native HTTP, Core persistence wiring, JWT
+expiry/recovery and automatic Password renewal were not yet implemented and
+remained required work. Metadata therefore adds only Authentication plus
 Password/ImportedToken and Jwt/Composite session declarations; Course/Task
 parsers remain offline helpers rather than advertised registry slots. This is
 offline orchestration evidence, not live authentication.
@@ -2511,10 +2526,11 @@ malformed composite JSON all fail as Authentication. Storage, key and
 ciphertext-authentication failures remain sanitized Internal errors.
 
 The resolver exposes only the bounded redacted openid/JWT session needed by the
-injected validation transport. It does not resolve username/password or perform
-renewal, and native HTTP remains absent. This closes the Core resolution side of
-session validation without claiming live validity, expiry recovery or native
-login compatibility.
+injected validation transport. At this checkpoint it did not resolve
+username/password, perform renewal or implement native HTTP; those remained
+required subsequent work. This closes the Core resolution side of session
+validation without claiming live validity, expiry recovery or native login
+compatibility.
 
 ## One-hundred-and-fifty-seventh Phase 0 slice
 
@@ -2680,9 +2696,8 @@ route still retains its numeric duration only as an untyped raw fact.
 The registry-consistent Development factory now composes all five read-only
 capabilities, while daemon opt-in and verification level remain unchanged.
 This is offline/native-boundary evidence only. DurationReport, execution,
-BrowserBridge, Capture and live verification remain absent; real-account
-read-only validation is scheduled after WebUI and Asterism-Plugin/Yunzai are
-complete.
+BrowserBridge and Capture remain active audited gaps; real-account read-only
+validation is scheduled after WebUI and Asterism-Plugin/Yunzai are complete.
 
 ## One-hundred-and-sixty-fifth Phase 0 slice
 
@@ -2739,7 +2754,8 @@ Metadata and the Development factory now agree on eight read-only capability
 slots. The fixture is synthetic encrypted data, verification remains
 Development, and real-account read-only validation remains scheduled after the
 WebUI and Asterism-Plugin/Yunzai surfaces are complete. `AnswerResolve`, every
-submission stage, BrowserBridge and Capture remain absent.
+submission stage, BrowserBridge and Capture remain active audited gaps rather
+than a later-phase exclusion.
 
 ## One-hundred-and-sixty-seventh Phase 0 slice
 
@@ -2757,9 +2773,9 @@ the already-sanitized normalized SCO observation.
 
 Metadata and the Development factory now agree on five read-only/authenticated
 slots. This remains synthetic/offline evidence at Development verification;
-CMI times remain opaque, DurationRead/DurationReport and remote execution stay
-unadvertised, and real-account read-only validation remains deferred until the
-WebUI and Asterism-Plugin/Yunzai surfaces are complete.
+CMI times remain opaque, while DurationRead/DurationReport, donor mutation and
+remote execution remain active audited gaps. Real-account read-only validation
+is scheduled after the WebUI and Asterism-Plugin/Yunzai surfaces are complete.
 
 ## One-hundred-and-sixty-eighth Phase 0 slice
 
@@ -2785,8 +2801,10 @@ remote completion. Every Provider error goes directly to HumanRequired without
 retry, and abandoned duration-report recovery neither reads TaskProgress nor
 re-enters start/keep/save. Provider and Engine regression tests cover these
 boundaries. `DurationRead` remains unadvertised because live evidence has not
-established the unit/grammar of WELearn's raw time values; completion-changing
-execution and Capture remain absent, and verification stays Development.
+established the unit/grammar of WELearn's raw time values. Completion/progress/
+score mutation, assessment/exercise execution and Capture remain separate active
+capability work; preserve-only reporting is not the only permitted write.
+Verification stays Development.
 
 ## One-hundred-and-sixty-ninth Phase 0 slice
 
@@ -2847,8 +2865,8 @@ server-visible answer match for every Draft item returns Confirmed/Completed;
 mismatches are Rejected and incomplete facts are Inconclusive. Synthetic
 fixtures and capability tests cover form allowlisting, acknowledgement-only
 semantics, independent slots, no-Receipt recovery and exact answer readback.
-No live compatibility or verification-level promotion is claimed, and Capture
-is not part of this slice.
+No live compatibility or verification-level promotion is claimed. Capture and
+BrowserBridge compatibility remain active work outside this native Work slice.
 
 ## One-hundred-and-seventy-first Phase 0 slice
 
@@ -2926,3 +2944,48 @@ revocation transaction, closing the previous cross-owner ID authorization
 gap. OpenAPI declares strong page/profile/audit schemas, and storage plus HTTP
 regressions prove optimistic concurrency, final-Master protection, password
 redaction, Audit scoping, token-scope non-escalation and cross-owner isolation.
+
+## One-hundred-and-seventy-fourth Phase 0 slice
+
+The first-batch Provider completion boundary is now the complete set of
+capabilities supported by audited donors, PortSources and reliable References,
+not a read-only, non-Capture or Native-HTTP-only subset. Completion, progress
+and score mutation, direct task execution, answer submission, Capture,
+BrowserBridge, browser storage/runtime state, dynamic cryptographic context and
+local authentication assistance are all in scope when upstream evidence exists.
+
+Native Rust HTTP remains the first engineering choice, but an incomplete native
+path must continue into the smallest Provider-specific BrowserBridge or Capture
+fallback that preserves the donor behavior. A milestone only reports progress.
+A Provider stops only after every audited ability is implemented and receives
+all currently executable verification, every remainder has a concrete hard
+blocker that further Capture/BrowserBridge/Core/donor work cannot resolve, or
+Main explicitly stops it.
+
+This scope expansion does not weaken the implementation contract. Bounded I/O,
+fresh identity rediscovery, immutable Drafts, receipt/verification separation,
+no ambiguous replay of non-idempotent mutations, zeroizing secrets, typed
+errors, protocol-drift fail-closed behavior, owner/account/task binding,
+durable recovery and separate Capability semantics remain mandatory. Live
+mutation validation still requires authority matching its remote effect, while
+code, fixtures and native/browser boundaries continue before that gate.
+
+## One-hundred-and-seventy-fifth Phase 0 slice
+
+Task execution now freezes the caller's exact, canonical executable Capability
+selection on the durable `Execution`. HTTP, OpenAPI, CLI and WebUI require an
+explicit non-empty selection; persistence rejects duplicates, read-only
+capabilities, submission/action mixtures and idempotency replay with a changed
+selection. The scheduler, Provider request and recovery path use that frozen
+selection rather than re-deriving every action advertised by a later Task
+snapshot.
+
+`ExecutionVerify` is now action-scoped. The Task marker advertises that at
+least one action supports goal-bound verification, while
+`TaskExecutionCapability::requires_execution_verification` decides for the
+frozen selection. This lets one WELearn SCO expose independent
+`ResourceExecution` and `DurationReport` actions: ResourceExecution uses its
+exact fresh completion/progress/score verifier; DurationReport keeps its own
+one-shot preservation verification and enters HumanRequired after an
+ambiguous write without being mistaken for the resource goal. Submission
+remains a separate single-action Draft/receipt/verification flow.
