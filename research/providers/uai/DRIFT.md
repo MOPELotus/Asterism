@@ -28,7 +28,7 @@
 | Submission throttling is mistaken for success | Donor returns `600001`/`600002` for rate limiting | Return typed retry state and never repeat a mutation without Core idempotency/recovery authority |
 | Submit receipt is accepted as result verification | Fresh user-module and progress reads are separate donor calls | Keep SubmissionExecute and SubmissionVerify separate and require a fresh identity-bound readback |
 | A missing receipt causes verification to guess the current module version | The readback route is keyed by the submit response version | Return Inconclusive without transport I/O when no accepted version receipt exists |
-| User-module route and response identify different Courses or Groups | The route uses fresh `courseInstanceId` while state carries separate submit metadata | Bind fresh Course detail, response Course, submit-info Group and both version fields before inspecting answers |
+| User-module route and response identify different Courses or Groups | The route uses fresh `courseInstanceId` while response and state carry separate module/submit metadata | Bind fresh Course detail, top-level and submit-info Course, exact Group-version module, submit-info Group and both version fields before inspecting answers |
 | User-module answer is stale, partial or changed | `quesData` embeds separately encoded context and answer children | Require one exact question, submitted context, every child `isDone`, and exact immutable draft-answer equality |
 | Unsupported UAI task kinds acquire a generic mutation default | Donors branch across oral, discussion, upload, preset and other provider-specific behaviors | Advertise execute/verify only for one-question simple-choice/multiple-choice/short-answer Groups; fail closed otherwise |
 

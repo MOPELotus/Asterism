@@ -240,10 +240,18 @@ fn bound_verification_state<'a>(
             "UAI submission verification read did not succeed",
         ));
     }
-    let state = response
+    let data = response
         .get("data")
         .and_then(Value::as_object)
-        .and_then(|data| data.get("state"))
+        .ok_or_else(|| protocol_drift("UAI submission verification has no data object"))?;
+    let expected_module = format!("{expected_group_id}-{expected_version}");
+    if data.get("module").and_then(Value::as_str) != Some(expected_module.as_str()) {
+        return Err(remote_changed(
+            "UAI user-module identity does not match the receipt binding",
+        ));
+    }
+    let state = data
+        .get("state")
         .and_then(Value::as_object)
         .ok_or_else(|| protocol_drift("UAI submission verification has no state object"))?;
     if state.get("version").and_then(Value::as_str) != Some(expected_version) {
@@ -354,13 +362,27 @@ pub(crate) fn validate_verification_course_binding(
 ) -> ProviderResult<()> {
     let response: Value = serde_json::from_str(document)
         .map_err(|_| invalid_response("UAI submission verification response is not valid JSON"))?;
-    let course = response
+    let data = response
         .get("data")
         .and_then(Value::as_object)
-        .and_then(|data| data.get("course"))
+        .ok_or_else(|| protocol_drift("UAI submission verification has no data object"))?;
+    let course = data
+        .get("course")
         .and_then(Value::as_str)
         .ok_or_else(|| protocol_drift("UAI submission verification has no Course binding"))?;
-    if course != expected_course_instance_id {
+    let submit_course = data
+        .get("state")
+        .and_then(Value::as_object)
+        .and_then(|state| state.get("__EXTEND_DATA__"))
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("__SUBMIT_INFO__"))
+        .and_then(Value::as_object)
+        .and_then(|submit| submit.get("course_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            protocol_drift("UAI submission verification has no submit-info Course binding")
+        })?;
+    if course != expected_course_instance_id || submit_course != expected_course_instance_id {
         return Err(remote_changed(
             "UAI submission verification Course does not match its fresh route",
         ));
@@ -649,6 +671,32 @@ mod tests {
         assert!(!format!("{snapshot:?}").contains("must_be_dropped"));
         validate_verification_course_binding(VERIFIED, "course-v2:synthetic+rw").unwrap();
         assert!(validate_verification_course_binding(VERIFIED, "changed").is_err());
+        let changed_module = VERIFIED.replace(
+            r#""module":"group-1-submit-version-42""#,
+            r#""module":"group-1-changed""#,
+        );
+        assert_eq!(
+            parse_verification_snapshot(
+                &changed_module,
+                "group-1",
+                "submit-version-42",
+                &plan,
+                &draft,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        let changed_course = VERIFIED.replace(
+            r#""course_id":"course-v2:synthetic+rw""#,
+            r#""course_id":"changed""#,
+        );
+        assert_eq!(
+            validate_verification_course_binding(&changed_course, "course-v2:synthetic+rw")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
     }
 
     #[tokio::test]

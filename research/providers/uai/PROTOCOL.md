@@ -203,11 +203,13 @@ repeated.
 
 Verification requires that accepted receipt and reads only the exact
 `{groupId}-{submitVersion}` user-module route after refreshing the Course
-instance. The response must bind the fresh Course, Group and version, contain
-exactly one matching question in submitted state, mark every answer child done,
-and reproduce the immutable draft answer exactly. Only then is the question
-Confirmed. No score, progress or Task-completion state is inferred. With no
-receipt the result is Inconclusive and no version route is guessed or read.
+instance. The response must bind both the top-level and submit-info Course to
+that fresh route, repeat the exact `{groupId}-{submitVersion}` module identity,
+bind Group and both version fields, contain exactly one matching question in
+submitted state, mark every answer child done, and reproduce the immutable
+draft answer exactly. Only then is the question Confirmed. No score, progress
+or Task-completion state is inferred. With no receipt the result is
+Inconclusive and no version route is guessed or read.
 Unsupported or unsafe types still fail closed; empty answers, synthetic uploads
 and discussion side effects are not portable defaults. This remains synthetic
 offline coverage and is not a live compatibility claim.
