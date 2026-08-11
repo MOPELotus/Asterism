@@ -2,11 +2,11 @@
 
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
-| Authentication | Current private donor | PortSource | Accept only manually imported opaque `UserToken`; validate through bounded `Student/Main`; no Password or native WeChat OAuth claim |
-| Stored session validation | Current private donor + Asterism secrets boundary | FromScratch | Persist one account-bound Provider access token; expiry is discovered by authenticated read because no trustworthy token expiry is exposed |
+| Authentication | Current private donor | PortSource | Accept only manually imported opaque `UserToken`; native shared-client validation through bounded `Student/Main` is offline/native-boundary covered; no Password or native WeChat OAuth claim |
+| Stored session validation | Current private donor + Asterism secrets boundary | FromScratch | Core-scoped resolver accepts one exact unexpired ManualImport + ProviderSpecific access token bound to account/reference/purpose; no trustworthy remote expiry is exposed |
 | Session recovery / refresh | Current private donor | Reference | Token replacement requires user import in the non-Capture batch; automatic refresh is not advertised |
-| CourseInventory | Current/private task pages + public issue fixture | PortSource | Derive unique stable Courses from the complete paginated class-task inventory, which contains `course_id` and `course_name` |
-| TaskInventory | Current/private donor | PortSource | Parse complete `ClassTask/PageTask` pagination; keep learning and test task types distinct and bind stable identity to `release_id` |
+| CourseInventory | Current/private task pages + public issue fixture | PortSource | Native signed pagination plus unique stable Course derivation from `course_id` and `course_name` are offline/native-boundary covered |
+| TaskInventory | Current/private donor | PortSource | Native signed `ClassTask/PageTask` pagination is all-or-nothing; learning/test types remain distinct and stable identity binds to `release_id` |
 | TaskDetail | Current donor + Asterism Core | FromScratch | Freshly re-list and require one exact release identity before returning details; never trust a stale `task_id` |
 | TaskProgressRead | Current/private task rows | PortSource | Fresh task row exposes bounded percent, status, score and time observations; completion, duration and score remain separate |
 | DurationRead | Public issue fixture | Reference | `time_spent` is recorded but its unit and semantics require live proof; do not expose seconds yet |
@@ -34,5 +34,10 @@ The initial non-Capture milestone now:
    `task_id` only as a fresh observation;
 8. composes injected Authentication, CourseInventory and TaskInventory slots
    into one registry-consistent Development entry;
-9. advertises no execution, answer, duration-seconds, Capture or live-verified
+9. resolves only an exact Core account/reference-bound manual access token and
+   uses one shared non-redirecting HTTPS client for account validation and
+   signed complete task pagination;
+10. freezes donor headers, request/body signing-version split, JSON/status/body
+   bounds and sensitive `UserToken` handling with offline tests;
+11. advertises no execution, answer, duration-seconds, Capture or live-verified
    capability.

@@ -22,6 +22,20 @@ expiry or refresh endpoint. Consequently the first batch supports only
 `ImportedToken` plus validation. WeChat OAuth, browser storage takeover,
 mitmproxy and system-proxy changes remain deferred Capture work.
 
+The native transport now uses the shared non-redirecting HTTPS client. It sends
+the token as a sensitive `UserToken` header, preserves the audited mobile
+User-Agent plus derived `Abc`/read `Authorization-V` headers, requires JSON
+Content-Type and UTF-8, and caps the account body at 64 KiB. HTTP 401/403 maps
+to Authentication, 429 retains a bounded Retry-After, redirects/404 map to
+ProtocolDrift and server failures remain ProviderUnavailable. Response bodies
+are zeroized after validation.
+
+The Core adapter requests only `ProviderAccessToken` and requires exactly one
+unexpired record whose account, reference, purpose, ManualImport acquisition
+and ProviderSpecific session kind all match the operation. Missing/stale token
+metadata maps to Authentication; storage/key failures remain sanitized
+Internal errors. No automatic renewal path exists.
+
 The original historical donor contains a `LoginByWechatCode` exchange. It does
 not establish a current clean native bootstrap and must not override the
 explicit first-batch authentication decision.
@@ -46,8 +60,16 @@ Content-Type: application/json
 ```
 
 The frozen signing input uses the donor's separately audited version label and
-a static suffix. Exact request signing belongs to the later native transport;
-fixtures never contain the suffix-derived signature.
+a static suffix. Native request construction is covered by a fixed-time digest
+vector; response fixtures never contain executable request signatures.
+
+The native transport preserves the donor's unusual version split: the JSON
+body uses `2.6.1.231204`, while the MD5 signing input uses
+`2.6.1.240122`. Page one is read and structurally parsed before its bounded
+`total` determines subsequent requests. One stored token is resolved for the
+whole scan; any missing page, HTTP failure or later parser disagreement rejects
+the complete inventory instead of returning a partial snapshot. Each page is
+bounded to 2 MiB and at most ten records.
 
 Each successful page contains `data.records` and `data.total`. Observed row
 fields include:

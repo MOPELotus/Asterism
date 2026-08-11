@@ -254,6 +254,10 @@ fn parse_page(document: &str) -> ProviderResult<(usize, Vec<ClassTaskRow>)> {
         .map(|rows| (total, rows))
 }
 
+pub(crate) fn class_task_total(document: &str) -> ProviderResult<usize> {
+    parse_page(document).map(|(total, _)| total)
+}
+
 fn parse_row(value: &Value) -> ProviderResult<ClassTaskRow> {
     let object = value
         .as_object()

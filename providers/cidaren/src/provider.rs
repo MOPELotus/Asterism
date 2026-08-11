@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
+use asterism_networking::ResolvedNetworkProfile;
 use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
+use asterism_secrets::ProviderCredentialResolver;
 
 use crate::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenClassTaskTransport,
     CidarenCourseInventory, CidarenSessionResolver, CidarenTaskInventory,
-    metadata::development_metadata,
+    metadata::development_metadata, native_http::NativeCidarenTransport,
+    stored_session::StoredCidarenSessionResolver,
 };
 
 /// Composes the Development entry around injected token/session and complete
@@ -45,10 +48,46 @@ pub fn build_development_provider(
     })
 }
 
+/// Composes the Development entry with native account validation and complete
+/// class-task HTTP around one injected session resolver.
+///
+/// # Errors
+///
+/// Returns a sanitized Provider error if metadata or the shared HTTP client
+/// cannot be initialized.
+pub fn build_development_provider_native(
+    network: &ResolvedNetworkProfile,
+    sessions: Arc<dyn CidarenSessionResolver>,
+) -> ProviderResult<ProviderEntry> {
+    let native = Arc::new(NativeCidarenTransport::try_new(network, sessions.clone())?);
+    build_development_provider(native.clone(), sessions, native)
+}
+
+/// Composes the native Development entry around Core's provider-scoped stored
+/// credential resolver. Manual tokens cannot renew automatically.
+///
+/// # Errors
+///
+/// Returns a sanitized Provider error if metadata or the shared HTTP client
+/// cannot be initialized.
+pub fn build_development_provider_with_stored_session(
+    network: &ResolvedNetworkProfile,
+    credentials: Arc<dyn ProviderCredentialResolver>,
+) -> ProviderResult<ProviderEntry> {
+    build_development_provider_native(
+        network,
+        Arc::new(StoredCidarenSessionResolver::new(credentials)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use asterism_networking::NetworkProfile;
     use asterism_provider_api::{
         ProviderContext, ProviderError, ProviderErrorKind, ProviderRegistry,
+    };
+    use asterism_secrets::{
+        ProviderCredentialResolution, ResolvedProviderCredential, SecretStoreError,
     };
     use async_trait::async_trait;
 
@@ -57,6 +96,16 @@ mod tests {
 
     #[derive(Debug)]
     struct UnusedBoundaries;
+
+    #[async_trait]
+    impl ProviderCredentialResolver for UnusedBoundaries {
+        async fn resolve_provider_credentials(
+            &self,
+            _request: ProviderCredentialResolution,
+        ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError> {
+            Err(SecretStoreError::NotFound)
+        }
+    }
 
     #[async_trait]
     impl CidarenAuthenticationTransport for UnusedBoundaries {
@@ -108,6 +157,19 @@ mod tests {
                 .get(&asterism_domain::ProviderId::new("cidaren").unwrap())
                 .is_some()
         );
+
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .expect("built-in network profile");
+        let boundaries = Arc::new(UnusedBoundaries);
+        let native = build_development_provider_native(&network, boundaries).unwrap();
+        let mut registry = ProviderRegistry::default();
+        registry.register(native).unwrap();
+
+        let stored =
+            build_development_provider_with_stored_session(&network, Arc::new(UnusedBoundaries))
+                .unwrap();
+        let mut registry = ProviderRegistry::default();
+        registry.register(stored).unwrap();
     }
 
     fn unused() -> ProviderError {

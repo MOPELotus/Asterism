@@ -9,11 +9,15 @@ repository.workspace = true
 
 [dependencies]
 asterism-domain = { path = "../../crates/domain" }
+asterism-networking = { path = "../../crates/networking" }
 asterism-provider-api = { path = "../../crates/provider-api" }
 asterism-secrets = { path = "../../crates/secrets" }
 async-trait.workspace = true
 chrono.workspace = true
 http.workspace = true
+md5.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true

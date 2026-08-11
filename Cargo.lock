@@ -283,11 +283,15 @@ name = "asterism-provider-cidaren"
 version = "0.1.0"
 dependencies = [
  "asterism-domain",
+ "asterism-networking",
  "asterism-provider-api",
  "asterism-secrets",
  "async-trait",
  "chrono",
  "http",
+ "md5",
+ "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",
