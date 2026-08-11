@@ -380,6 +380,16 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
         receipt
             .validate()
             .map_err(|_| invalid_response("UAI submission receipt is invalid"))?;
+        if receipt.remote_status != "accepted"
+            || receipt
+                .provider_trace_id
+                .as_deref()
+                .is_none_or(|value| !valid_submission_version(value))
+        {
+            return Err(invalid_response(
+                "UAI submission execution requires an accepted version receipt",
+            ));
+        }
         Ok(receipt)
     }
 }
@@ -651,6 +661,49 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct AmbiguousFailureTransport {
+        calls: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl UaiSubmissionTransport for AmbiguousFailureTransport {
+        async fn submit(
+            &self,
+            _context: &ProviderContext,
+            _course_resource_id: &str,
+            _group_id: &str,
+            _plan: &UaiSubmissionPlan,
+        ) -> ProviderResult<SubmissionReceipt> {
+            *self.calls.lock().unwrap() += 1;
+            Err(ProviderError::new(
+                ProviderErrorKind::Network,
+                "synthetic ambiguous UAI submission failure",
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnexpectedReceiptTransport;
+
+    #[async_trait]
+    impl UaiSubmissionTransport for UnexpectedReceiptTransport {
+        async fn submit(
+            &self,
+            _context: &ProviderContext,
+            _course_resource_id: &str,
+            _group_id: &str,
+            _plan: &UaiSubmissionPlan,
+        ) -> ProviderResult<SubmissionReceipt> {
+            Ok(SubmissionReceipt {
+                remote_status: "queued".to_owned(),
+                message_sanitized: None,
+                provider_trace_id: Some("submit-version-42".to_owned()),
+                received_at: Utc::now(),
+            })
+        }
+    }
+
     #[derive(Debug)]
     struct NoopEvents;
 
@@ -762,6 +815,52 @@ mod tests {
                 .is_err()
         );
         assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_transport_failure_is_returned_after_one_mutation_attempt() {
+        let transport = Arc::new(AmbiguousFailureTransport::default());
+        let capability = UaiSubmissionExecute::try_new(
+            Arc::new(FixtureDetail {
+                metadata: development_metadata().unwrap(),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+        let error = capability
+            .execute_submission(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &draft().await,
+                &runtime_settings(),
+                &NoopEvents,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Network);
+        assert_eq!(*transport.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn unexpected_receipt_semantics_are_rejected_after_the_mutation() {
+        let capability = UaiSubmissionExecute::try_new(
+            Arc::new(FixtureDetail {
+                metadata: development_metadata().unwrap(),
+            }),
+            Arc::new(UnexpectedReceiptTransport),
+        )
+        .unwrap();
+        let error = capability
+            .execute_submission(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &draft().await,
+                &runtime_settings(),
+                &NoopEvents,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
     }
 
     async fn draft() -> SubmissionDraft {
