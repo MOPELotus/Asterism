@@ -16,6 +16,10 @@ fixtures/providers/uai/
   tasks/tree-mixed.json
   progress/unit-mixed.json
   duration/unit-mixed.json
+  questions/content-multiple-choice.json
+  questions/answer-multiple-choice.json
+  submissions/accepted.json
+  submissions/verified.json
 ```
 
 They cover typed Password success/rejection/slider outcomes, strict atomic
@@ -29,6 +33,13 @@ seconds. Inline negative tests cover malformed/extra composite
 fields, duplicate
 resources/groups, misbound details/contexts, unknown roles and impossible point
 totals, plus duplicate duration nodes and missing/negative/overflow seconds.
+The encrypted question/answer fixtures additionally cover bounded `unipus.`
+framing, separate decryptions, exact Group/question binding and removal of key
+material. Submission fixtures cover one accepted version receipt and an exact
+receipt-versioned user-module readback. They use only synthetic answer values;
+tests require Course/Group/version/question/submitted-state/answer equality and
+reject changed answers. A missing receipt produces Inconclusive without making
+a transport request.
 
 ## Required live-sanitized fixtures
 
@@ -44,6 +55,10 @@ fixtures/providers/uai/
   progress/group-pending-in-progress-completed.json
   progress/total-and-unit-duration.json
   duration/unit-task-situation.json
+  questions/content-simple-types-live.json
+  questions/answer-simple-types-live.json
+  submissions/accepted-live.json
+  submissions/verified-live.json
 ```
 
 Remove usernames, passwords, JWT/openid values, annotator tokens, user IDs,
@@ -64,3 +79,9 @@ field names, placeholder identities and response/result codes.
 - Unknown tree roles fail closed.
 - Progress duration remains untyped and independent from completion.
 - Study-record duration seconds require one exact unique CourseResource/Unit/Group binding.
+- Content and standard answers remain independent fresh documents; neither may be reused as submission evidence.
+- Submission previews contain no selected answer values or executable provider payload.
+- Only one-question `single-choice`, `multichoice` and `short_answer` Groups advertise execute/verify.
+- Codes `600001` and `600002` never produce a receipt and never trigger an implicit mutation retry.
+- Verification requires the receipt version and an exact fresh Course/Group/question/submitted-answer readback.
+- Missing receipts are Inconclusive; receipts alone never confirm success, score, progress or completion.

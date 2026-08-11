@@ -17,13 +17,15 @@ use crate::{
     UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument, UaiJwtSession,
     UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
     UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
-    UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiVerificationDocument,
+    UaiVerificationTransport,
     annotator::generate_annotator_token,
     course_inventory::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
         required_remote_component,
     },
     parse_course_context, parse_submission_receipt,
+    submission_verify::validate_verification_course_binding,
     user_identity::parse_user_identity,
 };
 
@@ -38,6 +40,7 @@ const MAX_DURATION_RESPONSE_BYTES: usize = 1_024 * 1_024;
 const MAX_QUESTION_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_ANSWER_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_SUBMISSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
+const MAX_VERIFICATION_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 
 /// Native, non-redirecting UAI read and submission transport.
 pub struct NativeUaiInventoryTransport {
@@ -381,6 +384,61 @@ impl NativeUaiInventoryTransport {
         )?;
         parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
     }
+
+    async fn fetch_verification_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        group_id: &str,
+        submission_version: &str,
+    ) -> ProviderResult<UaiVerificationDocument> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "verification Course-resource ID",
+        )?;
+        let group_id = required_remote_component(
+            Some(&serde_json::Value::String(group_id.to_owned())),
+            "verification Group ID",
+        )?;
+        let submission_version = required_remote_component(
+            Some(&serde_json::Value::String(submission_version.to_owned())),
+            "verification submission version",
+        )?;
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let response = self
+            .client
+            .get(verification_url(
+                route.course_instance_id(),
+                &group_id,
+                &submission_version,
+            )?)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let document = read_json_response(response, ResponseRoute::SubmissionVerification).await?;
+        validate_verification_course_binding(&document, route.course_instance_id())?;
+        UaiVerificationDocument::try_new(document)
+    }
 }
 
 impl fmt::Debug for NativeUaiInventoryTransport {
@@ -544,6 +602,40 @@ impl UaiSubmissionTransport for NativeUaiInventoryTransport {
     }
 }
 
+#[async_trait]
+impl UaiVerificationTransport for NativeUaiInventoryTransport {
+    async fn fetch_verification(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        group_id: &str,
+        submission_version: &str,
+    ) -> ProviderResult<UaiVerificationDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_verification_with_session(
+                &session,
+                course_resource_id,
+                group_id,
+                submission_version,
+            )
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_verification_with_session(
+                    &session,
+                    course_resource_id,
+                    group_id,
+                    submission_version,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+}
+
 fn sensitive_authorization(session: &UaiJwtSession) -> ProviderResult<HeaderValue> {
     let mut value = HeaderValue::from_str(session.expose_authorization()).map_err(|_| {
         ProviderError::new(
@@ -566,6 +658,7 @@ enum ResponseRoute {
     QuestionContent,
     StandardAnswer,
     Submission,
+    SubmissionVerification,
 }
 
 impl ResponseRoute {
@@ -580,6 +673,7 @@ impl ResponseRoute {
             Self::QuestionContent => "Question content",
             Self::StandardAnswer => "standard answer",
             Self::Submission => "submission",
+            Self::SubmissionVerification => "submission verification",
         }
     }
 
@@ -591,6 +685,7 @@ impl ResponseRoute {
             Self::QuestionContent => MAX_QUESTION_RESPONSE_BYTES,
             Self::StandardAnswer => MAX_ANSWER_RESPONSE_BYTES,
             Self::Submission => MAX_SUBMISSION_RESPONSE_BYTES,
+            Self::SubmissionVerification => MAX_VERIFICATION_RESPONSE_BYTES,
             Self::CourseList | Self::CourseDetail | Self::TaskTree => MAX_INVENTORY_RESPONSE_BYTES,
         }
     }
@@ -809,6 +904,18 @@ fn submission_url() -> ProviderResult<Url> {
     route_url(
         UCONTENT_ORIGIN,
         &["course", "api", "v3", "newExploration", "submit"],
+    )
+}
+
+fn verification_url(
+    course_instance_id: &str,
+    group_id: &str,
+    submission_version: &str,
+) -> ProviderResult<Url> {
+    let module = format!("{group_id}-{submission_version}");
+    route_url(
+        UCONTENT_ORIGIN,
+        &["api", "mobile", "user_module", course_instance_id, &module],
     )
 }
 
@@ -1093,6 +1200,12 @@ mod tests {
             submission_url().unwrap().as_str(),
             "https://ucontent.unipus.cn/course/api/v3/newExploration/submit"
         );
+        assert_eq!(
+            verification_url("course-v2:synthetic+rw/guard", "group/1", "submit/version",)
+                .unwrap()
+                .as_str(),
+            "https://ucontent.unipus.cn/api/mobile/user_module/course-v2:synthetic+rw%2Fguard/group%2F1-submit%2Fversion"
+        );
         assert_eq!(ResponseRoute::Progress.maximum_bytes(), 1_024 * 1_024);
         assert_eq!(
             ResponseRoute::QuestionContent.maximum_bytes(),
@@ -1103,6 +1216,10 @@ mod tests {
             4 * 1_024 * 1_024
         );
         assert_eq!(ResponseRoute::Submission.maximum_bytes(), 1_024 * 1_024);
+        assert_eq!(
+            ResponseRoute::SubmissionVerification.maximum_bytes(),
+            4 * 1_024 * 1_024
+        );
         assert_eq!(
             unit_task_duration_url("2001", "unit-1", "app-42", "sso.42")
                 .unwrap()

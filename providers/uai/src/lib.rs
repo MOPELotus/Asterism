@@ -1,10 +1,10 @@
 //! `uai` Provider implementation.
 //!
 //! The current Development checkpoint provides native Password/JWT
-//! authentication, read-only Course/Task inventory, fresh Group detail,
-//! Group progress, identity-bound duration and answer-free encrypted Question
-//! parsing over the shared network policy. It makes no claim of live
-//! compatibility.
+//! authentication, Course/Task inventory, fresh Group detail and progress,
+//! identity-bound duration, separate encrypted Question/answer reads, and a
+//! preview/execute/verify submission chain for one-question simple Groups over
+//! the shared network policy. It makes no claim of live compatibility.
 
 mod annotator;
 mod answer;
@@ -22,6 +22,7 @@ mod question;
 mod stored_session;
 mod submission_build;
 mod submission_execute;
+mod submission_verify;
 mod task_detail;
 mod task_inventory;
 mod user_identity;
@@ -50,9 +51,9 @@ pub use progress::{
     parse_group_progress,
 };
 pub use provider::{
-    UaiDevelopmentTransports, build_development_provider, build_development_provider_native,
-    build_development_provider_with_native_inventory, build_development_provider_with_renewal,
-    build_development_provider_with_stored_session,
+    UaiDevelopmentTransports, UaiSubmissionTransports, build_development_provider,
+    build_development_provider_native, build_development_provider_with_native_inventory,
+    build_development_provider_with_renewal, build_development_provider_with_stored_session,
 };
 pub use question::{
     ParsedUaiQuestion, UaiQuestionDocument, UaiQuestionRead, UaiQuestionTransport,
@@ -63,6 +64,10 @@ pub use submission_build::UaiSubmissionBuild;
 pub use submission_execute::{
     UaiSubmissionExecute, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
     parse_submission_receipt,
+};
+pub use submission_verify::{
+    UaiSubmissionVerify, UaiVerificationDocument, UaiVerificationTransport,
+    parse_verification_snapshot,
 };
 pub use task_detail::UaiTaskDetail;
 pub use task_inventory::parse_task_inventory;

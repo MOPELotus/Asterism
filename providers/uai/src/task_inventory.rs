@@ -208,6 +208,12 @@ fn build_task(
             TaskCapability::SubmissionBuild,
         ]);
     }
+    if supports_submission_execution(&task_types, question_count) {
+        capabilities.extend([
+            TaskCapability::SubmissionExecute,
+            TaskCapability::SubmissionVerify,
+        ]);
+    }
     let remote_id = format!("group:{resource_id}:{}:{group_id}", unit.id);
     let normalized = serde_json::json!({
         "schema": "uai.group-task.v1",
@@ -294,6 +300,15 @@ fn question_count(value: Option<&Value>) -> ProviderResult<Option<u32>> {
                 .ok_or_else(|| protocol_drift("UAI Group Task contains an invalid question count"))
         })
         .transpose()
+}
+
+fn supports_submission_execution(task_types: &[String], question_count: Option<u32>) -> bool {
+    question_count == Some(1)
+        && task_types.len() == 1
+        && matches!(
+            task_types[0].as_str(),
+            "single-choice" | "multichoice" | "short_answer"
+        )
 }
 
 fn fingerprint(normalized: &Value) -> Result<String, ProviderError> {
@@ -402,6 +417,16 @@ mod tests {
                 .contains(&TaskCapability::SubmissionBuild)
         );
         assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::SubmissionExecute)
+        );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::SubmissionVerify)
+        );
+        assert!(
             !tasks[1]
                 .capabilities
                 .contains(&TaskCapability::QuestionInventory)
@@ -420,6 +445,16 @@ mod tests {
             !tasks[1]
                 .capabilities
                 .contains(&TaskCapability::SubmissionBuild)
+        );
+        assert!(
+            !tasks[1]
+                .capabilities
+                .contains(&TaskCapability::SubmissionExecute)
+        );
+        assert!(
+            !tasks[1]
+                .capabilities
+                .contains(&TaskCapability::SubmissionVerify)
         );
     }
 }

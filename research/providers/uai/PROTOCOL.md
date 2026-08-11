@@ -49,12 +49,13 @@ Authentication and every read operation retry at most once. ManualImport+Jwt
 sessions, incomplete metadata and stale credential versions cannot renew. JWT
 expiry extraction remains pending.
 
-The complete read-only Provider factory shares one resolved network policy and
+The complete Development Provider factory shares one resolved network policy and
 one account-scoped stored-session resolver across Authentication,
-CourseInventory, TaskInventory, TaskDetail, TaskProgressRead and DurationRead. The daemon does not
-register this entry by default. Its config, environment and CLI opt-ins are
-independent from the other development Providers, require a configured
-SecretStore and retain Development verification with a startup warning.
+CourseInventory, TaskInventory, TaskDetail, TaskProgressRead, DurationRead and
+the question/answer/submission transports. The daemon does not register this
+entry by default. Its config, environment and CLI opt-ins are independent from
+the other development Providers, require a configured SecretStore and retain
+Development verification with a startup warning.
 
 ## Course resource and tree
 
@@ -157,8 +158,9 @@ BrowserBridge/Capture work remains deferred, and a future native reporter needs
 sanitized network evidence plus fresh duration readback.
 
 DurationRead never creates an Execution, reports time or mutates remote state.
-Direct answer/submission routes are outside this slice. HTTP success or 100%
-completion cannot satisfy any future duration-report acceptance gate.
+The independently implemented submission route does not report duration. HTTP
+success or 100% completion cannot satisfy any future duration-report acceptance
+gate.
 
 ## Question, answer, submission and verification audit
 
@@ -180,10 +182,28 @@ fresh user-module read. Rate-limit codes `600001` and `600002` are not success.
 The donor also branches by `base` and `question_num`, including objective,
 preset, oral, subjective, discussion, exit-ticket and upload behavior.
 
-Asterism will therefore implement QuestionInventory/QuestionParse,
-AnswerResolve, SubmissionBuild, SubmissionExecute and SubmissionVerify as
-independent capabilities. Unsupported or unsafe types must fail closed; empty
-answers, synthetic uploads and discussion side effects cannot be inferred as
-portable defaults. A submission receipt alone will never satisfy verification.
-This section freezes the next implementation boundary only; none of those five
-capabilities is advertised by the current checkpoint.
+Asterism now implements QuestionInventory/QuestionParse, AnswerResolve,
+SubmissionBuild, SubmissionExecute and SubmissionVerify as independent
+capabilities. Content and standard-answer reads each refresh and bind the exact
+CourseResource/Group route, bound/decrypt their own `unipus.` document and drop
+ciphertext plus key material after normalization. The immutable draft preview
+contains question structure and answer shape but no selected answer values and
+no executable provider payload.
+
+Execution is advertised only when a fresh Group has exactly one question and
+one audited simple type: `single-choice`, `multichoice` or `short_answer`. The
+native body is constructed only inside the execution boundary. A code-`0`,
+version-bearing response becomes an accepted receipt; `600001` and `600002`
+become typed retry state without a receipt, and the mutation is not implicitly
+repeated.
+
+Verification requires that accepted receipt and reads only the exact
+`{groupId}-{submitVersion}` user-module route after refreshing the Course
+instance. The response must bind the fresh Course, Group and version, contain
+exactly one matching question in submitted state, mark every answer child done,
+and reproduce the immutable draft answer exactly. Only then is the question
+Confirmed. No score, progress or Task-completion state is inferred. With no
+receipt the result is Inconclusive and no version route is guessed or read.
+Unsupported or unsafe types still fail closed; empty answers, synthetic uploads
+and discussion side effects are not portable defaults. This remains synthetic
+offline coverage and is not a live compatibility claim.

@@ -9,8 +9,9 @@ use crate::{
     UaiAnswerResolve, UaiAnswerTransport, UaiAuthentication, UaiAuthenticationTransport,
     UaiCourseInventory, UaiCourseInventoryTransport, UaiDurationTransport, UaiProgressTransport,
     UaiQuestionRead, UaiQuestionTransport, UaiSessionResolver, UaiSubmissionBuild,
-    UaiSubmissionExecute, UaiSubmissionTransport, UaiTaskDetail, UaiTaskDuration, UaiTaskInventory,
-    UaiTaskInventoryTransport, UaiTaskProgress, metadata::development_metadata,
+    UaiSubmissionExecute, UaiSubmissionTransport, UaiSubmissionVerify, UaiTaskDetail,
+    UaiTaskDuration, UaiTaskInventory, UaiTaskInventoryTransport, UaiTaskProgress,
+    UaiVerificationTransport, metadata::development_metadata,
 };
 
 /// Injected read and mutation boundaries used by the UAI Development entry.
@@ -21,7 +22,32 @@ pub struct UaiDevelopmentTransports {
     duration: Arc<dyn UaiDurationTransport>,
     question: Arc<dyn UaiQuestionTransport>,
     answer: Arc<dyn UaiAnswerTransport>,
-    submission: Arc<dyn UaiSubmissionTransport>,
+    submission: UaiSubmissionTransports,
+}
+
+/// Injected mutation and verification boundaries kept together so neither
+/// half of the UAI submission protocol is accidentally omitted.
+pub struct UaiSubmissionTransports {
+    execute: Arc<dyn UaiSubmissionTransport>,
+    verify: Arc<dyn UaiVerificationTransport>,
+}
+
+impl UaiSubmissionTransports {
+    pub fn new(
+        execute: Arc<dyn UaiSubmissionTransport>,
+        verify: Arc<dyn UaiVerificationTransport>,
+    ) -> Self {
+        Self { execute, verify }
+    }
+}
+
+impl fmt::Debug for UaiSubmissionTransports {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiSubmissionTransports")
+            .field("boundaries", &"configured")
+            .finish()
+    }
 }
 
 impl UaiDevelopmentTransports {
@@ -32,7 +58,7 @@ impl UaiDevelopmentTransports {
         duration: Arc<dyn UaiDurationTransport>,
         question: Arc<dyn UaiQuestionTransport>,
         answer: Arc<dyn UaiAnswerTransport>,
-        submission: Arc<dyn UaiSubmissionTransport>,
+        submission: UaiSubmissionTransports,
     ) -> Self {
         Self {
             course,
@@ -90,7 +116,11 @@ pub fn build_development_provider(
     let submission_build = Arc::new(UaiSubmissionBuild::try_new()?);
     let submission_execute = Arc::new(UaiSubmissionExecute::try_new(
         task_detail.clone(),
-        transports.submission,
+        transports.submission.execute,
+    )?);
+    let submission_verify = Arc::new(UaiSubmissionVerify::try_new(
+        task_detail.clone(),
+        transports.submission.verify,
     )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
@@ -106,7 +136,7 @@ pub fn build_development_provider(
         answer_resolve: Some(answer_resolve),
         submission_build: Some(submission_build),
         submission_execute: Some(submission_execute),
-        submission_verify: None,
+        submission_verify: Some(submission_verify),
         task_execution: None,
         browser_bridge: None,
     })
@@ -139,7 +169,7 @@ pub fn build_development_provider_with_native_inventory(
             inventory.clone(),
             inventory.clone(),
             inventory.clone(),
-            inventory,
+            UaiSubmissionTransports::new(inventory.clone(), inventory),
         ),
     )
 }
@@ -279,7 +309,7 @@ mod tests {
         assert!(entry.answer_resolve.is_some());
         assert!(entry.submission_build.is_some());
         assert!(entry.submission_execute.is_some());
-        assert!(entry.submission_verify.is_none());
+        assert!(entry.submission_verify.is_some());
         assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_none());
         assert!(entry.runtime_settings.definitions.is_empty());
@@ -295,6 +325,7 @@ mod tests {
             ProviderCapability::AnswerResolve,
             ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
+            ProviderCapability::SubmissionVerify,
         ] {
             assert!(entry.metadata.capabilities.contains(&capability));
         }

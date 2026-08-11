@@ -8,7 +8,7 @@ use asterism_provider_api::{
 
 pub(crate) const PROVIDER_ID: &str = "uai";
 
-/// Returns metadata for the current read-only Development checkpoint.
+/// Returns metadata for the current Development checkpoint.
 ///
 /// # Errors
 ///
@@ -38,6 +38,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::AnswerResolve,
             ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
+            ProviderCapability::SubmissionVerify,
         ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken]),
         session_kinds: BTreeSet::from([SessionKind::Jwt, SessionKind::Composite]),
@@ -67,6 +68,7 @@ mod tests {
                 ProviderCapability::AnswerResolve,
                 ProviderCapability::SubmissionBuild,
                 ProviderCapability::SubmissionExecute,
+                ProviderCapability::SubmissionVerify,
             ])
         );
         assert_eq!(

@@ -145,7 +145,7 @@ pub struct UaiSubmissionPlan {
 }
 
 impl UaiSubmissionPlan {
-    fn from_draft(draft: &SubmissionDraft, task_type: &str) -> ProviderResult<Self> {
+    pub(crate) fn from_draft(draft: &SubmissionDraft, task_type: &str) -> ProviderResult<Self> {
         if draft.items.len() != 1 {
             return Err(unsupported(
                 "UAI submission execution currently supports one-Question Groups only",
@@ -600,11 +600,10 @@ mod tests {
             let course = parse_course_inventory(COURSES)?.remove(0);
             let context = parse_course_context(&course, DETAIL)?;
             let tree = TREE.replace("rich-text-read", "multichoice");
-            let mut task = parse_task_inventory(&course, &context, &tree)?
+            let task = parse_task_inventory(&course, &context, &tree)?
                 .into_iter()
                 .find(|task| task.remote_id == remote_task_id)
                 .ok_or_else(|| protocol_drift("synthetic UAI Group is missing"))?;
-            task.capabilities.push(TaskCapability::SubmissionExecute);
             Ok(RemoteTaskDetail {
                 normalized_detail: serde_json::json!({
                     "schema": "uai.group-task-detail.v1",

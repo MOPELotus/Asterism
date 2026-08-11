@@ -9,12 +9,12 @@
 | TaskDetail | Asterism Core + both backend donors | FromScratch | Re-lists CourseResources and re-runs fresh detail/tree inventory before returning one exact identity-bound Group detail |
 | TaskProgressRead | Both backend donors | Reference | Native fresh-detail + signed per-Unit read and identity-bound Group parser are offline/native-boundary covered; only pass/pass2/perm all 1 maps to completed |
 | DurationRead | UnipusHelperPro | Reference | Native user-info + per-Unit study-record read binds CourseResource/Unit/Group exactly; donor-documented Task duration seconds are offline/native-boundary covered |
-| Daemon composition | Asterism Core | FromScratch | Complete read-only Development entry is registered only through an independent disabled-by-default opt-in and configured SecretStore |
-| QuestionInventory / QuestionParse | AutoFinish | Reference | Encrypted content route and task `base`/`question_num` are frozen; bounded decryption and typed parser remain the next offline slice |
-| AnswerResolve | Both backend donors | Reference | Separate encrypted answer route is frozen; it must not be combined with question parsing or submission |
-| SubmissionBuild | Both backend donors | Reference | Preserve only a credential-free, answer-value-free preview before any executable payload is formed |
-| SubmissionExecute | Both backend donors | Reference | `newExploration/submit` is a distinct mutation; rate-limit responses are not receipts and no empty/upload/discussion default is inferred |
-| SubmissionVerify | UnipusHelperPro | Reference | Fresh user-module/progress reads remain independent from the submit receipt and must bind the exact Group |
+| Daemon composition | Asterism Core | FromScratch | Complete Development entry is registered only through an independent disabled-by-default opt-in and configured SecretStore |
+| QuestionInventory / QuestionParse | AutoFinish | Reference | Fresh encrypted content read, bounded framing/decryption and typed single-choice, multiple-choice and short-answer parsing are offline/native-boundary covered |
+| AnswerResolve | Both backend donors | Reference | A separate fresh encrypted standard-answer read is independently bound to the same Group/question snapshot; ciphertext, keys and route context are not returned |
+| SubmissionBuild | Both backend donors | Reference | Credential-free and answer-value-free immutable preview is offline covered; no executable body is retained in the draft |
+| SubmissionExecute | Both backend donors | Reference | Exact `newExploration/submit` mapping is enabled only for one-question simple Groups; `600001`/`600002` remain typed retry responses and never become receipts |
+| SubmissionVerify | UnipusHelperPro | Reference | Exact receipt-versioned fresh user-module readback independently binds Course/Group/version/question/submitted state and answer; missing receipts are Inconclusive without a guessed route |
 | ResourceExecution | AutoFinish | Reference | Direct completion/submission is not accepted as duration-complete execution |
 | DurationReport | AutoPlayer | Reference | Current evidence is page residence and interaction, not a confirmed public HTTP reporter; deferred |
 | Result verification | Fresh tree/progress/duration reads | FromScratch | Require independent readback after any future mutation |
@@ -23,7 +23,8 @@
 ## Initial implementation boundary
 
 The current crate advertises Authentication, CourseInventory, TaskInventory,
-TaskDetail, TaskProgressRead and DurationRead. It:
+TaskDetail, TaskProgressRead, DurationRead, QuestionInventory/QuestionParse,
+AnswerResolve and the three independent submission capabilities. It:
 
 1. parses a bounded authenticated Course list and flattens each CourseResource
    into a stable `RemoteCourse`;
@@ -50,7 +51,18 @@ TaskDetail, TaskProgressRead and DurationRead. It:
     then returns seconds only for one unique identity-bound Group Task;
 13. advertises ProgressRead and DurationRead on each normalized Group Task so
     Core can authorize the two independent read paths;
-14. composes those six capabilities into an independently opted-in daemon
+14. reads and decrypts fresh content and standard-answer documents separately,
+    binds every normalized question and candidate to the exact Group snapshot,
+    and drops ciphertext, key material and free-form route context;
+15. builds only an answer-value-free immutable preview, then forms the native
+    submission body inside the execution boundary for exactly one supported
+    question (`single-choice`, `multichoice` or `short_answer`);
+16. accepts only a successful version-bearing submit response as a receipt and
+    independently verifies that exact version through a fresh user-module read;
+17. confirms only exact submitted-answer equality, returns Inconclusive when no
+    version receipt exists, and never infers score, progress or completion;
+18. composes these capabilities into an independently opted-in daemon
     Development entry that still requires the configured SecretStore;
-15. retains progress-route Group duration without assigning a unit and makes no
-    DurationReport, execution, submission, BrowserBridge or Capture claim.
+19. retains progress-route Group duration without assigning a unit and makes no
+    DurationReport, general TaskExecution, BrowserBridge, Capture or live
+    compatibility claim.
