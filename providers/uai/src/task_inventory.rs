@@ -204,6 +204,7 @@ fn build_task(
         capabilities.extend([
             TaskCapability::QuestionInventory,
             TaskCapability::QuestionParse,
+            TaskCapability::AnswerResolve,
         ]);
     }
     let remote_id = format!("group:{resource_id}:{}:{group_id}", unit.id);
@@ -374,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn only_supported_question_groups_advertise_answer_free_question_slots() {
+    fn only_supported_question_groups_advertise_question_and_answer_slots() {
         let course = parse_course_inventory(COURSES).unwrap().remove(0);
         let context = parse_course_context(&course, DETAIL).unwrap();
         let tree = TREE.replace("rich-text-read", "single-choice");
@@ -390,6 +391,11 @@ mod tests {
                 .contains(&TaskCapability::QuestionParse)
         );
         assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::AnswerResolve)
+        );
+        assert!(
             !tasks[1]
                 .capabilities
                 .contains(&TaskCapability::QuestionInventory)
@@ -398,6 +404,11 @@ mod tests {
             !tasks[1]
                 .capabilities
                 .contains(&TaskCapability::QuestionParse)
+        );
+        assert!(
+            !tasks[1]
+                .capabilities
+                .contains(&TaskCapability::AnswerResolve)
         );
     }
 }

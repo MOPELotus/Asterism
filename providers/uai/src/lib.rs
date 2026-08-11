@@ -7,9 +7,11 @@
 //! compatibility.
 
 mod annotator;
+mod answer;
 mod authentication;
 mod course_inventory;
 mod duration;
+mod encrypted;
 mod inventory_capabilities;
 mod metadata;
 mod native_authentication;
@@ -22,6 +24,10 @@ mod task_detail;
 mod task_inventory;
 mod user_identity;
 
+pub use answer::{
+    UaiAnswerDocument, UaiAnswerDocuments, UaiAnswerResolve, UaiAnswerTransport,
+    parse_answer_candidates,
+};
 pub use authentication::{
     UaiAuthentication, UaiAuthenticationTransport, UaiJwtSession, UaiSessionResolver,
     classify_password_login_response,
@@ -42,7 +48,7 @@ pub use progress::{
     parse_group_progress,
 };
 pub use provider::{
-    build_development_provider, build_development_provider_native,
+    UaiDevelopmentTransports, build_development_provider, build_development_provider_native,
     build_development_provider_with_native_inventory, build_development_provider_with_renewal,
     build_development_provider_with_stored_session,
 };

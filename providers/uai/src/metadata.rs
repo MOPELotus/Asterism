@@ -35,6 +35,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::DurationRead,
             ProviderCapability::QuestionInventory,
             ProviderCapability::QuestionParse,
+            ProviderCapability::AnswerResolve,
         ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken]),
         session_kinds: BTreeSet::from([SessionKind::Jwt, SessionKind::Composite]),
@@ -61,6 +62,7 @@ mod tests {
                 ProviderCapability::DurationRead,
                 ProviderCapability::QuestionInventory,
                 ProviderCapability::QuestionParse,
+                ProviderCapability::AnswerResolve,
             ])
         );
         assert_eq!(

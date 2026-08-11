@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use asterism_networking::ResolvedNetworkProfile;
 use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
@@ -6,11 +6,50 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     NativeUaiAuthenticationTransport, NativeUaiInventoryTransport, StoredUaiSessionResolver,
-    UaiAuthentication, UaiAuthenticationTransport, UaiCourseInventory, UaiCourseInventoryTransport,
-    UaiDurationTransport, UaiProgressTransport, UaiQuestionRead, UaiQuestionTransport,
-    UaiSessionResolver, UaiTaskDetail, UaiTaskDuration, UaiTaskInventory,
-    UaiTaskInventoryTransport, UaiTaskProgress, metadata::development_metadata,
+    UaiAnswerResolve, UaiAnswerTransport, UaiAuthentication, UaiAuthenticationTransport,
+    UaiCourseInventory, UaiCourseInventoryTransport, UaiDurationTransport, UaiProgressTransport,
+    UaiQuestionRead, UaiQuestionTransport, UaiSessionResolver, UaiTaskDetail, UaiTaskDuration,
+    UaiTaskInventory, UaiTaskInventoryTransport, UaiTaskProgress, metadata::development_metadata,
 };
+
+/// Injected read boundaries used by the complete UAI Development entry.
+pub struct UaiDevelopmentTransports {
+    course: Arc<dyn UaiCourseInventoryTransport>,
+    task: Arc<dyn UaiTaskInventoryTransport>,
+    progress: Arc<dyn UaiProgressTransport>,
+    duration: Arc<dyn UaiDurationTransport>,
+    question: Arc<dyn UaiQuestionTransport>,
+    answer: Arc<dyn UaiAnswerTransport>,
+}
+
+impl UaiDevelopmentTransports {
+    pub fn new(
+        course: Arc<dyn UaiCourseInventoryTransport>,
+        task: Arc<dyn UaiTaskInventoryTransport>,
+        progress: Arc<dyn UaiProgressTransport>,
+        duration: Arc<dyn UaiDurationTransport>,
+        question: Arc<dyn UaiQuestionTransport>,
+        answer: Arc<dyn UaiAnswerTransport>,
+    ) -> Self {
+        Self {
+            course,
+            task,
+            progress,
+            duration,
+            question,
+            answer,
+        }
+    }
+}
+
+impl fmt::Debug for UaiDevelopmentTransports {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiDevelopmentTransports")
+            .field("boundaries", &"configured")
+            .finish()
+    }
+}
 
 /// Composes the complete read-only Development entry around injected
 /// authentication and inventory boundaries. Calling this function does not
@@ -22,27 +61,27 @@ use crate::{
 pub fn build_development_provider(
     authentication_transport: Arc<dyn UaiAuthenticationTransport>,
     sessions: Arc<dyn UaiSessionResolver>,
-    course_transport: Arc<dyn UaiCourseInventoryTransport>,
-    task_transport: Arc<dyn UaiTaskInventoryTransport>,
-    progress_transport: Arc<dyn UaiProgressTransport>,
-    duration_transport: Arc<dyn UaiDurationTransport>,
-    question_transport: Arc<dyn UaiQuestionTransport>,
+    transports: UaiDevelopmentTransports,
 ) -> ProviderResult<ProviderEntry> {
     let authentication = Arc::new(UaiAuthentication::try_new(
         authentication_transport,
         sessions,
     )?);
-    let course_inventory = Arc::new(UaiCourseInventory::try_new(course_transport)?);
-    let task_inventory = Arc::new(UaiTaskInventory::try_new(task_transport)?);
+    let course_inventory = Arc::new(UaiCourseInventory::try_new(transports.course)?);
+    let task_inventory = Arc::new(UaiTaskInventory::try_new(transports.task)?);
     let task_detail = Arc::new(UaiTaskDetail::try_new(
         course_inventory.clone(),
         task_inventory.clone(),
     )?);
-    let task_progress = Arc::new(UaiTaskProgress::try_new(progress_transport)?);
-    let task_duration = Arc::new(UaiTaskDuration::try_new(duration_transport)?);
+    let task_progress = Arc::new(UaiTaskProgress::try_new(transports.progress)?);
+    let task_duration = Arc::new(UaiTaskDuration::try_new(transports.duration)?);
     let question_read = Arc::new(UaiQuestionRead::try_new(
         task_detail.clone(),
-        question_transport,
+        transports.question,
+    )?);
+    let answer_resolve = Arc::new(UaiAnswerResolve::try_new(
+        task_detail.clone(),
+        transports.answer,
     )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
@@ -55,7 +94,7 @@ pub fn build_development_provider(
         duration_read: Some(task_duration),
         question_inventory: Some(question_read.clone()),
         question_parse: Some(question_read),
-        answer_resolve: None,
+        answer_resolve: Some(answer_resolve),
         submission_build: None,
         submission_execute: None,
         submission_verify: None,
@@ -84,11 +123,14 @@ pub fn build_development_provider_with_native_inventory(
     build_development_provider(
         authentication_transport,
         sessions,
-        inventory.clone(),
-        inventory.clone(),
-        inventory.clone(),
-        inventory.clone(),
-        inventory,
+        UaiDevelopmentTransports::new(
+            inventory.clone(),
+            inventory.clone(),
+            inventory.clone(),
+            inventory.clone(),
+            inventory.clone(),
+            inventory,
+        ),
     )
 }
 
@@ -224,6 +266,7 @@ mod tests {
         assert!(entry.duration_read.is_some());
         assert!(entry.question_inventory.is_some());
         assert!(entry.question_parse.is_some());
+        assert!(entry.answer_resolve.is_some());
         assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_none());
         assert!(entry.runtime_settings.definitions.is_empty());
@@ -236,6 +279,7 @@ mod tests {
             ProviderCapability::DurationRead,
             ProviderCapability::QuestionInventory,
             ProviderCapability::QuestionParse,
+            ProviderCapability::AnswerResolve,
         ] {
             assert!(entry.metadata.capabilities.contains(&capability));
         }
