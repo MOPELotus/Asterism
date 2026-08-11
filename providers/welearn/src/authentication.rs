@@ -112,7 +112,8 @@ pub trait WellearnSessionResolver: Send + Sync {
     }
 }
 
-/// `WELearn` Password and `ImportedCookie` authentication orchestration.
+/// `WELearn` Password, `ImportedCookie` and Capture-assisted Cookie
+/// authentication orchestration.
 pub struct WellearnAuthentication {
     metadata: ProviderMetadata,
     transport: Arc<dyn WellearnAuthenticationTransport>,
@@ -180,7 +181,9 @@ impl AuthenticationCapability for WellearnAuthentication {
         })?;
         let waiting_for = match method {
             AuthMethod::Password => WaitingUserState::CredentialInput,
-            AuthMethod::ImportedCookie => WaitingUserState::SessionImport,
+            AuthMethod::ImportedCookie | AuthMethod::AssistedSession => {
+                WaitingUserState::SessionImport
+            }
             _ => return Err(unsupported_auth_method()),
         };
         Ok(AuthChallenge {
@@ -207,6 +210,7 @@ impl AuthenticationCapability for WellearnAuthentication {
         match credential.auth_method {
             AuthMethod::Password => self.validate_password(credential).await,
             AuthMethod::ImportedCookie => self.validate_imported_cookie(credential).await,
+            AuthMethod::AssistedSession => self.validate_captured_cookie(credential).await,
             _ => Err(unsupported_auth_method()),
         }
     }
@@ -294,6 +298,19 @@ impl WellearnAuthentication {
         Ok(CredentialValidation::accepted(valid_session(
             SessionKind::Cookie,
         )))
+    }
+
+    async fn validate_captured_cookie(
+        &self,
+        credential: &CredentialBundle,
+    ) -> ProviderResult<CredentialValidation> {
+        if !matches!(
+            credential.acquired_via,
+            CredentialAcquisition::CaptureTool | CredentialAcquisition::BrowserExtension
+        ) {
+            return Err(invalid_credential_shape());
+        }
+        self.validate_imported_cookie(credential).await
     }
 }
 
@@ -779,7 +796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_validates_password_and_imported_cookie_without_capture() {
+    async fn capability_validates_native_imported_and_capture_cookie_paths() {
         let transport = Arc::new(FixtureTransport {
             exchanges: AtomicUsize::new(0),
             validations: AtomicUsize::new(0),
@@ -807,8 +824,21 @@ mod tests {
             .unwrap();
         assert_eq!(imported.status.kind, SessionKind::Cookie);
         assert!(imported.replacement.is_none());
+        let captured = authentication
+            .validate_credential(&auth_context(), &captured_cookie_bundle())
+            .await
+            .unwrap();
+        assert_eq!(captured.status.kind, SessionKind::Cookie);
+        let mut mislabeled = captured_cookie_bundle();
+        mislabeled.acquired_via = CredentialAcquisition::ManualImport;
+        assert!(
+            authentication
+                .validate_credential(&auth_context(), &mislabeled)
+                .await
+                .is_err()
+        );
         assert_eq!(transport.exchanges.load(Ordering::SeqCst), 1);
-        assert_eq!(transport.validations.load(Ordering::SeqCst), 2);
+        assert_eq!(transport.validations.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -829,6 +859,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(imported.waiting_for, WaitingUserState::SessionImport);
+        let captured = authentication
+            .begin_authentication(&auth_context(), AuthMethod::AssistedSession)
+            .await
+            .unwrap();
+        assert_eq!(captured.waiting_for, WaitingUserState::SessionImport);
         assert!(
             authentication
                 .begin_authentication(&auth_context(), AuthMethod::QrCode)
@@ -915,5 +950,12 @@ mod tests {
             }],
             user_id_hint: None,
         }
+    }
+
+    fn captured_cookie_bundle() -> CredentialBundle {
+        let mut credential = cookie_bundle();
+        credential.auth_method = AuthMethod::AssistedSession;
+        credential.acquired_via = CredentialAcquisition::CaptureTool;
+        credential
     }
 }

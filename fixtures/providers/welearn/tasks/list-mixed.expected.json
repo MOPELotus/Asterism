@@ -11,6 +11,9 @@
     "closes_at": null,
     "capabilities": [
       "progress_read",
+      "resource_execution",
+      "execution_verify",
+      "duration_read",
       "duration_report"
     ],
     "fingerprint": "v1:295edce22d5503624048c1c5a67aaf5dfe16d848c57ecd75830739c99e0b37c7",
@@ -44,6 +47,9 @@
     "closes_at": null,
     "capabilities": [
       "progress_read",
+      "resource_execution",
+      "execution_verify",
+      "duration_read",
       "duration_report"
     ],
     "fingerprint": "v1:3a8b21e6ea036bda992da49163b5f848fc08349360f42152b639562627caac0b",
@@ -77,7 +83,7 @@
     "closes_at": null,
     "capabilities": [
       "progress_read",
-      "duration_report"
+      "duration_read"
     ],
     "fingerprint": "v1:845536d30d715cbdde80a6142b7bc7d0f6f42847a1966cb735a2208178c37459",
     "normalized": {

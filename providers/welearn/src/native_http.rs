@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc, time::Duration};
 
-use asterism_domain::LogLevel;
+use asterism_domain::{HumanRequiredReason, LogLevel};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
     ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
@@ -11,11 +11,12 @@ use reqwest::{
     Client, Response, StatusCode, Url,
     header::{CONTENT_TYPE, COOKIE, HeaderMap, LOCATION, REFERER, RETRY_AFTER},
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     WellearnCmiDocument, WellearnCmiTransport, WellearnCourseInventoryTransport,
     WellearnDurationReportDocuments, WellearnDurationReportTransport, WellearnInventoryDocument,
+    WellearnResourceExecutionDocuments, WellearnResourceExecutionTransport,
     WellearnScoLeavesDocument, WellearnSessionResolver, WellearnTaskInventoryDocuments,
     WellearnTaskInventoryTransport,
     cmi::{WellearnCmiSnapshot, parse_cmi_snapshot},
@@ -214,6 +215,25 @@ impl NativeWellearnInventoryTransport {
             .map_err(|error| classify_reqwest_error(&error))?;
         read_inventory_response(response, ResponseContent::Json).await
     }
+
+    async fn send_sco_form_with_referer(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        referer: &Url,
+        fields: &[(&str, &str)],
+    ) -> ProviderResult<WellearnInventoryDocument> {
+        let response = self
+            .client
+            .post(sco_url(route.user_id())?)
+            .header(COOKIE, session.expose_secret())
+            .header(REFERER, referer.as_str())
+            .form(fields)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        read_inventory_response(response, ResponseContent::Json).await
+    }
 }
 
 impl fmt::Debug for NativeWellearnInventoryTransport {
@@ -291,6 +311,162 @@ impl WellearnCmiTransport for NativeWellearnInventoryTransport {
             }
             result => result,
         }
+    }
+}
+
+#[async_trait]
+impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the non-idempotent mutation sequence keeps every no-replay boundary explicit"
+    )]
+    async fn complete_resource(
+        &self,
+        context: &ProviderContext,
+        course_id: &str,
+        sco_id: &str,
+        score_percent: u8,
+    ) -> ProviderResult<WellearnResourceExecutionDocuments> {
+        if score_percent > 100 {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn resource transport received an out-of-range score",
+            ));
+        }
+        let (mut session, mut renewed) = self.session_for_operation(context).await?;
+        let (route, before) = match self
+            .read_duration_baseline(&session, course_id, sco_id)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                session = self.sessions.renew_session(context).await?;
+                renewed = true;
+                self.read_duration_baseline(&session, course_id, sco_id)
+                    .await?
+            }
+            result => result?,
+        };
+        let baseline = parse_cmi_snapshot(before.as_str())?;
+        let expected_score = score_percent.to_string();
+        if baseline.remote_state() == asterism_domain::RemoteState::Completed
+            && baseline.percent() == Some(100)
+            && baseline.score_scaled_raw() == Some(expected_score.as_str())
+        {
+            return Ok(WellearnResourceExecutionDocuments::already_completed(
+                before,
+            ));
+        }
+
+        let referer = study_course_url(&route, sco_id)?;
+        let score = score_percent.to_string();
+        let cmi = resource_completion_cmi(score_percent)?;
+        let start = self
+            .send_sco_form_with_referer(
+                &session,
+                &route,
+                &referer,
+                &[
+                    ("action", "startsco160928"),
+                    ("uid", route.user_id()),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("classid", route.class_id()),
+                    ("tid", "-1"),
+                ],
+            )
+            .await
+            .map_err(resource_mutation_error)?;
+        parse_mutation_response(start.as_str(), MutationResponseKind::StrictSuccess)
+            .map_err(resource_mutation_error)?;
+
+        let set = self
+            .send_sco_form_with_referer(
+                &session,
+                &route,
+                &referer,
+                &[
+                    ("action", "setscoinfo"),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("uid", route.user_id()),
+                    ("data", cmi.as_str()),
+                    ("isend", "False"),
+                ],
+            )
+            .await
+            .map_err(resource_mutation_error)?;
+        parse_mutation_response(set.as_str(), MutationResponseKind::StrictSuccess)
+            .map_err(resource_mutation_error)?;
+
+        let save = self
+            .send_sco_form_with_referer(
+                &session,
+                &route,
+                &referer,
+                &[
+                    ("action", "savescoinfo160928"),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("uid", route.user_id()),
+                    ("progress", "100"),
+                    ("crate", &score),
+                    ("status", "unknown"),
+                    ("cstatus", "completed"),
+                    ("trycount", "0"),
+                ],
+            )
+            .await
+            .map_err(resource_mutation_error)?;
+        parse_mutation_response(save.as_str(), MutationResponseKind::StrictSuccess)
+            .map_err(resource_mutation_error)?;
+
+        let after = match self.fetch_cmi_for_route(&session, &route, sco_id).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                session = self
+                    .sessions
+                    .renew_session(context)
+                    .await
+                    .map_err(resource_mutation_error)?;
+                let route = self
+                    .resolve_course_route(&session, course_id)
+                    .await
+                    .map_err(resource_mutation_error)?;
+                self.fetch_cmi_for_route(&session, &route, sco_id)
+                    .await
+                    .map_err(resource_mutation_error)?
+            }
+            result => result.map_err(resource_mutation_error)?,
+        };
+        Ok(WellearnResourceExecutionDocuments::submitted(
+            before, after, true,
+        ))
+    }
+
+    async fn verify_resource(
+        &self,
+        context: &ProviderContext,
+        course_id: &str,
+        sco_id: &str,
+    ) -> ProviderResult<WellearnCmiDocument> {
+        WellearnCmiTransport::fetch_cmi(self, context, course_id, sco_id).await
+    }
+}
+
+fn resource_mutation_error(error: ProviderError) -> ProviderError {
+    match error.kind {
+        ProviderErrorKind::Authentication => ProviderError::human_required(
+            "WELearn session expired after resource mutation began; execution was not replayed",
+            HumanRequiredReason::SessionExpired,
+        ),
+        ProviderErrorKind::RateLimited
+        | ProviderErrorKind::Network
+        | ProviderErrorKind::ProviderUnavailable
+        | ProviderErrorKind::ProtocolDrift
+        | ProviderErrorKind::InvalidResponse => ProviderError::human_required(
+            "WELearn resource mutation outcome is uncertain and requires fresh manual review",
+            HumanRequiredReason::ManualIntervention,
+        ),
+        _ => error,
     }
 }
 
@@ -557,7 +733,7 @@ fn parse_mutation_response(document: &str, kind: MutationResponseKind) -> Provid
     let value: serde_json::Value = serde_json::from_str(document).map_err(|_| {
         ProviderError::new(
             ProviderErrorKind::InvalidResponse,
-            "WELearn duration mutation response is not valid JSON",
+            "WELearn SCO mutation response is not valid JSON",
         )
     })?;
     let result = value
@@ -567,17 +743,61 @@ fn parse_mutation_response(document: &str, kind: MutationResponseKind) -> Provid
         .ok_or_else(|| {
             ProviderError::new(
                 ProviderErrorKind::ProtocolDrift,
-                "WELearn duration mutation response has no integer result",
+                "WELearn SCO mutation response has no integer result",
             )
         })?;
     let accepted = result == 0 || matches!(kind, MutationResponseKind::Heartbeat) && result == 1;
     if !accepted {
         return Err(ProviderError::new(
             ProviderErrorKind::RemoteChanged,
-            "WELearn duration mutation was not accepted",
+            "WELearn SCO mutation was not accepted",
         ));
     }
     Ok(())
+}
+
+fn resource_completion_cmi(score_percent: u8) -> ProviderResult<Zeroizing<String>> {
+    if score_percent > 100 {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "WELearn completion CMI received an out-of-range score",
+        ));
+    }
+    let score = score_percent.to_string();
+    serde_json::to_string(&serde_json::json!({
+        "cmi": {
+            "completion_status": "completed",
+            "interactions": [],
+            "launch_data": "",
+            "progress_measure": "1",
+            "score": {"scaled": score, "raw": "100"},
+            "session_time": "0",
+            "success_status": "unknown",
+            "total_time": "0",
+            "mode": "normal"
+        },
+        "adl": {"data": []},
+        "cci": {
+            "data": [],
+            "service": {
+                "dictionary": {"headword": "", "short_cuts": ""},
+                "new_words": [],
+                "notes": [],
+                "writing_marking": [],
+                "record": {"files": []},
+                "play": {"offline_media_id": "9999"}
+            },
+            "retry_count": "0",
+            "submit_time": ""
+        }
+    }))
+    .map(Zeroizing::new)
+    .map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "WELearn completion CMI serialization failed",
+        )
+    })
 }
 
 fn duration_log(
@@ -781,6 +1001,15 @@ fn sco_url(user_id: &str) -> ProviderResult<Url> {
     Ok(url)
 }
 
+fn study_course_url(route: &crate::WellearnCourseContext, sco_id: &str) -> ProviderResult<Url> {
+    let mut url = static_url(STUDY_COURSE_REFERER)?;
+    url.query_pairs_mut()
+        .append_pair("cid", route.course_id())
+        .append_pair("classid", route.class_id())
+        .append_pair("sco", sco_id);
+    Ok(url)
+}
+
 fn static_url(value: &'static str) -> ProviderResult<Url> {
     Url::parse(value).map_err(|_| static_route_error())
 }
@@ -950,6 +1179,45 @@ mod tests {
             );
         }
         assert!(parse_mutation_response(r#"{"ret":2}"#, MutationResponseKind::Heartbeat).is_err());
+    }
+
+    #[test]
+    fn resource_completion_cmi_is_bounded_and_matches_the_current_donor_shape() {
+        let document = resource_completion_cmi(82).unwrap();
+        let value: serde_json::Value = serde_json::from_str(document.as_str()).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/providers/welearn/cmi/resource-completion-cmi.expected.json"
+        ))
+        .unwrap();
+        assert_eq!(value, expected);
+        assert_eq!(value["cmi"]["completion_status"], "completed");
+        assert_eq!(value["cmi"]["progress_measure"], "1");
+        assert_eq!(value["cmi"]["score"]["scaled"], "82");
+        assert_eq!(value["cmi"]["score"]["raw"], "100");
+        assert_eq!(value["cmi"]["session_time"], "0");
+        assert_eq!(value["cmi"]["total_time"], "0");
+        assert!(resource_completion_cmi(101).is_err());
+    }
+
+    #[test]
+    fn ambiguous_post_mutation_errors_require_human_review() {
+        for kind in [
+            ProviderErrorKind::Authentication,
+            ProviderErrorKind::Network,
+            ProviderErrorKind::RateLimited,
+            ProviderErrorKind::ProviderUnavailable,
+            ProviderErrorKind::ProtocolDrift,
+            ProviderErrorKind::InvalidResponse,
+        ] {
+            let mapped = resource_mutation_error(ProviderError::new(kind, "fixture"));
+            assert_eq!(mapped.kind, ProviderErrorKind::HumanRequired);
+            assert!(mapped.human_required_reason.is_some());
+        }
+        let rejected = resource_mutation_error(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "fixture",
+        ));
+        assert_eq!(rejected.kind, ProviderErrorKind::RemoteChanged);
     }
 
     #[test]

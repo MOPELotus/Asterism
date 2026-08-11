@@ -1,6 +1,6 @@
 # WELearn protocol notes
 
-Audit date: 2026-08-09. All observations below come from static donor review and
+Audit date: 2026-08-11. All observations below come from static donor review and
 remain unverified against the live service.
 
 ## Authentication
@@ -21,7 +21,13 @@ POST https://sso.sflep.com/idsvr/account/login
 
 The returned redirect must be followed to complete Cookie establishment.
 Authentication responses may signal image captcha or SMS verification. Those
-states are `HumanRequired`; automated password retry must stop.
+states currently become typed `HumanRequired` and automated password retry must
+stop. Capture recipe v1 exposes a first-batch AssistedSession path: a local
+Capture/browser helper may submit the resulting bounded Cookie, which the
+Provider validates against the authenticated Course endpoint before Core stores
+it. The three pinned donors contain no reliable automated challenge-solving
+protocol, so automatic captcha/SMS interaction still requires sanitized live or
+new donor evidence rather than invented behavior.
 
 The native transport covers deterministic password form encoding, bounded
 login-envelope classification and a strict `https://sso.sflep.com/idsvr/`
@@ -34,8 +40,9 @@ Set-Cookie values are collected in a bounded redacted jar. Only `sflep.com`,
 `sso.sflep.com` and `welearn.sflep.com` scopes are accepted; domain and path
 matching are checked before each request, and deletion removes any retained
 value. The final Cookie is accepted only after the Course-list endpoint returns
-a parseable authenticated response. Password and ImportedCookie continue
-through the common Authentication capability. Stored Cookie reads now use only
+a parseable authenticated response. Password, ImportedCookie and
+Capture-assisted Cookie continue through the common Authentication capability.
+Stored Cookie reads now use only
 Core's provider-scoped resolver and require an exact account, requested secret
 reference, Cookie purpose, supported session kind and unexpired metadata before
 the native request.
@@ -113,7 +120,7 @@ keepsco_with_getticket_with_updatecmitime
 savescoinfo160928
 ```
 
-The implemented read-only path first refreshes the selected Course page to
+The implemented non-mutating TaskProgress path first refreshes the selected Course page to
 resolve its current `uid`, then sends the exact form action and stable IDs:
 
 ```text
@@ -152,8 +159,9 @@ The lifecycle sends an initial and then periodic
 `keepsco_with_getticket_with_updatecmitime` heartbeat, with real elapsed waits
 and the preserved session/total observations, before `savescoinfo160928`
 finalizes the session. The final form carries the preserved completion,
-progress, score and success values; it never uses donor paths that fabricate
-completion or scores, and it never calls `setscoinfo`. Start/finalize require
+progress, score and success values and does not call `setscoinfo`; this is the
+independent preservation-mode DurationReport capability, not a boundary on
+other mutations. Start/finalize require
 integer `ret=0`; heartbeat accepts only the two donor-observed integer values
 `0` and `1`.
 
@@ -173,12 +181,55 @@ Provider error is an uncertain duration mutation and goes directly to
 HumanRequired without retry. An abandoned duration-report execution also goes
 to HumanRequired without consulting TaskProgress or re-entering start/keep/save.
 
+The independent `DurationRead` path interprets canonical decimal `total_time`
+as seconds because both current donors advance/post those counters against real
+one-second waits. An explicit no-CMI state is zero. Empty, signed, fractional,
+leading-zero, SCORM-duration or over-ten-year observations fail closed as
+protocol drift until sanitized evidence supports another grammar. Generic
+TaskProgress deliberately remains free of duration; the dedicated capability
+owns this normalization.
+
 Master-owned runtime settings expose platform defaults and account/task
-overrides for actual report seconds and heartbeat interval. Provider and account
+overrides for fixed or donor-observed bounded-random report seconds and the
+heartbeat interval. The selected duration is derived from the frozen Task and
+remote identities so one execution uses one stable target. Provider and account
 execution concurrency plus periodic Course/Task scan interval are independently
-bounded. Until sanitized live responses establish the remote time grammar and
-unit, the parser retains raw time strings and `TaskProgressRead` does not report
-seconds; `DurationRead` therefore remains unadvertised.
+bounded.
+
+## Completion, progress and score execution
+
+All three pinned donors expose direct SCO execution behavior; the two current
+donors agree on the essential sequence:
+
+```text
+fresh Course/SCO rebind
+→ startsco160928
+→ setscoinfo(completion_status=completed, progress_measure=1, score.scaled=selected)
+→ savescoinfo160928(progress=100, crate=selected, cstatus=completed)
+→ fresh getscoinfo_v7
+```
+
+This behavior maps to `ResourceExecution`, rather than Question/Answer/
+Submission, because the audited implementations do not inventory questions or
+submit individual answers. Their user-facing “exercise accuracy” choice is a
+CMI score preset. Asterism implements both a fixed integer score and the
+donor-observed bounded random interval. Random selection is derived
+deterministically from the frozen Task identity and remote identity so the
+selected goal remains stable across normal verification and crash recovery.
+
+The Provider performs a complete fresh TaskDetail rebind before mutation. If
+the baseline CMI is already Completed, it skips all mutation and verifies that
+fact. Otherwise it builds the bounded CMI document before the first mutation,
+uses exact fresh `uid`/`classid` routing, accepts only integer `ret=0` from each
+write, and finally requires a fresh CMI showing exactly Completed, progress 100
+percent and the selected score. HTTP acceptance alone is not success.
+
+No start/setscoinfo/save call is replayed after an ambiguous outcome. The
+goal-bound `ExecutionVerify` implementation receives Core's same frozen
+ExecutionRequest, repeats the full TaskDetail identity rebind and calls only a
+fresh `getscoinfo_v7`. It recomputes the selected score from the frozen goal and
+requires the exact completion/progress/score tuple. Transient verification
+reads may be retried by Core, but the mutation path is never entered.
 
 ## Sanitization and routing
 
@@ -190,3 +241,5 @@ seconds; `DurationRead` therefore remains unadvertised.
   closed as protocol drift.
 - Course percentage and SCO duration are remote observations, not proof of a
   successful Asterism execution.
+- A selected score and completion preset are non-secret attempt facts, but the
+  route identity and CMI bodies remain operation-local, bounded and redacted.

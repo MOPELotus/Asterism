@@ -7,12 +7,13 @@ use asterism_provider_api::{
     ProviderResult, TaskExecutionCapability,
 };
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 use crate::{
     WellearnCmiDocument, WellearnCmiSnapshot,
     cmi::{parse_cmi_snapshot, parse_sco_identity},
     metadata::development_metadata,
-    runtime_settings::WellearnRuntimeSettings,
+    runtime_settings::{WellearnDurationTarget, WellearnRuntimeSettings},
 };
 
 /// Complete before/after evidence returned by one bounded `WELearn` duration
@@ -111,13 +112,14 @@ impl TaskExecutionCapability for WellearnDurationReport {
         }
         let (course_id, sco_id) = parse_sco_identity(&request.remote_task_id)?;
         let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
+        let duration_seconds = select_duration(settings.duration_report, request);
         let documents = self
             .transport
             .report_duration(
                 context,
                 &course_id,
                 &sco_id,
-                settings.duration_report_seconds,
+                duration_seconds,
                 settings.duration_heartbeat_interval_seconds,
                 events,
             )
@@ -151,7 +153,8 @@ impl TaskExecutionCapability for WellearnDurationReport {
                 metadata_sanitized: Some(serde_json::json!({
                     "started": documents.started,
                     "heartbeat_count": documents.heartbeat_count,
-                    "duration_report_seconds": settings.duration_report_seconds,
+                    "duration_report_seconds": duration_seconds,
+                    "duration_report_mode": duration_mode(settings.duration_report),
                     "duration_observation_changed": true,
                 })),
             })
@@ -163,13 +166,38 @@ impl TaskExecutionCapability for WellearnDurationReport {
                 "schema": "welearn.duration-report.v1",
                 "started": documents.started,
                 "heartbeat_count": documents.heartbeat_count,
-                "duration_report_seconds": settings.duration_report_seconds,
+                "duration_report_seconds": duration_seconds,
+                "duration_report_mode": duration_mode(settings.duration_report),
                 "completion_preserved": true,
                 "progress_preserved": true,
                 "score_preserved": true,
                 "duration_observation_changed": true,
             }),
         })
+    }
+}
+
+fn select_duration(configured: WellearnDurationTarget, request: &ExecutionRequest) -> u64 {
+    match configured {
+        WellearnDurationTarget::Fixed(seconds) => seconds,
+        WellearnDurationTarget::RandomRange { minimum, maximum } => {
+            let width = maximum - minimum + 1;
+            let mut hash = Sha256::new();
+            hash.update(b"asterism.welearn.duration-target.v1\0");
+            hash.update(request.task_id.to_string().as_bytes());
+            hash.update(b"\0");
+            hash.update(request.remote_task_id.as_bytes());
+            let digest = hash.finalize();
+            let sample = u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 prefix"));
+            minimum + sample % width
+        }
+    }
+}
+
+const fn duration_mode(configured: WellearnDurationTarget) -> &'static str {
+    match configured {
+        WellearnDurationTarget::Fixed(_) => "fixed",
+        WellearnDurationTarget::RandomRange { .. } => "random_range",
     }
 }
 
@@ -243,7 +271,9 @@ mod tests {
 
     use super::*;
     use crate::runtime_settings::{
-        DURATION_HEARTBEAT_INTERVAL_KEY, DURATION_REPORT_SECONDS_KEY, runtime_settings_schema,
+        DURATION_HEARTBEAT_INTERVAL_KEY, DURATION_REPORT_MAX_SECONDS_KEY,
+        DURATION_REPORT_MIN_SECONDS_KEY, DURATION_REPORT_MODE_KEY, DURATION_REPORT_SECONDS_KEY,
+        runtime_settings_schema,
     };
 
     const BEFORE: &str =
@@ -368,6 +398,35 @@ mod tests {
         assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
     }
 
+    #[tokio::test]
+    async fn random_duration_is_bounded_and_stable_for_the_frozen_task() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability = WellearnDurationReport::try_new(transport.clone()).unwrap();
+        let request = random_request();
+
+        let first = capability
+            .execute(&context(), &request, &FixtureEvents::default())
+            .await
+            .unwrap();
+        let second = capability
+            .execute(&context(), &request, &FixtureEvents::default())
+            .await
+            .unwrap();
+
+        let selected = first.result_sanitized["duration_report_seconds"]
+            .as_u64()
+            .unwrap();
+        assert!((180..=240).contains(&selected));
+        assert_eq!(
+            first.result_sanitized["duration_report_seconds"],
+            second.result_sanitized["duration_report_seconds"]
+        );
+        assert_eq!(
+            first.result_sanitized["duration_report_mode"],
+            "random_range"
+        );
+    }
+
     fn context() -> ProviderContext {
         ProviderContext {
             provider_id: ProviderId::new("welearn").unwrap(),
@@ -385,6 +444,38 @@ mod tests {
                 (
                     DURATION_REPORT_SECONDS_KEY.to_owned(),
                     ProviderSettingValue::DurationSeconds(120),
+                ),
+                (
+                    DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),
+                    ProviderSettingValue::DurationSeconds(30),
+                ),
+            ]),
+        };
+        ExecutionRequest {
+            task_id: TaskId::new(),
+            remote_task_id: "sco:1001:301".to_owned(),
+            course_id: None,
+            requested_capabilities: vec![TaskCapability::DurationReport],
+            runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+        }
+    }
+
+    fn random_request() -> ExecutionRequest {
+        let schema = runtime_settings_schema();
+        let task = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: std::collections::BTreeMap::from([
+                (
+                    DURATION_REPORT_MODE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("random_range".to_owned()),
+                ),
+                (
+                    DURATION_REPORT_MIN_SECONDS_KEY.to_owned(),
+                    ProviderSettingValue::DurationSeconds(180),
+                ),
+                (
+                    DURATION_REPORT_MAX_SECONDS_KEY.to_owned(),
+                    ProviderSettingValue::DurationSeconds(240),
                 ),
                 (
                     DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),

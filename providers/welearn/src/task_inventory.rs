@@ -220,6 +220,17 @@ fn parse_leaves(
             "completion": remote_state,
             "duration_raw": duration_raw,
         });
+        let mut capabilities = vec![TaskCapability::ProgressRead];
+        if visible {
+            capabilities.extend([
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ]);
+        }
+        capabilities.push(TaskCapability::DurationRead);
+        if visible {
+            capabilities.push(TaskCapability::DurationReport);
+        }
         tasks.push(RemoteTask {
             remote_id,
             course_remote_id: Some(course.remote_id.clone()),
@@ -230,7 +241,7 @@ fn parse_leaves(
             opens_at: None,
             due_at: None,
             closes_at: None,
-            capabilities: vec![TaskCapability::ProgressRead, TaskCapability::DurationReport],
+            capabilities,
             fingerprint: fingerprint(&normalized)?,
             normalized,
             raw_sanitized: serde_json::json!({
@@ -349,8 +360,30 @@ mod tests {
         assert_eq!(tasks[0].remote_state, RemoteState::Completed);
         assert_eq!(tasks[1].remote_state, RemoteState::Unknown);
         assert_eq!(tasks[2].remote_state, RemoteState::NotOpen);
-        assert!(tasks.iter().all(|task| task.capabilities
-            == [TaskCapability::ProgressRead, TaskCapability::DurationReport]));
+        assert_eq!(
+            tasks[0].capabilities,
+            [
+                TaskCapability::ProgressRead,
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+                TaskCapability::DurationRead,
+                TaskCapability::DurationReport,
+            ]
+        );
+        assert_eq!(
+            tasks[1].capabilities,
+            [
+                TaskCapability::ProgressRead,
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+                TaskCapability::DurationRead,
+                TaskCapability::DurationReport,
+            ]
+        );
+        assert_eq!(
+            tasks[2].capabilities,
+            [TaskCapability::ProgressRead, TaskCapability::DurationRead]
+        );
         assert!(tasks.iter().all(|task| task.fingerprint.starts_with("v1:")));
     }
 

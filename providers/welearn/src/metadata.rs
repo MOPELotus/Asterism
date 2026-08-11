@@ -28,16 +28,23 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
-        capture_recipe_version: None,
+        capture_recipe_version: Some(1),
         capabilities: BTreeSet::from([
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
             ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
+            ProviderCapability::DurationRead,
+            ProviderCapability::ResourceExecution,
+            ProviderCapability::ExecutionVerify,
             ProviderCapability::DurationReport,
         ]),
-        auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedCookie]),
+        auth_methods: BTreeSet::from([
+            AuthMethod::Password,
+            AuthMethod::ImportedCookie,
+            AuthMethod::AssistedSession,
+        ]),
         session_kinds: BTreeSet::from([
             SessionKind::Cookie,
             SessionKind::Composite,
@@ -51,7 +58,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn development_metadata_advertises_only_injected_read_and_auth_boundaries() {
+    fn development_metadata_matches_the_injected_provider_boundaries() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
@@ -63,12 +70,20 @@ mod tests {
                 ProviderCapability::TaskInventory,
                 ProviderCapability::TaskDetail,
                 ProviderCapability::TaskProgressRead,
+                ProviderCapability::DurationRead,
+                ProviderCapability::ResourceExecution,
+                ProviderCapability::ExecutionVerify,
                 ProviderCapability::DurationReport,
             ])
         );
         assert_eq!(
             metadata.auth_methods,
-            BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedCookie])
+            BTreeSet::from([
+                AuthMethod::Password,
+                AuthMethod::ImportedCookie,
+                AuthMethod::AssistedSession,
+            ])
         );
+        assert_eq!(metadata.capture_recipe_version, Some(1));
     }
 }

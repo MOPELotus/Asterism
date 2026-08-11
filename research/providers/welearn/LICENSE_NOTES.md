@@ -1,6 +1,6 @@
 # WELearn license notes
 
-Audit date: 2026-08-09
+Audit date: 2026-08-11
 
 | Source | Observed license evidence | Allowed use in Asterism |
 |---|---|---|
