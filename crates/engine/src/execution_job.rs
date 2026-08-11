@@ -329,6 +329,18 @@ where
         now: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        if duration_report_only(&execution_capabilities(task)) {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::InvalidRemoteState),
+                    None,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        }
         let execution_id = claimed_execution_id(job)?;
         let prepared = match self
             .prepare_recovery_call(execution_id, task, correlation_id)
@@ -847,7 +859,9 @@ where
             return Err(ScheduledExecutionRunError::ClaimLost);
         }
         match result {
-            Ok(outcome) if outcome.verified && outcome.remote_state == RemoteState::Completed => {
+            Ok(outcome)
+                if execution_goal_verified(&prepared.request.requested_capabilities, &outcome) =>
+            {
                 self.finish_success(job, attempt, Utc::now().max(now), correlation_id)
                     .await
             }
@@ -863,12 +877,20 @@ where
                 .await
             }
             Err(error) => {
-                let (error_class, disposition) = classify_provider_error(
-                    &error,
-                    attempt.attempt_no,
-                    Utc::now().max(now),
-                    self.config.retry_policy,
-                )?;
+                let (error_class, disposition) =
+                    if duration_report_only(&prepared.request.requested_capabilities) {
+                        (
+                            provider_error_class(&error),
+                            FailureDisposition::HumanRequired,
+                        )
+                    } else {
+                        classify_provider_error(
+                            &error,
+                            attempt.attempt_no,
+                            Utc::now().max(now),
+                            self.config.retry_policy,
+                        )?
+                    };
                 self.finish_failure(
                     job,
                     attempt,
@@ -1165,12 +1187,35 @@ fn execution_capabilities(task: &Task) -> Vec<TaskCapability> {
         .iter()
         .copied()
         .filter(|capability| {
-            !matches!(
+            matches!(
                 capability,
-                TaskCapability::ProgressRead | TaskCapability::BrowserBridge
+                TaskCapability::ResourceExecution
+                    | TaskCapability::SubmissionExecute
+                    | TaskCapability::DurationReport
+                    | TaskCapability::Discussion
+                    | TaskCapability::Practice
             )
         })
         .collect()
+}
+
+fn duration_report_only(capabilities: &[TaskCapability]) -> bool {
+    capabilities == [TaskCapability::DurationReport]
+}
+
+fn execution_goal_verified(
+    capabilities: &[TaskCapability],
+    outcome: &asterism_provider_api::ExecutionOutcome,
+) -> bool {
+    outcome.verified
+        && if duration_report_only(capabilities) {
+            matches!(
+                outcome.remote_state,
+                RemoteState::Pending | RemoteState::InProgress | RemoteState::Completed
+            )
+        } else {
+            outcome.remote_state == RemoteState::Completed
+        }
 }
 
 fn authorize_execution(
@@ -1412,6 +1457,8 @@ mod tests {
         Success,
         NetworkFailure,
         RecoveryPending,
+        DurationSuccess,
+        DurationNetworkFailure,
     }
 
     #[tokio::test]
@@ -1496,10 +1543,13 @@ mod tests {
             events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<ExecutionOutcome> {
             *self.calls.lock().unwrap() += 1;
-            assert_eq!(
-                request.requested_capabilities,
-                [TaskCapability::ResourceExecution]
-            );
+            let expected_capabilities = match self.behavior {
+                ProviderBehavior::DurationSuccess | ProviderBehavior::DurationNetworkFailure => {
+                    [TaskCapability::DurationReport]
+                }
+                _ => [TaskCapability::ResourceExecution],
+            };
+            assert_eq!(request.requested_capabilities, expected_capabilities);
             assert_eq!(
                 request
                     .runtime_settings
@@ -1540,6 +1590,15 @@ mod tests {
                     ProviderErrorKind::Internal,
                     "recovery-only fixture cannot execute",
                 )),
+                ProviderBehavior::DurationSuccess => Ok(ExecutionOutcome {
+                    remote_state: RemoteState::InProgress,
+                    verified: true,
+                    result_sanitized: serde_json::json!({"duration_changed": true}),
+                }),
+                ProviderBehavior::DurationNetworkFailure => Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "duration mutation outcome is uncertain",
+                )),
             }
         }
     }
@@ -1569,6 +1628,9 @@ mod tests {
                     ProviderErrorKind::Network,
                     "temporary progress read failure",
                 )),
+                ProviderBehavior::DurationSuccess | ProviderBehavior::DurationNetworkFailure => {
+                    panic!("DurationReport recovery must not use TaskProgress")
+                }
             }
         }
     }
@@ -1613,6 +1675,62 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(live_log, 1);
+    }
+
+    #[tokio::test]
+    async fn verified_duration_report_succeeds_without_completing_the_task_remotely() {
+        let fixture = Fixture::duration(ProviderBehavior::DurationSuccess).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn uncertain_duration_report_requires_human_review_without_retry() {
+        let fixture = Fixture::duration(ProviderBehavior::DurationNetworkFailure).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::HumanRequired {
+                error_class: ProviderErrorClass::Network,
+                ..
+            }
+        ));
+        let retry_jobs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM scheduled_jobs WHERE job_kind IN ('retry', 'recovery')",
+        )
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(retry_jobs, 0);
+    }
+
+    #[tokio::test]
+    async fn abandoned_duration_report_never_uses_completion_progress_for_recovery() {
+        let fixture = Fixture::duration_recovering(ProviderBehavior::DurationSuccess).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::HumanRequired {
+                error_class: ProviderErrorClass::InvalidRemoteState,
+                ..
+            }
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1907,63 +2025,78 @@ mod tests {
         }
 
         async fn recovering(behavior: ProviderBehavior) -> Self {
-            let mut fixture = Self::new(AssessmentClass::Routine, behavior).await;
+            Self::new(AssessmentClass::Routine, behavior)
+                .await
+                .enter_recovery()
+                .await
+        }
+
+        async fn duration(behavior: ProviderBehavior) -> Self {
+            let fixture = Self::new(AssessmentClass::Routine, behavior).await;
+            sqlx::query("UPDATE tasks SET capabilities_json = '[\"duration_report\"]'")
+                .execute(fixture.database.pool())
+                .await
+                .unwrap();
+            fixture
+        }
+
+        async fn duration_recovering(behavior: ProviderBehavior) -> Self {
+            Self::duration(behavior).await.enter_recovery().await
+        }
+
+        async fn enter_recovery(mut self) -> Self {
             let task_id = execution_id_to_task(
-                &SqliteExecutionRepository::new(fixture.database.clone()),
-                fixture.execution_id,
+                &SqliteExecutionRepository::new(self.database.clone()),
+                self.execution_id,
             )
             .await
             .unwrap();
             let lease = ExecutionLease {
                 task_id,
-                execution_id: fixture.execution_id,
+                execution_id: self.execution_id,
                 worker_id: "execution-worker".to_owned(),
-                expires_at: fixture.now + chrono::Duration::minutes(1),
+                expires_at: self.now + chrono::Duration::minutes(1),
             };
-            SqliteExecutionLeaseRepository::new(fixture.database.clone())
-                .try_acquire(&lease, fixture.now)
+            SqliteExecutionLeaseRepository::new(self.database.clone())
+                .try_acquire(&lease, self.now)
                 .await
                 .unwrap();
-            SqliteExecutionRepository::new(fixture.database.clone())
+            SqliteExecutionRepository::new(self.database.clone())
                 .start_attempt(ExecutionAttemptStartRequest {
-                    execution_id: fixture.execution_id,
-                    scheduler_job_id: fixture.job.id,
+                    execution_id: self.execution_id,
+                    scheduler_job_id: self.job.id,
                     worker_id: "execution-worker",
-                    at: fixture.now,
+                    at: self.now,
                     correlation_id: "stale-execution-test",
                 })
                 .await
                 .unwrap();
-            let expired = (fixture.now - chrono::Duration::seconds(1)).to_rfc3339();
+            let expired = (self.now - chrono::Duration::seconds(1)).to_rfc3339();
             sqlx::query("UPDATE execution_leases SET expires_at = ? WHERE execution_id = ?")
                 .bind(&expired)
-                .bind(fixture.execution_id.to_string())
-                .execute(fixture.database.pool())
+                .bind(self.execution_id.to_string())
+                .execute(self.database.pool())
                 .await
                 .unwrap();
             sqlx::query("UPDATE scheduled_jobs SET lease_expires_at = ? WHERE id = ?")
                 .bind(&expired)
-                .bind(fixture.job.id.to_string())
-                .execute(fixture.database.pool())
+                .bind(self.job.id.to_string())
+                .execute(self.database.pool())
                 .await
                 .unwrap();
-            fixture
-                .database
-                .recover_stale_work(fixture.now)
-                .await
-                .unwrap();
-            fixture.job = SqliteSchedulerRepository::new(fixture.database.clone())
+            self.database.recover_stale_work(self.now).await.unwrap();
+            self.job = SqliteSchedulerRepository::new(self.database.clone())
                 .claim_due_execution_jobs(
                     "recovery-worker",
-                    fixture.now,
-                    fixture.now + chrono::Duration::minutes(5),
+                    self.now,
+                    self.now + chrono::Duration::minutes(5),
                     1,
                 )
                 .await
                 .unwrap()
                 .pop()
                 .unwrap();
-            fixture
+            self
         }
 
         async fn persisted_state(&self) -> (String, String, i64) {
@@ -2125,6 +2258,7 @@ mod tests {
             capabilities: BTreeSet::from([
                 ProviderCapability::TaskProgressRead,
                 ProviderCapability::ResourceExecution,
+                ProviderCapability::DurationReport,
             ]),
             auth_methods: BTreeSet::new(),
             session_kinds: BTreeSet::new(),
