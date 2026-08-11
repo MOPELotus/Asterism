@@ -281,9 +281,7 @@ fn task_types(value: Option<&Value>) -> ProviderResult<Vec<String>> {
                 "UAI Group Task contains an invalid base type",
             ));
         }
-        if !result.contains(&item) {
-            result.push(item);
-        }
+        result.push(item);
         if result.len() > MAX_TASK_TYPES {
             return Err(invalid_response(
                 "UAI Group Task exceeds the base-type limit",
@@ -306,12 +304,7 @@ fn question_count(value: Option<&Value>) -> ProviderResult<Option<u32>> {
 }
 
 fn supports_submission_execution(task_types: &[String], question_count: Option<u32>) -> bool {
-    question_count == Some(1)
-        && task_types.len() == 1
-        && matches!(
-            task_types[0].as_str(),
-            "single-choice" | "multichoice" | "short_answer"
-        )
+    supports_question_read(task_types, question_count)
 }
 
 fn fingerprint(normalized: &Value) -> Result<String, ProviderError> {
@@ -466,6 +459,45 @@ mod tests {
             !tasks[1]
                 .capabilities
                 .contains(&TaskCapability::SubmissionVerify)
+        );
+
+        let multiple = TREE.replace(
+            r#"\"base\":\"rich-text-read\",\"question_num\":1"#,
+            r#"\"base\":\"multichoice,short_answer\",\"question_num\":2"#,
+        );
+        let tasks = parse_task_inventory(&course, &context, &multiple).unwrap();
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::SubmissionExecute)
+        );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::SubmissionVerify)
+        );
+
+        let mismatched = multiple.replace("question_num\\\":2", "question_num\\\":3");
+        let tasks = parse_task_inventory(&course, &context, &mismatched).unwrap();
+        assert!(
+            !tasks[0]
+                .capabilities
+                .contains(&TaskCapability::SubmissionExecute)
+        );
+
+        let repeated = TREE.replace(
+            r#"\"base\":\"rich-text-read\",\"question_num\":1"#,
+            r#"\"base\":\"multichoice,short_answer,multichoice\",\"question_num\":3"#,
+        );
+        let tasks = parse_task_inventory(&course, &context, &repeated).unwrap();
+        assert_eq!(
+            tasks[0].normalized["task_types"].as_array().unwrap().len(),
+            3
+        );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::SubmissionExecute)
         );
     }
 

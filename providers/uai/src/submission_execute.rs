@@ -21,6 +21,7 @@ const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 const MAX_REMOTE_QUESTION_ID_BYTES: usize = 512;
 const MAX_ANSWER_CHILDREN: usize = 256;
 const MAX_ANSWER_VALUES_PER_CHILD: usize = 256;
+const MAX_QUESTIONS_PER_SUBMISSION: usize = 5_000;
 const MAX_SUBMISSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
 const MAX_SUBMISSION_VERSION_BYTES: usize = 128;
 
@@ -134,22 +135,24 @@ pub fn parse_submission_receipt(
     Ok(receipt)
 }
 
-/// Ephemeral executable facts rebuilt from one immutable UAI draft. Debug
-/// output is redacted and all owned answer strings are zeroized on drop.
-pub struct UaiSubmissionPlan {
+/// One ordered native module inside an ephemeral UAI submission plan.
+pub struct UaiSubmissionQuestionPlan {
     remote_question_id: String,
     task_type: String,
     answer_children: Vec<Vec<String>>,
 }
 
-impl UaiSubmissionPlan {
-    pub(crate) fn from_draft(draft: &SubmissionDraft, task_type: &str) -> ProviderResult<Self> {
-        if draft.items.len() != 1 {
-            return Err(unsupported(
-                "UAI submission execution currently supports one-Question Groups only",
+impl UaiSubmissionQuestionPlan {
+    fn from_draft_item(
+        item: &asterism_domain::SubmissionDraftItem,
+        task_type: &str,
+        expected_position: u32,
+    ) -> ProviderResult<Self> {
+        if item.question.position != expected_position {
+            return Err(invalid_input(
+                "UAI submission execution requires Questions in exact remote order",
             ));
         }
-        let item = &draft.items[0];
         let remote_question_id = item
             .question
             .remote_question_id
@@ -231,6 +234,74 @@ impl UaiSubmissionPlan {
     pub fn answer_children(&self) -> &[Vec<String>] {
         &self.answer_children
     }
+}
+
+impl fmt::Debug for UaiSubmissionQuestionPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiSubmissionQuestionPlan")
+            .field("content", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for UaiSubmissionQuestionPlan {
+    fn drop(&mut self) {
+        self.remote_question_id.zeroize();
+        self.task_type.zeroize();
+        for child in &mut self.answer_children {
+            child.zeroize();
+        }
+        self.answer_children.zeroize();
+    }
+}
+
+/// Ephemeral executable facts rebuilt from one immutable UAI draft. Debug
+/// output is redacted and all owned identities, types and answers are zeroized
+/// on drop.
+pub struct UaiSubmissionPlan {
+    questions: Vec<UaiSubmissionQuestionPlan>,
+}
+
+impl UaiSubmissionPlan {
+    pub(crate) fn from_draft(
+        draft: &SubmissionDraft,
+        task_types: &[String],
+    ) -> ProviderResult<Self> {
+        if draft.items.is_empty() || draft.items.len() > MAX_QUESTIONS_PER_SUBMISSION {
+            return Err(unsupported(
+                "UAI submission execution requires a bounded non-empty Question set",
+            ));
+        }
+        if task_types.is_empty()
+            || (task_types.len() != 1 && task_types.len() != draft.items.len())
+            || task_types
+                .iter()
+                .any(|value| question_kind(value).is_none())
+        {
+            return Err(unsupported(
+                "UAI submission execution requires one shared or one-per-Question simple type",
+            ));
+        }
+        let questions = draft
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let task_type = task_types.get(index).unwrap_or(&task_types[0]);
+                let expected_position = u32::try_from(index + 1).map_err(|_| {
+                    invalid_input("UAI submission execution Question position exceeds the limit")
+                })?;
+                UaiSubmissionQuestionPlan::from_draft_item(item, task_type, expected_position)
+            })
+            .collect::<ProviderResult<Vec<_>>>()?;
+        Ok(Self { questions })
+    }
+
+    #[must_use]
+    pub fn questions(&self) -> &[UaiSubmissionQuestionPlan] {
+        &self.questions
+    }
 
     #[cfg(test)]
     pub(crate) fn fixture(
@@ -239,9 +310,27 @@ impl UaiSubmissionPlan {
         answer_children: Vec<Vec<String>>,
     ) -> Self {
         Self {
-            remote_question_id: remote_question_id.to_owned(),
-            task_type: task_type.to_owned(),
-            answer_children,
+            questions: vec![UaiSubmissionQuestionPlan {
+                remote_question_id: remote_question_id.to_owned(),
+                task_type: task_type.to_owned(),
+                answer_children,
+            }],
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_multiple(questions: Vec<(&str, &str, Vec<Vec<String>>)>) -> Self {
+        Self {
+            questions: questions
+                .into_iter()
+                .map(
+                    |(remote_question_id, task_type, answer_children)| UaiSubmissionQuestionPlan {
+                        remote_question_id: remote_question_id.to_owned(),
+                        task_type: task_type.to_owned(),
+                        answer_children,
+                    },
+                )
+                .collect(),
         }
     }
 }
@@ -252,17 +341,6 @@ impl fmt::Debug for UaiSubmissionPlan {
             .debug_struct("UaiSubmissionPlan")
             .field("content", &"[REDACTED]")
             .finish()
-    }
-}
-
-impl Drop for UaiSubmissionPlan {
-    fn drop(&mut self) {
-        self.remote_question_id.zeroize();
-        self.task_type.zeroize();
-        for child in &mut self.answer_children {
-            child.zeroize();
-        }
-        self.answer_children.zeroize();
     }
 }
 
@@ -374,8 +452,9 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
         }
 
         let detail = self.details.task_detail(context, remote_task_id).await?;
-        let task_type = validate_fresh_detail(&detail, &identity, remote_task_id)?;
-        let plan = UaiSubmissionPlan::from_draft(draft, task_type)?;
+        let task_types =
+            validate_fresh_detail(&detail, &identity, remote_task_id, draft.items.len())?;
+        let plan = UaiSubmissionPlan::from_draft(draft, &task_types)?;
         let receipt = self
             .transport
             .submit(context, &identity.course_resource, &identity.group, &plan)
@@ -397,11 +476,12 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
     }
 }
 
-fn validate_fresh_detail<'a>(
-    detail: &'a asterism_provider_api::RemoteTaskDetail,
+fn validate_fresh_detail(
+    detail: &asterism_provider_api::RemoteTaskDetail,
     identity: &GroupIdentity,
     remote_task_id: &str,
-) -> ProviderResult<&'a str> {
+    expected_question_count: usize,
+) -> ProviderResult<Vec<String>> {
     if detail.task.remote_id != remote_task_id
         || !detail
             .task
@@ -431,7 +511,8 @@ fn validate_fresh_detail<'a>(
         || task
             .get("question_count")
             .and_then(serde_json::Value::as_u64)
-            != Some(1)
+            .and_then(|value| usize::try_from(value).ok())
+            != Some(expected_question_count)
     {
         return Err(remote_changed(
             "UAI Group identity or Question count changed before submission",
@@ -441,15 +522,23 @@ fn validate_fresh_detail<'a>(
         .get("task_types")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| invalid_response("UAI fresh Group detail has no task types"))?;
-    if task_types.len() != 1 {
+    if task_types.is_empty()
+        || (task_types.len() != 1 && task_types.len() != expected_question_count)
+    {
         return Err(unsupported(
-            "UAI submission execution requires one simple Group task type",
+            "UAI submission execution requires one shared or one-per-Question task type",
         ));
     }
-    task_types[0]
-        .as_str()
-        .filter(|value| question_kind(value).is_some())
-        .ok_or_else(|| unsupported("UAI fresh Group task type is not executable"))
+    task_types
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| question_kind(value).is_some())
+                .map(str::to_owned)
+                .ok_or_else(|| unsupported("UAI fresh Group task type is not executable"))
+        })
+        .collect()
 }
 
 fn selections_exist(question: &asterism_domain::Question, values: &[String]) -> bool {
@@ -596,6 +685,8 @@ mod tests {
         include_str!("../../../fixtures/providers/uai/submissions/accepted.json");
     const CONTENT: &str =
         include_str!("../../../fixtures/providers/uai/questions/content-multiple-choice.json");
+    const MIXED_CONTENT: &str =
+        include_str!("../../../fixtures/providers/uai/questions/content-mixed-simple.json");
     const COURSES: &str = include_str!("../../../fixtures/providers/uai/courses/list-mixed.json");
     const DETAIL: &str =
         include_str!("../../../fixtures/providers/uai/courses/resource-detail.json");
@@ -604,6 +695,23 @@ mod tests {
     #[derive(Debug)]
     struct FixtureDetail {
         metadata: ProviderMetadata,
+        multiple: bool,
+    }
+
+    impl FixtureDetail {
+        fn single() -> Self {
+            Self {
+                metadata: development_metadata().unwrap(),
+                multiple: false,
+            }
+        }
+
+        fn multiple() -> Self {
+            Self {
+                metadata: development_metadata().unwrap(),
+                multiple: true,
+            }
+        }
     }
 
     impl ProviderIdentity for FixtureDetail {
@@ -621,7 +729,14 @@ mod tests {
         ) -> ProviderResult<RemoteTaskDetail> {
             let course = parse_course_inventory(COURSES)?.remove(0);
             let context = parse_course_context(&course, DETAIL)?;
-            let tree = TREE.replace("rich-text-read", "multichoice");
+            let tree = if self.multiple {
+                TREE.replace(
+                    r#"\"base\":\"rich-text-read\",\"question_num\":1"#,
+                    r#"\"base\":\"multichoice,short_answer\",\"question_num\":2"#,
+                )
+            } else {
+                TREE.replace("rich-text-read", "multichoice")
+            };
             let task = parse_task_inventory(&course, &context, &tree)?
                 .into_iter()
                 .find(|task| task.remote_id == remote_task_id)
@@ -641,7 +756,8 @@ mod tests {
         calls: Mutex<Vec<RecordedSubmission>>,
     }
 
-    type RecordedSubmission = (String, String, String, String, Vec<Vec<String>>);
+    type RecordedQuestion = (String, String, Vec<Vec<String>>);
+    type RecordedSubmission = (String, String, Vec<RecordedQuestion>);
 
     #[async_trait]
     impl UaiSubmissionTransport for FixtureTransport {
@@ -655,9 +771,16 @@ mod tests {
             self.calls.lock().unwrap().push((
                 course_resource_id.to_owned(),
                 group_id.to_owned(),
-                plan.remote_question_id().to_owned(),
-                plan.task_type().to_owned(),
-                plan.answer_children().to_vec(),
+                plan.questions()
+                    .iter()
+                    .map(|question| {
+                        (
+                            question.remote_question_id().to_owned(),
+                            question.task_type().to_owned(),
+                            question.answer_children().to_vec(),
+                        )
+                    })
+                    .collect(),
             ));
             Ok(SubmissionReceipt {
                 remote_status: "accepted".to_owned(),
@@ -768,13 +891,9 @@ mod tests {
     #[tokio::test]
     async fn execution_rechecks_preview_and_fresh_group_before_one_mutation() {
         let transport = Arc::new(FixtureTransport::default());
-        let capability = UaiSubmissionExecute::try_new(
-            Arc::new(FixtureDetail {
-                metadata: development_metadata().unwrap(),
-            }),
-            transport.clone(),
-        )
-        .unwrap();
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
         let draft = draft().await;
         let receipt = capability
             .execute_submission(
@@ -792,23 +911,79 @@ mod tests {
             &[(
                 "2001".to_owned(),
                 "group-1".to_owned(),
-                "1001".to_owned(),
-                "multichoice".to_owned(),
-                vec![vec!["A".to_owned(), "B".to_owned()]],
+                vec![(
+                    "1001".to_owned(),
+                    "multichoice".to_owned(),
+                    vec![vec!["A".to_owned(), "B".to_owned()]],
+                )],
             )]
         );
     }
 
     #[tokio::test]
+    async fn multiple_question_group_executes_one_ordered_mutation() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::multiple()), transport.clone())
+                .unwrap();
+        let receipt = capability
+            .execute_submission(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &multiple_draft().await,
+                &runtime_settings(),
+                &NoopEvents,
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.remote_status, "accepted");
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            &[(
+                "2001".to_owned(),
+                "group-1".to_owned(),
+                vec![
+                    (
+                        "1001".to_owned(),
+                        "multichoice".to_owned(),
+                        vec![vec!["A".to_owned(), "B".to_owned()]],
+                    ),
+                    (
+                        "1002".to_owned(),
+                        "short_answer".to_owned(),
+                        vec![vec!["first".to_owned()], vec!["second".to_owned()]],
+                    ),
+                ],
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_question_count_drift_fails_before_mutation() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
+        let error = capability
+            .execute_submission(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &multiple_draft().await,
+                &runtime_settings(),
+                &NoopEvents,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn stale_preview_fails_before_mutation() {
         let transport = Arc::new(FixtureTransport::default());
-        let capability = UaiSubmissionExecute::try_new(
-            Arc::new(FixtureDetail {
-                metadata: development_metadata().unwrap(),
-            }),
-            transport.clone(),
-        )
-        .unwrap();
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
         let mut draft = draft().await;
         draft.payload_preview.format = "uai.changed.v1".to_owned();
         assert!(
@@ -829,13 +1004,9 @@ mod tests {
     #[tokio::test]
     async fn non_numeric_question_identity_fails_before_mutation() {
         let transport = Arc::new(FixtureTransport::default());
-        let capability = UaiSubmissionExecute::try_new(
-            Arc::new(FixtureDetail {
-                metadata: development_metadata().unwrap(),
-            }),
-            transport.clone(),
-        )
-        .unwrap();
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
         let mut draft = draft().await;
         draft.items[0].question.remote_question_id = Some("question-1".to_owned());
         let error = capability
@@ -855,13 +1026,9 @@ mod tests {
     #[tokio::test]
     async fn ambiguous_transport_failure_is_returned_after_one_mutation_attempt() {
         let transport = Arc::new(AmbiguousFailureTransport::default());
-        let capability = UaiSubmissionExecute::try_new(
-            Arc::new(FixtureDetail {
-                metadata: development_metadata().unwrap(),
-            }),
-            transport.clone(),
-        )
-        .unwrap();
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
         let error = capability
             .execute_submission(
                 &context(),
@@ -879,9 +1046,7 @@ mod tests {
     #[tokio::test]
     async fn unexpected_receipt_semantics_are_rejected_after_the_mutation() {
         let capability = UaiSubmissionExecute::try_new(
-            Arc::new(FixtureDetail {
-                metadata: development_metadata().unwrap(),
-            }),
+            Arc::new(FixtureDetail::single()),
             Arc::new(UnexpectedReceiptTransport),
         )
         .unwrap();
@@ -934,6 +1099,66 @@ mod tests {
             provider_id: ProviderId::new("uai").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
             items: vec![SubmissionDraftItem { question, selected }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        }
+    }
+
+    async fn multiple_draft() -> SubmissionDraft {
+        let task_id = TaskId::new();
+        let questions = parse_question_content(
+            MIXED_CONTENT,
+            "group:2001:unit-1:group-1",
+            &["multichoice".to_owned(), "short_answer".to_owned()],
+            Some(2),
+        )
+        .unwrap()
+        .iter()
+        .map(|question| question.to_question(task_id).unwrap())
+        .collect::<Vec<_>>();
+        let answers = [
+            NormalizedAnswer::Selections(vec!["A".to_owned(), "B".to_owned()]),
+            NormalizedAnswer::Texts(vec!["first".to_owned(), "second".to_owned()]),
+        ];
+        let items = questions
+            .into_iter()
+            .zip(answers)
+            .map(|(question, answer)| SubmissionDraftItem {
+                selected: SelectedAnswer {
+                    candidate_id: AnswerCandidateId::new(),
+                    question_id: question.id,
+                    answer,
+                    source: AnswerSource::Manual,
+                    confidence: None,
+                },
+                question,
+            })
+            .collect::<Vec<_>>();
+        let questions = items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        let selected = items
+            .iter()
+            .map(|item| item.selected.clone())
+            .collect::<Vec<_>>();
+        let preview = UaiSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &questions,
+                &selected,
+            )
+            .await
+            .unwrap();
+        SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id: items[0].question.task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("uai").unwrap(),
+            provider_version: development_metadata().unwrap().implementation_version,
+            items,
             payload_preview: preview,
             created_at: Utc::now(),
         }

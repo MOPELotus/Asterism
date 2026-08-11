@@ -17,9 +17,12 @@ fixtures/providers/uai/
   progress/unit-mixed.json
   duration/unit-mixed.json
   questions/content-multiple-choice.json
+  questions/content-mixed-simple.json
   answers/standard-multiple-choice.json
+  answers/standard-mixed-simple.json
   submissions/accepted.json
   submissions/verified.json
+  submissions/verified-mixed-simple.json
 ```
 
 They cover typed Password success/rejection/slider outcomes, strict atomic
@@ -35,13 +38,15 @@ fields, duplicate
 resources/groups, misbound details/contexts, unknown roles and impossible point
 totals, plus duplicate duration nodes and missing/negative/overflow seconds.
 The encrypted question/answer fixtures additionally cover bounded `unipus.`
-framing, separate decryptions, exact Group/question binding and removal of key
-material. Their synthetic native instance identity is positive numeric, matching
-the mutation shape independently observed in both donors. Submission fixtures cover one accepted version receipt and an exact
-receipt-versioned user-module readback. They use only synthetic answer values;
-tests require Course/Group/version/question/submitted-state/answer equality and
-reject changed answers. A missing receipt produces Inconclusive without making
-a transport request.
+framing, separate decryptions, exact Group/question binding, a mixed ordered
+two-module simple Group and removal of key material. Their synthetic native
+instance identities are positive numeric, matching the mutation shape
+independently observed in the donors. Submission fixtures cover one accepted
+version receipt plus single- and multi-module exact receipt-versioned
+user-module readbacks. They use only synthetic answer values; tests require
+Course/Group/version/question order/submitted-state/answer equality and reject
+changed or reordered rows. A missing receipt produces Inconclusive without
+making a transport request.
 
 ## Required live-sanitized fixtures
 
@@ -89,10 +94,11 @@ field names, placeholder identities and response/result codes.
 - Executable answer-bearing and preset request JSON uses a zeroizing owner on every local success, error and cancellation path.
 - Question snapshots remain bound to the exact stable CourseResource/Unit/Group Task and cannot build a draft for another route.
 - Submission previews contain no selected answer values or executable provider payload.
-- Only one-question `single-choice`, `multichoice` and `short_answer` Groups advertise execute/verify.
+- Only bounded positive `single-choice`, `multichoice` and `short_answer` Groups with one shared type or exact one-type-per-Question cardinality advertise execute/verify.
+- Multi-Question execution preserves draft positions, native module identities, per-module children and flattened judge/completion order; fresh count/type drift fails before mutation.
 - Submission execution requires a positive numeric native instance ID and rejects arbitrary read-only Question identities before transport.
 - Codes `600001` and `600002` never produce a receipt and never trigger an implicit mutation retry.
 - Ambiguous mutation transport failures return after exactly one Provider attempt.
 - Preset no-Question completion uses the five base labels only as candidates, requires a fresh exact Unit/Group `tab_type=text|video` leaf, skips already-completed leaves, emits the exact empty `submitType=2` body at most once, and requires Core progress-only verification/recovery; its receipt and synthetic body are never completion evidence.
-- Verification requires the receipt version and an exact fresh Course/Group/question/submitted-answer readback.
+- Verification requires the receipt version and an exact fresh Course/Group/complete ordered Question set/submitted-answer readback.
 - Missing receipts are Inconclusive; receipts alone never confirm success, score, progress or completion.

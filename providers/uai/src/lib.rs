@@ -3,7 +3,7 @@
 //! The current Development checkpoint provides native Password/JWT
 //! authentication, Course/Task inventory, fresh Group detail and progress,
 //! identity-bound duration, separate encrypted Question/answer reads, and a
-//! preview/execute/verify submission chain for one-question simple Groups plus
+//! preview/execute/verify submission chain for bounded ordered simple Groups plus
 //! verify-only recovery for pure-study preset completion over the shared
 //! network policy. It makes no claim of live compatibility.
 
@@ -67,8 +67,8 @@ pub use resource_execution::{
 pub use stored_session::StoredUaiSessionResolver;
 pub use submission_build::UaiSubmissionBuild;
 pub use submission_execute::{
-    UaiSubmissionExecute, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
-    parse_submission_receipt,
+    UaiSubmissionExecute, UaiSubmissionPlan, UaiSubmissionQuestionPlan,
+    UaiSubmissionResponseDocument, UaiSubmissionTransport, parse_submission_receipt,
 };
 pub use submission_verify::{
     UaiSubmissionVerify, UaiVerificationDocument, UaiVerificationTransport,

@@ -108,8 +108,9 @@ Course list, selects exactly one CourseResource, then re-runs the complete
 fresh detail/tree Task inventory and requires exactly one matching Group. A
 missing CourseResource or Group becomes RemoteChanged; duplicate or mismatched
 normalized identities are protocol drift. The bounded tree facts now preserve
-`question_num` beside `base`, and Task fingerprints use an explicit `v1:`
-prefix for Core detail validation and future schema migration.
+`question_num` beside `base`, retain positional `base` tokens including
+repeats instead of treating them as a set, and use an explicit `v1:` Task
+fingerprint prefix for Core detail validation and future schema migration.
 
 ## Progress and duration separation
 
@@ -206,12 +207,18 @@ no executable provider payload. Each sanitized Question also carries the exact
 stable `group:{courseResourceId}:{unitId}:{groupId}` Task identity; answer
 resolution and draft construction reject a snapshot from any other route.
 
-Execution is advertised only when a fresh Group has exactly one question and
-one audited simple type: `single-choice`, `multichoice` or `short_answer`. The
-execution boundary additionally requires the explicit positive numeric answer-
-entry instance ID used by both donors; arbitrary strings remain read-only and
-cannot reach the POST. The native body is constructed only inside the execution
-boundary. A code-`0`,
+Execution is advertised only when a fresh Group has a bounded positive
+`question_num` and either one homogeneous type or exactly one positional type
+per Question, with every type limited to `single-choice`, `multichoice` or
+`short_answer`. Immutable draft items must remain in exact positions `1..n`.
+The execution boundary additionally requires the explicit unique positive
+numeric answer-entry instance ID used by the donors for every module; arbitrary
+strings remain read-only and cannot reach the POST. The native body is
+constructed only inside the execution boundary and preserves module order,
+per-module answer children and globally flattened completion/judge order. The
+single-module compatibility body retains version fields `0/0`; multi-module
+bodies use the current Rust donor's minimal `1/1` version shape rather than
+fabricating the MIT donor's client-authored score maps. A code-`0`,
 version-bearing response becomes an accepted receipt; `600001` and `600002`
 become typed retry state without a receipt, and the mutation is not implicitly
 repeated. A Network failure from the mutation boundary is likewise returned
@@ -231,10 +238,12 @@ Verification requires that accepted receipt and reads only the exact
 `{groupId}-{submitVersion}` user-module route after refreshing the Course
 instance. The response must bind both the top-level and submit-info Course to
 that fresh route, repeat the exact `{groupId}-{submitVersion}` module identity,
-bind Group and both version fields, contain exactly one matching question in
-submitted state, mark every answer child done, and reproduce the immutable
-draft answer exactly. Only then is the question Confirmed. No score, progress
-or Task-completion state is inferred. With no receipt the result is
+bind Group and both version fields, contain the complete exact ordered native
+Question/module set, keep every row in submitted state, mark every answer child
+done, and reproduce every immutable draft answer exactly. Only then are all
+Questions Confirmed; a missing, extra, duplicate, reordered or changed row
+fails the whole verification. No score, progress or Task-completion state is
+inferred. With no receipt the result is
 Inconclusive and no version route is guessed or read.
 Unsupported or unsafe types still fail closed; empty answers, synthetic uploads
 and discussion side effects are not portable defaults. This remains synthetic

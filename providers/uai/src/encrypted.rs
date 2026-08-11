@@ -23,6 +23,10 @@ impl ZeroizingJsonValue {
     pub(crate) const fn as_value(&self) -> &Value {
         &self.0
     }
+
+    pub(crate) const fn as_value_mut(&mut self) -> &mut Value {
+        &mut self.0
+    }
 }
 
 impl fmt::Debug for ZeroizingJsonValue {

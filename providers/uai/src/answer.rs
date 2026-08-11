@@ -650,6 +650,10 @@ mod tests {
         include_str!("../../../fixtures/providers/uai/answers/standard-multiple-choice.json");
     const CONTENT: &str =
         include_str!("../../../fixtures/providers/uai/questions/content-multiple-choice.json");
+    const MIXED_ANSWER: &str =
+        include_str!("../../../fixtures/providers/uai/answers/standard-mixed-simple.json");
+    const MIXED_CONTENT: &str =
+        include_str!("../../../fixtures/providers/uai/questions/content-mixed-simple.json");
     const COURSES: &str = include_str!("../../../fixtures/providers/uai/courses/list-mixed.json");
     const DETAIL: &str =
         include_str!("../../../fixtures/providers/uai/courses/resource-detail.json");
@@ -739,6 +743,31 @@ mod tests {
         assert!(!encoded.contains("sensitive-remote-answer-noise"));
         let document = UaiAnswerDocument::try_new(ANSWER.to_owned()).unwrap();
         assert!(!format!("{document:?}").contains("unipus."));
+    }
+
+    #[test]
+    fn mixed_standard_answers_bind_each_ordered_question() {
+        let task_id = TaskId::new();
+        let questions = parse_question_content(
+            MIXED_CONTENT,
+            "group:2001:unit-1:group-mixed",
+            &["multichoice".to_owned(), "short_answer".to_owned()],
+            Some(2),
+        )
+        .unwrap()
+        .iter()
+        .map(|question| question.to_question(task_id).unwrap())
+        .collect::<Vec<_>>();
+        let candidates = parse_answer_candidates(MIXED_ANSWER, &questions).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[0].answer,
+            NormalizedAnswer::Selections(vec!["A".to_owned(), "B".to_owned()])
+        );
+        assert_eq!(
+            candidates[1].answer,
+            NormalizedAnswer::Texts(vec!["first".to_owned(), "second".to_owned()])
+        );
     }
 
     #[test]

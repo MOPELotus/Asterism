@@ -6,9 +6,9 @@ default branches are not evidence for this checkpoint.
 | Source | Revision | Capability evidence | Use | License |
 |---|---|---|---|---|
 | [`create-try-now/AutoFinish_UxiaoyuanAI`](https://github.com/create-try-now/AutoFinish_UxiaoyuanAI) | `bef0d29155cef727e05ba6b72336ee212c94fe84` | Current Password/JWT, user info, Course list/detail, nested tree, encrypted content/answer, per-Unit completion and direct submit | Reference | Apache-2.0 |
-| [`Duster-Cule/UnipusHelperPro`](https://github.com/Duster-Cule/UnipusHelperPro) | `590b4a58fe175240fe9a08fdd69948effcf4f193` | Independent Course/task progress and duration reads; encrypted answer, submit and fresh user-module verification routes | Reference | MIT |
+| [`Duster-Cule/UnipusHelperPro`](https://github.com/Duster-Cule/UnipusHelperPro) | `590b4a58fe175240fe9a08fdd69948effcf4f193` | Independent Course/task progress and duration reads; encrypted answer, ordered single/multi-module submit builders and fresh user-module verification routes | Reference | MIT |
 | [`uxudjs/UnipusAIAutoPlayer`](https://github.com/uxudjs/UnipusAIAutoPlayer) | `cc6bdc86a13e7c80a54dff50819607a488ed952e` | Current Unit/Section/Micro DOM plus page-residence duration behavior | Reference | GPL-3.0 |
-| [`Zzj-klwgxdz/UnipusAI`](https://github.com/Zzj-klwgxdz/UnipusAI) | `40ead69c7dabf7a2f3a215ff69f3feba73a736f6` | Current Rust progress-leaf `tab_type`, exact text/video mark-seen body and submit route | Reference | GPL-3.0 |
+| [`Zzj-klwgxdz/UnipusAI`](https://github.com/Zzj-klwgxdz/UnipusAI) | `40ead69c7dabf7a2f3a215ff69f3feba73a736f6` | Current Rust progress-leaf `tab_type`, exact text/video mark-seen body, ordered multi-module answer body and submit route | Reference | GPL-3.0 |
 
 The Apache backend donor is the primary current HTTP reference. The MIT donor
 is an independent route/schema cross-check and proves that completion,
@@ -30,3 +30,11 @@ on the five preset `base` labels but its active generic builder inserts
 `instanceId=0` placeholder question rows, so that path is recorded as drift and
 is not body evidence. Asterism uses the five labels only to identify scan-time
 candidates and requires a fresh exact text/video progress leaf before mutation.
+
+For answer-bearing Groups, the current Rust and MIT donors both serialize one
+ordered `quesDatas` row per native module and flatten child completion/judge
+rows in the same order. Their client-authored auxiliary fields differ: the
+current donor uses a minimal `1/1` context/answer version pair, whereas the MIT
+multi builder uses `1/0` plus fabricated course-answer score maps. Asterism
+records the common ordered contract, uses the current minimal multi body, never
+copies or fabricates score maps, and retains Development verification.

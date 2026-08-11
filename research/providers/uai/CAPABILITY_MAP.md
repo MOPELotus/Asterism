@@ -13,8 +13,8 @@
 | QuestionInventory / QuestionParse | AutoFinish | Reference | Fresh encrypted content read, bounded framing/decryption and typed single-choice, multiple-choice and short-answer parsing are offline/native-boundary covered |
 | AnswerResolve | Both backend donors | Reference | A separate fresh encrypted standard-answer read is independently bound to the same Group/question snapshot; ciphertext, keys and route context are not returned |
 | SubmissionBuild | Both backend donors | Reference | Credential-free and answer-value-free immutable preview is offline covered; no executable body is retained in the draft |
-| SubmissionExecute | Both backend donors | Reference | Exact `newExploration/submit` mapping is enabled only for one-question simple Groups; `600001`/`600002` remain typed retry responses and never become receipts |
-| SubmissionVerify | UnipusHelperPro | Reference | Exact receipt-versioned fresh user-module readback independently binds Course/Group/version/question/submitted state and answer; missing receipts are Inconclusive without a guessed route |
+| SubmissionExecute | Both backend donors + current Rust donor | Reference | Exact `newExploration/submit` mapping accepts bounded ordered simple Groups with one homogeneous type or one type per Question; every positive numeric module identity and answer stays position-bound, while `600001`/`600002` remain typed retry responses and never become receipts |
+| SubmissionVerify | UnipusHelperPro | Reference | Exact receipt-versioned fresh user-module readback independently binds Course/Group/version plus the complete ordered Question set, submitted states and answers; missing receipts are Inconclusive without a guessed route |
 | ResourceExecution / ExecutionVerify | UnipusAI + UnipusHelperPro + Asterism Core | Reference | Five agreed pure-study base labels identify candidates, but mutation additionally requires a fresh exact `tab_type=text|video` progress leaf; the exact empty `submitType=2` body runs once and Core uses fresh TaskProgressRead for success and verify-only recovery, never duration inference or POST replay |
 | DurationReport | AutoPlayer | Reference | Current evidence is page residence and interaction, not a confirmed public HTTP reporter; deferred |
 | Result verification | Fresh tree/progress/duration reads | FromScratch | Require independent readback after any future mutation |
@@ -57,13 +57,14 @@ capabilities. It:
     Group Task snapshot,
     and drops ciphertext, key material and free-form route context;
 15. builds only an answer-value-free immutable preview, then forms the native
-    submission body inside the execution boundary for exactly one supported
-    question (`single-choice`, `multichoice` or `short_answer`) with the
-    donor-audited positive numeric instance identity;
+    submission body inside the execution boundary for a bounded ordered set of
+    `single-choice`, `multichoice` and `short_answer` Questions, each with its
+    donor-audited positive numeric instance identity and exact positional type;
 16. accepts only a successful version-bearing submit response as a receipt,
     returns ambiguous transport failures after one mutation attempt, and
     independently verifies that exact version through a fresh user-module read;
-17. confirms only exact submitted-answer equality, returns Inconclusive when no
+17. confirms only a complete ordered readback with exact identity, submitted
+    state and answer equality for every draft item, returns Inconclusive when no
     version receipt exists, and never infers score, progress or completion;
 18. submits the exact empty preset body only for `rich-text-read`, `text-learn`,
     `vocabulary`, `input` and `video-point-read`; the Provider returns an

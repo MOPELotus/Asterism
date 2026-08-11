@@ -788,6 +788,8 @@ mod tests {
 
     const CONTENT: &str =
         include_str!("../../../fixtures/providers/uai/questions/content-multiple-choice.json");
+    const MIXED_CONTENT: &str =
+        include_str!("../../../fixtures/providers/uai/questions/content-mixed-simple.json");
     const COURSES: &str = include_str!("../../../fixtures/providers/uai/courses/list-mixed.json");
     const DETAIL: &str =
         include_str!("../../../fixtures/providers/uai/courses/resource-detail.json");
@@ -878,6 +880,25 @@ mod tests {
         assert!(!encoded.contains("k1234567"));
         assert!(!encoded.contains("must_be_dropped"));
         assert!(!encoded.contains("answer"));
+    }
+
+    #[test]
+    fn encrypted_mixed_content_preserves_exact_remote_question_order() {
+        let questions = parse_question_content(
+            MIXED_CONTENT,
+            "group:2001:unit-1:group-mixed",
+            &["multichoice".to_owned(), "short_answer".to_owned()],
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(questions.len(), 2);
+        assert_eq!(questions[0].remote_id, "1001");
+        assert_eq!(questions[0].position, 1);
+        assert_eq!(questions[0].kind, QuestionKind::MultipleChoice);
+        assert_eq!(questions[1].remote_id, "1002");
+        assert_eq!(questions[1].position, 2);
+        assert_eq!(questions[1].kind, QuestionKind::ShortAnswer);
+        assert!(questions[1].options.is_empty());
     }
 
     #[test]

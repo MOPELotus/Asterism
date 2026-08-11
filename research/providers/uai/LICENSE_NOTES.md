@@ -4,14 +4,15 @@
   revision. Asterism uses it as protocol reference rather than copying its
   answer/submission implementation.
 - `Duster-Cule/UnipusHelperPro` declares MIT. Its documented response shapes
-  and route composition, including explicit study-record duration seconds, are
-  independently normalized into Asterism models.
+  and route composition, including explicit study-record duration seconds and
+  ordered multi-module submission structure, are independently normalized into
+  Asterism models.
 - `uxudjs/UnipusAIAutoPlayer` declares GPL-3.0. It is Reference-only: Asterism
   records the observable page-residence lifecycle and does not copy DOM or UI
   implementation code.
 - `Zzj-klwgxdz/UnipusAI` declares GPL-3.0. It is Reference-only: Asterism records
-  the observable text/video progress-leaf classification and mark-seen request
-  contract, and does not copy its Rust implementation.
+  the observable text/video progress-leaf classification, mark-seen request and
+  ordered module/child answer contract, and does not copy its Rust implementation.
 - The Apache and MIT backend donors independently expose the same fixed
   annotator-token claims/signature protocol. Asterism implements that protocol
   from the recorded contract only and confines generated tokens to bounded

@@ -81,7 +81,10 @@ impl SubmissionBuildCapability for UaiSubmissionBuild {
         let mut positions = BTreeSet::new();
         let mut remote_ids = BTreeSet::new();
         let mut fields = Vec::with_capacity(questions.len() * 5);
-        for question in questions {
+        for (index, question) in questions.iter().enumerate() {
+            let expected_position = u32::try_from(index + 1).map_err(|_| {
+                invalid_input("UAI submission preview Question position exceeds the limit")
+            })?;
             let selected = selected_by_question
                 .get(&question.id)
                 .copied()
@@ -114,6 +117,7 @@ impl SubmissionBuildCapability for UaiSubmissionBuild {
                     .get("remote_task_id")
                     .and_then(|value| value.as_str())
                     != Some(remote_task_id)
+                || question.position != expected_position
                 || !question_ids.insert(question.id)
                 || !positions.insert(question.position)
                 || !remote_ids.insert(remote_id)
@@ -132,14 +136,7 @@ impl SubmissionBuildCapability for UaiSubmissionBuild {
                 preview_field(question, "quesDatas[].answerVersion"),
             ]);
         }
-        if selected_by_question.len() != question_ids.len()
-            || !positions
-                .iter()
-                .copied()
-                .eq(1..=u32::try_from(questions.len()).map_err(|_| {
-                    invalid_input("UAI submission preview Question count exceeds the limit")
-                })?)
-        {
+        if selected_by_question.len() != question_ids.len() || positions.len() != questions.len() {
             return Err(invalid_input(
                 "UAI submission preview contains foreign or non-contiguous Questions",
             ));

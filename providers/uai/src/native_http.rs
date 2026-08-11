@@ -25,6 +25,7 @@ use crate::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
         required_remote_component,
     },
+    encrypted::ZeroizingJsonValue,
     parse_course_context, parse_group_progress, parse_submission_receipt,
     submission_verify::validate_verification_course_binding,
     user_identity::parse_user_identity,
@@ -41,6 +42,7 @@ const MAX_DURATION_RESPONSE_BYTES: usize = 1_024 * 1_024;
 const MAX_QUESTION_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_ANSWER_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_SUBMISSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
+const MAX_SUBMISSION_REQUEST_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_VERIFICATION_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 
 /// Native, non-redirecting UAI read and submission transport.
@@ -1030,65 +1032,94 @@ fn build_submission_body(
     group_id: &str,
     plan: &UaiSubmissionPlan,
 ) -> ProviderResult<String> {
-    let children = plan
-        .answer_children()
-        .iter()
-        .map(|values| {
-            serde_json::json!({
-                "value": values,
-                "isDone": true,
-                "isRight": true,
-                "replyCategory": "objective",
+    let (context_version, answer_version) = if plan.questions().len() == 1 {
+        (0, 0)
+    } else {
+        (1, 1)
+    };
+    let mut question_data = ZeroizingJsonValue::new(serde_json::Value::Array(Vec::with_capacity(
+        plan.questions().len(),
+    )));
+    let mut is_completed = Vec::new();
+    let mut judges = ZeroizingJsonValue::new(serde_json::Value::Array(Vec::new()));
+    for question in plan.questions() {
+        let children = question
+            .answer_children()
+            .iter()
+            .map(|values| {
+                serde_json::json!({
+                    "value": values,
+                    "isDone": true,
+                    "isRight": true,
+                    "replyCategory": "objective",
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    let inner_answer = serde_json::to_string(&serde_json::json!({
-        "value": [],
-        "children": children,
-        "progress": {},
-        "record": {"url": ""},
-    }))
-    .map_err(|_| static_submission_error())?;
-    let judge_type = plan.task_type().replace('_', "-");
-    let judges = plan
-        .answer_children()
-        .iter()
-        .map(|values| {
-            serde_json::json!({
-                "value": values.join(","),
-                "question_type": judge_type,
-                "reply_type": "objective",
-                "versions": {
-                    "course": 0,
-                    "group": 1,
-                    "template": 1,
-                    "answer": 0,
-                    "content": 0,
-                },
-                "payloads": [],
-            })
-        })
-        .collect::<Vec<_>>();
-    let judges = serde_json::to_string(&judges).map_err(|_| static_submission_error())?;
-    serde_json::to_string(&serde_json::json!({
-        "quesDatas": [{
-            "instanceId": plan.remote_question_id(),
-            "answer": inner_answer,
-            "context": "{\"state\":\"submitted\"}",
-            "contextVersion": 0,
-            "answerVersion": 0,
-        }],
+            .collect::<Vec<_>>();
+        let inner_answer_value = ZeroizingJsonValue::new(serde_json::json!({
+                "value": [],
+                "children": children,
+                "progress": {},
+                "record": {"url": ""},
+        }));
+        let inner_answer = Zeroizing::new(
+            serde_json::to_string(inner_answer_value.as_value())
+                .map_err(|_| static_submission_error())?,
+        );
+        question_data
+            .as_value_mut()
+            .as_array_mut()
+            .ok_or_else(static_submission_error)?
+            .push(serde_json::json!({
+                "instanceId": question.remote_question_id(),
+                "answer": inner_answer.as_str(),
+                "context": "{\"state\":\"submitted\"}",
+                "contextVersion": context_version,
+                "answerVersion": answer_version,
+            }));
+        let judge_type = question.task_type().replace('_', "-");
+        for values in question.answer_children() {
+            is_completed.push(true);
+            judges
+                .as_value_mut()
+                .as_array_mut()
+                .ok_or_else(static_submission_error)?
+                .push(serde_json::json!({
+                    "value": values.join(","),
+                    "question_type": judge_type.as_str(),
+                    "reply_type": "objective",
+                    "versions": {
+                        "course": 0,
+                        "group": 1,
+                        "template": 1,
+                        "answer": 0,
+                        "content": 0,
+                    },
+                    "payloads": [],
+                }));
+        }
+    }
+    let judges = Zeroizing::new(
+        serde_json::to_string(judges.as_value()).map_err(|_| static_submission_error())?,
+    );
+    let body = ZeroizingJsonValue::new(serde_json::json!({
+        "quesDatas": question_data.as_value(),
         "groupId": group_id,
-        "isCompleted": vec![true; plan.answer_children().len()],
-        "thirdPartyJudges": judges,
+        "isCompleted": is_completed,
+        "thirdPartyJudges": judges.as_str(),
         "submitType": 1,
         "hideLoading": false,
         "associationGroupId": "",
         "courseId": course_instance_id,
         "openId": open_id,
         "version": "default",
-    }))
-    .map_err(|_| static_submission_error())
+    }));
+    let mut encoded =
+        serde_json::to_string(body.as_value()).map_err(|_| static_submission_error())?;
+    if encoded.is_empty() || encoded.len() > MAX_SUBMISSION_REQUEST_BYTES {
+        encoded.zeroize();
+        return Err(static_submission_error());
+    }
+    Ok(encoded)
 }
 
 fn build_preset_submission_body(
@@ -1392,6 +1423,8 @@ mod tests {
         assert_eq!(body["openId"], "synthetic-open-id");
         assert_eq!(body["submitType"], 1);
         assert_eq!(body["quesDatas"][0]["instanceId"], "1001");
+        assert_eq!(body["quesDatas"][0]["contextVersion"], 0);
+        assert_eq!(body["quesDatas"][0]["answerVersion"], 0);
         let answer: serde_json::Value =
             serde_json::from_str(body["quesDatas"][0]["answer"].as_str().unwrap()).unwrap();
         assert_eq!(answer["children"][0]["value"][0], "A");
@@ -1402,6 +1435,48 @@ mod tests {
         assert_eq!(judges[0]["value"], "A,B");
         assert_eq!(judges[0]["question_type"], "multichoice");
         assert_eq!(judges[0]["reply_type"], "objective");
+    }
+
+    #[test]
+    fn submission_body_preserves_multiple_module_and_child_order() {
+        let plan = UaiSubmissionPlan::fixture_multiple(vec![
+            (
+                "1001",
+                "multichoice",
+                vec![vec!["A".to_owned(), "B".to_owned()]],
+            ),
+            (
+                "1002",
+                "short_answer",
+                vec![vec!["first".to_owned()], vec!["second".to_owned()]],
+            ),
+        ]);
+        let body = build_submission_body(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-1",
+            &plan,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["quesDatas"].as_array().unwrap().len(), 2);
+        assert_eq!(body["quesDatas"][0]["instanceId"], "1001");
+        assert_eq!(body["quesDatas"][1]["instanceId"], "1002");
+        assert_eq!(body["quesDatas"][0]["contextVersion"], 1);
+        assert_eq!(body["quesDatas"][0]["answerVersion"], 1);
+        assert_eq!(body["quesDatas"][1]["contextVersion"], 1);
+        assert_eq!(body["quesDatas"][1]["answerVersion"], 1);
+        let second_answer: serde_json::Value =
+            serde_json::from_str(body["quesDatas"][1]["answer"].as_str().unwrap()).unwrap();
+        assert_eq!(second_answer["children"][0]["value"][0], "first");
+        assert_eq!(second_answer["children"][1]["value"][0], "second");
+        assert_eq!(body["isCompleted"], serde_json::json!([true, true, true]));
+        let judges: serde_json::Value =
+            serde_json::from_str(body["thirdPartyJudges"].as_str().unwrap()).unwrap();
+        assert_eq!(judges.as_array().unwrap().len(), 3);
+        assert_eq!(judges[0]["question_type"], "multichoice");
+        assert_eq!(judges[1]["question_type"], "short-answer");
+        assert_eq!(judges[2]["value"], "second");
     }
 
     #[test]
