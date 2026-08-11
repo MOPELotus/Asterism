@@ -48,7 +48,7 @@ impl fmt::Debug for UaiCourseContext {
 /// malformed, inconsistent or duplicate rows.
 pub fn parse_course_inventory(document: &str) -> ProviderResult<Vec<RemoteCourse>> {
     let root = parse_object(document, "Course inventory")?;
-    require_success_if_present(&root, "Course inventory")?;
+    require_success(&root, "Course inventory")?;
     let courses = root
         .get("value")
         .and_then(Value::as_object)
@@ -131,7 +131,7 @@ pub(crate) fn parse_course_context_for_resource_id(
     let resource_id =
         required_remote_component(Some(&Value::String(resource_id)), "Course-resource ID")?;
     let root = parse_object(document, "Course-resource detail")?;
-    require_success_if_present(&root, "Course-resource detail")?;
+    require_success(&root, "Course-resource detail")?;
     let detail = root
         .get("value")
         .and_then(Value::as_object)
@@ -226,13 +226,9 @@ fn parse_object(document: &str, label: &'static str) -> ProviderResult<Map<Strin
     }
 }
 
-fn require_success_if_present(
-    root: &Map<String, Value>,
-    label: &'static str,
-) -> ProviderResult<()> {
-    if root
-        .get("success")
-        .is_some_and(|value| value != &Value::Bool(true))
+fn require_success(root: &Map<String, Value>, label: &'static str) -> ProviderResult<()> {
+    if root.get("code").and_then(Value::as_i64) != Some(1)
+        || root.get("success").and_then(Value::as_bool) != Some(true)
     {
         return Err(protocol_drift(format!("UAI {label} did not succeed")));
     }
@@ -355,13 +351,13 @@ mod tests {
         assert!(parse_course_inventory(r#"{"value":{"courseList":[null]}}"#).is_err());
         assert!(
             parse_course_inventory(
-                r#"{"value":{"courseList":[{"name":"A","courseResourceList":[{"id":1,"name":"X"},{"id":1,"name":"Y"}]}]}}"#,
+                r#"{"code":1,"success":true,"value":{"courseList":[{"name":"A","courseResourceList":[{"id":1,"name":"X"},{"id":1,"name":"Y"}]}]}}"#,
             )
             .is_err()
         );
         assert!(
             parse_course_inventory(
-                r#"{"value":{"courseList":[{"name":"A","courseResourceList":[{"id":1,"name":"X","finishPointNum":2,"totalPointNum":1}]}]}}"#,
+                r#"{"code":1,"success":true,"value":{"courseList":[{"name":"A","courseResourceList":[{"id":1,"name":"X","finishPointNum":2,"totalPointNum":1}]}]}}"#,
             )
             .is_err()
         );
@@ -369,7 +365,7 @@ mod tests {
         assert!(
             parse_course_context(
                 &course,
-                r#"{"success":true,"value":{"courseResource":{"courseResourceId":2002,"courseInstanceId":"other"}}}"#,
+                r#"{"code":1,"success":true,"value":{"courseResource":{"courseResourceId":2002,"courseInstanceId":"other"}}}"#,
             )
             .is_err()
         );

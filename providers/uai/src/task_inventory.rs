@@ -62,10 +62,7 @@ pub fn parse_task_inventory(
     let outer = outer
         .as_object()
         .ok_or_else(|| protocol_drift("UAI Task tree is not an object"))?;
-    if outer
-        .get("code")
-        .is_some_and(|value| value.as_i64() != Some(0))
-    {
+    if outer.get("code").and_then(Value::as_i64) != Some(0) {
         return Err(protocol_drift("UAI Task-tree read did not succeed"));
     }
     let nested = outer
@@ -356,6 +353,9 @@ mod tests {
     fn malformed_duplicate_or_unbound_trees_fail_closed() {
         let courses = parse_course_inventory(COURSES).unwrap();
         let context = parse_course_context(&courses[0], DETAIL).unwrap();
+        assert!(
+            parse_task_inventory(&courses[0], &context, r#"{"course":"{\"units\":[]}"}"#).is_err()
+        );
         assert!(
             parse_task_inventory(
                 &courses[1],

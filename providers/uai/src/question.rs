@@ -317,10 +317,7 @@ pub fn parse_question_content(
     let envelope = envelope
         .as_object()
         .ok_or_else(|| protocol_drift("UAI Question content response is not an object"))?;
-    if envelope
-        .get("code")
-        .is_some_and(|value| value.as_i64() != Some(0))
-    {
+    if envelope.get("code").and_then(Value::as_i64) != Some(0) {
         return Err(protocol_drift("UAI Question content read did not succeed"));
     }
     let encrypted = envelope
@@ -867,6 +864,15 @@ mod tests {
 
     #[test]
     fn malformed_framing_padding_counts_and_types_fail_closed() {
+        assert!(
+            parse_question_content(
+                &CONTENT.replacen("\"code\":0,", "", 1),
+                "group-questions",
+                &["multichoice".to_owned()],
+                Some(1),
+            )
+            .is_err()
+        );
         assert!(
             parse_question_content(
                 &CONTENT.replace("unipus.", "changed."),

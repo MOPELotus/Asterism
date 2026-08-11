@@ -5,6 +5,7 @@
 | Login result/code shape changes | Current donors use string code `0`; captcha uses `1506` | Parse typed bounded envelopes; classify challenges as `HumanRequired` and never log bodies |
 | JWT header format changes | Donors pass the returned JWT directly as `Authorization` | Validate through user-info/Course reads; do not guess a Bearer prefix |
 | Login/user-info routes redirect or return HTML | Shared client does not follow redirects and both routes are audited JSON APIs | Classify redirects/404 as protocol drift and reject missing/non-JSON Content-Type before parsing |
+| Read responses omit or change their success envelope | Audited UAI management APIs require numeric code `1` plus `success=true`; ucontent tree/progress/content require numeric code `0` | Require each route's exact success markers before consuming nested data; never accept a merely well-shaped body |
 | JWT/openid are stored or renewed separately | Both values are required by different authenticated routes | Persist one strict ProviderCompositeSession and replace it atomically |
 | Imported/native session metadata is confused | Both paths store the same encrypted document with different lifecycle authority | Bind ManualImport to Jwt and NativeProviderLogin to Composite; reject every other pairing |
 | Concurrent renewals overwrite a fresher session | Password credentials and composite session form one lifecycle set | Serialize by account, validate the new JWT, then compare-and-replace all three credentials atomically |

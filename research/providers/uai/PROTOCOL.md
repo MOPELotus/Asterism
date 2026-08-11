@@ -80,9 +80,11 @@ context.
 The native CourseInventory resolves one account-bound composite session and
 reads the fixed Course-list route with the raw JWT in a sensitive Authorization
 header. It applies status, JSON Content-Type, UTF-8 and 4 MiB response bounds
-before the complete parser runs; no partial inventory or route-only class and
-instance fields are returned. Authentication failures can renew one complete
-native session and restart the operation once.
+before the complete parser runs; Course management reads require numeric code
+`1` and `success=true`, while ucontent tree/progress/content reads require their
+numeric code `0`. No partial inventory or route-only class and instance fields
+are returned. Authentication failures can renew one complete native session
+and restart the operation once.
 
 The content response stores the actual Course tree as JSON text in outer field
 `course`. The nested root contains `units`; audited roles include `unit`,

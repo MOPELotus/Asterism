@@ -193,10 +193,7 @@ pub fn parse_group_progress(
     let root = root
         .as_object()
         .ok_or_else(|| protocol_drift("UAI progress response is not an object"))?;
-    if root
-        .get("code")
-        .is_some_and(|value| value.as_i64() != Some(0))
-    {
+    if root.get("code").and_then(Value::as_i64) != Some(0) {
         return Err(protocol_drift("UAI progress read did not succeed"));
     }
     let result = root
@@ -349,6 +346,14 @@ mod tests {
 
     #[test]
     fn parser_rejects_unbound_missing_or_invalid_state() {
+        assert!(
+            parse_group_progress(
+                &PROGRESS.replacen("\"code\": 0,", "\"message\": \"success\",", 1),
+                "unit-1",
+                "group-1",
+            )
+            .is_err()
+        );
         assert!(parse_group_progress(PROGRESS, "other-unit", "group-1").is_err());
         assert!(parse_group_progress(PROGRESS, "unit-1", "missing").is_err());
         assert!(
