@@ -60,15 +60,22 @@ impl Drop for WellearnCmiDocument {
 /// evidence establishes their unit and grammar.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WellearnCmiSnapshot {
+    cmi_present: bool,
     remote_state: RemoteState,
     percent: Option<u8>,
     completion_raw: Option<String>,
     progress_raw: Option<String>,
     session_time_raw: Option<String>,
     total_time_raw: Option<String>,
+    score_scaled_raw: Option<String>,
+    success_status_raw: Option<String>,
 }
 
 impl WellearnCmiSnapshot {
+    pub const fn cmi_present(&self) -> bool {
+        self.cmi_present
+    }
+
     pub const fn remote_state(&self) -> RemoteState {
         self.remote_state
     }
@@ -91,6 +98,14 @@ impl WellearnCmiSnapshot {
 
     pub fn total_time_raw(&self) -> Option<&str> {
         self.total_time_raw.as_deref()
+    }
+
+    pub fn score_scaled_raw(&self) -> Option<&str> {
+        self.score_scaled_raw.as_deref()
+    }
+
+    pub fn success_status_raw(&self) -> Option<&str> {
+        self.success_status_raw.as_deref()
     }
 
     fn into_remote_progress(self) -> RemoteProgress {
@@ -216,12 +231,15 @@ pub fn parse_cmi_snapshot(document: &str) -> ProviderResult<WellearnCmiSnapshot>
         .ok_or_else(|| protocol_drift("WELearn nested CMI document is not an object"))?;
     let Some(cmi) = nested.get("cmi") else {
         return Ok(WellearnCmiSnapshot {
+            cmi_present: false,
             remote_state: RemoteState::Pending,
             percent: Some(0),
             completion_raw: None,
             progress_raw: None,
             session_time_raw: None,
             total_time_raw: None,
+            score_scaled_raw: None,
+            success_status_raw: None,
         });
     };
     let cmi = cmi
@@ -233,13 +251,26 @@ pub fn parse_cmi_snapshot(document: &str) -> ProviderResult<WellearnCmiSnapshot>
         .as_deref()
         .map(parse_progress_percent)
         .transpose()?;
+    let score_scaled_raw = cmi
+        .get("score")
+        .map(|score| {
+            score
+                .as_object()
+                .ok_or_else(|| protocol_drift("WELearn CMI score is not an object"))
+                .and_then(|score| optional_scalar(score, "scaled"))
+        })
+        .transpose()?
+        .flatten();
     Ok(WellearnCmiSnapshot {
+        cmi_present: true,
         remote_state: completion_state(completion_raw.as_deref()),
         percent,
         completion_raw,
         progress_raw,
         session_time_raw: optional_scalar(cmi, "session_time")?,
         total_time_raw: optional_scalar(cmi, "total_time")?,
+        score_scaled_raw,
+        success_status_raw: optional_scalar(cmi, "success_status")?,
     })
 }
 
@@ -308,7 +339,7 @@ fn completion_state(value: Option<&str>) -> RemoteState {
     }
 }
 
-fn parse_sco_identity(value: &str) -> ProviderResult<(String, String)> {
+pub(crate) fn parse_sco_identity(value: &str) -> ProviderResult<(String, String)> {
     let mut components = value.split(':');
     if components.next() != Some("sco") {
         return Err(protocol_drift(
@@ -390,6 +421,9 @@ mod tests {
         assert_eq!(snapshot.progress_raw(), Some("0.421"));
         assert_eq!(snapshot.session_time_raw(), Some("PT5M"));
         assert_eq!(snapshot.total_time_raw(), Some("300"));
+        assert_eq!(snapshot.score_scaled_raw(), Some("0.8"));
+        assert_eq!(snapshot.success_status_raw(), Some("unknown"));
+        assert!(snapshot.cmi_present());
 
         let completed = parse_cmi_snapshot(
             r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"completed\",\"progress_measure\":\"0.25\",\"total_time\":\"900\"}}"}"#,
@@ -415,6 +449,7 @@ mod tests {
         let absent = parse_cmi_snapshot(r#"{"ret":0,"comment":"{}"}"#).unwrap();
         assert_eq!(absent.remote_state(), RemoteState::Pending);
         assert_eq!(absent.percent(), Some(0));
+        assert!(!absent.cmi_present());
     }
 
     #[tokio::test]

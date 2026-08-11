@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use asterism_networking::ResolvedNetworkProfile;
-use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
+use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCmiTransport,
-    WellearnCourseInventory, WellearnCourseInventoryTransport, WellearnSessionResolver,
-    WellearnTaskDetail, WellearnTaskInventory, WellearnTaskInventoryTransport,
-    WellearnTaskProgress, metadata::development_metadata,
-    native_authentication::NativeWellearnAuthenticationTransport,
-    native_http::NativeWellearnInventoryTransport, stored_session::StoredWellearnSessionResolver,
+    WellearnCourseInventory, WellearnCourseInventoryTransport, WellearnDurationReport,
+    WellearnDurationReportTransport, WellearnSessionResolver, WellearnTaskDetail,
+    WellearnTaskInventory, WellearnTaskInventoryTransport, WellearnTaskProgress,
+    metadata::development_metadata, native_authentication::NativeWellearnAuthenticationTransport,
+    native_http::NativeWellearnInventoryTransport, runtime_settings::runtime_settings_schema,
+    stored_session::StoredWellearnSessionResolver,
 };
 
 /// Composes the complete development entry around injected authentication and
@@ -26,6 +27,7 @@ pub fn build_development_provider(
     course_transport: Arc<dyn WellearnCourseInventoryTransport>,
     task_transport: Arc<dyn WellearnTaskInventoryTransport>,
     cmi_transport: Arc<dyn WellearnCmiTransport>,
+    duration_transport: Arc<dyn WellearnDurationReportTransport>,
 ) -> ProviderResult<ProviderEntry> {
     let authentication = Arc::new(WellearnAuthentication::try_new(
         authentication_transport,
@@ -38,9 +40,10 @@ pub fn build_development_provider(
         task_inventory.clone(),
     )?);
     let task_progress = Arc::new(WellearnTaskProgress::try_new(cmi_transport)?);
+    let duration_report = Arc::new(WellearnDurationReport::try_new(duration_transport)?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
-        runtime_settings: ProviderRuntimeSettingsSchema::default(),
+        runtime_settings: runtime_settings_schema(),
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),
@@ -53,7 +56,7 @@ pub fn build_development_provider(
         submission_build: None,
         submission_execute: None,
         submission_verify: None,
-        task_execution: None,
+        task_execution: Some(duration_report),
         browser_bridge: None,
     })
 }
@@ -77,6 +80,7 @@ pub fn build_development_provider_with_native_inventory(
     build_development_provider(
         authentication_transport,
         sessions,
+        inventory.clone(),
         inventory.clone(),
         inventory.clone(),
         inventory,
@@ -141,7 +145,8 @@ pub fn build_development_provider_with_renewal(
 mod tests {
     use asterism_networking::NetworkProfile;
     use asterism_provider_api::{
-        ProviderContext, ProviderError, ProviderErrorKind, ProviderRegistry, RemoteCourse,
+        ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderRegistry,
+        RemoteCourse,
     };
     use asterism_secrets::{
         ProviderCredential, ProviderCredentialRenewal, ProviderCredentialRenewer,
@@ -152,8 +157,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        WellearnCmiDocument, WellearnCookieSession, WellearnInventoryDocument,
-        WellearnTaskInventoryDocuments,
+        WellearnCmiDocument, WellearnCookieSession, WellearnDurationReportDocuments,
+        WellearnInventoryDocument, WellearnTaskInventoryDocuments,
     };
 
     #[derive(Debug)]
@@ -240,10 +245,26 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl WellearnDurationReportTransport for UnusedBoundaries {
+        async fn report_duration(
+            &self,
+            _context: &ProviderContext,
+            _course_id: &str,
+            _sco_id: &str,
+            _duration_seconds: u64,
+            _heartbeat_interval_seconds: u64,
+            _events: &(dyn ExecutionEventSink + Send + Sync),
+        ) -> ProviderResult<WellearnDurationReportDocuments> {
+            Err(unused())
+        }
+    }
+
     #[test]
     fn development_factory_is_registry_consistent_without_extra_slots() {
         let boundaries = Arc::new(UnusedBoundaries);
         let entry = build_development_provider(
+            boundaries.clone(),
             boundaries.clone(),
             boundaries.clone(),
             boundaries.clone(),
@@ -256,9 +277,10 @@ mod tests {
         assert!(entry.task_inventory.is_some());
         assert!(entry.task_detail.is_some());
         assert!(entry.task_progress.is_some());
-        assert!(entry.task_execution.is_none());
+        assert!(entry.task_execution.is_some());
         assert!(entry.browser_bridge.is_none());
-        assert!(entry.runtime_settings.definitions.is_empty());
+        assert_eq!(entry.runtime_settings.version, 1);
+        assert_eq!(entry.runtime_settings.definitions.len(), 5);
 
         let mut registry = ProviderRegistry::default();
         registry.register(entry).unwrap();

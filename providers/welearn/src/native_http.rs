@@ -1,8 +1,10 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
+use asterism_domain::LogLevel;
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteCourse,
+    ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
+    ProviderProgress, ProviderResult, RemoteCourse,
 };
 use async_trait::async_trait;
 use reqwest::{
@@ -13,8 +15,10 @@ use zeroize::Zeroize;
 
 use crate::{
     WellearnCmiDocument, WellearnCmiTransport, WellearnCourseInventoryTransport,
-    WellearnInventoryDocument, WellearnScoLeavesDocument, WellearnSessionResolver,
-    WellearnTaskInventoryDocuments, WellearnTaskInventoryTransport,
+    WellearnDurationReportDocuments, WellearnDurationReportTransport, WellearnInventoryDocument,
+    WellearnScoLeavesDocument, WellearnSessionResolver, WellearnTaskInventoryDocuments,
+    WellearnTaskInventoryTransport,
+    cmi::{WellearnCmiSnapshot, parse_cmi_snapshot},
     course_context::{parse_course_context, parse_course_context_for_id},
     course_inventory::course_id_from_remote,
     task_inventory::unit_count,
@@ -149,6 +153,15 @@ impl NativeWellearnInventoryTransport {
         course_id: &str,
         sco_id: &str,
     ) -> ProviderResult<WellearnCmiDocument> {
+        let route = self.resolve_course_route(session, course_id).await?;
+        self.fetch_cmi_for_route(session, &route, sco_id).await
+    }
+
+    async fn resolve_course_route(
+        &self,
+        session: &crate::WellearnCookieSession,
+        course_id: &str,
+    ) -> ProviderResult<crate::WellearnCourseContext> {
         let course_page = self
             .send_get_with_session(
                 session,
@@ -157,7 +170,15 @@ impl NativeWellearnInventoryTransport {
                 ResponseContent::Html,
             )
             .await?;
-        let route = parse_course_context_for_id(course_id.to_owned(), course_page.as_str())?;
+        parse_course_context_for_id(course_id.to_owned(), course_page.as_str())
+    }
+
+    async fn fetch_cmi_for_route(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        sco_id: &str,
+    ) -> ProviderResult<WellearnCmiDocument> {
         let response = self
             .client
             .post(sco_url(route.user_id())?)
@@ -174,6 +195,24 @@ impl NativeWellearnInventoryTransport {
             .map_err(|error| classify_reqwest_error(&error))?;
         let document = read_inventory_response(response, ResponseContent::Json).await?;
         WellearnCmiDocument::try_new(document.as_str().to_owned())
+    }
+
+    async fn send_sco_form(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        fields: &[(&str, &str)],
+    ) -> ProviderResult<WellearnInventoryDocument> {
+        let response = self
+            .client
+            .post(sco_url(route.user_id())?)
+            .header(COOKIE, session.expose_secret())
+            .header(REFERER, STUDY_COURSE_REFERER)
+            .form(fields)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        read_inventory_response(response, ResponseContent::Json).await
     }
 }
 
@@ -252,6 +291,298 @@ impl WellearnCmiTransport for NativeWellearnInventoryTransport {
             }
             result => result,
         }
+    }
+}
+
+#[async_trait]
+impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the duration operation keeps session renewal, mutation ordering and event emission explicit"
+    )]
+    async fn report_duration(
+        &self,
+        context: &ProviderContext,
+        course_id: &str,
+        sco_id: &str,
+        duration_seconds: u64,
+        heartbeat_interval_seconds: u64,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<WellearnDurationReportDocuments> {
+        if !(60..=7_200).contains(&duration_seconds)
+            || !(30..=90).contains(&heartbeat_interval_seconds)
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn duration transport received out-of-range runtime settings",
+            ));
+        }
+        let (mut session, mut renewed) = self.session_for_operation(context).await?;
+        let (mut route, mut before) = match self
+            .read_duration_baseline(&session, course_id, sco_id)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                session = self.sessions.renew_session(context).await?;
+                renewed = true;
+                self.read_duration_baseline(&session, course_id, sco_id)
+                    .await?
+            }
+            result => result?,
+        };
+        let mut snapshot = parse_cmi_snapshot(before.as_str())?;
+        let mut started = false;
+        if !snapshot.cmi_present() {
+            events
+                .log(duration_log(
+                    "duration_start",
+                    "远端尚无 CMI，正在启动学习会话",
+                    None,
+                ))
+                .await?;
+            let start = self
+                .send_sco_form(
+                    &session,
+                    &route,
+                    &[
+                        ("action", "startsco160928"),
+                        ("uid", route.user_id()),
+                        ("cid", route.course_id()),
+                        ("scoid", sco_id),
+                        ("classid", route.class_id()),
+                        ("tid", "-1"),
+                    ],
+                )
+                .await?;
+            parse_mutation_response(start.as_str(), MutationResponseKind::StrictSuccess)?;
+            started = true;
+            before = self.fetch_cmi_for_route(&session, &route, sco_id).await?;
+            snapshot = parse_cmi_snapshot(before.as_str())?;
+        }
+
+        let state = PreservedCmiState::from_snapshot(&snapshot);
+        events
+            .report(ProviderProgress {
+                percent: Some(0),
+                stage: "duration_execute".to_owned(),
+                status_text: Some("学习时长会话已开始".to_owned()),
+                completed_items: Some(0),
+                total_items: Some(1),
+            })
+            .await?;
+        events
+            .log(duration_log(
+                "duration_execute",
+                "开始按冻结运行参数执行时长心跳",
+                Some(serde_json::json!({
+                    "duration_report_seconds": duration_seconds,
+                    "heartbeat_interval_seconds": heartbeat_interval_seconds,
+                })),
+            ))
+            .await?;
+
+        let mut heartbeat_count = 0_u32;
+        self.keep_duration(&session, &route, sco_id, &state).await?;
+        heartbeat_count = heartbeat_count.saturating_add(1);
+        let mut elapsed = 0_u64;
+        while elapsed < duration_seconds {
+            let wait = heartbeat_interval_seconds.min(duration_seconds - elapsed);
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            elapsed = elapsed.saturating_add(wait);
+            self.keep_duration(&session, &route, sco_id, &state).await?;
+            heartbeat_count = heartbeat_count.saturating_add(1);
+            let percent = u8::try_from(elapsed.saturating_mul(90) / duration_seconds)
+                .unwrap_or(90)
+                .min(90);
+            events
+                .report(ProviderProgress {
+                    percent: Some(percent),
+                    stage: "duration_execute".to_owned(),
+                    status_text: Some("学习时长心跳已上报".to_owned()),
+                    completed_items: Some(0),
+                    total_items: Some(1),
+                })
+                .await?;
+        }
+
+        events
+            .report(ProviderProgress {
+                percent: Some(95),
+                stage: "duration_finalize".to_owned(),
+                status_text: Some("正在结束学习会话".to_owned()),
+                completed_items: Some(0),
+                total_items: Some(1),
+            })
+            .await?;
+        self.finalize_duration(&session, &route, sco_id, &state)
+            .await?;
+
+        let after = match self.fetch_cmi_for_route(&session, &route, sco_id).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                session = self.sessions.renew_session(context).await?;
+                route = self.resolve_course_route(&session, course_id).await?;
+                self.fetch_cmi_for_route(&session, &route, sco_id).await?
+            }
+            result => result?,
+        };
+        Ok(WellearnDurationReportDocuments::new(
+            before,
+            after,
+            started,
+            heartbeat_count,
+        ))
+    }
+}
+
+impl NativeWellearnInventoryTransport {
+    async fn read_duration_baseline(
+        &self,
+        session: &crate::WellearnCookieSession,
+        course_id: &str,
+        sco_id: &str,
+    ) -> ProviderResult<(crate::WellearnCourseContext, WellearnCmiDocument)> {
+        let route = self.resolve_course_route(session, course_id).await?;
+        let document = self.fetch_cmi_for_route(session, &route, sco_id).await?;
+        Ok((route, document))
+    }
+
+    async fn keep_duration(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        sco_id: &str,
+        state: &PreservedCmiState,
+    ) -> ProviderResult<()> {
+        let response = self
+            .send_sco_form(
+                session,
+                route,
+                &[
+                    ("action", "keepsco_with_getticket_with_updatecmitime"),
+                    ("uid", route.user_id()),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("session_time", &state.session_time),
+                    ("total_time", &state.total_time),
+                    ("timelimitsec", "0"),
+                    ("endcaltime", "false"),
+                ],
+            )
+            .await?;
+        parse_mutation_response(response.as_str(), MutationResponseKind::Heartbeat)
+    }
+
+    async fn finalize_duration(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        sco_id: &str,
+        state: &PreservedCmiState,
+    ) -> ProviderResult<()> {
+        let response = self
+            .send_sco_form(
+                session,
+                route,
+                &[
+                    ("action", "savescoinfo160928"),
+                    ("uid", route.user_id()),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("progress", &state.progress),
+                    ("crate", &state.score_scaled),
+                    ("status", &state.success_status),
+                    ("cstatus", &state.completion_status),
+                    ("trycount", "0"),
+                ],
+            )
+            .await?;
+        parse_mutation_response(response.as_str(), MutationResponseKind::StrictSuccess)
+    }
+}
+
+struct PreservedCmiState {
+    completion_status: String,
+    progress: String,
+    score_scaled: String,
+    success_status: String,
+    session_time: String,
+    total_time: String,
+}
+
+impl PreservedCmiState {
+    fn from_snapshot(snapshot: &WellearnCmiSnapshot) -> Self {
+        Self {
+            completion_status: snapshot
+                .completion_raw()
+                .unwrap_or("not_attempted")
+                .to_owned(),
+            progress: snapshot.progress_raw().unwrap_or("0").to_owned(),
+            score_scaled: snapshot.score_scaled_raw().unwrap_or("").to_owned(),
+            success_status: snapshot
+                .success_status_raw()
+                .unwrap_or("unknown")
+                .to_owned(),
+            session_time: snapshot.session_time_raw().unwrap_or("0").to_owned(),
+            total_time: snapshot.total_time_raw().unwrap_or("0").to_owned(),
+        }
+    }
+}
+
+impl Drop for PreservedCmiState {
+    fn drop(&mut self) {
+        self.completion_status.zeroize();
+        self.progress.zeroize();
+        self.score_scaled.zeroize();
+        self.success_status.zeroize();
+        self.session_time.zeroize();
+        self.total_time.zeroize();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MutationResponseKind {
+    StrictSuccess,
+    Heartbeat,
+}
+
+fn parse_mutation_response(document: &str, kind: MutationResponseKind) -> ProviderResult<()> {
+    let value: serde_json::Value = serde_json::from_str(document).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "WELearn duration mutation response is not valid JSON",
+        )
+    })?;
+    let result = value
+        .as_object()
+        .and_then(|object| object.get("ret"))
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn duration mutation response has no integer result",
+            )
+        })?;
+    let accepted = result == 0 || matches!(kind, MutationResponseKind::Heartbeat) && result == 1;
+    if !accepted {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "WELearn duration mutation was not accepted",
+        ));
+    }
+    Ok(())
+}
+
+fn duration_log(
+    stage: &str,
+    message: &str,
+    metadata_sanitized: Option<serde_json::Value>,
+) -> ProviderExecutionLog {
+    ProviderExecutionLog {
+        level: LogLevel::Info,
+        stage: stage.to_owned(),
+        message: message.to_owned(),
+        provider_trace_id: None,
+        metadata_sanitized,
     }
 }
 
@@ -592,6 +923,40 @@ mod tests {
             sco_url("user value").unwrap().as_str(),
             "https://welearn.sflep.com/Ajax/SCO.aspx?uid=user+value"
         );
+    }
+
+    #[test]
+    fn duration_mutation_results_are_strictly_classified() {
+        assert!(
+            parse_mutation_response(r#"{"ret":0}"#, MutationResponseKind::StrictSuccess).is_ok()
+        );
+        assert!(parse_mutation_response(r#"{"ret":1}"#, MutationResponseKind::Heartbeat).is_ok());
+        for document in [
+            r#"{"ret":1}"#,
+            r#"{"ret":"0"}"#,
+            r#"{"ok":true}"#,
+            "not-json",
+        ] {
+            assert!(
+                parse_mutation_response(document, MutationResponseKind::StrictSuccess).is_err()
+            );
+        }
+        assert!(parse_mutation_response(r#"{"ret":2}"#, MutationResponseKind::Heartbeat).is_err());
+    }
+
+    #[test]
+    fn duration_state_preserves_only_audited_cmi_scalars() {
+        let snapshot = parse_cmi_snapshot(
+            r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.25\",\"session_time\":\"15\",\"total_time\":\"45\",\"score\":{\"scaled\":\"0.8\"},\"success_status\":\"unknown\"}}"}"#,
+        )
+        .unwrap();
+        let state = PreservedCmiState::from_snapshot(&snapshot);
+        assert_eq!(state.completion_status, "incomplete");
+        assert_eq!(state.progress, "0.25");
+        assert_eq!(state.score_scaled, "0.8");
+        assert_eq!(state.success_status, "unknown");
+        assert_eq!(state.session_time, "15");
+        assert_eq!(state.total_time, "45");
     }
 
     #[test]

@@ -134,12 +134,35 @@ these independent facts:
 Completion != Progress != Session Time != Total Time
 ```
 
-A future duration implementation must acquire fresh CMI, preserve the existing
-completion/progress/score values, start when required, issue bounded heartbeats,
-finalize, and then re-read remote CMI. Donor paths which set completed/progress
-or fabricate scores without first reading the remote state are excluded.
-Until sanitized live responses establish the time grammar and unit, the parser
-retains bounded raw time strings but `TaskProgressRead` does not report seconds.
+The implemented `DurationReport` lifecycle acquires a fresh Course route and
+CMI document using one resolved Cookie. If a valid response explicitly has no
+`cmi`, it calls `startsco160928` once and re-reads the baseline. Malformed or
+ambiguous reads never trigger a start fallback. The baseline preserves bounded
+`completion_status`, `progress_measure`, `score.scaled`, `success_status`,
+`session_time` and `total_time` values.
+
+The lifecycle sends an initial and then periodic
+`keepsco_with_getticket_with_updatecmitime` heartbeat, with real elapsed waits
+and the preserved session/total observations, before `savescoinfo160928`
+finalizes the session. The final form carries the preserved completion,
+progress, score and success values; it never uses donor paths that fabricate
+completion or scores, and it never calls `setscoinfo`. Start/finalize require
+integer `ret=0`; heartbeat accepts only the two donor-observed integer values
+`0` and `1`.
+
+After finalization, a fresh CMI read must preserve completion, progress, score
+and success status while changing at least one raw time observation. HTTP
+success alone is never a verified outcome. Authentication may renew once before
+the first mutation. A mutation is never replayed after authentication fails;
+only the final read-only verification may renew if the operation has not already
+used its single renewal.
+
+Master-owned runtime settings expose platform defaults and account/task
+overrides for actual report seconds and heartbeat interval. Provider and account
+execution concurrency plus periodic Course/Task scan interval are independently
+bounded. Until sanitized live responses establish the remote time grammar and
+unit, the parser retains raw time strings and `TaskProgressRead` does not report
+seconds; `DurationRead` therefore remains unadvertised.
 
 ## Sanitization and routing
 

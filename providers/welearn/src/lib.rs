@@ -9,11 +9,13 @@ mod authentication;
 mod cmi;
 mod course_context;
 mod course_inventory;
+mod duration_report;
 mod inventory_capabilities;
 mod metadata;
 mod native_authentication;
 mod native_http;
 mod provider;
+mod runtime_settings;
 mod stored_session;
 mod task_detail;
 mod task_inventory;
@@ -29,6 +31,9 @@ pub use cmi::{
 };
 pub use course_context::{WellearnCourseContext, parse_course_context};
 pub use course_inventory::parse_course_inventory;
+pub use duration_report::{
+    WellearnDurationReport, WellearnDurationReportDocuments, WellearnDurationReportTransport,
+};
 pub use inventory_capabilities::{
     WellearnCourseInventory, WellearnCourseInventoryTransport, WellearnInventoryDocument,
     WellearnTaskInventory, WellearnTaskInventoryDocuments, WellearnTaskInventoryTransport,

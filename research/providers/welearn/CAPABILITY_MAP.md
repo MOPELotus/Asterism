@@ -9,10 +9,10 @@
 | TaskDetail | Fresh Course/Unit/SCO inventory | FromScratch | Re-lists Courses and re-runs one complete Course scan, then requires exactly one matching stable SCO identity; live pending |
 | TaskProgressRead | YZBRH | Reference | Implemented through a fresh read-only `getscoinfo_v7` CMI request; completion and progress are parsed independently; live pending |
 | DurationRead | YZBRH | Reference | Parser retains bounded raw `session_time` and `total_time` independently; no Core duration or seconds conversion until live unit evidence exists |
-| ResourceExecution | Fanyuchang 2026 + YZBRH | Reference | Start/keep/finalize lifecycle; not implemented until readback is modeled |
-| DurationReport | YZBRH | Reference | Heartbeat uses explicit session/total time; no blind completion mutation |
+| ResourceExecution | Fanyuchang 2026 + YZBRH | Reference | Completion-changing execution remains unimplemented; donor score/completion-forging paths stay excluded |
+| DurationReport | YZBRH + Fanyuchang 2026 | Reference | Native fresh-read → optional start → bounded real-time heartbeat → preserve-and-finalize → fresh-read lifecycle is offline/native-boundary covered; live pending |
 | Submission/assessment | None selected | FromScratch | Out of this inventory slice; donor score-forging paths are not accepted behavior |
-| Result verification | Fresh Course/SCO/CMI reads | FromScratch | Require post-mutation readback; HTTP success is insufficient |
+| Result verification | Fresh Course/SCO/CMI reads | FromScratch | Duration report requires fresh CMI, unchanged completion/progress/score and a changed raw time observation; live pending |
 | BrowserBridge | No current need | FromScratch | First batch defers Capture/browser-dependent work |
 
 ## Initial implementation boundary
@@ -43,3 +43,15 @@ unset. Fresh TaskDetail re-discovers the selected Course and exact SCO from the
 same complete inventory path; disappeared identities return RemoteChanged and
 versioned fingerprints satisfy the Core detail boundary. All live validation
 remains pending.
+
+The next implemented mutation boundary is `DurationReport` only. Master-owned
+runtime settings provide platform defaults plus account/task overrides for the
+actual report length and heartbeat interval, while Core-owned concurrency and
+scan-interval behaviors stay explicit. The native lifecycle keeps one resolved
+Cookie and fresh Course route through baseline read, optional start, bounded
+heartbeats and finalization. It preserves completion, progress, score and
+success status, never calls `setscoinfo`, and re-reads CMI before returning a
+verified outcome. Authentication before mutation may renew once; no mutation is
+replayed after an authentication failure. `DurationRead` remains absent because
+raw remote time units are still not live-proven, and completion-changing
+`ResourceExecution` remains separate and unadvertised.

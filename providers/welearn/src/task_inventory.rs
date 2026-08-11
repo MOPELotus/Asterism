@@ -230,7 +230,7 @@ fn parse_leaves(
             opens_at: None,
             due_at: None,
             closes_at: None,
-            capabilities: vec![TaskCapability::ProgressRead],
+            capabilities: vec![TaskCapability::ProgressRead, TaskCapability::DurationReport],
             fingerprint: fingerprint(&normalized)?,
             normalized,
             raw_sanitized: serde_json::json!({
@@ -349,11 +349,8 @@ mod tests {
         assert_eq!(tasks[0].remote_state, RemoteState::Completed);
         assert_eq!(tasks[1].remote_state, RemoteState::Unknown);
         assert_eq!(tasks[2].remote_state, RemoteState::NotOpen);
-        assert!(
-            tasks
-                .iter()
-                .all(|task| task.capabilities == [TaskCapability::ProgressRead])
-        );
+        assert!(tasks.iter().all(|task| task.capabilities
+            == [TaskCapability::ProgressRead, TaskCapability::DurationReport]));
         assert!(tasks.iter().all(|task| task.fingerprint.starts_with("v1:")));
     }
 

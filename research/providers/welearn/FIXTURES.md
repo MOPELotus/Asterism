@@ -20,6 +20,8 @@ fixtures/providers/welearn/
   tasks/leaves-unit-1.json
   tasks/list-mixed.expected.json
   cmi/progress-mixed.json
+  cmi/duration-before.json
+  cmi/duration-after.json
 ```
 
 The Auth fixtures cover bounded response classification, strict callback
@@ -34,6 +36,13 @@ independent completion/progress/session/total facts, unknown-field dropping and
 the explicit absence of any seconds conversion. Inline negative cases reject
 missing envelopes, non-zero result codes, malformed nested JSON, unsupported
 scalars and out-of-range progress.
+
+The duration pair is a synthetic before/after readback. It keeps completion,
+progress, score and success status identical while changing only opaque raw time
+observations. Injected lifecycle tests freeze provider/task runtime overrides,
+reject completion/score drift and reject a final read with no time change.
+Native-boundary tests separately reject malformed or unsupported mutation result
+codes and prove the preserved CMI form state.
 
 ## Required live-sanitized fixtures
 
@@ -73,3 +82,8 @@ only structural field names, response codes and bounded placeholder shapes.
 - Fresh detail re-lists the Course and exact SCO instead of echoing a persisted
   scan payload; malformed or disappeared identities fail closed.
 - Every normalized Task fingerprint uses an explicit version prefix.
+- Duration reporting preserves completion, progress, score and success status;
+  any drift rejects the entire execution outcome.
+- A successful mutation response is insufficient unless fresh CMI changes a raw
+  time observation.
+- Authentication failure after a mutation never replays the lifecycle.

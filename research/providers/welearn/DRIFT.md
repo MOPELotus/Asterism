@@ -12,7 +12,9 @@
 | CMI progress grammar changes | Current donor reads decimal `progress_measure` in the `0..1` range | Accept only the bounded audited decimal grammar; add sanitized evidence before widening it |
 | CMI time units/format drift | Donors forward opaque `session_time`/`total_time` values | Parse and report only after real response fixtures establish units and grammar |
 | Heartbeat semantics drift | Donors send the long action name at fixed intervals | Make interval a Master-controlled Provider default with per-task override, bounded by Provider safety limits |
-| Completion can be forged independently of duration | Donor has direct completed/progress/score payloads | Exclude that path; read, preserve, mutate narrowly and verify with fresh CMI |
+| Start/keep/save result grammar changes | Audited donors treat start/save `ret=0` and keep `ret=0/1` as accepted | Fail closed on missing, string or unknown result values; widen only from sanitized current evidence |
+| Session expires after a duration mutation | Replaying start/keep/save could double-report time | Never renew-and-replay a mutation; only renew the initial read or final read-only verification, at most once per operation |
+| Completion can be forged independently of duration | Donor has direct completed/progress/score payloads | Exclude that path; read, preserve, mutate narrowly and verify unchanged completion/progress/score with fresh CMI |
 | Session challenge appears after password failures | Current donor reports captcha/SMS branches | Stop retries and classify `HumanRequired`; Capture remains deferred for batch one |
 | Expired sessions return either redirects or `200` login HTML | Donors and web stacks vary in expiry presentation | Detect only structural login pages, renew a native Composite once, restart the complete read and never retry other error kinds as authentication |
 
