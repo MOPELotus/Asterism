@@ -2760,3 +2760,30 @@ slots. This remains synthetic/offline evidence at Development verification;
 CMI times remain opaque, DurationRead/DurationReport and remote execution stay
 unadvertised, and real-account read-only validation remains deferred until the
 WebUI and Asterism-Plugin/Yunzai surfaces are complete.
+
+## One-hundred-and-sixty-eighth Phase 0 slice
+
+WELearn now implements `DurationReport` as an execution goal independent of
+completion-changing `ResourceExecution`. Master-owned runtime settings expose
+bounded platform defaults with account/task overrides for actual report length
+and heartbeat interval, while Provider/account execution concurrency and scan
+interval remain separate settings.
+
+The native lifecycle resolves one current Cookie and fresh Course route, reads
+CMI, starts only when a valid response explicitly has no CMI, waits in real
+time while sending the audited heartbeat action, finalizes with the original
+completion/progress/score/success values and performs a fresh readback. A
+post-start baseline and final readback must contain the complete preservation
+set. Missing fields are never replaced with synthetic defaults; success also
+requires at least one opaque raw time observation to change without any
+preserved state drift. Mutation responses use the strict audited integer result
+grammar, and no mutation is renewed or replayed after failure.
+
+The shared Engine now accepts verified Pending, InProgress or Completed state
+for an only-DurationReport request because the goal is duration evidence, not
+remote completion. Every Provider error goes directly to HumanRequired without
+retry, and abandoned duration-report recovery neither reads TaskProgress nor
+re-enters start/keep/save. Provider and Engine regression tests cover these
+boundaries. `DurationRead` remains unadvertised because live evidence has not
+established the unit/grammar of WELearn's raw time values; completion-changing
+execution and Capture remain absent, and verification stays Development.
