@@ -205,6 +205,7 @@ fn build_task(
             TaskCapability::QuestionInventory,
             TaskCapability::QuestionParse,
             TaskCapability::AnswerResolve,
+            TaskCapability::SubmissionBuild,
         ]);
     }
     let remote_id = format!("group:{resource_id}:{}:{group_id}", unit.id);
@@ -396,6 +397,11 @@ mod tests {
                 .contains(&TaskCapability::AnswerResolve)
         );
         assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::SubmissionBuild)
+        );
+        assert!(
             !tasks[1]
                 .capabilities
                 .contains(&TaskCapability::QuestionInventory)
@@ -409,6 +415,11 @@ mod tests {
             !tasks[1]
                 .capabilities
                 .contains(&TaskCapability::AnswerResolve)
+        );
+        assert!(
+            !tasks[1]
+                .capabilities
+                .contains(&TaskCapability::SubmissionBuild)
         );
     }
 }

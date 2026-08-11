@@ -20,6 +20,7 @@ mod progress;
 mod provider;
 mod question;
 mod stored_session;
+mod submission_build;
 mod task_detail;
 mod task_inventory;
 mod user_identity;
@@ -57,5 +58,6 @@ pub use question::{
     parse_question_content,
 };
 pub use stored_session::StoredUaiSessionResolver;
+pub use submission_build::UaiSubmissionBuild;
 pub use task_detail::UaiTaskDetail;
 pub use task_inventory::parse_task_inventory;

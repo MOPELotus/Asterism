@@ -8,8 +8,9 @@ use crate::{
     NativeUaiAuthenticationTransport, NativeUaiInventoryTransport, StoredUaiSessionResolver,
     UaiAnswerResolve, UaiAnswerTransport, UaiAuthentication, UaiAuthenticationTransport,
     UaiCourseInventory, UaiCourseInventoryTransport, UaiDurationTransport, UaiProgressTransport,
-    UaiQuestionRead, UaiQuestionTransport, UaiSessionResolver, UaiTaskDetail, UaiTaskDuration,
-    UaiTaskInventory, UaiTaskInventoryTransport, UaiTaskProgress, metadata::development_metadata,
+    UaiQuestionRead, UaiQuestionTransport, UaiSessionResolver, UaiSubmissionBuild, UaiTaskDetail,
+    UaiTaskDuration, UaiTaskInventory, UaiTaskInventoryTransport, UaiTaskProgress,
+    metadata::development_metadata,
 };
 
 /// Injected read boundaries used by the complete UAI Development entry.
@@ -83,6 +84,7 @@ pub fn build_development_provider(
         task_detail.clone(),
         transports.answer,
     )?);
+    let submission_build = Arc::new(UaiSubmissionBuild::try_new()?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: ProviderRuntimeSettingsSchema::default(),
@@ -95,7 +97,7 @@ pub fn build_development_provider(
         question_inventory: Some(question_read.clone()),
         question_parse: Some(question_read),
         answer_resolve: Some(answer_resolve),
-        submission_build: None,
+        submission_build: Some(submission_build),
         submission_execute: None,
         submission_verify: None,
         task_execution: None,
@@ -267,6 +269,7 @@ mod tests {
         assert!(entry.question_inventory.is_some());
         assert!(entry.question_parse.is_some());
         assert!(entry.answer_resolve.is_some());
+        assert!(entry.submission_build.is_some());
         assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_none());
         assert!(entry.runtime_settings.definitions.is_empty());
@@ -280,6 +283,7 @@ mod tests {
             ProviderCapability::QuestionInventory,
             ProviderCapability::QuestionParse,
             ProviderCapability::AnswerResolve,
+            ProviderCapability::SubmissionBuild,
         ] {
             assert!(entry.metadata.capabilities.contains(&capability));
         }
