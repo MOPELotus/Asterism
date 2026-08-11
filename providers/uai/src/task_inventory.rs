@@ -197,6 +197,7 @@ fn build_task(
         .as_ref()
         .ok_or_else(|| protocol_drift("UAI Group Task is not nested under a Unit"))?;
     let task_types = task_types(object.get("base"))?;
+    let question_count = question_count(object.get("question_num"))?;
     let remote_id = format!("group:{resource_id}:{}:{group_id}", unit.id);
     let normalized = serde_json::json!({
         "schema": "uai.group-task.v1",
@@ -206,6 +207,7 @@ fn build_task(
         "micro": hierarchy.micro.as_ref().map(|value| serde_json::json!({"id": value.id, "title": value.title})),
         "group_id": group_id,
         "task_types": task_types,
+        "question_count": question_count,
     });
     Ok(RemoteTask {
         remote_id,
@@ -224,6 +226,7 @@ fn build_task(
             "schema": "uai.group-task.raw.v1",
             "role": "group",
             "task_types": task_types,
+            "question_count": question_count,
         }),
     })
 }
@@ -271,10 +274,22 @@ fn task_types(value: Option<&Value>) -> ProviderResult<Vec<String>> {
     Ok(result)
 }
 
+fn question_count(value: Option<&Value>) -> ProviderResult<Option<u32>> {
+    value
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|value| *value <= 100_000)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| protocol_drift("UAI Group Task contains an invalid question count"))
+        })
+        .transpose()
+}
+
 fn fingerprint(normalized: &Value) -> Result<String, ProviderError> {
     let bytes = serde_json::to_vec(normalized)
         .map_err(|_| invalid_response("UAI normalized Task cannot be encoded"))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("v1:{:x}", Sha256::digest(bytes)))
 }
 
 #[cfg(test)]
@@ -304,6 +319,9 @@ mod tests {
         assert_eq!(tasks[0].normalized["section"]["id"], "section-1");
         assert_eq!(tasks[0].normalized["micro"]["id"], "micro-1");
         assert_eq!(tasks[0].normalized["task_types"][0], "rich-text-read");
+        assert_eq!(tasks[0].normalized["question_count"], 1);
+        assert_eq!(tasks[1].normalized["question_count"], 2);
+        assert!(tasks[0].fingerprint.starts_with("v1:"));
         let encoded = serde_json::to_string(&tasks).unwrap();
         assert!(!encoded.contains("must-be-dropped"));
         assert!(!encoded.contains(context.course_instance_id()));
@@ -334,6 +352,14 @@ mod tests {
                 &courses[0],
                 &context,
                 r#"{"code":0,"course":"{\"units\":[{\"id\":\"unit-1\",\"role\":\"new-role\",\"name\":\"Unit\"}]}"}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_task_inventory(
+                &courses[0],
+                &context,
+                r#"{"code":0,"course":"{\"units\":[{\"id\":\"unit-1\",\"role\":\"unit\",\"name\":\"Unit\",\"children\":[{\"id\":\"group-1\",\"role\":\"group\",\"name\":\"Task\",\"question_num\":-1}]}]}"}"#,
             )
             .is_err()
         );

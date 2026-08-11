@@ -22,7 +22,8 @@ They cover typed Password success/rejection/slider outcomes, strict atomic
 openid/JWT parsing, bounded user-info identity validation, Course →
 CourseResource flattening, paired point counts, fresh detail binding, redacted
 Course-instance routing, the outer/nested Course-tree envelope,
-Unit/Section/Micro/Group identity separation, identity-bound per-Unit flags plus
+Unit/Section/Micro/Group identity separation, bounded task type/question count,
+versioned Task fingerprints, identity-bound per-Unit flags plus
 raw progress duration, and exact CourseResource/Unit/Group-bound learning
 seconds. Inline negative tests cover malformed/extra composite
 fields, duplicate
@@ -56,6 +57,8 @@ field names, placeholder identities and response/result codes.
 - Duplicate resources or Groups fail the complete scan.
 - `courseInstanceId` remains operation-only and absent from serialized Tasks.
 - Stable Group identity contains CourseResource, Unit and Group components.
+- Fresh TaskDetail must rediscover that exact identity and reject disappearance or drift.
+- Group question counts are optional bounded facts and never authorize a submission by themselves.
 - Course point totals never imply Group completion.
 - `base` labels never imply executable or assessment capability.
 - Unknown tree roles fail closed.

@@ -13,6 +13,8 @@
 | Course tree outer envelope changes | Current response stores JSON text in `course` | Bound both layers and fail closed on non-string, malformed or oversized nested data |
 | New tree role appears | Audited roles are Unit, Section, Node, Link and Group | Reject unknown roles and add a sanitized fixture before mapping them |
 | Group ID disappears or becomes URL-only | Historical parser falls back to URLs for generic nodes | Require explicit bounded Group IDs; never persist route URLs as Task identity |
+| Persisted Group facts become stale before a read | CourseResource detail supplies a fresh instance route and trees can change | TaskDetail re-lists CourseResources and rebuilds the exact Group; missing facts become RemoteChanged |
+| Task-detail fingerprints change shape silently | Core requires versioned fingerprints for fresh detail validation | Prefix normalized Group hashes with `v1:` and bump the version when fingerprint material changes |
 | Completion flags gain new values | Current donor requires `pass == pass2 == perm == 1` | Keep each flag independent and map only sanitized verified combinations |
 | Annotator token claims/signature change | Both backend donors independently use the same HS256 openid claims and millisecond expiry | Keep generation private to account-bound GET reads, pin an exact-time vector and fail closed on header/clock errors |
 | Study-record duration unit/meaning drifts | Frozen MIT donor explicitly documents Course/Unit/Task `duration` in seconds | Keep the study-record route independent, bind exact CourseResource/Unit/Group identities and recheck with live before/after measurements |
@@ -20,6 +22,9 @@
 | Study-record tree duplicates or changes roles | Donor indexes nodeId and currently emits Unit/Section/Node/Link hierarchy | Require unique bounded node IDs, audited roles and one exact matching Task; reject drift before returning duration |
 | Page residence stops producing duration | Current userscript relies on active page lifecycle | Prefer native network evidence; otherwise isolate a headless compatibility worker and verify fresh duration |
 | Direct submit completes without duration | Backend donors submit answers independently of page residence | Keep CompletionService and DurationService separate; never claim execution from completion alone |
+| Encrypted content/answer framing changes | Donors currently use `unipus.` hex AES-ECB envelopes with a key suffix | Bound and validate every layer before decrypting; never persist ciphertext, key material or route context |
+| Submission throttling is mistaken for success | Donor returns `600001`/`600002` for rate limiting | Return typed retry state and never repeat a mutation without Core idempotency/recovery authority |
+| Submit receipt is accepted as result verification | Fresh user-module and progress reads are separate donor calls | Keep SubmissionExecute and SubmissionVerify separate and require a fresh identity-bound readback |
 
 ## Live-validation gate
 

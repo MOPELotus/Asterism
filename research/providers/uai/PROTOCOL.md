@@ -51,7 +51,7 @@ expiry extraction remains pending.
 
 The complete read-only Provider factory shares one resolved network policy and
 one account-scoped stored-session resolver across Authentication,
-CourseInventory, TaskInventory, TaskProgressRead and DurationRead. The daemon does not
+CourseInventory, TaskInventory, TaskDetail, TaskProgressRead and DurationRead. The daemon does not
 register this entry by default. Its config, environment and CLI opt-ins are
 independent from the other development Providers, require a configured
 SecretStore and retain Development verification with a startup warning.
@@ -94,6 +94,15 @@ parsed all-or-nothing; the instance route is never serialized into a Course or
 Task. Authentication renewal restarts the detail/tree pair from the fresh
 detail; progress and duration remain independent capabilities over the same
 native transport.
+
+TaskDetail never trusts the persisted scan payload as current. It parses the
+stable `group:{courseResourceId}:{unitId}:{groupId}` identity, re-reads the
+Course list, selects exactly one CourseResource, then re-runs the complete
+fresh detail/tree Task inventory and requires exactly one matching Group. A
+missing CourseResource or Group becomes RemoteChanged; duplicate or mismatched
+normalized identities are protocol drift. The bounded tree facts now preserve
+`question_num` beside `base`, and Task fingerprints use an explicit `v1:`
+prefix for Core detail validation and future schema migration.
 
 ## Progress and duration separation
 
@@ -150,3 +159,31 @@ sanitized network evidence plus fresh duration readback.
 DurationRead never creates an Execution, reports time or mutates remote state.
 Direct answer/submission routes are outside this slice. HTTP success or 100%
 completion cannot satisfy any future duration-report acceptance gate.
+
+## Question, answer, submission and verification audit
+
+The frozen backend donors expose four distinct protocol stages:
+
+```text
+GET  https://ucontent.unipus.cn/course/api/v3/content/
+     {courseInstanceId}/{groupId}/default
+GET  https://ucontent.unipus.cn/course/api/v3/answer/
+     {courseInstanceId}/{groupId}/default
+POST https://ucontent.unipus.cn/course/api/v3/newExploration/submit
+GET  https://ucontent.unipus.cn/api/mobile/user_module/
+     {courseInstanceId}/{groupId}-{submitVersion}
+```
+
+Content and answer responses carry separate `unipus.`-prefixed AES-ECB
+ciphertext plus a bounded key suffix; submission returns a version used by the
+fresh user-module read. Rate-limit codes `600001` and `600002` are not success.
+The donor also branches by `base` and `question_num`, including objective,
+preset, oral, subjective, discussion, exit-ticket and upload behavior.
+
+Asterism will therefore implement QuestionInventory/QuestionParse,
+AnswerResolve, SubmissionBuild, SubmissionExecute and SubmissionVerify as
+independent capabilities. Unsupported or unsafe types must fail closed; empty
+answers, synthetic uploads and discussion side effects cannot be inferred as
+portable defaults. A submission receipt alone will never satisfy verification.
+This section freezes the next implementation boundary only; none of those five
+capabilities is advertised by the current checkpoint.

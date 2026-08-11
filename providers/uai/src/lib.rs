@@ -1,9 +1,9 @@
 //! `uai` Provider implementation.
 //!
 //! The current Development checkpoint provides native Password/JWT
-//! authentication, read-only Course/Task inventory, Group progress and
-//! identity-bound duration over the shared network policy. It makes no claim
-//! of live compatibility.
+//! authentication, read-only Course/Task inventory, fresh Group detail,
+//! Group progress and identity-bound duration over the shared network policy.
+//! It makes no claim of live compatibility.
 
 mod annotator;
 mod authentication;
@@ -16,6 +16,7 @@ mod native_http;
 mod progress;
 mod provider;
 mod stored_session;
+mod task_detail;
 mod task_inventory;
 mod user_identity;
 
@@ -44,4 +45,5 @@ pub use provider::{
     build_development_provider_with_stored_session,
 };
 pub use stored_session::StoredUaiSessionResolver;
+pub use task_detail::UaiTaskDetail;
 pub use task_inventory::parse_task_inventory;

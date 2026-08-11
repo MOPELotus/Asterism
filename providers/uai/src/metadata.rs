@@ -30,6 +30,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
+            ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
             ProviderCapability::DurationRead,
         ]),
@@ -53,6 +54,7 @@ mod tests {
                 ProviderCapability::Authentication,
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
+                ProviderCapability::TaskDetail,
                 ProviderCapability::TaskProgressRead,
                 ProviderCapability::DurationRead,
             ])

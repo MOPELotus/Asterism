@@ -7,7 +7,7 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 use crate::{
     NativeUaiAuthenticationTransport, NativeUaiInventoryTransport, StoredUaiSessionResolver,
     UaiAuthentication, UaiAuthenticationTransport, UaiCourseInventory, UaiCourseInventoryTransport,
-    UaiDurationTransport, UaiProgressTransport, UaiSessionResolver, UaiTaskDuration,
+    UaiDurationTransport, UaiProgressTransport, UaiSessionResolver, UaiTaskDetail, UaiTaskDuration,
     UaiTaskInventory, UaiTaskInventoryTransport, UaiTaskProgress, metadata::development_metadata,
 };
 
@@ -32,6 +32,10 @@ pub fn build_development_provider(
     )?);
     let course_inventory = Arc::new(UaiCourseInventory::try_new(course_transport)?);
     let task_inventory = Arc::new(UaiTaskInventory::try_new(task_transport)?);
+    let task_detail = Arc::new(UaiTaskDetail::try_new(
+        course_inventory.clone(),
+        task_inventory.clone(),
+    )?);
     let task_progress = Arc::new(UaiTaskProgress::try_new(progress_transport)?);
     let task_duration = Arc::new(UaiTaskDuration::try_new(duration_transport)?);
     Ok(ProviderEntry {
@@ -40,7 +44,7 @@ pub fn build_development_provider(
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),
-        task_detail: None,
+        task_detail: Some(task_detail),
         task_progress: Some(task_progress),
         duration_read: Some(task_duration),
         question_inventory: None,
@@ -54,8 +58,9 @@ pub fn build_development_provider(
     })
 }
 
-/// Composes the Development entry with native Course/Task/progress/duration
-/// HTTP and an injected authentication exchange and stored-session boundary.
+/// Composes the Development entry with native Course/Task/detail/progress/
+/// duration HTTP and an injected authentication exchange and stored-session
+/// boundary.
 ///
 /// # Errors
 ///
@@ -207,6 +212,7 @@ mod tests {
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());
+        assert!(entry.task_detail.is_some());
         assert!(entry.task_progress.is_some());
         assert!(entry.duration_read.is_some());
         assert!(entry.task_execution.is_none());
@@ -216,6 +222,7 @@ mod tests {
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
+            ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
             ProviderCapability::DurationRead,
         ] {

@@ -2683,3 +2683,27 @@ This is offline/native-boundary evidence only. DurationReport, execution,
 BrowserBridge, Capture and live verification remain absent; real-account
 read-only validation is scheduled after WebUI and Asterism-Plugin/Yunzai are
 complete.
+
+## One-hundred-and-sixty-fifth Phase 0 slice
+
+UAI now advertises a fresh `TaskDetail` capability instead of returning the
+persisted scan payload as current state. It parses the stable
+`group:{courseResource}:{unit}:{group}` identity, re-lists CourseResources,
+selects exactly one match, re-runs the complete fresh detail/tree inventory and
+requires exactly one matching Group. Disappeared CourseResources or Groups are
+RemoteChanged; duplicate and normalized-identity drift fail closed.
+
+The bounded tree parser now preserves optional `question_num` beside the
+existing `base` task types and emits `v1:`-prefixed normalized fingerprints.
+These facts are visible in the sanitized fresh detail but do not authorize
+question access or submission by themselves. The Development factory and
+metadata now agree on six read-only registry slots.
+
+The frozen backend audit also records separate encrypted content, encrypted
+answer, submit and fresh user-module verification routes. They map to
+QuestionInventory/QuestionParse, AnswerResolve, SubmissionBuild,
+SubmissionExecute and SubmissionVerify rather than one monolithic execute
+operation. Rate-limit responses are not receipts, a receipt is not
+verification, and unsupported empty/upload/discussion behavior cannot be
+invented as a default. Those five capabilities remain unadvertised pending
+their own bounded offline slices; live-account validation timing is unchanged.
