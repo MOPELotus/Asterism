@@ -1,0 +1,21 @@
+{
+  "code": 1,
+  "msg": "success",
+  "data": {
+    "records": [
+      {"release_id": 2001, "task_id": 9001, "task_name": "Learning Pending", "task_type": 1, "source": 1, "course_id": "course-a", "course_name": "Synthetic Course A", "release_time": 1730000000000, "start_time": 1730000001000, "over_time": 86400000, "over_status": 2, "score": 0.0, "progress": 0, "time_spent": 0, "unknown": "must-be-dropped"},
+      {"release_id": 2002, "task_id": -1, "task_name": "Test In Progress", "task_type": 2, "source": 1, "course_id": "course-a", "course_name": "Synthetic Course A", "release_time": 1730000100000, "start_time": 1730000101000, "over_time": 86400000, "over_status": 2, "score": 42.5, "progress": 35, "time_spent": 125000},
+      {"release_id": 2003, "task_id": 9003, "task_name": "Learning Completed", "task_type": 1, "source": 1, "course_id": "course-a", "course_name": "Synthetic Course A", "release_time": 1730000200000, "start_time": 1730000201000, "over_time": 86400000, "over_status": 3, "score": 100.0, "progress": 100, "time_spent": 300000},
+      {"release_id": 2004, "task_id": 9004, "task_name": "Test Expired", "task_type": 2, "source": 1, "course_id": "course-b", "course_name": "Synthetic Course B", "release_time": 1730000300000, "start_time": 1730000301000, "over_time": 86400000, "over_status": 3, "score": 0.0, "progress": 20, "time_spent": 60000},
+      {"release_id": 2005, "task_id": 9005, "task_name": "Learning Not Open", "task_type": 1, "source": 1, "course_id": "course-b", "course_name": "Synthetic Course B", "release_time": 1730000400000, "start_time": 1730000401000, "over_time": 86400000, "over_status": 1, "score": null, "progress": 0, "time_spent": 0},
+      {"release_id": 2006, "task_id": 9006, "task_name": "Learning Six", "task_type": 1, "source": 1, "course_id": "course-a", "course_name": "Synthetic Course A", "over_status": 2, "progress": 5},
+      {"release_id": 2007, "task_id": 9007, "task_name": "Test Seven", "task_type": 2, "source": 1, "course_id": "course-b", "course_name": "Synthetic Course B", "over_status": 2, "progress": 70},
+      {"release_id": 2008, "task_id": 9008, "task_name": "Learning Eight", "task_type": 1, "source": 1, "course_id": "course-a", "course_name": "Synthetic Course A", "over_status": 2, "progress": 80},
+      {"release_id": 2009, "task_id": 9009, "task_name": "Test Nine", "task_type": 2, "source": 1, "course_id": "course-b", "course_name": "Synthetic Course B", "over_status": 2, "progress": 90},
+      {"release_id": 2010, "task_id": 9010, "task_name": "Learning Ten", "task_type": 1, "source": 1, "course_id": "course-a", "course_name": "Synthetic Course A", "over_status": 2, "progress": 10}
+    ],
+    "total": 12
+  },
+  "jv": "0",
+  "cv": "0"
+}

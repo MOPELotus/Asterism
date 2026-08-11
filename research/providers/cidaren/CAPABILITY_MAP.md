@@ -17,9 +17,9 @@
 | SubmissionVerify | Fresh class task/detail read | FromScratch | A mutation receipt or completion message is insufficient; require fresh exact release readback |
 | Capture bootstrap | Current private donor | Reference | Deferred; no mitmproxy/system-proxy or injected browser-storage capture in the first batch |
 
-## Initial implementation boundary
+## Current implementation boundary
 
-The first non-Capture milestone will:
+The initial non-Capture milestone now:
 
 1. establish a Development-only Provider crate with exact canonical ID
    `cidaren`;
@@ -32,5 +32,7 @@ The first non-Capture milestone will:
 6. retain progress, score and raw timing independently;
 7. use `class-task:{release_id}` as the stable Task identity and preserve
    `task_id` only as a fresh observation;
-8. advertise no execution, answer, duration-seconds, Capture or live-verified
+8. composes injected Authentication, CourseInventory and TaskInventory slots
+   into one registry-consistent Development entry;
+9. advertises no execution, answer, duration-seconds, Capture or live-verified
    capability.

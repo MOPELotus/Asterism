@@ -10,14 +10,19 @@ by the public issue tracker.
 fixtures/providers/cidaren/
   auth/token-success.json
   auth/token-rejected.json
-  courses/class-task-pages.json
-  tasks/class-task-pages.json
+  tasks/class-task-page-1.json
+  tasks/class-task-page-2.json
 ```
 
 The task fixture will include multiple Courses, learning and test rows, pending,
 in-progress, completed and expired states, `task_id=-1`, page boundaries and
 unknown fields that must be dropped. The course and task views may share the
 same page envelope, but expected normalization remains independent.
+
+These fixtures now drive the Development crate's strict token-response,
+Course grouping, stable release identity, state classification, redaction and
+all-or-nothing pagination tests. They remain synthetic and do not establish
+native HTTP or live compatibility.
 
 Inline negative tests must cover empty/oversized/non-JSON responses, non-object
 records, unsupported task types/status values, duplicate release identities,

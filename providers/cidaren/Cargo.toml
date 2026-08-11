@@ -1,0 +1,23 @@
+[package]
+name = "asterism-provider-cidaren"
+description = "Cidaren Provider implementation for Asterism"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+asterism-domain = { path = "../../crates/domain" }
+asterism-provider-api = { path = "../../crates/provider-api" }
+asterism-secrets = { path = "../../crates/secrets" }
+async-trait.workspace = true
+chrono.workspace = true
+http.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true
