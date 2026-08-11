@@ -1,5 +1,6 @@
 import type {
   BuildSubmissionDraftResponse,
+  CurrentIdentityResponse,
   GetExecutionResponse,
   GetOwnCreditAccountResponse,
   GetProviderRuntimeSettingsResponse,
@@ -31,6 +32,17 @@ export type LoginContractIsTyped = Assert<
 
 export type ErrorContractIsTyped = Assert<
   LoginError extends { error: { code: string; message: string } } ? true : false
+>;
+
+export type IdentityPermissionContractIsTyped = Assert<
+  CurrentIdentityResponse extends {
+    identity_type: "web_session" | "service_token";
+    permissions: Array<string>;
+    scopes: Array<string>;
+    user_id: string | null;
+  }
+    ? true
+    : false
 >;
 
 export type ProviderListContractIsTyped = Assert<

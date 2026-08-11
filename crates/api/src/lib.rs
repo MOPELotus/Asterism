@@ -724,6 +724,10 @@ pub fn openapi_document() -> Value {
             }
         }
     });
+    document["servers"] = json!([{
+        "url": "/",
+        "description": "Same-origin Asterism daemon"
+    }]);
     document["paths"]
         .as_object_mut()
         .expect("static OpenAPI paths object")

@@ -150,6 +150,25 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             json!({"type": "string", "enum": ["master", "operator", "user"]}),
         ),
         (
+            "Permission",
+            string_enum(&[
+                "read_providers",
+                "read_own_tasks",
+                "manage_users",
+                "manage_providers",
+                "manage_credits",
+                "grant_credits",
+                "manage_pricing",
+                "manage_system",
+                "manage_own_accounts",
+                "read_own_credits",
+                "execute_own_tasks",
+                "execute_any_task",
+                "view_own_audit",
+                "view_any_audit",
+            ]),
+        ),
+        (
             "UserSummary",
             object(
                 &["id", "username", "roles"],
@@ -170,12 +189,19 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         (
             "IdentityResponse",
             object(
-                &["identity_type", "user_id", "service_token_id", "scopes"],
+                &[
+                    "identity_type",
+                    "user_id",
+                    "service_token_id",
+                    "scopes",
+                    "permissions",
+                ],
                 json!({
                     "identity_type": {"type": "string", "enum": ["web_session", "service_token"]},
                     "user_id": nullable_uuid(),
                     "service_token_id": nullable_uuid(),
-                    "scopes": {"type": "array", "uniqueItems": true, "items": schema_ref("ServiceScope")}
+                    "scopes": {"type": "array", "uniqueItems": true, "items": schema_ref("ServiceScope")},
+                    "permissions": {"type": "array", "uniqueItems": true, "items": schema_ref("Permission")}
                 }),
             ),
         ),

@@ -338,12 +338,14 @@ pub(super) async fn current_identity(Extension(auth): Extension<AuthContext>) ->
             user_id: Some(principal.user_id),
             service_token_id: None,
             scopes: BTreeSet::new(),
+            permissions: principal.permissions().clone(),
         },
         AuthIdentity::Service(token) => IdentityResponse {
             identity_type: IdentityType::ServiceToken,
             user_id: token.owner_user_id,
             service_token_id: Some(token.id),
             scopes: token.scopes,
+            permissions: BTreeSet::new(),
         },
     };
     no_store(Json(response).into_response())
@@ -658,6 +660,7 @@ pub struct IdentityResponse {
     pub user_id: Option<UserId>,
     pub service_token_id: Option<ServiceTokenId>,
     pub scopes: BTreeSet<ServiceScope>,
+    pub permissions: BTreeSet<Permission>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

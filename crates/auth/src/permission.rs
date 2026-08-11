@@ -28,6 +28,12 @@ impl Principal {
         self.permissions.contains(&permission)
     }
 
+    /// Returns the effective permissions after role grants and explicit grants
+    /// have been merged.
+    pub fn permissions(&self) -> &BTreeSet<Permission> {
+        &self.permissions
+    }
+
     /// Requires one permission without consulting role names.
     ///
     /// # Errors
@@ -129,6 +135,7 @@ mod tests {
         let master = Principal::from_roles(UserId::new(), [Role::Master], []);
         assert!(master.has(Permission::ManageSystem));
         assert!(master.has(Permission::GrantCredits));
+        assert!(master.permissions().contains(&Permission::ManageSystem));
 
         let user = Principal::from_roles(UserId::new(), [Role::User], []);
         assert!(user.has(Permission::ExecuteOwnTasks));
