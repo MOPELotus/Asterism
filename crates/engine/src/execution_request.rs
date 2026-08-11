@@ -345,12 +345,7 @@ fn validate_task(
 }
 
 fn remote_state_is_executable(task: &Task) -> bool {
-    let actions = task
-        .capabilities
-        .iter()
-        .copied()
-        .filter(|capability| is_execution_capability(*capability))
-        .collect::<Vec<_>>();
+    let actions = execution_actions(task);
     matches!(
         task.remote_state,
         RemoteState::Pending | RemoteState::InProgress
@@ -359,6 +354,11 @@ fn remote_state_is_executable(task: &Task) -> bool {
             task.remote_state,
             RemoteState::Completed | RemoteState::Unknown
         ))
+        || (safe_verification_action(task, &actions)
+            && matches!(
+                task.remote_state,
+                RemoteState::Unknown | RemoteState::Completed
+            ))
 }
 
 const fn is_execution_capability(capability: TaskCapability) -> bool {
@@ -378,6 +378,17 @@ fn execution_actions(task: &Task) -> Vec<TaskCapability> {
         .copied()
         .filter(|capability| is_execution_capability(*capability))
         .collect()
+}
+
+fn safe_verification_action(task: &Task, actions: &[TaskCapability]) -> bool {
+    (actions == [TaskCapability::SubmissionExecute]
+        && task
+            .capabilities
+            .contains(&TaskCapability::SubmissionVerify))
+        || (actions.len() == 1
+            && actions != [TaskCapability::SubmissionExecute]
+            && task.capabilities.contains(&TaskCapability::ExecutionVerify)
+            && task.capabilities.contains(&TaskCapability::ProgressRead))
 }
 
 fn validate_execution_verification_contract(
@@ -474,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_remote_state_is_executable_only_for_duration_report_goal() {
+    fn unknown_or_completed_remote_state_requires_a_safe_verification_action() {
         assert!(remote_state_is_executable(&task(
             RemoteState::Completed,
             vec![TaskCapability::DurationReport],
@@ -494,6 +505,23 @@ mod tests {
                 TaskCapability::ResourceExecution,
             ],
         )));
+        for state in [RemoteState::Unknown, RemoteState::Completed] {
+            assert!(remote_state_is_executable(&task(
+                state,
+                vec![
+                    TaskCapability::ProgressRead,
+                    TaskCapability::ResourceExecution,
+                    TaskCapability::ExecutionVerify,
+                ],
+            )));
+            assert!(remote_state_is_executable(&task(
+                state,
+                vec![
+                    TaskCapability::SubmissionExecute,
+                    TaskCapability::SubmissionVerify,
+                ],
+            )));
+        }
     }
 
     #[test]

@@ -977,13 +977,19 @@ where
                 .execute_submission_attempt(job, task, attempt, now, correlation_id)
                 .await;
         }
-        if task.remote_state == RemoteState::Completed {
+        let verified_execution = task.capabilities.contains(&TaskCapability::ExecutionVerify);
+        if task.remote_state == RemoteState::Completed && !verified_execution {
             return self.finish_success(job, attempt, now, correlation_id).await;
         }
-        if !matches!(
+        if !(matches!(
             task.remote_state,
             RemoteState::Pending | RemoteState::InProgress
-        ) {
+        ) || verified_execution
+            && matches!(
+                task.remote_state,
+                RemoteState::Unknown | RemoteState::Completed
+            ))
+        {
             return self
                 .finish_failure(
                     job,
@@ -1013,6 +1019,29 @@ where
                     .await;
             }
         };
+        if task.remote_state == RemoteState::Completed {
+            let Some(verification) = prepared.verification.as_deref() else {
+                return self
+                    .finish_failure(
+                        job,
+                        attempt,
+                        ProviderErrorClass::UnsupportedTask,
+                        FailureDisposition::Failed,
+                        now,
+                        correlation_id,
+                    )
+                    .await;
+            };
+            return self
+                .verify_task_execution_without_mutation(
+                    job,
+                    attempt,
+                    &prepared,
+                    verification,
+                    correlation_id,
+                )
+                .await;
+        }
         self.call_provider(job, attempt, &prepared, correlation_id)
             .await
     }
@@ -1027,7 +1056,10 @@ where
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
         if !matches!(
             task.remote_state,
-            RemoteState::Pending | RemoteState::InProgress | RemoteState::Completed
+            RemoteState::Pending
+                | RemoteState::InProgress
+                | RemoteState::Completed
+                | RemoteState::Unknown
         ) {
             return self
                 .finish_failure(
@@ -1327,7 +1359,7 @@ where
         if let Some(verification) = &prepared.verification {
             return match result {
                 Ok(_) => {
-                    self.verify_task_execution(
+                    self.verify_task_execution_claimed(
                         job,
                         attempt,
                         prepared,
@@ -1393,7 +1425,27 @@ where
         }
     }
 
-    async fn verify_task_execution(
+    async fn verify_task_execution_without_mutation(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        prepared: &PreparedProviderCall,
+        verification: &(dyn TaskProgressCapability + Send + Sync),
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let _admission = self
+            .acquire_admission(
+                job,
+                attempt.execution_id,
+                &prepared.context,
+                prepared.concurrency,
+            )
+            .await?;
+        self.verify_task_execution_claimed(job, attempt, prepared, verification, correlation_id)
+            .await
+    }
+
+    async fn verify_task_execution_claimed(
         &self,
         job: &ScheduledJob,
         attempt: &ExecutionAttempt,
@@ -2670,6 +2722,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_non_idempotent_execution_runs_once_then_verifies() {
+        let fixture = Fixture::verified(ProviderBehavior::Success).await;
+        sqlx::query("UPDATE tasks SET remote_state = 'unknown'")
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn completed_non_idempotent_execution_only_verifies() {
+        let fixture = Fixture::verified(ProviderBehavior::Success).await;
+        sqlx::query("UPDATE tasks SET remote_state = 'completed'")
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn ambiguous_non_idempotent_execution_schedules_verify_only_recovery() {
         let fixture = Fixture::verified(ProviderBehavior::NetworkFailure).await;
         let outcome = fixture
@@ -2858,6 +2948,25 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(counts, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn unknown_submission_executes_once_under_its_independent_verify_contract() {
+        let fixture = Fixture::submission(ProviderBehavior::SubmissionConfirmed).await;
+        sqlx::query("UPDATE tasks SET remote_state = 'unknown'")
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]
