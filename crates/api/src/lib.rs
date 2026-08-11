@@ -165,6 +165,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(admin::get_user).put(admin::update_user),
         )
         .route(
+            "/api/v1/admin/users/{user_id}/credit-grants",
+            post(credit::grant_user_credits),
+        )
+        .route(
             "/api/v1/service-tokens/{token_id}",
             delete(auth::revoke_service_token),
         )
@@ -958,6 +962,13 @@ pub fn openapi_document() -> Value {
     document["paths"]
         .as_object_mut()
         .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/admin/users/{user_id}/credit-grants".to_owned(),
+            admin_credit_grant_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
         .insert("/api/v1/audit".to_owned(), audit_path());
     for (action, operation_id, requires_body) in [
         ("approve", "approveTask", false),
@@ -1298,6 +1309,36 @@ fn admin_user_path() -> Value {
             }
         }
     })
+}
+
+fn admin_credit_grant_path() -> Value {
+    json!({"post": {
+        "operationId": "grantUserCredits",
+        "description": "Atomically grants credit, immutable ledger transaction, sanitized Audit, Outbox event and persistent idempotency receipt. Exact retries return the original post-grant snapshot.",
+        "security": [{"cookieAuth": []}],
+        "parameters": [
+            {"name": "user_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 256}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+            "type": "object",
+            "required": ["amount", "reason"],
+            "properties": {
+                "amount": {"type": "integer", "minimum": 1, "maximum": 9_223_372_036_854_775_807_u64},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 256}
+            },
+            "additionalProperties": false
+        }}}},
+        "responses": {
+            "200": {"description": "Exact idempotent replay of the original grant result"},
+            "201": {"description": "Credit grant committed atomically"},
+            "400": {"description": "Invalid user ID, amount, reason or idempotency key"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "GrantCredits Web permission required"},
+            "404": {"description": "User not found"},
+            "409": {"description": "Idempotency key is bound to a different grant"}
+        }
+    }})
 }
 
 fn audit_path() -> Value {
@@ -5086,6 +5127,143 @@ mod tests {
         assert!(stored_hash.starts_with("$argon2id$"));
     }
 
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the credit grant API test keeps authorization, idempotency and atomic effects together"
+    )]
+    async fn master_credit_grant_is_atomic_idempotent_and_web_only() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let master_cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let member = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/admin/users")
+                    .header(header::COOKIE, &master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"username":"credit-member","password":"credit-member-password","roles":["user"],"permissions":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(member.status(), StatusCode::CREATED);
+        let member = response_json(member).await;
+        let user_id = member["id"].as_str().unwrap().to_owned();
+        let grant_path = format!("/api/v1/admin/users/{user_id}/credit-grants");
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post(&grant_path)
+                    .header(header::COOKIE, &master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", "grant-credit-member-100")
+                    .header("x-request-id", "grant-credit-member-first")
+                    .body(Body::from(r#"{"amount":100,"reason":"manual grant"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let first = response_json(first).await;
+        assert_eq!(first["created"], true);
+        assert_eq!(first["account"]["available"], 100);
+        assert_eq!(first["transaction"]["amount"], 100);
+
+        let replay = app
+            .clone()
+            .oneshot(
+                Request::post(&grant_path)
+                    .header(header::COOKIE, &master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", "grant-credit-member-100")
+                    .header("x-request-id", "grant-credit-member-retry")
+                    .body(Body::from(r#"{"amount":100,"reason":"manual grant"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = response_json(replay).await;
+        assert_eq!(replay["created"], false);
+        assert_eq!(replay["account"], first["account"]);
+        assert_eq!(replay["transaction"], first["transaction"]);
+
+        let conflict = app
+            .clone()
+            .oneshot(
+                Request::post(&grant_path)
+                    .header(header::COOKIE, &master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", "grant-credit-member-100")
+                    .body(Body::from(r#"{"amount":101,"reason":"manual grant"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+        let member_login = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 4], 41_004))))
+                    .body(Body::from(
+                        r#"{"username":"credit-member","password":"credit-member-password"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let member_cookie = member_login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let forbidden = app
+            .oneshot(
+                Request::post(&grant_path)
+                    .header(header::COOKIE, member_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", "member-self-grant")
+                    .body(Body::from(r#"{"amount":100,"reason":"self grant"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let transaction_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM credit_transactions WHERE user_id = ? AND transaction_type = 'master_grant'",
+        )
+        .bind(&user_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        let receipt_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credit_grant_receipts")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records WHERE action = 'credit_granted'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!((transaction_count, receipt_count, audit_count), (1, 1, 1));
+    }
+
     async fn execution_action_fixture() -> (
         Router,
         Database,
@@ -5410,6 +5588,7 @@ mod tests {
             "/api/v1/credits/account",
             "/api/v1/credits/transactions",
             "/api/v1/credits/reservations",
+            "/api/v1/admin/users/{user_id}/credit-grants",
             "/api/v1/executions",
             "/api/v1/executions/{execution_id}",
             "/api/v1/executions/{execution_id}/logs",
@@ -5508,6 +5687,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/credits/reservations"]["get"]["operationId"],
             "listOwnCreditReservations"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/admin/users/{user_id}/credit-grants"]["post"]["operationId"],
+            "grantUserCredits"
         );
         assert_eq!(
             document["paths"]["/api/v1/admin/tasks/{task_id}/runtime-settings"]["put"]["operationId"],

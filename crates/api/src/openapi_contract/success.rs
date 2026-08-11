@@ -84,6 +84,7 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("createAdminUser", "UserProfile"),
     ("getAdminUser", "UserProfile"),
     ("updateAdminUser", "UserProfile"),
+    ("grantUserCredits", "CreditGrantResponse"),
     ("listAuditRecords", "AuditPageResponse"),
     ("getOwnCreditAccount", "CreditAccount"),
     ("listOwnCreditTransactions", "CreditTransactionPageResponse"),
@@ -684,6 +685,17 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         ("PriceQuote", price_quote_schema()),
         ("CreditReservation", credit_reservation_schema()),
         ("CreditTransaction", credit_transaction_schema()),
+        (
+            "CreditGrantResponse",
+            object(
+                &["account", "transaction", "created"],
+                json!({
+                    "account": schema_ref("CreditAccount"),
+                    "transaction": schema_ref("CreditTransaction"),
+                    "created": {"type": "boolean"}
+                }),
+            ),
+        ),
         (
             "CreditReservationDetailResponse",
             object(

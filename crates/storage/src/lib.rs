@@ -24,7 +24,7 @@ mod user;
 pub use admin::SqliteAdminRepository;
 pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
-pub use credit::{CreditGrant, SqliteCreditRepository};
+pub use credit::{CreditGrant, CreditGrantOutcome, CreditGrantResult, SqliteCreditRepository};
 pub use database::{Database, StorageError};
 pub use execution::SqliteExecutionRepository;
 pub use lease::{LeaseAcquireOutcome, SqliteExecutionLeaseRepository};

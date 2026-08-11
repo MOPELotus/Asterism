@@ -1,9 +1,10 @@
 use std::str::FromStr;
 
 use asterism_domain::{
-    CreditAccount, CreditAmount, CreditReservation, CreditReservationId, CreditReservationState,
-    CreditTransaction, CreditTransactionId, CreditTransactionType, ExecutionId, ExecutionState,
-    PriceQuote, PriceQuoteId, TaskId, Timestamp, UserId,
+    AuditRecordId, CreditAccount, CreditAmount, CreditGrantReceiptId, CreditReservation,
+    CreditReservationId, CreditReservationState, CreditTransaction, CreditTransactionId,
+    CreditTransactionType, ExecutionId, ExecutionState, PriceQuote, PriceQuoteId, TaskId,
+    Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use async_trait::async_trait;
@@ -20,12 +21,29 @@ const MAX_CREDIT_OFFSET: u64 = 1_000_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreditGrant {
+    pub receipt_id: CreditGrantReceiptId,
     pub transaction_id: CreditTransactionId,
     pub user_id: UserId,
     pub operator_id: UserId,
     pub amount: CreditAmount,
     pub reason: String,
+    pub idempotency_key: String,
+    pub correlation_id: String,
     pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreditGrantResult {
+    pub account: CreditAccount,
+    pub transaction: CreditTransaction,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CreditGrantOutcome {
+    Applied(CreditGrantResult),
+    IdempotencyConflict,
+    UserNotFound,
 }
 
 #[derive(Clone, Debug)]
@@ -51,21 +69,77 @@ impl CreditRepository for SqliteCreditRepository {
         row.map(|row| decode_account(&row)).transpose()
     }
 
-    async fn grant(&self, grant: &CreditGrant) -> Result<CreditAccount, StorageError> {
+    async fn grant(&self, grant: &CreditGrant) -> Result<CreditGrantOutcome, StorageError> {
+        validate_credit_grant(grant)?;
         let amount = encode_amount(grant.amount)?;
         let timestamp = encode_timestamp(grant.created_at);
-        let mut transaction = self.database.pool().begin().await?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(existing) =
+            find_credit_grant_receipt(&mut transaction, grant.operator_id, &grant.idempotency_key)
+                .await?
+        {
+            if existing.user_id != grant.user_id
+                || existing.amount != grant.amount
+                || existing.reason != grant.reason
+            {
+                transaction.rollback().await?;
+                return Ok(CreditGrantOutcome::IdempotencyConflict);
+            }
+            let credit_transaction =
+                fetch_credit_transaction(&mut transaction, existing.transaction_id).await?;
+            transaction.rollback().await?;
+            return Ok(CreditGrantOutcome::Applied(CreditGrantResult {
+                account: CreditAccount {
+                    user_id: existing.user_id,
+                    available: existing.result_available,
+                    reserved: existing.result_reserved,
+                },
+                transaction: credit_transaction,
+                created: false,
+            }));
+        }
+        let user_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
+                .bind(grant.user_id.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if !user_exists {
+            transaction.rollback().await?;
+            return Ok(CreditGrantOutcome::UserNotFound);
+        }
         sqlx::query(
             "INSERT INTO credit_accounts (user_id, available, reserved, updated_at) \
-             VALUES (?, ?, 0, ?) \
-             ON CONFLICT(user_id) DO UPDATE SET \
-                 available = available + excluded.available, updated_at = excluded.updated_at",
+             VALUES (?, 0, 0, ?) ON CONFLICT(user_id) DO NOTHING",
         )
         .bind(grant.user_id.to_string())
-        .bind(amount)
         .bind(&timestamp)
         .execute(&mut *transaction)
         .await?;
+        let changed = sqlx::query(
+            "UPDATE credit_accounts SET available = available + ?, updated_at = ? \
+             WHERE user_id = ? AND available <= ?",
+        )
+        .bind(amount)
+        .bind(&timestamp)
+        .bind(grant.user_id.to_string())
+        .bind(i64::MAX - amount)
+        .execute(&mut *transaction)
+        .await?;
+        if changed.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(StorageError::CreditAmountOutOfRange);
+        }
+        let credit_transaction = CreditTransaction {
+            id: grant.transaction_id,
+            user_id: grant.user_id,
+            amount,
+            transaction_type: CreditTransactionType::MasterGrant,
+            task_id: None,
+            execution_id: None,
+            operator_id: Some(grant.operator_id),
+            reason: grant.reason.clone(),
+            created_at: grant.created_at,
+        };
         sqlx::query(
             "INSERT INTO credit_transactions \
              (id, user_id, amount, transaction_type, operator_id, reason, created_at) \
@@ -79,10 +153,31 @@ impl CreditRepository for SqliteCreditRepository {
         .bind(&timestamp)
         .execute(&mut *transaction)
         .await?;
+        let account = fetch_account(&mut transaction, grant.user_id).await?;
+        sqlx::query(
+            "INSERT INTO credit_grant_receipts \
+             (id, operator_id, idempotency_key, user_id, amount, reason, transaction_id, \
+              result_available, result_reserved, correlation_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(grant.receipt_id.to_string())
+        .bind(grant.operator_id.to_string())
+        .bind(&grant.idempotency_key)
+        .bind(grant.user_id.to_string())
+        .bind(amount)
+        .bind(&grant.reason)
+        .bind(grant.transaction_id.to_string())
+        .bind(encode_amount(account.available)?)
+        .bind(encode_amount(account.reserved)?)
+        .bind(&grant.correlation_id)
+        .bind(&timestamp)
+        .execute(&mut *transaction)
+        .await?;
+        insert_credit_grant_audit(&mut transaction, grant).await?;
         enqueue_in_transaction(
             &mut transaction,
             &EventEnvelope::at(
-                format!("credit-grant:{}", grant.transaction_id),
+                &grant.correlation_id,
                 DomainEvent::CreditGranted {
                     user_id: grant.user_id,
                     operator_id: grant.operator_id,
@@ -92,9 +187,12 @@ impl CreditRepository for SqliteCreditRepository {
             ),
         )
         .await?;
-        let account = fetch_account(&mut transaction, grant.user_id).await?;
         transaction.commit().await?;
-        Ok(account)
+        Ok(CreditGrantOutcome::Applied(CreditGrantResult {
+            account,
+            transaction: credit_transaction,
+            created: true,
+        }))
     }
 
     async fn reserve(
@@ -467,6 +565,103 @@ async fn release_active_reservation(
     fetch_account(transaction, reservation.user_id).await
 }
 
+struct StoredCreditGrantReceipt {
+    user_id: UserId,
+    amount: CreditAmount,
+    reason: String,
+    transaction_id: CreditTransactionId,
+    result_available: CreditAmount,
+    result_reserved: CreditAmount,
+}
+
+async fn find_credit_grant_receipt(
+    transaction: &mut Transaction<'_, Sqlite>,
+    operator_id: UserId,
+    idempotency_key: &str,
+) -> Result<Option<StoredCreditGrantReceipt>, StorageError> {
+    let row = sqlx::query(
+        "SELECT user_id, amount, reason, transaction_id, result_available, result_reserved \
+         FROM credit_grant_receipts WHERE operator_id = ? AND idempotency_key = ?",
+    )
+    .bind(operator_id.to_string())
+    .bind(idempotency_key)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.as_ref()
+        .map(|row| {
+            Ok(StoredCreditGrantReceipt {
+                user_id: parse_id(row.try_get("user_id")?)?,
+                amount: CreditAmount::new(decode_amount(row.try_get("amount")?)?),
+                reason: row.try_get("reason")?,
+                transaction_id: parse_id(row.try_get("transaction_id")?)?,
+                result_available: CreditAmount::new(decode_amount(
+                    row.try_get("result_available")?,
+                )?),
+                result_reserved: CreditAmount::new(decode_amount(row.try_get("result_reserved")?)?),
+            })
+        })
+        .transpose()
+}
+
+async fn fetch_credit_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    transaction_id: CreditTransactionId,
+) -> Result<CreditTransaction, StorageError> {
+    let row = sqlx::query(
+        "SELECT id, user_id, amount, transaction_type, task_id, execution_id, operator_id, \
+                reason, created_at FROM credit_transactions WHERE id = ?",
+    )
+    .bind(transaction_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    decode_transaction(&row)
+}
+
+async fn insert_credit_grant_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    grant: &CreditGrant,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'user', ?, 'credit_granted', 'user', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(grant.created_at))
+    .bind(grant.operator_id.to_string())
+    .bind(grant.user_id.to_string())
+    .bind(&grant.correlation_id)
+    .bind(serde_json::to_string(&serde_json::json!({
+        "amount": grant.amount,
+        "reason": grant.reason,
+        "transaction_id": grant.transaction_id,
+    }))?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn validate_credit_grant(grant: &CreditGrant) -> Result<(), StorageError> {
+    if grant.amount == CreditAmount::ZERO
+        || invalid_bounded_text(&grant.reason, 256)
+        || invalid_bounded_text(&grant.idempotency_key, 256)
+        || invalid_bounded_text(&grant.correlation_id, 128)
+    {
+        return Err(StorageError::InvalidData(
+            "credit grant violates persistence invariants".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_bounded_text(value: &str, max_bytes: usize) -> bool {
+    value.is_empty()
+        || value.len() > max_bytes
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+}
+
 struct ActiveReservation {
     user_id: UserId,
     amount: i64,
@@ -809,16 +1004,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_grant_is_persistently_idempotent_and_audited() {
+        let scenario = scenario().await;
+        let original = CreditGrant {
+            receipt_id: CreditGrantReceiptId::new(),
+            transaction_id: CreditTransactionId::new(),
+            user_id: scenario.user_id,
+            operator_id: scenario.operator_id,
+            amount: CreditAmount::new(100),
+            reason: "manual grant".to_owned(),
+            idempotency_key: "grant-user-100".to_owned(),
+            correlation_id: "grant-request-1".to_owned(),
+            created_at: scenario.now,
+        };
+        let CreditGrantOutcome::Applied(first) =
+            scenario.repository.grant(&original).await.unwrap()
+        else {
+            panic!("first grant must be applied");
+        };
+        assert!(first.created);
+        assert_eq!(first.account.available, CreditAmount::new(100));
+
+        let replay = CreditGrant {
+            receipt_id: CreditGrantReceiptId::new(),
+            transaction_id: CreditTransactionId::new(),
+            correlation_id: "grant-request-2".to_owned(),
+            ..original.clone()
+        };
+        let CreditGrantOutcome::Applied(replayed) =
+            scenario.repository.grant(&replay).await.unwrap()
+        else {
+            panic!("exact grant retry must replay");
+        };
+        assert!(!replayed.created);
+        assert_eq!(replayed.account, first.account);
+        assert_eq!(replayed.transaction, first.transaction);
+
+        let conflict = CreditGrant {
+            amount: CreditAmount::new(101),
+            ..replay
+        };
+        assert_eq!(
+            scenario.repository.grant(&conflict).await.unwrap(),
+            CreditGrantOutcome::IdempotencyConflict
+        );
+        for table in [
+            "credit_grant_receipts",
+            "credit_transactions",
+            "audit_records",
+            "event_outbox",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(scenario.repository.database.pool())
+                .await
+                .unwrap();
+            assert_eq!(count, 1, "unexpected {table} mutation count");
+        }
+    }
+
+    #[tokio::test]
     async fn concurrent_reservations_cannot_overspend() {
         let scenario = scenario().await;
         scenario
             .repository
             .grant(&CreditGrant {
+                receipt_id: CreditGrantReceiptId::new(),
                 transaction_id: CreditTransactionId::new(),
                 user_id: scenario.user_id,
                 operator_id: scenario.operator_id,
                 amount: CreditAmount::new(100),
                 reason: "initial".to_owned(),
+                idempotency_key: "initial-grant".to_owned(),
+                correlation_id: "initial-grant".to_owned(),
                 created_at: scenario.now,
             })
             .await
@@ -852,11 +1109,14 @@ mod tests {
         scenario
             .repository
             .grant(&CreditGrant {
+                receipt_id: CreditGrantReceiptId::new(),
                 transaction_id: CreditTransactionId::new(),
                 user_id: scenario.user_id,
                 operator_id: scenario.operator_id,
                 amount: CreditAmount::new(200),
                 reason: "initial".to_owned(),
+                idempotency_key: "initial-grant".to_owned(),
+                correlation_id: "initial-grant".to_owned(),
                 created_at: scenario.now,
             })
             .await
@@ -908,11 +1168,14 @@ mod tests {
         scenario
             .repository
             .grant(&CreditGrant {
+                receipt_id: CreditGrantReceiptId::new(),
                 transaction_id: CreditTransactionId::new(),
                 user_id: scenario.user_id,
                 operator_id: scenario.operator_id,
                 amount: CreditAmount::new(200),
                 reason: "initial".to_owned(),
+                idempotency_key: "initial-grant".to_owned(),
+                correlation_id: "initial-grant".to_owned(),
                 created_at: scenario.now,
             })
             .await
@@ -950,11 +1213,14 @@ mod tests {
         scenario
             .repository
             .grant(&CreditGrant {
+                receipt_id: CreditGrantReceiptId::new(),
                 transaction_id: CreditTransactionId::new(),
                 user_id: scenario.user_id,
                 operator_id: scenario.operator_id,
                 amount: CreditAmount::new(200),
                 reason: "initial".to_owned(),
+                idempotency_key: "initial-grant".to_owned(),
+                correlation_id: "initial-grant".to_owned(),
                 created_at: scenario.now,
             })
             .await
@@ -1059,11 +1325,14 @@ mod tests {
         scenario
             .repository
             .grant(&CreditGrant {
+                receipt_id: CreditGrantReceiptId::new(),
                 transaction_id: CreditTransactionId::new(),
                 user_id: scenario.user_id,
                 operator_id: scenario.operator_id,
                 amount: CreditAmount::new(100),
                 reason: "initial".to_owned(),
+                idempotency_key: "initial-grant".to_owned(),
+                correlation_id: "initial-grant".to_owned(),
                 created_at: scenario.now,
             })
             .await

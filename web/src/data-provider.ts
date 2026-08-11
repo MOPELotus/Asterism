@@ -18,19 +18,25 @@ import type {
 
 import "@/api/client.ts";
 import {
+  createAdminUser,
   createProviderAccount,
   deleteProviderAccount,
   getExecution,
+  getAdminUser,
   getProviderAccount,
   getTask,
   listExecutions,
+  listAdminUsers,
   listProviderAccounts,
   listProviders,
   listTasks,
   updateProviderAccount,
+  updateAdminUser,
 } from "@/api/generated/sdk.gen.ts";
 import type {
+  CreateAdminUserData,
   CreateProviderAccount,
+  UpdateAdminUserData,
   UpdateProviderAccount,
 } from "@/api/generated/types.gen.ts";
 import { ensureSuccess, requireData } from "@/api/result.ts";
@@ -74,6 +80,10 @@ export const dataProvider: DataProvider = {
         );
         return { data: page.items as unknown as TData[], total: page.total };
       }
+      case "admin-users": {
+        const page = requireData(await listAdminUsers({ query: { limit, offset } }));
+        return { data: page.items as unknown as TData[], total: page.total };
+      }
       default:
         throw new Error(`不支持的 Refine resource: ${resource}`);
     }
@@ -105,14 +115,23 @@ export const dataProvider: DataProvider = {
           data: { ...detail, id: detail.execution.id } as unknown as TData,
         };
       }
+      case "admin-users":
+        return {
+          data: requireData(await getAdminUser({ path: { user_id: value } })) as unknown as TData,
+        };
       default:
         throw new Error(`不支持的 Refine resource: ${resource}`);
     }
   },
   create: async <TData extends BaseRecord = BaseRecord, TVariables = Record<string, unknown>>({ resource, variables }: CreateParams<TVariables>): Promise<CreateResponse<TData>> => {
-    if (resource !== "provider-accounts") {
-      throw new Error(`resource ${resource} 不支持 create`);
+    if (resource === "admin-users") {
+      return {
+        data: requireData(
+          await createAdminUser({ body: variables as CreateAdminUserData["body"] }),
+        ) as unknown as TData,
+      };
     }
+    if (resource !== "provider-accounts") throw new Error(`resource ${resource} 不支持 create`);
     return {
       data: requireData(
         await createProviderAccount({ body: variables as CreateProviderAccount }),
@@ -120,9 +139,17 @@ export const dataProvider: DataProvider = {
     };
   },
   update: async <TData extends BaseRecord = BaseRecord, TVariables = Record<string, unknown>>({ resource, id, variables }: UpdateParams<TVariables>): Promise<UpdateResponse<TData>> => {
-    if (resource !== "provider-accounts") {
-      throw new Error(`resource ${resource} 不支持 update`);
+    if (resource === "admin-users") {
+      return {
+        data: requireData(
+          await updateAdminUser({
+            path: { user_id: String(id) },
+            body: variables as UpdateAdminUserData["body"],
+          }),
+        ) as unknown as TData,
+      };
     }
+    if (resource !== "provider-accounts") throw new Error(`resource ${resource} 不支持 update`);
     return {
       data: requireData(
         await updateProviderAccount({

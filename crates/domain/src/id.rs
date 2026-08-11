@@ -69,6 +69,7 @@ entity_id!(ExecutionAttemptId);
 entity_id!(ScheduleId);
 entity_id!(AutomationPlanId);
 entity_id!(PriceQuoteId);
+entity_id!(CreditGrantReceiptId);
 entity_id!(CreditTransactionId);
 entity_id!(CreditReservationId);
 entity_id!(AuthSessionId);

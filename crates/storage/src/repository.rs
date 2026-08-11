@@ -24,7 +24,9 @@ use async_trait::async_trait;
 use crate::StorageError;
 
 use crate::JobFailureDisposition;
-use crate::{CreditGrant, FailureDisposition, LeaseAcquireOutcome, OutboxRecord};
+use crate::{
+    CreditGrant, CreditGrantOutcome, FailureDisposition, LeaseAcquireOutcome, OutboxRecord,
+};
 
 /// Persistence contract consumed by task services. It intentionally contains no
 /// `SQLite` types.
@@ -915,7 +917,7 @@ pub trait OutboxRepository: Send + Sync {
 pub trait CreditRepository: Send + Sync {
     async fn account(&self, user_id: UserId) -> Result<Option<CreditAccount>, StorageError>;
 
-    async fn grant(&self, grant: &CreditGrant) -> Result<CreditAccount, StorageError>;
+    async fn grant(&self, grant: &CreditGrant) -> Result<CreditGrantOutcome, StorageError>;
 
     async fn reserve(&self, reservation: &CreditReservation)
     -> Result<CreditAccount, StorageError>;

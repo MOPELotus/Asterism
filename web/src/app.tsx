@@ -10,6 +10,7 @@ import { AppLayout } from "@/layouts/app-layout.tsx";
 import { LoginPage } from "@/pages/login-page.tsx";
 
 const CreditsPage = lazy(() => import("@/pages/credits-page.tsx").then((module) => ({ default: module.CreditsPage })));
+const AuditPage = lazy(() => import("@/pages/audit-page.tsx").then((module) => ({ default: module.AuditPage })));
 const DashboardPage = lazy(() => import("@/pages/dashboard-page.tsx").then((module) => ({ default: module.DashboardPage })));
 const ExecutionDetailPage = lazy(() => import("@/pages/execution-detail-page.tsx").then((module) => ({ default: module.ExecutionDetailPage })));
 const ExecutionsPage = lazy(() => import("@/pages/executions-page.tsx").then((module) => ({ default: module.ExecutionsPage })));
@@ -18,9 +19,11 @@ const ProviderAccountsPage = lazy(() => import("@/pages/provider-accounts-page.t
 const ProviderAccountCreatePage = lazy(() => import("@/pages/provider-account-create-page.tsx").then((module) => ({ default: module.ProviderAccountCreatePage })));
 const ProviderAccountDetailPage = lazy(() => import("@/pages/provider-account-detail-page.tsx").then((module) => ({ default: module.ProviderAccountDetailPage })));
 const RuntimeSettingsPage = lazy(() => import("@/pages/runtime-settings-page.tsx").then((module) => ({ default: module.RuntimeSettingsPage })));
+const ServiceTokensPage = lazy(() => import("@/pages/service-tokens-page.tsx").then((module) => ({ default: module.ServiceTokensPage })));
 const TasksPage = lazy(() => import("@/pages/tasks-page.tsx").then((module) => ({ default: module.TasksPage })));
 const TaskDetailPage = lazy(() => import("@/pages/task-detail-page.tsx").then((module) => ({ default: module.TaskDetailPage })));
 const AnswerWorkflowPage = lazy(() => import("@/pages/answer-workflow-page.tsx").then((module) => ({ default: module.AnswerWorkflowPage })));
+const UsersPage = lazy(() => import("@/pages/users-page.tsx").then((module) => ({ default: module.UsersPage })));
 
 export function App() {
   return (
@@ -34,6 +37,7 @@ export function App() {
           { name: "provider-accounts", list: "/provider-accounts", create: "/provider-accounts/create", show: "/provider-accounts/:id" },
           { name: "tasks", list: "/tasks", show: "/tasks/:id" },
           { name: "executions", list: "/executions", show: "/executions/:id" },
+          { name: "admin-users", list: "/admin/users" },
         ]}
         options={{
           disableTelemetry: true,
@@ -65,6 +69,9 @@ export function App() {
             <Route path="executions" element={<ExecutionsPage />} />
             <Route path="executions/:executionId" element={<ExecutionDetailPage />} />
             <Route path="credits" element={<CreditsPage />} />
+            <Route path="admin/users" element={<UsersPage />} />
+            <Route path="admin/audit" element={<AuditPage />} />
+            <Route path="admin/service-tokens" element={<ServiceTokensPage />} />
             <Route path="admin/runtime-settings" element={<RuntimeSettingsPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>

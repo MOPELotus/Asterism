@@ -192,6 +192,15 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn require_credit_grant(&self) -> Result<UserId, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } if principal.has(Permission::GrantCredits) => {
+                Ok(principal.user_id)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
     pub(super) fn require_task_execute(&self) -> Result<(UserId, RequestSource), ApiError> {
         match &self.identity {
             AuthIdentity::Web { principal, .. }

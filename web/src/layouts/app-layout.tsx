@@ -7,7 +7,10 @@ import {
   LogOut,
   PanelLeft,
   PlugZap,
+  ScrollText,
   Settings2,
+  Users,
+  KeyRound,
 } from "lucide-react";
 import { useState } from "react";
 import { NavLink, Outlet } from "react-router";
@@ -30,6 +33,8 @@ export function AppLayout() {
   const permissions = usePermissions<string[]>({});
   const logout = useLogout();
   const canManageSystem = permissions.data?.includes("manage_system") ?? false;
+  const canManageUsers = permissions.data?.includes("manage_users") ?? false;
+  const canReadAudit = permissions.data?.some((permission) => permission === "view_any_audit" || permission === "view_own_audit") ?? false;
 
   return (
     <div className="min-h-screen bg-background">
@@ -60,6 +65,9 @@ export function AppLayout() {
               onNavigate={() => setMobileOpen(false)}
             />
           ) : null}
+          {canManageUsers ? <NavItem to="/admin/users" label="用户管理" icon={Users} onNavigate={() => setMobileOpen(false)} /> : null}
+          {canReadAudit ? <NavItem to="/admin/audit" label="审计" icon={ScrollText} onNavigate={() => setMobileOpen(false)} /> : null}
+          {canManageSystem ? <NavItem to="/admin/service-tokens" label="服务令牌" icon={KeyRound} onNavigate={() => setMobileOpen(false)} /> : null}
         </nav>
         <div className="absolute inset-x-0 bottom-0 border-t p-3">
           <div className="mb-2 rounded-lg bg-muted px-3 py-2">
