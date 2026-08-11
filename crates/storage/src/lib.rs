@@ -1,5 +1,6 @@
 //! `SQLite` adapter for Asterism's repository boundary.
 
+mod admin;
 mod auth_bootstrap;
 mod auth_session;
 mod credit;
@@ -20,6 +21,7 @@ mod task;
 mod task_lifecycle;
 mod user;
 
+pub use admin::SqliteAdminRepository;
 pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
 pub use credit::{CreditGrant, SqliteCreditRepository};
@@ -32,8 +34,8 @@ pub use provider_runtime_settings::SqliteProviderRuntimeSettingsRepository;
 pub use question::SqliteQuestionSnapshotRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
-    AnswerCacheRepository, AnswerCandidateRecord, AnswerCandidateRepository,
-    AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
+    AnswerCacheRepository, AnswerCandidateRecord, AnswerCandidateRepository, AuditFilter,
+    AuditPage, AuditQueryRepository, AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, CreditQueryRepository, CreditRepository,
@@ -48,11 +50,13 @@ pub use repository::{
     ProviderRuntimeSettingsRecord, ProviderRuntimeSettingsRepository,
     ProviderRuntimeSettingsTarget, ProviderRuntimeSettingsWriteOutcome,
     ProviderRuntimeSettingsWriteRequest, QuestionSnapshot, QuestionSnapshotRepository,
-    ScanScheduleRepository, SchedulerRepository, SessionRepository, SubmissionDraftRepository,
-    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
-    TaskLifecycleMutation, TaskLifecycleMutationOutcome, TaskLifecycleReceipt,
-    TaskLifecycleRepository, TaskPage, TaskQueryRepository, TaskRepository, TaskRuntimeRepository,
-    UserRepository, VerificationRecoveryStartRequest,
+    ScanScheduleRepository, SchedulerRepository, ServiceTokenPage, ServiceTokenQueryRepository,
+    SessionRepository, SubmissionDraftRepository, SubmissionReceiptPersistRequest,
+    SubmissionResultPersistRequest, SubmissionResultRepository, TaskLifecycleMutation,
+    TaskLifecycleMutationOutcome, TaskLifecycleReceipt, TaskLifecycleRepository, TaskPage,
+    TaskQueryRepository, TaskRepository, TaskRuntimeRepository, UserAdminCreate,
+    UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate, UserAdminUpdateOutcome,
+    UserProfilePage, UserRepository, VerificationRecoveryStartRequest,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

@@ -1,6 +1,9 @@
+#![recursion_limit = "256"]
+
 //! Versioned HTTP transport for Asterism core services.
 
 mod account;
+mod admin;
 mod auth;
 mod auth_bootstrap;
 mod credit;
@@ -88,6 +91,10 @@ impl ApiState {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the versioned route table remains together for transport-surface review"
+)]
 pub fn build_router(state: ApiState) -> Router {
     let protected = Router::new()
         .route("/api/v1/auth/session", get(auth::current_identity))
@@ -144,7 +151,19 @@ pub fn build_router(state: ApiState) -> Router {
         .merge(runtime_settings_routes())
         .merge(credit_routes())
         .merge(execution_routes())
-        .route("/api/v1/service-tokens", post(auth::create_service_token))
+        .route(
+            "/api/v1/service-tokens",
+            get(auth::list_service_tokens).post(auth::create_service_token),
+        )
+        .route("/api/v1/audit", get(admin::list_audit))
+        .route(
+            "/api/v1/admin/users",
+            get(admin::list_users).post(admin::create_user),
+        )
+        .route(
+            "/api/v1/admin/users/{user_id}",
+            get(admin::get_user).put(admin::update_user),
+        )
         .route(
             "/api/v1/service-tokens/{token_id}",
             delete(auth::revoke_service_token),
@@ -591,12 +610,24 @@ pub fn openapi_document() -> Value {
                 "parameters": [{"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
                 "responses": {"200": {"description": "Owner-scoped task"}, "400": {"description": "Invalid task ID"}, "404": {"description": "Task not found"}}
             }},
-            "/api/v1/service-tokens": {"post": {
-                "operationId": "createServiceToken",
-                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
-                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateServiceToken"}}}},
-                "responses": {"200": {"description": "Scoped token created; plaintext returned once"}, "400": {"description": "Invalid request"}, "401": {"description": "Authentication required"}, "403": {"description": "Insufficient permission"}}
-            }},
+            "/api/v1/service-tokens": {
+                "get": {
+                    "operationId": "listServiceTokens",
+                    "description": "Master Web Sessions list all token metadata; delegated ServiceTokenManage identities remain owner-scoped. Plaintext and digests are never returned.",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "parameters": [
+                        {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+                        {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}
+                    ],
+                    "responses": {"200": {"description": "Paginated sanitized ServiceToken metadata"}, "400": {"description": "Invalid pagination"}, "401": {"description": "Authentication required"}, "403": {"description": "Service token management permission required"}}
+                },
+                "post": {
+                    "operationId": "createServiceToken",
+                    "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateServiceToken"}}}},
+                    "responses": {"200": {"description": "Scoped token created; plaintext returned once"}, "400": {"description": "Invalid request"}, "401": {"description": "Authentication required"}, "403": {"description": "Insufficient permission"}}
+                }
+            },
             "/api/v1/service-tokens/{token_id}": {"delete": {
                 "operationId": "revokeServiceToken",
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
@@ -913,6 +944,21 @@ pub fn openapi_document() -> Value {
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert("/api/v1/admin/users".to_owned(), admin_users_path());
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/admin/users/{user_id}".to_owned(),
+            admin_user_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert("/api/v1/audit".to_owned(), audit_path());
     for (action, operation_id, requires_body) in [
         ("approve", "approveTask", false),
         ("cancel", "cancelTask", false),
@@ -1169,6 +1215,118 @@ fn task_lifecycle_path(operation_id: &str, requires_body: bool) -> Value {
         });
     }
     json!({"post": operation})
+}
+
+fn admin_users_path() -> Value {
+    json!({
+        "get": {
+            "operationId": "listAdminUsers",
+            "description": "Lists password-free user profiles for a Web Session with ManageUsers.",
+            "security": [{"cookieAuth": []}],
+            "parameters": admin_page_parameters(),
+            "responses": {
+                "200": {"description": "Paginated password-free user profiles"},
+                "400": {"description": "Invalid pagination"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "ManageUsers Web permission required"}
+            }
+        },
+        "post": {
+            "operationId": "createAdminUser",
+            "description": "Creates one user with an Argon2id password hash, initial zero credit account, Audit and Outbox event. Plaintext password is never returned.",
+            "security": [{"cookieAuth": []}],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                "type": "object",
+                "required": ["username", "password", "roles"],
+                "properties": {
+                    "username": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "password": {"type": "string", "format": "password", "minLength": 8, "maxLength": 1024, "writeOnly": true},
+                    "status": {"$ref": "#/components/schemas/UserStatus"},
+                    "roles": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/components/schemas/Role"}},
+                    "permissions": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/components/schemas/Permission"}}
+                },
+                "additionalProperties": false
+            }}}},
+            "responses": {
+                "201": {"description": "Password-free user profile created"},
+                "400": {"description": "Invalid username, password, roles or permissions"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "ManageUsers Web permission required"},
+                "409": {"description": "Username already exists"}
+            }
+        }
+    })
+}
+
+fn admin_user_path() -> Value {
+    json!({
+        "get": {
+            "operationId": "getAdminUser",
+            "security": [{"cookieAuth": []}],
+            "parameters": [{"name": "user_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+            "responses": {
+                "200": {"description": "One password-free user profile"},
+                "400": {"description": "Invalid user ID"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "ManageUsers Web permission required"},
+                "404": {"description": "User not found"}
+            }
+        },
+        "put": {
+            "operationId": "updateAdminUser",
+            "description": "Revision-guards status, roles and explicit permissions and refuses removal of the final active Master.",
+            "security": [{"cookieAuth": []}],
+            "parameters": [{"name": "user_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                "type": "object",
+                "required": ["expected_updated_at", "status", "roles"],
+                "properties": {
+                    "expected_updated_at": {"type": "string", "format": "date-time"},
+                    "status": {"$ref": "#/components/schemas/UserStatus"},
+                    "roles": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/components/schemas/Role"}},
+                    "permissions": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/components/schemas/Permission"}}
+                },
+                "additionalProperties": false
+            }}}},
+            "responses": {
+                "200": {"description": "Updated password-free user profile"},
+                "400": {"description": "Invalid user ID, revision, roles or permissions"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "ManageUsers Web permission required"},
+                "404": {"description": "User not found"},
+                "409": {"description": "Revision conflict or final active Master safeguard"}
+            }
+        }
+    })
+}
+
+fn audit_path() -> Value {
+    let mut parameters = vec![
+        json!({"name": "action", "in": "query", "schema": {"type": "string", "minLength": 1, "maxLength": 128}}),
+        json!({"name": "resource_type", "in": "query", "schema": {"type": "string", "minLength": 1, "maxLength": 128}}),
+        json!({"name": "resource_id", "in": "query", "schema": {"type": "string", "minLength": 1, "maxLength": 128}}),
+        json!({"name": "outcome", "in": "query", "schema": {"type": "string", "minLength": 1, "maxLength": 128}}),
+    ];
+    parameters.extend(admin_page_parameters());
+    json!({"get": {
+        "operationId": "listAuditRecords",
+        "description": "Lists immutable sanitized Audit records. ViewAnyAudit sees all records; ViewOwnAudit and owner-bound AuditRead service tokens receive a non-leaking owner scope.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": parameters,
+        "responses": {
+            "200": {"description": "Paginated immutable sanitized Audit records"},
+            "400": {"description": "Invalid filter or pagination"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Audit permission or owner binding required"}
+        }
+    }})
+}
+
+fn admin_page_parameters() -> Vec<Value> {
+    vec![
+        json!({"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}}),
+        json!({"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}),
+    ]
 }
 
 fn task_detail_path() -> Value {
@@ -4749,6 +4907,185 @@ mod tests {
         assert_eq!(receipt_count, 4);
     }
 
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the end-to-end administration test keeps mutation, audit, and owner scope together"
+    )]
+    async fn user_and_audit_admin_surfaces_are_password_free_revisioned_and_scoped() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let master_cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/admin/users")
+                    .header(header::COOKIE, &master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "create-member-api")
+                    .body(Body::from(
+                        r#"{"username":"member","password":"member-password","roles":["user"],"permissions":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = response_json(created).await;
+        assert!(created.get("password_hash").is_none());
+        assert!(created.get("password").is_none());
+        let user_id = created["id"].as_str().unwrap();
+        let expected_updated_at = created["updated_at"].as_str().unwrap();
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/admin/users?limit=10&offset=0")
+                    .header(header::COOKIE, &master_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let list = response_json(list).await;
+        assert_eq!(list["total"], 2);
+        assert!(
+            list["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|profile| profile.get("password_hash").is_none())
+        );
+
+        let updated = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/api/v1/admin/users/{user_id}"))
+                    .header(header::COOKIE, &master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "suspend-member-api")
+                    .body(Body::from(
+                        json!({
+                            "expected_updated_at": expected_updated_at,
+                            "status": "active",
+                            "roles": ["user"],
+                            "permissions": ["read_providers"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(updated).await["permissions"],
+            json!(["read_providers"])
+        );
+
+        let stale = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/api/v1/admin/users/{user_id}"))
+                    .header(header::COOKIE, &master_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "stale-member-api")
+                    .body(Body::from(
+                        json!({
+                            "expected_updated_at": expected_updated_at,
+                            "status": "suspended",
+                            "roles": ["user"],
+                            "permissions": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+        let audit = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/audit?action=user_updated&limit=10&offset=0")
+                    .header(header::COOKIE, &master_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(audit.status(), StatusCode::OK);
+        let audit = response_json(audit).await;
+        assert_eq!(audit["total"], 1);
+        assert_eq!(audit["items"][0]["resource_id"], user_id);
+        assert!(audit["items"][0].get("metadata_sanitized_json").is_none());
+        assert!(audit["items"][0].get("metadata_sanitized").is_some());
+
+        let login = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 2], 41_002))))
+                    .body(Body::from(
+                        r#"{"username":"member","password":"member-password"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let member_cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/admin/users")
+                    .header(header::COOKIE, member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        let own_audit = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/audit?limit=50&offset=0")
+                    .header(header::COOKIE, member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(own_audit.status(), StatusCode::OK);
+        let own_audit = response_json(own_audit).await;
+        assert!(
+            own_audit["items"].as_array().unwrap().iter().all(|record| {
+                record["resource_id"] == user_id || record["actor_id"] == user_id
+            })
+        );
+        let stored_hash: String =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+                .bind(user_id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert!(stored_hash.starts_with("$argon2id$"));
+    }
+
     async fn execution_action_fixture() -> (
         Router,
         Database,
@@ -5218,6 +5555,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the end-to-end token test keeps delegation and cross-owner isolation together"
+    )]
     async fn service_tokens_cannot_escalate_their_own_scopes() {
         let (app, database) = test_app(false, None).await;
         let bootstrap = bootstrap(&app).await;
@@ -5236,7 +5577,7 @@ mod tests {
             .oneshot(
                 Request::post("/api/v1/service-tokens")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, &cookie)
                     .body(Body::from(
                         r#"{"name":"limited","scopes":["service_token_manage"],"expires_in_seconds":3600}"#,
                     ))
@@ -5249,6 +5590,7 @@ mod tests {
         let body = to_bytes(created.into_body(), 16 * 1024).await.unwrap();
         let created: Value = serde_json::from_slice(&body).unwrap();
         let plaintext = created["token"].as_str().unwrap().to_owned();
+        let token_id = created["metadata"]["id"].as_str().unwrap().to_owned();
         let stored_digest: Vec<u8> =
             sqlx::query_scalar("SELECT token_hash FROM service_tokens WHERE name = 'limited'")
                 .fetch_one(database.pool())
@@ -5256,6 +5598,113 @@ mod tests {
                 .unwrap();
         assert_eq!(stored_digest.len(), 32);
         assert_ne!(stored_digest, plaintext.as_bytes());
+
+        let other_master = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/admin/users")
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"username":"other-master","password":"other-master-password","roles":["master"],"permissions":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other_master.status(), StatusCode::CREATED);
+        let other_master_login = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 3], 41_003))))
+                    .body(Body::from(
+                        r#"{"username":"other-master","password":"other-master-password"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other_master_login.status(), StatusCode::OK);
+        let other_cookie = other_master_login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let foreign = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/service-tokens")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, other_cookie)
+                    .body(Body::from(
+                        r#"{"name":"foreign","scopes":["service_token_manage"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::OK);
+        let foreign = response_json(foreign).await;
+        let foreign_id = foreign["metadata"]["id"].as_str().unwrap().to_owned();
+
+        let system_list = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/service-tokens?limit=20&offset=0")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(system_list.status(), StatusCode::OK);
+        let system_list = response_json(system_list).await;
+        assert_eq!(system_list["total"], 2);
+        assert!(
+            system_list["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|token| { token.get("token").is_none() && token.get("token_hash").is_none() })
+        );
+
+        let owner_list = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/service-tokens?limit=20&offset=0")
+                    .header(header::AUTHORIZATION, format!("Bearer {plaintext}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner_list.status(), StatusCode::OK);
+        let owner_list = response_json(owner_list).await;
+        assert_eq!(owner_list["total"], 1);
+        assert_eq!(owner_list["items"][0]["id"], token_id);
+
+        let foreign_revoke = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/service-tokens/{foreign_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {plaintext}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign_revoke.status(), StatusCode::NOT_FOUND);
+        let foreign_revoked_at: Option<String> =
+            sqlx::query_scalar("SELECT revoked_at FROM service_tokens WHERE id = ?")
+                .bind(&foreign_id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert!(foreign_revoked_at.is_none());
 
         let escalation = app
             .clone()

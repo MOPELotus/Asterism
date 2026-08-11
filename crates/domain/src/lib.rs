@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod answer_resolution;
+pub mod audit;
 pub mod auth;
 pub mod auth_bootstrap;
 pub mod auth_bootstrap_event;
@@ -19,6 +20,7 @@ pub use answer_resolution::{
     AnswerResolutionDecision, AnswerResolutionPlan, AnswerResolutionStatus,
     AnswerResolutionValidationError,
 };
+pub use audit::AuditRecord;
 pub use auth::{
     AuditActor, AuthMethod, AuthSession, AuthSessionError, AuthState, HumanRequiredReason,
     ServiceScope, ServiceToken, SessionKind, WaitingUserState, WebSession,
@@ -59,7 +61,7 @@ pub use task::{
     AssessmentClass, OrchestrationState, RemoteState, SourceType, Task, TaskCapability,
     TaskDiffKind, TaskLifecycleAction, TaskSnapshot, classify_task_changes,
 };
-pub use user::{Permission, QqIdentity, Role, User, UserStatus};
+pub use user::{Permission, QqIdentity, Role, User, UserProfile, UserStatus};
 
 /// UTC timestamp used by all persisted and externally visible domain objects.
 pub type Timestamp = chrono::DateTime<chrono::Utc>;

@@ -9,7 +9,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction};
 
-use crate::{Database, SessionRepository, SqliteUserRepository, StorageError, UserRepository};
+use crate::{
+    Database, ServiceTokenPage, ServiceTokenQueryRepository, SessionRepository,
+    SqliteUserRepository, StorageError, UserRepository,
+};
+
+const MAX_SERVICE_TOKEN_PAGE_SIZE: u32 = 200;
+const MAX_SERVICE_TOKEN_OFFSET: u64 = 1_000_000;
 
 #[derive(Clone, Debug)]
 pub struct SqliteSessionRepository {
@@ -234,6 +240,67 @@ impl SessionRepository for SqliteSessionRepository {
         }
         transaction.commit().await?;
         Ok(revoked)
+    }
+}
+
+#[async_trait]
+impl ServiceTokenQueryRepository for SqliteSessionRepository {
+    async fn list_service_tokens(
+        &self,
+        owner_scope: Option<asterism_domain::UserId>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<ServiceTokenPage, StorageError> {
+        if limit == 0 || limit > MAX_SERVICE_TOKEN_PAGE_SIZE || offset > MAX_SERVICE_TOKEN_OFFSET {
+            return Err(StorageError::InvalidData(
+                "service token pagination is outside the supported range".to_owned(),
+            ));
+        }
+        let owner = owner_scope.map(|id| id.to_string());
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM service_tokens WHERE (? IS NULL OR owner_user_id = ?)",
+        )
+        .bind(&owner)
+        .bind(&owner)
+        .fetch_one(self.database.pool())
+        .await?;
+        let rows = sqlx::query(
+            "SELECT id, owner_user_id, name, scopes_json, created_at, expires_at, revoked_at, \
+                    last_used_at FROM service_tokens \
+             WHERE (? IS NULL OR owner_user_id = ?) \
+             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(&owner)
+        .bind(&owner)
+        .bind(i64::from(limit))
+        .bind(i64::try_from(offset).expect("validated service token offset fits i64"))
+        .fetch_all(self.database.pool())
+        .await?;
+        Ok(ServiceTokenPage {
+            items: rows
+                .iter()
+                .map(decode_service_token)
+                .collect::<Result<_, _>>()?,
+            total: u64::try_from(total).map_err(|_| {
+                StorageError::InvalidData("service token count is invalid".to_owned())
+            })?,
+        })
+    }
+
+    async fn find_service_token(
+        &self,
+        token_id: ServiceTokenId,
+    ) -> Result<Option<ServiceToken>, StorageError> {
+        sqlx::query(
+            "SELECT id, owner_user_id, name, scopes_json, created_at, expires_at, revoked_at, \
+                    last_used_at FROM service_tokens WHERE id = ?",
+        )
+        .bind(token_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?
+        .as_ref()
+        .map(decode_service_token)
+        .transpose()
     }
 }
 

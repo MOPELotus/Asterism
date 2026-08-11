@@ -4,7 +4,7 @@
 use asterism_domain::{
     AuthSessionId, AuthState, CreditAmount, EventId, ExecutionId, ExecutionLogEvent,
     ExecutionProgress, HumanRequiredReason, OrchestrationState, TaskDiffKind, TaskId,
-    TaskLifecycleAction, Timestamp, UserId,
+    TaskLifecycleAction, Timestamp, UserId, UserStatus,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,10 @@ pub enum DomainEvent {
         state: OrchestrationState,
         delayed_until: Option<Timestamp>,
         affected_execution_id: Option<ExecutionId>,
+    },
+    UserChanged {
+        user_id: UserId,
+        status: UserStatus,
     },
     ExecutionStateChanged {
         execution_id: ExecutionId,

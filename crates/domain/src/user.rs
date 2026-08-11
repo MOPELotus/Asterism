@@ -50,6 +50,33 @@ pub struct User {
     pub updated_at: Timestamp,
 }
 
+/// Password-free representation used by administration and integration
+/// surfaces. Authentication hashes never cross this boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UserProfile {
+    pub id: UserId,
+    pub username: String,
+    pub status: UserStatus,
+    pub roles: Vec<Role>,
+    pub permissions: Vec<Permission>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+impl From<&User> for UserProfile {
+    fn from(user: &User) -> Self {
+        Self {
+            id: user.id,
+            username: user.username.clone(),
+            status: user.status,
+            roles: user.roles.clone(),
+            permissions: user.permissions.clone(),
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QqIdentity {
     pub user_id: UserId,

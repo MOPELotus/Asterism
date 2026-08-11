@@ -2,16 +2,17 @@ use std::collections::BTreeMap;
 
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor, AuthBootstrapClientEvent,
-    AuthBootstrapSession, AuthBootstrapSessionId, AuthSession, AuthSessionId, CreditAccount,
-    CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId, Execution,
-    ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent,
-    ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote,
-    ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
-    Question, QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken,
-    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
-    SubmissionResultId, Task, TaskActionReceiptId, TaskId, TaskLifecycleAction, Timestamp, User,
-    UserId, WebSession, WebSessionId,
+    AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor, AuditRecord,
+    AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId, AuthSession,
+    AuthSessionId, CreditAccount, CreditReservation, CreditReservationId, CreditTransaction,
+    CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId, ExecutionId,
+    ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, LogLevel,
+    OrchestrationState, PriceQuote, ProviderAccount, ProviderAccountId, ProviderErrorClass,
+    ProviderId, ProviderRuntimeSettingsId, Question, QuestionContentFingerprint,
+    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
+    SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
+    TaskActionReceiptId, TaskId, TaskLifecycleAction, Timestamp, User, UserId, UserProfile,
+    UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -540,6 +541,92 @@ pub trait UserRepository: Send + Sync {
     async fn save_user(&self, user: &User) -> Result<(), StorageError>;
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserProfilePage {
+    pub items: Vec<UserProfile>,
+    pub total: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct UserAdminCreate<'a> {
+    pub user: &'a User,
+    pub actor: AuditActor,
+    pub correlation_id: &'a str,
+}
+
+#[derive(Clone, Debug)]
+pub struct UserAdminUpdate<'a> {
+    pub user_id: UserId,
+    pub expected_updated_at: Timestamp,
+    pub status: UserStatus,
+    pub roles: &'a [asterism_domain::Role],
+    pub permissions: &'a [asterism_domain::Permission],
+    pub actor: AuditActor,
+    pub correlation_id: &'a str,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UserAdminCreateOutcome {
+    Created(UserProfile),
+    UsernameConflict,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UserAdminUpdateOutcome {
+    Updated(UserProfile),
+    UserNotFound,
+    RevisionConflict,
+    LastActiveMaster,
+}
+
+#[async_trait]
+pub trait UserAdminRepository: Send + Sync {
+    async fn list_user_profiles(
+        &self,
+        limit: u32,
+        offset: u64,
+    ) -> Result<UserProfilePage, StorageError>;
+
+    async fn find_user_profile(&self, user_id: UserId)
+    -> Result<Option<UserProfile>, StorageError>;
+
+    async fn create_user(
+        &self,
+        request: UserAdminCreate<'_>,
+    ) -> Result<UserAdminCreateOutcome, StorageError>;
+
+    async fn update_user(
+        &self,
+        request: UserAdminUpdate<'_>,
+    ) -> Result<UserAdminUpdateOutcome, StorageError>;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AuditFilter {
+    pub action: Option<String>,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub outcome: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuditPage {
+    pub items: Vec<AuditRecord>,
+    pub total: u64,
+}
+
+#[async_trait]
+pub trait AuditQueryRepository: Send + Sync {
+    async fn list_audit_records(
+        &self,
+        owner_scope: Option<UserId>,
+        filter: &AuditFilter,
+        limit: u32,
+        offset: u64,
+    ) -> Result<AuditPage, StorageError>;
+}
+
 #[async_trait]
 pub trait ExecutionLeaseRepository: Send + Sync {
     async fn try_acquire(
@@ -1003,4 +1090,25 @@ pub trait SessionRepository: Send + Sync {
         at: Timestamp,
         actor: AuditActor,
     ) -> Result<bool, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceTokenPage {
+    pub items: Vec<ServiceToken>,
+    pub total: u64,
+}
+
+#[async_trait]
+pub trait ServiceTokenQueryRepository: Send + Sync {
+    async fn list_service_tokens(
+        &self,
+        owner_scope: Option<UserId>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<ServiceTokenPage, StorageError>;
+
+    async fn find_service_token(
+        &self,
+        token_id: ServiceTokenId,
+    ) -> Result<Option<ServiceToken>, StorageError>;
 }

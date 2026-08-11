@@ -61,6 +61,7 @@ Phase 0 已建立并持续完善以下基础：
 - owner-scoped 且带持久幂等回执的 Task 批准、取消、延迟、忽略 Core Action；批准只释放编排等待态而不绕过正式测评保护，延迟同步更新 Execution/Job，取消只接受未领取的远端工作并原子撤销 Job、Execution 与积分预留；
 - 点数 grant / reserve / commit / release 流程、不可变流水，以及 Quote + Reserve + Execution 原子调度边界；
 - SecretStore 抽象、Argon2id 密码、服务端 Session、scoped Service Token 与登录限速；
+- password/hash 永不出管理边界、带 revision 冲突检测和最后活跃 Master 保护的用户管理 API，以及按权限全局/owner 隔离的脱敏 Audit 查询；Service Token 增加仅返回元数据的分页管理面，owner-bound 管理令牌只能列出、派生和撤销同一 owner 的令牌；
 - 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；OpenAPI 统一声明稳定错误响应、`X-Request-ID` 与限流 `Retry-After`，并以契约测试校验 operationId、路径参数、请求体、响应及本地 `$ref` 的客户端生成完整性；除明确后置的 Capture/Bootstrap 外，健康/认证、Provider 管理与 scan report、Master 分层运行设置、credit、任务/执行/SSE、题目/候选/解析计划及 Submission Draft/Result 等主管理面均已声明强类型成功响应，并由离线 Rust 导出、固定版本 Hey API SDK 生成、关键类型断言和 strict TypeScript 编译组成 CI 闭环；
 - Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；

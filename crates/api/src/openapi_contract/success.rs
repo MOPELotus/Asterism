@@ -80,6 +80,11 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("cancelTask", "TaskLifecycleResponse"),
     ("delayTask", "TaskLifecycleResponse"),
     ("ignoreTask", "TaskLifecycleResponse"),
+    ("listAdminUsers", "UserProfilePageResponse"),
+    ("createAdminUser", "UserProfile"),
+    ("getAdminUser", "UserProfile"),
+    ("updateAdminUser", "UserProfile"),
+    ("listAuditRecords", "AuditPageResponse"),
     ("getOwnCreditAccount", "CreditAccount"),
     ("listOwnCreditTransactions", "CreditTransactionPageResponse"),
     ("listOwnCreditReservations", "CreditReservationPageResponse"),
@@ -87,6 +92,7 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("getExecution", "ExecutionDetailResponse"),
     ("listExecutionLogs", "ExecutionLogPageResponse"),
     ("createServiceToken", "CreateServiceTokenResponse"),
+    ("listServiceTokens", "ServiceTokenPageResponse"),
 ];
 
 #[cfg(test)]
@@ -185,6 +191,66 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             ),
         ),
         (
+            "UserStatus",
+            json!({"type": "string", "enum": ["active", "suspended", "disabled"]}),
+        ),
+        (
+            "UserProfile",
+            object(
+                &[
+                    "id",
+                    "username",
+                    "status",
+                    "roles",
+                    "permissions",
+                    "created_at",
+                    "updated_at",
+                ],
+                json!({
+                    "id": uuid(),
+                    "username": string(),
+                    "status": schema_ref("UserStatus"),
+                    "roles": {"type": "array", "uniqueItems": true, "items": schema_ref("Role")},
+                    "permissions": {"type": "array", "uniqueItems": true, "items": schema_ref("Permission")},
+                    "created_at": timestamp(),
+                    "updated_at": timestamp()
+                }),
+            ),
+        ),
+        ("UserProfilePageResponse", page_response("UserProfile")),
+        (
+            "AuditRecord",
+            object(
+                &[
+                    "id",
+                    "occurred_at",
+                    "actor_type",
+                    "actor_id",
+                    "action",
+                    "resource_type",
+                    "resource_id",
+                    "request_id",
+                    "correlation_id",
+                    "outcome",
+                    "metadata_sanitized",
+                ],
+                json!({
+                    "id": uuid(),
+                    "occurred_at": timestamp(),
+                    "actor_type": string(),
+                    "actor_id": nullable_string(),
+                    "action": string(),
+                    "resource_type": string(),
+                    "resource_id": nullable_string(),
+                    "request_id": nullable_string(),
+                    "correlation_id": nullable_string(),
+                    "outcome": string(),
+                    "metadata_sanitized": {}
+                }),
+            ),
+        ),
+        ("AuditPageResponse", page_response("AuditRecord")),
+        (
             "LoginResponse",
             object(
                 &["user", "expires_at"],
@@ -245,6 +311,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 }),
             ),
         ),
+        ("ServiceTokenPageResponse", page_response("ServiceToken")),
         (
             "VerificationLevel",
             string_enum(&[

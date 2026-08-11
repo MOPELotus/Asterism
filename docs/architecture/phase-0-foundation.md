@@ -2899,3 +2899,30 @@ controls, preserves idempotency keys across retries, and clearly separates
 orchestration approval from the formal-assessment safety barrier. Storage,
 Engine and HTTP regressions cover replay, waiting-state bypass prevention,
 atomic delay, atomic cancellation/refund and claimed-job refusal.
+
+## One-hundred-and-seventy-third Phase 0 slice
+
+The shared administration boundary now exposes password-free `UserProfile`
+records rather than serializing the authentication `User` model. Master Web
+Sessions can page, create, read and revision-update users through versioned
+routes; username uniqueness, Argon2id hashing, roles, explicit permissions and
+the zero-balance credit account are committed atomically. Updates compare the
+client's exact `updated_at` revision and refuse to suspend, disable or demote
+the final active Master.
+
+Every accepted user mutation writes one sanitized Audit record and a
+`UserChanged` outbox event in the same transaction. Audit queries use an
+explicit authority: `ViewAnyAudit` sees the global log, while ordinary
+`ViewOwnAudit` Web identities and owner-bound `AuditRead` service identities
+see only their user actor, owned service-token actors and resources targeting
+that owner. Authentication hashes, plaintext passwords and unsanitized
+metadata never enter an administration or audit response.
+
+Service-token management now has a paginated metadata-only list route. A
+Master Web Session can manage the complete set; a delegated owner-bound token
+with `ServiceTokenManage` can list, derive and revoke only tokens owned by the
+same user. Foreign token IDs are hidden as not found and checked before the
+revocation transaction, closing the previous cross-owner ID authorization
+gap. OpenAPI declares strong page/profile/audit schemas, and storage plus HTTP
+regressions prove optimistic concurrency, final-Master protection, password
+redaction, Audit scoping, token-scope non-escalation and cross-owner isolation.

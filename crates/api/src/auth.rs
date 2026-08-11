@@ -7,12 +7,15 @@ use asterism_domain::{
 };
 use asterism_secrets::{SecretActor, SecretString};
 use asterism_storage::{
-    InitialMaster, SessionRepository, SqliteSessionRepository, SqliteUserRepository, StorageError,
-    UserRepository,
+    InitialMaster, ServiceTokenQueryRepository, SessionRepository, SqliteSessionRepository,
+    SqliteUserRepository, StorageError, UserRepository,
 };
 use axum::{
     Extension, Json,
-    extract::{ConnectInfo, Path, Request, State, rejection::JsonRejection},
+    extract::{
+        ConnectInfo, Path, Query, Request, State, rejection::JsonRejection,
+        rejection::QueryRejection,
+    },
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -44,6 +47,18 @@ enum AuthIdentity {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProviderSettingsAuthority {
+    System,
+    Owner(UserId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AuditAuthority {
+    Any,
+    Owner(UserId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ServiceTokenAuthority {
     System,
     Owner(UserId),
 }
@@ -198,6 +213,33 @@ impl AuthContext {
         }
     }
 
+    pub(super) fn require_user_manage(&self) -> Result<UserId, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } if principal.has(Permission::ManageUsers) => {
+                Ok(principal.user_id)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
+    pub(super) fn require_audit_read(&self) -> Result<AuditAuthority, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } if principal.has(Permission::ViewAnyAudit) => {
+                Ok(AuditAuthority::Any)
+            }
+            AuthIdentity::Web { principal, .. } if principal.has(Permission::ViewOwnAudit) => {
+                Ok(AuditAuthority::Owner(principal.user_id))
+            }
+            AuthIdentity::Service(token) if token.scopes.contains(&ServiceScope::AuditRead) => {
+                token
+                    .owner_user_id
+                    .map(AuditAuthority::Owner)
+                    .ok_or_else(ApiError::forbidden)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
     fn require_service_token_creation(
         &self,
         requested_scopes: &BTreeSet<ServiceScope>,
@@ -213,6 +255,23 @@ impl AuthContext {
                 Ok(())
             }
             AuthIdentity::Service(_) => Err(ApiError::forbidden()),
+        }
+    }
+
+    fn require_service_token_manage(&self) -> Result<ServiceTokenAuthority, ApiError> {
+        match &self.identity {
+            AuthIdentity::Web { principal, .. } if principal.has(Permission::ManageSystem) => {
+                Ok(ServiceTokenAuthority::System)
+            }
+            AuthIdentity::Service(token)
+                if token.scopes.contains(&ServiceScope::ServiceTokenManage) =>
+            {
+                token
+                    .owner_user_id
+                    .map(ServiceTokenAuthority::Owner)
+                    .ok_or_else(ApiError::forbidden)
+            }
+            AuthIdentity::Web { .. } | AuthIdentity::Service(_) => Err(ApiError::forbidden()),
         }
     }
 }
@@ -419,20 +478,69 @@ pub(super) async fn create_service_token(
     ))
 }
 
+pub(super) async fn list_service_tokens(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    query: Result<Query<ServiceTokenListQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let authority = auth.require_service_token_manage()?;
+    let query = query.map(|Query(query)| query).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_service_token_query",
+            "service token query parameters are invalid",
+        )
+    })?;
+    let limit = query.limit.unwrap_or(50);
+    let offset = query.offset.unwrap_or_default();
+    if limit == 0 || limit > 200 || offset > 1_000_000 {
+        return Err(ApiError::bad_request(
+            "invalid_service_token_pagination",
+            "limit must be 1-200 and offset must not exceed 1000000",
+        ));
+    }
+    let owner_scope = match authority {
+        ServiceTokenAuthority::System => None,
+        ServiceTokenAuthority::Owner(user_id) => Some(user_id),
+    };
+    let page = SqliteSessionRepository::new(state.database)
+        .list_service_tokens(owner_scope, limit, offset)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(no_store(
+        Json(ServiceTokenPageResponse {
+            items: page.items,
+            total: page.total,
+            limit,
+            offset,
+        })
+        .into_response(),
+    ))
+}
+
 pub(super) async fn revoke_service_token(
     State(state): State<ApiState>,
     Extension(auth): Extension<AuthContext>,
     Path(token_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    auth.require(
-        Permission::ManageSystem,
-        Some(ServiceScope::ServiceTokenManage),
-    )?;
+    let authority = auth.require_service_token_manage()?;
     let token_id = ServiceTokenId::from_str(&token_id).map_err(|_| {
         ApiError::bad_request("invalid_service_token_id", "service token ID is invalid")
     })?;
+    let repository = SqliteSessionRepository::new(state.database);
+    let token = repository
+        .find_service_token(token_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|token| match authority {
+            ServiceTokenAuthority::System => true,
+            ServiceTokenAuthority::Owner(owner_id) => token.owner_user_id == Some(owner_id),
+        })
+        .ok_or_else(|| ApiError::not_found("service_token_not_found"))?;
+    if token.revoked_at.is_some() {
+        return Err(ApiError::not_found("service_token_not_found"));
+    }
     let actor = auth.audit_actor();
-    let revoked = SqliteSessionRepository::new(state.database)
+    let revoked = repository
         .revoke_service_token(token_id, Utc::now(), actor)
         .await
         .map_err(ApiError::internal)?;
@@ -503,7 +611,7 @@ fn api_json<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     })
 }
 
-fn validate_username(username: &str) -> Result<&str, ApiError> {
+pub(super) fn validate_username(username: &str) -> Result<&str, ApiError> {
     let username = username.trim();
     if username.is_empty()
         || username.len() > MAX_USERNAME_BYTES
@@ -518,7 +626,10 @@ fn validate_username(username: &str) -> Result<&str, ApiError> {
     }
 }
 
-fn validate_password(password: &SecretString, require_minimum: bool) -> Result<(), ApiError> {
+pub(super) fn validate_password(
+    password: &SecretString,
+    require_minimum: bool,
+) -> Result<(), ApiError> {
     let length = password.expose_secret().len();
     let minimum = if require_minimum {
         MIN_PASSWORD_BYTES
@@ -683,6 +794,21 @@ struct CreateServiceTokenResponse {
     /// Returned once. Only its digest is stored.
     token: String,
     metadata: ServiceToken,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ServiceTokenListQuery {
+    limit: Option<u32>,
+    offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ServiceTokenPageResponse {
+    items: Vec<ServiceToken>,
+    total: u64,
+    limit: u32,
+    offset: u64,
 }
 
 impl fmt::Debug for CreateServiceTokenResponse {
