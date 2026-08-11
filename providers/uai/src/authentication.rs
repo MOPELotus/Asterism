@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{AuthMethod, HumanRequiredReason, SessionKind, WaitingUserState};
+use asterism_domain::{AuthMethod, HumanRequiredReason, SessionKind, Timestamp, WaitingUserState};
 use asterism_provider_api::{
     AuthChallenge, AuthenticationCapability, CredentialReplacement, CredentialValidation,
     ProviderAuthContext, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
@@ -11,6 +11,7 @@ use asterism_secrets::{
     SecretValue,
 };
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -28,6 +29,7 @@ const MAX_SESSION_DOCUMENT_BYTES: usize = 96 * 1_024;
 pub struct UaiJwtSession {
     open_id: SecretString,
     authorization: SecretString,
+    expires_at: Option<Timestamp>,
 }
 
 impl UaiJwtSession {
@@ -44,9 +46,11 @@ impl UaiJwtSession {
             jwt.zeroize();
             return Err(invalid_credential_shape());
         }
+        let expires_at = jwt_expiry(&jwt);
         Ok(Self {
             open_id: SecretString::new(open_id),
             authorization: SecretString::new(jwt),
+            expires_at,
         })
     }
 
@@ -75,6 +79,14 @@ impl UaiJwtSession {
     /// Exposes the open ID only to bounded account-scoped routes.
     pub fn expose_open_id(&self) -> &str {
         self.open_id.expose_secret()
+    }
+
+    /// Returns the standard JWT expiry claim when it can be decoded. The
+    /// claim is only a conservative lifecycle hint; native user-info remains
+    /// the authority for session validity.
+    #[must_use]
+    pub fn expires_at(&self) -> Option<Timestamp> {
+        self.expires_at
     }
 
     pub(crate) fn to_secret_value(&self) -> ProviderResult<SecretValue> {
@@ -202,7 +214,7 @@ impl UaiAuthentication {
             .await?;
         self.transport.validate_jwt(&session).await?;
         Ok(CredentialValidation {
-            status: valid_session(SessionKind::Composite),
+            status: valid_session(SessionKind::Composite, session.expires_at()),
             replacement: Some(CredentialReplacement {
                 session_kind: SessionKind::Composite,
                 fields: vec![
@@ -238,6 +250,7 @@ impl UaiAuthentication {
         self.transport.validate_jwt(&session).await?;
         Ok(CredentialValidation::accepted(valid_session(
             SessionKind::Jwt,
+            session.expires_at(),
         )))
     }
 }
@@ -321,14 +334,18 @@ impl AuthenticationCapability for UaiAuthentication {
             }
             Err(error) => return Err(error),
         };
-        match self.transport.validate_jwt(&session).await {
+        let session = match self.transport.validate_jwt(&session).await {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 let session = self.sessions.renew_session(context).await?;
                 self.transport.validate_jwt(&session).await?;
+                session
             }
-            result => result?,
-        }
-        Ok(valid_session(SessionKind::Jwt))
+            result => {
+                result?;
+                session
+            }
+        };
+        Ok(valid_session(SessionKind::Jwt, session.expires_at()))
     }
 }
 
@@ -454,11 +471,27 @@ fn valid_jwt(value: &str) -> bool {
     )
 }
 
-fn valid_session(kind: SessionKind) -> SessionStatus {
+fn jwt_expiry(value: &str) -> Option<Timestamp> {
+    let payload = value.split('.').nth(1)?;
+    let mut decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims = serde_json::from_slice::<JwtExpiryClaims>(&decoded).ok();
+    decoded.zeroize();
+    claims?
+        .exp
+        .and_then(|seconds| Timestamp::from_timestamp(seconds, 0))
+}
+
+#[derive(Deserialize)]
+struct JwtExpiryClaims {
+    #[serde(default)]
+    exp: Option<i64>,
+}
+
+fn valid_session(kind: SessionKind, expires_at: Option<Timestamp>) -> SessionStatus {
     SessionStatus {
         valid: true,
         kind,
-        expires_at: None,
+        expires_at,
         account_hint: None,
     }
 }
@@ -576,6 +609,31 @@ mod tests {
         );
         assert!(UaiJwtSession::try_new("bad/open", "a.b.c").is_err());
         assert!(UaiJwtSession::try_new("open", "not-a-jwt").is_err());
+    }
+
+    #[test]
+    fn standard_jwt_expiry_is_a_bounded_session_hint_only() {
+        let expiry_seconds = 4_102_444_800;
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{expiry_seconds}}}"#));
+        let session = UaiJwtSession::try_new(
+            "synthetic-open-id",
+            format!("{header}.{payload}.synthetic-signature"),
+        )
+        .unwrap();
+        let expires_at = Timestamp::from_timestamp(expiry_seconds, 0).unwrap();
+        assert_eq!(session.expires_at(), Some(expires_at));
+        assert_eq!(
+            valid_session(SessionKind::Jwt, session.expires_at()).expires_at,
+            Some(expires_at)
+        );
+
+        let opaque = UaiJwtSession::try_new(
+            "synthetic-open-id",
+            "SAFE_HEADER.SAFE_PAYLOAD.SAFE_SIGNATURE",
+        )
+        .unwrap();
+        assert_eq!(opaque.expires_at(), None);
     }
 
     #[tokio::test]

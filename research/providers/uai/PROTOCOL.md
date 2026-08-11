@@ -47,7 +47,11 @@ collapse concurrent refreshes. A fresh Password exchange must pass user-info
 validation before Core compare-and-replaces the complete credential set.
 Authentication and every read operation retry at most once. ManualImport+Jwt
 sessions, incomplete metadata and stale credential versions cannot renew. JWT
-expiry extraction remains pending.
+standard `exp` is decoded only as a conservative lifecycle hint after the
+native user-info authority accepts the token. Native Password credentials may
+be resolved after that hint expires solely for an atomic re-login; imported
+sessions still cannot renew. Renewed-session cache entries are evicted at JWT
+expiry even when their short cache TTL has not elapsed.
 
 The complete Development Provider factory shares one resolved network policy and
 one account-scoped stored-session resolver across Authentication,

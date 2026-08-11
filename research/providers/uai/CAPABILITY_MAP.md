@@ -2,8 +2,8 @@
 
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
-| Authentication | AutoFinish + UnipusHelperPro | Reference | Password/ImportedToken orchestration, strict login-envelope classification, native Password exchange and atomic openid/JWT CompositeSession are offline/native-boundary covered |
-| Stored session validation | User-info and Course-list reads | FromScratch | Core provider-scoped resolver accepts only exact unexpired native Composite or manual JWT metadata; native Composite can renew atomically after user-info validation, manual JWT cannot |
+| Authentication | AutoFinish + UnipusHelperPro | Reference | Password/ImportedToken orchestration, strict login-envelope classification, native Password exchange, standard JWT-expiry hint and atomic openid/JWT CompositeSession are offline/native-boundary covered |
+| Stored session validation | User-info and Course-list reads | FromScratch | Core provider-scoped resolver accepts only exact unexpired native Composite or manual JWT metadata; expired native Composite can use its complete Password set only for atomic user-info-validated renewal, while manual JWT cannot renew |
 | CourseInventory | AutoFinish + UnipusHelperPro | Reference | Native authenticated Course list plus bounded Course → CourseResource flattening are offline/native-boundary covered |
 | TaskInventory | AutoFinish + UnipusHelperPro | Reference | Native fresh resource-detail/tree reads plus bounded nested Course JSON → Unit/Section/Node/Group parser are offline/native-boundary covered |
 | TaskDetail | Asterism Core + both backend donors | FromScratch | Re-lists CourseResources and re-runs fresh detail/tree inventory before returning one exact identity-bound Group detail |

@@ -92,9 +92,15 @@ impl StoredUaiSessionResolver {
         context: &ProviderContext,
     ) -> ProviderResult<Option<UaiJwtSession>> {
         let now = Instant::now();
+        let wall_clock = Utc::now();
         let mut sessions = self.renewed_sessions.lock().await;
-        sessions
-            .retain(|_, cached| now.duration_since(cached.cached_at) < RENEWED_SESSION_CACHE_TTL);
+        sessions.retain(|_, cached| {
+            now.duration_since(cached.cached_at) < RENEWED_SESSION_CACHE_TTL
+                && cached
+                    .session
+                    .expires_at()
+                    .is_none_or(|expires_at| expires_at > wall_clock)
+        });
         sessions
             .get(&renewed_session_key(context))
             .map(|cached| clone_session(&cached.session))
@@ -263,7 +269,6 @@ fn validate_renewal_credentials(
                 || !context
                     .credential_refs
                     .contains(&resolved.credential.secret.id)
-                || resolved.credential.is_expired_at(Utc::now())
         })
         || credentials.iter().enumerate().any(|(index, resolved)| {
             credentials[..index]
@@ -317,7 +322,7 @@ fn renewed_bundle(
         auth_method: AuthMethod::Password,
         acquired_via: CredentialAcquisition::NativeProviderLogin,
         captured_at: Utc::now(),
-        expires_at: None,
+        expires_at: session.expires_at(),
         session_kind: SessionKind::Composite,
         fields: vec![
             CredentialField {
@@ -371,6 +376,7 @@ mod tests {
         ProviderCredential, ProviderCredentialRenewal, ProviderCredentialRenewer,
         ResolvedProviderCredential, SecretRef, SecretValue,
     };
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
     use super::*;
 
@@ -398,6 +404,7 @@ mod tests {
     #[derive(Debug)]
     struct RenewalCredentialResolver {
         native: bool,
+        expired: bool,
         resolutions: AtomicUsize,
     }
 
@@ -425,6 +432,7 @@ mod tests {
             } else {
                 (SessionKind::Jwt, CredentialAcquisition::ManualImport)
             };
+            let expires_at = self.expired.then(Timestamp::default);
             Ok(vec![
                 resolved_credential(
                     request.provider_account_id,
@@ -432,7 +440,7 @@ mod tests {
                     SecretPurpose::ProviderUsername,
                     kind,
                     acquired_via,
-                    None,
+                    expires_at,
                     b"test-user",
                 ),
                 resolved_credential(
@@ -441,7 +449,7 @@ mod tests {
                     SecretPurpose::ProviderPassword,
                     kind,
                     acquired_via,
-                    None,
+                    expires_at,
                     b"test-password",
                 ),
                 resolved_credential(
@@ -450,7 +458,7 @@ mod tests {
                     SecretPurpose::ProviderCompositeSession,
                     kind,
                     acquired_via,
-                    None,
+                    expires_at,
                     br#"{"openid":"old-open-id","jwt":"OLD.HEADER.SIGNATURE"}"#,
                 ),
             ])
@@ -675,6 +683,7 @@ mod tests {
     async fn renewal_reauthenticates_validates_and_commits_atomically_once() {
         let credentials = Arc::new(RenewalCredentialResolver {
             native: true,
+            expired: false,
             resolutions: AtomicUsize::new(0),
         });
         let renewer = Arc::new(FixtureRenewer::default());
@@ -699,9 +708,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_native_composite_can_only_be_used_for_atomic_renewal() {
+        let credentials = Arc::new(RenewalCredentialResolver {
+            native: true,
+            expired: true,
+            resolutions: AtomicUsize::new(0),
+        });
+        let renewer = Arc::new(FixtureRenewer::default());
+        let authentication = Arc::new(FixtureAuthentication::default());
+        let resolver = StoredUaiSessionResolver::with_renewal(
+            credentials,
+            renewer.clone(),
+            authentication.clone(),
+        );
+        let session = resolver.renew_session(&renewal_context()).await.unwrap();
+        assert_eq!(session.expose_open_id(), "new-open-id");
+        assert_eq!(renewer.renewals.load(Ordering::SeqCst), 1);
+        assert_eq!(authentication.exchanges.load(Ordering::SeqCst), 1);
+        assert_eq!(authentication.validations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_jwt_never_survives_the_short_renewal_cache() {
+        let resolver = StoredUaiSessionResolver::new(Arc::new(FixtureCredentialResolver {
+            behavior: FixtureBehavior::Imported,
+            request: Mutex::new(None),
+            resolutions: AtomicUsize::new(0),
+        }));
+        let expiry_seconds = 1_577_836_800;
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{expiry_seconds}}}"#));
+        let session =
+            UaiJwtSession::try_new("expired-open-id", format!("header.{payload}.signature"))
+                .unwrap();
+        let context = renewal_context();
+        resolver
+            .cache_renewed_session(&context, &session)
+            .await
+            .unwrap();
+        assert!(
+            resolver
+                .cached_renewed_session(&context)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn renewal_rejects_manual_import_metadata_before_login() {
         let credentials = Arc::new(RenewalCredentialResolver {
             native: false,
+            expired: false,
             resolutions: AtomicUsize::new(0),
         });
         let renewer = Arc::new(FixtureRenewer::default());
