@@ -22,7 +22,7 @@ const MAX_REMOTE_QUESTION_ID_BYTES: usize = 512;
 const MAX_ANSWER_CHILDREN: usize = 256;
 const MAX_ANSWER_VALUES_PER_CHILD: usize = 256;
 const MAX_SUBMISSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
-const MAX_SUBMISSION_VERSION_BYTES: usize = 256;
+const MAX_SUBMISSION_VERSION_BYTES: usize = 128;
 
 /// Redacted ownership wrapper for one bounded UAI submit acknowledgement.
 pub struct UaiSubmissionResponseDocument(String);
@@ -115,12 +115,7 @@ pub fn parse_submission_receipt(
     let version = data
         .get("version")
         .and_then(Value::as_str)
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= MAX_SUBMISSION_VERSION_BYTES
-                && value.trim() == *value
-                && !value.chars().any(char::is_control)
-        })
+        .filter(|value| valid_submission_version(value))
         .ok_or_else(|| {
             protocol_drift("UAI submission acknowledgement has no bounded verification version")
         })?;
@@ -516,6 +511,14 @@ fn valid_question_identity(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+pub(crate) fn valid_submission_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SUBMISSION_VERSION_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
     if context.provider_id != metadata.id {
         return Err(internal(
@@ -687,6 +690,16 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            parse_submission_receipt(
+                &ACCEPTED.replace("submit-version-42", "unsafe/version"),
+                "course-v2:synthetic+rw",
+                "group-1",
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
         );
     }
 

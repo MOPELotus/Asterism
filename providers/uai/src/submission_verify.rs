@@ -14,7 +14,10 @@ use chrono::Utc;
 use serde_json::Value;
 use zeroize::Zeroize;
 
-use crate::{UaiSubmissionBuild, UaiSubmissionPlan, metadata::development_metadata};
+use crate::{
+    UaiSubmissionBuild, UaiSubmissionPlan, metadata::development_metadata,
+    submission_execute::valid_submission_version,
+};
 
 const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_NESTED_QUESTION_DATA_BYTES: usize = 2 * 1_024 * 1_024;
@@ -22,7 +25,6 @@ const MAX_NESTED_ANSWER_BYTES: usize = 1_024 * 1_024;
 const MAX_NESTED_CONTEXT_BYTES: usize = 64 * 1_024;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
-const MAX_SUBMISSION_VERSION_BYTES: usize = 256;
 
 /// Redacted ownership wrapper for one bounded fresh UAI user-module response.
 pub struct UaiVerificationDocument(String);
@@ -521,13 +523,6 @@ fn valid_component(value: Option<&str>) -> ProviderResult<String> {
         })
         .map(str::to_owned)
         .ok_or_else(|| invalid_response("UAI Group Task identity is invalid"))
-}
-
-fn valid_submission_version(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_SUBMISSION_VERSION_BYTES
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
 }
 
 fn remote_identity(value: &Value) -> Option<String> {
