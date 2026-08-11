@@ -210,6 +210,13 @@ repeated. A Network failure from the mutation boundary is likewise returned
 after one attempt so Core can retain verify-only recovery authority without
 replaying the POST.
 
+The native mutation client intentionally does not inherit an SSO browser cookie.
+It sends the account-bound JWT and annotator token, but the frozen donors run
+their POST through cookie-bearing sessions and therefore do not yet prove that
+this clean-client authentication combination is live-compatible. The Provider
+remains Development; no browser cookie will be persisted or added without a
+separately authorized sanitized mutation audit.
+
 Verification requires that accepted receipt and reads only the exact
 `{groupId}-{submitVersion}` user-module route after refreshing the Course
 instance. The response must bind both the top-level and submit-info Course to

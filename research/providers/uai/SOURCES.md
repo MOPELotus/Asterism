@@ -17,5 +17,6 @@ route caller binds query `id` to the numeric CourseResource ID. The GPL userscri
 only to understand browser lifecycle behavior; no implementation code is
 copied. Asterism's native authentication boundary and read-only parsers remain
 offline-covered. The two backend donors independently corroborate the
-annotator-token/progress contract; Asterism reimplements that bounded protocol
-without copying donor implementation code.
+annotator-token contract across content, progress and submission routes;
+Asterism reimplements that bounded protocol without copying donor
+implementation code.
