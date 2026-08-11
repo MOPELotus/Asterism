@@ -356,7 +356,7 @@ pub fn parse_question_content(
             .get(index)
             .or_else(|| task_types.last())
             .ok_or_else(|| protocol_drift("UAI Group Task has no Question type"))?;
-        let question = parse_question_entry(entry, group_id, position, task_type)?;
+        let question = parse_question_entry(entry, position, task_type)?;
         if !remote_ids.insert(question.remote_id.clone()) {
             return Err(protocol_drift(
                 "UAI decrypted Question wrapper contains duplicate identity",
@@ -370,7 +370,6 @@ pub fn parse_question_content(
 
 fn parse_question_entry(
     entry: &Value,
-    group_id: &str,
     position: u32,
     task_type: &str,
 ) -> ProviderResult<ParsedUaiQuestion> {
@@ -395,7 +394,7 @@ fn parse_question_entry(
         .get("id")
         .and_then(remote_identity)
         .or_else(|| content.get("id").and_then(remote_identity))
-        .unwrap_or_else(|| format!("{group_id}:question:{position}"));
+        .ok_or_else(|| protocol_drift("UAI Question has no explicit remote identity"))?;
     valid_question_identity(&remote_id)?;
     let stem = question_stem(content)?;
     let options = question_options(content)?;
@@ -547,9 +546,11 @@ const fn question_kind(task_type: &str) -> QuestionKind {
 
 pub(crate) fn supports_question_read(task_types: &[String], question_count: Option<u32>) -> bool {
     question_count
-        .filter(|count| *count > 0)
         .and_then(|count| usize::try_from(count).ok())
-        .is_some_and(|count| task_types.len() == 1 || task_types.len() == count)
+        .is_some_and(|count| {
+            (1..=MAX_QUESTIONS_PER_DOCUMENT).contains(&count)
+                && (task_types.len() == 1 || task_types.len() == count)
+        })
         && task_types
             .iter()
             .all(|value| supported_question_type(value))
@@ -925,6 +926,29 @@ mod tests {
             &["multichoice".to_owned(), "short_answer".to_owned()],
             Some(3),
         ));
+        assert!(!supports_question_read(
+            &["multichoice".to_owned()],
+            Some(5_001),
+        ));
+        assert!(
+            parse_question_entry(
+                &json!({
+                    "content": serde_json::to_string(&json!({
+                        "stem": "Synthetic prompt",
+                        "children": [{
+                            "options": [
+                                {"name": "A", "text": "Alpha"},
+                                {"name": "B", "text": "Beta"},
+                            ]
+                        }],
+                    }))
+                    .unwrap(),
+                }),
+                1,
+                "multichoice",
+            )
+            .is_err()
+        );
         assert!(
             parse_question_content(
                 CONTENT,
