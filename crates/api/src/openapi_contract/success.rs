@@ -60,6 +60,7 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("getTaskProgress", "TaskProgressResponse"),
     ("getTaskDuration", "TaskDurationResponse"),
     ("getTaskQuestions", "TaskQuestionsResponse"),
+    ("getTaskQuestionSnapshot", "TaskQuestionsResponse"),
     (
         "resolveProviderAnswerCandidates",
         "AnswerCandidatesResponse",

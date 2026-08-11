@@ -2849,3 +2849,21 @@ fixtures and capability tests cover form allowlisting, acknowledgement-only
 semantics, independent slots, no-Receipt recovery and exact answer readback.
 No live compatibility or verification-level promotion is claimed, and Capture
 is not part of this slice.
+
+## One-hundred-and-seventy-first Phase 0 slice
+
+The management API now reads an exact persisted Question snapshot through its
+full owner-scoped Task/Snapshot identity chain without contacting the Provider.
+The response reuses the same bounded sanitized shape as a fresh Question read,
+while mismatched Task IDs and cross-owner snapshots remain indistinguishable
+from missing records. OpenAPI and generated-client contract checks require the
+typed response.
+
+The first formal WebUI answer workflow consumes this immutable read after page
+reloads. Provider-native, local-cache and manual candidates remain separate
+evidence; conservative resolution preselects only unambiguous decisions, every
+conflict or missing answer requires an explicit selection, and Draft build
+still passes exact persisted Candidate IDs through the shared Core action.
+Execution binds the returned immutable Draft and a stable idempotency key.
+Formal assessments remain blocked because a durable approval contract does not
+yet exist; the browser cannot turn a local confirmation into execution policy.

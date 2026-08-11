@@ -232,6 +232,32 @@ pub(super) async fn get_task_questions(
     ))
 }
 
+pub(super) async fn get_task_question_snapshot(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((task_id, snapshot_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
+    let snapshot = SqliteQuestionSnapshotRepository::new(state.database)
+        .find_owned_question_snapshot(owner_id, snapshot_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|snapshot| snapshot.task_id == task_id)
+        .ok_or_else(|| ApiError::not_found("question_snapshot_not_found"))?;
+    Ok(crate::auth::no_store(
+        Json(TaskQuestionsResponse {
+            task_id: snapshot.task_id,
+            provider_id: snapshot.provider_id,
+            provider_version: snapshot.provider_version,
+            snapshot_id: snapshot.id,
+            captured_at: snapshot.captured_at,
+            questions: snapshot.questions,
+        })
+        .into_response(),
+    ))
+}
+
 pub(super) async fn resolve_provider_answer_candidates(
     State(state): State<ApiState>,
     Extension(auth): Extension<AuthContext>,

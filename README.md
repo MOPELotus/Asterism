@@ -49,7 +49,7 @@ Phase 0 已建立并持续完善以下基础：
 - 通过数据库复合外键绑定 SubmissionDraft / Execution / ExecutionAttempt / Task、整份验证后不可变持久化且 owner-scoped 读取的 SubmissionResult；
 - 将一个不可变 SubmissionDraft 最多冻结到一个 Execution、先持久化有界 Attempt Receipt 再独立 Verify，并在任何歧义或 Pending 后只验证而绝不重提的 Submission worker；
 - 以 `ExecutionVerify` 显式标记无 SubmissionDraft 的非幂等 TaskExecution：每个 Execution 最多调用一次远端变更，随后必须 fresh `TaskProgress` 确认完成；只有该契约与独立 Submission 契约可从无法安全细分的 `Unknown` 启动，返回歧义、Pending 或崩溃统一进入无重放路径的验证恢复；已知 Completed 只复核、不写入；
-- 按 Task / QuestionSnapshot / SubmissionDraft / SubmissionResult 完整身份链只读验证结果的 HTTP/CLI 审计入口；
+- 按 Task / QuestionSnapshot / SubmissionDraft / SubmissionResult 完整身份链读取不可变题目、草稿和验证结果的 owner-scoped HTTP 审计入口，以及现有 Draft/Result CLI 入口；
 - Capability-based Provider API、Metadata 与 Registry，包括与远端执行解耦的题目发现、解析、Provider-native 候选答案解析和只读提交草稿构建槽位；
 - 课程发现到后续 capability 的短命、脱敏且不持久化路由上下文；
 - Account > Provider > Global 覆盖的 NetworkProfile 与集中 HTTP Client 构建；

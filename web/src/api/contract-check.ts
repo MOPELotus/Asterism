@@ -6,6 +6,7 @@ import type {
   GetProviderRuntimeSettingsResponse,
   GetSubmissionResultResponse,
   GetTaskQuestionsResponse,
+  GetTaskQuestionSnapshotResponse,
   ListAnswerCandidatesResponse,
   ListProvidersResponse,
   ListTasksResponse,
@@ -104,6 +105,10 @@ export type QuestionContractIsTyped = Assert<
   }
     ? true
     : false
+>;
+
+export type PersistedQuestionSnapshotContractIsTyped = Assert<
+  GetTaskQuestionSnapshotResponse extends GetTaskQuestionsResponse ? true : false
 >;
 
 export type CandidateContractIsTyped = Assert<

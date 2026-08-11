@@ -255,6 +255,10 @@ fn task_routes() -> Router<ApiState> {
             get(task::get_task_questions),
         )
         .route(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}",
+            get(task::get_task_question_snapshot),
+        )
+        .route(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates",
             post(task::resolve_provider_answer_candidates),
         )
@@ -844,6 +848,13 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}".to_owned(),
+            task_question_snapshot_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/provider-answer-candidates"
                 .to_owned(),
             provider_answer_candidates_path(),
@@ -1183,6 +1194,23 @@ fn task_questions_path() -> Value {
             "429": {"description": "Provider rate limited"},
             "502": {"description": "Provider returned inconsistent Questions"},
             "503": {"description": "Provider temporarily unavailable"}
+        }
+    }})
+}
+
+fn task_question_snapshot_path() -> Value {
+    json!({"get": {
+        "operationId": "getTaskQuestionSnapshot",
+        "description": "Reads one exact immutable, owner-scoped Question snapshot without contacting the Provider.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "snapshot_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Persisted bounded and sanitized Questions with their immutable snapshot identity"},
+            "400": {"description": "Invalid Task or Question snapshot ID"},
+            "404": {"description": "Task-bound owner-scoped Question snapshot not found"}
         }
     }})
 }
@@ -4115,6 +4143,44 @@ mod tests {
             created_at: now,
         };
         repository.save_submission_result(&result).await.unwrap();
+
+        let snapshot_response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}",
+                    snapshot.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot_response.status(), StatusCode::OK);
+        assert_eq!(
+            snapshot_response.headers()[header::CACHE_CONTROL],
+            "no-store"
+        );
+        let snapshot_body = response_json(snapshot_response).await;
+        assert_eq!(snapshot_body["snapshot_id"], snapshot.id.to_string());
+        assert_eq!(snapshot_body["questions"][0]["id"], question_id.to_string());
+
+        let mismatched_snapshot = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{}/question-snapshots/{}",
+                    TaskId::new(),
+                    snapshot.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatched_snapshot.status(), StatusCode::NOT_FOUND);
 
         let manual_response = app
             .clone()

@@ -20,6 +20,7 @@ const ProviderAccountDetailPage = lazy(() => import("@/pages/provider-account-de
 const RuntimeSettingsPage = lazy(() => import("@/pages/runtime-settings-page.tsx").then((module) => ({ default: module.RuntimeSettingsPage })));
 const TasksPage = lazy(() => import("@/pages/tasks-page.tsx").then((module) => ({ default: module.TasksPage })));
 const TaskDetailPage = lazy(() => import("@/pages/task-detail-page.tsx").then((module) => ({ default: module.TaskDetailPage })));
+const AnswerWorkflowPage = lazy(() => import("@/pages/answer-workflow-page.tsx").then((module) => ({ default: module.AnswerWorkflowPage })));
 
 export function App() {
   return (
@@ -60,6 +61,7 @@ export function App() {
             <Route path="provider-accounts/:accountId" element={<ProviderAccountDetailPage />} />
             <Route path="tasks" element={<TasksPage />} />
             <Route path="tasks/:taskId" element={<TaskDetailPage />} />
+            <Route path="tasks/:taskId/question-snapshots/:snapshotId" element={<AnswerWorkflowPage />} />
             <Route path="executions" element={<ExecutionsPage />} />
             <Route path="executions/:executionId" element={<ExecutionDetailPage />} />
             <Route path="credits" element={<CreditsPage />} />
