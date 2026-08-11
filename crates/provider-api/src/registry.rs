@@ -182,6 +182,19 @@ impl ProviderEntry {
             });
         }
 
+        if self
+            .metadata
+            .advertises(ProviderCapability::ExecutionVerify)
+            && (!self
+                .metadata
+                .advertises(ProviderCapability::TaskProgressRead)
+                || !advertises_execution)
+        {
+            return Err(RegistryError::ExecutionVerificationMismatch {
+                provider_id: self.metadata.id.clone(),
+            });
+        }
+
         if self.metadata.advertises(ProviderCapability::BrowserBridge)
             != self.browser_bridge.is_some()
         {
@@ -345,6 +358,10 @@ pub enum RegistryError {
         "provider `{provider_id}` execution capability metadata disagrees with its implementation"
     )]
     ExecutionCapabilityMismatch { provider_id: ProviderId },
+    #[error(
+        "provider `{provider_id}` execution verification requires both task execution and progress read"
+    )]
+    ExecutionVerificationMismatch { provider_id: ProviderId },
     #[error("provider `{provider_id}` has a mismatched implementation in `{slot}`")]
     IdentityMismatch {
         provider_id: ProviderId,
@@ -579,6 +596,20 @@ mod tests {
         assert!(matches!(
             registry.register(ProviderEntry::metadata_only(metadata)),
             Err(RegistryError::CapabilityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn execution_verification_requires_execution_and_progress_contracts() {
+        let mut metadata = metadata();
+        metadata
+            .capabilities
+            .insert(ProviderCapability::ExecutionVerify);
+        let mut registry = ProviderRegistry::default();
+
+        assert!(matches!(
+            registry.register(ProviderEntry::metadata_only(metadata)),
+            Err(RegistryError::ExecutionVerificationMismatch { .. })
         ));
     }
 

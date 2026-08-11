@@ -5,7 +5,7 @@ use asterism_domain::{
     RequestSource, SubmissionDraft, SubmissionDraftId, Task, TaskCapability, TaskId, Timestamp,
     UserId,
 };
-use asterism_provider_api::{ProviderRegistry, ProviderRuntimeSettingsSchema};
+use asterism_provider_api::{ProviderCapability, ProviderRegistry, ProviderRuntimeSettingsSchema};
 use asterism_storage::{
     ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
     ExecutionScheduleOutcome, ExecutionScheduleRequest, ProviderAccountRuntimeRepository,
@@ -118,6 +118,11 @@ where
         let (runtime_settings, runtime_settings_schema) = self
             .resolve_runtime_settings(command.owner_id, &task, command.requested_at)
             .await?;
+        validate_execution_verification_contract(
+            &task,
+            &self.providers,
+            &runtime_settings.provider_id,
+        )?;
         let submission_draft = self
             .resolve_submission_draft(
                 command.owner_id,
@@ -327,6 +332,15 @@ fn validate_task(
     {
         authorize_task_action(task, TaskAction::Submit, formal_policy)?;
     }
+    if task.capabilities.contains(&TaskCapability::ExecutionVerify)
+        && (!task.capabilities.contains(&TaskCapability::ProgressRead)
+            || execution_actions(task).len() != 1
+            || task
+                .capabilities
+                .contains(&TaskCapability::SubmissionExecute))
+    {
+        return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
+    }
     Ok(())
 }
 
@@ -358,6 +372,36 @@ const fn is_execution_capability(capability: TaskCapability) -> bool {
     )
 }
 
+fn execution_actions(task: &Task) -> Vec<TaskCapability> {
+    task.capabilities
+        .iter()
+        .copied()
+        .filter(|capability| is_execution_capability(*capability))
+        .collect()
+}
+
+fn validate_execution_verification_contract(
+    task: &Task,
+    providers: &ProviderRegistry,
+    provider_id: &asterism_domain::ProviderId,
+) -> Result<(), ExecutionRequestError> {
+    if !task.capabilities.contains(&TaskCapability::ExecutionVerify) {
+        return Ok(());
+    }
+    let provider = providers
+        .get(provider_id)
+        .ok_or(ExecutionRequestError::ProviderRuntimeUnavailable)?;
+    if !provider
+        .metadata
+        .advertises(ProviderCapability::ExecutionVerify)
+        || provider.task_execution.is_none()
+        || provider.task_progress.is_none()
+    {
+        return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutionRequestError {
     #[error("task was not found")]
@@ -382,6 +426,10 @@ pub enum ExecutionRequestError {
     SubmissionDraftVersionConflict,
     #[error("the task cannot be submitted because independent verification is unavailable")]
     SubmissionVerificationUnavailable,
+    #[error(
+        "the task mutation cannot run because independent execution verification is unavailable"
+    )]
+    ExecutionVerificationUnavailable,
     #[error("the registered Provider runtime settings are unavailable or incompatible")]
     ProviderRuntimeUnavailable,
     #[error("Provider runtime settings changed while the execution was being scheduled")]
@@ -446,5 +494,43 @@ mod tests {
                 TaskCapability::ResourceExecution,
             ],
         )));
+    }
+
+    #[test]
+    fn execution_verification_requires_one_non_submission_action_and_progress() {
+        let valid = task(
+            RemoteState::Pending,
+            vec![
+                TaskCapability::ProgressRead,
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ],
+        );
+        assert!(validate_task(&valid, FormalAssessmentPolicy::default()).is_ok());
+
+        let missing_progress = task(
+            RemoteState::Pending,
+            vec![
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ],
+        );
+        assert!(matches!(
+            validate_task(&missing_progress, FormalAssessmentPolicy::default()),
+            Err(ExecutionRequestError::ExecutionVerificationUnavailable)
+        ));
+
+        let submission = task(
+            RemoteState::Pending,
+            vec![
+                TaskCapability::ProgressRead,
+                TaskCapability::SubmissionExecute,
+                TaskCapability::ExecutionVerify,
+            ],
+        );
+        assert!(matches!(
+            validate_task(&submission, FormalAssessmentPolicy::default()),
+            Err(ExecutionRequestError::ExecutionVerificationUnavailable)
+        ));
     }
 }

@@ -41,6 +41,10 @@ pub enum ProviderCapability {
     TaskDetail,
     TaskProgressRead,
     ResourceExecution,
+    /// The Provider can independently verify a non-idempotent task execution
+    /// through its task-progress capability, allowing Core to recover without
+    /// replaying the remote mutation.
+    ExecutionVerify,
     QuestionInventory,
     QuestionParse,
     AnswerResolve,

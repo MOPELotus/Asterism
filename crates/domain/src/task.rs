@@ -57,6 +57,11 @@ pub enum OrchestrationState {
 pub enum TaskCapability {
     ProgressRead,
     ResourceExecution,
+    /// Marks a potentially non-idempotent `TaskExecution` mutation whose
+    /// outcome must be confirmed through an independent progress read. Core
+    /// invokes the mutation at most once per Execution and uses verify-only
+    /// recovery after every ambiguous outcome.
+    ExecutionVerify,
     QuestionInventory,
     QuestionParse,
     AnswerResolve,

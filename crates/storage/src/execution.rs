@@ -24,9 +24,10 @@ use crate::{
     ExecutionBillingReservation, ExecutionLogAppendRequest, ExecutionProgressUpdate,
     ExecutionQueryRepository, ExecutionRecoveryFinishRequest, ExecutionRepository,
     ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome,
-    ExecutionScheduleRequest, ExecutionSubmissionRepository, StorageError,
-    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionRecoveryStartRequest,
-    SubmissionResultPersistRequest, SubmissionResultRepository,
+    ExecutionScheduleRequest, ExecutionSubmissionRepository,
+    ExecutionVerificationRecoveryRepository, StorageError, SubmissionDraftRepository,
+    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
+    VerificationRecoveryStartRequest,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage, SqliteQuestionSnapshotRepository};
 
@@ -649,14 +650,17 @@ impl ExecutionSubmissionRepository for SqliteExecutionRepository {
             .save_submission_result(request.result)
             .await
     }
+}
 
+#[async_trait]
+impl ExecutionVerificationRecoveryRepository for SqliteExecutionRepository {
     #[allow(
         clippy::too_many_lines,
         reason = "the transaction keeps claim, lease, state, recovery job and outbox writes visibly atomic"
     )]
-    async fn begin_submission_recovery(
+    async fn begin_verification_recovery(
         &self,
-        request: SubmissionRecoveryStartRequest<'_>,
+        request: VerificationRecoveryStartRequest<'_>,
     ) -> Result<Execution, StorageError> {
         validate_worker_token(request.worker_id, request.correlation_id)?;
         validate_progress(request.progress)?;
@@ -665,7 +669,7 @@ impl ExecutionSubmissionRepository for SqliteExecutionRepository {
             || request.progress.stage != ExecutionStage::Verifying
         {
             return Err(StorageError::InvalidData(
-                "submission recovery progress is invalid".to_owned(),
+                "verification recovery progress is invalid".to_owned(),
             ));
         }
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
@@ -680,7 +684,7 @@ impl ExecutionSubmissionRepository for SqliteExecutionRepository {
         .await?;
         let row = select_execution(&mut transaction, request.execution_id).await?;
         let mut execution = decode_execution(&row)?;
-        if execution.state != ExecutionState::Running || execution.submission_draft_id.is_none() {
+        if execution.state != ExecutionState::Running {
             return Err(StorageError::ExecutionStateConflict);
         }
         let active_attempt = find_active_attempt(&mut transaction, request.execution_id).await?;
@@ -754,7 +758,7 @@ impl ExecutionSubmissionRepository for SqliteExecutionRepository {
                 at: request.at,
                 level: LogLevel::Warn,
                 stage: ExecutionStage::Verifying,
-                message: "submission outcome requires verification-only recovery",
+                message: "remote mutation outcome requires verification-only recovery",
                 provider_trace_id: None,
                 metadata_sanitized: None,
             },
@@ -2665,7 +2669,7 @@ mod tests {
             updated_at: recovery_at,
         };
         let recovering = repository
-            .begin_submission_recovery(SubmissionRecoveryStartRequest {
+            .begin_verification_recovery(VerificationRecoveryStartRequest {
                 execution_id: execution.id,
                 attempt_id: attempt.id,
                 scheduler_job_id: job_id,

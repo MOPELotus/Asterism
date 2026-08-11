@@ -15,9 +15,9 @@ use asterism_domain::{
     SubmissionVerificationStatus, Task, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
-    ExecutionEventSink, ExecutionRequest as ProviderExecutionRequest, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderExecutionConcurrency, ProviderExecutionLog,
-    ProviderProgress, ProviderRegistry, ResolvedProviderRuntimeSettings,
+    ExecutionEventSink, ExecutionRequest as ProviderExecutionRequest, ProviderCapability,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionConcurrency,
+    ProviderExecutionLog, ProviderProgress, ProviderRegistry, ResolvedProviderRuntimeSettings,
     SubmissionExecuteCapability, SubmissionVerifyCapability, TaskExecutionCapability,
     TaskProgressCapability,
 };
@@ -27,10 +27,10 @@ use asterism_scheduler::{
 use asterism_storage::{
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionLeaseRepository,
     ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionRecoveryFinishRequest,
-    ExecutionRepository, ExecutionSubmissionRepository, LeaseAcquireOutcome,
-    ProviderAccountRuntimeRepository, SchedulerRepository, StorageError,
-    SubmissionReceiptPersistRequest, SubmissionRecoveryStartRequest,
-    SubmissionResultPersistRequest, TaskRuntimeRepository,
+    ExecutionRepository, ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository,
+    LeaseAcquireOutcome, ProviderAccountRuntimeRepository, SchedulerRepository, StorageError,
+    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, TaskRuntimeRepository,
+    VerificationRecoveryStartRequest,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -211,7 +211,9 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
 
 impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T>
 where
-    E: ExecutionRepository + ExecutionSubmissionRepository,
+    E: ExecutionRepository
+        + ExecutionSubmissionRepository
+        + ExecutionVerificationRecoveryRepository,
     L: ExecutionLeaseRepository,
     S: SchedulerRepository,
     A: ProviderAccountRuntimeRepository,
@@ -398,6 +400,7 @@ where
                 self.finish_from_remote_progress(
                     job,
                     progress.remote_state,
+                    task.capabilities.contains(&TaskCapability::ExecutionVerify),
                     finished_at,
                     correlation_id,
                 )
@@ -671,6 +674,13 @@ where
         let Some(capability) = entry.task_progress.clone() else {
             return Ok(Err(ProviderErrorClass::UnsupportedTask));
         };
+        if task.capabilities.contains(&TaskCapability::ExecutionVerify)
+            && !entry
+                .metadata
+                .advertises(ProviderCapability::ExecutionVerify)
+        {
+            return Ok(Err(ProviderErrorClass::UnsupportedTask));
+        }
         let Some(runtime_settings) = self
             .executions
             .find_execution_runtime_settings(execution_id)
@@ -703,6 +713,7 @@ where
         &self,
         job: &ScheduledJob,
         remote_state: RemoteState,
+        verify_only: bool,
         at: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
@@ -719,6 +730,21 @@ where
                 .await
             }
             RemoteState::Pending => {
+                if verify_only {
+                    return if let Some(retry_at) = self.recovery_retry_at(job, at)? {
+                        self.defer_recovery(job, retry_at, at).await
+                    } else {
+                        self.finish_recovery(
+                            job,
+                            ExecutionState::HumanRequired,
+                            Some(ProviderErrorClass::InvalidRemoteState),
+                            None,
+                            at,
+                            correlation_id,
+                        )
+                        .await
+                    };
+                }
                 if let Some(retry_at) = self.recovery_retry_at(job, at)? {
                     self.finish_recovery(
                         job,
@@ -1202,6 +1228,10 @@ where
                 disposition: FailureDisposition::Failed,
             }));
         };
+        let verification = match execution_verification(task, &capabilities, entry) {
+            Ok(verification) => verification,
+            Err(failure) => return Ok(Err(failure)),
+        };
         let Some(runtime_settings) = self
             .executions
             .find_execution_runtime_settings(execution_id)
@@ -1229,6 +1259,7 @@ where
         };
         Ok(Ok(PreparedProviderCall {
             capability,
+            verification,
             context: ProviderContext {
                 provider_id: account.provider_id,
                 account_id: account.id,
@@ -1246,6 +1277,10 @@ where
         }))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the Provider call keeps lease renewal, persisted events and the verify-only mutation boundary visible together"
+    )]
     async fn call_provider(
         &self,
         job: &ScheduledJob,
@@ -1289,6 +1324,29 @@ where
         if claim_lost.load(Ordering::Acquire) {
             return Err(ScheduledExecutionRunError::ClaimLost);
         }
+        if let Some(verification) = &prepared.verification {
+            return match result {
+                Ok(_) => {
+                    self.verify_task_execution(
+                        job,
+                        attempt,
+                        prepared,
+                        verification.as_ref(),
+                        correlation_id,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    self.begin_verification_recovery(
+                        job,
+                        attempt,
+                        provider_error_class(&error),
+                        correlation_id,
+                    )
+                    .await
+                }
+            };
+        }
         match result {
             Ok(outcome)
                 if execution_goal_verified(&prepared.request.requested_capabilities, &outcome) =>
@@ -1328,6 +1386,57 @@ where
                     error_class,
                     disposition,
                     Utc::now().max(now),
+                    correlation_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn verify_task_execution(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        prepared: &PreparedProviderCall,
+        verification: &(dyn TaskProgressCapability + Send + Sync),
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let provider =
+            verification.read_progress(&prepared.context, &prepared.request.remote_task_id);
+        tokio::pin!(provider);
+        let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        let result = loop {
+            tokio::select! {
+                result = &mut provider => break result,
+                _ = heartbeat.tick() => self.renew_claims(job, attempt.execution_id).await?,
+            }
+        };
+        match result {
+            Ok(progress) if progress.remote_state == RemoteState::Completed => {
+                self.finish_success(
+                    job,
+                    attempt,
+                    Utc::now().max(attempt.started_at),
+                    correlation_id,
+                )
+                .await
+            }
+            Ok(_) => {
+                self.begin_verification_recovery(
+                    job,
+                    attempt,
+                    ProviderErrorClass::InvalidRemoteState,
+                    correlation_id,
+                )
+                .await
+            }
+            Err(error) => {
+                self.begin_verification_recovery(
+                    job,
+                    attempt,
+                    provider_error_class(&error),
                     correlation_id,
                 )
                 .await
@@ -1383,7 +1492,7 @@ where
             Ok(receipt) if receipt.validate().is_ok() => receipt,
             Ok(_) => {
                 return self
-                    .begin_submission_recovery(
+                    .begin_verification_recovery(
                         job,
                         attempt,
                         ProviderErrorClass::ProtocolDrift,
@@ -1393,7 +1502,7 @@ where
             }
             Err(error) => {
                 return self
-                    .begin_submission_recovery(
+                    .begin_verification_recovery(
                         job,
                         attempt,
                         provider_error_class(&error),
@@ -1482,7 +1591,7 @@ where
                 .await
             }
             Err(error) => {
-                self.begin_submission_recovery(
+                self.begin_verification_recovery(
                     job,
                     attempt,
                     provider_error_class(&error),
@@ -1511,7 +1620,7 @@ where
                 && verification.remote_state != Some(RemoteState::Completed))
         {
             return self
-                .begin_submission_recovery(
+                .begin_verification_recovery(
                     job,
                     attempt,
                     ProviderErrorClass::ProtocolDrift,
@@ -1524,7 +1633,7 @@ where
             SubmissionVerificationStatus::Rejected => SubmissionResultStatus::Rejected,
             SubmissionVerificationStatus::Pending | SubmissionVerificationStatus::Inconclusive => {
                 return self
-                    .begin_submission_recovery(
+                    .begin_verification_recovery(
                         job,
                         attempt,
                         ProviderErrorClass::InvalidRemoteState,
@@ -1581,7 +1690,7 @@ where
         }
     }
 
-    async fn begin_submission_recovery(
+    async fn begin_verification_recovery(
         &self,
         job: &ScheduledJob,
         attempt: &ExecutionAttempt,
@@ -1594,7 +1703,8 @@ where
             percent: None,
             stage: ExecutionStage::Verifying,
             status_text: Some(
-                "submission outcome uncertain; verification-only recovery scheduled".to_owned(),
+                "remote mutation outcome uncertain; verification-only recovery scheduled"
+                    .to_owned(),
             ),
             current_item: None,
             completed_items: None,
@@ -1603,7 +1713,7 @@ where
         };
         let execution = self
             .executions
-            .begin_submission_recovery(SubmissionRecoveryStartRequest {
+            .begin_verification_recovery(VerificationRecoveryStartRequest {
                 execution_id: attempt.execution_id,
                 attempt_id: attempt.id,
                 scheduler_job_id: job.id,
@@ -1781,6 +1891,7 @@ async fn execution_id_to_task<E: ExecutionRepository>(
 
 struct PreparedProviderCall {
     capability: Arc<dyn TaskExecutionCapability>,
+    verification: Option<Arc<dyn TaskProgressCapability>>,
     context: ProviderContext,
     request: ProviderExecutionRequest,
     concurrency: ProviderExecutionConcurrency,
@@ -1921,6 +2032,36 @@ fn execution_capabilities(task: &Task) -> Vec<TaskCapability> {
             )
         })
         .collect()
+}
+
+fn execution_verification(
+    task: &Task,
+    execution_capabilities: &[TaskCapability],
+    entry: &asterism_provider_api::ProviderEntry,
+) -> Result<Option<Arc<dyn TaskProgressCapability>>, PreparedFailure> {
+    if !task.capabilities.contains(&TaskCapability::ExecutionVerify) {
+        return Ok(None);
+    }
+    if !task.capabilities.contains(&TaskCapability::ProgressRead)
+        || execution_capabilities.len() != 1
+        || !entry
+            .metadata
+            .advertises(ProviderCapability::ExecutionVerify)
+    {
+        return Err(unsupported_execution_verification());
+    }
+    entry
+        .task_progress
+        .clone()
+        .map(Some)
+        .ok_or_else(unsupported_execution_verification)
+}
+
+const fn unsupported_execution_verification() -> PreparedFailure {
+    PreparedFailure {
+        error_class: ProviderErrorClass::UnsupportedTask,
+        disposition: FailureDisposition::Failed,
+    }
 }
 
 fn duration_report_only(capabilities: &[TaskCapability]) -> bool {
@@ -2194,6 +2335,8 @@ mod tests {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum ProviderBehavior {
         Success,
+        VerifiedPending,
+        ExecuteNetworkThenCompleted,
         NetworkFailure,
         RecoveryPending,
         DurationSuccess,
@@ -2305,7 +2448,7 @@ mod tests {
                 Some(3)
             );
             match self.behavior {
-                ProviderBehavior::Success => {
+                ProviderBehavior::Success | ProviderBehavior::VerifiedPending => {
                     events
                         .report(ProviderProgress {
                             percent: Some(50),
@@ -2330,7 +2473,8 @@ mod tests {
                         result_sanitized: serde_json::json!({"verified": true}),
                     })
                 }
-                ProviderBehavior::NetworkFailure => Err(ProviderError::new(
+                ProviderBehavior::NetworkFailure
+                | ProviderBehavior::ExecuteNetworkThenCompleted => Err(ProviderError::new(
                     ProviderErrorKind::Network,
                     "temporary network failure",
                 )),
@@ -2365,15 +2509,23 @@ mod tests {
         ) -> ProviderResult<RemoteProgress> {
             *self.progress_calls.lock().unwrap() += 1;
             match self.behavior {
-                ProviderBehavior::Success => Ok(RemoteProgress {
-                    remote_state: RemoteState::Completed,
-                    percent: Some(100),
-                    duration_seconds: None,
-                    updated_at: Utc::now(),
-                }),
+                ProviderBehavior::Success | ProviderBehavior::ExecuteNetworkThenCompleted => {
+                    Ok(RemoteProgress {
+                        remote_state: RemoteState::Completed,
+                        percent: Some(100),
+                        duration_seconds: None,
+                        updated_at: Utc::now(),
+                    })
+                }
                 ProviderBehavior::RecoveryPending => Ok(RemoteProgress {
                     remote_state: RemoteState::Pending,
                     percent: Some(0),
+                    duration_seconds: None,
+                    updated_at: Utc::now(),
+                }),
+                ProviderBehavior::VerifiedPending => Ok(RemoteProgress {
+                    remote_state: RemoteState::InProgress,
+                    percent: Some(50),
                     duration_seconds: None,
                     updated_at: Utc::now(),
                 }),
@@ -2501,6 +2653,122 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(live_log, 1);
+    }
+
+    #[tokio::test]
+    async fn non_idempotent_execution_requires_fresh_progress_confirmation() {
+        let fixture = Fixture::verified(ProviderBehavior::Success).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_non_idempotent_execution_schedules_verify_only_recovery() {
+        let fixture = Fixture::verified(ProviderBehavior::NetworkFailure).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::RecoveryScheduled(_)
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
+        let jobs: Vec<(String, String)> =
+            sqlx::query_as("SELECT job_kind, state FROM scheduled_jobs ORDER BY created_at, id")
+                .fetch_all(fixture.database.pool())
+                .await
+                .unwrap();
+        assert!(jobs.contains(&("execution".to_owned(), "completed".to_owned())));
+        assert!(jobs.contains(&("recovery".to_owned(), "pending".to_owned())));
+        assert!(!jobs.iter().any(|(kind, _)| kind == "retry"));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_non_idempotent_execution_recovers_without_replaying_mutation() {
+        let mut fixture = Fixture::verified(ProviderBehavior::ExecuteNetworkThenCompleted).await;
+        let first = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            first,
+            ScheduledExecutionOutcome::RecoveryScheduled(_)
+        ));
+
+        let recovery_at = Utc::now();
+        fixture.job = fixture.claim_recovery(recovery_at).await;
+        let recovered = fixture
+            .runner
+            .run_claimed(&fixture.job, recovery_at)
+            .await
+            .unwrap();
+
+        assert!(matches!(recovered, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_non_idempotent_verification_never_finishes_from_execute_receipt() {
+        let mut fixture = Fixture::verified(ProviderBehavior::VerifiedPending).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::RecoveryScheduled(_)
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+
+        let recovery_at = Utc::now();
+        fixture.job = fixture.claim_recovery(recovery_at).await;
+        let recovered = fixture
+            .runner
+            .run_claimed(&fixture.job, recovery_at)
+            .await
+            .unwrap();
+        assert!(matches!(
+            recovered,
+            ScheduledExecutionOutcome::Deferred { .. }
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 2);
+        let retry_jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_jobs WHERE job_kind = 'retry'")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert_eq!(retry_jobs, 0);
+    }
+
+    #[tokio::test]
+    async fn abandoned_non_idempotent_execution_recovers_without_reexecution() {
+        let fixture = Fixture::verified_recovering(ProviderBehavior::Success).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -2952,6 +3220,22 @@ mod tests {
                 .await
         }
 
+        async fn verified(behavior: ProviderBehavior) -> Self {
+            let fixture = Self::new(AssessmentClass::Routine, behavior).await;
+            sqlx::query(
+                "UPDATE tasks SET capabilities_json = \
+                 '[\"progress_read\",\"resource_execution\",\"execution_verify\"]'",
+            )
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+            fixture
+        }
+
+        async fn verified_recovering(behavior: ProviderBehavior) -> Self {
+            Self::verified(behavior).await.enter_recovery().await
+        }
+
         async fn duration(behavior: ProviderBehavior) -> Self {
             let fixture = Self::new(AssessmentClass::Routine, behavior).await;
             sqlx::query("UPDATE tasks SET capabilities_json = '[\"duration_report\"]'")
@@ -3299,6 +3583,7 @@ mod tests {
             capabilities: BTreeSet::from([
                 ProviderCapability::TaskProgressRead,
                 ProviderCapability::ResourceExecution,
+                ProviderCapability::ExecutionVerify,
                 ProviderCapability::DurationReport,
                 ProviderCapability::SubmissionExecute,
                 ProviderCapability::SubmissionVerify,

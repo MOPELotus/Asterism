@@ -652,6 +652,10 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
             "submission_verification_unavailable",
             "submission execution is disabled without independent verification",
         ),
+        ExecutionRequestError::ExecutionVerificationUnavailable => ApiError::conflict(
+            "execution_verification_unavailable",
+            "non-idempotent task execution is disabled without independent progress verification",
+        ),
         ExecutionRequestError::ProviderRuntimeUnavailable => ApiError::conflict(
             "provider_runtime_settings_unavailable",
             "the registered Provider runtime settings are unavailable or incompatible",

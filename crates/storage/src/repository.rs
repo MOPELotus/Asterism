@@ -635,7 +635,7 @@ pub struct SubmissionResultPersistRequest<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct SubmissionRecoveryStartRequest<'a> {
+pub struct VerificationRecoveryStartRequest<'a> {
     pub execution_id: ExecutionId,
     pub attempt_id: ExecutionAttemptId,
     pub scheduler_job_id: ScheduleId,
@@ -644,6 +644,16 @@ pub struct SubmissionRecoveryStartRequest<'a> {
     pub progress: &'a ExecutionProgress,
     pub at: Timestamp,
     pub correlation_id: &'a str,
+}
+
+/// Atomically leaves the mutation attempt and schedules a verify-only Recovery
+/// job after a potentially non-idempotent remote outcome becomes ambiguous.
+#[async_trait]
+pub trait ExecutionVerificationRecoveryRepository: Send + Sync {
+    async fn begin_verification_recovery(
+        &self,
+        request: VerificationRecoveryStartRequest<'_>,
+    ) -> Result<Execution, StorageError>;
 }
 
 /// Worker-only persistence for a Draft-bound independent submission. A known
@@ -680,11 +690,6 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
         &self,
         request: SubmissionResultPersistRequest<'_>,
     ) -> Result<(), StorageError>;
-
-    async fn begin_submission_recovery(
-        &self,
-        request: SubmissionRecoveryStartRequest<'_>,
-    ) -> Result<Execution, StorageError>;
 }
 
 /// Atomic execution request boundary. Creating the optional immutable quote and

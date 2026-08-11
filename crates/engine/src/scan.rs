@@ -146,6 +146,7 @@ pub(crate) const fn task_provider_capability(capability: TaskCapability) -> Prov
     match capability {
         TaskCapability::ProgressRead => ProviderCapability::TaskProgressRead,
         TaskCapability::ResourceExecution => ProviderCapability::ResourceExecution,
+        TaskCapability::ExecutionVerify => ProviderCapability::ExecutionVerify,
         TaskCapability::QuestionInventory => ProviderCapability::QuestionInventory,
         TaskCapability::QuestionParse => ProviderCapability::QuestionParse,
         TaskCapability::AnswerResolve => ProviderCapability::AnswerResolve,

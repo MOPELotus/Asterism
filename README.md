@@ -48,6 +48,7 @@ Phase 0 已建立并持续完善以下基础：
 - 不以远端回执代替验证的 SubmissionResult / VerificationSnapshot 领域模型，以及互相独立的 SubmissionExecute / SubmissionVerify Provider 槽位；
 - 通过数据库复合外键绑定 SubmissionDraft / Execution / ExecutionAttempt / Task、整份验证后不可变持久化且 owner-scoped 读取的 SubmissionResult；
 - 将一个不可变 SubmissionDraft 最多冻结到一个 Execution、先持久化有界 Attempt Receipt 再独立 Verify，并在任何歧义或 Pending 后只验证而绝不重提的 Submission worker；
+- 以 `ExecutionVerify` 显式标记无 SubmissionDraft 的非幂等 TaskExecution：每个 Execution 最多调用一次远端变更，随后必须 fresh `TaskProgress` 确认完成；返回歧义、Pending 或崩溃统一进入无重放路径的验证恢复；
 - 按 Task / QuestionSnapshot / SubmissionDraft / SubmissionResult 完整身份链只读验证结果的 HTTP/CLI 审计入口；
 - Capability-based Provider API、Metadata 与 Registry，包括与远端执行解耦的题目发现、解析、Provider-native 候选答案解析和只读提交草稿构建槽位；
 - 课程发现到后续 capability 的短命、脱敏且不持久化路由上下文；
@@ -170,7 +171,7 @@ cargo run -p asterismctl -- provider-account scan <account-id>
 
 SecretStore keyring 只从进程环境读取，不接受 TOML 或 CLI 参数。`ASTERISM_SECRET_ACTIVE_KEY_ID` 指定活动 key ID，`ASTERISM_SECRET_KEYS` 使用逗号分隔的 `<key-id>=<base64-encoded-32-byte-key>`；两者必须同时提供。轮换时保留旧 key 并添加新 key，再切换活动 ID；确认所有密文已轮换前不要移除旧 key。`/health` 的 `secret_store_configured` 只报告是否已配置，不返回 key ID 或 key material。
 
-统一 Scheduler worker 默认启用，每 5 秒分别执行一次有界 Scan tick 与 Execution tick；默认每次最多领取一个 Scan Job，Execution worker 固定串行领取一个 `execution`、`retry` 或 `recovery` Job，避免长任务的后续预领取 claim 在等待时过期。每个 Execution tick 会先扫描失去租约的 Running Execution，原子转入 Recovering 并创建只读远端复核任务；普通资源执行只有远端完成才收口成功，明确 Pending 才可重新执行，无法判断则要求人工处理。独立提交执行始终按冻结 Draft 调用一次 Submit、持久化回执、再调用 Verify；Submit 后的网络歧义、Pending、崩溃或重启只会反复调用 Verify，永远不会由 Recovery 或 Retry 重放提交。only-DurationReport 以时长证据而非完成状态作为目标，任何不确定写入直接要求人工处理且不会自动重跑。claim TTL 与 Execution lease 默认均为 300 秒，运行期间会一起续租。独立 Outbox dispatcher 每 250 毫秒领取最多 128 条已提交领域事件并派发到有界进程内实时总线；没有在线订阅者不会让已持久化事件无限重试，后续连接以查询快照重新同步。停止 `asterismd` 时会终止 SSE、停止新 tick，等待当前 Scan、Execution 或 Outbox 派发返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
+统一 Scheduler worker 默认启用，每 5 秒分别执行一次有界 Scan tick 与 Execution tick；默认每次最多领取一个 Scan Job，Execution worker 固定串行领取一个 `execution`、`retry` 或 `recovery` Job，避免长任务的后续预领取 claim 在等待时过期。每个 Execution tick 会先扫描失去租约的 Running Execution，原子转入 Recovering 并创建只读远端复核任务；普通资源执行只有远端完成才收口成功，明确 Pending 才可重新执行，无法判断则要求人工处理。声明 `ExecutionVerify` 的非幂等 TaskExecution 以已持久化 Attempt 为最多一次边界，执行后必须 fresh progress 确认，任何错误、Pending 或崩溃都只调度验证恢复而不创建写入 Retry。独立提交执行始终按冻结 Draft 调用一次 Submit、持久化回执、再调用 Verify；Submit 后的网络歧义、Pending、崩溃或重启只会反复调用 Verify，永远不会由 Recovery 或 Retry 重放提交。only-DurationReport 以时长证据而非完成状态作为目标，任何不确定写入直接要求人工处理且不会自动重跑。claim TTL 与 Execution lease 默认均为 300 秒，运行期间会一起续租。独立 Outbox dispatcher 每 250 毫秒领取最多 128 条已提交领域事件并派发到有界进程内实时总线；没有在线订阅者不会让已持久化事件无限重试，后续连接以查询快照重新同步。停止 `asterismd` 时会终止 SSE、停止新 tick，等待当前 Scan、Execution 或 Outbox 派发返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
 
 另开一个终端检查服务：
 
