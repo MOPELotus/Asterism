@@ -70,3 +70,6 @@ only structural field names, response codes and bounded placeholder shapes.
 - CMI time strings never populate `duration_seconds` without live unit evidence.
 - Missing or malformed CMI never triggers a start/mutation fallback.
 - Unknown fields are dropped from sanitized normalized data.
+- Fresh detail re-lists the Course and exact SCO instead of echoing a persisted
+  scan payload; malformed or disappeared identities fail closed.
+- Every normalized Task fingerprint uses an explicit version prefix.

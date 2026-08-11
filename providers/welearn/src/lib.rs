@@ -15,6 +15,7 @@ mod native_authentication;
 mod native_http;
 mod provider;
 mod stored_session;
+mod task_detail;
 mod task_inventory;
 
 pub use authentication::{
@@ -41,4 +42,5 @@ pub use provider::{
     build_development_provider_with_stored_session,
 };
 pub use stored_session::StoredWellearnSessionResolver;
+pub use task_detail::WellearnTaskDetail;
 pub use task_inventory::{WellearnScoLeavesDocument, parse_task_inventory};

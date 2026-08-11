@@ -317,7 +317,7 @@ fn sanitized_scalar(value: &Value) -> ProviderResult<Value> {
 fn fingerprint(normalized: &Value) -> Result<String, ProviderError> {
     let bytes = serde_json::to_vec(normalized)
         .map_err(|_| invalid_response("WELearn normalized Task cannot be encoded"))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("v1:{:x}", Sha256::digest(bytes)))
 }
 
 #[cfg(test)]
@@ -354,6 +354,7 @@ mod tests {
                 .iter()
                 .all(|task| task.capabilities == [TaskCapability::ProgressRead])
         );
+        assert!(tasks.iter().all(|task| task.fingerprint.starts_with("v1:")));
     }
 
     #[test]

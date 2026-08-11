@@ -6,6 +6,7 @@
 | Stored session validation | Fanyuchang 2026 | Reference | Core-scoped Cookie resolution, authenticated Course-list validation and atomic Password/Composite renewal are native-boundary covered; live pending |
 | CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Native authenticated `authCourse.aspx?action=gmc` read is implemented behind shared NetworkProfile; live pending |
 | TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Native Course page → `courseunits` → one `scoLeaves` response per Unit is implemented all-or-nothing; live pending |
+| TaskDetail | Fresh Course/Unit/SCO inventory | FromScratch | Re-lists Courses and re-runs one complete Course scan, then requires exactly one matching stable SCO identity; live pending |
 | TaskProgressRead | YZBRH | Reference | Implemented through a fresh read-only `getscoinfo_v7` CMI request; completion and progress are parsed independently; live pending |
 | DurationRead | YZBRH | Reference | Parser retains bounded raw `session_time` and `total_time` independently; no Core duration or seconds conversion until live unit evidence exists |
 | ResourceExecution | Fanyuchang 2026 + YZBRH | Reference | Start/keep/finalize lifecycle; not implemented until readback is modeled |
@@ -27,7 +28,7 @@ The first code slice is fixture-only and read-only:
 The crate now provides this parser boundary and synthetic fixtures. It also
 implements Password/ImportedCookie orchestration behind injected transport and
 stored-session resolver contracts. Metadata remains `Development` and advertises
-Authentication, CourseInventory, TaskInventory and TaskProgressRead. A registry-consistent
+Authentication, CourseInventory, TaskInventory, TaskDetail and TaskProgressRead. A registry-consistent
 development entry can be composed from injected boundaries. A shared-policy,
 non-redirecting native Password/OIDC and Course/Task HTTP transports now exist.
 Stored credential resolution now validates exact account/reference/purpose,
@@ -38,4 +39,7 @@ renewal uses Core compare-and-replace and retries one read operation only after
 an Authentication failure. Fresh CMI reads re-resolve the Course route, post
 only `getscoinfo_v7`, and never start or mutate a SCO as a fallback. Raw CMI
 times are available to the parser but `RemoteProgress.duration_seconds` remains
-unset. All live validation remains pending.
+unset. Fresh TaskDetail re-discovers the selected Course and exact SCO from the
+same complete inventory path; disappeared identities return RemoteChanged and
+versioned fingerprints satisfy the Core detail boundary. All live validation
+remains pending.

@@ -7,8 +7,9 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 use crate::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCmiTransport,
     WellearnCourseInventory, WellearnCourseInventoryTransport, WellearnSessionResolver,
-    WellearnTaskInventory, WellearnTaskInventoryTransport, WellearnTaskProgress,
-    metadata::development_metadata, native_authentication::NativeWellearnAuthenticationTransport,
+    WellearnTaskDetail, WellearnTaskInventory, WellearnTaskInventoryTransport,
+    WellearnTaskProgress, metadata::development_metadata,
+    native_authentication::NativeWellearnAuthenticationTransport,
     native_http::NativeWellearnInventoryTransport, stored_session::StoredWellearnSessionResolver,
 };
 
@@ -32,6 +33,10 @@ pub fn build_development_provider(
     )?);
     let course_inventory = Arc::new(WellearnCourseInventory::try_new(course_transport)?);
     let task_inventory = Arc::new(WellearnTaskInventory::try_new(task_transport)?);
+    let task_detail = Arc::new(WellearnTaskDetail::try_new(
+        course_inventory.clone(),
+        task_inventory.clone(),
+    )?);
     let task_progress = Arc::new(WellearnTaskProgress::try_new(cmi_transport)?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
@@ -39,7 +44,7 @@ pub fn build_development_provider(
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),
-        task_detail: None,
+        task_detail: Some(task_detail),
         task_progress: Some(task_progress),
         duration_read: None,
         question_inventory: None,
@@ -249,6 +254,7 @@ mod tests {
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());
+        assert!(entry.task_detail.is_some());
         assert!(entry.task_progress.is_some());
         assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_none());

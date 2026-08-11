@@ -2740,3 +2740,23 @@ slots. The fixture is synthetic encrypted data, verification remains
 Development, and real-account read-only validation remains scheduled after the
 WebUI and Asterism-Plugin/Yunzai surfaces are complete. `AnswerResolve`, every
 submission stage, BrowserBridge and Capture remain absent.
+
+## One-hundred-and-sixty-seventh Phase 0 slice
+
+WELearn now advertises fresh `TaskDetail` beside its existing authenticated
+Course/Unit/SCO inventory and read-only CMI progress. Detail parses only the
+stable `sco:{course}:{sco}` identity, re-lists current Courses, selects exactly
+one match, then re-runs that Course's complete all-or-nothing Unit/SCO scan and
+requires exactly one matching SCO. It never trusts persisted `uid`, `classid`
+or Unit routing values.
+
+Disappeared Course or SCO identities are RemoteChanged; malformed, duplicate
+or normalized-identity drift fails closed. WELearn Task fingerprints now use
+the Core-compatible `v1:{sha256}` grammar, and the detail payload retains only
+the already-sanitized normalized SCO observation.
+
+Metadata and the Development factory now agree on five read-only/authenticated
+slots. This remains synthetic/offline evidence at Development verification;
+CMI times remain opaque, DurationRead/DurationReport and remote execution stay
+unadvertised, and real-account read-only validation remains deferred until the
+WebUI and Asterism-Plugin/Yunzai surfaces are complete.

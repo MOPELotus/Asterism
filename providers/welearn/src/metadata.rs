@@ -33,6 +33,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
+            ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
         ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedCookie]),
@@ -59,6 +60,7 @@ mod tests {
                 ProviderCapability::Authentication,
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
+                ProviderCapability::TaskDetail,
                 ProviderCapability::TaskProgressRead,
             ])
         );

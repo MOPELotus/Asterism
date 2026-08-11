@@ -79,6 +79,14 @@ or cross-Unit response rejects the whole scan. Authentication and both inventory
 slots can be composed into a registry-consistent Development entry using
 injected transports.
 
+Fresh TaskDetail parses only the stable `sco:{cid}:{scoid}` identity, re-lists
+the current Courses, requires exactly one matching Course, then re-runs that
+Course's complete Unit/SCO scan and requires exactly one matching SCO. It never
+reuses persisted `uid`, `classid` or Unit routing facts. Missing Course/SCO
+identities are RemoteChanged; duplicate or normalized identity drift is
+ProtocolDrift. Task fingerprints use the versioned `v1:{sha256}` grammar
+required by the Core detail boundary.
+
 The native inventory adapter now uses the shared non-redirecting HTTP client.
 It reads the fixed HTTPS Course endpoint, re-fetches the selected Course page,
 extracts one unambiguous `uid`/`classid` pair, posts `courseunits`, then reads
