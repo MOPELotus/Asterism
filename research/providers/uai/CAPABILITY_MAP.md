@@ -57,7 +57,8 @@ AnswerResolve and the three independent submission capabilities. It:
     and drops ciphertext, key material and free-form route context;
 15. builds only an answer-value-free immutable preview, then forms the native
     submission body inside the execution boundary for exactly one supported
-    question (`single-choice`, `multichoice` or `short_answer`);
+    question (`single-choice`, `multichoice` or `short_answer`) with the
+    donor-audited positive numeric instance identity;
 16. accepts only a successful version-bearing submit response as a receipt,
     returns ambiguous transport failures after one mutation attempt, and
     independently verifies that exact version through a fresh user-module read;

@@ -848,7 +848,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(questions.len(), 1);
-        assert_eq!(questions[0].remote_id, "question-1");
+        assert_eq!(questions[0].remote_id, "1001");
         assert_eq!(questions[0].position, 1);
         assert_eq!(questions[0].kind, QuestionKind::MultipleChoice);
         assert_eq!(
@@ -1001,7 +1001,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(question.task_id, task_id);
-        assert_eq!(question.remote_question_id.as_deref(), Some("question-1"));
+        assert_eq!(question.remote_question_id.as_deref(), Some("1001"));
         assert_eq!(question.kind, QuestionKind::MultipleChoice);
         assert_eq!(
             reader

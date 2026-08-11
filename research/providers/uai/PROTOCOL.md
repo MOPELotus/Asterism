@@ -200,7 +200,10 @@ resolution and draft construction reject a snapshot from any other route.
 
 Execution is advertised only when a fresh Group has exactly one question and
 one audited simple type: `single-choice`, `multichoice` or `short_answer`. The
-native body is constructed only inside the execution boundary. A code-`0`,
+execution boundary additionally requires the explicit positive numeric answer-
+entry instance ID used by both donors; arbitrary strings remain read-only and
+cannot reach the POST. The native body is constructed only inside the execution
+boundary. A code-`0`,
 version-bearing response becomes an accepted receipt; `600001` and `600002`
 become typed retry state without a receipt, and the mutation is not implicitly
 repeated. A Network failure from the mutation boundary is likewise returned

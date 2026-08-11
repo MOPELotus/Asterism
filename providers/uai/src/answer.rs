@@ -742,7 +742,7 @@ mod tests {
         assert!(
             parse_answer_candidates(
                 &encrypted_answer_for_test(
-                    r#"[{"id":"question-1","answer":"{\"children\":[{\"answers\":[\"C\"]}]}"}]"#,
+                    r#"[{"id":"1001","answer":"{\"children\":[{\"answers\":[\"C\"]}]}"}]"#,
                 ),
                 &questions,
             )

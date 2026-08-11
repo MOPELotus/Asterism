@@ -35,7 +35,8 @@ resources/groups, misbound details/contexts, unknown roles and impossible point
 totals, plus duplicate duration nodes and missing/negative/overflow seconds.
 The encrypted question/answer fixtures additionally cover bounded `unipus.`
 framing, separate decryptions, exact Group/question binding and removal of key
-material. Submission fixtures cover one accepted version receipt and an exact
+material. Their synthetic native instance identity is positive numeric, matching
+the mutation shape independently observed in both donors. Submission fixtures cover one accepted version receipt and an exact
 receipt-versioned user-module readback. They use only synthetic answer values;
 tests require Course/Group/version/question/submitted-state/answer equality and
 reject changed answers. A missing receipt produces Inconclusive without making
@@ -85,6 +86,7 @@ field names, placeholder identities and response/result codes.
 - Question snapshots remain bound to the exact stable CourseResource/Unit/Group Task and cannot build a draft for another route.
 - Submission previews contain no selected answer values or executable provider payload.
 - Only one-question `single-choice`, `multichoice` and `short_answer` Groups advertise execute/verify.
+- Submission execution requires a positive numeric native instance ID and rejects arbitrary read-only Question identities before transport.
 - Codes `600001` and `600002` never produce a receipt and never trigger an implicit mutation retry.
 - Ambiguous mutation transport failures return after exactly one Provider attempt.
 - Verification requires the receipt version and an exact fresh Course/Group/question/submitted-answer readback.

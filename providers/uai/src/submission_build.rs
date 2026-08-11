@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(preview.fields[1].field_name, "quesDatas[].answer");
         let encoded = serde_json::to_string(&preview).unwrap();
         assert!(!encoded.contains("\"A\""));
-        assert!(!encoded.contains("question-1"));
+        assert!(!encoded.contains("1001"));
         assert!(!encoded.contains("newExploration/submit"));
         assert!(!encoded.contains("courseId"));
         assert!(!encoded.contains("openId"));

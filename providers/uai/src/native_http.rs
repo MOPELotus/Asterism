@@ -1233,7 +1233,7 @@ mod tests {
     #[test]
     fn submission_body_matches_the_audited_simple_json_shape() {
         let plan = UaiSubmissionPlan::fixture(
-            "question-1",
+            "1001",
             "multichoice",
             vec![vec!["A".to_owned(), "B".to_owned()]],
         );
@@ -1249,7 +1249,7 @@ mod tests {
         assert_eq!(body["courseId"], "course-v2:synthetic+rw");
         assert_eq!(body["openId"], "synthetic-open-id");
         assert_eq!(body["submitType"], 1);
-        assert_eq!(body["quesDatas"][0]["instanceId"], "question-1");
+        assert_eq!(body["quesDatas"][0]["instanceId"], "1001");
         let answer: serde_json::Value =
             serde_json::from_str(body["quesDatas"][0]["answer"].as_str().unwrap()).unwrap();
         assert_eq!(answer["children"][0]["value"][0], "A");

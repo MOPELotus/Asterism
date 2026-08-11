@@ -151,9 +151,9 @@ impl UaiSubmissionPlan {
             .question
             .remote_question_id
             .as_deref()
-            .filter(|value| valid_question_identity(value))
+            .filter(|value| valid_submission_question_identity(value))
             .ok_or_else(|| {
-                invalid_input("UAI submission execution requires a bounded remote Question ID")
+                unsupported("UAI submission execution requires a donor-audited numeric instance ID")
             })?
             .to_owned();
         let answer_children = match (item.question.kind, &item.selected.answer) {
@@ -521,6 +521,12 @@ fn valid_question_identity(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+fn valid_submission_question_identity(value: &str) -> bool {
+    valid_question_identity(value)
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<u64>().is_ok_and(|value| value > 0)
+}
+
 pub(crate) fn valid_submission_version(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_SUBMISSION_VERSION_BYTES
@@ -783,7 +789,7 @@ mod tests {
             &[(
                 "2001".to_owned(),
                 "group-1".to_owned(),
-                "question-1".to_owned(),
+                "1001".to_owned(),
                 "multichoice".to_owned(),
                 vec![vec!["A".to_owned(), "B".to_owned()]],
             )]
@@ -814,6 +820,32 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_numeric_question_identity_fails_before_mutation() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability = UaiSubmissionExecute::try_new(
+            Arc::new(FixtureDetail {
+                metadata: development_metadata().unwrap(),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+        let mut draft = draft().await;
+        draft.items[0].question.remote_question_id = Some("question-1".to_owned());
+        let error = capability
+            .execute_submission(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &draft,
+                &runtime_settings(),
+                &NoopEvents,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
         assert!(transport.calls.lock().unwrap().is_empty());
     }
 
