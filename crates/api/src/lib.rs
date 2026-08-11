@@ -5,6 +5,7 @@ mod auth;
 mod auth_bootstrap;
 mod credit;
 mod execution;
+mod openapi_contract;
 mod rate_limit;
 mod runtime_settings;
 mod task;
@@ -899,6 +900,7 @@ async fn openapi() -> Json<Value> {
         .as_object_mut()
         .expect("static OpenAPI schemas object")
         .insert("NormalizedAnswer".to_owned(), normalized_answer_schema());
+    openapi_contract::finalize(&mut document);
     Json(document)
 }
 
@@ -4744,8 +4746,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = to_bytes(response.into_body(), 256 * 1024).await.unwrap();
         let document: Value = serde_json::from_slice(&body).unwrap();
+        if let Err(failures) = openapi_contract::validate(&document) {
+            panic!("OpenAPI client-readiness validation failed: {failures:#?}");
+        }
         for path in [
             "/api/v1/auth/bootstrap",
             "/api/v1/auth/login",

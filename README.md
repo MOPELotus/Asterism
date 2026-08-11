@@ -60,7 +60,7 @@ Phase 0 已建立并持续完善以下基础：
 - 幂等执行请求、执行租约、周期扫描物化、隔离认领的 worker 与事务化 Event Outbox；
 - 点数 grant / reserve / commit / release 流程、不可变流水，以及 Quote + Reserve + Execution 原子调度边界；
 - SecretStore 抽象、Argon2id 密码、服务端 Session、scoped Service Token 与登录限速；
-- 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；
+- 内部 Axum API、OpenAPI 入口、健康检查与 HTTP-only CLI；OpenAPI 统一声明稳定错误响应、`X-Request-ID` 与限流 `Retry-After`，并以契约测试校验 operationId、路径参数、请求体、响应及本地 `$ref` 的客户端生成完整性；
 - Auth Bootstrap 配对、状态事件、Provider 服务端验证与原子凭据提交；
 - owner-scoped 人工扫描 API / CLI 与同事务扫描审计；
 - Chaoxing 能力级上游审计、独立 Chapter / Resource / Work / Exam TaskInventory、按稳定身份重新发现并经 Core 校验的 TaskDetail / Progress API 与 CLI、四类任务的模块化只读进度复核、明确区分 Chapter Work 与独立 Work / Exam 的题面离线解析、独立 Work 原生题目读取与无值 SubmissionBuild，以及限定单选/多选/判断的单次原生 SubmissionExecute 和逐题服务端答案 SubmissionVerify；提交 JSON 仅形成 Receipt，prompt/editor 不算完成，歧义恢复不重提；Document / Read / Video 原生执行、有界 Work 详情状态复核、Cookie 自动续登与显式开发验证入口均保持 Development、等待后续真实账号只读/授权写入验证；
