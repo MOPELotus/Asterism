@@ -43,7 +43,11 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::SubmissionVerify,
         ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken]),
-        session_kinds: BTreeSet::from([SessionKind::Jwt, SessionKind::Composite]),
+        session_kinds: BTreeSet::from([
+            SessionKind::Jwt,
+            SessionKind::Composite,
+            SessionKind::ProviderSpecific,
+        ]),
     })
 }
 
@@ -81,7 +85,11 @@ mod tests {
         );
         assert_eq!(
             metadata.session_kinds,
-            BTreeSet::from([SessionKind::Jwt, SessionKind::Composite])
+            BTreeSet::from([
+                SessionKind::Jwt,
+                SessionKind::Composite,
+                SessionKind::ProviderSpecific,
+            ])
         );
     }
 }

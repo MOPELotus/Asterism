@@ -18,8 +18,9 @@ A successful response uses string code `0` and returns distinct `openid` and
 `Authorization`. Donor code `1506` indicates a slider/captcha state and becomes
 `HumanRequired`, not a password retry.
 
-The injected Authentication boundary accepts exact username/password fields or
-one manually imported provider session document:
+The injected Authentication boundary accepts exact username/password fields in
+a transient `ProviderSpecific` candidate or one manually imported provider
+session document:
 
 ```json
 {"openid":"...","jwt":"header.payload.signature"}
@@ -28,7 +29,10 @@ one manually imported provider session document:
 The document rejects unknown fields, unsafe open IDs and non-JWT shapes. Native
 Password success produces username + password + one encrypted
 ProviderCompositeSession replacement so openid/JWT cannot be committed or
-renewed separately. Debug output redacts both. Injected session validation
+renewed separately. Provider metadata declares that transient input kind as
+well as the persisted `Composite` and `Jwt` kinds, allowing Core to validate
+both sides of the replacement without confusing the password candidate for a
+stored session. Debug output redacts both. Injected session validation
 resolves an account-bound composite and validates the JWT through the transport;
 the concrete Core adapter requests only `ProviderCompositeSession`, verifies
 the exact account/reference/purpose/expiry tuple, and accepts only

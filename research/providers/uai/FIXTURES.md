@@ -79,6 +79,7 @@ field names, placeholder identities and response/result codes.
 
 - Numeric and string CourseResource IDs normalize identically.
 - A decodable standard JWT `exp` bounds persisted/session-cache lifetime but never replaces native user-info validation.
+- Provider metadata accepts the transient `ProviderSpecific` Password candidate and the resulting persisted `Composite` replacement, while manual import remains `Jwt`.
 - Expired native Composite metadata may enter only the exact atomic Password renewal path; expired imported JWT cannot renew.
 - Duplicate resources or Groups fail the complete scan.
 - `courseInstanceId` remains operation-only and absent from serialized Tasks.

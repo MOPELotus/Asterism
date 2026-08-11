@@ -309,6 +309,24 @@ mod tests {
     }
 
     fn assert_registry_consistent(entry: ProviderEntry) {
+        assert!(
+            entry
+                .metadata
+                .session_kinds
+                .contains(&asterism_domain::SessionKind::ProviderSpecific)
+        );
+        assert!(
+            entry
+                .metadata
+                .session_kinds
+                .contains(&asterism_domain::SessionKind::Jwt)
+        );
+        assert!(
+            entry
+                .metadata
+                .session_kinds
+                .contains(&asterism_domain::SessionKind::Composite)
+        );
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());

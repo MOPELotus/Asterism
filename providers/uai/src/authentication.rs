@@ -674,6 +674,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn password_candidate_and_replacement_satisfy_core_metadata_gate() {
+        let boundaries = Arc::new(FixtureBoundaries::default());
+        let authentication = UaiAuthentication::try_new(boundaries.clone(), boundaries).unwrap();
+        let candidate = password_bundle();
+
+        assert!(
+            authentication
+                .metadata
+                .auth_methods
+                .contains(&candidate.auth_method)
+        );
+        assert!(
+            authentication
+                .metadata
+                .session_kinds
+                .contains(&candidate.session_kind)
+        );
+        let validation = authentication
+            .validate_credential(&auth_context(), &candidate)
+            .await
+            .unwrap();
+        let replacement = validation.replacement.unwrap();
+        assert_eq!(validation.status.kind, replacement.session_kind);
+        assert!(
+            authentication
+                .metadata
+                .session_kinds
+                .contains(&replacement.session_kind)
+        );
+    }
+
+    #[tokio::test]
     async fn challenges_and_credential_shapes_are_explicit() {
         let boundaries = Arc::new(FixtureBoundaries::default());
         let authentication = UaiAuthentication::try_new(boundaries.clone(), boundaries).unwrap();
