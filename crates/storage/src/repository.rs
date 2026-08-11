@@ -634,6 +634,18 @@ pub struct SubmissionResultPersistRequest<'a> {
     pub at: Timestamp,
 }
 
+#[derive(Clone, Debug)]
+pub struct SubmissionRecoveryStartRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub error_class: ProviderErrorClass,
+    pub progress: &'a ExecutionProgress,
+    pub at: Timestamp,
+    pub correlation_id: &'a str,
+}
+
 /// Worker-only persistence for a Draft-bound independent submission. A known
 /// receipt is durable before verification, while recovery can load the exact
 /// Draft and latest active-attempt receipt without granting any resubmit path.
@@ -654,10 +666,25 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
         execution_id: ExecutionId,
     ) -> Result<Option<SubmissionAttemptReceipt>, StorageError>;
 
+    async fn find_active_submission_attempt_id(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionAttemptId>, StorageError>;
+
+    async fn find_active_submission_result(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<SubmissionResult>, StorageError>;
+
     async fn persist_submission_result(
         &self,
         request: SubmissionResultPersistRequest<'_>,
     ) -> Result<(), StorageError>;
+
+    async fn begin_submission_recovery(
+        &self,
+        request: SubmissionRecoveryStartRequest<'_>,
+    ) -> Result<Execution, StorageError>;
 }
 
 /// Atomic execution request boundary. Creating the optional immutable quote and

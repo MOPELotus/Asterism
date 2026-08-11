@@ -10,12 +10,16 @@ use std::{
 use asterism_domain::{
     AttemptResult, AuthState, Execution, ExecutionAttempt, ExecutionId, ExecutionLease,
     ExecutionProgress, ExecutionStage, ExecutionState, OrchestrationState, ProviderAccountId,
-    ProviderErrorClass, ProviderId, RemoteState, Task, TaskCapability, Timestamp,
+    ProviderErrorClass, ProviderId, RemoteState, SubmissionAttemptReceipt, SubmissionDraft,
+    SubmissionResult, SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot,
+    SubmissionVerificationStatus, Task, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionRequest as ProviderExecutionRequest, ProviderContext,
     ProviderError, ProviderErrorKind, ProviderExecutionConcurrency, ProviderExecutionLog,
-    ProviderProgress, ProviderRegistry, TaskExecutionCapability, TaskProgressCapability,
+    ProviderProgress, ProviderRegistry, ResolvedProviderRuntimeSettings,
+    SubmissionExecuteCapability, SubmissionVerifyCapability, TaskExecutionCapability,
+    TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
@@ -23,8 +27,10 @@ use asterism_scheduler::{
 use asterism_storage::{
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionLeaseRepository,
     ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionRecoveryFinishRequest,
-    ExecutionRepository, LeaseAcquireOutcome, ProviderAccountRuntimeRepository,
-    SchedulerRepository, StorageError, TaskRuntimeRepository,
+    ExecutionRepository, ExecutionSubmissionRepository, LeaseAcquireOutcome,
+    ProviderAccountRuntimeRepository, SchedulerRepository, StorageError,
+    SubmissionReceiptPersistRequest, SubmissionRecoveryStartRequest,
+    SubmissionResultPersistRequest, TaskRuntimeRepository,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -205,7 +211,7 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
 
 impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T>
 where
-    E: ExecutionRepository,
+    E: ExecutionRepository + ExecutionSubmissionRepository,
     L: ExecutionLeaseRepository,
     S: SchedulerRepository,
     A: ProviderAccountRuntimeRepository,
@@ -329,6 +335,14 @@ where
         now: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        if task
+            .capabilities
+            .contains(&TaskCapability::SubmissionExecute)
+        {
+            return self
+                .recover_submission(job, task, now, correlation_id)
+                .await;
+        }
         if duration_report_only(&execution_capabilities(task)) {
             return self
                 .finish_recovery(
@@ -394,6 +408,242 @@ where
                     .await
             }
         }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "submission recovery keeps the no-resubmit verification path and frozen bindings explicit"
+    )]
+    async fn recover_submission(
+        &self,
+        job: &ScheduledJob,
+        task: &Task,
+        now: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let execution_id = claimed_execution_id(job)?;
+        let prepared = match self
+            .prepare_submission_call(execution_id, task, correlation_id)
+            .await?
+        {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                return self
+                    .finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(failure.error_class),
+                        None,
+                        now,
+                        correlation_id,
+                    )
+                    .await;
+            }
+        };
+        if let Some(result) = self
+            .executions
+            .find_active_submission_result(execution_id)
+            .await?
+        {
+            return self
+                .finish_recovery_from_submission_result(job, &result, now, correlation_id)
+                .await;
+        }
+        let Some(attempt_id) = self
+            .executions
+            .find_active_submission_attempt_id(execution_id)
+            .await?
+        else {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::Internal),
+                    None,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        };
+        let receipt = self
+            .executions
+            .find_active_submission_receipt(execution_id)
+            .await?;
+        if receipt.as_ref().is_some_and(|record| {
+            record.execution_attempt_id != attempt_id
+                || record.validate_for_draft(&prepared.draft).is_err()
+        }) {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::Internal),
+                    None,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        }
+        let _admission = self
+            .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
+            .await?;
+        let provider = prepared.verify.verify_submission(
+            &prepared.context,
+            &prepared.remote_task_id,
+            &prepared.draft,
+            receipt.as_ref().map(|record| &record.receipt),
+        );
+        tokio::pin!(provider);
+        let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        let verification = loop {
+            tokio::select! {
+                result = &mut provider => break result,
+                _ = heartbeat.tick() => self.renew_claims(job, execution_id).await?,
+            }
+        };
+        let finished_at = Utc::now().max(now);
+        match verification {
+            Ok(verification) => {
+                self.finish_recovered_submission_verification(
+                    job,
+                    attempt_id,
+                    &prepared,
+                    receipt.as_ref().map(|record| &record.receipt),
+                    verification,
+                    finished_at,
+                    correlation_id,
+                )
+                .await
+            }
+            Err(error) => {
+                self.finish_from_recovery_error(job, &error, finished_at, correlation_id)
+                    .await
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "recovery persists one exact attempt, Draft, receipt and verification binding"
+    )]
+    async fn finish_recovered_submission_verification(
+        &self,
+        job: &ScheduledJob,
+        attempt_id: asterism_domain::ExecutionAttemptId,
+        prepared: &PreparedSubmissionCall,
+        receipt: Option<&asterism_domain::SubmissionReceipt>,
+        verification: SubmissionVerificationSnapshot,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        if verification.validate().is_err()
+            || (verification.status == SubmissionVerificationStatus::Confirmed
+                && verification.remote_state != Some(RemoteState::Completed))
+        {
+            return self
+                .defer_or_require_submission_review(
+                    job,
+                    ProviderErrorClass::ProtocolDrift,
+                    at,
+                    correlation_id,
+                )
+                .await;
+        }
+        if matches!(
+            verification.status,
+            SubmissionVerificationStatus::Pending | SubmissionVerificationStatus::Inconclusive
+        ) && self.recovery_retry_at(job, at)?.is_some()
+        {
+            return self
+                .defer_or_require_submission_review(
+                    job,
+                    ProviderErrorClass::InvalidRemoteState,
+                    at,
+                    correlation_id,
+                )
+                .await;
+        }
+        let status = match verification.status {
+            SubmissionVerificationStatus::Confirmed => SubmissionResultStatus::Confirmed,
+            SubmissionVerificationStatus::Rejected => SubmissionResultStatus::Rejected,
+            SubmissionVerificationStatus::Pending | SubmissionVerificationStatus::Inconclusive => {
+                SubmissionResultStatus::Inconclusive
+            }
+        };
+        let result = SubmissionResult {
+            id: SubmissionResultId::new(),
+            submission_draft_id: prepared.draft.id,
+            execution_id: claimed_execution_id(job)?,
+            execution_attempt_id: attempt_id,
+            task_id: prepared.draft.task_id,
+            question_snapshot_id: prepared.draft.question_snapshot_id,
+            provider_id: prepared.draft.provider_id.clone(),
+            provider_version: prepared.provider_version.clone(),
+            status,
+            receipt: receipt.cloned(),
+            verification,
+            created_at: at,
+        };
+        result
+            .validate_for_draft(&prepared.draft)
+            .map_err(|_| ScheduledExecutionRunError::StateConflict)?;
+        self.executions
+            .persist_submission_result(SubmissionResultPersistRequest {
+                result: &result,
+                scheduler_job_id: job.id,
+                worker_id: claimed_worker(job)?,
+                correlation_id,
+                at,
+            })
+            .await?;
+        self.finish_recovery_from_submission_result(job, &result, at, correlation_id)
+            .await
+    }
+
+    async fn defer_or_require_submission_review(
+        &self,
+        job: &ScheduledJob,
+        error_class: ProviderErrorClass,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        if let Some(retry_at) = self.recovery_retry_at(job, at)? {
+            self.defer_recovery(job, retry_at, at).await
+        } else {
+            self.finish_recovery(
+                job,
+                ExecutionState::HumanRequired,
+                Some(error_class),
+                None,
+                at,
+                correlation_id,
+            )
+            .await
+        }
+    }
+
+    async fn finish_recovery_from_submission_result(
+        &self,
+        job: &ScheduledJob,
+        result: &SubmissionResult,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let (state, error_class) = match result.status {
+            SubmissionResultStatus::Confirmed => (ExecutionState::Succeeded, None),
+            SubmissionResultStatus::Rejected => (
+                ExecutionState::Failed,
+                Some(ProviderErrorClass::InvalidRemoteState),
+            ),
+            SubmissionResultStatus::ExecutionFailed | SubmissionResultStatus::Inconclusive => (
+                ExecutionState::HumanRequired,
+                Some(ProviderErrorClass::InvalidRemoteState),
+            ),
+        };
+        self.finish_recovery(job, state, error_class, None, at, correlation_id)
+            .await
     }
 
     async fn prepare_recovery_call(
@@ -633,6 +883,11 @@ where
                 ExecutionStage::Finalizing,
                 "remote outcome remains uncertain; human action required",
             ),
+            ExecutionState::Failed => (
+                None,
+                ExecutionStage::Finalizing,
+                "remote submission was rejected during recovery",
+            ),
             _ => return Err(ScheduledExecutionRunError::StateConflict),
         };
         let execution_id = claimed_execution_id(job)?;
@@ -672,6 +927,10 @@ where
                 execution,
                 error_class: error_class.expect("human recovery has an error class"),
             },
+            ExecutionState::Failed => ScheduledExecutionOutcome::Failed {
+                execution,
+                error_class: error_class.expect("failed recovery has an error class"),
+            },
             _ => unreachable!("recovery finish states were validated"),
         })
     }
@@ -684,6 +943,14 @@ where
         now: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        if task
+            .capabilities
+            .contains(&TaskCapability::SubmissionExecute)
+        {
+            return self
+                .execute_submission_attempt(job, task, attempt, now, correlation_id)
+                .await;
+        }
         if task.remote_state == RemoteState::Completed {
             return self.finish_success(job, attempt, now, correlation_id).await;
         }
@@ -722,6 +989,170 @@ where
         };
         self.call_provider(job, attempt, &prepared, correlation_id)
             .await
+    }
+
+    async fn execute_submission_attempt(
+        &self,
+        job: &ScheduledJob,
+        task: &Task,
+        attempt: &ExecutionAttempt,
+        now: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        if !matches!(
+            task.remote_state,
+            RemoteState::Pending | RemoteState::InProgress | RemoteState::Completed
+        ) {
+            return self
+                .finish_failure(
+                    job,
+                    attempt,
+                    ProviderErrorClass::InvalidRemoteState,
+                    FailureDisposition::Failed,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        }
+        let prepared = match self
+            .prepare_submission_call(attempt.execution_id, task, correlation_id)
+            .await?
+        {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                return self
+                    .finish_failure(
+                        job,
+                        attempt,
+                        failure.error_class,
+                        failure.disposition,
+                        now,
+                        correlation_id,
+                    )
+                    .await;
+            }
+        };
+        if task.remote_state == RemoteState::Completed {
+            return self
+                .verify_submission_without_mutation(job, attempt, &prepared, None, correlation_id)
+                .await;
+        }
+        self.call_submission(job, attempt, &prepared, correlation_id)
+            .await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "submission preparation fails closed across every account, capability, Draft and settings binding"
+    )]
+    async fn prepare_submission_call(
+        &self,
+        execution_id: ExecutionId,
+        task: &Task,
+        correlation_id: &str,
+    ) -> Result<Result<PreparedSubmissionCall, PreparedFailure>, ScheduledExecutionRunError> {
+        if authorize_execution(task, self.config.formal_assessment_policy).is_err() {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Authorization,
+                disposition: FailureDisposition::HumanRequired,
+            }));
+        }
+        if execution_capabilities(task) != [TaskCapability::SubmissionExecute]
+            || !task
+                .capabilities
+                .contains(&TaskCapability::SubmissionVerify)
+        {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::UnsupportedTask,
+                disposition: FailureDisposition::Failed,
+            }));
+        }
+        let Some(account) = self
+            .accounts
+            .find_runtime_provider_account(task.provider_account_id)
+            .await?
+        else {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Internal,
+                disposition: FailureDisposition::Failed,
+            }));
+        };
+        if account.auth_state != AuthState::Authenticated {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Authentication,
+                disposition: FailureDisposition::HumanRequired,
+            }));
+        }
+        let Some(entry) = self.registry.get(&account.provider_id) else {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::UnsupportedTask,
+                disposition: FailureDisposition::Failed,
+            }));
+        };
+        let (Some(execute), Some(verify)) = (
+            entry.submission_execute.clone(),
+            entry.submission_verify.clone(),
+        ) else {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::UnsupportedTask,
+                disposition: FailureDisposition::Failed,
+            }));
+        };
+        let Some(runtime_settings) = self
+            .executions
+            .find_execution_runtime_settings(execution_id)
+            .await?
+        else {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Internal,
+                disposition: FailureDisposition::Failed,
+            }));
+        };
+        let Some(draft) = self
+            .executions
+            .find_execution_submission_draft(execution_id)
+            .await?
+        else {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Internal,
+                disposition: FailureDisposition::Failed,
+            }));
+        };
+        if runtime_settings.provider_id != account.provider_id
+            || draft.task_id != task.id
+            || draft.provider_id != account.provider_id
+            || draft.provider_version != entry.metadata.implementation_version
+            || draft.validate().is_err()
+        {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Internal,
+                disposition: FailureDisposition::HumanRequired,
+            }));
+        }
+        let Ok(concurrency) = entry
+            .runtime_settings
+            .execution_concurrency(&runtime_settings.resolved)
+        else {
+            return Ok(Err(PreparedFailure {
+                error_class: ProviderErrorClass::Internal,
+                disposition: FailureDisposition::Failed,
+            }));
+        };
+        Ok(Ok(PreparedSubmissionCall {
+            execute,
+            verify,
+            context: ProviderContext {
+                provider_id: account.provider_id,
+                account_id: account.id,
+                credential_refs: account.credential_refs,
+                correlation_id: correlation_id.to_owned(),
+            },
+            remote_task_id: task.remote_id.clone(),
+            draft,
+            runtime_settings: runtime_settings.resolved,
+            concurrency,
+            provider_version: entry.metadata.implementation_version.clone(),
+        }))
     }
 
     async fn prepare_provider_call(
@@ -904,6 +1335,288 @@ where
         }
     }
 
+    async fn call_submission(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        prepared: &PreparedSubmissionCall,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let _admission = self
+            .acquire_admission(
+                job,
+                attempt.execution_id,
+                &prepared.context,
+                prepared.concurrency,
+            )
+            .await?;
+        let claim_lost = Arc::new(AtomicBool::new(false));
+        let sink = PersistedExecutionEventSink {
+            executions: &self.executions,
+            execution_id: attempt.execution_id,
+            attempt_id: attempt.id,
+            worker_id: claimed_worker(job)?,
+            correlation_id,
+            claim_lost: Arc::clone(&claim_lost),
+        };
+        let provider = prepared.execute.execute_submission(
+            &prepared.context,
+            &prepared.remote_task_id,
+            &prepared.draft,
+            &prepared.runtime_settings,
+            &sink,
+        );
+        tokio::pin!(provider);
+        let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        let result = loop {
+            tokio::select! {
+                result = &mut provider => break result,
+                _ = heartbeat.tick() => self.renew_claims(job, attempt.execution_id).await?,
+            }
+        };
+        if claim_lost.load(Ordering::Acquire) {
+            return Err(ScheduledExecutionRunError::ClaimLost);
+        }
+        let receipt = match result {
+            Ok(receipt) if receipt.validate().is_ok() => receipt,
+            Ok(_) => {
+                return self
+                    .begin_submission_recovery(
+                        job,
+                        attempt,
+                        ProviderErrorClass::ProtocolDrift,
+                        correlation_id,
+                    )
+                    .await;
+            }
+            Err(error) => {
+                return self
+                    .begin_submission_recovery(
+                        job,
+                        attempt,
+                        provider_error_class(&error),
+                        correlation_id,
+                    )
+                    .await;
+            }
+        };
+        let persisted_at = Utc::now().max(attempt.started_at);
+        let record = SubmissionAttemptReceipt {
+            submission_draft_id: prepared.draft.id,
+            execution_id: attempt.execution_id,
+            execution_attempt_id: attempt.id,
+            receipt: receipt.clone(),
+        };
+        record
+            .validate_for_draft(&prepared.draft)
+            .map_err(|_| ScheduledExecutionRunError::StateConflict)?;
+        self.executions
+            .persist_submission_receipt(SubmissionReceiptPersistRequest {
+                record: &record,
+                scheduler_job_id: job.id,
+                worker_id: claimed_worker(job)?,
+                correlation_id,
+                at: persisted_at,
+            })
+            .await?;
+        self.verify_submission_claimed(job, attempt, prepared, Some(&receipt), correlation_id)
+            .await
+    }
+
+    async fn verify_submission_without_mutation(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        prepared: &PreparedSubmissionCall,
+        receipt: Option<&asterism_domain::SubmissionReceipt>,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let _admission = self
+            .acquire_admission(
+                job,
+                attempt.execution_id,
+                &prepared.context,
+                prepared.concurrency,
+            )
+            .await?;
+        self.verify_submission_claimed(job, attempt, prepared, receipt, correlation_id)
+            .await
+    }
+
+    async fn verify_submission_claimed(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        prepared: &PreparedSubmissionCall,
+        receipt: Option<&asterism_domain::SubmissionReceipt>,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let provider = prepared.verify.verify_submission(
+            &prepared.context,
+            &prepared.remote_task_id,
+            &prepared.draft,
+            receipt,
+        );
+        tokio::pin!(provider);
+        let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        let result = loop {
+            tokio::select! {
+                result = &mut provider => break result,
+                _ = heartbeat.tick() => self.renew_claims(job, attempt.execution_id).await?,
+            }
+        };
+        match result {
+            Ok(verification) => {
+                self.finish_submission_verification(
+                    job,
+                    attempt,
+                    prepared,
+                    receipt,
+                    verification,
+                    correlation_id,
+                )
+                .await
+            }
+            Err(error) => {
+                self.begin_submission_recovery(
+                    job,
+                    attempt,
+                    provider_error_class(&error),
+                    correlation_id,
+                )
+                .await
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "submission verification must retain the exact worker, Draft and receipt bindings"
+    )]
+    async fn finish_submission_verification(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        prepared: &PreparedSubmissionCall,
+        receipt: Option<&asterism_domain::SubmissionReceipt>,
+        verification: SubmissionVerificationSnapshot,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        if verification.validate().is_err()
+            || (verification.status == SubmissionVerificationStatus::Confirmed
+                && verification.remote_state != Some(RemoteState::Completed))
+        {
+            return self
+                .begin_submission_recovery(
+                    job,
+                    attempt,
+                    ProviderErrorClass::ProtocolDrift,
+                    correlation_id,
+                )
+                .await;
+        }
+        let status = match verification.status {
+            SubmissionVerificationStatus::Confirmed => SubmissionResultStatus::Confirmed,
+            SubmissionVerificationStatus::Rejected => SubmissionResultStatus::Rejected,
+            SubmissionVerificationStatus::Pending | SubmissionVerificationStatus::Inconclusive => {
+                return self
+                    .begin_submission_recovery(
+                        job,
+                        attempt,
+                        ProviderErrorClass::InvalidRemoteState,
+                        correlation_id,
+                    )
+                    .await;
+            }
+        };
+        let now = Utc::now().max(attempt.started_at);
+        let result = SubmissionResult {
+            id: SubmissionResultId::new(),
+            submission_draft_id: prepared.draft.id,
+            execution_id: attempt.execution_id,
+            execution_attempt_id: attempt.id,
+            task_id: prepared.draft.task_id,
+            question_snapshot_id: prepared.draft.question_snapshot_id,
+            provider_id: prepared.draft.provider_id.clone(),
+            provider_version: prepared.provider_version.clone(),
+            status,
+            receipt: receipt.cloned(),
+            verification,
+            created_at: now,
+        };
+        result
+            .validate_for_draft(&prepared.draft)
+            .map_err(|_| ScheduledExecutionRunError::StateConflict)?;
+        self.executions
+            .persist_submission_result(SubmissionResultPersistRequest {
+                result: &result,
+                scheduler_job_id: job.id,
+                worker_id: claimed_worker(job)?,
+                correlation_id,
+                at: now,
+            })
+            .await?;
+        match status {
+            SubmissionResultStatus::Confirmed => {
+                self.finish_success(job, attempt, now, correlation_id).await
+            }
+            SubmissionResultStatus::Rejected => {
+                self.finish_failure(
+                    job,
+                    attempt,
+                    ProviderErrorClass::InvalidRemoteState,
+                    FailureDisposition::Failed,
+                    now,
+                    correlation_id,
+                )
+                .await
+            }
+            SubmissionResultStatus::ExecutionFailed | SubmissionResultStatus::Inconclusive => {
+                unreachable!("only terminal verification statuses are persisted here")
+            }
+        }
+    }
+
+    async fn begin_submission_recovery(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        error_class: ProviderErrorClass,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let at = Utc::now().max(attempt.started_at);
+        let progress = ExecutionProgress {
+            execution_id: attempt.execution_id,
+            percent: None,
+            stage: ExecutionStage::Verifying,
+            status_text: Some(
+                "submission outcome uncertain; verification-only recovery scheduled".to_owned(),
+            ),
+            current_item: None,
+            completed_items: None,
+            total_items: None,
+            updated_at: at,
+        };
+        let execution = self
+            .executions
+            .begin_submission_recovery(SubmissionRecoveryStartRequest {
+                execution_id: attempt.execution_id,
+                attempt_id: attempt.id,
+                scheduler_job_id: job.id,
+                worker_id: claimed_worker(job)?,
+                error_class,
+                progress: &progress,
+                at,
+                correlation_id,
+            })
+            .await?;
+        Ok(ScheduledExecutionOutcome::RecoveryScheduled(execution))
+    }
+
     async fn acquire_admission(
         &self,
         job: &ScheduledJob,
@@ -1073,6 +1786,17 @@ struct PreparedProviderCall {
     concurrency: ProviderExecutionConcurrency,
 }
 
+struct PreparedSubmissionCall {
+    execute: Arc<dyn SubmissionExecuteCapability>,
+    verify: Arc<dyn SubmissionVerifyCapability>,
+    context: ProviderContext,
+    remote_task_id: String,
+    draft: SubmissionDraft,
+    runtime_settings: ResolvedProviderRuntimeSettings,
+    concurrency: ProviderExecutionConcurrency,
+    provider_version: String,
+}
+
 struct PreparedRecoveryCall {
     capability: Arc<dyn TaskProgressCapability>,
     context: ProviderContext,
@@ -1211,7 +1935,10 @@ fn execution_goal_verified(
         && if duration_report_only(capabilities) {
             matches!(
                 outcome.remote_state,
-                RemoteState::Pending | RemoteState::InProgress | RemoteState::Completed
+                RemoteState::Pending
+                    | RemoteState::InProgress
+                    | RemoteState::Completed
+                    | RemoteState::Unknown
             )
         } else {
             outcome.remote_state == RemoteState::Completed
@@ -1254,7 +1981,11 @@ fn validate_execution_binding(
                 )
         )
     };
-    if execution.task_id == task.id && synchronized {
+    let submission_binding_matches = task
+        .capabilities
+        .contains(&TaskCapability::SubmissionExecute)
+        == execution.submission_draft_id.is_some();
+    if execution.task_id == task.id && synchronized && submission_binding_matches {
         Ok(())
     } else {
         Err(ScheduledExecutionRunError::StateConflict)
@@ -1380,6 +2111,7 @@ enum FailureDisposition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScheduledExecutionOutcome {
     Succeeded(Execution),
+    RecoveryScheduled(Execution),
     RetryScheduled {
         execution: Execution,
         error_class: ProviderErrorClass,
@@ -1434,31 +2166,41 @@ mod tests {
     };
 
     use asterism_domain::{
-        AssessmentClass, AuditActor, ProviderAccountId, ProviderId, ProviderRuntimeSettingsId,
-        RequestSource, TaskId, UserId,
+        AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, AssessmentClass,
+        AuditActor, NormalizedAnswer, ProviderAccountId, ProviderId, ProviderRuntimeSettingsId,
+        Question, QuestionId, QuestionKind, QuestionOption, QuestionSnapshotId, RequestSource,
+        SelectedAnswer, SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadEncoding,
+        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, TaskId, UserId,
     };
     use asterism_provider_api::{
         ExecutionOutcome, ProviderCapability, ProviderEntry, ProviderIdentity, ProviderMetadata,
         ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingDefinition,
         ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, RemoteProgress,
-        TaskProgressCapability, VerificationLevel,
+        SubmissionExecuteCapability, SubmissionVerifyCapability, TaskProgressCapability,
+        VerificationLevel,
     };
     use asterism_storage::{
-        Database, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-        ExecutionScheduleRequest, SqliteExecutionLeaseRepository, SqliteExecutionRepository,
-        SqliteProviderAccountRepository, SqliteSchedulerRepository, SqliteTaskQueryRepository,
+        AnswerCandidateRecord, AnswerCandidateRepository, Database,
+        ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
+        ExecutionScheduleRequest, QuestionSnapshot, QuestionSnapshotRepository,
+        SqliteExecutionLeaseRepository, SqliteExecutionRepository, SqliteProviderAccountRepository,
+        SqliteQuestionSnapshotRepository, SqliteSchedulerRepository, SqliteTaskQueryRepository,
+        SubmissionDraftRepository,
     };
     use sqlx::Row;
 
     use super::*;
 
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum ProviderBehavior {
         Success,
         NetworkFailure,
         RecoveryPending,
         DurationSuccess,
         DurationNetworkFailure,
+        SubmissionConfirmed,
+        SubmissionPending,
+        SubmissionExecuteNetwork,
     }
 
     #[tokio::test]
@@ -1526,6 +2268,7 @@ mod tests {
         behavior: ProviderBehavior,
         calls: Mutex<u32>,
         progress_calls: Mutex<u32>,
+        submission_verify_calls: Mutex<u32>,
     }
 
     impl ProviderIdentity for FakeExecution {
@@ -1546,6 +2289,11 @@ mod tests {
             let expected_capabilities = match self.behavior {
                 ProviderBehavior::DurationSuccess | ProviderBehavior::DurationNetworkFailure => {
                     [TaskCapability::DurationReport]
+                }
+                ProviderBehavior::SubmissionConfirmed
+                | ProviderBehavior::SubmissionPending
+                | ProviderBehavior::SubmissionExecuteNetwork => {
+                    panic!("submission behaviors use the independent mutation slot")
                 }
                 _ => [TaskCapability::ResourceExecution],
             };
@@ -1599,6 +2347,11 @@ mod tests {
                     ProviderErrorKind::Network,
                     "duration mutation outcome is uncertain",
                 )),
+                ProviderBehavior::SubmissionConfirmed
+                | ProviderBehavior::SubmissionPending
+                | ProviderBehavior::SubmissionExecuteNetwork => {
+                    panic!("submission behaviors use the independent mutation slot")
+                }
             }
         }
     }
@@ -1631,7 +2384,80 @@ mod tests {
                 ProviderBehavior::DurationSuccess | ProviderBehavior::DurationNetworkFailure => {
                     panic!("DurationReport recovery must not use TaskProgress")
                 }
+                ProviderBehavior::SubmissionConfirmed
+                | ProviderBehavior::SubmissionPending
+                | ProviderBehavior::SubmissionExecuteNetwork => {
+                    panic!("submission recovery must use SubmissionVerify")
+                }
             }
+        }
+    }
+
+    #[async_trait]
+    impl SubmissionExecuteCapability for FakeExecution {
+        async fn execute_submission(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+            draft: &SubmissionDraft,
+            _runtime_settings: &ResolvedProviderRuntimeSettings,
+            _events: &(dyn ExecutionEventSink + Send + Sync),
+        ) -> ProviderResult<asterism_domain::SubmissionReceipt> {
+            *self.calls.lock().unwrap() += 1;
+            assert_eq!(draft.provider_id, self.metadata.id);
+            if self.behavior == ProviderBehavior::SubmissionExecuteNetwork {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "submission mutation outcome is uncertain",
+                ));
+            }
+            Ok(asterism_domain::SubmissionReceipt {
+                remote_status: "accepted".to_owned(),
+                message_sanitized: None,
+                provider_trace_id: Some("submission-trace".to_owned()),
+                received_at: Utc::now(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl SubmissionVerifyCapability for FakeExecution {
+        async fn verify_submission(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+            draft: &SubmissionDraft,
+            _receipt: Option<&asterism_domain::SubmissionReceipt>,
+        ) -> ProviderResult<SubmissionVerificationSnapshot> {
+            *self.submission_verify_calls.lock().unwrap() += 1;
+            let pending = self.behavior == ProviderBehavior::SubmissionPending;
+            Ok(SubmissionVerificationSnapshot {
+                status: if pending {
+                    SubmissionVerificationStatus::Pending
+                } else {
+                    SubmissionVerificationStatus::Confirmed
+                },
+                remote_state: Some(if pending {
+                    RemoteState::InProgress
+                } else {
+                    RemoteState::Completed
+                }),
+                score: None,
+                progress_percent: Some(if pending { 50 } else { 100 }),
+                questions: draft
+                    .items
+                    .iter()
+                    .map(|item| asterism_domain::SubmissionQuestionVerification {
+                        question_id: item.question.id,
+                        status: if pending {
+                            asterism_domain::SubmissionQuestionVerificationStatus::Unverified
+                        } else {
+                            asterism_domain::SubmissionQuestionVerificationStatus::Confirmed
+                        },
+                    })
+                    .collect(),
+                verified_at: Utc::now(),
+            })
         }
     }
 
@@ -1690,6 +2516,18 @@ mod tests {
         assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
     }
 
+    #[test]
+    fn verified_duration_goal_does_not_invent_a_completion_state() {
+        assert!(execution_goal_verified(
+            &[TaskCapability::DurationReport],
+            &ExecutionOutcome {
+                remote_state: RemoteState::Unknown,
+                verified: true,
+                result_sanitized: serde_json::json!({"duration_changed": true}),
+            },
+        ));
+    }
+
     #[tokio::test]
     async fn uncertain_duration_report_requires_human_review_without_retry() {
         let fixture = Fixture::duration(ProviderBehavior::DurationNetworkFailure).await;
@@ -1731,6 +2569,88 @@ mod tests {
         ));
         assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
         assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn submission_succeeds_only_after_draft_bound_verification() {
+        let fixture = Fixture::submission(ProviderBehavior::SubmissionConfirmed).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 1);
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM submission_attempt_receipts), \
+                    (SELECT COUNT(*) FROM submission_results)",
+        )
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(counts, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn receipt_with_pending_verification_recovers_without_resubmitting() {
+        let mut fixture = Fixture::submission(ProviderBehavior::SubmissionPending).await;
+        let first = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            first,
+            ScheduledExecutionOutcome::RecoveryScheduled(_)
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 1);
+
+        let recovery_at = Utc::now();
+        fixture.job = fixture.claim_recovery(recovery_at).await;
+        let recovered = fixture
+            .runner
+            .run_claimed(&fixture.job, recovery_at)
+            .await
+            .unwrap();
+        assert!(matches!(
+            recovered,
+            ScheduledExecutionOutcome::Deferred { .. }
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_submit_error_recovers_by_verification_only() {
+        let mut fixture = Fixture::submission(ProviderBehavior::SubmissionExecuteNetwork).await;
+        let first = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            first,
+            ScheduledExecutionOutcome::RecoveryScheduled(_)
+        ));
+        let receipt_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM submission_attempt_receipts")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert_eq!(receipt_count, 0);
+
+        let recovery_at = Utc::now();
+        fixture.job = fixture.claim_recovery(recovery_at).await;
+        let recovered = fixture
+            .runner
+            .run_claimed(&fixture.job, recovery_at)
+            .await
+            .unwrap();
+        assert!(matches!(recovered, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -1981,6 +2901,7 @@ mod tests {
                 behavior,
                 calls: Mutex::new(0),
                 progress_calls: Mutex::new(0),
+                submission_verify_calls: Mutex::new(0),
             });
             let mut registry = ProviderRegistry::default();
             registry
@@ -1997,8 +2918,8 @@ mod tests {
                     question_parse: None,
                     answer_resolve: None,
                     submission_build: None,
-                    submission_execute: None,
-                    submission_verify: None,
+                    submission_execute: Some(provider.clone()),
+                    submission_verify: Some(provider.clone()),
                     task_execution: Some(provider.clone()),
                     browser_bridge: None,
                 })
@@ -2042,6 +2963,33 @@ mod tests {
 
         async fn duration_recovering(behavior: ProviderBehavior) -> Self {
             Self::duration(behavior).await.enter_recovery().await
+        }
+
+        async fn submission(behavior: ProviderBehavior) -> Self {
+            let fixture = Self::new(AssessmentClass::Routine, behavior).await;
+            let task_id = execution_id_to_task(
+                &SqliteExecutionRepository::new(fixture.database.clone()),
+                fixture.execution_id,
+            )
+            .await
+            .unwrap();
+            let draft = persist_submission_draft(&fixture.database, task_id, fixture.now).await;
+            sqlx::query(
+                "UPDATE tasks SET source_type = 'work', \
+                    capabilities_json = '[\"submission_execute\",\"submission_verify\"]' \
+                 WHERE id = ?",
+            )
+            .bind(task_id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+            sqlx::query("UPDATE executions SET submission_draft_id = ? WHERE id = ?")
+                .bind(draft.id.to_string())
+                .bind(fixture.execution_id.to_string())
+                .execute(fixture.database.pool())
+                .await
+                .unwrap();
+            fixture
         }
 
         async fn enter_recovery(mut self) -> Self {
@@ -2097,6 +3045,20 @@ mod tests {
                 .pop()
                 .unwrap();
             self
+        }
+
+        async fn claim_recovery(&self, now: Timestamp) -> ScheduledJob {
+            SqliteSchedulerRepository::new(self.database.clone())
+                .claim_due_execution_jobs(
+                    "submission-recovery-worker",
+                    now,
+                    now + chrono::Duration::minutes(5),
+                    1,
+                )
+                .await
+                .unwrap()
+                .pop()
+                .unwrap()
         }
 
         async fn persisted_state(&self) -> (String, String, i64) {
@@ -2173,6 +3135,85 @@ mod tests {
         .await
         .unwrap();
         (owner, account_id, task_id)
+    }
+
+    async fn persist_submission_draft(
+        database: &Database,
+        task_id: TaskId,
+        now: Timestamp,
+    ) -> SubmissionDraft {
+        let question_id = QuestionId::new();
+        let question = Question {
+            id: question_id,
+            task_id,
+            remote_question_id: Some("question-1".to_owned()),
+            kind: QuestionKind::SingleChoice,
+            stem: "Question".to_owned(),
+            options: vec![QuestionOption {
+                id: "A".to_owned(),
+                content: Some("Answer".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({}),
+            }],
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({}),
+            position: 1,
+        };
+        let snapshot = QuestionSnapshot {
+            id: QuestionSnapshotId::new(),
+            task_id,
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            provider_version: "test".to_owned(),
+            captured_at: now,
+            questions: vec![question.clone()],
+        };
+        let repository = SqliteQuestionSnapshotRepository::new(database.clone());
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        let candidate = AnswerCandidateRecord {
+            id: AnswerCandidateId::new(),
+            question_snapshot_id: snapshot.id,
+            candidate: AnswerCandidate {
+                question_id,
+                source: AnswerSource::Manual,
+                answer: NormalizedAnswer::Selections(vec!["A".to_owned()]),
+                confidence: Some(AnswerConfidence::try_new(10_000).unwrap()),
+                explanation: None,
+                provenance_sanitized: serde_json::json!({"manual": true}),
+            },
+            created_at: now,
+        };
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&candidate))
+            .await
+            .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: snapshot.id,
+            provider_id: snapshot.provider_id,
+            provider_version: "test".to_owned(),
+            items: vec![SubmissionDraftItem {
+                question,
+                selected: SelectedAnswer {
+                    candidate_id: candidate.id,
+                    question_id,
+                    answer: candidate.candidate.answer,
+                    source: candidate.candidate.source,
+                    confidence: candidate.candidate.confidence,
+                },
+            }],
+            payload_preview: SubmissionPayloadPreview {
+                encoding: SubmissionPayloadEncoding::Json,
+                format: "provider-alpha.submission.v1".to_owned(),
+                fields: vec![SubmissionPayloadFieldPreview {
+                    question_id,
+                    field_name: "answer[question-1]".to_owned(),
+                }],
+            },
+            created_at: now,
+        };
+        repository.save_submission_draft(&draft).await.unwrap();
+        draft
     }
 
     async fn schedule_and_claim(
@@ -2259,6 +3300,8 @@ mod tests {
                 ProviderCapability::TaskProgressRead,
                 ProviderCapability::ResourceExecution,
                 ProviderCapability::DurationReport,
+                ProviderCapability::SubmissionExecute,
+                ProviderCapability::SubmissionVerify,
             ]),
             auth_methods: BTreeSet::new(),
             session_kinds: BTreeSet::new(),

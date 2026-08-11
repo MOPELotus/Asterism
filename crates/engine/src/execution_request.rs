@@ -309,10 +309,7 @@ fn validate_task(
     ) {
         return Err(ExecutionRequestError::TaskStateConflict);
     }
-    if !matches!(
-        task.remote_state,
-        RemoteState::Pending | RemoteState::InProgress
-    ) {
+    if !remote_state_is_executable(task) {
         return Err(ExecutionRequestError::RemoteStateNotExecutable);
     }
     if !task
@@ -331,6 +328,23 @@ fn validate_task(
         authorize_task_action(task, TaskAction::Submit, formal_policy)?;
     }
     Ok(())
+}
+
+fn remote_state_is_executable(task: &Task) -> bool {
+    let actions = task
+        .capabilities
+        .iter()
+        .copied()
+        .filter(|capability| is_execution_capability(*capability))
+        .collect::<Vec<_>>();
+    matches!(
+        task.remote_state,
+        RemoteState::Pending | RemoteState::InProgress
+    ) || (actions == [TaskCapability::DurationReport]
+        && matches!(
+            task.remote_state,
+            RemoteState::Completed | RemoteState::Unknown
+        ))
 }
 
 const fn is_execution_capability(capability: TaskCapability) -> bool {
@@ -378,4 +392,59 @@ pub enum ExecutionRequestError {
     Transition(#[from] ExecutionTransitionError),
     #[error(transparent)]
     Storage(#[from] StorageError),
+}
+
+#[cfg(test)]
+mod tests {
+    use asterism_domain::{
+        AssessmentClass, OrchestrationState, ProviderAccountId, SourceType, TaskSnapshotId,
+    };
+    use chrono::Utc;
+
+    use super::*;
+
+    fn task(remote_state: RemoteState, capabilities: Vec<TaskCapability>) -> Task {
+        let now = Utc::now();
+        Task {
+            id: TaskId::new(),
+            provider_account_id: ProviderAccountId::new(),
+            course_id: None,
+            remote_id: "remote-task".to_owned(),
+            source_type: SourceType::Resource,
+            assessment_class: AssessmentClass::Routine,
+            title: "Task".to_owned(),
+            remote_state,
+            orchestration_state: OrchestrationState::Ready,
+            opens_at: None,
+            due_at: None,
+            closes_at: None,
+            discovered_at: now,
+            updated_at: now,
+            latest_snapshot_id: None::<TaskSnapshotId>,
+            capabilities,
+        }
+    }
+
+    #[test]
+    fn completed_remote_state_is_executable_only_for_duration_report_goal() {
+        assert!(remote_state_is_executable(&task(
+            RemoteState::Completed,
+            vec![TaskCapability::DurationReport],
+        )));
+        assert!(!remote_state_is_executable(&task(
+            RemoteState::Completed,
+            vec![TaskCapability::ResourceExecution],
+        )));
+        assert!(remote_state_is_executable(&task(
+            RemoteState::Unknown,
+            vec![TaskCapability::DurationReport],
+        )));
+        assert!(!remote_state_is_executable(&task(
+            RemoteState::Completed,
+            vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ],
+        )));
+    }
 }

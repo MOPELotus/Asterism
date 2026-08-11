@@ -2787,3 +2787,37 @@ re-enters start/keep/save. Provider and Engine regression tests cover these
 boundaries. `DurationRead` remains unadvertised because live evidence has not
 established the unit/grammar of WELearn's raw time values; completion-changing
 execution and Capture remain absent, and verification stays Development.
+
+## One-hundred-and-sixty-ninth Phase 0 slice
+
+Independent submission execution is now a first-class Core worker path rather
+than falling through generic `TaskExecutionCapability`. Scheduling requires one
+owner-scoped immutable `SubmissionDraft`, freezes its identity on the
+`Execution`, checks Task, Provider and implementation-version bindings, and
+permits a Draft to be consumed by at most one Execution. Idempotent replay must
+match that same Draft; non-submission Tasks reject one.
+
+The worker invokes `SubmissionExecute` at most once for the active Attempt,
+validates and durably persists its bounded receipt, then invokes the separate
+`SubmissionVerify` slot. A receipt never closes the Execution. Only a valid
+Confirmed verification with Completed remote state persists a Confirmed result
+and succeeds; Rejected persists its result and fails, while Pending,
+Inconclusive, protocol drift and mutation-side transport ambiguity atomically
+move the existing Attempt into Recovering.
+
+Submission recovery reloads the same frozen Draft and active Attempt, supplies
+the persisted receipt when available, and calls only `SubmissionVerify`.
+Pending and transient verification failures may defer another read, but never
+create a Retry job or invoke Submit again. A crash before receipt persistence
+therefore verifies with no receipt rather than guessing that the mutation did
+not occur. Existing terminal results are reused after a crash between result
+persistence and Execution finalization. Storage and Engine regressions cover
+Draft uniqueness, receipt idempotency, confirmed execution, receipt-with-
+Pending recovery and ambiguous submit recovery without resubmission.
+
+The target-aware DurationReport contract is aligned at scheduling as well as
+execution: an only-DurationReport goal may run for Pending, InProgress,
+Completed or explicitly Unknown completion state, because a verified duration
+change must not invent or require a completion value. Any ambiguous duration
+mutation still goes directly to HumanRequired and cannot be automatically
+retried or recovered through TaskProgress.

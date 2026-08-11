@@ -85,7 +85,7 @@ where
 
 impl<E, L, S, A, T> ExecutionSchedulerWorker<E, L, S, A, T>
 where
-    E: ExecutionRepository,
+    E: ExecutionRepository + asterism_storage::ExecutionSubmissionRepository,
     L: ExecutionLeaseRepository,
     S: Clone + SchedulerRepository,
     A: ProviderAccountRuntimeRepository,
@@ -129,6 +129,7 @@ where
         for outcome in outcomes {
             match outcome? {
                 ScheduledExecutionOutcome::Succeeded(_) => report.succeeded += 1,
+                ScheduledExecutionOutcome::RecoveryScheduled(_) => report.recovery_scheduled += 1,
                 ScheduledExecutionOutcome::RetryScheduled { .. } => report.retry_scheduled += 1,
                 ScheduledExecutionOutcome::HumanRequired { .. } => report.human_required += 1,
                 ScheduledExecutionOutcome::Failed { .. } => report.failed += 1,
@@ -145,6 +146,7 @@ where
 pub struct ExecutionSchedulerTickReport {
     pub claimed: usize,
     pub succeeded: usize,
+    pub recovery_scheduled: usize,
     pub retry_scheduled: usize,
     pub human_required: usize,
     pub failed: usize,

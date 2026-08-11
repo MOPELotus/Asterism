@@ -25,8 +25,8 @@ use crate::{
     ExecutionQueryRepository, ExecutionRecoveryFinishRequest, ExecutionRepository,
     ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome,
     ExecutionScheduleRequest, ExecutionSubmissionRepository, StorageError,
-    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
-    SubmissionResultRepository,
+    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionRecoveryStartRequest,
+    SubmissionResultPersistRequest, SubmissionResultRepository,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage, SqliteQuestionSnapshotRepository};
 
@@ -559,6 +559,59 @@ impl ExecutionSubmissionRepository for SqliteExecutionRepository {
         row.as_ref().map(decode_submission_receipt).transpose()
     }
 
+    async fn find_active_submission_attempt_id(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionAttemptId>, StorageError> {
+        let attempt_id: Option<String> = sqlx::query_scalar(
+            "SELECT attempt.id FROM execution_attempts AS attempt \
+             INNER JOIN executions AS execution ON execution.id = attempt.execution_id \
+             WHERE execution.id = ? AND execution.submission_draft_id IS NOT NULL \
+               AND attempt.finished_at IS NULL ORDER BY attempt.attempt_no DESC LIMIT 1",
+        )
+        .bind(execution_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        attempt_id
+            .map(|value| {
+                ExecutionAttemptId::from_str(&value)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))
+            })
+            .transpose()
+    }
+
+    async fn find_active_submission_result(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<asterism_domain::SubmissionResult>, StorageError> {
+        let binding: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT execution.requested_by, execution.submission_draft_id, attempt.id \
+             FROM executions AS execution \
+             INNER JOIN execution_attempts AS attempt ON attempt.execution_id = execution.id \
+             WHERE execution.id = ? AND execution.requested_by IS NOT NULL \
+               AND execution.submission_draft_id IS NOT NULL AND attempt.finished_at IS NULL \
+             ORDER BY attempt.attempt_no DESC LIMIT 1",
+        )
+        .bind(execution_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        let Some((owner_id, draft_id, attempt_id)) = binding else {
+            return Ok(None);
+        };
+        let owner_id = UserId::from_str(&owner_id)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let draft_id = asterism_domain::SubmissionDraftId::from_str(&draft_id)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let attempt_id = ExecutionAttemptId::from_str(&attempt_id)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        Ok(SqliteQuestionSnapshotRepository::new(self.database.clone())
+            .find_latest_owned_submission_result(owner_id, draft_id)
+            .await?
+            .filter(|result| {
+                result.execution_id == execution_id && result.execution_attempt_id == attempt_id
+            }))
+    }
+
     async fn persist_submission_result(
         &self,
         request: SubmissionResultPersistRequest<'_>,
@@ -580,9 +633,157 @@ impl ExecutionSubmissionRepository for SqliteExecutionRepository {
         )
         .await?;
         transaction.commit().await?;
+        if let Some(existing) = self
+            .find_active_submission_result(request.result.execution_id)
+            .await?
+        {
+            return if existing == *request.result {
+                Ok(())
+            } else {
+                Err(StorageError::InvalidData(
+                    "active submission attempt already has another result".to_owned(),
+                ))
+            };
+        }
         SqliteQuestionSnapshotRepository::new(self.database.clone())
             .save_submission_result(request.result)
             .await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the transaction keeps claim, lease, state, recovery job and outbox writes visibly atomic"
+    )]
+    async fn begin_submission_recovery(
+        &self,
+        request: SubmissionRecoveryStartRequest<'_>,
+    ) -> Result<Execution, StorageError> {
+        validate_worker_token(request.worker_id, request.correlation_id)?;
+        validate_progress(request.progress)?;
+        if request.progress.execution_id != request.execution_id
+            || request.progress.updated_at != request.at
+            || request.progress.stage != ExecutionStage::Verifying
+        {
+            return Err(StorageError::InvalidData(
+                "submission recovery progress is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let row = select_execution(&mut transaction, request.execution_id).await?;
+        let mut execution = decode_execution(&row)?;
+        if execution.state != ExecutionState::Running || execution.submission_draft_id.is_none() {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        let active_attempt = find_active_attempt(&mut transaction, request.execution_id).await?;
+        if active_attempt.id != request.attempt_id {
+            return Err(StorageError::ExecutionAttemptNotActive);
+        }
+        execution.state = ExecutionState::Recovering;
+        let execution_changed = sqlx::query(
+            "UPDATE executions SET state = 'recovering' WHERE id = ? AND state = 'running'",
+        )
+        .bind(request.execution_id.to_string())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        let task_changed = sqlx::query(
+            "UPDATE tasks SET orchestration_state = 'recovering', updated_at = ? \
+             WHERE id = ? AND orchestration_state = 'running'",
+        )
+        .bind(encode_timestamp(request.at))
+        .bind(execution.task_id.to_string())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        upsert_progress(&mut transaction, request.progress).await?;
+        let scheduler_changed = sqlx::query(
+            "UPDATE scheduled_jobs SET state = 'completed', worker_id = NULL, \
+                    lease_expires_at = NULL, updated_at = ? \
+             WHERE id = ? AND state = 'claimed' AND worker_id = ?",
+        )
+        .bind(encode_timestamp(request.at))
+        .bind(request.scheduler_job_id.to_string())
+        .bind(request.worker_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        let lease_removed =
+            sqlx::query("DELETE FROM execution_leases WHERE execution_id = ? AND worker_id = ?")
+                .bind(request.execution_id.to_string())
+                .bind(request.worker_id)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+        if execution_changed != 1
+            || task_changed != 1
+            || scheduler_changed != 1
+            || lease_removed != 1
+        {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        let recovery_kind = ScheduledJobKind::Recovery {
+            execution_id: request.execution_id,
+        };
+        sqlx::query(
+            "INSERT INTO scheduled_jobs \
+             (id, job_kind, payload_json, run_at, state, attempts, idempotency_key, created_at, updated_at) \
+             VALUES (?, 'recovery', ?, ?, 'pending', 0, ?, ?, ?)",
+        )
+        .bind(ScheduleId::new().to_string())
+        .bind(serde_json::to_string(&recovery_kind)?)
+        .bind(encode_timestamp(request.at))
+        .bind(format!("recovery:{}", request.execution_id))
+        .bind(encode_timestamp(request.at))
+        .bind(encode_timestamp(request.at))
+        .execute(&mut *transaction)
+        .await?;
+        insert_execution_log(
+            &mut transaction,
+            ExecutionLogInsert {
+                execution_id: request.execution_id,
+                attempt_id: Some(request.attempt_id),
+                at: request.at,
+                level: LogLevel::Warn,
+                stage: ExecutionStage::Verifying,
+                message: "submission outcome requires verification-only recovery",
+                provider_trace_id: None,
+                metadata_sanitized: None,
+            },
+            request.correlation_id,
+        )
+        .await?;
+        enqueue_state_event(
+            &mut transaction,
+            request.execution_id,
+            ExecutionState::Recovering,
+            request.at,
+            request.correlation_id,
+        )
+        .await?;
+        enqueue_progress_event(&mut transaction, request.progress, request.correlation_id).await?;
+        enqueue_in_transaction(
+            &mut transaction,
+            &EventEnvelope::at(
+                request.correlation_id,
+                DomainEvent::ExecutionRecoveryRequired {
+                    execution_id: request.execution_id,
+                    task_id: execution.task_id,
+                },
+                request.at,
+            ),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(execution)
     }
 }
 
@@ -1259,6 +1460,7 @@ fn validate_recovery_finish_request(
         ExecutionState::HumanRequired => {
             request.error_class.is_some() && request.retry_at.is_none()
         }
+        ExecutionState::Failed => request.error_class.is_some() && request.retry_at.is_none(),
         ExecutionState::RetryWaiting => {
             request.error_class.is_some()
                 && request
@@ -2375,6 +2577,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression keeps receipt idempotency and recovery transition in one attempt"
+    )]
     async fn submission_receipt_is_active_attempt_bound_and_idempotent() {
         let (database, owner, task_id) = fixture().await;
         let repository = SqliteExecutionRepository::new(database.clone());
@@ -2445,6 +2651,48 @@ mod tests {
                 })
                 .await
                 .is_err()
+        );
+
+        let recovery_at = conflicting.receipt.received_at + chrono::Duration::seconds(1);
+        let progress = ExecutionProgress {
+            execution_id: execution.id,
+            percent: None,
+            stage: ExecutionStage::Verifying,
+            status_text: Some("verification-only recovery".to_owned()),
+            current_item: None,
+            completed_items: None,
+            total_items: None,
+            updated_at: recovery_at,
+        };
+        let recovering = repository
+            .begin_submission_recovery(SubmissionRecoveryStartRequest {
+                execution_id: execution.id,
+                attempt_id: attempt.id,
+                scheduler_job_id: job_id,
+                worker_id: "receipt-worker",
+                error_class: asterism_domain::ProviderErrorClass::Network,
+                progress: &progress,
+                at: recovery_at,
+                correlation_id: "receipt-recovery",
+            })
+            .await
+            .unwrap();
+        assert_eq!(recovering.state, ExecutionState::Recovering);
+        let states: Vec<(String, String)> =
+            sqlx::query_as("SELECT job_kind, state FROM scheduled_jobs ORDER BY created_at, id")
+                .fetch_all(database.pool())
+                .await
+                .unwrap();
+        assert!(states.contains(&("execution".to_owned(), "completed".to_owned())));
+        assert!(states.contains(&("recovery".to_owned(), "pending".to_owned())));
+        let mut expected_receipt = conflicting;
+        expected_receipt.receipt.remote_status = "accepted".to_owned();
+        assert_eq!(
+            repository
+                .find_active_submission_receipt(execution.id)
+                .await
+                .unwrap(),
+            Some(expected_receipt)
         );
     }
 
