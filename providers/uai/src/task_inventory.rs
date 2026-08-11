@@ -9,6 +9,7 @@ use crate::course_inventory::{
     UaiCourseContext, course_resource_id_from_remote, invalid_response, protocol_drift,
     required_remote_component, required_text,
 };
+use crate::question::supports_question_read;
 
 const MAX_TREE_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_NESTED_COURSE_BYTES: usize = 4 * 1_024 * 1_024;
@@ -198,6 +199,13 @@ fn build_task(
         .ok_or_else(|| protocol_drift("UAI Group Task is not nested under a Unit"))?;
     let task_types = task_types(object.get("base"))?;
     let question_count = question_count(object.get("question_num"))?;
+    let mut capabilities = vec![TaskCapability::ProgressRead, TaskCapability::DurationRead];
+    if supports_question_read(&task_types, question_count) {
+        capabilities.extend([
+            TaskCapability::QuestionInventory,
+            TaskCapability::QuestionParse,
+        ]);
+    }
     let remote_id = format!("group:{resource_id}:{}:{group_id}", unit.id);
     let normalized = serde_json::json!({
         "schema": "uai.group-task.v1",
@@ -219,7 +227,7 @@ fn build_task(
         opens_at: None,
         due_at: None,
         closes_at: None,
-        capabilities: vec![TaskCapability::ProgressRead, TaskCapability::DurationRead],
+        capabilities,
         fingerprint: fingerprint(&normalized)?,
         normalized,
         raw_sanitized: serde_json::json!({
@@ -362,6 +370,34 @@ mod tests {
                 r#"{"code":0,"course":"{\"units\":[{\"id\":\"unit-1\",\"role\":\"unit\",\"name\":\"Unit\",\"children\":[{\"id\":\"group-1\",\"role\":\"group\",\"name\":\"Task\",\"question_num\":-1}]}]}"}"#,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn only_supported_question_groups_advertise_answer_free_question_slots() {
+        let course = parse_course_inventory(COURSES).unwrap().remove(0);
+        let context = parse_course_context(&course, DETAIL).unwrap();
+        let tree = TREE.replace("rich-text-read", "single-choice");
+        let tasks = parse_task_inventory(&course, &context, &tree).unwrap();
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::QuestionInventory)
+        );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::QuestionParse)
+        );
+        assert!(
+            !tasks[1]
+                .capabilities
+                .contains(&TaskCapability::QuestionInventory)
+        );
+        assert!(
+            !tasks[1]
+                .capabilities
+                .contains(&TaskCapability::QuestionParse)
         );
     }
 }

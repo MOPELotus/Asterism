@@ -2707,3 +2707,36 @@ operation. Rate-limit responses are not receipts, a receipt is not
 verification, and unsupported empty/upload/discussion behavior cannot be
 invented as a default. Those five capabilities remain unadvertised pending
 their own bounded offline slices; live-account validation timing is unchanged.
+
+## One-hundred-and-sixty-sixth Phase 0 slice
+
+UAI now fills the independent `QuestionInventory` and `QuestionParse` slots
+without reading the encrypted standard-answer route or granting any submission
+authority. Fresh TaskDetail must still identify exactly one
+`group:{courseResource}:{unit}:{group}` and explicitly advertise both Question
+capabilities. Only donor-shaped `single-choice`, `multichoice` and
+`short_answer` Groups with a positive bounded `question_num` currently opt in;
+all other task types fail closed.
+
+The native transport re-reads CourseResource detail, keeps the resulting
+`courseInstanceId` operation-local and obtains exactly one bounded v3 content
+response with raw sensitive JWT Authorization and a sensitive annotator token.
+An Authentication failure restarts the complete detail/content pair at most
+once. Redirects, non-JSON media, oversized bodies and identity drift remain
+typed failures.
+
+The answer-free parser requires the `unipus.` hexadecimal framing, a bounded
+eight-byte key suffix joined to the audited `1a2b3c4d` prefix, AES-128 ECB,
+valid PKCS#7 or donor-observed zero padding, a bounded decrypted array and one
+bounded nested content JSON document per fresh question count. It retains only
+attempt-local identity, normalized visible stem text and visible options;
+ciphertext, key suffix, unknown fields, answer-shaped fields and route material
+never enter the Domain Question. Inventory and parsing share a five-minute,
+account/correlation/task-scoped in-memory attempt cache that is consumed after
+the last Question.
+
+Metadata and the Development factory now agree on eight read-only capability
+slots. The fixture is synthetic encrypted data, verification remains
+Development, and real-account read-only validation remains scheduled after the
+WebUI and Asterism-Plugin/Yunzai surfaces are complete. `AnswerResolve`, every
+submission stage, BrowserBridge and Capture remain absent.

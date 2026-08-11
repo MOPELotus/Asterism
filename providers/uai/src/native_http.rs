@@ -13,8 +13,8 @@ use zeroize::Zeroize;
 
 use crate::{
     UaiCourseInventoryTransport, UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument,
-    UaiJwtSession, UaiProgressDocument, UaiProgressTransport, UaiSessionResolver,
-    UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+    UaiJwtSession, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
+    UaiQuestionTransport, UaiSessionResolver, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
     annotator::generate_annotator_token,
     course_inventory::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
@@ -32,8 +32,9 @@ const MAX_INVENTORY_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_PROGRESS_RESPONSE_BYTES: usize = 1_024 * 1_024;
 const MAX_USER_INFO_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_DURATION_RESPONSE_BYTES: usize = 1_024 * 1_024;
+const MAX_QUESTION_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 
-/// Native, non-redirecting UAI Course/Task inventory, progress and duration transport.
+/// Native, non-redirecting UAI inventory, progress, duration and Question transport.
 pub struct NativeUaiInventoryTransport {
     client: Client,
     sessions: Arc<dyn UaiSessionResolver>,
@@ -212,6 +213,52 @@ impl NativeUaiInventoryTransport {
             .await?;
         UaiDurationDocument::try_new(document)
     }
+
+    async fn fetch_question_content_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiQuestionDocument> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "Question Course-resource ID",
+        )?;
+        let group_id = required_remote_component(
+            Some(&serde_json::Value::String(group_id.to_owned())),
+            "Question Group ID",
+        )?;
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let response = self
+            .client
+            .get(question_content_url(route.course_instance_id(), &group_id)?)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        UaiQuestionDocument::try_new(
+            read_json_response(response, ResponseRoute::QuestionContent).await?,
+        )
+    }
 }
 
 impl fmt::Debug for NativeUaiInventoryTransport {
@@ -305,6 +352,29 @@ impl UaiDurationTransport for NativeUaiInventoryTransport {
     }
 }
 
+#[async_trait]
+impl UaiQuestionTransport for NativeUaiInventoryTransport {
+    async fn fetch_question_content(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiQuestionDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_question_content_with_session(&session, course_resource_id, group_id)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_question_content_with_session(&session, course_resource_id, group_id)
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
 fn sensitive_authorization(session: &UaiJwtSession) -> ProviderResult<HeaderValue> {
     let mut value = HeaderValue::from_str(session.expose_authorization()).map_err(|_| {
         ProviderError::new(
@@ -324,6 +394,7 @@ enum ResponseRoute {
     Progress,
     UserInfo,
     Duration,
+    QuestionContent,
 }
 
 impl ResponseRoute {
@@ -335,6 +406,7 @@ impl ResponseRoute {
             Self::Progress => "Task progress",
             Self::UserInfo => "User info",
             Self::Duration => "Task duration",
+            Self::QuestionContent => "Question content",
         }
     }
 
@@ -343,6 +415,7 @@ impl ResponseRoute {
             Self::Progress => MAX_PROGRESS_RESPONSE_BYTES,
             Self::UserInfo => MAX_USER_INFO_RESPONSE_BYTES,
             Self::Duration => MAX_DURATION_RESPONSE_BYTES,
+            Self::QuestionContent => MAX_QUESTION_RESPONSE_BYTES,
             Self::CourseList | Self::CourseDetail | Self::TaskTree => MAX_INVENTORY_RESPONSE_BYTES,
         }
     }
@@ -522,6 +595,21 @@ fn course_progress_url(
             course_instance_id,
             unit_id,
             open_id,
+            "default",
+        ],
+    )
+}
+
+fn question_content_url(course_instance_id: &str, group_id: &str) -> ProviderResult<Url> {
+    route_url(
+        UCONTENT_ORIGIN,
+        &[
+            "course",
+            "api",
+            "v3",
+            "content",
+            course_instance_id,
+            group_id,
             "default",
         ],
     )
@@ -718,7 +806,17 @@ mod tests {
                 .as_str(),
             "https://ucontent.unipus.cn/course/api/v2/course_progress/course-v2:synthetic+rw/unit-1/open-id/default"
         );
+        assert_eq!(
+            question_content_url("course-v2:synthetic+rw/guard", "group/1")
+                .unwrap()
+                .as_str(),
+            "https://ucontent.unipus.cn/course/api/v3/content/course-v2:synthetic+rw%2Fguard/group%2F1/default"
+        );
         assert_eq!(ResponseRoute::Progress.maximum_bytes(), 1_024 * 1_024);
+        assert_eq!(
+            ResponseRoute::QuestionContent.maximum_bytes(),
+            4 * 1_024 * 1_024
+        );
         assert_eq!(
             unit_task_duration_url("2001", "unit-1", "app-42", "sso.42")
                 .unwrap()

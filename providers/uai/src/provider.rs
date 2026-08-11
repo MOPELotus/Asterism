@@ -7,8 +7,9 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 use crate::{
     NativeUaiAuthenticationTransport, NativeUaiInventoryTransport, StoredUaiSessionResolver,
     UaiAuthentication, UaiAuthenticationTransport, UaiCourseInventory, UaiCourseInventoryTransport,
-    UaiDurationTransport, UaiProgressTransport, UaiSessionResolver, UaiTaskDetail, UaiTaskDuration,
-    UaiTaskInventory, UaiTaskInventoryTransport, UaiTaskProgress, metadata::development_metadata,
+    UaiDurationTransport, UaiProgressTransport, UaiQuestionRead, UaiQuestionTransport,
+    UaiSessionResolver, UaiTaskDetail, UaiTaskDuration, UaiTaskInventory,
+    UaiTaskInventoryTransport, UaiTaskProgress, metadata::development_metadata,
 };
 
 /// Composes the complete read-only Development entry around injected
@@ -25,6 +26,7 @@ pub fn build_development_provider(
     task_transport: Arc<dyn UaiTaskInventoryTransport>,
     progress_transport: Arc<dyn UaiProgressTransport>,
     duration_transport: Arc<dyn UaiDurationTransport>,
+    question_transport: Arc<dyn UaiQuestionTransport>,
 ) -> ProviderResult<ProviderEntry> {
     let authentication = Arc::new(UaiAuthentication::try_new(
         authentication_transport,
@@ -38,6 +40,10 @@ pub fn build_development_provider(
     )?);
     let task_progress = Arc::new(UaiTaskProgress::try_new(progress_transport)?);
     let task_duration = Arc::new(UaiTaskDuration::try_new(duration_transport)?);
+    let question_read = Arc::new(UaiQuestionRead::try_new(
+        task_detail.clone(),
+        question_transport,
+    )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: ProviderRuntimeSettingsSchema::default(),
@@ -47,8 +53,8 @@ pub fn build_development_provider(
         task_detail: Some(task_detail),
         task_progress: Some(task_progress),
         duration_read: Some(task_duration),
-        question_inventory: None,
-        question_parse: None,
+        question_inventory: Some(question_read.clone()),
+        question_parse: Some(question_read),
         answer_resolve: None,
         submission_build: None,
         submission_execute: None,
@@ -59,8 +65,8 @@ pub fn build_development_provider(
 }
 
 /// Composes the Development entry with native Course/Task/detail/progress/
-/// duration HTTP and an injected authentication exchange and stored-session
-/// boundary.
+/// duration/Question HTTP and an injected authentication exchange and
+/// stored-session boundary.
 ///
 /// # Errors
 ///
@@ -78,6 +84,7 @@ pub fn build_development_provider_with_native_inventory(
     build_development_provider(
         authentication_transport,
         sessions,
+        inventory.clone(),
         inventory.clone(),
         inventory.clone(),
         inventory.clone(),
@@ -215,6 +222,8 @@ mod tests {
         assert!(entry.task_detail.is_some());
         assert!(entry.task_progress.is_some());
         assert!(entry.duration_read.is_some());
+        assert!(entry.question_inventory.is_some());
+        assert!(entry.question_parse.is_some());
         assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_none());
         assert!(entry.runtime_settings.definitions.is_empty());
@@ -225,6 +234,8 @@ mod tests {
             ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
             ProviderCapability::DurationRead,
+            ProviderCapability::QuestionInventory,
+            ProviderCapability::QuestionParse,
         ] {
             assert!(entry.metadata.capabilities.contains(&capability));
         }

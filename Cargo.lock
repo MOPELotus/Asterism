@@ -282,6 +282,7 @@ dependencies = [
 name = "asterism-provider-uai"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "asterism-domain",
  "asterism-networking",
  "asterism-provider-api",
