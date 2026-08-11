@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ExecutionAttemptId, ExecutionId, PriceQuoteId, TaskId, Timestamp, UserId};
+use crate::{
+    ExecutionAttemptId, ExecutionId, PriceQuoteId, SubmissionDraftId, TaskId, Timestamp, UserId,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +38,9 @@ impl ExecutionState {
 pub struct Execution {
     pub id: ExecutionId,
     pub task_id: TaskId,
+    /// Frozen only for independent submission executions. Resource and other
+    /// non-submission executions deliberately leave this unset.
+    pub submission_draft_id: Option<SubmissionDraftId>,
     pub requested_by: Option<UserId>,
     pub request_source: RequestSource,
     pub quote_id: Option<PriceQuoteId>,

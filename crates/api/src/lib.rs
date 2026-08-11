@@ -1069,10 +1069,20 @@ fn task_execute_path() -> Value {
             {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
             {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 256}}
         ],
+        "requestBody": {
+            "required": true,
+            "content": {"application/json": {"schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "submission_draft_id": {"type": "string", "format": "uuid", "description": "Required only for Tasks advertising submission_execute; binds this Execution to one immutable draft."}
+                }
+            }}}
+        },
         "responses": {
             "200": {"description": "Idempotent replay of an existing Execution"},
             "201": {"description": "Execution scheduled atomically"},
-            "400": {"description": "Invalid task ID or idempotency key"},
+            "400": {"description": "Invalid task ID, idempotency key, or request body"},
             "401": {"description": "Authentication required"},
             "403": {"description": "Insufficient permission"},
             "404": {"description": "Task not found for this owner"},
@@ -4564,12 +4574,13 @@ mod tests {
     ) -> Response {
         let mut request = Request::post(format!("/api/v1/tasks/{task_id}/execute"))
             .header(header::COOKIE, cookie)
+            .header(header::CONTENT_TYPE, "application/json")
             .header("x-request-id", format!("request-{task_id}"));
         if let Some(idempotency_key) = idempotency_key {
             request = request.header("idempotency-key", idempotency_key);
         }
         app.clone()
-            .oneshot(request.body(Body::empty()).unwrap())
+            .oneshot(request.body(Body::from("{}")).unwrap())
             .await
             .unwrap()
     }

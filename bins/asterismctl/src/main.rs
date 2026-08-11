@@ -287,6 +287,9 @@ enum TaskCommand {
         /// Stable caller-provided key. Reuse it when retrying the same request.
         #[arg(long)]
         idempotency_key: String,
+        /// Immutable `SubmissionDraft` to bind when the Task is a submission.
+        #[arg(long)]
+        submission_draft: Option<String>,
     },
 }
 
@@ -901,10 +904,16 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
         TaskCommand::Execute {
             task_id,
             idempotency_key,
+            submission_draft,
         } => {
             let path = format!("/api/v1/tasks/{task_id}/execute");
             client
-                .post_authorized_idempotent(&path, &token, &idempotency_key)
+                .post_authorized_idempotent(
+                    &path,
+                    &token,
+                    &idempotency_key,
+                    &json!({"submission_draft_id": submission_draft}),
+                )
                 .await?
         }
     };
@@ -1079,6 +1088,7 @@ mod tests {
                 command: TaskCommand::Execute {
                     task_id,
                     idempotency_key,
+                    submission_draft: None,
                 }
             } if task_id == "task-id" && idempotency_key == "manual-run-1"
         ));

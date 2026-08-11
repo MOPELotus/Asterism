@@ -96,11 +96,13 @@ impl ApiClient {
         path: &str,
         token: &SecretString,
         idempotency_key: &str,
+        body: &impl Serialize,
     ) -> anyhow::Result<serde_json::Value> {
         let request = self
             .request(Method::POST, path)?
             .bearer_auth(token.expose_secret())
-            .header("idempotency-key", idempotency_key);
+            .header("idempotency-key", idempotency_key)
+            .json(body);
         send_json_with_statuses(request, &[StatusCode::OK, StatusCode::CREATED]).await
     }
 

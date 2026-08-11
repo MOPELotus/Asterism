@@ -2,14 +2,15 @@ use std::sync::Arc;
 
 use asterism_domain::{
     AuditActor, Execution, ExecutionId, ExecutionState, OrchestrationState, RemoteState,
-    RequestSource, Task, TaskCapability, TaskId, Timestamp, UserId,
+    RequestSource, SubmissionDraft, SubmissionDraftId, Task, TaskCapability, TaskId, Timestamp,
+    UserId,
 };
 use asterism_provider_api::{ProviderRegistry, ProviderRuntimeSettingsSchema};
 use asterism_storage::{
     ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
     ExecutionScheduleOutcome, ExecutionScheduleRequest, ProviderAccountRuntimeRepository,
     ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget, StorageError,
-    TaskQueryRepository,
+    SubmissionDraftRepository, TaskQueryRepository,
 };
 
 use crate::{
@@ -21,6 +22,7 @@ use crate::{
 pub struct ExecuteTaskCommand {
     pub owner_id: UserId,
     pub task_id: TaskId,
+    pub submission_draft_id: Option<SubmissionDraftId>,
     pub request_source: RequestSource,
     pub actor: AuditActor,
     pub idempotency_key: String,
@@ -35,21 +37,23 @@ pub struct ExecutionRequestResult {
 }
 
 #[derive(Clone, Debug)]
-pub struct ExecutionRequestService<Q, E, A, S> {
+pub struct ExecutionRequestService<Q, E, A, S, D> {
     tasks: Q,
     executions: E,
     accounts: A,
     settings: S,
+    submission_drafts: D,
     providers: Arc<ProviderRegistry>,
     formal_policy: FormalAssessmentPolicy,
 }
 
-impl<Q, E, A, S> ExecutionRequestService<Q, E, A, S> {
+impl<Q, E, A, S, D> ExecutionRequestService<Q, E, A, S, D> {
     pub fn new(
         tasks: Q,
         executions: E,
         accounts: A,
         settings: S,
+        submission_drafts: D,
         providers: Arc<ProviderRegistry>,
         formal_policy: FormalAssessmentPolicy,
     ) -> Self {
@@ -58,18 +62,20 @@ impl<Q, E, A, S> ExecutionRequestService<Q, E, A, S> {
             executions,
             accounts,
             settings,
+            submission_drafts,
             providers,
             formal_policy,
         }
     }
 }
 
-impl<Q, E, A, S> ExecutionRequestService<Q, E, A, S>
+impl<Q, E, A, S, D> ExecutionRequestService<Q, E, A, S, D>
 where
     Q: TaskQueryRepository,
     E: ExecutionRepository,
     A: ProviderAccountRuntimeRepository,
     S: ProviderRuntimeSettingsRepository,
+    D: SubmissionDraftRepository,
 {
     /// Authorizes and schedules one owner-scoped Task execution. Scoped
     /// idempotency is checked before mutable Task state so a network replay can
@@ -92,6 +98,7 @@ where
         {
             return if existing.task_id == command.task_id
                 && existing.requested_by == Some(command.owner_id)
+                && existing.submission_draft_id == command.submission_draft_id
             {
                 Ok(ExecutionRequestResult {
                     execution: existing,
@@ -111,9 +118,18 @@ where
         let (runtime_settings, runtime_settings_schema) = self
             .resolve_runtime_settings(command.owner_id, &task, command.requested_at)
             .await?;
+        let submission_draft = self
+            .resolve_submission_draft(
+                command.owner_id,
+                &task,
+                command.submission_draft_id,
+                &runtime_settings,
+            )
+            .await?;
         let mut execution = Execution {
             id: ExecutionId::new(),
             task_id: task.id,
+            submission_draft_id: submission_draft.as_ref().map(|draft| draft.id),
             requested_by: Some(command.owner_id),
             request_source: command.request_source,
             quote_id: None,
@@ -157,6 +173,9 @@ where
             ExecutionScheduleOutcome::IdempotencyConflict => {
                 Err(ExecutionRequestError::IdempotencyConflict)
             }
+            ExecutionScheduleOutcome::SubmissionDraftConflict => {
+                Err(ExecutionRequestError::SubmissionDraftConflict)
+            }
             ExecutionScheduleOutcome::TaskStateConflict => {
                 Err(ExecutionRequestError::TaskStateConflict)
             }
@@ -164,6 +183,52 @@ where
                 Err(ExecutionRequestError::RuntimeSettingsConflict)
             }
         }
+    }
+
+    async fn resolve_submission_draft(
+        &self,
+        owner_id: UserId,
+        task: &Task,
+        submission_draft_id: Option<SubmissionDraftId>,
+        runtime_settings: &ExecutionRuntimeSettingsSnapshot,
+    ) -> Result<Option<SubmissionDraft>, ExecutionRequestError> {
+        let submission = task
+            .capabilities
+            .contains(&TaskCapability::SubmissionExecute);
+        if !submission {
+            return if submission_draft_id.is_some() {
+                Err(ExecutionRequestError::UnexpectedSubmissionDraft)
+            } else {
+                Ok(None)
+            };
+        }
+        if !task
+            .capabilities
+            .contains(&TaskCapability::SubmissionVerify)
+        {
+            return Err(ExecutionRequestError::SubmissionVerificationUnavailable);
+        }
+        let submission_draft_id =
+            submission_draft_id.ok_or(ExecutionRequestError::SubmissionDraftRequired)?;
+        let draft = self
+            .submission_drafts
+            .find_owned_submission_draft(owner_id, submission_draft_id)
+            .await?
+            .ok_or(ExecutionRequestError::SubmissionDraftNotFound)?;
+        if draft.task_id != task.id || draft.provider_id != runtime_settings.provider_id {
+            return Err(ExecutionRequestError::SubmissionDraftConflict);
+        }
+        let provider = self
+            .providers
+            .get(&runtime_settings.provider_id)
+            .ok_or(ExecutionRequestError::ProviderRuntimeUnavailable)?;
+        if draft.provider_version != provider.metadata.implementation_version {
+            return Err(ExecutionRequestError::SubmissionDraftVersionConflict);
+        }
+        if provider.submission_execute.is_none() || provider.submission_verify.is_none() {
+            return Err(ExecutionRequestError::SubmissionVerificationUnavailable);
+        }
+        Ok(Some(draft))
     }
 
     async fn resolve_runtime_settings(
@@ -291,6 +356,18 @@ pub enum ExecutionRequestError {
     UnsupportedTask,
     #[error("the idempotency key is already bound to another execution request")]
     IdempotencyConflict,
+    #[error("a SubmissionDraft is required for this task")]
+    SubmissionDraftRequired,
+    #[error("a SubmissionDraft cannot be supplied for this task")]
+    UnexpectedSubmissionDraft,
+    #[error("the SubmissionDraft was not found for this owner")]
+    SubmissionDraftNotFound,
+    #[error("the SubmissionDraft is foreign, stale, or already bound to another Execution")]
+    SubmissionDraftConflict,
+    #[error("the SubmissionDraft was built by another Provider implementation version")]
+    SubmissionDraftVersionConflict,
+    #[error("the task cannot be submitted because independent verification is unavailable")]
+    SubmissionVerificationUnavailable,
     #[error("the registered Provider runtime settings are unavailable or incompatible")]
     ProviderRuntimeUnavailable,
     #[error("Provider runtime settings changed while the execution was being scheduled")]

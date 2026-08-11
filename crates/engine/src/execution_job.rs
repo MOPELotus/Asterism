@@ -2051,6 +2051,7 @@ mod tests {
         let execution = Execution {
             id: ExecutionId::new(),
             task_id,
+            submission_draft_id: None,
             requested_by: Some(owner),
             request_source: RequestSource::System,
             quote_id: None,

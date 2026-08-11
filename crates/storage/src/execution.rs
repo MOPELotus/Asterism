@@ -57,8 +57,8 @@ impl ExecutionRepository for SqliteExecutionRepository {
     ) -> Result<Option<Execution>, StorageError> {
         validate_idempotency_tokens(idempotency_scope, idempotency_key)?;
         sqlx::query(
-            "SELECT id, task_id, requested_by, request_source, quote_id, state, scheduled_at, \
-                    started_at, finished_at, created_at FROM executions \
+            "SELECT id, task_id, submission_draft_id, requested_by, request_source, quote_id, \
+                    state, scheduled_at, started_at, finished_at, created_at FROM executions \
              WHERE idempotency_scope = ? AND idempotency_key = ?",
         )
         .bind(idempotency_scope)
@@ -91,6 +91,11 @@ impl ExecutionRepository for SqliteExecutionRepository {
             };
         }
 
+        if !submission_draft_is_available(&mut transaction, request.execution).await? {
+            transaction.rollback().await?;
+            return Ok(ExecutionScheduleOutcome::SubmissionDraftConflict);
+        }
+
         if let Some(resolution) = request.runtime_settings
             && !runtime_settings_match_current_layers(
                 &mut transaction,
@@ -116,12 +121,13 @@ impl ExecutionRepository for SqliteExecutionRepository {
         let execution = request.execution;
         sqlx::query(
             "INSERT INTO executions \
-             (id, task_id, requested_by, request_source, quote_id, state, scheduled_at, started_at, \
-              finished_at, created_at, idempotency_scope, idempotency_key) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, task_id, submission_draft_id, requested_by, request_source, quote_id, state, \
+              scheduled_at, started_at, finished_at, created_at, idempotency_scope, idempotency_key) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(execution.id.to_string())
         .bind(execution.task_id.to_string())
+        .bind(execution.submission_draft_id.map(|id| id.to_string()))
         .bind(execution.requested_by.map(|id| id.to_string()))
         .bind(enum_name(execution.request_source)?)
         .bind(execution.quote_id.map(|id| id.to_string()))
@@ -181,8 +187,9 @@ impl ExecutionRepository for SqliteExecutionRepository {
         execution_id: ExecutionId,
     ) -> Result<Option<Execution>, StorageError> {
         sqlx::query(
-            "SELECT id, task_id, requested_by, request_source, quote_id, state, scheduled_at, \
-                    started_at, finished_at, created_at FROM executions WHERE id = ?",
+            "SELECT id, task_id, submission_draft_id, requested_by, request_source, quote_id, \
+                    state, scheduled_at, started_at, finished_at, created_at \
+             FROM executions WHERE id = ?",
         )
         .bind(execution_id.to_string())
         .fetch_optional(self.database.pool())
@@ -456,7 +463,7 @@ impl ExecutionQueryRepository for SqliteExecutionRepository {
         .fetch_one(self.database.pool())
         .await?;
         let rows = sqlx::query(
-            "SELECT execution.id, execution.task_id, execution.requested_by, \
+            "SELECT execution.id, execution.task_id, execution.submission_draft_id, execution.requested_by, \
                     execution.request_source, execution.quote_id, execution.state, \
                     execution.scheduled_at, execution.started_at, execution.finished_at, \
                     execution.created_at FROM executions AS execution \
@@ -490,7 +497,7 @@ impl ExecutionQueryRepository for SqliteExecutionRepository {
     ) -> Result<Option<ExecutionDetail>, StorageError> {
         let mut transaction = self.database.pool().begin().await?;
         let execution = sqlx::query(
-            "SELECT execution.id, execution.task_id, execution.requested_by, \
+            "SELECT execution.id, execution.task_id, execution.submission_draft_id, execution.requested_by, \
                     execution.request_source, execution.quote_id, execution.state, \
                     execution.scheduled_at, execution.started_at, execution.finished_at, \
                     execution.created_at \
@@ -921,8 +928,8 @@ async fn select_execution(
     execution_id: ExecutionId,
 ) -> Result<sqlx::sqlite::SqliteRow, StorageError> {
     sqlx::query(
-        "SELECT id, task_id, requested_by, request_source, quote_id, state, scheduled_at, \
-                started_at, finished_at, created_at FROM executions WHERE id = ?",
+        "SELECT id, task_id, submission_draft_id, requested_by, request_source, quote_id, state, \
+                scheduled_at, started_at, finished_at, created_at FROM executions WHERE id = ?",
     )
     .bind(execution_id.to_string())
     .fetch_optional(&mut **transaction)
@@ -1512,8 +1519,43 @@ fn validate_idempotency_tokens(scope: &str, key: &str) -> Result<(), StorageErro
 
 fn same_request(existing: &Execution, requested: &Execution) -> bool {
     existing.task_id == requested.task_id
+        && existing.submission_draft_id == requested.submission_draft_id
         && existing.requested_by == requested.requested_by
         && existing.quote_id == requested.quote_id
+}
+
+async fn submission_draft_is_available(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution: &Execution,
+) -> Result<bool, StorageError> {
+    let Some(submission_draft_id) = execution.submission_draft_id else {
+        return Ok(true);
+    };
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM executions WHERE submission_draft_id = ?")
+            .bind(submission_draft_id.to_string())
+            .fetch_optional(&mut **transaction)
+            .await?;
+    if existing.is_some() {
+        return Ok(false);
+    }
+    let binding: Option<(String, String)> = sqlx::query_as(
+        "SELECT draft.task_id, draft.provider_id FROM submission_drafts AS draft WHERE draft.id = ?",
+    )
+    .bind(submission_draft_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let expected_provider: Option<String> = sqlx::query_scalar(
+        "SELECT account.provider_id FROM tasks AS task \
+         INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+         WHERE task.id = ?",
+    )
+    .bind(execution.task_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(binding.as_ref().is_some_and(|(task_id, provider_id)| {
+        task_id == &execution.task_id.to_string() && expected_provider.as_ref() == Some(provider_id)
+    }))
 }
 
 async fn transition_task_to_scheduled(
@@ -1538,8 +1580,8 @@ async fn find_idempotent_execution_in_transaction(
     idempotency_key: &str,
 ) -> Result<Option<Execution>, StorageError> {
     sqlx::query(
-        "SELECT id, task_id, requested_by, request_source, quote_id, state, scheduled_at, \
-                started_at, finished_at, created_at FROM executions \
+        "SELECT id, task_id, submission_draft_id, requested_by, request_source, quote_id, state, \
+                scheduled_at, started_at, finished_at, created_at FROM executions \
          WHERE idempotency_scope = ? AND idempotency_key = ?",
     )
     .bind(idempotency_scope)
@@ -1889,6 +1931,11 @@ fn decode_execution(row: &sqlx::sqlite::SqliteRow) -> Result<Execution, StorageE
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
         task_id: TaskId::from_str(row.try_get("task_id")?)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        submission_draft_id: row
+            .try_get::<Option<&str>, _>("submission_draft_id")?
+            .map(asterism_domain::SubmissionDraftId::from_str)
+            .transpose()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
         requested_by: row
             .try_get::<Option<&str>, _>("requested_by")?
             .map(UserId::from_str)
@@ -2026,7 +2073,7 @@ mod tests {
 
     use asterism_domain::{
         CreditAmount, CreditReservation, CreditReservationId, PriceQuote, PriceQuoteId,
-        ProviderAccountId, RequestSource, TaskId,
+        ProviderAccountId, QuestionSnapshotId, RequestSource, SubmissionDraftId, TaskId,
     };
     use asterism_provider_api::{
         ProviderRuntimeSettingsSchema, ProviderSettingDefinition, ProviderSettingKind,
@@ -2086,6 +2133,60 @@ mod tests {
                 .get("count");
             assert_eq!(count, 1, "unexpected row count in {table}");
         }
+    }
+
+    #[tokio::test]
+    async fn submission_draft_is_frozen_unique_and_checked_before_scheduling() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let missing_draft_id = SubmissionDraftId::new();
+        let mut missing = scheduled_execution(owner, task_id, now);
+        missing.submission_draft_id = Some(missing_draft_id);
+        assert_eq!(
+            repository
+                .schedule_execution(test_request(&missing, owner, "missing-draft"))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::SubmissionDraftConflict
+        );
+        let task_state: String =
+            sqlx::query_scalar("SELECT orchestration_state FROM tasks WHERE id = ?")
+                .bind(task_id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(task_state, "ready");
+
+        let draft_id = insert_submission_draft(&database, task_id, now).await;
+        let mut execution = scheduled_execution(owner, task_id, now);
+        execution.submission_draft_id = Some(draft_id);
+        assert_eq!(
+            repository
+                .schedule_execution(test_request(&execution, owner, "bound-draft"))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::Created(execution.clone())
+        );
+        assert_eq!(
+            repository.find_execution(execution.id).await.unwrap(),
+            Some(execution.clone())
+        );
+
+        let mut duplicate = scheduled_execution(owner, task_id, now);
+        duplicate.submission_draft_id = Some(draft_id);
+        assert_eq!(
+            repository
+                .schedule_execution(test_request(&duplicate, owner, "duplicate-draft"))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::SubmissionDraftConflict
+        );
+        let execution_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM executions")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(execution_count, 1);
     }
 
     #[tokio::test]
@@ -2978,6 +3079,7 @@ mod tests {
         Execution {
             id: ExecutionId::new(),
             task_id,
+            submission_draft_id: None,
             requested_by: Some(owner),
             request_source: RequestSource::WebUi,
             quote_id: None,
@@ -3183,6 +3285,43 @@ mod tests {
         insert_user(&database, owner).await;
         let task_id = insert_task(&database, ProviderAccountId::new(), owner).await;
         (database, owner, task_id)
+    }
+
+    async fn insert_submission_draft(
+        database: &Database,
+        task_id: TaskId,
+        now: Timestamp,
+    ) -> SubmissionDraftId {
+        let snapshot_id = QuestionSnapshotId::new();
+        sqlx::query(
+            "INSERT INTO question_snapshots \
+             (id, task_id, provider_id, provider_version, captured_at, question_count, total_bytes) \
+             VALUES (?, ?, 'test', '0.1.0', ?, 0, 0)",
+        )
+        .bind(snapshot_id.to_string())
+        .bind(task_id.to_string())
+        .bind(encode_timestamp(now))
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let draft_id = SubmissionDraftId::new();
+        let preview = r#"{"encoding":"json","format":"test.v1","fields":[]}"#;
+        sqlx::query(
+            "INSERT INTO submission_drafts \
+             (id, question_snapshot_id, task_id, provider_id, provider_version, \
+              payload_preview_json, preview_bytes, item_count, created_at) \
+             VALUES (?, ?, ?, 'test', '0.1.0', ?, ?, 1, ?)",
+        )
+        .bind(draft_id.to_string())
+        .bind(snapshot_id.to_string())
+        .bind(task_id.to_string())
+        .bind(preview)
+        .bind(i64::try_from(preview.len()).unwrap())
+        .bind(encode_timestamp(now))
+        .execute(database.pool())
+        .await
+        .unwrap();
+        draft_id
     }
 
     async fn insert_credit_account(

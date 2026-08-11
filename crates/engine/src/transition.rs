@@ -160,6 +160,7 @@ mod tests {
         Execution {
             id: ExecutionId::new(),
             task_id: TaskId::new(),
+            submission_draft_id: None,
             requested_by: None,
             request_source: RequestSource::System,
             quote_id: None,

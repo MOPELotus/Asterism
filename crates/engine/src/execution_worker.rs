@@ -192,6 +192,7 @@ mod tests {
         let execution = Execution {
             id: ExecutionId::new(),
             task_id,
+            submission_draft_id: None,
             requested_by: Some(owner_id),
             request_source: RequestSource::Scheduler,
             quote_id: None,

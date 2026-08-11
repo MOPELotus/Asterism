@@ -520,17 +520,36 @@ pub(super) async fn execute_task(
     Extension(auth): Extension<AuthContext>,
     Path(task_id): Path<String>,
     headers: HeaderMap,
+    payload: Result<Json<ExecuteTaskRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let (owner_id, request_source) = auth.require_task_execute()?;
     let task_id = TaskId::from_str(&task_id)
         .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
     let idempotency_key = required_header(&headers, IDEMPOTENCY_KEY, 256)?;
     let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let request = payload.map(|Json(request)| request).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_execute_task_request",
+            "the execution request body must be a valid JSON object",
+        )
+    })?;
+    let submission_draft_id = request
+        .submission_draft_id
+        .as_deref()
+        .map(SubmissionDraftId::from_str)
+        .transpose()
+        .map_err(|_| {
+            ApiError::bad_request(
+                "invalid_submission_draft_id",
+                "SubmissionDraft ID is invalid",
+            )
+        })?;
     let service = ExecutionRequestService::new(
         SqliteTaskQueryRepository::new(state.database.clone()),
         SqliteExecutionRepository::new(state.database.clone()),
         SqliteProviderAccountRepository::new(state.database.clone()),
-        SqliteProviderRuntimeSettingsRepository::new(state.database),
+        SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
+        SqliteQuestionSnapshotRepository::new(state.database),
         state.providers,
         FormalAssessmentPolicy::default(),
     );
@@ -538,6 +557,7 @@ pub(super) async fn execute_task(
         .execute(ExecuteTaskCommand {
             owner_id,
             task_id,
+            submission_draft_id,
             request_source,
             actor: auth.audit_actor(),
             idempotency_key: idempotency_key.to_owned(),
@@ -608,6 +628,29 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
         ExecutionRequestError::IdempotencyConflict => ApiError::conflict(
             "idempotency_conflict",
             "the idempotency key is already bound to another execution request",
+        ),
+        ExecutionRequestError::SubmissionDraftRequired => ApiError::conflict(
+            "submission_draft_required",
+            "this task requires an explicit immutable SubmissionDraft",
+        ),
+        ExecutionRequestError::UnexpectedSubmissionDraft => ApiError::conflict(
+            "submission_draft_not_applicable",
+            "this task does not accept a SubmissionDraft",
+        ),
+        ExecutionRequestError::SubmissionDraftNotFound => {
+            ApiError::not_found("submission_draft_not_found")
+        }
+        ExecutionRequestError::SubmissionDraftConflict => ApiError::conflict(
+            "submission_draft_conflict",
+            "the SubmissionDraft is foreign, stale, or already bound to another Execution",
+        ),
+        ExecutionRequestError::SubmissionDraftVersionConflict => ApiError::conflict(
+            "submission_draft_version_conflict",
+            "the SubmissionDraft must be rebuilt for the current Provider implementation",
+        ),
+        ExecutionRequestError::SubmissionVerificationUnavailable => ApiError::conflict(
+            "submission_verification_unavailable",
+            "submission execution is disabled without independent verification",
         ),
         ExecutionRequestError::ProviderRuntimeUnavailable => ApiError::conflict(
             "provider_runtime_settings_unavailable",
@@ -1119,6 +1162,12 @@ struct TaskPageResponse {
 struct ExecuteTaskResponse {
     execution: Execution,
     created: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExecuteTaskRequest {
+    submission_draft_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

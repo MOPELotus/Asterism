@@ -551,6 +551,7 @@ pub enum ExecutionScheduleOutcome {
     Created(Execution),
     Existing(Execution),
     IdempotencyConflict,
+    SubmissionDraftConflict,
     TaskStateConflict,
     RuntimeSettingsConflict,
 }
