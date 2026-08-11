@@ -14,7 +14,7 @@ use zeroize::Zeroize;
 
 use crate::{
     UaiQuestionDocument, encrypted::decrypt_unipus_payload, metadata::development_metadata,
-    parse_question_content,
+    parse_question_content, question::supports_question_read,
 };
 
 const MAX_ANSWER_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -528,7 +528,7 @@ impl TaskAnswerShape {
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value > 0)
             .ok_or_else(|| protocol_drift("UAI fresh Group has an invalid question count"))?;
-        if task_types.is_empty() {
+        if !supports_question_read(&task_types, Some(question_count)) {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
                 "UAI Group Task does not have a supported standard-answer shape",
@@ -765,6 +765,24 @@ mod tests {
             transport.calls.lock().unwrap().as_slice(),
             &[("2001".to_owned(), "group-1".to_owned())]
         );
+    }
+
+    #[tokio::test]
+    async fn answer_shape_rejects_fresh_type_count_cardinality_drift() {
+        let remote_task_id = "group:2001:unit-1:group-1";
+        let mut detail = FixtureDetail {
+            metadata: development_metadata().unwrap(),
+        }
+        .task_detail(&provider_context(), remote_task_id)
+        .await
+        .unwrap();
+        detail.normalized_detail["task"]["question_count"] = json!(3);
+        detail.normalized_detail["task"]["task_types"] = json!(["multichoice", "short_answer"]);
+        let identity = GroupIdentity::parse(remote_task_id).unwrap();
+        let Err(error) = TaskAnswerShape::from_detail(&detail, &identity, remote_task_id) else {
+            panic!("invalid UAI answer cardinality must fail closed");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
     }
 
     fn fixture_questions() -> Vec<Question> {
