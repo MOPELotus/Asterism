@@ -8,16 +8,18 @@ use reqwest::{
     Client, Response, StatusCode,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER},
 };
-use serde::{Deserialize, Deserializer, Serialize, de::Visitor};
+use serde::Serialize;
 use zeroize::Zeroize;
 
-use crate::{UaiAuthenticationTransport, UaiJwtSession, classify_password_login_response};
+use crate::{
+    UaiAuthenticationTransport, UaiJwtSession, classify_password_login_response,
+    user_identity::parse_user_identity,
+};
 
 const LOGIN_URL: &str = "https://sso.unipus.cn/sso/0.1/sso/login";
 const LOGIN_SERVICE: &str = "https://uai.unipus.cn/home";
 const USER_INFO_URL: &str = "https://uai.unipus.cn/api/account/user/info";
 const MAX_AUTH_RESPONSE_BYTES: usize = 64 * 1_024;
-const MAX_IDENTITY_BYTES: usize = 512;
 
 /// Native Password exchange and JWT validation over the shared network policy.
 pub struct NativeUaiAuthenticationTransport {
@@ -219,84 +221,7 @@ fn validate_json_content_type(headers: &HeaderMap, route: &'static str) -> Provi
 }
 
 fn validate_user_info_response(document: &[u8]) -> ProviderResult<()> {
-    if document.is_empty() || document.len() > MAX_AUTH_RESPONSE_BYTES {
-        return Err(invalid_user_info_response());
-    }
-    let envelope: UserInfoEnvelope =
-        serde_json::from_slice(document).map_err(|_| invalid_user_info_response())?;
-    if envelope.success == Some(false) {
-        return Err(ProviderError::new(
-            ProviderErrorKind::Authentication,
-            "UAI user-info endpoint rejected the current session",
-        ));
-    }
-    let user = envelope
-        .value
-        .and_then(|value| value.user_info)
-        .ok_or_else(invalid_user_info_response)?;
-    if !user.app_user_id.0 || !user.sso_id.0 {
-        return Err(invalid_user_info_response());
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-struct UserInfoEnvelope {
-    #[serde(default)]
-    success: Option<bool>,
-    #[serde(default)]
-    value: Option<UserInfoValue>,
-}
-
-#[derive(Deserialize)]
-struct UserInfoValue {
-    #[serde(default, rename = "userInfo")]
-    user_info: Option<UserInfo>,
-}
-
-#[derive(Deserialize)]
-struct UserInfo {
-    #[serde(rename = "appUserId")]
-    app_user_id: IdentityMarker,
-    #[serde(rename = "ssoId")]
-    sso_id: IdentityMarker,
-}
-
-struct IdentityMarker(bool);
-
-impl<'de> Deserialize<'de> for IdentityMarker {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct MarkerVisitor;
-
-        impl Visitor<'_> for MarkerVisitor {
-            type Value = IdentityMarker;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a bounded non-empty identity string or positive integer")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(IdentityMarker(
-                    !value.is_empty()
-                        && value.len() <= MAX_IDENTITY_BYTES
-                        && !value.chars().any(char::is_control),
-                ))
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(IdentityMarker(value > 0))
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(IdentityMarker(value > 0))
-            }
-        }
-
-        deserializer.deserialize_any(MarkerVisitor)
-    }
+    parse_user_identity(document).map(|_| ())
 }
 
 fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
@@ -312,13 +237,6 @@ fn oversized_response(route: &'static str) -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::InvalidResponse,
         format!("UAI {route} response exceeds the size limit"),
-    )
-}
-
-fn invalid_user_info_response() -> ProviderError {
-    ProviderError::new(
-        ProviderErrorKind::InvalidResponse,
-        "UAI user-info endpoint returned an invalid response",
     )
 }
 

@@ -15,13 +15,16 @@
 | Group ID disappears or becomes URL-only | Historical parser falls back to URLs for generic nodes | Require explicit bounded Group IDs; never persist route URLs as Task identity |
 | Completion flags gain new values | Current donor requires `pass == pass2 == perm == 1` | Keep each flag independent and map only sanitized verified combinations |
 | Annotator token claims/signature change | Both backend donors independently use the same HS256 openid claims and millisecond expiry | Keep generation private to account-bound GET reads, pin an exact-time vector and fail closed on header/clock errors |
-| Duration unit/meaning drifts | Summary exposes integer `duration` without a proven unit | Preserve raw value only until live before/after measurements establish semantics |
+| Study-record duration unit/meaning drifts | Frozen MIT donor explicitly documents Course/Unit/Task `duration` in seconds | Keep the study-record route independent, bind exact CourseResource/Unit/Group identities and recheck with live before/after measurements |
+| Progress duration is confused with study duration | Signed progress response also exposes an untyped numeric `duration` | Preserve progress value as raw only; populate seconds exclusively from the independent study-record response |
+| Study-record tree duplicates or changes roles | Donor indexes nodeId and currently emits Unit/Section/Node/Link hierarchy | Require unique bounded node IDs, audited roles and one exact matching Task; reject drift before returning duration |
 | Page residence stops producing duration | Current userscript relies on active page lifecycle | Prefer native network evidence; otherwise isolate a headless compatibility worker and verify fresh duration |
 | Direct submit completes without duration | Backend donors submit answers independently of page residence | Keep CompletionService and DurationService separate; never claim execution from completion alone |
 
 ## Live-validation gate
 
-Before advancing verification:
+After WebUI and Asterism-Plugin/Yunzai are complete and read-only test accounts
+are available, before advancing verification:
 
 1. validate Password login, captcha classification, JWT/annotator acceptance,
    expiry and recovery;

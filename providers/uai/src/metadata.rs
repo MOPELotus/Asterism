@@ -31,6 +31,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
             ProviderCapability::TaskProgressRead,
+            ProviderCapability::DurationRead,
         ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken]),
         session_kinds: BTreeSet::from([SessionKind::Jwt, SessionKind::Composite]),
@@ -42,7 +43,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metadata_advertises_authentication_inventory_and_progress() {
+    fn metadata_advertises_all_read_only_development_capabilities() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
@@ -53,6 +54,7 @@ mod tests {
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
                 ProviderCapability::TaskProgressRead,
+                ProviderCapability::DurationRead,
             ])
         );
         assert_eq!(

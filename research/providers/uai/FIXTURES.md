@@ -15,17 +15,19 @@ fixtures/providers/uai/
   courses/resource-detail.json
   tasks/tree-mixed.json
   progress/unit-mixed.json
+  duration/unit-mixed.json
 ```
 
 They cover typed Password success/rejection/slider outcomes, strict atomic
 openid/JWT parsing, bounded user-info identity validation, Course →
 CourseResource flattening, paired point counts, fresh detail binding, redacted
 Course-instance routing, the outer/nested Course-tree envelope,
-Unit/Section/Micro/Group identity separation and identity-bound per-Unit flags
-plus raw duration. Inline negative tests cover malformed/extra composite
+Unit/Section/Micro/Group identity separation, identity-bound per-Unit flags plus
+raw progress duration, and exact CourseResource/Unit/Group-bound learning
+seconds. Inline negative tests cover malformed/extra composite
 fields, duplicate
 resources/groups, misbound details/contexts, unknown roles and impossible point
-totals.
+totals, plus duplicate duration nodes and missing/negative/overflow seconds.
 
 ## Required live-sanitized fixtures
 
@@ -40,6 +42,7 @@ fixtures/providers/uai/
   tasks/tree-unit-section-micro.json
   progress/group-pending-in-progress-completed.json
   progress/total-and-unit-duration.json
+  duration/unit-task-situation.json
 ```
 
 Remove usernames, passwords, JWT/openid values, annotator tokens, user IDs,
@@ -56,4 +59,5 @@ field names, placeholder identities and response/result codes.
 - Course point totals never imply Group completion.
 - `base` labels never imply executable or assessment capability.
 - Unknown tree roles fail closed.
-- Duration remains independent from completion and has no inferred unit.
+- Progress duration remains untyped and independent from completion.
+- Study-record duration seconds require one exact unique CourseResource/Unit/Group binding.

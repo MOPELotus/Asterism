@@ -51,7 +51,7 @@ expiry extraction remains pending.
 
 The complete read-only Provider factory shares one resolved network policy and
 one account-scoped stored-session resolver across Authentication,
-CourseInventory, TaskInventory and TaskProgressRead. The daemon does not
+CourseInventory, TaskInventory, TaskProgressRead and DurationRead. The daemon does not
 register this entry by default. Its config, environment and CLI opt-ins are
 independent from the other development Providers, require a configured
 SecretStore and retain Development verification with a startup warning.
@@ -92,8 +92,8 @@ is the fresh `courseInstanceId` encoded as one URL path segment for the tree
 read. Both completed bodies are held in one redacted transport result and
 parsed all-or-nothing; the instance route is never serialized into a Course or
 Task. Authentication renewal restarts the detail/tree pair from the fresh
-detail; progress remains an independent capability over the same native
-transport.
+detail; progress and duration remain independent capabilities over the same
+native transport.
 
 ## Progress and duration separation
 
@@ -102,10 +102,10 @@ GET https://ucontent.unipus.cn/course/api/v2/course_progress/
     {courseInstanceId}/{unitId}/{openid}/default
 
 GET https://uai.unipus.cn/api/tla/learningDetail/studyRecord/
-    totalAndUnitSituation?id={strategyId}&appUserId={appUserId}
+    totalAndUnitSituation?id={courseResourceId}&appUserId={appUserId}
 
 GET https://uai.unipus.cn/api/tla/learningDetail/studyRecord/
-    unitTaskSituation?nodeId={unitId}&id={strategyId}
+    unitTaskSituation?nodeId={unitId}&id={courseResourceId}
     &appUserId={appUserId}&ssoId={ssoId}
 ```
 
@@ -121,13 +121,24 @@ response must repeat the Unit and contain the exact Group leaf. A Group maps to
 Completed/100 only when `pass`, `pass2` and `perm` are all `1`; every other
 valid flag combination remains Unknown with no percentage.
 
-The independent summary response contains both
-`finishProgress` and `duration` for total and Unit records. Their coexistence is
-evidence that completion/progress and learning duration are separate; it is not
-yet evidence for duration units or reporting semantics.
+The independent study-record responses contain both `finishProgress` and
+`duration`. The frozen MIT donor explicitly documents Course, Unit and nested
+Task `duration` as learning seconds and passes the numeric CourseResource ID as
+query parameter `id`; it is not a strategy ID. Asterism therefore exposes an
+independent DurationRead but does not infer reporting semantics.
 
-The per-Group response can also contain numeric `duration`. Asterism retains it
-only as `duration_raw`; it never populates `duration_seconds` from that field.
+Each duration operation resolves the account-bound session, obtains only the
+bounded `appUserId` and `ssoId` facts from a fresh user-info response, then
+reads `unitTaskSituation` for the exact CourseResource and Unit. The parser
+requires exactly one matching Unit, unique node identities and exactly one
+matching Group identity with audited `link` or `group` role and an explicit
+unsigned duration. Unknown roles, duplicate IDs, missing/negative/overflow
+duration and every identity mismatch fail closed. An Authentication failure
+restarts the whole user-info + duration pair once after atomic renewal.
+
+The separate progress response can also contain numeric `duration`. Asterism
+retains it only as `duration_raw`; it never populates `duration_seconds` from
+that field.
 
 The current userscript distributes a requested residence time across visible
 Unit/Section/Micro pages, tabs and tasks while keeping the real page active. It
@@ -136,5 +147,6 @@ Therefore Asterism must not invent a NativeDurationReporter from the timer.
 BrowserBridge/Capture work remains deferred, and a future native reporter needs
 sanitized network evidence plus fresh duration readback.
 
+DurationRead never creates an Execution, reports time or mutates remote state.
 Direct answer/submission routes are outside this slice. HTTP success or 100%
-completion cannot satisfy the duration acceptance gate.
+completion cannot satisfy any future duration-report acceptance gate.

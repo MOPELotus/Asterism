@@ -7,8 +7,8 @@ use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 use crate::{
     NativeUaiAuthenticationTransport, NativeUaiInventoryTransport, StoredUaiSessionResolver,
     UaiAuthentication, UaiAuthenticationTransport, UaiCourseInventory, UaiCourseInventoryTransport,
-    UaiProgressTransport, UaiSessionResolver, UaiTaskInventory, UaiTaskInventoryTransport,
-    UaiTaskProgress, metadata::development_metadata,
+    UaiDurationTransport, UaiProgressTransport, UaiSessionResolver, UaiTaskDuration,
+    UaiTaskInventory, UaiTaskInventoryTransport, UaiTaskProgress, metadata::development_metadata,
 };
 
 /// Composes the complete read-only Development entry around injected
@@ -24,6 +24,7 @@ pub fn build_development_provider(
     course_transport: Arc<dyn UaiCourseInventoryTransport>,
     task_transport: Arc<dyn UaiTaskInventoryTransport>,
     progress_transport: Arc<dyn UaiProgressTransport>,
+    duration_transport: Arc<dyn UaiDurationTransport>,
 ) -> ProviderResult<ProviderEntry> {
     let authentication = Arc::new(UaiAuthentication::try_new(
         authentication_transport,
@@ -32,6 +33,7 @@ pub fn build_development_provider(
     let course_inventory = Arc::new(UaiCourseInventory::try_new(course_transport)?);
     let task_inventory = Arc::new(UaiTaskInventory::try_new(task_transport)?);
     let task_progress = Arc::new(UaiTaskProgress::try_new(progress_transport)?);
+    let task_duration = Arc::new(UaiTaskDuration::try_new(duration_transport)?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: ProviderRuntimeSettingsSchema::default(),
@@ -40,7 +42,7 @@ pub fn build_development_provider(
         task_inventory: Some(task_inventory),
         task_detail: None,
         task_progress: Some(task_progress),
-        duration_read: None,
+        duration_read: Some(task_duration),
         question_inventory: None,
         question_parse: None,
         answer_resolve: None,
@@ -52,8 +54,8 @@ pub fn build_development_provider(
     })
 }
 
-/// Composes the Development entry with native Course/Task/progress HTTP and an
-/// injected authentication exchange and stored-session boundary.
+/// Composes the Development entry with native Course/Task/progress/duration
+/// HTTP and an injected authentication exchange and stored-session boundary.
 ///
 /// # Errors
 ///
@@ -71,6 +73,7 @@ pub fn build_development_provider_with_native_inventory(
     build_development_provider(
         authentication_transport,
         sessions,
+        inventory.clone(),
         inventory.clone(),
         inventory.clone(),
         inventory,
@@ -205,6 +208,7 @@ mod tests {
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());
         assert!(entry.task_progress.is_some());
+        assert!(entry.duration_read.is_some());
         assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_none());
         assert!(entry.runtime_settings.definitions.is_empty());
@@ -213,6 +217,7 @@ mod tests {
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
             ProviderCapability::TaskProgressRead,
+            ProviderCapability::DurationRead,
         ] {
             assert!(entry.metadata.capabilities.contains(&capability));
         }

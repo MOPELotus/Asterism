@@ -12,23 +12,28 @@ use reqwest::{
 use zeroize::Zeroize;
 
 use crate::{
-    UaiCourseInventoryTransport, UaiInventoryDocument, UaiJwtSession, UaiProgressDocument,
-    UaiProgressTransport, UaiSessionResolver, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+    UaiCourseInventoryTransport, UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument,
+    UaiJwtSession, UaiProgressDocument, UaiProgressTransport, UaiSessionResolver,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
     annotator::generate_annotator_token,
     course_inventory::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
         required_remote_component,
     },
     parse_course_context,
+    user_identity::parse_user_identity,
 };
 
 const COURSE_LIST_URL: &str = "https://uai.unipus.cn/api/cmgt/course/getCourseListByStudent";
+const USER_INFO_URL: &str = "https://uai.unipus.cn/api/account/user/info";
 const UAI_ORIGIN: &str = "https://uai.unipus.cn";
 const UCONTENT_ORIGIN: &str = "https://ucontent.unipus.cn";
 const MAX_INVENTORY_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_PROGRESS_RESPONSE_BYTES: usize = 1_024 * 1_024;
+const MAX_USER_INFO_RESPONSE_BYTES: usize = 64 * 1_024;
+const MAX_DURATION_RESPONSE_BYTES: usize = 1_024 * 1_024;
 
-/// Native, non-redirecting UAI Course/Task inventory and progress transport.
+/// Native, non-redirecting UAI Course/Task inventory, progress and duration transport.
 pub struct NativeUaiInventoryTransport {
     client: Client,
     sessions: Arc<dyn UaiSessionResolver>,
@@ -172,6 +177,41 @@ impl NativeUaiInventoryTransport {
             .map_err(|error| classify_reqwest_error(&error))?;
         UaiProgressDocument::try_new(read_json_response(response, ResponseRoute::Progress).await?)
     }
+
+    async fn fetch_duration_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+    ) -> ProviderResult<UaiDurationDocument> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "duration Course-resource ID",
+        )?;
+        let unit_id = required_remote_component(
+            Some(&serde_json::Value::String(unit_id.to_owned())),
+            "duration Unit ID",
+        )?;
+        let mut user_info = self
+            .send_get_with_session(session, static_url(USER_INFO_URL)?, ResponseRoute::UserInfo)
+            .await?;
+        let identity = parse_user_identity(user_info.as_bytes());
+        user_info.zeroize();
+        let identity = identity?;
+        let document = self
+            .send_get_with_session(
+                session,
+                unit_task_duration_url(
+                    &course_resource_id,
+                    &unit_id,
+                    identity.app_user_id(),
+                    identity.sso_id(),
+                )?,
+                ResponseRoute::Duration,
+            )
+            .await?;
+        UaiDurationDocument::try_new(document)
+    }
 }
 
 impl fmt::Debug for NativeUaiInventoryTransport {
@@ -242,6 +282,29 @@ impl UaiProgressTransport for NativeUaiInventoryTransport {
     }
 }
 
+#[async_trait]
+impl UaiDurationTransport for NativeUaiInventoryTransport {
+    async fn fetch_duration(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+    ) -> ProviderResult<UaiDurationDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_duration_with_session(&session, course_resource_id, unit_id)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_duration_with_session(&session, course_resource_id, unit_id)
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
 fn sensitive_authorization(session: &UaiJwtSession) -> ProviderResult<HeaderValue> {
     let mut value = HeaderValue::from_str(session.expose_authorization()).map_err(|_| {
         ProviderError::new(
@@ -259,6 +322,8 @@ enum ResponseRoute {
     CourseDetail,
     TaskTree,
     Progress,
+    UserInfo,
+    Duration,
 }
 
 impl ResponseRoute {
@@ -268,12 +333,16 @@ impl ResponseRoute {
             Self::CourseDetail => "Course-resource detail",
             Self::TaskTree => "Task tree",
             Self::Progress => "Task progress",
+            Self::UserInfo => "User info",
+            Self::Duration => "Task duration",
         }
     }
 
     const fn maximum_bytes(self) -> usize {
         match self {
             Self::Progress => MAX_PROGRESS_RESPONSE_BYTES,
+            Self::UserInfo => MAX_USER_INFO_RESPONSE_BYTES,
+            Self::Duration => MAX_DURATION_RESPONSE_BYTES,
             Self::CourseList | Self::CourseDetail | Self::TaskTree => MAX_INVENTORY_RESPONSE_BYTES,
         }
     }
@@ -458,6 +527,30 @@ fn course_progress_url(
     )
 }
 
+fn unit_task_duration_url(
+    course_resource_id: &str,
+    unit_id: &str,
+    app_user_id: &str,
+    sso_id: &str,
+) -> ProviderResult<Url> {
+    let mut url = route_url(
+        UAI_ORIGIN,
+        &[
+            "api",
+            "tla",
+            "learningDetail",
+            "studyRecord",
+            "unitTaskSituation",
+        ],
+    )?;
+    url.query_pairs_mut()
+        .append_pair("nodeId", unit_id)
+        .append_pair("id", course_resource_id)
+        .append_pair("appUserId", app_user_id)
+        .append_pair("ssoId", sso_id);
+    Ok(url)
+}
+
 fn route_url(origin: &'static str, segments: &[&str]) -> ProviderResult<Url> {
     let mut url = static_url(origin)?;
     url.path_segments_mut()
@@ -626,6 +719,14 @@ mod tests {
             "https://ucontent.unipus.cn/course/api/v2/course_progress/course-v2:synthetic+rw/unit-1/open-id/default"
         );
         assert_eq!(ResponseRoute::Progress.maximum_bytes(), 1_024 * 1_024);
+        assert_eq!(
+            unit_task_duration_url("2001", "unit-1", "app-42", "sso.42")
+                .unwrap()
+                .as_str(),
+            "https://uai.unipus.cn/api/tla/learningDetail/studyRecord/unitTaskSituation?nodeId=unit-1&id=2001&appUserId=app-42&ssoId=sso.42"
+        );
+        assert_eq!(ResponseRoute::UserInfo.maximum_bytes(), 64 * 1_024);
+        assert_eq!(ResponseRoute::Duration.maximum_bytes(), 1_024 * 1_024);
     }
 
     fn provider_context() -> ProviderContext {

@@ -4,7 +4,8 @@
   revision. Asterism uses it as protocol reference rather than copying its
   answer/submission implementation.
 - `Duster-Cule/UnipusHelperPro` declares MIT. Its documented response shapes
-  and route composition are independently normalized into Asterism models.
+  and route composition, including explicit study-record duration seconds, are
+  independently normalized into Asterism models.
 - `uxudjs/UnipusAIAutoPlayer` declares GPL-3.0. It is Reference-only: Asterism
   records the observable page-residence lifecycle and does not copy DOM or UI
   implementation code.

@@ -2656,3 +2656,30 @@ progress/reporting slot.
 Registry, Engine, API/OpenAPI and CLI tests prove the capability stays separate
 from progress and remote mutation. Providers still need their own normalized
 seconds evidence before populating this slot.
+
+## One-hundred-and-sixty-fourth Phase 0 slice
+
+UAI now populates the independent `DurationRead` slot from its native
+study-record boundary. The frozen MIT donor explicitly documents Course, Unit
+and nested Task duration values in seconds and passes the numeric
+CourseResource ID—not strategy ID—as query parameter `id`.
+
+Each read parses `group:{courseResource}:{unit}:{group}`, resolves or atomically
+renews the account-bound JWT, fetches only bounded `appUserId` and `ssoId`
+identity facts, then reads `unitTaskSituation` for that exact CourseResource
+and Unit. Authentication retry restarts the complete user-info/duration pair at
+most once. Returned documents are bounded, redacted and zeroized.
+
+The parser requires one matching Unit, globally unique bounded node identities
+inside it, audited hierarchy roles and one exact matching Group identity with
+an explicit unsigned duration. Duplicate/missing identities, unknown roles and
+missing, negative or overflowing values fail closed. Normalized UAI Group Tasks
+now persist both ProgressRead and DurationRead. The separate signed progress
+route still retains its numeric duration only as an untyped raw fact.
+
+The registry-consistent Development factory now composes all five read-only
+capabilities, while daemon opt-in and verification level remain unchanged.
+This is offline/native-boundary evidence only. DurationReport, execution,
+BrowserBridge, Capture and live verification remain absent; real-account
+read-only validation is scheduled after WebUI and Asterism-Plugin/Yunzai are
+complete.

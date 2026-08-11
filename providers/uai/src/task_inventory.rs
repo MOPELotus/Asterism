@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType};
+use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
 use asterism_provider_api::{ProviderError, ProviderResult, RemoteCourse, RemoteTask};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -217,7 +217,7 @@ fn build_task(
         opens_at: None,
         due_at: None,
         closes_at: None,
-        capabilities: Vec::new(),
+        capabilities: vec![TaskCapability::ProgressRead, TaskCapability::DurationRead],
         fingerprint: fingerprint(&normalized)?,
         normalized,
         raw_sanitized: serde_json::json!({
@@ -296,7 +296,10 @@ mod tests {
         assert_eq!(tasks[0].remote_id, "group:2001:unit-1:group-1");
         assert_eq!(tasks[0].title, "Read the passage");
         assert_eq!(tasks[0].remote_state, RemoteState::Unknown);
-        assert!(tasks[0].capabilities.is_empty());
+        assert_eq!(
+            tasks[0].capabilities,
+            vec![TaskCapability::ProgressRead, TaskCapability::DurationRead]
+        );
         assert_eq!(tasks[0].normalized["unit"]["id"], "unit-1");
         assert_eq!(tasks[0].normalized["section"]["id"], "section-1");
         assert_eq!(tasks[0].normalized["micro"]["id"], "micro-1");
