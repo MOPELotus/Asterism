@@ -1,4 +1,5 @@
 import { useList } from "@refinedev/core";
+import { Link } from "react-router";
 
 import type { Task } from "@/api/generated/types.gen.ts";
 import { PageShell } from "@/components/page-shell.tsx";
@@ -24,7 +25,7 @@ export function TasksPage() {
             <TableBody>
               {tasks.result.data?.map((task) => (
                 <TableRow key={task.id}>
-                  <TableCell className="max-w-md"><div className="truncate font-medium">{task.title}</div><div className="font-mono text-xs text-muted-foreground">{shortId(task.id)}</div></TableCell>
+                  <TableCell className="max-w-md"><Link className="block truncate font-medium text-primary hover:underline" to={`/tasks/${task.id}`}>{task.title}</Link><div className="font-mono text-xs text-muted-foreground">{shortId(task.id)}</div></TableCell>
                   <TableCell>{task.source_type}</TableCell>
                   <TableCell><StateBadge state={task.remote_state} /></TableCell>
                   <TableCell><StateBadge state={task.orchestration_state} /></TableCell>

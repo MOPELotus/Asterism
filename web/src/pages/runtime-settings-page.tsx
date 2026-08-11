@@ -2,6 +2,7 @@ import { useList } from "@refinedev/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Save, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router";
 
 import {
   getProviderAccountRuntimeSettings,
@@ -35,10 +36,13 @@ type DraftValues = Record<string, ProviderSettingValue>;
 const selectClassName = "h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring";
 
 export function RuntimeSettingsPage() {
-  const [scope, setScope] = useState<SettingsScope>("provider");
+  const [searchParams] = useSearchParams();
+  const requestedScope = parseScope(searchParams.get("scope"));
+  const requestedTarget = searchParams.get("target") ?? "";
+  const [scope, setScope] = useState<SettingsScope>(requestedScope);
   const [providerId, setProviderId] = useState("");
-  const [accountId, setAccountId] = useState("");
-  const [taskId, setTaskId] = useState("");
+  const [accountId, setAccountId] = useState(requestedScope === "provider_account" ? requestedTarget : "");
+  const [taskId, setTaskId] = useState(requestedScope === "task" ? requestedTarget : "");
   const [draft, setDraft] = useState<DraftValues>({});
   const [confirmed, setConfirmed] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -171,6 +175,10 @@ function displayValue(value: ProviderSettingValue): string {
 
 function scopeLabel(scope: SettingsScope): string {
   return scope === "provider" ? "Provider 默认" : scope === "provider_account" ? "账号覆盖" : "任务覆盖";
+}
+
+function parseScope(value: string | null): SettingsScope {
+  return value === "provider_account" || value === "task" ? value : "provider";
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

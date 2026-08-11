@@ -1,10 +1,13 @@
 import { useList } from "@refinedev/core";
+import { Plus } from "lucide-react";
+import { Link } from "react-router";
 
 import type { ProviderAccountResponse } from "@/api/generated/types.gen.ts";
 import { PageShell } from "@/components/page-shell.tsx";
 import { QueryError, TableSkeleton } from "@/components/query-feedback.tsx";
 import { StateBadge } from "@/components/state-badge.tsx";
 import { Card, CardContent } from "@/components/ui/card.tsx";
+import { buttonVariants } from "@/components/ui/button.tsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table.tsx";
 import { formatTimestamp, shortId } from "@/lib/format.ts";
 
@@ -12,7 +15,7 @@ export function ProviderAccountsPage() {
   const accounts = useList<ProviderAccountResponse>({ resource: "provider-accounts", pagination: { pageSize: 100 } });
 
   return (
-    <PageShell title="平台账号" description="管理当前身份可见的平台账号与认证状态。">
+    <PageShell title="平台账号" description="管理当前身份可见的平台账号与认证状态。" actions={<Link className={buttonVariants({ variant: "default" })} to="/provider-accounts/create"><Plus className="size-4" />添加账号</Link>}>
       {accounts.query.error ? <QueryError error={accounts.query.error} /> : null}
       {accounts.query.isLoading ? <TableSkeleton /> : (
         <Card><CardContent className="p-0">
@@ -24,7 +27,7 @@ export function ProviderAccountsPage() {
             <TableBody>
               {accounts.result.data?.map((account) => (
                 <TableRow key={account.id}>
-                  <TableCell><div className="font-medium">{account.display_name}</div><div className="font-mono text-xs text-muted-foreground">{shortId(account.id)}</div></TableCell>
+                  <TableCell><Link className="font-medium text-primary hover:underline" to={`/provider-accounts/${account.id}`}>{account.display_name}</Link><div className="font-mono text-xs text-muted-foreground">{shortId(account.id)}</div></TableCell>
                   <TableCell>{account.provider_id}</TableCell>
                   <TableCell>{account.tenant ?? "—"}</TableCell>
                   <TableCell><StateBadge state={account.auth_state.state} /></TableCell>
