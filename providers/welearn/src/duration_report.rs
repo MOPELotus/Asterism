@@ -124,6 +124,8 @@ impl TaskExecutionCapability for WellearnDurationReport {
             .await?;
         let before = parse_cmi_snapshot(documents.before.as_str())?;
         let after = parse_cmi_snapshot(documents.after.as_str())?;
+        require_duration_snapshot(&before, "baseline")?;
+        require_duration_snapshot(&after, "verification")?;
         verify_preserved_state(&before, &after)?;
         if !duration_observation_changed(&before, &after) {
             return Err(ProviderError::new(
@@ -175,16 +177,34 @@ fn verify_preserved_state(
     before: &WellearnCmiSnapshot,
     after: &WellearnCmiSnapshot,
 ) -> ProviderResult<()> {
-    if before.completion_raw().unwrap_or("not_attempted")
-        != after.completion_raw().unwrap_or("not_attempted")
-        || before.progress_raw().unwrap_or("0") != after.progress_raw().unwrap_or("0")
-        || before.score_scaled_raw().unwrap_or("") != after.score_scaled_raw().unwrap_or("")
-        || before.success_status_raw().unwrap_or("unknown")
-            != after.success_status_raw().unwrap_or("unknown")
+    if before.completion_raw() != after.completion_raw()
+        || before.progress_raw() != after.progress_raw()
+        || before.score_scaled_raw() != after.score_scaled_raw()
+        || before.success_status_raw() != after.success_status_raw()
     {
         return Err(ProviderError::new(
             ProviderErrorKind::RemoteChanged,
             "WELearn completion, progress or score changed during duration reporting",
+        ));
+    }
+    Ok(())
+}
+
+fn require_duration_snapshot(
+    snapshot: &WellearnCmiSnapshot,
+    stage: &'static str,
+) -> ProviderResult<()> {
+    if !snapshot.cmi_present()
+        || snapshot.completion_raw().is_none()
+        || snapshot.progress_raw().is_none()
+        || snapshot.score_scaled_raw().is_none()
+        || snapshot.success_status_raw().is_none()
+        || snapshot.session_time_raw().is_none()
+        || snapshot.total_time_raw().is_none()
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            format!("WELearn duration {stage} CMI is incomplete"),
         ));
     }
     Ok(())
@@ -236,6 +256,7 @@ mod tests {
         settings: Mutex<Option<(u64, u64)>>,
         drift_completion: bool,
         unchanged_duration: bool,
+        incomplete_verification: bool,
     }
 
     #[async_trait]
@@ -257,6 +278,8 @@ mod tests {
                 AFTER.replace("incomplete", "completed")
             } else if self.unchanged_duration {
                 BEFORE.to_owned()
+            } else if self.incomplete_verification {
+                r#"{"ret":0,"comment":"{}"}"#.to_owned()
             } else {
                 AFTER.to_owned()
             };
@@ -328,6 +351,21 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
         }
+    }
+
+    #[tokio::test]
+    async fn duration_report_rejects_missing_verification_cmi() {
+        let capability = WellearnDurationReport::try_new(Arc::new(FixtureTransport {
+            incomplete_verification: true,
+            ..FixtureTransport::default()
+        }))
+        .unwrap();
+        let error = capability
+            .execute(&context(), &request(), &FixtureEvents::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
     }
 
     fn context() -> ProviderContext {

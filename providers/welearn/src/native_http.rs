@@ -360,7 +360,7 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             snapshot = parse_cmi_snapshot(before.as_str())?;
         }
 
-        let state = PreservedCmiState::from_snapshot(&snapshot);
+        let state = PreservedCmiState::try_from_snapshot(&snapshot)?;
         events
             .report(ProviderProgress {
                 percent: Some(0),
@@ -510,21 +510,29 @@ struct PreservedCmiState {
 }
 
 impl PreservedCmiState {
-    fn from_snapshot(snapshot: &WellearnCmiSnapshot) -> Self {
-        Self {
-            completion_status: snapshot
-                .completion_raw()
-                .unwrap_or("not_attempted")
-                .to_owned(),
-            progress: snapshot.progress_raw().unwrap_or("0").to_owned(),
-            score_scaled: snapshot.score_scaled_raw().unwrap_or("").to_owned(),
-            success_status: snapshot
-                .success_status_raw()
-                .unwrap_or("unknown")
-                .to_owned(),
-            session_time: snapshot.session_time_raw().unwrap_or("0").to_owned(),
-            total_time: snapshot.total_time_raw().unwrap_or("0").to_owned(),
+    fn try_from_snapshot(snapshot: &WellearnCmiSnapshot) -> ProviderResult<Self> {
+        let required = |value: Option<&str>, field: &'static str| {
+            value.map(str::to_owned).ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    format!("WELearn duration baseline has no {field}"),
+                )
+            })
+        };
+        if !snapshot.cmi_present() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn duration baseline still has no CMI after start",
+            ));
         }
+        Ok(Self {
+            completion_status: required(snapshot.completion_raw(), "completion status")?,
+            progress: required(snapshot.progress_raw(), "progress measure")?,
+            score_scaled: required(snapshot.score_scaled_raw(), "scaled score")?,
+            success_status: required(snapshot.success_status_raw(), "success status")?,
+            session_time: required(snapshot.session_time_raw(), "session time")?,
+            total_time: required(snapshot.total_time_raw(), "total time")?,
+        })
     }
 }
 
@@ -950,13 +958,27 @@ mod tests {
             r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.25\",\"session_time\":\"15\",\"total_time\":\"45\",\"score\":{\"scaled\":\"0.8\"},\"success_status\":\"unknown\"}}"}"#,
         )
         .unwrap();
-        let state = PreservedCmiState::from_snapshot(&snapshot);
+        let state = PreservedCmiState::try_from_snapshot(&snapshot).unwrap();
         assert_eq!(state.completion_status, "incomplete");
         assert_eq!(state.progress, "0.25");
         assert_eq!(state.score_scaled, "0.8");
         assert_eq!(state.success_status, "unknown");
         assert_eq!(state.session_time, "15");
         assert_eq!(state.total_time, "45");
+    }
+
+    #[test]
+    fn duration_state_rejects_absent_or_incomplete_cmi() {
+        for document in [
+            r#"{"ret":0,"comment":"{}"}"#,
+            r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.25\",\"session_time\":\"15\",\"total_time\":\"45\",\"score\":{\"scaled\":\"0.8\"}}}"}"#,
+        ] {
+            let snapshot = parse_cmi_snapshot(document).unwrap();
+            let Err(error) = PreservedCmiState::try_from_snapshot(&snapshot) else {
+                panic!("incomplete CMI must not produce mutation state");
+            };
+            assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        }
     }
 
     #[test]

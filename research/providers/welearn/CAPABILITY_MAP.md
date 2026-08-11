@@ -10,7 +10,7 @@
 | TaskProgressRead | YZBRH | Reference | Implemented through a fresh read-only `getscoinfo_v7` CMI request; completion and progress are parsed independently; live pending |
 | DurationRead | YZBRH | Reference | Parser retains bounded raw `session_time` and `total_time` independently; no Core duration or seconds conversion until live unit evidence exists |
 | ResourceExecution | Fanyuchang 2026 + YZBRH | Reference | Completion-changing execution remains unimplemented; donor score/completion-forging paths stay excluded |
-| DurationReport | YZBRH + Fanyuchang 2026 | Reference | Native fresh-read → optional start → bounded real-time heartbeat → preserve-and-finalize → fresh-read lifecycle is offline/native-boundary covered; live pending |
+| DurationReport | YZBRH + Fanyuchang 2026 | Reference | Native fresh-read → optional start → complete preservation baseline → bounded real-time heartbeat → preserve-and-finalize → strict fresh-read lifecycle is offline/native-boundary covered; live pending |
 | Submission/assessment | None selected | FromScratch | Out of this inventory slice; donor score-forging paths are not accepted behavior |
 | Result verification | Fresh Course/SCO/CMI reads | FromScratch | Duration report requires fresh CMI, unchanged completion/progress/score and a changed raw time observation; live pending |
 | BrowserBridge | No current need | FromScratch | First batch defers Capture/browser-dependent work |
@@ -51,7 +51,8 @@ scan-interval behaviors stay explicit. The native lifecycle keeps one resolved
 Cookie and fresh Course route through baseline read, optional start, bounded
 heartbeats and finalization. It preserves completion, progress, score and
 success status, never calls `setscoinfo`, and re-reads CMI before returning a
-verified outcome. Authentication before mutation may renew once; no mutation is
+verified outcome. Missing baseline/readback preservation fields fail closed
+instead of becoming synthetic defaults. Authentication before mutation may renew once; no mutation is
 replayed after an authentication failure. `DurationRead` remains absent because
 raw remote time units are still not live-proven, and completion-changing
 `ResourceExecution` remains separate and unadvertised.

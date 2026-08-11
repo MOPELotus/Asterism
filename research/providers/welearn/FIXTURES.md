@@ -40,7 +40,8 @@ scalars and out-of-range progress.
 The duration pair is a synthetic before/after readback. It keeps completion,
 progress, score and success status identical while changing only opaque raw time
 observations. Injected lifecycle tests freeze provider/task runtime overrides,
-reject completion/score drift and reject a final read with no time change.
+reject completion/score drift, reject absent/partial preservation fields and
+reject a final read with no time change.
 Native-boundary tests separately reject malformed or unsupported mutation result
 codes and prove the preserved CMI form state.
 
@@ -80,6 +81,8 @@ only structural field names, response codes and bounded placeholder shapes.
 - CMI completion and decimal progress remain independent observations.
 - CMI time strings never populate `duration_seconds` without live unit evidence.
 - Missing or malformed CMI never triggers a start/mutation fallback.
+- A post-start baseline or final readback without the complete preservation set
+  fails closed; missing facts are never replaced with mutation defaults.
 - Unknown fields are dropped from sanitized normalized data.
 - Fresh detail re-lists the Course and exact SCO instead of echoing a persisted
   scan payload; malformed or disappeared identities fail closed.

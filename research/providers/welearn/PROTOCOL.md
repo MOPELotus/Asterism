@@ -142,9 +142,11 @@ Completion != Progress != Session Time != Total Time
 The implemented `DurationReport` lifecycle acquires a fresh Course route and
 CMI document using one resolved Cookie. If a valid response explicitly has no
 `cmi`, it calls `startsco160928` once and re-reads the baseline. Malformed or
-ambiguous reads never trigger a start fallback. The baseline preserves bounded
-`completion_status`, `progress_measure`, `score.scaled`, `success_status`,
-`session_time` and `total_time` values.
+ambiguous reads never trigger a start fallback. The post-start read must expose
+the complete audited CMI preservation set; a still-absent or partial CMI stops
+before any heartbeat or finalization rather than synthesizing defaults. The
+baseline preserves bounded `completion_status`, `progress_measure`,
+`score.scaled`, `success_status`, `session_time` and `total_time` values.
 
 The lifecycle sends an initial and then periodic
 `keepsco_with_getticket_with_updatecmitime` heartbeat, with real elapsed waits
@@ -156,7 +158,9 @@ integer `ret=0`; heartbeat accepts only the two donor-observed integer values
 `0` and `1`.
 
 After finalization, a fresh CMI read must preserve completion, progress, score
-and success status while changing at least one raw time observation. HTTP
+and success status with the same explicit field presence while changing at
+least one raw time observation. An absent or partial readback is protocol drift,
+not evidence that a default-valued state was preserved. HTTP
 success alone is never a verified outcome. Authentication may renew once before
 the first mutation. A mutation is never replayed after authentication fails;
 only the final read-only verification may renew if the operation has not already
