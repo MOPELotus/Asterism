@@ -118,6 +118,23 @@ impl WellearnCmiSnapshot {
     }
 }
 
+impl Drop for WellearnCmiSnapshot {
+    fn drop(&mut self) {
+        for value in [
+            &mut self.completion_raw,
+            &mut self.progress_raw,
+            &mut self.session_time_raw,
+            &mut self.total_time_raw,
+            &mut self.score_scaled_raw,
+            &mut self.success_status_raw,
+        ] {
+            if let Some(value) = value.as_mut() {
+                value.zeroize();
+            }
+        }
+    }
+}
+
 /// Native boundary for one fresh `getscoinfo_v7` read.
 #[async_trait]
 pub trait WellearnCmiTransport: Send + Sync {

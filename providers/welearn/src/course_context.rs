@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, fmt};
 
 use asterism_provider_api::{ProviderResult, RemoteCourse};
+use zeroize::Zeroize;
 
 use crate::course_inventory::{course_id_from_remote, protocol_drift};
 
@@ -41,6 +42,14 @@ impl fmt::Debug for WellearnCourseContext {
             .debug_struct("WellearnCourseContext")
             .field("values", &"[REDACTED]")
             .finish()
+    }
+}
+
+impl Drop for WellearnCourseContext {
+    fn drop(&mut self) {
+        self.course.zeroize();
+        self.user.zeroize();
+        self.class.zeroize();
     }
 }
 

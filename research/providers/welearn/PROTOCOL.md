@@ -183,7 +183,9 @@ seconds; `DurationRead` therefore remains unadvertised.
 ## Sanitization and routing
 
 - `uid`, `classid`, redirect state, PKCE material and Cookies are route/session
-  facts, never persisted normalized metadata.
+  facts, never persisted normalized metadata. Fresh Course route values and
+  parsed CMI preservation scalars are redacted from Debug output where exposed
+  and explicitly zeroized when their operation-local containers are dropped.
 - Only the audited HTTPS hosts may be contacted; unexpected OIDC redirects fail
   closed as protocol drift.
 - Course percentage and SCO duration are remote observations, not proof of a
