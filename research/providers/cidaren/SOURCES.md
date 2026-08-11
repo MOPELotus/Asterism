@@ -18,6 +18,9 @@ not credentials or executable request material:
 - [issue 6](https://github.com/ularch/Easy_Cidaren/issues/6) records paginated
   `ClassTask/PageTask` rows, `task_type`, `over_status`, progress, score and
   millisecond timing fields;
+- [issue 83](https://github.com/ularch/Easy_Cidaren/issues/83) records a 2026
+  `StudyTask/List` response with selected Course metadata, ordinary unit rows,
+  `task_type=3`, `list_id`, access flags and repeated `task_id=-1`;
 - [issue 106](https://github.com/ularch/Easy_Cidaren/issues/106) records the
   identity hazard around `task_id=-1`, so a class task must be rebound through
   its release identity before later operations;

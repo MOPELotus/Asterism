@@ -12,18 +12,21 @@ fixtures/providers/cidaren/
   auth/token-rejected.json
   tasks/class-task-page-1.json
   tasks/class-task-page-2.json
+  tasks/study-task-list.json
 ```
 
-The task fixture will include multiple Courses, learning and test rows, pending,
+The class fixture includes multiple Courses, learning and test rows, pending,
 in-progress, completed and expired states, `task_id=-1`, page boundaries and
-unknown fields that must be dropped. The course and task views may share the
-same page envelope, but expected normalization remains independent.
+unknown fields that must be dropped. The study fixture adds selected-Course
+binding, ordinary `task_type=3` units, stable `list_id`, access flags and
+repeated uninitialized task identity behavior.
 
 These fixtures now drive the Development crate's strict token-response,
-Course grouping, stable release identity, state classification, redaction,
-all-or-nothing pagination, fresh TaskDetail and TaskProgressRead tests. They
-remain synthetic and do not establish live compatibility; native HTTP request
-and response boundaries are covered separately with deterministic transports.
+Course merging, stable release/list identity, state classification, redaction,
+all-or-nothing pagination, selected-Course query binding, fresh TaskDetail and
+TaskProgressRead tests. They remain synthetic and do not establish live
+compatibility; native HTTP request and response boundaries are covered
+separately with deterministic transports.
 
 Inline negative tests must cover empty/oversized/non-JSON responses, non-object
 records, unsupported task types/status values, duplicate release identities,
@@ -42,7 +45,10 @@ fixtures/providers/cidaren/
   courses/class-task-empty-live.json
   tasks/class-task-mixed-live.json
   tasks/class-task-task-id-minus-one-live.json
+  tasks/study-task-selected-live.json
+  tasks/study-task-task-id-minus-one-live.json
   progress/class-task-fresh-live.json
+  progress/study-task-fresh-live.json
 ```
 
 Remove UserToken, browser crypto context, student name/code, school/class,
@@ -56,6 +62,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Class-task pagination is complete and total-consistent before normalization.
 - Course identity is `course:{course_id}` and duplicate rows must agree.
 - Task identity is `class-task:{release_id}` even when `task_id == -1`.
+- Ordinary study identity is `study-task:{course_id}:{list_id}` even when
+  `task_id == -1`.
+- Selected Course, query and `StudyTask/List` response/rows must agree.
 - TaskDetail and TaskProgressRead re-scan and reject missing fresh identities.
 - Learning and test tasks remain distinct source types but both are Routine.
 - Expiry, completion, progress, score and raw time remain independent facts.

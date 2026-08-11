@@ -16,12 +16,14 @@ use zeroize::Zeroize;
 
 use crate::{
     CidarenAuthenticationTransport, CidarenClassTaskPageDocument, CidarenClassTaskTransport,
-    CidarenSessionResolver, CidarenTokenSession, class_tasks::class_task_total,
+    CidarenSessionResolver, CidarenStudyTaskDocument, CidarenStudyTaskTransport,
+    CidarenTokenSession, authentication::selected_course_id, class_tasks::class_task_total,
     classify_token_validation_response,
 };
 
 const STUDENT_MAIN_URL: &str = "https://app.vocabgo.com/student/api/Student/Main";
 const CLASS_TASK_PAGE_URL: &str = "https://app.vocabgo.com/student/api/Student/ClassTask/PageTask";
+const STUDY_TASK_LIST_URL: &str = "https://app.vocabgo.com/student/api/Student/StudyTask/List";
 const STUDENT_REFERER: &str = "https://app.vocabgo.com/student/";
 const DONOR_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 8.1.2; LIO-AN00 Build/LIO-AN00; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/92.0.4515.131 Safari/537.36 MMWEBID/4462 MicroMessenger/8.0.20.2100(0x28001438) Process/toolsmp WeChat/arm64 Weixin Android Tablet NetType/WIFI Language/zh_CN ABI/arm64";
 const ABC_HEADER_VALUE: &str = "60cd4becac3c293c3107d9a8087e7f47";
@@ -33,14 +35,15 @@ const PAGE_SIZE: u32 = 10;
 const MAX_TASKS: usize = 10_000;
 const MAX_AUTH_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_PAGE_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_STUDY_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 
 const USER_TOKEN: HeaderName = HeaderName::from_static("usertoken");
 const ABC: HeaderName = HeaderName::from_static("abc");
 const AUTHORIZATION_V: HeaderName = HeaderName::from_static("authorization-v");
 const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-with");
 
-/// Native imported-token validation and class-task HTTP transport over the
-/// shared non-redirecting network policy.
+/// Native imported-token validation plus class/study Task HTTP transport over
+/// the shared non-redirecting network policy.
 pub struct NativeCidarenTransport {
     client: Client,
     sessions: Arc<dyn CidarenSessionResolver>,
@@ -108,6 +111,28 @@ impl NativeCidarenTransport {
         .await?;
         CidarenClassTaskPageDocument::try_new(page_count, document)
     }
+
+    async fn fetch_study_document(
+        &self,
+        session: &CidarenTokenSession,
+    ) -> ProviderResult<CidarenStudyTaskDocument> {
+        let mut account = self.fetch_account_document(session).await?;
+        let course_id_result = selected_course_id(account.as_bytes());
+        account.zeroize();
+        let course_id = course_id_result?;
+        let timestamp = current_timestamp_millis()?;
+        let response = study_task_request(&self.client, session, &course_id, timestamp)?
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error, ResponseRoute::StudyTaskList))?;
+        let document = read_json_response(
+            response,
+            ResponseRoute::StudyTaskList,
+            MAX_STUDY_RESPONSE_BYTES,
+        )
+        .await?;
+        CidarenStudyTaskDocument::try_new(course_id, document)
+    }
 }
 
 impl fmt::Debug for NativeCidarenTransport {
@@ -166,6 +191,17 @@ impl CidarenClassTaskTransport for NativeCidarenTransport {
     }
 }
 
+#[async_trait]
+impl CidarenStudyTaskTransport for NativeCidarenTransport {
+    async fn fetch_study_task_document(
+        &self,
+        context: &ProviderContext,
+    ) -> ProviderResult<CidarenStudyTaskDocument> {
+        let session = self.sessions.resolve_session(context).await?;
+        self.fetch_study_document(&session).await
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ClassTaskRequest {
     search_type: &'static str,
@@ -196,6 +232,21 @@ fn class_task_request(page_count: u32, timestamp: u64) -> ProviderResult<ClassTa
         sign: format!("{:x}", md5::compute(signature_input.as_bytes())),
         app_type: 1,
     })
+}
+
+fn study_task_request(
+    client: &Client,
+    session: &CidarenTokenSession,
+    course_id: &str,
+    timestamp: u64,
+) -> ProviderResult<RequestBuilder> {
+    let request = client.get(STUDY_TASK_LIST_URL).query(&[
+        ("course_id", course_id.to_owned()),
+        ("timestamp", timestamp.to_string()),
+        ("version", REQUEST_VERSION.to_owned()),
+        ("app_type", "1".to_owned()),
+    ]);
+    authenticated_request(request, session)
 }
 
 fn authenticated_request(
@@ -377,6 +428,7 @@ fn oversized_response(route: ResponseRoute) -> ProviderError {
 enum ResponseRoute {
     AccountValidation,
     ClassTaskPage,
+    StudyTaskList,
 }
 
 impl ResponseRoute {
@@ -384,6 +436,7 @@ impl ResponseRoute {
         match self {
             Self::AccountValidation => "account-validation",
             Self::ClassTaskPage => "class-task",
+            Self::StudyTaskList => "study-task",
         }
     }
 }
@@ -442,6 +495,41 @@ mod tests {
             })
         );
         assert!(class_task_request(0, 1).is_err());
+    }
+
+    #[test]
+    fn study_task_request_is_bound_to_selected_course_and_read_headers() {
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .expect("built-in network profile");
+        let client = build_http_client(&network).unwrap();
+        let session = CidarenTokenSession::try_new("synthetic-user-token").unwrap();
+        let request = study_task_request(&client, &session, "course-a", 1_730_000_000_000)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().path(), "/student/api/Student/StudyTask/List");
+        let query = request
+            .url()
+            .query_pairs()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            query.get("course_id").map(std::convert::AsRef::as_ref),
+            Some("course-a")
+        );
+        assert_eq!(
+            query.get("version").map(std::convert::AsRef::as_ref),
+            Some(REQUEST_VERSION)
+        );
+        assert_eq!(
+            query.get("app_type").map(std::convert::AsRef::as_ref),
+            Some("1")
+        );
+        let token = request.headers().get(USER_TOKEN).unwrap();
+        assert!(token.is_sensitive());
+        assert_eq!(
+            request.headers().get(AUTHORIZATION_V).unwrap(),
+            AUTHORIZATION_V_READ
+        );
     }
 
     #[test]

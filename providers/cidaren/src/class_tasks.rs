@@ -105,6 +105,7 @@ pub fn parse_course_inventory(
                 metadata_sanitized: serde_json::json!({
                     "schema": "cidaren.course.v1",
                     "course_id": row.course_id,
+                    "inventory_sources": ["class-task"],
                 }),
                 route_context: ProviderRouteContext::default(),
             },

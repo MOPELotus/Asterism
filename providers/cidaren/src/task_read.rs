@@ -10,16 +10,18 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::{
-    CidarenClassTaskPageDocument, CidarenClassTaskTransport, class_tasks::parse_task_inventory,
-    metadata::development_metadata,
+    CidarenClassTaskTransport, CidarenStudyTaskTransport, class_tasks::parse_task_inventory,
+    metadata::development_metadata, study_tasks::parse_study_task_inventory,
 };
 
 const MAX_RELEASE_ID_BYTES: usize = 32;
+const MAX_STUDY_COMPONENT_BYTES: usize = 256;
 
-/// Fresh identity-bound Task detail over complete class-task pagination.
+/// Fresh identity-bound Task detail over the matching class/study inventory.
 pub struct CidarenTaskDetail {
     metadata: ProviderMetadata,
-    transport: Arc<dyn CidarenClassTaskTransport>,
+    class_tasks: Arc<dyn CidarenClassTaskTransport>,
+    study_tasks: Arc<dyn CidarenStudyTaskTransport>,
 }
 
 impl CidarenTaskDetail {
@@ -28,10 +30,14 @@ impl CidarenTaskDetail {
     /// # Errors
     ///
     /// Returns an internal error if compile-time metadata is invalid.
-    pub fn try_new(transport: Arc<dyn CidarenClassTaskTransport>) -> ProviderResult<Self> {
+    pub fn try_new(
+        class_tasks: Arc<dyn CidarenClassTaskTransport>,
+        study_tasks: Arc<dyn CidarenStudyTaskTransport>,
+    ) -> ProviderResult<Self> {
         Ok(Self {
             metadata: development_metadata()?,
-            transport,
+            class_tasks,
+            study_tasks,
         })
     }
 }
@@ -41,7 +47,8 @@ impl fmt::Debug for CidarenTaskDetail {
         formatter
             .debug_struct("CidarenTaskDetail")
             .field("metadata", &self.metadata)
-            .field("transport", &"configured")
+            .field("class_tasks", &"configured")
+            .field("study_tasks", &"configured")
             .finish()
     }
 }
@@ -60,24 +67,40 @@ impl TaskDetailCapability for CidarenTaskDetail {
         remote_task_id: &str,
     ) -> ProviderResult<RemoteTaskDetail> {
         validate_context(context, &self.metadata)?;
-        let release_id = parse_release_identity(remote_task_id)?;
-        let pages = self.transport.fetch_class_task_pages(context).await?;
-        let task = find_fresh_task(remote_task_id, release_id, &pages)?;
-        Ok(RemoteTaskDetail {
-            normalized_detail: serde_json::json!({
+        let identity = parse_task_identity(remote_task_id)?;
+        let task = find_fresh_task(
+            remote_task_id,
+            &identity,
+            context,
+            self.class_tasks.as_ref(),
+            self.study_tasks.as_ref(),
+        )
+        .await?;
+        let normalized_detail = match identity {
+            TaskIdentity::Class { release_id } => serde_json::json!({
                 "schema": "cidaren.class-task.detail.v1",
                 "release_id": release_id,
                 "task": task.normalized,
             }),
+            TaskIdentity::Study { course_id, list_id } => serde_json::json!({
+                "schema": "cidaren.study-task.detail.v1",
+                "course_id": course_id,
+                "list_id": list_id,
+                "task": task.normalized,
+            }),
+        };
+        Ok(RemoteTaskDetail {
+            normalized_detail,
             task,
         })
     }
 }
 
-/// Fresh read-only class-task progress.
+/// Fresh read-only class/study Task progress.
 pub struct CidarenTaskProgress {
     metadata: ProviderMetadata,
-    transport: Arc<dyn CidarenClassTaskTransport>,
+    class_tasks: Arc<dyn CidarenClassTaskTransport>,
+    study_tasks: Arc<dyn CidarenStudyTaskTransport>,
 }
 
 impl CidarenTaskProgress {
@@ -86,10 +109,14 @@ impl CidarenTaskProgress {
     /// # Errors
     ///
     /// Returns an internal error if compile-time metadata is invalid.
-    pub fn try_new(transport: Arc<dyn CidarenClassTaskTransport>) -> ProviderResult<Self> {
+    pub fn try_new(
+        class_tasks: Arc<dyn CidarenClassTaskTransport>,
+        study_tasks: Arc<dyn CidarenStudyTaskTransport>,
+    ) -> ProviderResult<Self> {
         Ok(Self {
             metadata: development_metadata()?,
-            transport,
+            class_tasks,
+            study_tasks,
         })
     }
 }
@@ -99,7 +126,8 @@ impl fmt::Debug for CidarenTaskProgress {
         formatter
             .debug_struct("CidarenTaskProgress")
             .field("metadata", &self.metadata)
-            .field("transport", &"configured")
+            .field("class_tasks", &"configured")
+            .field("study_tasks", &"configured")
             .finish()
     }
 }
@@ -118,9 +146,15 @@ impl TaskProgressCapability for CidarenTaskProgress {
         remote_task_id: &str,
     ) -> ProviderResult<RemoteProgress> {
         validate_context(context, &self.metadata)?;
-        let release_id = parse_release_identity(remote_task_id)?;
-        let pages = self.transport.fetch_class_task_pages(context).await?;
-        let task = find_fresh_task(remote_task_id, release_id, &pages)?;
+        let identity = parse_task_identity(remote_task_id)?;
+        let task = find_fresh_task(
+            remote_task_id,
+            &identity,
+            context,
+            self.class_tasks.as_ref(),
+            self.study_tasks.as_ref(),
+        )
+        .await?;
         let percent = task
             .normalized
             .get("progress")
@@ -158,42 +192,76 @@ fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> P
     Ok(())
 }
 
-fn parse_release_identity(remote_task_id: &str) -> ProviderResult<&str> {
-    let release_id = remote_task_id
-        .strip_prefix("class-task:")
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= MAX_RELEASE_ID_BYTES
-                && value.bytes().all(|byte| byte.is_ascii_digit())
-                && value != &"0"
-                && !value.starts_with('0')
-        })
-        .ok_or_else(|| {
-            ProviderError::new(
-                ProviderErrorKind::ProtocolDrift,
-                "Cidaren Task identity is invalid",
-            )
-        })?;
-    Ok(release_id)
+#[derive(Clone, Copy, Debug)]
+enum TaskIdentity<'a> {
+    Class {
+        release_id: &'a str,
+    },
+    Study {
+        course_id: &'a str,
+        list_id: &'a str,
+    },
 }
 
-fn find_fresh_task(
+fn parse_task_identity(remote_task_id: &str) -> ProviderResult<TaskIdentity<'_>> {
+    if let Some(release_id) = remote_task_id.strip_prefix("class-task:")
+        && !release_id.is_empty()
+        && release_id.len() <= MAX_RELEASE_ID_BYTES
+        && release_id.bytes().all(|byte| byte.is_ascii_digit())
+        && release_id != "0"
+        && !release_id.starts_with('0')
+    {
+        return Ok(TaskIdentity::Class { release_id });
+    }
+    if let Some(identity) = remote_task_id.strip_prefix("study-task:")
+        && let Some((course_id, list_id)) = identity.split_once(':')
+        && valid_study_component(course_id)
+        && valid_study_component(list_id)
+    {
+        return Ok(TaskIdentity::Study { course_id, list_id });
+    }
+    Err(ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        "Cidaren Task identity is invalid",
+    ))
+}
+
+async fn find_fresh_task(
     remote_task_id: &str,
-    release_id: &str,
-    pages: &[CidarenClassTaskPageDocument],
+    identity: &TaskIdentity<'_>,
+    context: &ProviderContext,
+    class_tasks: &dyn CidarenClassTaskTransport,
+    study_tasks: &dyn CidarenStudyTaskTransport,
 ) -> ProviderResult<RemoteTask> {
-    let mut matches = parse_task_inventory(None, pages)?
+    let tasks = match identity {
+        TaskIdentity::Class { .. } => {
+            let pages = class_tasks.fetch_class_task_pages(context).await?;
+            parse_task_inventory(None, &pages)?
+        }
+        TaskIdentity::Study { .. } => {
+            let document = study_tasks.fetch_study_task_document(context).await?;
+            parse_study_task_inventory(None, &document)?
+        }
+    };
+    let mut matches = tasks
         .into_iter()
         .filter(|task| task.remote_id == remote_task_id);
     let task = matches.next().ok_or_else(|| {
         ProviderError::new(
             ProviderErrorKind::RemoteChanged,
-            "Cidaren class task no longer exists in the fresh inventory",
+            "Cidaren Task no longer exists in the matching fresh inventory",
         )
     })?;
-    if matches.next().is_some()
-        || task.normalized.get("release_id").and_then(Value::as_str) != Some(release_id)
-    {
+    let identity_matches = match identity {
+        TaskIdentity::Class { release_id } => {
+            task.normalized.get("release_id").and_then(Value::as_str) == Some(*release_id)
+        }
+        TaskIdentity::Study { course_id, list_id } => {
+            task.normalized.get("course_id").and_then(Value::as_str) == Some(*course_id)
+                && task.normalized.get("list_id").and_then(Value::as_str) == Some(*list_id)
+        }
+    };
+    if matches.next().is_some() || !identity_matches {
         return Err(ProviderError::new(
             ProviderErrorKind::ProtocolDrift,
             "Cidaren fresh Task identity is duplicated or drifted",
@@ -202,11 +270,20 @@ fn find_fresh_task(
     Ok(task)
 }
 
+fn valid_study_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_STUDY_COMPONENT_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 #[cfg(test)]
 mod tests {
     use asterism_domain::{ProviderAccountId, ProviderId, RemoteState, SecretId};
 
     use super::*;
+    use crate::{CidarenClassTaskPageDocument, CidarenStudyTaskDocument};
 
     #[derive(Debug)]
     struct FixtureTransport;
@@ -221,9 +298,20 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl CidarenStudyTaskTransport for FixtureTransport {
+        async fn fetch_study_task_document(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<CidarenStudyTaskDocument> {
+            Ok(fixture_study_document())
+        }
+    }
+
     #[tokio::test]
     async fn task_detail_rebinds_release_identity_to_fresh_row() {
-        let capability = CidarenTaskDetail::try_new(Arc::new(FixtureTransport)).unwrap();
+        let transport = Arc::new(FixtureTransport);
+        let capability = CidarenTaskDetail::try_new(transport.clone(), transport).unwrap();
         let detail = capability
             .task_detail(&provider_context(), "class-task:2002")
             .await
@@ -238,8 +326,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn study_detail_rebinds_course_and_list_identity() {
+        let transport = Arc::new(FixtureTransport);
+        let capability = CidarenTaskDetail::try_new(transport.clone(), transport).unwrap();
+        let detail = capability
+            .task_detail(&provider_context(), "study-task:course-a:course-a_02")
+            .await
+            .unwrap();
+        assert_eq!(detail.task.normalized["task_id"], 71002);
+        assert_eq!(detail.normalized_detail["course_id"], "course-a");
+        assert_eq!(detail.normalized_detail["list_id"], "course-a_02");
+        assert_eq!(
+            detail.normalized_detail["schema"],
+            "cidaren.study-task.detail.v1"
+        );
+    }
+
+    #[tokio::test]
     async fn progress_is_fresh_and_never_converts_raw_time() {
-        let capability = CidarenTaskProgress::try_new(Arc::new(FixtureTransport)).unwrap();
+        let transport = Arc::new(FixtureTransport);
+        let capability = CidarenTaskProgress::try_new(transport.clone(), transport).unwrap();
         let progress = capability
             .read_progress(&provider_context(), "class-task:2002")
             .await
@@ -254,16 +360,30 @@ mod tests {
             .unwrap();
         assert_eq!(completed.remote_state, RemoteState::Completed);
         assert_eq!(completed.percent, Some(100));
+
+        let transport = Arc::new(FixtureTransport);
+        let study = CidarenTaskProgress::try_new(transport.clone(), transport)
+            .unwrap()
+            .read_progress(&provider_context(), "study-task:course-a:course-a_02")
+            .await
+            .unwrap();
+        assert_eq!(study.remote_state, RemoteState::InProgress);
+        assert_eq!(study.percent, Some(35));
+        assert!(study.duration_seconds.is_none());
     }
 
     #[tokio::test]
     async fn malformed_or_missing_identity_fails_closed() {
-        let capability = CidarenTaskDetail::try_new(Arc::new(FixtureTransport)).unwrap();
+        let transport = Arc::new(FixtureTransport);
+        let capability = CidarenTaskDetail::try_new(transport.clone(), transport).unwrap();
         for remote_id in [
             "task:2002",
             "class-task:0",
             "class-task:02002",
             "class-task:x",
+            "study-task:course-a",
+            "study-task:unsafe/course:list",
+            "study-task:course-a:list:extra",
         ] {
             assert_eq!(
                 capability
@@ -277,6 +397,14 @@ mod tests {
         assert_eq!(
             capability
                 .task_detail(&provider_context(), "class-task:9999")
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            capability
+                .task_detail(&provider_context(), "study-task:course-a:course-a_99")
                 .await
                 .unwrap_err()
                 .kind,
@@ -297,6 +425,14 @@ mod tests {
             )
             .unwrap(),
         ]
+    }
+
+    fn fixture_study_document() -> CidarenStudyTaskDocument {
+        CidarenStudyTaskDocument::try_new(
+            "course-a",
+            include_str!("../../../fixtures/providers/cidaren/tasks/study-task-list.json"),
+        )
+        .unwrap()
     }
 
     fn provider_context() -> ProviderContext {

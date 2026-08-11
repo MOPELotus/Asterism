@@ -6,14 +6,14 @@ use asterism_secrets::ProviderCredentialResolver;
 
 use crate::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenClassTaskTransport,
-    CidarenCourseInventory, CidarenSessionResolver, CidarenTaskDetail, CidarenTaskInventory,
-    CidarenTaskProgress, metadata::development_metadata, native_http::NativeCidarenTransport,
-    stored_session::StoredCidarenSessionResolver,
+    CidarenCourseInventory, CidarenSessionResolver, CidarenStudyTaskTransport, CidarenTaskDetail,
+    CidarenTaskInventory, CidarenTaskProgress, metadata::development_metadata,
+    native_http::NativeCidarenTransport, stored_session::StoredCidarenSessionResolver,
 };
 
 /// Composes the Development entry around injected token/session and complete
-/// class-task pagination boundaries. Calling this function does not register
-/// the Provider or claim native/live compatibility.
+/// class-task and ordinary study-task boundaries. Calling this function does
+/// not register the Provider or claim live compatibility.
 ///
 /// # Errors
 ///
@@ -22,9 +22,16 @@ pub fn build_development_provider(
     authentication_transport: Arc<dyn CidarenAuthenticationTransport>,
     sessions: Arc<dyn CidarenSessionResolver>,
     class_tasks: Arc<dyn CidarenClassTaskTransport>,
+    study_tasks: Arc<dyn CidarenStudyTaskTransport>,
 ) -> ProviderResult<ProviderEntry> {
-    let task_detail = Arc::new(CidarenTaskDetail::try_new(class_tasks.clone())?);
-    let task_progress = Arc::new(CidarenTaskProgress::try_new(class_tasks.clone())?);
+    let task_detail = Arc::new(CidarenTaskDetail::try_new(
+        class_tasks.clone(),
+        study_tasks.clone(),
+    )?);
+    let task_progress = Arc::new(CidarenTaskProgress::try_new(
+        class_tasks.clone(),
+        study_tasks.clone(),
+    )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: ProviderRuntimeSettingsSchema::default(),
@@ -34,8 +41,12 @@ pub fn build_development_provider(
         )?)),
         course_inventory: Some(Arc::new(CidarenCourseInventory::try_new(
             class_tasks.clone(),
+            study_tasks.clone(),
         )?)),
-        task_inventory: Some(Arc::new(CidarenTaskInventory::try_new(class_tasks)?)),
+        task_inventory: Some(Arc::new(CidarenTaskInventory::try_new(
+            class_tasks,
+            study_tasks,
+        )?)),
         task_detail: Some(task_detail),
         task_progress: Some(task_progress),
         duration_read: None,
@@ -50,8 +61,9 @@ pub fn build_development_provider(
     })
 }
 
-/// Composes the Development entry with native account validation and complete
-/// class-task HTTP around one injected session resolver.
+/// Composes the Development entry with native account validation, complete
+/// class-task pagination and selected-Course study units around one injected
+/// session resolver.
 ///
 /// # Errors
 ///
@@ -62,7 +74,7 @@ pub fn build_development_provider_native(
     sessions: Arc<dyn CidarenSessionResolver>,
 ) -> ProviderResult<ProviderEntry> {
     let native = Arc::new(NativeCidarenTransport::try_new(network, sessions.clone())?);
-    build_development_provider(native.clone(), sessions, native)
+    build_development_provider(native.clone(), sessions, native.clone(), native)
 }
 
 /// Composes the native Development entry around Core's provider-scoped stored
@@ -94,7 +106,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::{CidarenClassTaskPageDocument, CidarenTokenSession};
+    use crate::{CidarenClassTaskPageDocument, CidarenStudyTaskDocument, CidarenTokenSession};
 
     #[derive(Debug)]
     struct UnusedBoundaries;
@@ -136,11 +148,26 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl CidarenStudyTaskTransport for UnusedBoundaries {
+        async fn fetch_study_task_document(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<CidarenStudyTaskDocument> {
+            Err(unused())
+        }
+    }
+
     #[test]
     fn development_factory_is_registry_consistent_without_extra_slots() {
         let boundaries = Arc::new(UnusedBoundaries);
-        let entry =
-            build_development_provider(boundaries.clone(), boundaries.clone(), boundaries).unwrap();
+        let entry = build_development_provider(
+            boundaries.clone(),
+            boundaries.clone(),
+            boundaries.clone(),
+            boundaries,
+        )
+        .unwrap();
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());

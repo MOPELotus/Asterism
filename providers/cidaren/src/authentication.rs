@@ -16,6 +16,7 @@ use crate::metadata::development_metadata;
 
 const MAX_TOKEN_BYTES: usize = 64 * 1_024;
 const MAX_VALIDATION_RESPONSE_BYTES: usize = 64 * 1_024;
+const MAX_SELECTED_COURSE_ID_BYTES: usize = 256;
 
 /// One bounded opaque `UserToken`. Plaintext is redacted and zeroized.
 pub struct CidarenTokenSession(SecretString);
@@ -243,6 +244,34 @@ pub fn classify_token_validation_response(document: &[u8]) -> ProviderResult<()>
     Ok(())
 }
 
+pub(crate) fn selected_course_id(document: &[u8]) -> ProviderResult<String> {
+    classify_token_validation_response(document)?;
+    let root: Value =
+        serde_json::from_slice(document).map_err(|_| invalid_validation_response())?;
+    let course_id = root
+        .get("data")
+        .and_then(Value::as_object)
+        .and_then(|data| data.get("user_info"))
+        .and_then(Value::as_object)
+        .and_then(|profile| profile.get("course_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_SELECTED_COURSE_ID_BYTES
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "Cidaren account response has no valid selected Course identity",
+            )
+        })?;
+    Ok(course_id.to_owned())
+}
+
 const fn valid_session() -> SessionStatus {
     SessionStatus {
         valid: true,
@@ -315,11 +344,16 @@ mod tests {
     #[test]
     fn validation_response_classifies_expiry_and_drops_profile() {
         classify_token_validation_response(TOKEN_SUCCESS).unwrap();
+        assert_eq!(selected_course_id(TOKEN_SUCCESS).unwrap(), "course-a");
         let rejected = classify_token_validation_response(TOKEN_REJECTED).unwrap_err();
         assert_eq!(rejected.kind, ProviderErrorKind::Authentication);
         assert!(!rejected.message.contains("synthetic detail"));
         assert!(classify_token_validation_response(br#"{"code":1,"data":{}}"#).is_err());
         assert!(classify_token_validation_response(b"not-json").is_err());
+        assert!(
+            selected_course_id(br#"{"code":1,"data":{"user_info":{"course_id":"unsafe/course"}}}"#)
+                .is_err()
+        );
     }
 
     #[test]

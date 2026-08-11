@@ -9,9 +9,11 @@
 | Class-task pagination is partial | Donor loops pages from `total` | Native transport fetches page one first; parser requires a complete, ordered, total-consistent page set before returning any Courses/Tasks |
 | Body and signing versions are accidentally unified | Current donor sends `231204` but signs `240122` | Freeze the split in an exact-time request vector and treat any future change as protocol research |
 | Course title changes across rows | Course data is duplicated on every task row | Require one normalized title per stable Course in a scan; treat conflicts as protocol drift |
+| Selected Course changes or `StudyTask/List` returns another Course | `Student/Main` supplies the ordinary study query binding | Re-read the selected Course, bind it into the request and reject response/row identity disagreement |
 | `task_id=-1` or stale ID targets another task | Public issue 106 and donor flow | Use `release_id` as stable identity; TaskDetail/Progress already fresh-rebind through a complete scan and every later operation must do the same |
+| Ordinary unit `task_id` remains `-1` | Public issue 83 records repeated uninitialized study rows | Use `course_id + list_id` as the stable ordinary-study identity and keep `task_id` observational |
 | Stable release disappears between reads | Remote inventory can change independently of local state | Return RemoteChanged from the fresh TaskDetail/Progress scan instead of serving stale detail or progress |
-| New `task_type` appears | Current donor recognizes only 1 learning and 2 test | Fail closed and add a sanitized fixture before normalization |
+| New `task_type` appears | Current evidence recognizes class 1/2 and ordinary study 3 | Fail closed within the matching response family and add a sanitized fixture before normalization |
 | Status vocabulary changes | Donor documents `over_status` 1/2/3 | Preserve unknown only after explicit mapping decision; never silently mark executable |
 | Completion is inferred from expiry | Donor filters expiry and progress independently | Keep remote state, progress and close status separate |
 | `time_spent` is assumed to be seconds | Samples are millisecond-like but no live unit proof exists | Preserve raw value; do not expose DurationRead until measured |
@@ -25,9 +27,10 @@
 After the product UI/plugin stage and read-only account delivery:
 
 1. verify imported-token validation, expiry classification and re-import;
-2. compare complete class-task pagination and Course grouping with visible H5;
-3. confirm task type/status vocabulary, `task_id=-1` behavior and stable
-   release identity;
+2. compare complete class-task pagination, selected-Course study units and
+   merged Course grouping with visible H5;
+3. confirm task type/status/access vocabulary, `task_id=-1` behavior and both
+   stable release/list identities;
 4. measure `start_time`, `over_time` and `time_spent` semantics without remote
    mutation;
 5. record only sanitized response fixtures and retain Development until all

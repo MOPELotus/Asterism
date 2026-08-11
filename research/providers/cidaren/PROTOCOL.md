@@ -40,7 +40,7 @@ The original historical donor contains a `LoginByWechatCode` exchange. It does
 not establish a current clean native bootstrap and must not override the
 explicit first-batch authentication decision.
 
-## Course and class-task inventory
+## Course, class-task and ordinary study inventory
 
 The donor reads ten class tasks per page:
 
@@ -95,10 +95,26 @@ separate; `time_spent` is not converted to learning seconds before live proof.
 
 Course inventory can be derived from the complete class-task pages because
 each row carries stable `course_id` plus `course_name`. Multiple rows for one
-course must agree on the normalized course title or the whole scan fails. An
-account with no class tasks yields no course through this evidence path; the
-single selected `course_id` in `Student/Main` is insufficient for a titled
-Course and is not fabricated into one.
+course must agree on the normalized course title or the whole scan fails.
+
+The selected `course_id` from `Student/Main` also drives the current/historical
+donor's ordinary self-study route:
+
+```text
+GET https://app.vocabgo.com/student/api/Student/StudyTask/List
+    ?course_id={selected_course_id}
+    &timestamp={milliseconds}&version=2.6.1.231204&app_type=1
+```
+
+Public issue 83 contains a 2026 response with `data.course_id`,
+`course_name`, Course progress/raw time/access observations and a `task_list`.
+Each ordinary unit exposes `task_type == 3`, `list_id`, task name, score,
+progress, raw time, access flags and a `task_id` that may remain `-1` across
+every uninitialized unit. The native boundary first re-reads `Student/Main`,
+accepts only a safe selected Course identity, binds that exact value into the
+query and rejects a response or row that changes it. Class and study Course
+views are merged by `course_id`; conflicting titles fail closed. This also
+allows a selected Course with no class assignments to remain visible.
 
 Pagination is all-or-nothing. Page one defines total rows; Asterism requires
 exactly pages `1..ceil(total/10)`, a consistent total, no duplicate page, no
@@ -114,15 +130,18 @@ Therefore the stable Asterism identity is:
 
 ```text
 class-task:{release_id}
+study-task:{course_id}:{list_id}
 ```
 
 `release_id` is required, positive and unique in a scan. `task_id` remains a
 bounded signed observation because later routes may need the current value.
-TaskDetail and TaskProgressRead now re-list the complete signed pagination and
-select exactly one row by release identity. A malformed identity is protocol
+For ordinary study units, the selected `course_id` and unique `list_id` replace
+the unusable `task_id=-1` as stable identity. TaskDetail and TaskProgressRead
+re-list the matching complete class pagination or selected study list and
+select exactly one row by stable identity. A malformed identity is protocol
 drift; an identity absent from the fresh inventory is RemoteChanged. The fresh
-detail preserves the current `task_id`, course binding and normalized status,
-while progress publishes only the bounded percentage and remote state.
+detail preserves the current `task_id`, Course/list binding and normalized
+status, while progress publishes only the bounded percentage and remote state.
 `time_spent` remains a raw detail observation and is never converted into
 duration seconds. Future question or submission operations must perform the
 same fresh release-identity binding before using `task_id`, `course_id` or task

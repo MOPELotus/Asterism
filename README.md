@@ -47,6 +47,7 @@ Phase 0 已建立并持续完善以下基础：
 - 使用 Task Read 权限和显式 Task/Snapshot/Candidate 身份构建草稿、按 Task/Snapshot/Draft 精确读取草稿的 HTTP/CLI 入口；
 - 不以远端回执代替验证的 SubmissionResult / VerificationSnapshot 领域模型，以及互相独立的 SubmissionExecute / SubmissionVerify Provider 槽位；
 - 通过数据库复合外键绑定 SubmissionDraft / Execution / ExecutionAttempt / Task、整份验证后不可变持久化且 owner-scoped 读取的 SubmissionResult；
+- 将一个不可变 SubmissionDraft 最多冻结到一个 Execution、先持久化有界 Attempt Receipt 再独立 Verify，并在任何歧义或 Pending 后只验证而绝不重提的 Submission worker；
 - 按 Task / QuestionSnapshot / SubmissionDraft / SubmissionResult 完整身份链只读验证结果的 HTTP/CLI 审计入口；
 - Capability-based Provider API、Metadata 与 Registry，包括与远端执行解耦的题目发现、解析、Provider-native 候选答案解析和只读提交草稿构建槽位；
 - 课程发现到后续 capability 的短命、脱敏且不持久化路由上下文；
@@ -64,7 +65,7 @@ Phase 0 已建立并持续完善以下基础：
 - Chaoxing 能力级上游审计、独立 Chapter / Resource / Work / Exam TaskInventory、按稳定身份重新发现并经 Core 校验的 TaskDetail / Progress API 与 CLI、四类任务的模块化只读进度复核、明确区分 Chapter Work 与独立 Work / Exam 的题面离线解析、仅在新鲜详情确认可作答后开放的独立 Work 原生题目读取与无值 SubmissionBuild 预览、Document / Read / Video 原生执行、有界 Work 详情状态复核、Cookie 自动续登与显式开发验证入口；
 - WELearn clean-room 上游审计、Password / ImportedCookie 认证编排与有界 Course / Task inventory capability，验证码/短信正确进入 HumanRequired，完成状态、可见性和未确认单位的 donor 时长事实保持独立；Password/OIDC 手动重定向、限定域 Cookie 收集、Core 持久会话解析与原子自动续登、Course / Unit / SCO 原生读取、按稳定身份完整重扫的 fresh `TaskDetail` 及只读 CMI `TaskProgressRead` 均已接入，并提供默认关闭的 daemon 开发注册入口；独立 `DurationReport` 以 Master 平台默认和账号/任务覆盖参数执行真实等待、CMI heartbeat 和 preserve-and-finalize，fresh readback 必须证明 raw time 已变化且 completion/progress/score/success 未漂移；Engine 按报时目标判定成功，任何不确定写入直接进入 HumanRequired 且不重试；CMI 时间仍按原始事实保留、不换算秒数，真实账号验证仍待完成；
 - UAI clean-room 上游审计、Password / ImportedToken 认证编排、Core scoped 持久会话解析与原子自动续登，以及 CourseResource / Unit / Section / Micro / Group 有界解析；原生 Password JSON 登录、只读 user-info JWT 校验、Course/Task inventory、fresh `TaskDetail`、per-Unit `TaskProgressRead`、独立 `DurationRead` 与 answer-free `QuestionInventory` / `QuestionParse` 已复用共享网络策略，并组合为默认关闭、要求 SecretStore 的 daemon Development 注册入口；题面读取重绑 fresh CourseResource/Group，以敏感 header 获取有界 encrypted content，严格解开 `unipus.` AES-ECB/嵌套 JSON 后只保留题干、选项和身份，短生命周期 attempt cache 不持久化密文或路由材料；目前仅为 donor 形状明确的 single-choice、multichoice、short_answer Group 开放，其他题型失败关闭；TaskDetail 重读 fresh CourseResource/tree，Progress 则重新绑定 fresh detail，时长读取用 fresh user identity 绑定 CourseResource / Unit / Group 后只接受 study-record 接口明确以秒计的 duration；Group 任务保留有界 task type/question count 和版本化指纹，openid/JWT 作为一个 CompositeSession 替换，ManualImport JWT 不可自动续期，滑块验证码进入 HumanRequired；Group 仅在 pass/pass2/perm 均为 1 时完成，progress 原始 duration 仍不换算秒数；标准答案、DurationReport 与执行尚未接入；
-- Cidaren 已建立 ImportedToken → Core scoped stored `UserToken` → bounded `Student/Main` validation → signed complete `ClassTask/PageTask` pagination → Course / learning / test Task → fresh TaskDetail / TaskProgressRead 的原生只读边界；稳定任务身份使用 `release_id`，详情与进度读取均完整重扫并拒绝消失的任务，`task_id=-1` 只作 fresh observation，进度、完成、过期、分数和 raw time 独立保留；当前声明 Authentication、CourseInventory、TaskInventory、TaskDetail、TaskProgressRead，微信 OAuth/Capture、Duration、答案、执行和真实账号验证均未接入；
+- Cidaren 已建立 ImportedToken → Core scoped stored `UserToken` → bounded `Student/Main` validation/selected Course → signed complete `ClassTask/PageTask` + bounded `StudyTask/List` → Course / class learning / class test / ordinary study Task → fresh TaskDetail / TaskProgressRead 的原生只读边界；班级任务稳定身份使用 `release_id`，普通学习单元使用 `course_id + list_id`，详情与进度读取均重扫对应端点并拒绝消失的任务，`task_id=-1` 只作 fresh observation，进度、完成、过期、访问标记、分数和 raw time 独立保留；当前声明 Authentication、CourseInventory、TaskInventory、TaskDetail、TaskProgressRead，微信 OAuth/Capture、Duration、答案、执行和真实账号验证均未接入；
 - rustfmt、Clippy 和全 workspace 测试组成的 CI 基线。
 
 正在进行的工作以 [Phase 0 架构检查点](docs/architecture/phase-0-foundation.md) 为准。内部 API 在第二批 Provider 完成前仍可能发生不兼容变更。
@@ -117,7 +118,7 @@ CLI / WebUI / Asterism-Plugin
 | 阶段 | Provider / 交付物 | 状态 |
 |---|---|---|
 | Phase 0 | Core、Storage、Scheduler、Auth、内部 API / CLI | 开发中 |
-| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中（Chaoxing 已建立 Password → Cookie → Course / Chapter / Resource / Work / Exam 的开发验证链路；WELearn 已建立 Password/OIDC → Cookie validation → Course / Unit / SCO → fresh CMI progress / independent duration report 的原生边界；UAI 已建立 Password/JWT → CourseResource → Unit / Section / Micro / Group → fresh detail / progress / duration / encrypted question parse 的原生只读边界；Cidaren 已建立 ImportedToken → Course / learning / test Task → fresh detail / progress 的原生只读边界；均未完成真实账号验证，真实账号只读联调安排在 WebUI 与 Asterism-Plugin/Yunzai 完成后） |
+| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中（Chaoxing 已建立 Password → Cookie → Course / Chapter / Resource / Work / Exam 的开发验证链路；WELearn 已建立 Password/OIDC → Cookie validation → Course / Unit / SCO → fresh CMI progress / independent duration report 的原生边界；UAI 已建立 Password/JWT → CourseResource → Unit / Section / Micro / Group → fresh detail / progress / duration / encrypted question parse 的原生只读边界；Cidaren 已建立 ImportedToken → class/ordinary-study Course/Task → fresh detail/progress 的原生只读边界；均未完成真实账号验证，真实账号只读联调安排在 WebUI 与 Asterism-Plugin/Yunzai 完成后） |
 | 第一批后交付 | OpenAPI Client Generation Readiness、Refine v5 + shadcn/ui WebUI、Asterism-Plugin | 第一批完成后立即开始 |
 | 第二批 | `zhihuishu`、`zjy`、`icve` | 计划中 |
 | 兼容性收口 | 稳定并冻结 API / OpenAPI 基线，完成 WebUI / Plugin 兼容性收口 | 第二批完成后开始 |
@@ -169,7 +170,7 @@ cargo run -p asterismctl -- provider-account scan <account-id>
 
 SecretStore keyring 只从进程环境读取，不接受 TOML 或 CLI 参数。`ASTERISM_SECRET_ACTIVE_KEY_ID` 指定活动 key ID，`ASTERISM_SECRET_KEYS` 使用逗号分隔的 `<key-id>=<base64-encoded-32-byte-key>`；两者必须同时提供。轮换时保留旧 key 并添加新 key，再切换活动 ID；确认所有密文已轮换前不要移除旧 key。`/health` 的 `secret_store_configured` 只报告是否已配置，不返回 key ID 或 key material。
 
-统一 Scheduler worker 默认启用，每 5 秒分别执行一次有界 Scan tick 与 Execution tick；默认每次最多领取一个 Scan Job，Execution worker 固定串行领取一个 `execution`、`retry` 或 `recovery` Job，避免长任务的后续预领取 claim 在等待时过期。每个 Execution tick 会先扫描失去租约的 Running Execution，原子转入 Recovering 并创建只读远端复核任务；远端完成才收口成功，明确 Pending 才重新执行，无法判断则要求人工处理。claim TTL 与 Execution lease 默认均为 300 秒，运行期间会一起续租。独立 Outbox dispatcher 每 250 毫秒领取最多 128 条已提交领域事件并派发到有界进程内实时总线；没有在线订阅者不会让已持久化事件无限重试，后续连接以查询快照重新同步。停止 `asterismd` 时会终止 SSE、停止新 tick，等待当前 Scan、Execution 或 Outbox 派发返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
+统一 Scheduler worker 默认启用，每 5 秒分别执行一次有界 Scan tick 与 Execution tick；默认每次最多领取一个 Scan Job，Execution worker 固定串行领取一个 `execution`、`retry` 或 `recovery` Job，避免长任务的后续预领取 claim 在等待时过期。每个 Execution tick 会先扫描失去租约的 Running Execution，原子转入 Recovering 并创建只读远端复核任务；普通资源执行只有远端完成才收口成功，明确 Pending 才可重新执行，无法判断则要求人工处理。独立提交执行始终按冻结 Draft 调用一次 Submit、持久化回执、再调用 Verify；Submit 后的网络歧义、Pending、崩溃或重启只会反复调用 Verify，永远不会由 Recovery 或 Retry 重放提交。only-DurationReport 以时长证据而非完成状态作为目标，任何不确定写入直接要求人工处理且不会自动重跑。claim TTL 与 Execution lease 默认均为 300 秒，运行期间会一起续租。独立 Outbox dispatcher 每 250 毫秒领取最多 128 条已提交领域事件并派发到有界进程内实时总线；没有在线订阅者不会让已持久化事件无限重试，后续连接以查询快照重新同步。停止 `asterismd` 时会终止 SSE、停止新 tick，等待当前 Scan、Execution 或 Outbox 派发返回，再关闭数据库；具体安全边界与重试默认值见 `asterism.example.toml`。
 
 另开一个终端检查服务：
 
