@@ -37,6 +37,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::QuestionParse,
             ProviderCapability::AnswerResolve,
             ProviderCapability::SubmissionBuild,
+            ProviderCapability::SubmissionExecute,
         ]),
         auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken]),
         session_kinds: BTreeSet::from([SessionKind::Jwt, SessionKind::Composite]),
@@ -48,7 +49,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metadata_advertises_all_read_only_development_capabilities() {
+    fn metadata_advertises_all_development_capabilities() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
@@ -65,6 +66,7 @@ mod tests {
                 ProviderCapability::QuestionParse,
                 ProviderCapability::AnswerResolve,
                 ProviderCapability::SubmissionBuild,
+                ProviderCapability::SubmissionExecute,
             ])
         );
         assert_eq!(

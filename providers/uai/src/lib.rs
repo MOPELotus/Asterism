@@ -21,6 +21,7 @@ mod provider;
 mod question;
 mod stored_session;
 mod submission_build;
+mod submission_execute;
 mod task_detail;
 mod task_inventory;
 mod user_identity;
@@ -59,5 +60,9 @@ pub use question::{
 };
 pub use stored_session::StoredUaiSessionResolver;
 pub use submission_build::UaiSubmissionBuild;
+pub use submission_execute::{
+    UaiSubmissionExecute, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    parse_submission_receipt,
+};
 pub use task_detail::UaiTaskDetail;
 pub use task_inventory::parse_task_inventory;

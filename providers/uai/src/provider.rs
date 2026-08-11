@@ -8,12 +8,12 @@ use crate::{
     NativeUaiAuthenticationTransport, NativeUaiInventoryTransport, StoredUaiSessionResolver,
     UaiAnswerResolve, UaiAnswerTransport, UaiAuthentication, UaiAuthenticationTransport,
     UaiCourseInventory, UaiCourseInventoryTransport, UaiDurationTransport, UaiProgressTransport,
-    UaiQuestionRead, UaiQuestionTransport, UaiSessionResolver, UaiSubmissionBuild, UaiTaskDetail,
-    UaiTaskDuration, UaiTaskInventory, UaiTaskInventoryTransport, UaiTaskProgress,
-    metadata::development_metadata,
+    UaiQuestionRead, UaiQuestionTransport, UaiSessionResolver, UaiSubmissionBuild,
+    UaiSubmissionExecute, UaiSubmissionTransport, UaiTaskDetail, UaiTaskDuration, UaiTaskInventory,
+    UaiTaskInventoryTransport, UaiTaskProgress, metadata::development_metadata,
 };
 
-/// Injected read boundaries used by the complete UAI Development entry.
+/// Injected read and mutation boundaries used by the UAI Development entry.
 pub struct UaiDevelopmentTransports {
     course: Arc<dyn UaiCourseInventoryTransport>,
     task: Arc<dyn UaiTaskInventoryTransport>,
@@ -21,6 +21,7 @@ pub struct UaiDevelopmentTransports {
     duration: Arc<dyn UaiDurationTransport>,
     question: Arc<dyn UaiQuestionTransport>,
     answer: Arc<dyn UaiAnswerTransport>,
+    submission: Arc<dyn UaiSubmissionTransport>,
 }
 
 impl UaiDevelopmentTransports {
@@ -31,6 +32,7 @@ impl UaiDevelopmentTransports {
         duration: Arc<dyn UaiDurationTransport>,
         question: Arc<dyn UaiQuestionTransport>,
         answer: Arc<dyn UaiAnswerTransport>,
+        submission: Arc<dyn UaiSubmissionTransport>,
     ) -> Self {
         Self {
             course,
@@ -39,6 +41,7 @@ impl UaiDevelopmentTransports {
             duration,
             question,
             answer,
+            submission,
         }
     }
 }
@@ -52,9 +55,9 @@ impl fmt::Debug for UaiDevelopmentTransports {
     }
 }
 
-/// Composes the complete read-only Development entry around injected
-/// authentication and inventory boundaries. Calling this function does not
-/// register the Provider or claim native/live compatibility.
+/// Composes the Development entry around injected Provider boundaries. Calling
+/// this function does not register the Provider or claim native/live
+/// compatibility.
 ///
 /// # Errors
 ///
@@ -85,6 +88,10 @@ pub fn build_development_provider(
         transports.answer,
     )?);
     let submission_build = Arc::new(UaiSubmissionBuild::try_new()?);
+    let submission_execute = Arc::new(UaiSubmissionExecute::try_new(
+        task_detail.clone(),
+        transports.submission,
+    )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: ProviderRuntimeSettingsSchema::default(),
@@ -98,7 +105,7 @@ pub fn build_development_provider(
         question_parse: Some(question_read),
         answer_resolve: Some(answer_resolve),
         submission_build: Some(submission_build),
-        submission_execute: None,
+        submission_execute: Some(submission_execute),
         submission_verify: None,
         task_execution: None,
         browser_bridge: None,
@@ -126,6 +133,7 @@ pub fn build_development_provider_with_native_inventory(
         authentication_transport,
         sessions,
         UaiDevelopmentTransports::new(
+            inventory.clone(),
             inventory.clone(),
             inventory.clone(),
             inventory.clone(),
@@ -270,6 +278,8 @@ mod tests {
         assert!(entry.question_parse.is_some());
         assert!(entry.answer_resolve.is_some());
         assert!(entry.submission_build.is_some());
+        assert!(entry.submission_execute.is_some());
+        assert!(entry.submission_verify.is_none());
         assert!(entry.task_execution.is_none());
         assert!(entry.browser_bridge.is_none());
         assert!(entry.runtime_settings.definitions.is_empty());
@@ -284,6 +294,7 @@ mod tests {
             ProviderCapability::QuestionParse,
             ProviderCapability::AnswerResolve,
             ProviderCapability::SubmissionBuild,
+            ProviderCapability::SubmissionExecute,
         ] {
             assert!(entry.metadata.capabilities.contains(&capability));
         }

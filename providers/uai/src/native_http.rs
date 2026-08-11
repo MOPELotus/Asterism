@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use asterism_domain::SubmissionReceipt;
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteCourse,
@@ -15,13 +16,14 @@ use crate::{
     UaiAnswerDocument, UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport,
     UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument, UaiJwtSession,
     UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
-    UaiSessionResolver, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+    UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
     annotator::generate_annotator_token,
     course_inventory::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
         required_remote_component,
     },
-    parse_course_context,
+    parse_course_context, parse_submission_receipt,
     user_identity::parse_user_identity,
 };
 
@@ -35,8 +37,9 @@ const MAX_USER_INFO_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_DURATION_RESPONSE_BYTES: usize = 1_024 * 1_024;
 const MAX_QUESTION_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_ANSWER_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_SUBMISSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
 
-/// Native, non-redirecting UAI inventory, progress, duration and Question transport.
+/// Native, non-redirecting UAI read and submission transport.
 pub struct NativeUaiInventoryTransport {
     client: Client,
     sessions: Arc<dyn UaiSessionResolver>,
@@ -320,6 +323,64 @@ impl NativeUaiInventoryTransport {
         )?;
         Ok(UaiAnswerDocuments::new(content, answer))
     }
+
+    async fn submit_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        group_id: &str,
+        plan: &UaiSubmissionPlan,
+    ) -> ProviderResult<SubmissionReceipt> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "submission Course-resource ID",
+        )?;
+        let group_id = required_remote_component(
+            Some(&serde_json::Value::String(group_id.to_owned())),
+            "submission Group ID",
+        )?;
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let mut body = build_submission_body(
+            route.course_instance_id(),
+            session.expose_open_id(),
+            &group_id,
+            plan,
+        )?;
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let response = self
+            .client
+            .post(submission_url()?)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .body(body.as_bytes().to_vec())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error));
+        body.zeroize();
+        let response = response?;
+        let document = UaiSubmissionResponseDocument::try_new(
+            read_json_response(response, ResponseRoute::Submission).await?,
+        )?;
+        parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
+    }
 }
 
 impl fmt::Debug for NativeUaiInventoryTransport {
@@ -459,6 +520,30 @@ impl UaiAnswerTransport for NativeUaiInventoryTransport {
     }
 }
 
+#[async_trait]
+impl UaiSubmissionTransport for NativeUaiInventoryTransport {
+    async fn submit(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        group_id: &str,
+        plan: &UaiSubmissionPlan,
+    ) -> ProviderResult<SubmissionReceipt> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .submit_with_session(&session, course_resource_id, group_id, plan)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.submit_with_session(&session, course_resource_id, group_id, plan)
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
 fn sensitive_authorization(session: &UaiJwtSession) -> ProviderResult<HeaderValue> {
     let mut value = HeaderValue::from_str(session.expose_authorization()).map_err(|_| {
         ProviderError::new(
@@ -480,6 +565,7 @@ enum ResponseRoute {
     Duration,
     QuestionContent,
     StandardAnswer,
+    Submission,
 }
 
 impl ResponseRoute {
@@ -493,6 +579,7 @@ impl ResponseRoute {
             Self::Duration => "Task duration",
             Self::QuestionContent => "Question content",
             Self::StandardAnswer => "standard answer",
+            Self::Submission => "submission",
         }
     }
 
@@ -503,6 +590,7 @@ impl ResponseRoute {
             Self::Duration => MAX_DURATION_RESPONSE_BYTES,
             Self::QuestionContent => MAX_QUESTION_RESPONSE_BYTES,
             Self::StandardAnswer => MAX_ANSWER_RESPONSE_BYTES,
+            Self::Submission => MAX_SUBMISSION_RESPONSE_BYTES,
             Self::CourseList | Self::CourseDetail | Self::TaskTree => MAX_INVENTORY_RESPONSE_BYTES,
         }
     }
@@ -717,6 +805,87 @@ fn standard_answer_url(course_instance_id: &str, group_id: &str) -> ProviderResu
     )
 }
 
+fn submission_url() -> ProviderResult<Url> {
+    route_url(
+        UCONTENT_ORIGIN,
+        &["course", "api", "v3", "newExploration", "submit"],
+    )
+}
+
+fn build_submission_body(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+    plan: &UaiSubmissionPlan,
+) -> ProviderResult<String> {
+    let children = plan
+        .answer_children()
+        .iter()
+        .map(|values| {
+            serde_json::json!({
+                "value": values,
+                "isDone": true,
+                "isRight": true,
+                "replyCategory": "objective",
+            })
+        })
+        .collect::<Vec<_>>();
+    let inner_answer = serde_json::to_string(&serde_json::json!({
+        "value": [],
+        "children": children,
+        "progress": {},
+        "record": {"url": ""},
+    }))
+    .map_err(|_| static_submission_error())?;
+    let judge_type = plan.task_type().replace('_', "-");
+    let judges = plan
+        .answer_children()
+        .iter()
+        .map(|values| {
+            serde_json::json!({
+                "value": values.join(","),
+                "question_type": judge_type,
+                "reply_type": "objective",
+                "versions": {
+                    "course": 0,
+                    "group": 1,
+                    "template": 1,
+                    "answer": 0,
+                    "content": 0,
+                },
+                "payloads": [],
+            })
+        })
+        .collect::<Vec<_>>();
+    let judges = serde_json::to_string(&judges).map_err(|_| static_submission_error())?;
+    serde_json::to_string(&serde_json::json!({
+        "quesDatas": [{
+            "instanceId": plan.remote_question_id(),
+            "answer": inner_answer,
+            "context": "{\"state\":\"submitted\"}",
+            "contextVersion": 0,
+            "answerVersion": 0,
+        }],
+        "groupId": group_id,
+        "isCompleted": vec![true; plan.answer_children().len()],
+        "thirdPartyJudges": judges,
+        "submitType": 1,
+        "hideLoading": false,
+        "associationGroupId": "",
+        "courseId": course_instance_id,
+        "openId": open_id,
+        "version": "default",
+    }))
+    .map_err(|_| static_submission_error())
+}
+
+fn static_submission_error() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "UAI submission request cannot be encoded",
+    )
+}
+
 fn unit_task_duration_url(
     course_resource_id: &str,
     unit_id: &str,
@@ -920,6 +1089,10 @@ mod tests {
                 .as_str(),
             "https://ucontent.unipus.cn/course/api/v3/answer/course-v2:synthetic+rw%2Fguard/group%2F1/default"
         );
+        assert_eq!(
+            submission_url().unwrap().as_str(),
+            "https://ucontent.unipus.cn/course/api/v3/newExploration/submit"
+        );
         assert_eq!(ResponseRoute::Progress.maximum_bytes(), 1_024 * 1_024);
         assert_eq!(
             ResponseRoute::QuestionContent.maximum_bytes(),
@@ -929,6 +1102,7 @@ mod tests {
             ResponseRoute::StandardAnswer.maximum_bytes(),
             4 * 1_024 * 1_024
         );
+        assert_eq!(ResponseRoute::Submission.maximum_bytes(), 1_024 * 1_024);
         assert_eq!(
             unit_task_duration_url("2001", "unit-1", "app-42", "sso.42")
                 .unwrap()
@@ -937,6 +1111,38 @@ mod tests {
         );
         assert_eq!(ResponseRoute::UserInfo.maximum_bytes(), 64 * 1_024);
         assert_eq!(ResponseRoute::Duration.maximum_bytes(), 1_024 * 1_024);
+    }
+
+    #[test]
+    fn submission_body_matches_the_audited_simple_json_shape() {
+        let plan = UaiSubmissionPlan::fixture(
+            "question-1",
+            "multichoice",
+            vec![vec!["A".to_owned(), "B".to_owned()]],
+        );
+        let body = build_submission_body(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-1",
+            &plan,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["groupId"], "group-1");
+        assert_eq!(body["courseId"], "course-v2:synthetic+rw");
+        assert_eq!(body["openId"], "synthetic-open-id");
+        assert_eq!(body["submitType"], 1);
+        assert_eq!(body["quesDatas"][0]["instanceId"], "question-1");
+        let answer: serde_json::Value =
+            serde_json::from_str(body["quesDatas"][0]["answer"].as_str().unwrap()).unwrap();
+        assert_eq!(answer["children"][0]["value"][0], "A");
+        assert_eq!(answer["children"][0]["value"][1], "B");
+        assert_eq!(body["isCompleted"], serde_json::json!([true]));
+        let judges: serde_json::Value =
+            serde_json::from_str(body["thirdPartyJudges"].as_str().unwrap()).unwrap();
+        assert_eq!(judges[0]["value"], "A,B");
+        assert_eq!(judges[0]["question_type"], "multichoice");
+        assert_eq!(judges[0]["reply_type"], "objective");
     }
 
     fn provider_context() -> ProviderContext {
