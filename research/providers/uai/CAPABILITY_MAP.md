@@ -15,7 +15,7 @@
 | SubmissionBuild | Both backend donors | Reference | Credential-free and answer-value-free immutable preview is offline covered; no executable body is retained in the draft |
 | SubmissionExecute | Both backend donors | Reference | Exact `newExploration/submit` mapping is enabled only for one-question simple Groups; `600001`/`600002` remain typed retry responses and never become receipts |
 | SubmissionVerify | UnipusHelperPro | Reference | Exact receipt-versioned fresh user-module readback independently binds Course/Group/version/question/submitted state and answer; missing receipts are Inconclusive without a guessed route |
-| ResourceExecution | AutoFinish | Reference | Direct completion/submission is not accepted as duration-complete execution |
+| ResourceExecution | Both backend donors | Reference | Empty `submitType=2` preset completion is statically audited, but remains unregistered until Core can durably recover a no-Question mutation without resubmitting; it never counts as duration completion |
 | DurationReport | AutoPlayer | Reference | Current evidence is page residence and interaction, not a confirmed public HTTP reporter; deferred |
 | Result verification | Fresh tree/progress/duration reads | FromScratch | Require independent readback after any future mutation |
 | BrowserBridge | AutoPlayer | Reference | Possible duration compatibility path, but first-batch Capture-dependent work is deferred |

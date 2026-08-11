@@ -60,6 +60,7 @@ fixtures/providers/uai/
   questions/answer-simple-types-live.json
   submissions/accepted-live.json
   submissions/verified-live.json
+  submissions/preset-completion-live.json
 ```
 
 Remove usernames, passwords, JWT/openid values, annotator tokens, user IDs,
@@ -89,5 +90,6 @@ field names, placeholder identities and response/result codes.
 - Submission execution requires a positive numeric native instance ID and rejects arbitrary read-only Question identities before transport.
 - Codes `600001` and `600002` never produce a receipt and never trigger an implicit mutation retry.
 - Ambiguous mutation transport failures return after exactly one Provider attempt.
+- Preset no-Question completion remains unregistered until it has durable at-most-once attempt state and progress-only recovery; a synthetic body alone is not acceptance evidence.
 - Verification requires the receipt version and an exact fresh Course/Group/question/submitted-answer readback.
 - Missing receipts are Inconclusive; receipts alone never confirm success, score, progress or completion.

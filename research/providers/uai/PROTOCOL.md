@@ -229,3 +229,13 @@ Inconclusive and no version route is guessed or read.
 Unsupported or unsafe types still fail closed; empty answers, synthetic uploads
 and discussion side effects are not portable defaults. This remains synthetic
 offline coverage and is not a live compatibility claim.
+
+The donors also complete preset study Groups such as `rich-text-read`,
+`text-learn`, `vocabulary` and `video-point-read` with `quesDatas=[]`,
+`isCompleted=[]`, `thirdPartyJudges="[]"` and `submitType=2`, followed by fresh
+progress reads. That operation has no Question/SelectedAnswer pair, so it cannot
+be represented by the current non-empty `SubmissionDraft`. Registering it as
+ordinary ResourceExecution would allow generic retry/crash re-entry without a
+durable receipt or verify-only path. Asterism therefore keeps the shape audited
+but unimplemented until the shared mutation-recovery contract can express it;
+no idempotency assumption is made.
