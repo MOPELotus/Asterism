@@ -86,6 +86,37 @@ pub struct SubmissionReceipt {
     pub received_at: Timestamp,
 }
 
+/// Durable acknowledgement attached to the exact attempt that issued one
+/// remote submission mutation. Persisting it does not imply success; it only
+/// gives later verification and crash recovery bounded context without
+/// allowing the mutation to be replayed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmissionAttemptReceipt {
+    pub submission_draft_id: SubmissionDraftId,
+    pub execution_id: ExecutionId,
+    pub execution_attempt_id: ExecutionAttemptId,
+    pub receipt: SubmissionReceipt,
+}
+
+impl SubmissionAttemptReceipt {
+    /// Validates the bounded receipt and its immutable Draft binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmissionResultValidationError`] when receipt facts are
+    /// malformed or the record is foreign to the supplied draft.
+    pub fn validate_for_draft(
+        &self,
+        draft: &SubmissionDraft,
+    ) -> Result<(), SubmissionResultValidationError> {
+        self.receipt.validate()?;
+        if self.submission_draft_id != draft.id {
+            return Err(SubmissionResultValidationError::DraftBindingInvalid);
+        }
+        Ok(())
+    }
+}
+
 impl SubmissionReceipt {
     /// Validates bounded, credential-free acknowledgement facts.
     ///
@@ -535,6 +566,29 @@ mod tests {
         assert_eq!(
             result.validate_for_draft(&draft),
             Err(SubmissionResultValidationError::StatusMismatch)
+        );
+    }
+
+    #[test]
+    fn attempt_receipt_is_only_acknowledgement_context_for_one_draft() {
+        let draft = draft();
+        let record = SubmissionAttemptReceipt {
+            submission_draft_id: draft.id,
+            execution_id: ExecutionId::new(),
+            execution_attempt_id: ExecutionAttemptId::new(),
+            receipt: SubmissionReceipt {
+                remote_status: "accepted".to_owned(),
+                message_sanitized: None,
+                provider_trace_id: None,
+                received_at: Utc::now(),
+            },
+        };
+        assert_eq!(record.validate_for_draft(&draft), Ok(()));
+        let mut foreign = record;
+        foreign.submission_draft_id = SubmissionDraftId::new();
+        assert_eq!(
+            foreign.validate_for_draft(&draft),
+            Err(SubmissionResultValidationError::DraftBindingInvalid)
         );
     }
 

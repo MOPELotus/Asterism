@@ -9,8 +9,8 @@ use asterism_domain::{
     ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, OrchestrationState, PriceQuote,
     ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
     Question, QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken,
-    ServiceTokenId, SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
-    TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
+    SubmissionResultId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -614,6 +614,50 @@ pub struct ExecutionRecoveryFinishRequest<'a> {
     pub progress: &'a ExecutionProgress,
     pub at: Timestamp,
     pub correlation_id: &'a str,
+}
+
+#[derive(Clone, Debug)]
+pub struct SubmissionReceiptPersistRequest<'a> {
+    pub record: &'a SubmissionAttemptReceipt,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct SubmissionResultPersistRequest<'a> {
+    pub result: &'a SubmissionResult,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+/// Worker-only persistence for a Draft-bound independent submission. A known
+/// receipt is durable before verification, while recovery can load the exact
+/// Draft and latest active-attempt receipt without granting any resubmit path.
+#[async_trait]
+pub trait ExecutionSubmissionRepository: Send + Sync {
+    async fn find_execution_submission_draft(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<SubmissionDraft>, StorageError>;
+
+    async fn persist_submission_receipt(
+        &self,
+        request: SubmissionReceiptPersistRequest<'_>,
+    ) -> Result<(), StorageError>;
+
+    async fn find_active_submission_receipt(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<SubmissionAttemptReceipt>, StorageError>;
+
+    async fn persist_submission_result(
+        &self,
+        request: SubmissionResultPersistRequest<'_>,
+    ) -> Result<(), StorageError>;
 }
 
 /// Atomic execution request boundary. Creating the optional immutable quote and

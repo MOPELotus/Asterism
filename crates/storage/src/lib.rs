@@ -42,13 +42,14 @@ pub use repository::{
     ExecutionPage, ExecutionProgressUpdate, ExecutionQueryRepository,
     ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionRuntimeSettingsResolution,
     ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome, ExecutionScheduleRequest,
-    OutboxRepository, PriorAnswerEvidence, ProviderAccountRepository,
-    ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
+    ExecutionSubmissionRepository, OutboxRepository, PriorAnswerEvidence,
+    ProviderAccountRepository, ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
     ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
     ProviderRuntimeSettingsWriteOutcome, ProviderRuntimeSettingsWriteRequest, QuestionSnapshot,
     QuestionSnapshotRepository, ScanScheduleRepository, SchedulerRepository, SessionRepository,
-    SubmissionDraftRepository, SubmissionResultRepository, TaskPage, TaskQueryRepository,
-    TaskRepository, TaskRuntimeRepository, UserRepository,
+    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
+    SubmissionResultRepository, TaskPage, TaskQueryRepository, TaskRepository,
+    TaskRuntimeRepository, UserRepository,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

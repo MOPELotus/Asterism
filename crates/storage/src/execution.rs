@@ -4,7 +4,7 @@ use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, CreditReservationState, Execution, ExecutionAttempt,
     ExecutionAttemptId, ExecutionId, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
     ExecutionState, LogLevel, OrchestrationState, ProviderAccountId, ProviderId, ScheduleId,
-    TaskId, Timestamp, UserId,
+    SubmissionAttemptReceipt, SubmissionDraft, TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
@@ -24,9 +24,11 @@ use crate::{
     ExecutionBillingReservation, ExecutionLogAppendRequest, ExecutionProgressUpdate,
     ExecutionQueryRepository, ExecutionRecoveryFinishRequest, ExecutionRepository,
     ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome,
-    ExecutionScheduleRequest, StorageError,
+    ExecutionScheduleRequest, ExecutionSubmissionRepository, StorageError,
+    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
+    SubmissionResultRepository,
 };
-use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage};
+use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage, SqliteQuestionSnapshotRepository};
 
 const MAX_EXECUTION_ATTEMPTS: usize = 1_000;
 const MAX_EXECUTION_PAGE_SIZE: u32 = 200;
@@ -433,6 +435,154 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .await?;
         transaction.commit().await?;
         Ok(execution)
+    }
+}
+
+#[async_trait]
+impl ExecutionSubmissionRepository for SqliteExecutionRepository {
+    async fn find_execution_submission_draft(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<SubmissionDraft>, StorageError> {
+        let binding: Option<(String, String)> = sqlx::query_as(
+            "SELECT requested_by, submission_draft_id FROM executions \
+             WHERE id = ? AND requested_by IS NOT NULL AND submission_draft_id IS NOT NULL",
+        )
+        .bind(execution_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        let Some((owner_id, draft_id)) = binding else {
+            return Ok(None);
+        };
+        let owner_id = UserId::from_str(&owner_id)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let draft_id = asterism_domain::SubmissionDraftId::from_str(&draft_id)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        SqliteQuestionSnapshotRepository::new(self.database.clone())
+            .find_owned_submission_draft(owner_id, draft_id)
+            .await
+    }
+
+    async fn persist_submission_receipt(
+        &self,
+        request: SubmissionReceiptPersistRequest<'_>,
+    ) -> Result<(), StorageError> {
+        validate_worker_token(request.worker_id, request.correlation_id)?;
+        request
+            .record
+            .receipt
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if request.record.receipt.received_at > request.at {
+            return Err(invalid_submission_receipt());
+        }
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.record.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let bound: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM executions AS execution \
+             INNER JOIN execution_attempts AS attempt ON attempt.execution_id = execution.id \
+             WHERE execution.id = ? AND execution.submission_draft_id = ? \
+               AND execution.state = 'running' AND attempt.id = ? AND attempt.finished_at IS NULL",
+        )
+        .bind(request.record.execution_id.to_string())
+        .bind(request.record.submission_draft_id.to_string())
+        .bind(request.record.execution_attempt_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if bound.is_none() {
+            return Err(invalid_submission_receipt());
+        }
+        let receipt_json = serde_json::to_string(&request.record.receipt)?;
+        if receipt_json.is_empty() || receipt_json.len() > 64 * 1_024 {
+            return Err(invalid_submission_receipt());
+        }
+        let receipt_bytes = receipt_json.len();
+        let inserted = sqlx::query(
+            "INSERT INTO submission_attempt_receipts \
+             (execution_attempt_id, execution_id, submission_draft_id, receipt_json, \
+              receipt_bytes, received_at) VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(execution_attempt_id) DO NOTHING",
+        )
+        .bind(request.record.execution_attempt_id.to_string())
+        .bind(request.record.execution_id.to_string())
+        .bind(request.record.submission_draft_id.to_string())
+        .bind(&receipt_json)
+        .bind(i64::try_from(receipt_bytes).map_err(|_| invalid_submission_receipt())?)
+        .bind(encode_timestamp(request.record.receipt.received_at))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if inserted == 0 {
+            let existing = sqlx::query(
+                "SELECT execution_attempt_id, execution_id, submission_draft_id, receipt_json, \
+                        receipt_bytes FROM submission_attempt_receipts \
+                 WHERE execution_attempt_id = ?",
+            )
+            .bind(request.record.execution_attempt_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if decode_submission_receipt(&existing)? != *request.record {
+                return Err(invalid_submission_receipt());
+            }
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn find_active_submission_receipt(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<SubmissionAttemptReceipt>, StorageError> {
+        let row = sqlx::query(
+            "SELECT receipt.execution_attempt_id, receipt.execution_id, \
+                    receipt.submission_draft_id, receipt.receipt_json, receipt.receipt_bytes \
+             FROM submission_attempt_receipts AS receipt \
+             INNER JOIN execution_attempts AS attempt \
+                ON attempt.id = receipt.execution_attempt_id \
+               AND attempt.execution_id = receipt.execution_id \
+             INNER JOIN executions AS execution ON execution.id = receipt.execution_id \
+             WHERE receipt.execution_id = ? AND attempt.finished_at IS NULL \
+               AND execution.submission_draft_id = receipt.submission_draft_id \
+             ORDER BY attempt.attempt_no DESC LIMIT 1",
+        )
+        .bind(execution_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        row.as_ref().map(decode_submission_receipt).transpose()
+    }
+
+    async fn persist_submission_result(
+        &self,
+        request: SubmissionResultPersistRequest<'_>,
+    ) -> Result<(), StorageError> {
+        validate_worker_token(request.worker_id, request.correlation_id)?;
+        if request.result.created_at > request.at {
+            return Err(StorageError::InvalidData(
+                "submission result timestamp is after persistence".to_owned(),
+            ));
+        }
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.result.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        transaction.commit().await?;
+        SqliteQuestionSnapshotRepository::new(self.database.clone())
+            .save_submission_result(request.result)
+            .await
     }
 }
 
@@ -1955,6 +2105,40 @@ fn decode_execution(row: &sqlx::sqlite::SqliteRow) -> Result<Execution, StorageE
     })
 }
 
+fn decode_submission_receipt(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<SubmissionAttemptReceipt, StorageError> {
+    let receipt_json: &str = row.try_get("receipt_json")?;
+    let receipt_bytes = usize::try_from(row.try_get::<i64, _>("receipt_bytes")?)
+        .map_err(|_| invalid_submission_receipt())?;
+    if receipt_json.is_empty() || receipt_json.len() != receipt_bytes || receipt_bytes > 64 * 1_024
+    {
+        return Err(invalid_submission_receipt());
+    }
+    let record = SubmissionAttemptReceipt {
+        submission_draft_id: asterism_domain::SubmissionDraftId::from_str(
+            row.try_get("submission_draft_id")?,
+        )
+        .map_err(|_| invalid_submission_receipt())?,
+        execution_id: ExecutionId::from_str(row.try_get("execution_id")?)
+            .map_err(|_| invalid_submission_receipt())?,
+        execution_attempt_id: ExecutionAttemptId::from_str(row.try_get("execution_attempt_id")?)
+            .map_err(|_| invalid_submission_receipt())?,
+        receipt: serde_json::from_str(receipt_json)?,
+    };
+    record
+        .receipt
+        .validate()
+        .map_err(|_| invalid_submission_receipt())?;
+    Ok(record)
+}
+
+fn invalid_submission_receipt() -> StorageError {
+    StorageError::InvalidData(
+        "submission receipt is malformed or not bound to the active attempt".to_owned(),
+    )
+}
+
 fn decode_attempt(row: &sqlx::sqlite::SqliteRow) -> Result<ExecutionAttempt, StorageError> {
     let attempt_no = row.try_get::<i64, _>("attempt_no")?;
     Ok(ExecutionAttempt {
@@ -2073,7 +2257,8 @@ mod tests {
 
     use asterism_domain::{
         CreditAmount, CreditReservation, CreditReservationId, PriceQuote, PriceQuoteId,
-        ProviderAccountId, QuestionSnapshotId, RequestSource, SubmissionDraftId, TaskId,
+        ProviderAccountId, QuestionSnapshotId, RequestSource, SubmissionAttemptReceipt,
+        SubmissionDraftId, SubmissionReceipt, TaskId,
     };
     use asterism_provider_api::{
         ProviderRuntimeSettingsSchema, ProviderSettingDefinition, ProviderSettingKind,
@@ -2187,6 +2372,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(execution_count, 1);
+    }
+
+    #[tokio::test]
+    async fn submission_receipt_is_active_attempt_bound_and_idempotent() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let draft_id = insert_submission_draft(&database, task_id, now).await;
+        let mut execution = scheduled_execution(owner, task_id, now);
+        execution.submission_draft_id = Some(draft_id);
+        repository
+            .schedule_execution(test_request(&execution, owner, "receipt-bound-draft"))
+            .await
+            .unwrap();
+        let job_id = claim_execution(&database, &execution, "receipt-worker", now).await;
+        let started_at = now + chrono::Duration::seconds(1);
+        let attempt = repository
+            .start_attempt(ExecutionAttemptStartRequest {
+                execution_id: execution.id,
+                scheduler_job_id: job_id,
+                worker_id: "receipt-worker",
+                at: started_at,
+                correlation_id: "receipt-attempt",
+            })
+            .await
+            .unwrap();
+        let record = SubmissionAttemptReceipt {
+            submission_draft_id: draft_id,
+            execution_id: execution.id,
+            execution_attempt_id: attempt.id,
+            receipt: SubmissionReceipt {
+                remote_status: "accepted".to_owned(),
+                message_sanitized: None,
+                provider_trace_id: Some("trace-receipt".to_owned()),
+                received_at: started_at + chrono::Duration::seconds(1),
+            },
+        };
+        let persist = || SubmissionReceiptPersistRequest {
+            record: &record,
+            scheduler_job_id: job_id,
+            worker_id: "receipt-worker",
+            correlation_id: "receipt-persist",
+            at: record.receipt.received_at,
+        };
+        repository
+            .persist_submission_receipt(persist())
+            .await
+            .unwrap();
+        repository
+            .persist_submission_receipt(persist())
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .find_active_submission_receipt(execution.id)
+                .await
+                .unwrap(),
+            Some(record.clone())
+        );
+
+        let mut conflicting = record;
+        conflicting.receipt.remote_status = "different".to_owned();
+        assert!(
+            repository
+                .persist_submission_receipt(SubmissionReceiptPersistRequest {
+                    record: &conflicting,
+                    scheduler_job_id: job_id,
+                    worker_id: "receipt-worker",
+                    correlation_id: "receipt-conflict",
+                    at: conflicting.receipt.received_at,
+                })
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
