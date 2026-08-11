@@ -9,7 +9,8 @@
 | Class-task pagination is partial | Donor loops pages from `total` | Native transport fetches page one first; parser requires a complete, ordered, total-consistent page set before returning any Courses/Tasks |
 | Body and signing versions are accidentally unified | Current donor sends `231204` but signs `240122` | Freeze the split in an exact-time request vector and treat any future change as protocol research |
 | Course title changes across rows | Course data is duplicated on every task row | Require one normalized title per stable Course in a scan; treat conflicts as protocol drift |
-| `task_id=-1` or stale ID targets another task | Public issue 106 and donor flow | Use `release_id` as stable identity and fresh-rebind every later operation |
+| `task_id=-1` or stale ID targets another task | Public issue 106 and donor flow | Use `release_id` as stable identity; TaskDetail/Progress already fresh-rebind through a complete scan and every later operation must do the same |
+| Stable release disappears between reads | Remote inventory can change independently of local state | Return RemoteChanged from the fresh TaskDetail/Progress scan instead of serving stale detail or progress |
 | New `task_type` appears | Current donor recognizes only 1 learning and 2 test | Fail closed and add a sanitized fixture before normalization |
 | Status vocabulary changes | Donor documents `over_status` 1/2/3 | Preserve unknown only after explicit mapping decision; never silently mark executable |
 | Completion is inferred from expiry | Donor filters expiry and progress independently | Keep remote state, progress and close status separate |

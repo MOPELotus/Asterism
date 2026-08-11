@@ -1,9 +1,9 @@
 //! `Cidaren` Provider implementation.
 //!
 //! The current Development checkpoint exposes manually imported token
-//! authentication plus fixture/native-boundary Course and class-task inventory
-//! through Core-scoped stored tokens. It makes no Capture, mutation or
-//! live-compatibility claim.
+//! authentication plus fixture/native-boundary Course/class-task inventory and
+//! fresh Task detail/progress reads through Core-scoped stored tokens. It makes
+//! no Capture, mutation or live-compatibility claim.
 
 mod authentication;
 mod class_tasks;
@@ -12,6 +12,7 @@ mod metadata;
 mod native_http;
 mod provider;
 mod stored_session;
+mod task_read;
 
 pub use authentication::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenSessionResolver,
@@ -29,3 +30,4 @@ pub use provider::{
     build_development_provider_with_stored_session,
 };
 pub use stored_session::StoredCidarenSessionResolver;
+pub use task_read::{CidarenTaskDetail, CidarenTaskProgress};

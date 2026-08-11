@@ -118,9 +118,15 @@ class-task:{release_id}
 
 `release_id` is required, positive and unique in a scan. `task_id` remains a
 bounded signed observation because later routes may need the current value.
-Every future TaskDetail, question or submission operation must re-list and
-select exactly one row by release identity before using `task_id`, `course_id`
-or task type.
+TaskDetail and TaskProgressRead now re-list the complete signed pagination and
+select exactly one row by release identity. A malformed identity is protocol
+drift; an identity absent from the fresh inventory is RemoteChanged. The fresh
+detail preserves the current `task_id`, course binding and normalized status,
+while progress publishes only the bounded percentage and remote state.
+`time_spent` remains a raw detail observation and is never converted into
+duration seconds. Future question or submission operations must perform the
+same fresh release-identity binding before using `task_id`, `course_id` or task
+type.
 
 ## Question and mutation chain
 

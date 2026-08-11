@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType};
+use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
 use asterism_provider_api::{
     ProviderError, ProviderErrorKind, ProviderResult, ProviderRouteContext, RemoteCourse,
     RemoteTask,
@@ -343,7 +343,7 @@ fn normalize_task(row: ClassTaskRow) -> ProviderResult<RemoteTask> {
         opens_at,
         due_at: None,
         closes_at: None,
-        capabilities: Vec::new(),
+        capabilities: vec![TaskCapability::ProgressRead],
         fingerprint: fingerprint(&normalized)?,
         normalized,
         raw_sanitized: serde_json::json!({
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(learning.source_type, SourceType::Practice);
         assert_eq!(learning.assessment_class, AssessmentClass::Routine);
         assert_eq!(learning.remote_state, RemoteState::Pending);
-        assert!(learning.capabilities.is_empty());
+        assert_eq!(learning.capabilities, [TaskCapability::ProgressRead]);
         assert!(learning.fingerprint.starts_with("v1:"));
 
         let test = tasks

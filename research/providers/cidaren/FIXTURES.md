@@ -20,9 +20,10 @@ unknown fields that must be dropped. The course and task views may share the
 same page envelope, but expected normalization remains independent.
 
 These fixtures now drive the Development crate's strict token-response,
-Course grouping, stable release identity, state classification, redaction and
-all-or-nothing pagination tests. They remain synthetic and do not establish
-native HTTP or live compatibility.
+Course grouping, stable release identity, state classification, redaction,
+all-or-nothing pagination, fresh TaskDetail and TaskProgressRead tests. They
+remain synthetic and do not establish live compatibility; native HTTP request
+and response boundaries are covered separately with deterministic transports.
 
 Inline negative tests must cover empty/oversized/non-JSON responses, non-object
 records, unsupported task types/status values, duplicate release identities,
@@ -55,7 +56,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Class-task pagination is complete and total-consistent before normalization.
 - Course identity is `course:{course_id}` and duplicate rows must agree.
 - Task identity is `class-task:{release_id}` even when `task_id == -1`.
+- TaskDetail and TaskProgressRead re-scan and reject missing fresh identities.
 - Learning and test tasks remain distinct source types but both are Routine.
 - Expiry, completion, progress, score and raw time remain independent facts.
+- Raw `time_spent` never becomes `duration_seconds` without live unit proof.
 - Unknown response fields are dropped.
 - No Capture, answer, mutation or live-verification capability is advertised.

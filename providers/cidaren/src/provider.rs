@@ -6,8 +6,8 @@ use asterism_secrets::ProviderCredentialResolver;
 
 use crate::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenClassTaskTransport,
-    CidarenCourseInventory, CidarenSessionResolver, CidarenTaskInventory,
-    metadata::development_metadata, native_http::NativeCidarenTransport,
+    CidarenCourseInventory, CidarenSessionResolver, CidarenTaskDetail, CidarenTaskInventory,
+    CidarenTaskProgress, metadata::development_metadata, native_http::NativeCidarenTransport,
     stored_session::StoredCidarenSessionResolver,
 };
 
@@ -23,6 +23,8 @@ pub fn build_development_provider(
     sessions: Arc<dyn CidarenSessionResolver>,
     class_tasks: Arc<dyn CidarenClassTaskTransport>,
 ) -> ProviderResult<ProviderEntry> {
+    let task_detail = Arc::new(CidarenTaskDetail::try_new(class_tasks.clone())?);
+    let task_progress = Arc::new(CidarenTaskProgress::try_new(class_tasks.clone())?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
         runtime_settings: ProviderRuntimeSettingsSchema::default(),
@@ -34,8 +36,8 @@ pub fn build_development_provider(
             class_tasks.clone(),
         )?)),
         task_inventory: Some(Arc::new(CidarenTaskInventory::try_new(class_tasks)?)),
-        task_detail: None,
-        task_progress: None,
+        task_detail: Some(task_detail),
+        task_progress: Some(task_progress),
         duration_read: None,
         question_inventory: None,
         question_parse: None,
@@ -142,8 +144,8 @@ mod tests {
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());
-        assert!(entry.task_detail.is_none());
-        assert!(entry.task_progress.is_none());
+        assert!(entry.task_detail.is_some());
+        assert!(entry.task_progress.is_some());
         assert!(entry.duration_read.is_none());
         assert!(entry.question_inventory.is_none());
         assert!(entry.submission_execute.is_none());
