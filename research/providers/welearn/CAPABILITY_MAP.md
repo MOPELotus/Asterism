@@ -56,3 +56,11 @@ instead of becoming synthetic defaults. Authentication before mutation may renew
 replayed after an authentication failure. `DurationRead` remains absent because
 raw remote time units are still not live-proven, and completion-changing
 `ResourceExecution` remains separate and unadvertised.
+
+The shared Engine now evaluates a DurationReport-only execution against the
+duration goal instead of requiring the remote Task to become Completed. A
+verified Pending, InProgress or Completed readback can therefore finish the
+Execution, while every Provider error goes directly to HumanRequired without a
+retry. Recovery of an abandoned duration report never calls TaskProgress and
+never re-enters the write lifecycle. This closes the offline Core contract gap;
+live Provider validation remains pending.

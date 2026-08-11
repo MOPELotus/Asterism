@@ -166,6 +166,13 @@ the first mutation. A mutation is never replayed after authentication fails;
 only the final read-only verification may renew if the operation has not already
 used its single renewal.
 
+The shared Engine treats an only-`DurationReport` request as goal-verified when
+the Provider returns `verified=true` and a Pending, InProgress or Completed
+remote Task state. This does not reinterpret duration as completion. Any
+Provider error is an uncertain duration mutation and goes directly to
+HumanRequired without retry. An abandoned duration-report execution also goes
+to HumanRequired without consulting TaskProgress or re-entering start/keep/save.
+
 Master-owned runtime settings expose platform defaults and account/task
 overrides for actual report seconds and heartbeat interval. Provider and account
 execution concurrency plus periodic Course/Task scan interval are independently
