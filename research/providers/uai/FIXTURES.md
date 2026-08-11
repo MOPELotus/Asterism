@@ -82,8 +82,10 @@ field names, placeholder identities and response/result codes.
 - Progress duration remains untyped and independent from completion.
 - Study-record duration seconds require one exact unique CourseResource/Unit/Group binding.
 - Content and standard answers remain independent fresh documents; neither may be reused as submission evidence.
+- Question snapshots remain bound to the exact stable CourseResource/Unit/Group Task and cannot build a draft for another route.
 - Submission previews contain no selected answer values or executable provider payload.
 - Only one-question `single-choice`, `multichoice` and `short_answer` Groups advertise execute/verify.
 - Codes `600001` and `600002` never produce a receipt and never trigger an implicit mutation retry.
+- Ambiguous mutation transport failures return after exactly one Provider attempt.
 - Verification requires the receipt version and an exact fresh Course/Group/question/submitted-answer readback.
 - Missing receipts are Inconclusive; receipts alone never confirm success, score, progress or completion.

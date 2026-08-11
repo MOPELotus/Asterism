@@ -776,12 +776,16 @@ mod tests {
 
     async fn draft() -> SubmissionDraft {
         let task_id = TaskId::new();
-        let question =
-            parse_question_content(CONTENT, "group-1", &["multichoice".to_owned()], Some(1))
-                .unwrap()
-                .remove(0)
-                .to_question(task_id)
-                .unwrap();
+        let question = parse_question_content(
+            CONTENT,
+            "group:2001:unit-1:group-1",
+            &["multichoice".to_owned()],
+            Some(1),
+        )
+        .unwrap()
+        .remove(0)
+        .to_question(task_id)
+        .unwrap();
         let selected = SelectedAnswer {
             candidate_id: AnswerCandidateId::new(),
             question_id: question.id,

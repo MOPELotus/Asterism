@@ -109,6 +109,11 @@ impl SubmissionBuildCapability for UaiSubmissionBuild {
                     .get("schema")
                     .and_then(|value| value.as_str())
                     != Some("uai.encrypted-question.v1")
+                || question
+                    .metadata_sanitized
+                    .get("remote_task_id")
+                    .and_then(|value| value.as_str())
+                    != Some(remote_task_id)
                 || !question_ids.insert(question.id)
                 || !positions.insert(question.position)
                 || !remote_ids.insert(remote_id)
@@ -341,6 +346,19 @@ mod tests {
                 .kind,
             ProviderErrorKind::UnsupportedTask
         );
+        assert_eq!(
+            capability
+                .build_submission_preview(
+                    &context(),
+                    "group:2001:unit-1:other-group",
+                    &questions,
+                    &selected,
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::InvalidResponse
+        );
         let foreign = vec![selection(
             asterism_domain::QuestionId::new(),
             NormalizedAnswer::Selections(vec!["A".to_owned()]),
@@ -360,11 +378,16 @@ mod tests {
 
     fn questions() -> Vec<Question> {
         let task_id = TaskId::new();
-        parse_question_content(CONTENT, "group-1", &["multichoice".to_owned()], Some(1))
-            .unwrap()
-            .iter()
-            .map(|question| question.to_question(task_id).unwrap())
-            .collect()
+        parse_question_content(
+            CONTENT,
+            "group:2001:unit-1:group-1",
+            &["multichoice".to_owned()],
+            Some(1),
+        )
+        .unwrap()
+        .iter()
+        .map(|question| question.to_question(task_id).unwrap())
+        .collect()
     }
 
     fn selection(

@@ -52,12 +52,14 @@ AnswerResolve and the three independent submission capabilities. It:
 13. advertises ProgressRead and DurationRead on each normalized Group Task so
     Core can authorize the two independent read paths;
 14. reads and decrypts fresh content and standard-answer documents separately,
-    binds every normalized question and candidate to the exact Group snapshot,
+    binds every normalized question and candidate to the exact stable remote
+    Group Task snapshot,
     and drops ciphertext, key material and free-form route context;
 15. builds only an answer-value-free immutable preview, then forms the native
     submission body inside the execution boundary for exactly one supported
     question (`single-choice`, `multichoice` or `short_answer`);
-16. accepts only a successful version-bearing submit response as a receipt and
+16. accepts only a successful version-bearing submit response as a receipt,
+    returns ambiguous transport failures after one mutation attempt, and
     independently verifies that exact version through a fresh user-module read;
 17. confirms only exact submitted-answer equality, returns Inconclusive when no
     version receipt exists, and never infers score, progress or completion;

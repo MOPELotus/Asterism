@@ -142,14 +142,14 @@ impl AnswerResolveCapability for UaiAnswerResolve {
         let identity = GroupIdentity::parse(remote_task_id)?;
         let detail = self.details.task_detail(context, remote_task_id).await?;
         let shape = TaskAnswerShape::from_detail(&detail, &identity, remote_task_id)?;
-        validate_snapshot_questions(questions, &shape)?;
+        validate_snapshot_questions(questions, &shape, remote_task_id)?;
         let documents = self
             .transport
             .fetch_answer_documents(context, &identity.course_resource, &identity.group)
             .await?;
         let parsed = parse_question_content(
             documents.content.as_str(),
-            &identity.group,
+            remote_task_id,
             &shape.task_types,
             Some(shape.question_count),
         )?;
@@ -385,6 +385,7 @@ fn validate_fresh_content(
 fn validate_snapshot_questions(
     questions: &[Question],
     shape: &TaskAnswerShape,
+    remote_task_id: &str,
 ) -> ProviderResult<()> {
     validate_question_sequence(questions)?;
     if usize::try_from(shape.question_count).ok() != Some(questions.len()) {
@@ -401,6 +402,16 @@ fn validate_snapshot_questions(
         if question.kind != question_kind(task_type) {
             return Err(remote_changed(
                 "UAI fresh Group Question type differs from the Question snapshot",
+            ));
+        }
+        if question
+            .metadata_sanitized
+            .get("remote_task_id")
+            .and_then(Value::as_str)
+            != Some(remote_task_id)
+        {
+            return Err(remote_changed(
+                "UAI Question snapshot belongs to another remote Task",
             ));
         }
     }
@@ -787,11 +798,16 @@ mod tests {
 
     fn fixture_questions() -> Vec<Question> {
         let task_id = TaskId::new();
-        parse_question_content(CONTENT, "group-1", &["multichoice".to_owned()], Some(1))
-            .unwrap()
-            .iter()
-            .map(|question| question.to_question(task_id).unwrap())
-            .collect()
+        parse_question_content(
+            CONTENT,
+            "group:2001:unit-1:group-1",
+            &["multichoice".to_owned()],
+            Some(1),
+        )
+        .unwrap()
+        .iter()
+        .map(|question| question.to_question(task_id).unwrap())
+        .collect()
     }
 
     fn provider_context() -> ProviderContext {

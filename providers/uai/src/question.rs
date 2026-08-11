@@ -115,7 +115,7 @@ impl UaiQuestionRead {
             .await?;
         parse_question_content(
             document.as_str(),
-            &identity.group,
+            remote_task_id,
             &shape.task_types,
             shape.question_count,
         )
@@ -296,7 +296,7 @@ impl ParsedUaiQuestion {
 /// padding, nested JSON, identity, counts or bounded Question semantics.
 pub fn parse_question_content(
     document: &str,
-    group_id: &str,
+    remote_task_id: &str,
     task_types: &[String],
     expected_count: Option<u32>,
 ) -> ProviderResult<Vec<ParsedUaiQuestion>> {
@@ -305,7 +305,7 @@ pub fn parse_question_content(
             "UAI Question content is empty or exceeds the size limit",
         ));
     }
-    valid_component(group_id)?;
+    GroupIdentity::parse(remote_task_id)?;
     if !supports_question_read(task_types, expected_count) {
         return Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
@@ -356,7 +356,7 @@ pub fn parse_question_content(
             .get(index)
             .or_else(|| task_types.last())
             .ok_or_else(|| protocol_drift("UAI Group Task has no Question type"))?;
-        let question = parse_question_entry(entry, position, task_type)?;
+        let question = parse_question_entry(entry, position, task_type, remote_task_id)?;
         if !remote_ids.insert(question.remote_id.clone()) {
             return Err(protocol_drift(
                 "UAI decrypted Question wrapper contains duplicate identity",
@@ -372,6 +372,7 @@ fn parse_question_entry(
     entry: &Value,
     position: u32,
     task_type: &str,
+    remote_task_id: &str,
 ) -> ProviderResult<ParsedUaiQuestion> {
     let entry = entry
         .as_object()
@@ -417,6 +418,7 @@ fn parse_question_entry(
         metadata_sanitized: json!({
             "schema": "uai.encrypted-question.v1",
             "task_type": task_type,
+            "remote_task_id": remote_task_id,
         }),
     };
     question.to_question(TaskId::new())?;
@@ -840,7 +842,7 @@ mod tests {
     fn encrypted_content_becomes_answer_free_bounded_questions() {
         let questions = parse_question_content(
             CONTENT,
-            "group-questions",
+            "group:2001:unit-1:group-questions",
             &["multichoice".to_owned()],
             Some(1),
         )
@@ -856,6 +858,10 @@ mod tests {
         assert_eq!(questions[0].options.len(), 2);
         assert_eq!(questions[0].options[0].id, "A");
         assert_eq!(questions[0].options[0].content.as_deref(), Some("Alpha"));
+        assert_eq!(
+            questions[0].metadata_sanitized["remote_task_id"],
+            "group:2001:unit-1:group-questions"
+        );
         let encoded = serde_json::to_string(&questions[0].reference().unwrap()).unwrap();
         assert!(!encoded.contains("unipus."));
         assert!(!encoded.contains("k1234567"));
@@ -868,7 +874,7 @@ mod tests {
         assert!(
             parse_question_content(
                 &CONTENT.replacen("\"code\":0,", "", 1),
-                "group-questions",
+                "group:2001:unit-1:group-questions",
                 &["multichoice".to_owned()],
                 Some(1),
             )
@@ -877,7 +883,7 @@ mod tests {
         assert!(
             parse_question_content(
                 &CONTENT.replace("unipus.", "changed."),
-                "group-questions",
+                "group:2001:unit-1:group-questions",
                 &["multichoice".to_owned()],
                 Some(1),
             )
@@ -889,7 +895,7 @@ mod tests {
         assert!(
             parse_question_content(
                 &corrupted,
-                "group-questions",
+                "group:2001:unit-1:group-questions",
                 &["multichoice".to_owned()],
                 Some(1),
             )
@@ -898,7 +904,7 @@ mod tests {
         assert!(
             parse_question_content(
                 CONTENT,
-                "group-questions",
+                "group:2001:unit-1:group-questions",
                 &["multichoice".to_owned()],
                 Some(2),
             )
@@ -907,7 +913,7 @@ mod tests {
         assert!(
             parse_question_content(
                 CONTENT,
-                "group-questions",
+                "group:2001:unit-1:group-questions",
                 &["multichoice".to_owned(), "short_answer".to_owned()],
                 Some(1),
             )
@@ -946,13 +952,14 @@ mod tests {
                 }),
                 1,
                 "multichoice",
+                "group:2001:unit-1:group-questions",
             )
             .is_err()
         );
         assert!(
             parse_question_content(
                 CONTENT,
-                "group-questions",
+                "group:2001:unit-1:group-questions",
                 &["video-point-read".to_owned()],
                 Some(1),
             )

@@ -194,14 +194,18 @@ capabilities. Content and standard-answer reads each refresh and bind the exact
 CourseResource/Group route, bound/decrypt their own `unipus.` document and drop
 ciphertext plus key material after normalization. The immutable draft preview
 contains question structure and answer shape but no selected answer values and
-no executable provider payload.
+no executable provider payload. Each sanitized Question also carries the exact
+stable `group:{courseResourceId}:{unitId}:{groupId}` Task identity; answer
+resolution and draft construction reject a snapshot from any other route.
 
 Execution is advertised only when a fresh Group has exactly one question and
 one audited simple type: `single-choice`, `multichoice` or `short_answer`. The
 native body is constructed only inside the execution boundary. A code-`0`,
 version-bearing response becomes an accepted receipt; `600001` and `600002`
 become typed retry state without a receipt, and the mutation is not implicitly
-repeated.
+repeated. A Network failure from the mutation boundary is likewise returned
+after one attempt so Core can retain verify-only recovery authority without
+replaying the POST.
 
 Verification requires that accepted receipt and reads only the exact
 `{groupId}-{submitVersion}` user-module route after refreshing the Course
