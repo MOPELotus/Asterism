@@ -287,6 +287,10 @@ fn task_routes() -> Router<ApiState> {
             get(task::get_submission_result),
         )
         .route("/api/v1/tasks/{task_id}/execute", post(task::execute_task))
+        .route("/api/v1/tasks/{task_id}/approve", post(task::approve_task))
+        .route("/api/v1/tasks/{task_id}/cancel", post(task::cancel_task))
+        .route("/api/v1/tasks/{task_id}/delay", post(task::delay_task))
+        .route("/api/v1/tasks/{task_id}/ignore", post(task::ignore_task))
 }
 
 async fn health(State(state): State<ApiState>) -> Result<Json<HealthResponse>, ApiError> {
@@ -909,6 +913,20 @@ pub fn openapi_document() -> Value {
             "/api/v1/tasks/{task_id}/execute".to_owned(),
             task_execute_path(),
         );
+    for (action, operation_id, requires_body) in [
+        ("approve", "approveTask", false),
+        ("cancel", "cancelTask", false),
+        ("delay", "delayTask", true),
+        ("ignore", "ignoreTask", false),
+    ] {
+        document["paths"]
+            .as_object_mut()
+            .expect("static OpenAPI paths object")
+            .insert(
+                format!("/api/v1/tasks/{{task_id}}/{action}"),
+                task_lifecycle_path(operation_id, requires_body),
+            );
+    }
     document["paths"]
         .as_object_mut()
         .expect("static OpenAPI paths object")
@@ -1118,6 +1136,39 @@ fn task_execute_path() -> Value {
             "409": {"description": "Task state, capability, assessment policy, or idempotency conflict"}
         }
     }})
+}
+
+fn task_lifecycle_path(operation_id: &str, requires_body: bool) -> Value {
+    let mut operation = json!({
+        "operationId": operation_id,
+        "description": "Applies an owner-scoped, idempotent Core Task lifecycle action. Approval never grants formal-assessment execution or submission permission; cancellation refuses already claimed/running remote work.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 256}}
+        ],
+        "responses": {
+            "200": {"description": "Idempotent replay of the same Task lifecycle action"},
+            "201": {"description": "Task lifecycle action committed atomically with audit and outbox effects"},
+            "400": {"description": "Invalid Task ID, idempotency key, or delay timestamp"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Insufficient permission"},
+            "404": {"description": "Task not found for this owner"},
+            "409": {"description": "Task state, scheduler claim, active remote work, or idempotency conflict"}
+        }
+    });
+    if requires_body {
+        operation["requestBody"] = json!({
+            "required": true,
+            "content": {"application/json": {"schema": {
+                "type": "object",
+                "required": ["delayed_until"],
+                "properties": {"delayed_until": {"type": "string", "format": "date-time"}},
+                "additionalProperties": false
+            }}}
+        });
+    }
+    json!({"post": operation})
 }
 
 fn task_detail_path() -> Value {
@@ -4582,6 +4633,122 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the API regression keeps approval, delay, cancellation, ignore and replay guarantees in one shared workflow"
+    )]
+    async fn task_lifecycle_actions_share_one_idempotent_owner_scoped_contract() {
+        let (app, database, _, cookie, waiting_task, ignored_task, _, _) =
+            execution_action_fixture().await;
+        sqlx::query("UPDATE tasks SET orchestration_state = 'waiting_approval' WHERE id = ?")
+            .bind(waiting_task.to_string())
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        let unapproved =
+            post_task_execution(&app, &cookie, waiting_task, Some("execute-before-approval")).await;
+        assert_eq!(unapproved.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(unapproved).await["error"]["code"],
+            "task_state_conflict"
+        );
+
+        let approved = post_task_lifecycle(
+            &app,
+            &cookie,
+            waiting_task,
+            "approve",
+            "approve-task-1",
+            None,
+        )
+        .await;
+        assert_eq!(approved.status(), StatusCode::CREATED);
+        let approved = response_json(approved).await;
+        assert_eq!(approved["action"], "approve");
+        assert_eq!(approved["task_state"], "ready");
+        assert_eq!(approved["created"], true);
+
+        let replayed = post_task_lifecycle(
+            &app,
+            &cookie,
+            waiting_task,
+            "approve",
+            "approve-task-1",
+            None,
+        )
+        .await;
+        assert_eq!(replayed.status(), StatusCode::OK);
+        assert_eq!(response_json(replayed).await["created"], false);
+
+        let execution =
+            post_task_execution(&app, &cookie, waiting_task, Some("execute-approved-task")).await;
+        assert_eq!(execution.status(), StatusCode::CREATED);
+        let execution_id = response_json(execution).await["execution"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let delayed_until = Utc::now() + chrono::Duration::hours(2);
+        let delayed = post_task_lifecycle(
+            &app,
+            &cookie,
+            waiting_task,
+            "delay",
+            "delay-task-1",
+            Some(json!({"delayed_until": delayed_until})),
+        )
+        .await;
+        assert_eq!(delayed.status(), StatusCode::CREATED);
+        let delayed = response_json(delayed).await;
+        assert_eq!(delayed["task_state"], "scheduled");
+        assert_eq!(delayed["affected_execution_id"], execution_id);
+
+        let cancelled =
+            post_task_lifecycle(&app, &cookie, waiting_task, "cancel", "cancel-task-1", None).await;
+        assert_eq!(cancelled.status(), StatusCode::CREATED);
+        assert_eq!(response_json(cancelled).await["task_state"], "cancelled");
+        let persisted: (String, String, String) = sqlx::query_as(
+            "SELECT task.orchestration_state, execution.state, job.state \
+             FROM tasks AS task INNER JOIN executions AS execution ON execution.task_id = task.id \
+             INNER JOIN scheduled_jobs AS job ON job.idempotency_key = ? WHERE task.id = ?",
+        )
+        .bind(format!("execution:{execution_id}"))
+        .bind(waiting_task.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted,
+            ("cancelled".into(), "cancelled".into(), "cancelled".into())
+        );
+
+        let ignored =
+            post_task_lifecycle(&app, &cookie, ignored_task, "ignore", "ignore-task-1", None).await;
+        assert_eq!(ignored.status(), StatusCode::CREATED);
+        assert_eq!(response_json(ignored).await["task_state"], "ignored");
+
+        let conflicting_key = post_task_lifecycle(
+            &app,
+            &cookie,
+            ignored_task,
+            "cancel",
+            "approve-task-1",
+            None,
+        )
+        .await;
+        assert_eq!(conflicting_key.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(conflicting_key).await["error"]["code"],
+            "idempotency_conflict"
+        );
+        let receipt_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_action_receipts")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(receipt_count, 4);
+    }
+
     async fn execution_action_fixture() -> (
         Router,
         Database,
@@ -4673,6 +4840,28 @@ mod tests {
         }
         app.clone()
             .oneshot(request.body(Body::from("{}")).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn post_task_lifecycle(
+        app: &Router,
+        cookie: &str,
+        task_id: asterism_domain::TaskId,
+        action: &str,
+        idempotency_key: &str,
+        body: Option<Value>,
+    ) -> Response {
+        app.clone()
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{task_id}/{action}"))
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", idempotency_key)
+                    .header("x-request-id", format!("{action}-{task_id}"))
+                    .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+                    .unwrap(),
+            )
             .await
             .unwrap()
     }

@@ -12,6 +12,7 @@ anyhow.workspace = true
 asterism-domain = { path = "../../crates/domain" }
 asterism-secrets = { path = "../../crates/secrets" }
 clap.workspace = true
+chrono.workspace = true
 reqwest.workspace = true
 rpassword.workspace = true
 serde.workspace = true

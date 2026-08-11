@@ -291,6 +291,32 @@ enum TaskCommand {
         #[arg(long)]
         submission_draft: Option<String>,
     },
+    /// Approve a task waiting for manual approval without weakening formal-assessment guards.
+    Approve {
+        task_id: String,
+        #[arg(long)]
+        idempotency_key: String,
+    },
+    /// Cancel a task and any unclaimed pending execution atomically.
+    Cancel {
+        task_id: String,
+        #[arg(long)]
+        idempotency_key: String,
+    },
+    /// Move one pending scheduled execution to an RFC 3339 timestamp.
+    Delay {
+        task_id: String,
+        #[arg(long)]
+        until: String,
+        #[arg(long)]
+        idempotency_key: String,
+    },
+    /// Ignore a task locally without modifying the remote task.
+    Ignore {
+        task_id: String,
+        #[arg(long)]
+        idempotency_key: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -916,6 +942,50 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
                 )
                 .await?
         }
+        TaskCommand::Approve {
+            task_id,
+            idempotency_key,
+        } => {
+            let path = format!("/api/v1/tasks/{task_id}/approve");
+            client
+                .post_authorized_idempotent(&path, &token, &idempotency_key, &json!({}))
+                .await?
+        }
+        TaskCommand::Cancel {
+            task_id,
+            idempotency_key,
+        } => {
+            let path = format!("/api/v1/tasks/{task_id}/cancel");
+            client
+                .post_authorized_idempotent(&path, &token, &idempotency_key, &json!({}))
+                .await?
+        }
+        TaskCommand::Delay {
+            task_id,
+            until,
+            idempotency_key,
+        } => {
+            let delayed_until = chrono::DateTime::parse_from_rfc3339(&until)
+                .context("--until must be an RFC 3339 timestamp")?;
+            let path = format!("/api/v1/tasks/{task_id}/delay");
+            client
+                .post_authorized_idempotent(
+                    &path,
+                    &token,
+                    &idempotency_key,
+                    &json!({"delayed_until": delayed_until}),
+                )
+                .await?
+        }
+        TaskCommand::Ignore {
+            task_id,
+            idempotency_key,
+        } => {
+            let path = format!("/api/v1/tasks/{task_id}/ignore");
+            client
+                .post_authorized_idempotent(&path, &token, &idempotency_key, &json!({}))
+                .await?
+        }
     };
     write_json(&value)
 }
@@ -1093,6 +1163,46 @@ mod tests {
             } if task_id == "task-id" && idempotency_key == "manual-run-1"
         ));
         assert!(Arguments::try_parse_from(["asterismctl", "task", "execute", "task-id"]).is_err());
+    }
+
+    #[test]
+    fn task_lifecycle_commands_require_explicit_reusable_idempotency_keys() {
+        let approve = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "approve",
+            "task-id",
+            "--idempotency-key",
+            "approve-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            approve.command,
+            Command::Task {
+                command: TaskCommand::Approve {
+                    task_id,
+                    idempotency_key,
+                }
+            } if task_id == "task-id" && idempotency_key == "approve-1"
+        ));
+        assert!(Arguments::try_parse_from(["asterismctl", "task", "cancel", "task-id"]).is_err());
+        let delay = Arguments::try_parse_from([
+            "asterismctl",
+            "task",
+            "delay",
+            "task-id",
+            "--until",
+            "2026-08-11T20:00:00+08:00",
+            "--idempotency-key",
+            "delay-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            delay.command,
+            Command::Task {
+                command: TaskCommand::Delay { task_id, until, .. }
+            } if task_id == "task-id" && until == "2026-08-11T20:00:00+08:00"
+        ));
     }
 
     #[test]

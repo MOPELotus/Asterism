@@ -57,7 +57,7 @@ pub use submission::{
 };
 pub use task::{
     AssessmentClass, OrchestrationState, RemoteState, SourceType, Task, TaskCapability,
-    TaskDiffKind, TaskSnapshot, classify_task_changes,
+    TaskDiffKind, TaskLifecycleAction, TaskSnapshot, classify_task_changes,
 };
 pub use user::{Permission, QqIdentity, Role, User, UserStatus};
 

@@ -1,10 +1,10 @@
 import { usePermissions } from "@refinedev/core";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { Activity, Clock3, FileQuestion, Play, RefreshCw, Settings2 } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Activity, Ban, CheckCircle2, Clock3, EyeOff, FileQuestion, Hourglass, Play, RefreshCw, Settings2 } from "lucide-react";
 import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { executeTask, getTask, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions } from "@/api/generated/sdk.gen.ts";
+import { approveTask, cancelTask, delayTask, executeTask, getTask, getTaskDetail, getTaskDuration, getTaskProgress, getTaskQuestions, ignoreTask } from "@/api/generated/sdk.gen.ts";
 import { requireData } from "@/api/result.ts";
 import { PageShell } from "@/components/page-shell.tsx";
 import { QueryError, TableSkeleton } from "@/components/query-feedback.tsx";
@@ -20,10 +20,17 @@ import { formatTimestamp, shortId } from "@/lib/format.ts";
 export function TaskDetailPage() {
   const { taskId = "" } = useParams();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const permissions = usePermissions<string[]>({});
   const canManageSystem = permissions.data?.includes("manage_system") ?? false;
   const [submissionDraftId, setSubmissionDraftId] = useState("");
+  const [delayedUntil, setDelayedUntil] = useState(() => new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString().slice(0, 16));
+  const [actionNotice, setActionNotice] = useState<string>();
   const idempotencyKey = useRef(crypto.randomUUID());
+  const approveKey = useRef(crypto.randomUUID());
+  const cancelKey = useRef(crypto.randomUUID());
+  const delayKey = useRef(crypto.randomUUID());
+  const ignoreKey = useRef(crypto.randomUUID());
 
   const task = useQuery({ queryKey: ["tasks", taskId], enabled: Boolean(taskId), queryFn: async () => requireData(await getTask({ path: { task_id: taskId } })) });
   const detail = useQuery({ queryKey: ["tasks", taskId, "remote-detail"], enabled: false, retry: false, queryFn: async () => requireData(await getTaskDetail({ path: { task_id: taskId } })) });
@@ -37,14 +44,41 @@ export function TaskDetailPage() {
       navigate(`/executions/${execution.id}`);
     },
   });
+  const refreshTask = async (message: string) => {
+    setActionNotice(message);
+    await queryClient.invalidateQueries({ queryKey: ["tasks", taskId] });
+    await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+  };
+  const approve = useMutation({
+    mutationFn: async () => requireData(await approveTask({ path: { task_id: taskId }, headers: { "Idempotency-Key": approveKey.current } })),
+    onSuccess: async () => { approveKey.current = crypto.randomUUID(); await refreshTask("任务已批准并回到可调度状态；正式测评保护仍独立生效。"); },
+  });
+  const cancel = useMutation({
+    mutationFn: async () => requireData(await cancelTask({ path: { task_id: taskId }, headers: { "Idempotency-Key": cancelKey.current } })),
+    onSuccess: async () => { cancelKey.current = crypto.randomUUID(); await refreshTask("任务已取消；如存在尚未领取的 Execution，其 Job 与积分预留也已原子撤销。"); },
+  });
+  const delay = useMutation({
+    mutationFn: async () => requireData(await delayTask({ path: { task_id: taskId }, headers: { "Idempotency-Key": delayKey.current }, body: { delayed_until: new Date(delayedUntil).toISOString() } })),
+    onSuccess: async () => { delayKey.current = crypto.randomUUID(); await refreshTask("待执行任务已延迟，Execution 与 Scheduler Job 使用同一新时间。"); },
+  });
+  const ignore = useMutation({
+    mutationFn: async () => requireData(await ignoreTask({ path: { task_id: taskId }, headers: { "Idempotency-Key": ignoreKey.current } })),
+    onSuccess: async () => { ignoreKey.current = crypto.randomUUID(); await refreshTask("任务已忽略；远端任务未被修改。"); },
+  });
 
-  const error = task.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? execute.error;
+  const error = task.error ?? detail.error ?? progress.error ?? duration.error ?? questions.error ?? execute.error ?? approve.error ?? cancel.error ?? delay.error ?? ignore.error;
   if (task.isLoading) return <PageShell title="任务详情" description="正在读取任务。"><TableSkeleton /></PageShell>;
   if (!task.data) return <PageShell title="任务详情" description="任务不存在或当前身份不可访问。">{error ? <QueryError error={error} /> : null}</PageShell>;
 
   const needsDraft = task.data.capabilities.includes("submission_execute");
   const executable = task.data.capabilities.includes("resource_execution") || needsDraft;
-  const policyBlocked = task.data.assessment_class !== "routine";
+  const policyBlocked = task.data.assessment_class === "formal";
+  const lifecyclePending = approve.isPending || cancel.isPending || delay.isPending || ignore.isPending;
+  const canApprove = task.data.orchestration_state === "waiting_approval";
+  const canCancel = ["waiting_approval", "scheduled", "credit_blocked", "human_required", "retry_waiting", "failed"].includes(task.data.orchestration_state);
+  const canDelay = task.data.orchestration_state === "scheduled" && Boolean(delayedUntil) && new Date(delayedUntil).getTime() > Date.now();
+  const canIgnore = ["discovered", "ready", "waiting_approval", "credit_blocked", "human_required", "failed"].includes(task.data.orchestration_state);
+  const canExecuteState = ["ready", "failed"].includes(task.data.orchestration_state);
 
   return <PageShell title={task.data.title} description={`${task.data.source_type} · ${shortId(task.data.id)}`} actions={canManageSystem ? <Link className={buttonVariants({ variant: "outline" })} to={`/admin/runtime-settings?scope=task&target=${taskId}`}><Settings2 className="size-4" />任务运行设置</Link> : undefined}>
     {error ? <QueryError error={error} /> : null}
@@ -57,10 +91,18 @@ export function TaskDetailPage() {
 
     <Card><CardHeader><CardTitle>能力与操作</CardTitle></CardHeader><CardContent className="space-y-4">
       <div className="flex flex-wrap gap-2">{task.data.capabilities.map((capability) => <Badge key={capability} variant="secondary">{capability}</Badge>)}</div>
-      {policyBlocked && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>策略阻止自动执行</AlertTitle><AlertDescription>正式或未知性质任务必须先通过统一审批策略；当前 API 尚未提供对应批准动作，因此 WebUI 不会绕过 Core 直接执行。</AlertDescription></Alert> : null}
+      {actionNotice ? <Alert><AlertTitle>Core Action 已提交</AlertTitle><AlertDescription>{actionNotice}</AlertDescription></Alert> : null}
+      {policyBlocked && executable ? <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"><AlertTitle>正式测评保护生效</AlertTitle><AlertDescription>批准只改变编排等待状态，不会授予正式测评的执行或提交权限；当前 Core 默认继续阻止远端写入。</AlertDescription></Alert> : null}
       {needsDraft ? <div className="max-w-xl space-y-2"><Label htmlFor="submission-draft">Submission Draft ID</Label><Input id="submission-draft" value={submissionDraftId} onChange={(event) => setSubmissionDraftId(event.target.value)} placeholder="测评任务必须绑定已审核的不可变 Draft" /></div> : null}
-      <Button disabled={!executable || policyBlocked || execute.isPending || (needsDraft && !submissionDraftId.trim())} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : "通过 Core 调度执行"}</Button>
+      <div className="flex flex-wrap gap-2">
+        <Button disabled={!executable || !canExecuteState || policyBlocked || execute.isPending || lifecyclePending || (needsDraft && !submissionDraftId.trim())} onClick={() => execute.mutate()}><Play className="size-4" />{execute.isPending ? "正在调度…" : "通过 Core 调度执行"}</Button>
+        <Button variant="outline" disabled={!canApprove || lifecyclePending || execute.isPending} onClick={() => approve.mutate()}><CheckCircle2 className="size-4" />{approve.isPending ? "批准中…" : "批准"}</Button>
+        <Button variant="outline" disabled={!canIgnore || lifecyclePending || execute.isPending} onClick={() => { if (window.confirm("忽略后 Asterism 不会自动处理此任务，确认继续？")) ignore.mutate(); }}><EyeOff className="size-4" />{ignore.isPending ? "忽略中…" : "忽略"}</Button>
+        <Button variant="destructive" disabled={!canCancel || lifecyclePending || execute.isPending} onClick={() => { if (window.confirm("取消会撤销尚未领取的执行和积分预留，确认继续？")) cancel.mutate(); }}><Ban className="size-4" />{cancel.isPending ? "取消中…" : "取消"}</Button>
+      </div>
+      <div className="grid max-w-xl gap-2 sm:grid-cols-[1fr_auto] sm:items-end"><div className="space-y-2"><Label htmlFor="delayed-until">延迟至</Label><Input id="delayed-until" type="datetime-local" value={delayedUntil} onChange={(event) => setDelayedUntil(event.target.value)} /></div><Button variant="outline" disabled={!canDelay || lifecyclePending || execute.isPending} onClick={() => delay.mutate()}><Hourglass className="size-4" />{delay.isPending ? "延迟中…" : "延迟待执行任务"}</Button></div>
       {!executable ? <p className="text-sm text-muted-foreground">此任务未声明可执行 capability，只提供只读检查。</p> : null}
+      {executable && !canExecuteState && !policyBlocked ? <p className="text-sm text-muted-foreground">当前编排状态不可直接执行；等待审批时先批准，已调度时可延迟或取消。</p> : null}
     </CardContent></Card>
 
     <div className="grid gap-4 lg:grid-cols-3">

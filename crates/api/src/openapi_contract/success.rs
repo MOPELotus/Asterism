@@ -76,6 +76,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("getSubmissionDraft", "SubmissionDraft"),
     ("getSubmissionResult", "SubmissionResult"),
     ("executeTask", "ExecuteTaskResponse"),
+    ("approveTask", "TaskLifecycleResponse"),
+    ("cancelTask", "TaskLifecycleResponse"),
+    ("delayTask", "TaskLifecycleResponse"),
+    ("ignoreTask", "TaskLifecycleResponse"),
     ("getOwnCreditAccount", "CreditAccount"),
     ("listOwnCreditTransactions", "CreditTransactionPageResponse"),
     ("listOwnCreditReservations", "CreditReservationPageResponse"),
@@ -640,6 +644,27 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             object(
                 &["execution", "created"],
                 json!({"execution": schema_ref("Execution"), "created": {"type": "boolean"}}),
+            ),
+        ),
+        (
+            "TaskLifecycleResponse",
+            object(
+                &[
+                    "task_id",
+                    "action",
+                    "task_state",
+                    "affected_execution_id",
+                    "delayed_until",
+                    "created",
+                ],
+                json!({
+                    "task_id": uuid(),
+                    "action": {"type": "string", "enum": ["approve", "cancel", "delay", "ignore"]},
+                    "task_state": {"type": "string", "enum": ["discovered", "ready", "waiting_approval", "scheduled", "credit_blocked", "human_required", "running", "recovering", "retry_waiting", "succeeded", "failed", "cancelled", "ignored"]},
+                    "affected_execution_id": {"oneOf": [uuid(), {"type": "null"}]},
+                    "delayed_until": {"oneOf": [timestamp(), {"type": "null"}]},
+                    "created": {"type": "boolean"}
+                }),
             ),
         ),
         ("ExecutionPageResponse", page_response("Execution")),

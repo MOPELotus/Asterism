@@ -209,10 +209,11 @@ fn event_type(event: &EventEnvelope) -> &'static str {
     use asterism_events::DomainEvent::{
         AuthStateChanged, CreditCommitted, CreditGranted, CreditReleased, CreditReserved,
         ExecutionLogged, ExecutionProgressed, ExecutionRecoveryRequired, ExecutionStateChanged,
-        HumanRequired, TaskChanged,
+        HumanRequired, TaskChanged, TaskLifecycleActionApplied,
     };
     match &event.event {
         TaskChanged { .. } => "task_changed",
+        TaskLifecycleActionApplied { .. } => "task_lifecycle_action_applied",
         ExecutionStateChanged { .. } => "execution_state_changed",
         ExecutionProgressed(_) => "execution_progressed",
         ExecutionLogged(_) => "execution_logged",

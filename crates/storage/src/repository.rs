@@ -10,7 +10,8 @@ use asterism_domain::{
     ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
     Question, QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken,
     ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
-    SubmissionResultId, Task, TaskId, Timestamp, User, UserId, WebSession, WebSessionId,
+    SubmissionResultId, Task, TaskActionReceiptId, TaskId, TaskLifecycleAction, Timestamp, User,
+    UserId, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -60,6 +61,59 @@ pub trait TaskQueryRepository: Send + Sync {
 #[async_trait]
 pub trait TaskRuntimeRepository: Send + Sync {
     async fn find_runtime_task(&self, task_id: TaskId) -> Result<Option<Task>, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskLifecycleReceipt {
+    pub id: TaskActionReceiptId,
+    pub owner_id: UserId,
+    pub task_id: TaskId,
+    pub action: TaskLifecycleAction,
+    pub idempotency_key: String,
+    pub delayed_until: Option<Timestamp>,
+    pub result_task_state: OrchestrationState,
+    pub affected_execution_id: Option<ExecutionId>,
+    pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskLifecycleMutation<'a> {
+    pub owner_id: UserId,
+    pub task_id: TaskId,
+    pub action: TaskLifecycleAction,
+    pub expected_task_state: OrchestrationState,
+    pub target_task_state: OrchestrationState,
+    pub delayed_until: Option<Timestamp>,
+    pub request_source: asterism_domain::RequestSource,
+    pub actor: AuditActor,
+    pub idempotency_key: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskLifecycleMutationOutcome {
+    Applied(TaskLifecycleReceipt),
+    Existing(TaskLifecycleReceipt),
+    IdempotencyConflict,
+    TaskNotFound,
+    StateConflict,
+}
+
+/// Atomic owner-scoped Task lifecycle control, including any pending
+/// Execution, scheduler job, credit reservation, audit and outbox effects.
+#[async_trait]
+pub trait TaskLifecycleRepository: Send + Sync {
+    async fn find_task_lifecycle_receipt(
+        &self,
+        owner_id: UserId,
+        idempotency_key: &str,
+    ) -> Result<Option<TaskLifecycleReceipt>, StorageError>;
+
+    async fn apply_task_lifecycle_mutation(
+        &self,
+        mutation: TaskLifecycleMutation<'_>,
+    ) -> Result<TaskLifecycleMutationOutcome, StorageError>;
 }
 
 /// One immutable, complete Question parse captured from a single fresh Provider

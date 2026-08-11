@@ -3,7 +3,7 @@ use std::str::FromStr;
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, Execution, NormalizedAnswer,
     ProviderAccountId, ProviderId, Question, QuestionId, QuestionSnapshotId, SubmissionDraftId,
-    SubmissionResultId, Task, TaskId, Timestamp,
+    SubmissionResultId, Task, TaskId, TaskLifecycleAction, Timestamp,
 };
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
@@ -16,14 +16,15 @@ use asterism_engine::{
     ProviderTaskDurationService, ProviderTaskProgressError, ProviderTaskProgressService,
     ReadTaskDetailCommand, ReadTaskDurationCommand, ReadTaskProgressCommand,
     ReadTaskQuestionsCommand, ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand,
-    SubmissionDraftBuildError, SubmissionDraftBuildService,
+    SubmissionDraftBuildError, SubmissionDraftBuildService, TaskLifecycleCommand,
+    TaskLifecycleError, TaskLifecycleService,
 };
 use asterism_provider_api::{ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail};
 use asterism_storage::{
     AnswerCandidateRepository, QuestionSnapshotRepository, SqliteExecutionRepository,
     SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
-    SqliteQuestionSnapshotRepository, SqliteTaskQueryRepository, SubmissionDraftRepository,
-    SubmissionResultRepository, TaskQueryRepository,
+    SqliteQuestionSnapshotRepository, SqliteTaskLifecycleRepository, SqliteTaskQueryRepository,
+    SubmissionDraftRepository, SubmissionResultRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -609,6 +610,132 @@ pub(super) async fn execute_task(
     ))
 }
 
+pub(super) async fn approve_task(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    apply_lifecycle_action(
+        state,
+        auth,
+        &task_id,
+        &headers,
+        TaskLifecycleAction::Approve,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn cancel_task(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    apply_lifecycle_action(
+        state,
+        auth,
+        &task_id,
+        &headers,
+        TaskLifecycleAction::Cancel,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn ignore_task(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    apply_lifecycle_action(
+        state,
+        auth,
+        &task_id,
+        &headers,
+        TaskLifecycleAction::Ignore,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn delay_task(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<DelayTaskRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let request = payload.map(|Json(request)| request).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_delay_task_request",
+            "the delay request must contain one valid future delayed_until timestamp",
+        )
+    })?;
+    apply_lifecycle_action(
+        state,
+        auth,
+        &task_id,
+        &headers,
+        TaskLifecycleAction::Delay,
+        Some(request.delayed_until),
+    )
+    .await
+}
+
+async fn apply_lifecycle_action(
+    state: ApiState,
+    auth: AuthContext,
+    task_id: &str,
+    headers: &HeaderMap,
+    action: TaskLifecycleAction,
+    delayed_until: Option<Timestamp>,
+) -> Result<Response, ApiError> {
+    let (owner_id, request_source) = auth.require_task_execute()?;
+    let task_id = TaskId::from_str(task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let idempotency_key = required_header(headers, IDEMPOTENCY_KEY, 256)?;
+    let correlation_id = required_header(headers, "x-request-id", 128)?;
+    let result = TaskLifecycleService::new(
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteTaskLifecycleRepository::new(state.database),
+    )
+    .apply(TaskLifecycleCommand {
+        owner_id,
+        task_id,
+        action,
+        delayed_until,
+        request_source,
+        actor: auth.audit_actor(),
+        idempotency_key: idempotency_key.to_owned(),
+        correlation_id: correlation_id.to_owned(),
+        requested_at: Utc::now(),
+    })
+    .await
+    .map_err(map_task_lifecycle_error)?;
+    let status = if result.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok(crate::auth::no_store(
+        (
+            status,
+            Json(TaskLifecycleResponse {
+                task_id: result.task_id,
+                action: result.action,
+                task_state: result.task_state,
+                affected_execution_id: result.affected_execution_id,
+                delayed_until: result.delayed_until,
+                created: result.created,
+            }),
+        )
+            .into_response(),
+    ))
+}
+
 fn required_header<'a>(
     headers: &'a HeaderMap,
     name: &'static str,
@@ -697,6 +824,25 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
         ExecutionRequestError::Transition(_) | ExecutionRequestError::Storage(_) => {
             ApiError::internal(error)
         }
+    }
+}
+
+fn map_task_lifecycle_error(error: TaskLifecycleError) -> ApiError {
+    match error {
+        TaskLifecycleError::TaskNotFound => ApiError::not_found("task_not_found"),
+        TaskLifecycleError::TaskStateConflict => ApiError::conflict(
+            "task_state_conflict",
+            "the task state changed, the action is not allowed, or a pending job is already claimed",
+        ),
+        TaskLifecycleError::InvalidDelay => ApiError::bad_request(
+            "invalid_task_delay",
+            "delay requires a future delayed_until timestamp for a pending scheduled task",
+        ),
+        TaskLifecycleError::IdempotencyConflict => ApiError::conflict(
+            "idempotency_conflict",
+            "the idempotency key is already bound to another task action",
+        ),
+        TaskLifecycleError::Storage(_) => ApiError::internal(error),
     }
 }
 
@@ -1192,6 +1338,22 @@ struct TaskPageResponse {
 struct ExecuteTaskResponse {
     execution: Execution,
     created: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskLifecycleResponse {
+    task_id: TaskId,
+    action: TaskLifecycleAction,
+    task_state: asterism_domain::OrchestrationState,
+    affected_execution_id: Option<asterism_domain::ExecutionId>,
+    delayed_until: Option<Timestamp>,
+    created: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DelayTaskRequest {
+    delayed_until: Timestamp,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]

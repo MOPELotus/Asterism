@@ -308,9 +308,7 @@ fn validate_task(
 ) -> Result<(), ExecutionRequestError> {
     if !matches!(
         task.orchestration_state,
-        OrchestrationState::Ready
-            | OrchestrationState::WaitingApproval
-            | OrchestrationState::Failed
+        OrchestrationState::Ready | OrchestrationState::Failed
     ) {
         return Err(ExecutionRequestError::TaskStateConflict);
     }

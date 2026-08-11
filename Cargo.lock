@@ -389,6 +389,7 @@ dependencies = [
  "anyhow",
  "asterism-domain",
  "asterism-secrets",
+ "chrono",
  "clap",
  "reqwest",
  "rpassword",

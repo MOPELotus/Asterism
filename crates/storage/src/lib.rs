@@ -17,6 +17,7 @@ mod scheduler;
 mod secret;
 mod session;
 mod task;
+mod task_lifecycle;
 mod user;
 
 pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
@@ -49,8 +50,9 @@ pub use repository::{
     ProviderRuntimeSettingsWriteRequest, QuestionSnapshot, QuestionSnapshotRepository,
     ScanScheduleRepository, SchedulerRepository, SessionRepository, SubmissionDraftRepository,
     SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
-    TaskPage, TaskQueryRepository, TaskRepository, TaskRuntimeRepository, UserRepository,
-    VerificationRecoveryStartRequest,
+    TaskLifecycleMutation, TaskLifecycleMutationOutcome, TaskLifecycleReceipt,
+    TaskLifecycleRepository, TaskPage, TaskQueryRepository, TaskRepository, TaskRuntimeRepository,
+    UserRepository, VerificationRecoveryStartRequest,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,
@@ -62,4 +64,5 @@ pub use secret::{
 };
 pub use session::SqliteSessionRepository;
 pub use task::SqliteTaskQueryRepository;
+pub use task_lifecycle::SqliteTaskLifecycleRepository;
 pub use user::{InitialMaster, SqliteUserRepository};

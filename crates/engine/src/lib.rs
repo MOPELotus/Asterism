@@ -20,6 +20,7 @@ mod scan_worker;
 mod submission_build;
 mod task_detail;
 mod task_duration;
+mod task_lifecycle;
 mod task_progress;
 mod transition;
 
@@ -89,6 +90,9 @@ pub use task_detail::{
 pub use task_duration::{
     ProviderTaskDurationError, ProviderTaskDurationResult, ProviderTaskDurationService,
     ReadTaskDurationCommand,
+};
+pub use task_lifecycle::{
+    TaskLifecycleCommand, TaskLifecycleError, TaskLifecycleResult, TaskLifecycleService,
 };
 pub use task_progress::{
     ProviderTaskProgressError, ProviderTaskProgressResult, ProviderTaskProgressService,

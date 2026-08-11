@@ -1,5 +1,6 @@
 import type {
   BuildSubmissionDraftResponse,
+  ApproveTaskResponse,
   CurrentIdentityResponse,
   GetExecutionResponse,
   GetOwnCreditAccountResponse,
@@ -56,6 +57,19 @@ export type TaskListContractIsTyped = Assert<
     limit: number;
     offset: number;
     total: number;
+  }
+    ? true
+    : false
+>;
+
+export type TaskLifecycleContractIsTyped = Assert<
+  ApproveTaskResponse extends {
+    action: "approve" | "cancel" | "delay" | "ignore";
+    affected_execution_id: string | null;
+    created: boolean;
+    delayed_until: string | null;
+    task_id: string;
+    task_state: string;
   }
     ? true
     : false

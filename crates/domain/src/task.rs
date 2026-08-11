@@ -52,6 +52,17 @@ pub enum OrchestrationState {
     Ignored,
 }
 
+/// User-facing controls over Core orchestration. These actions never grant
+/// permission to execute or submit a formal assessment.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskLifecycleAction {
+    Approve,
+    Cancel,
+    Delay,
+    Ignore,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskCapability {

@@ -2867,3 +2867,35 @@ still passes exact persisted Candidate IDs through the shared Core action.
 Execution binds the returned immutable Draft and a stable idempotency key.
 Formal assessments remain blocked because a durable approval contract does not
 yet exist; the browser cannot turn a local confirmation into execution policy.
+
+## One-hundred-and-seventy-second Phase 0 slice
+
+Task approval, cancellation, delay and ignore now use one owner-scoped Engine
+service and four versioned HTTP Core Actions shared by WebUI, CLI and future
+integration clients. Every action requires a caller-stable idempotency key and
+persists an exact receipt; replay returns the original outcome, while reusing a
+key for another Task, action or delay timestamp conflicts before mutable state
+is inspected.
+
+Approval is deliberately narrow: only WaitingApproval moves to Ready. It does
+not set or persist any formal-assessment execution/submission permission, so a
+formal Task remains blocked by the independent assessment guard. Execute can no
+longer schedule directly from WaitingApproval. Ignore changes only local
+orchestration and never contacts a Provider.
+
+Delay is accepted only for a future timestamp while the Task and its single
+active Execution are Scheduled and the initial scheduler Job is still Pending;
+the Execution and Job timestamps move in one immediate transaction. Cancel can
+close a Task with no Execution, or atomically cancel a non-running Requested,
+Scheduled, RetryWaiting or HumanRequired Execution, cancel all matching pending
+Jobs, release an active credit reservation, write sanitized Audit, persist the
+receipt and enqueue Task/Execution/Credit outbox events. A claimed Job, lease,
+Running or Recovering mutation conflicts instead of presenting a false local
+cancellation while remote work may continue.
+
+The generated OpenAPI client exposes strong response types for all four
+actions. The Task page renders state-aware approve, cancel, delay and ignore
+controls, preserves idempotency keys across retries, and clearly separates
+orchestration approval from the formal-assessment safety barrier. Storage,
+Engine and HTTP regressions cover replay, waiting-state bypass prevention,
+atomic delay, atomic cancellation/refund and claimed-job refusal.
