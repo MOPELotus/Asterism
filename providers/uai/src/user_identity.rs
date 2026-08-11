@@ -48,6 +48,9 @@ pub(crate) fn parse_user_identity(document: &[u8]) -> ProviderResult<UaiUserIden
             "UAI user-info endpoint rejected the current session",
         ));
     }
+    if envelope.code != Some(1) || envelope.success != Some(true) {
+        return Err(invalid_user_info_response());
+    }
     let mut user = envelope
         .value
         .and_then(|value| value.user_info)
@@ -60,6 +63,8 @@ pub(crate) fn parse_user_identity(document: &[u8]) -> ProviderResult<UaiUserIden
 
 #[derive(Deserialize)]
 struct UserInfoEnvelope {
+    #[serde(default)]
+    code: Option<i64>,
     #[serde(default)]
     success: Option<bool>,
     #[serde(default)]
@@ -169,7 +174,7 @@ mod tests {
         assert!(!format!("{identity:?}").contains("synthetic"));
 
         let text = parse_user_identity(
-            br#"{"success":true,"value":{"userInfo":{"appUserId":"app-42","ssoId":"sso.42"}}}"#,
+            br#"{"code":1,"success":true,"value":{"userInfo":{"appUserId":"app-42","ssoId":"sso.42"}}}"#,
         )
         .unwrap();
         assert_eq!(text.app_user_id(), "app-42");
@@ -179,13 +184,13 @@ mod tests {
     fn parser_rejects_missing_rejected_or_unsafe_identity_facts() {
         assert!(
             parse_user_identity(
-                br#"{"success":true,"value":{"userInfo":{"appUserId":"synthetic"}}}"#
+                br#"{"code":1,"success":true,"value":{"userInfo":{"appUserId":"synthetic"}}}"#
             )
             .is_err()
         );
         assert_eq!(
             parse_user_identity(
-                br#"{"success":false,"value":{"userInfo":{"appUserId":42,"ssoId":"id"}}}"#
+                br#"{"code":0,"success":false,"value":{"userInfo":{"appUserId":42,"ssoId":"id"}}}"#
             )
             .unwrap_err()
             .kind,
@@ -193,13 +198,19 @@ mod tests {
         );
         assert!(
             parse_user_identity(
-                br#"{"success":true,"value":{"userInfo":{"appUserId":"../unsafe","ssoId":"id"}}}"#
+                br#"{"code":1,"success":true,"value":{"userInfo":{"appUserId":"../unsafe","ssoId":"id"}}}"#
             )
             .is_err()
         );
         assert!(
             parse_user_identity(
-                br#"{"success":true,"value":{"userInfo":{"appUserId":0,"ssoId":"id"}}}"#
+                br#"{"code":1,"success":true,"value":{"userInfo":{"appUserId":0,"ssoId":"id"}}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            parse_user_identity(
+                br#"{"success":true,"value":{"userInfo":{"appUserId":42,"ssoId":"id"}}}"#
             )
             .is_err()
         );

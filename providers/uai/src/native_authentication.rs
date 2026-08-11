@@ -283,18 +283,18 @@ mod tests {
     fn user_info_requires_both_bounded_identity_markers() {
         validate_user_info_response(USER_INFO).unwrap();
         validate_user_info_response(
-            br#"{"success":true,"value":{"userInfo":{"appUserId":42,"ssoId":"synthetic-sso"}}}"#,
+            br#"{"code":1,"success":true,"value":{"userInfo":{"appUserId":42,"ssoId":"synthetic-sso"}}}"#,
         )
         .unwrap();
         assert!(
             validate_user_info_response(
-                br#"{"success":true,"value":{"userInfo":{"appUserId":"synthetic"}}}"#
+                br#"{"code":1,"success":true,"value":{"userInfo":{"appUserId":"synthetic"}}}"#
             )
             .is_err()
         );
         assert!(
             validate_user_info_response(
-                br#"{"success":false,"value":{"userInfo":{"appUserId":42,"ssoId":"id"}}}"#
+                br#"{"code":0,"success":false,"value":{"userInfo":{"appUserId":42,"ssoId":"id"}}}"#
             )
             .is_err()
         );
