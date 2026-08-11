@@ -72,6 +72,11 @@ Task identity. Unit facts include `unitname` and `visible`. SCO leaf facts inclu
 Stable normalized hierarchy is Course → Unit index → SCO ID. Mutable labels,
 visibility, completion and duration must not be used as identity.
 
+The audited `scoLeaves` shape does not expose a trustworthy assessment-nature
+field. Every SCO therefore keeps `assessment_class=Unknown`; a Resource module
+label or ordinary-looking title is not evidence that an item is Routine, and
+cannot be used to bypass the independent formal-assessment policy.
+
 The current runtime boundary requires one Course-list document and, for every
 explicit Course scan, one Unit document plus exactly one `scoLeaves` response
 per Unit. An empty Unit response is valid; a missing, duplicated, out-of-range

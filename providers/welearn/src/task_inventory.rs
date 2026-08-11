@@ -225,7 +225,7 @@ fn parse_leaves(
             course_remote_id: Some(course.remote_id.clone()),
             title,
             source_type: SourceType::Resource,
-            assessment_class: AssessmentClass::Routine,
+            assessment_class: AssessmentClass::Unknown,
             remote_state,
             opens_at: None,
             due_at: None,

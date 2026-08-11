@@ -70,6 +70,8 @@ only structural field names, response codes and bounded placeholder shapes.
 ## Regression requirements
 
 - String and numeric `cid`/SCO IDs normalize identically.
+- SCO assessment nature remains `Unknown` unless a future audited field proves
+  it; a Resource source type never implies Routine assessment.
 - Unknown/missing completion text maps to `Unknown`, never `Pending` by default.
 - Hidden Units/SCOs remain visible as `NotOpen` observations rather than being
   silently deleted.

@@ -8,6 +8,7 @@
 | Course path alternates between `/student` and `/2019/student` | Donors mix both paths | Treat one as current only after live comparison; do not scatter hard-coded paths |
 | `courseunits` accepts GET and POST in different donors | Both forms appear in audited revisions | Select one after live validation and retain the other only as a classified fallback |
 | Completion labels are localized or schema-dependent | `scoLeaves` donors inspect text fields directly | Keep raw sanitized label and map unknown values to `Unknown` |
+| SCO module label is mistaken for assessment nature | Current inventory exposes Resource-like leaves but no formal/routine classification field | Keep assessment class `Unknown`; classify only from a separately audited explicit fact |
 | `getscoinfo_v7` outer or nested shape changes | Audited response stores JSON text inside the outer `comment` string and may omit `cmi` before first start | Keep both layers bounded, reject ambiguous shapes, and never start a SCO to repair a read |
 | CMI progress grammar changes | Current donor reads decimal `progress_measure` in the `0..1` range | Accept only the bounded audited decimal grammar; add sanitized evidence before widening it |
 | CMI time units/format drift | Donors forward opaque `session_time`/`total_time` values | Parse and report only after real response fixtures establish units and grammar |
