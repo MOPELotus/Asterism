@@ -306,14 +306,10 @@ pub fn parse_question_content(
         ));
     }
     valid_component(group_id)?;
-    if task_types.is_empty()
-        || !task_types
-            .iter()
-            .all(|value| supported_question_type(value))
-    {
+    if !supports_question_read(task_types, expected_count) {
         return Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
-            "UAI Question read does not support this Group task type",
+            "UAI Question read does not support this Group Question shape",
         ));
     }
     let envelope: Value = serde_json::from_str(document)
@@ -553,8 +549,10 @@ const fn question_kind(task_type: &str) -> QuestionKind {
 }
 
 pub(crate) fn supports_question_read(task_types: &[String], question_count: Option<u32>) -> bool {
-    question_count.is_some_and(|value| value > 0)
-        && !task_types.is_empty()
+    question_count
+        .filter(|count| *count > 0)
+        .and_then(|count| usize::try_from(count).ok())
+        .is_some_and(|count| task_types.len() == 1 || task_types.len() == count)
         && task_types
             .iter()
             .all(|value| supported_question_type(value))
@@ -899,6 +897,28 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            parse_question_content(
+                CONTENT,
+                "group-questions",
+                &["multichoice".to_owned(), "short_answer".to_owned()],
+                Some(1),
+            )
+            .is_err()
+        );
+        assert!(supports_question_read(&["multichoice".to_owned()], Some(3)));
+        assert!(supports_question_read(
+            &[
+                "multichoice".to_owned(),
+                "short_answer".to_owned(),
+                "single-choice".to_owned(),
+            ],
+            Some(3),
+        ));
+        assert!(!supports_question_read(
+            &["multichoice".to_owned(), "short_answer".to_owned()],
+            Some(3),
+        ));
         assert!(
             parse_question_content(
                 CONTENT,

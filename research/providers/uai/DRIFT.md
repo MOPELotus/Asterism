@@ -25,6 +25,7 @@
 | Page residence stops producing duration | Current userscript relies on active page lifecycle | Prefer native network evidence; otherwise isolate a headless compatibility worker and verify fresh duration |
 | Direct submit completes without duration | Backend donors submit answers independently of page residence | Keep CompletionService and DurationService separate; never claim execution from completion alone |
 | Encrypted content/answer framing changes | Donors currently use `unipus.` hex AES-ECB envelopes with a key suffix | Bound and validate every layer before decrypting; never persist ciphertext, key material or route context |
+| Group `base` cardinality no longer describes its Questions | Donors use either one homogeneous type or one type per Question | Require exactly one supported type or an exact type-to-`question_num` cardinality before advertising or parsing Questions |
 | Submission throttling is mistaken for success | Donor returns `600001`/`600002` for rate limiting | Return typed retry state and never repeat a mutation without Core idempotency/recovery authority |
 | Submit receipt is accepted as result verification | Fresh user-module and progress reads are separate donor calls | Keep SubmissionExecute and SubmissionVerify separate and require a fresh identity-bound readback |
 | A missing receipt causes verification to guess the current module version | The readback route is keyed by the submit response version | Return Inconclusive without transport I/O when no accepted version receipt exists |

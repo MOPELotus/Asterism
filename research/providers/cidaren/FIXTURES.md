@@ -32,6 +32,9 @@ Inline negative tests must cover empty/oversized/non-JSON responses, non-object
 records, unsupported task types/status values, duplicate release identities,
 conflicting duplicate Course titles, inconsistent totals, missing pages,
 oversized page/row counts, invalid percentages and unsafe remote components.
+Legacy decoder tests generate synthetic JSON/base64 and insert the exact
+versioned confusion bytes in memory; no published or real word/question payload
+is copied into the repository.
 
 ## Required live-sanitized fixtures
 
@@ -69,5 +72,7 @@ placeholder identities, result codes, status values and pagination shape.
 - Learning and test tasks remain distinct source types but both are Routine.
 - Expiry, completion, progress, score and raw time remain independent facts.
 - Raw `time_spent` never becomes `duration_seconds` without live unit proof.
+- Legacy response decoding is bounded, exact-version only and rejects
+  Capture-bound `jv=99` without retaining plaintext buffers.
 - Unknown response fields are dropped.
 - No Capture, answer, mutation or live-verification capability is advertised.

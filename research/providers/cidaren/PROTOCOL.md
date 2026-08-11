@@ -165,6 +165,25 @@ crypto context and derives a per-session key with HKDF before AES-GCM
 authentication. That material is Capture-dependent and is not implemented in
 the first non-Capture read-only milestone.
 
+The Provider now isolates a non-Capture decoder for exact audited variants:
+
+```text
+jv=0
+jv=2_1254
+jv=2_9214
+jv=2_10232
+jv=2_10234
+jv=3_1021
+```
+
+It bounds encoded and decoded data to 2 MiB, accepts only JSON objects/arrays,
+removes only the fixed inserted-byte positions for the declared variant,
+zeroizes temporary decoded bytes and rejects unknown versions instead of
+guessing indices. Public issue 43 establishes the `2_1254` family, but its
+textbook word payload is not retained as a fixture. `jv=99` returns
+UnsupportedTask at this boundary; the decoder does not justify advertising
+QuestionInventory/QuestionParse or starting a remote attempt.
+
 Question discovery, answer resolution, submission construction, mutation and
 fresh verification must remain separate capabilities. The donor's strings
 such as “task complete” do not replace an identity-bound post-mutation read.

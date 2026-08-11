@@ -21,6 +21,10 @@ not credentials or executable request material:
 - [issue 83](https://github.com/ularch/Easy_Cidaren/issues/83) records a 2026
   `StudyTask/List` response with selected Course metadata, ordinary unit rows,
   `task_type=3`, `list_id`, access flags and repeated `task_id=-1`;
+- [issue 43](https://github.com/ularch/Easy_Cidaren/issues/43) records a 2025
+  `StudyTask/Info` response using the legacy `jv=2_1254` inserted-byte base64
+  family; the published payload is evidence only and is not copied into a
+  fixture;
 - [issue 106](https://github.com/ularch/Easy_Cidaren/issues/106) records the
   identity hazard around `task_id=-1`, so a class task must be rebound through
   its release identity before later operations;

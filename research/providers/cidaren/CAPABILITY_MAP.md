@@ -10,7 +10,7 @@
 | TaskDetail | Current donor + Asterism Core | FromScratch | Offline/native-boundary covered: freshly re-list the matching class or study endpoint and require one exact stable identity before returning details; never trust a stale `task_id` |
 | TaskProgressRead | Current/private task rows | PortSource | Offline/native-boundary covered for class and ordinary study Tasks: fresh rows expose bounded percent and state; duration remains unavailable while raw time, score and completion stay separate |
 | DurationRead | Public issue fixture | Reference | `time_spent` is recorded but its unit and semantics require live proof; do not expose seconds yet |
-| QuestionInventory / QuestionParse | Current private donor | PortSource | `StartAnswer` returns one decoded topic at a time; defer until the current `jv` decoder and attempt lifecycle are isolated |
+| QuestionInventory / QuestionParse | Current private donor + public issue 43 | PortSource | Exact bounded legacy `jv=0`, `2_*` and `3_*` response decoding is isolated and offline-tested, but no capability is advertised because current `jv=99` still requires deferred Capture crypto context and `StartAnswer` creates an attempt lifecycle |
 | AnswerResolve | Current private donor | PortSource | Donor derives answers from course vocabulary and topic mode; keep separate from parsing and mutation |
 | SubmissionBuild | Current/private donor | Reference | Preserve signed request shape as a credential-free preview before execution |
 | SubmissionExecute | Current/private donor | PortSource | `VerifyAnswer`, `SubmitAnswerAndSave`, `SkipAnswer` and `SubmitChoseWord` are distinct mutations; deferred until read-only chain is complete |
@@ -48,5 +48,8 @@ The initial non-Capture milestone now:
 12. re-lists the matching native inventory for every detail/progress read,
     rejects malformed or disappeared stable identities and never converts raw
     `time_spent` into duration seconds;
-13. advertises no execution, answer, duration-seconds, Capture or live-verified
-    capability.
+13. isolates exact legacy base64/confusion-byte response decoding without
+    copying public word/question payloads, rejects unknown variants and returns
+    UnsupportedTask for Capture-bound `jv=99`;
+14. advertises no execution, question, answer, duration-seconds, Capture or
+    live-verified capability.

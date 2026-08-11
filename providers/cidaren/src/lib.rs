@@ -11,6 +11,7 @@ mod inventory;
 mod metadata;
 mod native_http;
 mod provider;
+mod response_decode;
 mod stored_session;
 mod study_tasks;
 mod task_read;
@@ -30,6 +31,7 @@ pub use provider::{
     build_development_provider, build_development_provider_native,
     build_development_provider_with_stored_session,
 };
+pub use response_decode::decode_legacy_response_data;
 pub use stored_session::StoredCidarenSessionResolver;
 pub use study_tasks::{parse_study_course, parse_study_task_inventory};
 pub use task_read::{CidarenTaskDetail, CidarenTaskProgress};

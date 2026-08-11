@@ -17,7 +17,7 @@
 | Status vocabulary changes | Donor documents `over_status` 1/2/3 | Preserve unknown only after explicit mapping decision; never silently mark executable |
 | Completion is inferred from expiry | Donor filters expiry and progress independently | Keep remote state, progress and close status separate |
 | `time_spent` is assumed to be seconds | Samples are millisecond-like but no live unit proof exists | Preserve raw value; do not expose DurationRead until measured |
-| Response `jv` obfuscation changes | Multiple inserted-byte variants and 2026 `jv=99` exist | Bind decoder to exact version/crypto context; fail closed on unknown `jv` |
+| Response `jv` obfuscation changes | Multiple inserted-byte variants and 2026 `jv=99` exist | Legacy decoder accepts only exact frozen variants and bounded JSON; fail closed on unknown `jv`, and keep `jv=99` behind deferred Capture |
 | Browser crypto material leaks | Current private donor captures login/session crypto context | Store only through SecretStore if Capture is later implemented; never persist in Task data or logs |
 | Mutation success text is accepted as verification | Donor stops on localized completion strings | Re-list exact release identity and verify fresh progress/state after mutation |
 | Development Provider activates accidentally | No live account verification exists | Keep registration disabled by default and metadata at Development |
