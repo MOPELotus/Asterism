@@ -10,11 +10,14 @@ use asterism_provider_api::{
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    UaiQuestionDocument, encrypted::decrypt_unipus_payload, metadata::development_metadata,
-    parse_question_content, question::supports_question_read,
+    UaiQuestionDocument,
+    encrypted::{ZeroizingJsonValue, decrypt_unipus_payload},
+    metadata::development_metadata,
+    parse_question_content,
+    question::supports_question_read,
 };
 
 const MAX_ANSWER_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -191,11 +194,17 @@ pub fn parse_answer_candidates(
         .get("k")
         .and_then(Value::as_str)
         .ok_or_else(|| protocol_drift("UAI standard-answer response has no key suffix"))?;
-    let mut plaintext = decrypt_unipus_payload(encrypted, key_suffix, MAX_DECRYPTED_ANSWER_BYTES)?;
-    let decrypted: Value = serde_json::from_slice(&plaintext)
-        .map_err(|_| invalid_response("UAI decrypted standard answer is not valid JSON"))?;
-    plaintext.zeroize();
+    let plaintext = Zeroizing::new(decrypt_unipus_payload(
+        encrypted,
+        key_suffix,
+        MAX_DECRYPTED_ANSWER_BYTES,
+    )?);
+    let decrypted = ZeroizingJsonValue::new(
+        serde_json::from_slice(&plaintext)
+            .map_err(|_| invalid_response("UAI decrypted standard answer is not valid JSON"))?,
+    );
     let entries = decrypted
+        .as_value()
         .as_array()
         .ok_or_else(|| protocol_drift("UAI decrypted standard answer is not an array"))?;
     if entries.len() != questions.len() || entries.len() > MAX_QUESTIONS_PER_ANSWER {
@@ -273,9 +282,12 @@ fn choice_answers(entry: &serde_json::Map<String, Value>) -> ProviderResult<Vec<
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| protocol_drift("UAI choice standard answer has no answer document"))?;
-    let answer: Value = serde_json::from_str(answer)
-        .map_err(|_| invalid_response("UAI nested choice answer is not valid JSON"))?;
+    let answer = ZeroizingJsonValue::new(
+        serde_json::from_str(answer)
+            .map_err(|_| invalid_response("UAI nested choice answer is not valid JSON"))?,
+    );
     let children = answer
+        .as_value()
         .get("children")
         .and_then(Value::as_array)
         .ok_or_else(|| protocol_drift("UAI nested choice answer has no children"))?;
@@ -314,9 +326,12 @@ fn short_answer_texts(entry: &serde_json::Map<String, Value>) -> ProviderResult<
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| protocol_drift("UAI short-answer standard answer has no analysis"))?;
-    let analysis: Value = serde_json::from_str(analysis)
-        .map_err(|_| invalid_response("UAI nested short-answer analysis is not valid JSON"))?;
+    let analysis = ZeroizingJsonValue::new(
+        serde_json::from_str(analysis)
+            .map_err(|_| invalid_response("UAI nested short-answer analysis is not valid JSON"))?,
+    );
     let children = analysis
+        .as_value()
         .get("children")
         .and_then(Value::as_array)
         .ok_or_else(|| protocol_drift("UAI nested short-answer analysis has no children"))?;

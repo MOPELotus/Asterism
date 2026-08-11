@@ -188,6 +188,12 @@ fresh user-module read. Rate-limit codes `600001` and `600002` are not success.
 The donor also branches by `base` and `question_num`, including objective,
 preset, oral, subjective, discussion, exit-ticket and upload behavior.
 
+Decrypted byte buffers are zeroizing owners on every success and error path.
+Parsed decrypted content, standard-answer and user-module JSON trees likewise
+recursively zeroize all owned string values when normalization ends, including
+ignored remote fields. Only the explicitly normalized Question or answer facts
+cross the parser boundary; debug formatting for the raw JSON owner is redacted.
+
 Asterism now implements QuestionInventory/QuestionParse, AnswerResolve,
 SubmissionBuild, SubmissionExecute and SubmissionVerify as independent
 capabilities. Content and standard-answer reads each refresh and bind the exact

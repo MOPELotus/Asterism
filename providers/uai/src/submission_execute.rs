@@ -14,7 +14,7 @@ use chrono::Utc;
 use serde_json::Value;
 use zeroize::Zeroize;
 
-use crate::{UaiSubmissionBuild, metadata::development_metadata};
+use crate::{UaiSubmissionBuild, encrypted::ZeroizingJsonValue, metadata::development_metadata};
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
@@ -78,9 +78,12 @@ pub fn parse_submission_receipt(
             "UAI submission response is empty or exceeds the size limit",
         ));
     }
-    let response: Value = serde_json::from_str(document)
-        .map_err(|_| invalid_response("UAI submission response is not valid JSON"))?;
+    let response = ZeroizingJsonValue::new(
+        serde_json::from_str(document)
+            .map_err(|_| invalid_response("UAI submission response is not valid JSON"))?,
+    );
     let response = response
+        .as_value()
         .as_object()
         .ok_or_else(|| protocol_drift("UAI submission response is not an object"))?;
     let code = response

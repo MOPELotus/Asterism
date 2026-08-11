@@ -84,6 +84,7 @@ field names, placeholder identities and response/result codes.
 - Progress duration remains untyped and independent from completion.
 - Study-record duration seconds require one exact unique CourseResource/Unit/Group binding.
 - Content and standard answers remain independent fresh documents; neither may be reused as submission evidence.
+- Decrypted byte owners zeroize on parse success and failure; raw parsed JSON owners redact Debug output and recursively zeroize nested string values after normalization.
 - Question snapshots remain bound to the exact stable CourseResource/Unit/Group Task and cannot build a draft for another route.
 - Submission previews contain no selected answer values or executable provider payload.
 - Only one-question `single-choice`, `multichoice` and `short_answer` Groups advertise execute/verify.

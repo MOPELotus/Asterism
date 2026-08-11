@@ -3,11 +3,48 @@ use aes::{
     cipher::{Array, BlockCipherDecrypt, KeyInit},
 };
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
+use serde_json::Value;
+use std::fmt;
 use zeroize::Zeroize;
 
 const ENCRYPTED_PREFIX: &str = "unipus.";
 const AES_KEY_PREFIX: &[u8; 8] = b"1a2b3c4d";
 const AES_BLOCK_BYTES: usize = 16;
+
+/// Owns one decrypted JSON tree and recursively zeroizes every string value
+/// when the parser finishes, including ignored remote fields.
+pub(crate) struct ZeroizingJsonValue(Value);
+
+impl ZeroizingJsonValue {
+    pub(crate) const fn new(value: Value) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn as_value(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ZeroizingJsonValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ZeroizingJsonValue([REDACTED])")
+    }
+}
+
+impl Drop for ZeroizingJsonValue {
+    fn drop(&mut self) {
+        zeroize_json_strings(&mut self.0);
+    }
+}
+
+fn zeroize_json_strings(value: &mut Value) {
+    match value {
+        Value::String(value) => value.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_json_strings),
+        Value::Object(values) => values.values_mut().for_each(zeroize_json_strings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
 
 pub(crate) fn decrypt_unipus_payload(
     encrypted: &str,
@@ -110,4 +147,26 @@ fn invalid_response(message: &'static str) -> ProviderError {
 
 fn protocol_drift(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decrypted_json_owner_redacts_debug_and_zeroizes_nested_strings() {
+        let document = ZeroizingJsonValue::new(serde_json::json!({
+            "answer": "sensitive-answer",
+            "nested": ["ignored-sensitive-field"],
+        }));
+        assert!(!format!("{document:?}").contains("sensitive"));
+
+        let mut value = serde_json::json!({
+            "answer": "sensitive-answer",
+            "nested": ["ignored-sensitive-field"],
+        });
+        zeroize_json_strings(&mut value);
+        assert_eq!(value["answer"], "");
+        assert_eq!(value["nested"][0], "");
+    }
 }

@@ -13,9 +13,12 @@ use asterism_provider_api::{
 };
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::{encrypted::decrypt_unipus_payload, metadata::development_metadata};
+use crate::{
+    encrypted::{ZeroizingJsonValue, decrypt_unipus_payload},
+    metadata::development_metadata,
+};
 
 const MAX_QUESTION_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_DECRYPTED_DOCUMENT_BYTES: usize = 2 * 1_024 * 1_024;
@@ -328,12 +331,17 @@ pub fn parse_question_content(
         .get("k")
         .and_then(Value::as_str)
         .ok_or_else(|| protocol_drift("UAI Question content response has no key suffix"))?;
-    let mut plaintext =
-        decrypt_unipus_payload(encrypted, key_suffix, MAX_DECRYPTED_DOCUMENT_BYTES)?;
-    let outer: Value = serde_json::from_slice(&plaintext)
-        .map_err(|_| invalid_response("UAI decrypted Question wrapper is not valid JSON"))?;
-    plaintext.zeroize();
+    let plaintext = Zeroizing::new(decrypt_unipus_payload(
+        encrypted,
+        key_suffix,
+        MAX_DECRYPTED_DOCUMENT_BYTES,
+    )?);
+    let outer = ZeroizingJsonValue::new(
+        serde_json::from_slice(&plaintext)
+            .map_err(|_| invalid_response("UAI decrypted Question wrapper is not valid JSON"))?,
+    );
     let entries = outer
+        .as_value()
         .as_array()
         .ok_or_else(|| protocol_drift("UAI decrypted Question wrapper is not an array"))?;
     if entries.is_empty() || entries.len() > MAX_QUESTIONS_PER_DOCUMENT {
@@ -386,9 +394,12 @@ fn parse_question_entry(
             "UAI nested Question content is empty or exceeds the size limit",
         ));
     }
-    let content: Value = serde_json::from_str(content)
-        .map_err(|_| invalid_response("UAI nested Question content is not valid JSON"))?;
+    let content = ZeroizingJsonValue::new(
+        serde_json::from_str(content)
+            .map_err(|_| invalid_response("UAI nested Question content is not valid JSON"))?,
+    );
     let content = content
+        .as_value()
         .as_object()
         .ok_or_else(|| protocol_drift("UAI nested Question content is not an object"))?;
     let remote_id = entry

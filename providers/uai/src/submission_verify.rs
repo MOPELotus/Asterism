@@ -12,11 +12,11 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    UaiSubmissionBuild, UaiSubmissionPlan, metadata::development_metadata,
-    submission_execute::valid_submission_version,
+    UaiSubmissionBuild, UaiSubmissionPlan, encrypted::ZeroizingJsonValue,
+    metadata::development_metadata, submission_execute::valid_submission_version,
 };
 
 const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -198,9 +198,11 @@ pub fn parse_verification_snapshot(
             "UAI submission verification response is empty or exceeds the size limit",
         ));
     }
-    let response: Value = serde_json::from_str(document)
-        .map_err(|_| invalid_response("UAI submission verification response is not valid JSON"))?;
-    let state = bound_verification_state(&response, expected_group_id, expected_version)?;
+    let response =
+        ZeroizingJsonValue::new(serde_json::from_str(document).map_err(|_| {
+            invalid_response("UAI submission verification response is not valid JSON")
+        })?);
+    let state = bound_verification_state(response.as_value(), expected_group_id, expected_version)?;
     let mut remote_children = parse_remote_question(state, plan, draft.items.len())?;
     if remote_children != plan.answer_children() {
         remote_children.zeroize();
@@ -282,16 +284,20 @@ fn parse_remote_question(
     plan: &UaiSubmissionPlan,
     expected_count: usize,
 ) -> ProviderResult<Vec<Vec<String>>> {
-    let mut question_data = state
-        .get("quesData")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= MAX_NESTED_QUESTION_DATA_BYTES)
-        .ok_or_else(|| protocol_drift("UAI user-module has no bounded Question data"))?
-        .to_owned();
-    let question_data_value: Value = serde_json::from_str(&question_data)
-        .map_err(|_| invalid_response("UAI user-module Question data is not valid JSON"))?;
-    question_data.zeroize();
+    let question_data = Zeroizing::new(
+        state
+            .get("quesData")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= MAX_NESTED_QUESTION_DATA_BYTES)
+            .ok_or_else(|| protocol_drift("UAI user-module has no bounded Question data"))?
+            .to_owned(),
+    );
+    let question_data_value = ZeroizingJsonValue::new(
+        serde_json::from_str(&question_data)
+            .map_err(|_| invalid_response("UAI user-module Question data is not valid JSON"))?,
+    );
     let entries = question_data_value
+        .as_value()
         .as_array()
         .ok_or_else(|| protocol_drift("UAI user-module Question data is not an array"))?;
     if entries.len() != 1 || expected_count != 1 {
@@ -314,23 +320,29 @@ fn parse_remote_question(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && value.len() <= MAX_NESTED_CONTEXT_BYTES)
         .ok_or_else(|| protocol_drift("UAI user-module has no bounded submission context"))?;
-    let context: Value = serde_json::from_str(context)
-        .map_err(|_| invalid_response("UAI user-module submission context is not valid JSON"))?;
-    if context.get("state").and_then(Value::as_str) != Some("submitted") {
+    let context =
+        ZeroizingJsonValue::new(serde_json::from_str(context).map_err(|_| {
+            invalid_response("UAI user-module submission context is not valid JSON")
+        })?);
+    if context.as_value().get("state").and_then(Value::as_str) != Some("submitted") {
         return Err(remote_changed(
             "UAI user-module Question is not in submitted state",
         ));
     }
-    let mut answer = entry
-        .get("answer")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= MAX_NESTED_ANSWER_BYTES)
-        .ok_or_else(|| protocol_drift("UAI user-module has no bounded answer data"))?
-        .to_owned();
-    let answer_value: Value = serde_json::from_str(&answer)
-        .map_err(|_| invalid_response("UAI user-module answer data is not valid JSON"))?;
-    answer.zeroize();
+    let answer = Zeroizing::new(
+        entry
+            .get("answer")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= MAX_NESTED_ANSWER_BYTES)
+            .ok_or_else(|| protocol_drift("UAI user-module has no bounded answer data"))?
+            .to_owned(),
+    );
+    let answer_value = ZeroizingJsonValue::new(
+        serde_json::from_str(&answer)
+            .map_err(|_| invalid_response("UAI user-module answer data is not valid JSON"))?,
+    );
     let children = answer_value
+        .as_value()
         .get("children")
         .and_then(Value::as_array)
         .ok_or_else(|| protocol_drift("UAI user-module answer has no children"))?;
@@ -362,9 +374,12 @@ pub(crate) fn validate_verification_course_binding(
     document: &str,
     expected_course_instance_id: &str,
 ) -> ProviderResult<()> {
-    let response: Value = serde_json::from_str(document)
-        .map_err(|_| invalid_response("UAI submission verification response is not valid JSON"))?;
+    let response =
+        ZeroizingJsonValue::new(serde_json::from_str(document).map_err(|_| {
+            invalid_response("UAI submission verification response is not valid JSON")
+        })?);
     let data = response
+        .as_value()
         .get("data")
         .and_then(Value::as_object)
         .ok_or_else(|| protocol_drift("UAI submission verification has no data object"))?;
