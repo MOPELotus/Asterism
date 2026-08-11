@@ -284,6 +284,9 @@ enum TaskCommand {
     /// Schedule one task through the shared idempotent Core Action.
     Execute {
         task_id: String,
+        /// Exact executable capability subset, for example resource_execution.
+        #[arg(long = "capability", required = true, num_args = 1..)]
+        capabilities: Vec<String>,
         /// Stable caller-provided key. Reuse it when retrying the same request.
         #[arg(long)]
         idempotency_key: String,
@@ -929,6 +932,7 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
         }
         TaskCommand::Execute {
             task_id,
+            capabilities,
             idempotency_key,
             submission_draft,
         } => {
@@ -938,7 +942,10 @@ async fn handle_task(client: &ApiClient, command: TaskCommand) -> anyhow::Result
                     &path,
                     &token,
                     &idempotency_key,
-                    &json!({"submission_draft_id": submission_draft}),
+                    &json!({
+                        "requested_capabilities": capabilities,
+                        "submission_draft_id": submission_draft
+                    }),
                 )
                 .await?
         }
@@ -1142,12 +1149,14 @@ mod tests {
     }
 
     #[test]
-    fn task_execute_requires_an_explicit_reusable_idempotency_key() {
+    fn task_execute_requires_an_explicit_capability_and_reusable_idempotency_key() {
         let arguments = Arguments::try_parse_from([
             "asterismctl",
             "task",
             "execute",
             "task-id",
+            "--capability",
+            "resource_execution",
             "--idempotency-key",
             "manual-run-1",
         ])
@@ -1157,12 +1166,26 @@ mod tests {
             Command::Task {
                 command: TaskCommand::Execute {
                     task_id,
+                    capabilities,
                     idempotency_key,
                     submission_draft: None,
                 }
-            } if task_id == "task-id" && idempotency_key == "manual-run-1"
+            } if task_id == "task-id"
+                && capabilities == ["resource_execution"]
+                && idempotency_key == "manual-run-1"
         ));
         assert!(Arguments::try_parse_from(["asterismctl", "task", "execute", "task-id"]).is_err());
+        assert!(
+            Arguments::try_parse_from([
+                "asterismctl",
+                "task",
+                "execute",
+                "task-id",
+                "--idempotency-key",
+                "manual-run-1",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -1382,6 +1382,7 @@ fn execution_schema() -> Value {
         &[
             "id",
             "task_id",
+            "requested_capabilities",
             "submission_draft_id",
             "requested_by",
             "request_source",
@@ -1395,6 +1396,13 @@ fn execution_schema() -> Value {
         json!({
             "id": uuid(),
             "task_id": uuid(),
+            "requested_capabilities": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "uniqueItems": true,
+                "items": task_capability()
+            },
             "submission_draft_id": nullable_uuid(),
             "requested_by": nullable_uuid(),
             "request_source": string_enum(&["scheduler", "web_ui", "yunzai", "cli", "system"]),

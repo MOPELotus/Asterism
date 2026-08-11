@@ -298,7 +298,7 @@ where
         let correlation_id = format!("scheduled-execution:{}", job.id);
         if claim.recovery {
             return self
-                .recover_execution(job, &task, now, &correlation_id)
+                .recover_execution(job, &execution, &task, now, &correlation_id)
                 .await;
         }
         let attempt = self
@@ -326,49 +326,39 @@ where
                 )
                 .await;
         }
-        self.execute_attempt(job, &task, &attempt, now, &correlation_id)
+        self.execute_attempt(job, &execution, &task, &attempt, now, &correlation_id)
             .await
     }
 
     async fn recover_execution(
         &self,
         job: &ScheduledJob,
+        execution: &Execution,
         task: &Task,
         now: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
-        if task
-            .capabilities
-            .contains(&TaskCapability::SubmissionExecute)
-        {
+        if execution.requested_capabilities == [TaskCapability::SubmissionExecute] {
             return self
-                .recover_submission(job, task, now, correlation_id)
+                .recover_submission(job, execution, task, now, correlation_id)
                 .await;
         }
-        if duration_report_only(&execution_capabilities(task)) {
-            return self
-                .finish_recovery(
-                    job,
-                    ExecutionState::HumanRequired,
-                    Some(ProviderErrorClass::InvalidRemoteState),
-                    None,
-                    now,
-                    correlation_id,
-                )
-                .await;
-        }
-        let execution_id = claimed_execution_id(job)?;
         let prepared = match self
-            .prepare_recovery_call(execution_id, task, correlation_id)
+            .prepare_provider_call(
+                execution.id,
+                task,
+                &execution.requested_capabilities,
+                correlation_id,
+            )
             .await?
         {
             Ok(prepared) => prepared,
-            Err(error_class) => {
+            Err(failure) => {
                 return self
                     .finish_recovery(
                         job,
                         ExecutionState::HumanRequired,
-                        Some(error_class),
+                        Some(failure.error_class),
                         None,
                         now,
                         correlation_id,
@@ -376,12 +366,30 @@ where
                     .await;
             }
         };
+        if !prepared.verification {
+            if duration_report_only(&execution.requested_capabilities) {
+                return self
+                    .finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(ProviderErrorClass::InvalidRemoteState),
+                        None,
+                        now,
+                        correlation_id,
+                    )
+                    .await;
+            }
+            return self
+                .recover_execution_by_progress(job, task, now, correlation_id)
+                .await;
+        }
+        let execution_id = claimed_execution_id(job)?;
         let _admission = self
             .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
             .await?;
         let provider = prepared
             .capability
-            .read_progress(&prepared.context, &task.remote_id);
+            .verify_execution(&prepared.context, &prepared.request);
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -396,11 +404,11 @@ where
         };
         let finished_at = Utc::now().max(now);
         match result {
-            Ok(progress) => {
-                self.finish_from_remote_progress(
+            Ok(verification) => {
+                self.finish_from_execution_verification(
                     job,
-                    progress.remote_state,
-                    task.capabilities.contains(&TaskCapability::ExecutionVerify),
+                    &prepared.request.requested_capabilities,
+                    &verification,
                     finished_at,
                     correlation_id,
                 )
@@ -420,13 +428,19 @@ where
     async fn recover_submission(
         &self,
         job: &ScheduledJob,
+        execution: &Execution,
         task: &Task,
         now: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
         let execution_id = claimed_execution_id(job)?;
         let prepared = match self
-            .prepare_submission_call(execution_id, task, correlation_id)
+            .prepare_submission_call(
+                execution_id,
+                task,
+                &execution.requested_capabilities,
+                correlation_id,
+            )
             .await?
         {
             Ok(prepared) => prepared,
@@ -649,12 +663,73 @@ where
             .await
     }
 
-    async fn prepare_recovery_call(
+    async fn recover_execution_by_progress(
+        &self,
+        job: &ScheduledJob,
+        task: &Task,
+        now: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let execution_id = claimed_execution_id(job)?;
+        let prepared = match self
+            .prepare_progress_recovery_call(execution_id, task, correlation_id)
+            .await?
+        {
+            Ok(prepared) => prepared,
+            Err(error_class) => {
+                return self
+                    .finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(error_class),
+                        None,
+                        now,
+                        correlation_id,
+                    )
+                    .await;
+            }
+        };
+        let _admission = self
+            .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
+            .await?;
+        let provider = prepared
+            .capability
+            .read_progress(&prepared.context, &task.remote_id);
+        tokio::pin!(provider);
+        let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        let result = loop {
+            tokio::select! {
+                result = &mut provider => break result,
+                _ = heartbeat.tick() => self.renew_claims(job, execution_id).await?,
+            }
+        };
+        let finished_at = Utc::now().max(now);
+        match result {
+            Ok(progress) => {
+                self.finish_from_remote_progress(
+                    job,
+                    progress.remote_state,
+                    finished_at,
+                    correlation_id,
+                )
+                .await
+            }
+            Err(error) => {
+                self.finish_from_recovery_error(job, &error, finished_at, correlation_id)
+                    .await
+            }
+        }
+    }
+
+    async fn prepare_progress_recovery_call(
         &self,
         execution_id: ExecutionId,
         task: &Task,
         correlation_id: &str,
-    ) -> Result<Result<PreparedRecoveryCall, ProviderErrorClass>, ScheduledExecutionRunError> {
+    ) -> Result<Result<PreparedProgressRecoveryCall, ProviderErrorClass>, ScheduledExecutionRunError>
+    {
         if !task.capabilities.contains(&TaskCapability::ProgressRead) {
             return Ok(Err(ProviderErrorClass::UnsupportedTask));
         }
@@ -674,13 +749,6 @@ where
         let Some(capability) = entry.task_progress.clone() else {
             return Ok(Err(ProviderErrorClass::UnsupportedTask));
         };
-        if task.capabilities.contains(&TaskCapability::ExecutionVerify)
-            && !entry
-                .metadata
-                .advertises(ProviderCapability::ExecutionVerify)
-        {
-            return Ok(Err(ProviderErrorClass::UnsupportedTask));
-        }
         let Some(runtime_settings) = self
             .executions
             .find_execution_runtime_settings(execution_id)
@@ -697,7 +765,7 @@ where
         else {
             return Ok(Err(ProviderErrorClass::Internal));
         };
-        Ok(Ok(PreparedRecoveryCall {
+        Ok(Ok(PreparedProgressRecoveryCall {
             capability,
             context: ProviderContext {
                 provider_id: account.provider_id,
@@ -713,7 +781,6 @@ where
         &self,
         job: &ScheduledJob,
         remote_state: RemoteState,
-        verify_only: bool,
         at: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
@@ -730,21 +797,6 @@ where
                 .await
             }
             RemoteState::Pending => {
-                if verify_only {
-                    return if let Some(retry_at) = self.recovery_retry_at(job, at)? {
-                        self.defer_recovery(job, retry_at, at).await
-                    } else {
-                        self.finish_recovery(
-                            job,
-                            ExecutionState::HumanRequired,
-                            Some(ProviderErrorClass::InvalidRemoteState),
-                            None,
-                            at,
-                            correlation_id,
-                        )
-                        .await
-                    };
-                }
                 if let Some(retry_at) = self.recovery_retry_at(job, at)? {
                     self.finish_recovery(
                         job,
@@ -768,6 +820,59 @@ where
                 }
             }
             RemoteState::InProgress => {
+                if let Some(retry_at) = self.recovery_retry_at(job, at)? {
+                    self.defer_recovery(job, retry_at, at).await
+                } else {
+                    self.finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(ProviderErrorClass::InvalidRemoteState),
+                        None,
+                        at,
+                        correlation_id,
+                    )
+                    .await
+                }
+            }
+            RemoteState::Unknown
+            | RemoteState::NotOpen
+            | RemoteState::Expired
+            | RemoteState::Removed => {
+                self.finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::InvalidRemoteState),
+                    None,
+                    at,
+                    correlation_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn finish_from_execution_verification(
+        &self,
+        job: &ScheduledJob,
+        capabilities: &[TaskCapability],
+        verification: &asterism_provider_api::ExecutionOutcome,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        if execution_goal_verified(capabilities, verification) {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::Succeeded,
+                    None,
+                    None,
+                    at,
+                    correlation_id,
+                )
+                .await;
+        }
+        match verification.remote_state {
+            RemoteState::Pending | RemoteState::InProgress | RemoteState::Completed => {
                 if let Some(retry_at) = self.recovery_retry_at(job, at)? {
                     self.defer_recovery(job, retry_at, at).await
                 } else {
@@ -964,31 +1069,37 @@ where
     async fn execute_attempt(
         &self,
         job: &ScheduledJob,
+        execution: &Execution,
         task: &Task,
         attempt: &ExecutionAttempt,
         now: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
-        if task
-            .capabilities
-            .contains(&TaskCapability::SubmissionExecute)
-        {
+        if execution.requested_capabilities == [TaskCapability::SubmissionExecute] {
             return self
-                .execute_submission_attempt(job, task, attempt, now, correlation_id)
+                .execute_submission_attempt(job, execution, task, attempt, now, correlation_id)
                 .await;
         }
-        let verified_execution = task.capabilities.contains(&TaskCapability::ExecutionVerify);
-        if task.remote_state == RemoteState::Completed && !verified_execution {
+        let verification_candidate = task.capabilities.contains(&TaskCapability::ExecutionVerify)
+            && execution.requested_capabilities.len() == 1;
+        let duration_only = duration_report_only(&execution.requested_capabilities);
+        if task.remote_state == RemoteState::Completed && !verification_candidate && !duration_only
+        {
             return self.finish_success(job, attempt, now, correlation_id).await;
         }
         if !(matches!(
             task.remote_state,
             RemoteState::Pending | RemoteState::InProgress
-        ) || verified_execution
+        ) || duration_only
             && matches!(
                 task.remote_state,
                 RemoteState::Unknown | RemoteState::Completed
-            ))
+            )
+            || verification_candidate
+                && matches!(
+                    task.remote_state,
+                    RemoteState::Unknown | RemoteState::Completed
+                ))
         {
             return self
                 .finish_failure(
@@ -1002,7 +1113,12 @@ where
                 .await;
         }
         let prepared = match self
-            .prepare_provider_call(attempt.execution_id, task, correlation_id)
+            .prepare_provider_call(
+                attempt.execution_id,
+                task,
+                &execution.requested_capabilities,
+                correlation_id,
+            )
             .await?
         {
             Ok(prepared) => prepared,
@@ -1019,25 +1135,19 @@ where
                     .await;
             }
         };
-        if task.remote_state == RemoteState::Completed {
-            let Some(verification) = prepared.verification.as_deref() else {
-                return self
-                    .finish_failure(
-                        job,
-                        attempt,
-                        ProviderErrorClass::UnsupportedTask,
-                        FailureDisposition::Failed,
-                        now,
-                        correlation_id,
-                    )
-                    .await;
-            };
+        if task.remote_state == RemoteState::Completed && prepared.verification {
             return self
-                .verify_task_execution_without_mutation(
+                .verify_task_execution_without_mutation(job, attempt, &prepared, correlation_id)
+                .await;
+        }
+        if task.remote_state == RemoteState::Unknown && !duration_only && !prepared.verification {
+            return self
+                .finish_failure(
                     job,
                     attempt,
-                    &prepared,
-                    verification,
+                    ProviderErrorClass::UnsupportedTask,
+                    FailureDisposition::Failed,
+                    now,
                     correlation_id,
                 )
                 .await;
@@ -1049,6 +1159,7 @@ where
     async fn execute_submission_attempt(
         &self,
         job: &ScheduledJob,
+        execution: &Execution,
         task: &Task,
         attempt: &ExecutionAttempt,
         now: Timestamp,
@@ -1073,7 +1184,12 @@ where
                 .await;
         }
         let prepared = match self
-            .prepare_submission_call(attempt.execution_id, task, correlation_id)
+            .prepare_submission_call(
+                attempt.execution_id,
+                task,
+                &execution.requested_capabilities,
+                correlation_id,
+            )
             .await?
         {
             Ok(prepared) => prepared,
@@ -1107,15 +1223,22 @@ where
         &self,
         execution_id: ExecutionId,
         task: &Task,
+        requested_capabilities: &[TaskCapability],
         correlation_id: &str,
     ) -> Result<Result<PreparedSubmissionCall, PreparedFailure>, ScheduledExecutionRunError> {
-        if authorize_execution(task, self.config.formal_assessment_policy).is_err() {
+        if authorize_execution(
+            task,
+            requested_capabilities,
+            self.config.formal_assessment_policy,
+        )
+        .is_err()
+        {
             return Ok(Err(PreparedFailure {
                 error_class: ProviderErrorClass::Authorization,
                 disposition: FailureDisposition::HumanRequired,
             }));
         }
-        if execution_capabilities(task) != [TaskCapability::SubmissionExecute]
+        if requested_capabilities != [TaskCapability::SubmissionExecute]
             || !task
                 .capabilities
                 .contains(&TaskCapability::SubmissionVerify)
@@ -1217,15 +1340,22 @@ where
         &self,
         execution_id: ExecutionId,
         task: &Task,
+        requested_capabilities: &[TaskCapability],
         correlation_id: &str,
     ) -> Result<Result<PreparedProviderCall, PreparedFailure>, ScheduledExecutionRunError> {
-        if authorize_execution(task, self.config.formal_assessment_policy).is_err() {
+        if authorize_execution(
+            task,
+            requested_capabilities,
+            self.config.formal_assessment_policy,
+        )
+        .is_err()
+        {
             return Ok(Err(PreparedFailure {
                 error_class: ProviderErrorClass::Authorization,
                 disposition: FailureDisposition::HumanRequired,
             }));
         }
-        let capabilities = execution_capabilities(task);
+        let capabilities = requested_capabilities.to_vec();
         if capabilities.is_empty() {
             return Ok(Err(PreparedFailure {
                 error_class: ProviderErrorClass::UnsupportedTask,
@@ -1260,7 +1390,7 @@ where
                 disposition: FailureDisposition::Failed,
             }));
         };
-        let verification = match execution_verification(task, &capabilities, entry) {
+        let verification = match execution_verification(task, &capabilities, entry, &capability) {
             Ok(verification) => verification,
             Err(failure) => return Ok(Err(failure)),
         };
@@ -1356,17 +1486,11 @@ where
         if claim_lost.load(Ordering::Acquire) {
             return Err(ScheduledExecutionRunError::ClaimLost);
         }
-        if let Some(verification) = &prepared.verification {
+        if prepared.verification {
             return match result {
                 Ok(_) => {
-                    self.verify_task_execution_claimed(
-                        job,
-                        attempt,
-                        prepared,
-                        verification.as_ref(),
-                        correlation_id,
-                    )
-                    .await
+                    self.verify_task_execution_claimed(job, attempt, prepared, correlation_id)
+                        .await
                 }
                 Err(error) => {
                     self.begin_verification_recovery(
@@ -1430,7 +1554,6 @@ where
         job: &ScheduledJob,
         attempt: &ExecutionAttempt,
         prepared: &PreparedProviderCall,
-        verification: &(dyn TaskProgressCapability + Send + Sync),
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
         let _admission = self
@@ -1441,7 +1564,7 @@ where
                 prepared.concurrency,
             )
             .await?;
-        self.verify_task_execution_claimed(job, attempt, prepared, verification, correlation_id)
+        self.verify_task_execution_claimed(job, attempt, prepared, correlation_id)
             .await
     }
 
@@ -1450,11 +1573,11 @@ where
         job: &ScheduledJob,
         attempt: &ExecutionAttempt,
         prepared: &PreparedProviderCall,
-        verification: &(dyn TaskProgressCapability + Send + Sync),
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
-        let provider =
-            verification.read_progress(&prepared.context, &prepared.request.remote_task_id);
+        let provider = prepared
+            .capability
+            .verify_execution(&prepared.context, &prepared.request);
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1466,7 +1589,12 @@ where
             }
         };
         match result {
-            Ok(progress) if progress.remote_state == RemoteState::Completed => {
+            Ok(verification)
+                if execution_goal_verified(
+                    &prepared.request.requested_capabilities,
+                    &verification,
+                ) =>
+            {
                 self.finish_success(
                     job,
                     attempt,
@@ -1943,7 +2071,7 @@ async fn execution_id_to_task<E: ExecutionRepository>(
 
 struct PreparedProviderCall {
     capability: Arc<dyn TaskExecutionCapability>,
-    verification: Option<Arc<dyn TaskProgressCapability>>,
+    verification: bool,
     context: ProviderContext,
     request: ProviderExecutionRequest,
     concurrency: ProviderExecutionConcurrency,
@@ -1960,7 +2088,7 @@ struct PreparedSubmissionCall {
     provider_version: String,
 }
 
-struct PreparedRecoveryCall {
+struct PreparedProgressRecoveryCall {
     capability: Arc<dyn TaskProgressCapability>,
     context: ProviderContext,
     concurrency: ProviderExecutionConcurrency,
@@ -2069,44 +2197,28 @@ fn map_provider_stage(stage: &str) -> ExecutionStage {
     }
 }
 
-fn execution_capabilities(task: &Task) -> Vec<TaskCapability> {
-    task.capabilities
-        .iter()
-        .copied()
-        .filter(|capability| {
-            matches!(
-                capability,
-                TaskCapability::ResourceExecution
-                    | TaskCapability::SubmissionExecute
-                    | TaskCapability::DurationReport
-                    | TaskCapability::Discussion
-                    | TaskCapability::Practice
-            )
-        })
-        .collect()
-}
-
 fn execution_verification(
     task: &Task,
     execution_capabilities: &[TaskCapability],
     entry: &asterism_provider_api::ProviderEntry,
-) -> Result<Option<Arc<dyn TaskProgressCapability>>, PreparedFailure> {
+    capability: &Arc<dyn TaskExecutionCapability>,
+) -> Result<bool, PreparedFailure> {
     if !task.capabilities.contains(&TaskCapability::ExecutionVerify) {
-        return Ok(None);
+        return Ok(false);
     }
-    if !task.capabilities.contains(&TaskCapability::ProgressRead)
-        || execution_capabilities.len() != 1
-        || !entry
-            .metadata
-            .advertises(ProviderCapability::ExecutionVerify)
+    if execution_capabilities.len() != 1 {
+        return Err(unsupported_execution_verification());
+    }
+    if !capability.requires_execution_verification(execution_capabilities) {
+        return Ok(false);
+    }
+    if !entry
+        .metadata
+        .advertises(ProviderCapability::ExecutionVerify)
     {
         return Err(unsupported_execution_verification());
     }
-    entry
-        .task_progress
-        .clone()
-        .map(Some)
-        .ok_or_else(unsupported_execution_verification)
+    Ok(true)
 }
 
 const fn unsupported_execution_verification() -> PreparedFailure {
@@ -2124,7 +2236,8 @@ fn execution_goal_verified(
     capabilities: &[TaskCapability],
     outcome: &asterism_provider_api::ExecutionOutcome,
 ) -> bool {
-    outcome.verified
+    outcome.validate().is_ok()
+        && outcome.verified
         && if duration_report_only(capabilities) {
             matches!(
                 outcome.remote_state,
@@ -2140,13 +2253,11 @@ fn execution_goal_verified(
 
 fn authorize_execution(
     task: &Task,
+    requested_capabilities: &[TaskCapability],
     policy: FormalAssessmentPolicy,
 ) -> Result<(), crate::AssessmentGuardError> {
     authorize_task_action(task, TaskAction::Execute, policy)?;
-    if task
-        .capabilities
-        .contains(&TaskCapability::SubmissionExecute)
-    {
+    if requested_capabilities.contains(&TaskCapability::SubmissionExecute) {
         authorize_task_action(task, TaskAction::Submit, policy)?;
     }
     Ok(())
@@ -2174,11 +2285,35 @@ fn validate_execution_binding(
                 )
         )
     };
-    let submission_binding_matches = task
-        .capabilities
-        .contains(&TaskCapability::SubmissionExecute)
-        == execution.submission_draft_id.is_some();
-    if execution.task_id == task.id && synchronized && submission_binding_matches {
+    let requested_capabilities_valid = !execution.requested_capabilities.is_empty()
+        && execution.requested_capabilities.len() <= 5
+        && execution
+            .requested_capabilities
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && execution.requested_capabilities.iter().all(|capability| {
+            task.capabilities.contains(capability)
+                && matches!(
+                    capability,
+                    TaskCapability::ResourceExecution
+                        | TaskCapability::SubmissionExecute
+                        | TaskCapability::DurationReport
+                        | TaskCapability::Discussion
+                        | TaskCapability::Practice
+                )
+        })
+        && (!execution
+            .requested_capabilities
+            .contains(&TaskCapability::SubmissionExecute)
+            || execution.requested_capabilities == [TaskCapability::SubmissionExecute]);
+    let submission_selected =
+        execution.requested_capabilities == [TaskCapability::SubmissionExecute];
+    let submission_binding_matches = submission_selected == execution.submission_draft_id.is_some();
+    if execution.task_id == task.id
+        && synchronized
+        && requested_capabilities_valid
+        && submission_binding_matches
+    {
         Ok(())
     } else {
         Err(ScheduledExecutionRunError::StateConflict)
@@ -2547,6 +2682,57 @@ mod tests {
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork => {
                     panic!("submission behaviors use the independent mutation slot")
+                }
+            }
+        }
+
+        async fn verify_execution(
+            &self,
+            _context: &ProviderContext,
+            request: &ProviderExecutionRequest,
+        ) -> ProviderResult<ExecutionOutcome> {
+            *self.progress_calls.lock().unwrap() += 1;
+            assert_eq!(
+                request
+                    .runtime_settings
+                    .integer("execution.max_concurrency"),
+                Some(3)
+            );
+            match self.behavior {
+                ProviderBehavior::Success | ProviderBehavior::ExecuteNetworkThenCompleted => {
+                    Ok(ExecutionOutcome {
+                        remote_state: RemoteState::Completed,
+                        verified: true,
+                        result_sanitized: serde_json::json!({"goal_matched": true}),
+                    })
+                }
+                ProviderBehavior::RecoveryPending => Ok(ExecutionOutcome {
+                    remote_state: RemoteState::Pending,
+                    verified: false,
+                    result_sanitized: serde_json::json!({"goal_matched": false}),
+                }),
+                ProviderBehavior::VerifiedPending => Ok(ExecutionOutcome {
+                    remote_state: RemoteState::InProgress,
+                    verified: false,
+                    result_sanitized: serde_json::json!({"goal_matched": false}),
+                }),
+                ProviderBehavior::NetworkFailure => Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "temporary goal verification failure",
+                )),
+                ProviderBehavior::DurationSuccess => Ok(ExecutionOutcome {
+                    remote_state: RemoteState::InProgress,
+                    verified: true,
+                    result_sanitized: serde_json::json!({"duration_goal_matched": true}),
+                }),
+                ProviderBehavior::DurationNetworkFailure => Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "duration goal verification is uncertain",
+                )),
+                ProviderBehavior::SubmissionConfirmed
+                | ProviderBehavior::SubmissionPending
+                | ProviderBehavior::SubmissionExecuteNetwork => {
+                    panic!("submission recovery must use SubmissionVerify")
                 }
             }
         }
@@ -3351,6 +3537,14 @@ mod tests {
                 .execute(fixture.database.pool())
                 .await
                 .unwrap();
+            sqlx::query(
+                "UPDATE executions SET requested_capabilities_json = '[\"duration_report\"]' \
+                 WHERE id = ?",
+            )
+            .bind(fixture.execution_id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
             fixture
         }
 
@@ -3376,12 +3570,15 @@ mod tests {
             .execute(fixture.database.pool())
             .await
             .unwrap();
-            sqlx::query("UPDATE executions SET submission_draft_id = ? WHERE id = ?")
-                .bind(draft.id.to_string())
-                .bind(fixture.execution_id.to_string())
-                .execute(fixture.database.pool())
-                .await
-                .unwrap();
+            sqlx::query(
+                "UPDATE executions SET requested_capabilities_json = \
+                    '[\"submission_execute\"]', submission_draft_id = ? WHERE id = ?",
+            )
+            .bind(draft.id.to_string())
+            .bind(fixture.execution_id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
             fixture
         }
 
@@ -3618,6 +3815,7 @@ mod tests {
         let execution = Execution {
             id: ExecutionId::new(),
             task_id,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
             submission_draft_id: None,
             requested_by: Some(owner),
             request_source: RequestSource::System,

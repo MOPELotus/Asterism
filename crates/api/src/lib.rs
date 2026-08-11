@@ -1177,8 +1177,17 @@ fn task_execute_path() -> Value {
             "required": true,
             "content": {"application/json": {"schema": {
                 "type": "object",
+                "required": ["requested_capabilities"],
                 "additionalProperties": false,
                 "properties": {
+                    "requested_capabilities": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "uniqueItems": true,
+                        "description": "Exact executable Task capability subset frozen onto this Execution.",
+                        "items": {"type": "string", "enum": ["resource_execution", "submission_execute", "duration_report", "discussion", "practice"]}
+                    },
                     "submission_draft_id": {"type": "string", "format": "uuid", "description": "Required only for Tasks advertising submission_execute; binds this Execution to one immutable draft."}
                 }
             }}}
@@ -4711,6 +4720,10 @@ mod tests {
         let created = response_json(created).await;
         assert_eq!(created["created"], true);
         assert_eq!(created["execution"]["request_source"], "web_ui");
+        assert_eq!(
+            created["execution"]["requested_capabilities"],
+            json!(["resource_execution"])
+        );
         let execution_id = created["execution"]["id"].as_str().unwrap().to_owned();
 
         let execution_page = app
@@ -5354,7 +5367,13 @@ mod tests {
             request = request.header("idempotency-key", idempotency_key);
         }
         app.clone()
-            .oneshot(request.body(Body::from("{}")).unwrap())
+            .oneshot(
+                request
+                    .body(Body::from(
+                        r#"{"requested_capabilities":["resource_execution"]}"#,
+                    ))
+                    .unwrap(),
+            )
             .await
             .unwrap()
     }

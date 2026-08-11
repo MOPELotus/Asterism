@@ -42,8 +42,8 @@ pub enum ProviderCapability {
     TaskProgressRead,
     ResourceExecution,
     /// The Provider can independently verify a non-idempotent task execution
-    /// through its task-progress capability, allowing Core to recover without
-    /// replaying the remote mutation.
+    /// against the same frozen execution goal, allowing Core to recover without
+    /// replaying the remote mutation or reducing success to generic completion.
     ExecutionVerify,
     QuestionInventory,
     QuestionParse,

@@ -72,7 +72,7 @@ export function AnswerWorkflowPage() {
   const execute = useMutation({
     mutationFn: async () => {
       if (!draft) throw new Error("请先构建不可变 Submission Draft");
-      return requireData(await executeTask({ path: { task_id: taskId }, headers: { "Idempotency-Key": idempotencyKey.current }, body: { submission_draft_id: draft.id } }));
+      return requireData(await executeTask({ path: { task_id: taskId }, headers: { "Idempotency-Key": idempotencyKey.current }, body: { requested_capabilities: ["submission_execute"], submission_draft_id: draft.id } }));
     },
     onSuccess: ({ execution }) => { idempotencyKey.current = crypto.randomUUID(); navigate(`/executions/${execution.id}`); },
   });

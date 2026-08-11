@@ -180,12 +180,34 @@ pub trait SubmissionVerifyCapability: ProviderIdentity {
 
 #[async_trait]
 pub trait TaskExecutionCapability: ProviderIdentity {
+    /// Declares whether this exact selected action set requires the Provider's
+    /// goal-bound, read-only verification path. Task-level `ExecutionVerify`
+    /// metadata only advertises that at least one action supports this path;
+    /// this method binds the requirement to the frozen Execution selection.
+    fn requires_execution_verification(&self, _requested_capabilities: &[TaskCapability]) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         context: &ProviderContext,
         request: &ExecutionRequest,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome>;
+
+    /// Rebinds the same frozen execution goal and reads enough fresh remote
+    /// state to verify it without repeating any mutation. Providers which
+    /// advertise `ExecutionVerify` must override this method.
+    async fn verify_execution(
+        &self,
+        _context: &ProviderContext,
+        _request: &ExecutionRequest,
+    ) -> ProviderResult<ExecutionOutcome> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement goal-bound execution verification",
+        ))
+    }
 }
 
 #[async_trait]
@@ -612,6 +634,33 @@ mod execution_log_tests {
 }
 
 #[cfg(test)]
+mod execution_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn execution_outcome_is_bounded_and_rejects_secret_keys() {
+        let valid = ExecutionOutcome {
+            remote_state: RemoteState::Completed,
+            verified: true,
+            result_sanitized: serde_json::json!({"completed": true, "score": 100}),
+        };
+        assert_eq!(valid.validate(), Ok(()));
+
+        let secret = ExecutionOutcome {
+            result_sanitized: serde_json::json!({"nested": {"access_token": "secret"}}),
+            ..valid.clone()
+        };
+        assert_eq!(secret.validate(), Err(ExecutionOutcomeError::Invalid));
+
+        let oversized = ExecutionOutcome {
+            result_sanitized: serde_json::json!({"result": "x".repeat(65 * 1_024)}),
+            ..valid
+        };
+        assert_eq!(oversized.validate(), Err(ExecutionOutcomeError::Invalid));
+    }
+}
+
+#[cfg(test)]
 mod question_ref_tests {
     use super::*;
 
@@ -654,6 +703,31 @@ pub struct ExecutionOutcome {
     pub remote_state: RemoteState,
     pub verified: bool,
     pub result_sanitized: serde_json::Value,
+}
+
+impl ExecutionOutcome {
+    /// Validates bounded, credential-free execution/verification facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecutionOutcomeError::Invalid`] when the sanitized result is
+    /// oversized or contains credential-shaped keys.
+    pub fn validate(&self) -> Result<(), ExecutionOutcomeError> {
+        if serde_json::to_vec(&self.result_sanitized)
+            .map_or(true, |encoded| encoded.len() > 64 * 1_024)
+            || contains_secret_key(&self.result_sanitized)
+        {
+            Err(ExecutionOutcomeError::Invalid)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ExecutionOutcomeError {
+    #[error("Provider execution outcome is oversized or not sanitized")]
+    Invalid,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -4,7 +4,7 @@ use asterism_domain::{
     AttemptResult, AuditActor, AuditRecordId, CreditReservationState, Execution, ExecutionAttempt,
     ExecutionAttemptId, ExecutionId, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
     ExecutionState, LogLevel, OrchestrationState, ProviderAccountId, ProviderId, ScheduleId,
-    SubmissionAttemptReceipt, SubmissionDraft, TaskId, Timestamp, UserId,
+    SubmissionAttemptReceipt, SubmissionDraft, TaskCapability, TaskId, Timestamp, UserId,
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
@@ -60,7 +60,7 @@ impl ExecutionRepository for SqliteExecutionRepository {
     ) -> Result<Option<Execution>, StorageError> {
         validate_idempotency_tokens(idempotency_scope, idempotency_key)?;
         sqlx::query(
-            "SELECT id, task_id, submission_draft_id, requested_by, request_source, quote_id, \
+            "SELECT id, task_id, requested_capabilities_json, submission_draft_id, requested_by, request_source, quote_id, \
                     state, scheduled_at, started_at, finished_at, created_at FROM executions \
              WHERE idempotency_scope = ? AND idempotency_key = ?",
         )
@@ -124,12 +124,13 @@ impl ExecutionRepository for SqliteExecutionRepository {
         let execution = request.execution;
         sqlx::query(
             "INSERT INTO executions \
-             (id, task_id, submission_draft_id, requested_by, request_source, quote_id, state, \
+             (id, task_id, requested_capabilities_json, submission_draft_id, requested_by, request_source, quote_id, state, \
               scheduled_at, started_at, finished_at, created_at, idempotency_scope, idempotency_key) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(execution.id.to_string())
         .bind(execution.task_id.to_string())
+        .bind(serde_json::to_string(&execution.requested_capabilities)?)
         .bind(execution.submission_draft_id.map(|id| id.to_string()))
         .bind(execution.requested_by.map(|id| id.to_string()))
         .bind(enum_name(execution.request_source)?)
@@ -190,7 +191,7 @@ impl ExecutionRepository for SqliteExecutionRepository {
         execution_id: ExecutionId,
     ) -> Result<Option<Execution>, StorageError> {
         sqlx::query(
-            "SELECT id, task_id, submission_draft_id, requested_by, request_source, quote_id, \
+            "SELECT id, task_id, requested_capabilities_json, submission_draft_id, requested_by, request_source, quote_id, \
                     state, scheduled_at, started_at, finished_at, created_at \
              FROM executions WHERE id = ?",
         )
@@ -818,7 +819,7 @@ impl ExecutionQueryRepository for SqliteExecutionRepository {
         .fetch_one(self.database.pool())
         .await?;
         let rows = sqlx::query(
-            "SELECT execution.id, execution.task_id, execution.submission_draft_id, execution.requested_by, \
+            "SELECT execution.id, execution.task_id, execution.requested_capabilities_json, execution.submission_draft_id, execution.requested_by, \
                     execution.request_source, execution.quote_id, execution.state, \
                     execution.scheduled_at, execution.started_at, execution.finished_at, \
                     execution.created_at FROM executions AS execution \
@@ -852,7 +853,7 @@ impl ExecutionQueryRepository for SqliteExecutionRepository {
     ) -> Result<Option<ExecutionDetail>, StorageError> {
         let mut transaction = self.database.pool().begin().await?;
         let execution = sqlx::query(
-            "SELECT execution.id, execution.task_id, execution.submission_draft_id, execution.requested_by, \
+            "SELECT execution.id, execution.task_id, execution.requested_capabilities_json, execution.submission_draft_id, execution.requested_by, \
                     execution.request_source, execution.quote_id, execution.state, \
                     execution.scheduled_at, execution.started_at, execution.finished_at, \
                     execution.created_at \
@@ -1283,7 +1284,7 @@ async fn select_execution(
     execution_id: ExecutionId,
 ) -> Result<sqlx::sqlite::SqliteRow, StorageError> {
     sqlx::query(
-        "SELECT id, task_id, submission_draft_id, requested_by, request_source, quote_id, state, \
+        "SELECT id, task_id, requested_capabilities_json, submission_draft_id, requested_by, request_source, quote_id, state, \
                 scheduled_at, started_at, finished_at, created_at FROM executions WHERE id = ?",
     )
     .bind(execution_id.to_string())
@@ -1793,6 +1794,11 @@ fn validate_schedule_request(request: &ExecutionScheduleRequest<'_>) -> Result<(
             && resolution.snapshot.resolved.schema_version == resolution.schema.version
     });
     if execution.state != ExecutionState::Scheduled
+        || !valid_requested_capabilities(&execution.requested_capabilities)
+        || execution
+            .requested_capabilities
+            .contains(&TaskCapability::SubmissionExecute)
+            != execution.submission_draft_id.is_some()
         || execution.scheduled_at.is_none()
         || execution.started_at.is_some()
         || execution.finished_at.is_some()
@@ -1875,6 +1881,7 @@ fn validate_idempotency_tokens(scope: &str, key: &str) -> Result<(), StorageErro
 
 fn same_request(existing: &Execution, requested: &Execution) -> bool {
     existing.task_id == requested.task_id
+        && existing.requested_capabilities == requested.requested_capabilities
         && existing.submission_draft_id == requested.submission_draft_id
         && existing.requested_by == requested.requested_by
         && existing.quote_id == requested.quote_id
@@ -1936,7 +1943,7 @@ async fn find_idempotent_execution_in_transaction(
     idempotency_key: &str,
 ) -> Result<Option<Execution>, StorageError> {
     sqlx::query(
-        "SELECT id, task_id, submission_draft_id, requested_by, request_source, quote_id, state, \
+        "SELECT id, task_id, requested_capabilities_json, submission_draft_id, requested_by, request_source, quote_id, state, \
                 scheduled_at, started_at, finished_at, created_at FROM executions \
          WHERE idempotency_scope = ? AND idempotency_key = ?",
     )
@@ -2282,11 +2289,19 @@ async fn insert_credit_reservation(
 }
 
 fn decode_execution(row: &sqlx::sqlite::SqliteRow) -> Result<Execution, StorageError> {
+    let requested_capabilities: Vec<TaskCapability> =
+        serde_json::from_str(row.try_get("requested_capabilities_json")?)?;
+    if !valid_requested_capabilities(&requested_capabilities) {
+        return Err(StorageError::InvalidData(
+            "persisted Execution capability selection is invalid".to_owned(),
+        ));
+    }
     Ok(Execution {
         id: ExecutionId::from_str(row.try_get("id")?)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
         task_id: TaskId::from_str(row.try_get("task_id")?)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        requested_capabilities,
         submission_draft_id: row
             .try_get::<Option<&str>, _>("submission_draft_id")?
             .map(asterism_domain::SubmissionDraftId::from_str)
@@ -2309,6 +2324,24 @@ fn decode_execution(row: &sqlx::sqlite::SqliteRow) -> Result<Execution, StorageE
         finished_at: decode_optional_timestamp(row.try_get("finished_at")?)?,
         created_at: decode_timestamp(row.try_get("created_at")?)?,
     })
+}
+
+fn valid_requested_capabilities(capabilities: &[TaskCapability]) -> bool {
+    !capabilities.is_empty()
+        && capabilities.len() <= 5
+        && capabilities.windows(2).all(|pair| pair[0] < pair[1])
+        && capabilities.iter().all(|capability| {
+            matches!(
+                capability,
+                TaskCapability::ResourceExecution
+                    | TaskCapability::SubmissionExecute
+                    | TaskCapability::DurationReport
+                    | TaskCapability::Discussion
+                    | TaskCapability::Practice
+            )
+        })
+        && (!capabilities.contains(&TaskCapability::SubmissionExecute)
+            || capabilities == [TaskCapability::SubmissionExecute])
 }
 
 fn decode_submission_receipt(
@@ -2533,6 +2566,7 @@ mod tests {
         let now = Utc::now();
         let missing_draft_id = SubmissionDraftId::new();
         let mut missing = scheduled_execution(owner, task_id, now);
+        missing.requested_capabilities = vec![TaskCapability::SubmissionExecute];
         missing.submission_draft_id = Some(missing_draft_id);
         assert_eq!(
             repository
@@ -2551,6 +2585,7 @@ mod tests {
 
         let draft_id = insert_submission_draft(&database, task_id, now).await;
         let mut execution = scheduled_execution(owner, task_id, now);
+        execution.requested_capabilities = vec![TaskCapability::SubmissionExecute];
         execution.submission_draft_id = Some(draft_id);
         assert_eq!(
             repository
@@ -2565,6 +2600,7 @@ mod tests {
         );
 
         let mut duplicate = scheduled_execution(owner, task_id, now);
+        duplicate.requested_capabilities = vec![TaskCapability::SubmissionExecute];
         duplicate.submission_draft_id = Some(draft_id);
         assert_eq!(
             repository
@@ -2591,6 +2627,7 @@ mod tests {
         let now = Utc::now();
         let draft_id = insert_submission_draft(&database, task_id, now).await;
         let mut execution = scheduled_execution(owner, task_id, now);
+        execution.requested_capabilities = vec![TaskCapability::SubmissionExecute];
         execution.submission_draft_id = Some(draft_id);
         repository
             .schedule_execution(test_request(&execution, owner, "receipt-bound-draft"))
@@ -3209,6 +3246,17 @@ mod tests {
                 .unwrap(),
             ExecutionScheduleOutcome::IdempotencyConflict
         );
+
+        let mut different_action = first.clone();
+        different_action.id = ExecutionId::new();
+        different_action.requested_capabilities = vec![TaskCapability::DurationReport];
+        assert_eq!(
+            repository
+                .schedule_execution(test_request(&different_action, owner, "same-key"))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::IdempotencyConflict
+        );
     }
 
     #[tokio::test]
@@ -3590,6 +3638,7 @@ mod tests {
         Execution {
             id: ExecutionId::new(),
             task_id,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
             submission_draft_id: None,
             requested_by: Some(owner),
             request_source: RequestSource::WebUi,

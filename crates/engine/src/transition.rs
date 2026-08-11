@@ -160,6 +160,7 @@ mod tests {
         Execution {
             id: ExecutionId::new(),
             task_id: TaskId::new(),
+            requested_capabilities: vec![asterism_domain::TaskCapability::ResourceExecution],
             submission_draft_id: None,
             requested_by: None,
             request_source: RequestSource::System,

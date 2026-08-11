@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ExecutionAttemptId, ExecutionId, PriceQuoteId, SubmissionDraftId, TaskId, Timestamp, UserId,
+    ExecutionAttemptId, ExecutionId, PriceQuoteId, SubmissionDraftId, TaskCapability, TaskId,
+    Timestamp, UserId,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -38,6 +39,10 @@ impl ExecutionState {
 pub struct Execution {
     pub id: ExecutionId,
     pub task_id: TaskId,
+    /// Immutable, canonical action set selected by the caller. Providers must
+    /// execute only these advertised capabilities, never every action on the
+    /// latest Task snapshot.
+    pub requested_capabilities: Vec<TaskCapability>,
     /// Frozen only for independent submission executions. Resource and other
     /// non-submission executions deliberately leave this unset.
     pub submission_draft_id: Option<SubmissionDraftId>,

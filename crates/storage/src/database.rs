@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 31);
+        assert_eq!(migration_count, 32);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -185,6 +185,39 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(desired, 90);
+    }
+
+    #[tokio::test]
+    async fn execution_capability_selection_migration_backfills_existing_rows() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, capabilities_json TEXT NOT NULL) STRICT;\
+             CREATE TABLE executions (id TEXT PRIMARY KEY NOT NULL, task_id TEXT NOT NULL) STRICT;\
+             INSERT INTO tasks (id, capabilities_json) VALUES \
+                 ('task-a', '[\"progress_read\",\"resource_execution\",\"duration_report\"]');\
+             INSERT INTO executions (id, task_id) VALUES ('execution-a', 'task-a');",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/032_execution_requested_capabilities.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let capabilities: String = sqlx::query_scalar(
+            "SELECT requested_capabilities_json FROM executions WHERE id = 'execution-a'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&capabilities).unwrap(),
+            serde_json::json!(["resource_execution", "duration_report"])
+        );
     }
 
     #[tokio::test]

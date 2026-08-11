@@ -185,10 +185,7 @@ impl ProviderEntry {
         if self
             .metadata
             .advertises(ProviderCapability::ExecutionVerify)
-            && (!self
-                .metadata
-                .advertises(ProviderCapability::TaskProgressRead)
-                || !advertises_execution)
+            && !advertises_execution
         {
             return Err(RegistryError::ExecutionVerificationMismatch {
                 provider_id: self.metadata.id.clone(),
@@ -600,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_verification_requires_execution_and_progress_contracts() {
+    fn execution_verification_requires_an_execution_contract() {
         let mut metadata = metadata();
         metadata
             .capabilities

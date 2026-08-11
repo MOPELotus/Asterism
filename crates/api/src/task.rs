@@ -3,7 +3,7 @@ use std::str::FromStr;
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, Execution, NormalizedAnswer,
     ProviderAccountId, ProviderId, Question, QuestionId, QuestionSnapshotId, SubmissionDraftId,
-    SubmissionResultId, Task, TaskId, TaskLifecycleAction, Timestamp,
+    SubmissionResultId, Task, TaskCapability, TaskId, TaskLifecycleAction, Timestamp,
 };
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
@@ -584,6 +584,7 @@ pub(super) async fn execute_task(
         .execute(ExecuteTaskCommand {
             owner_id,
             task_id,
+            requested_capabilities: request.requested_capabilities,
             submission_draft_id,
             request_source,
             actor: auth.audit_actor(),
@@ -777,6 +778,10 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
         ExecutionRequestError::UnsupportedTask => ApiError::conflict(
             "task_execution_unsupported",
             "the task advertises no executable Provider capability",
+        ),
+        ExecutionRequestError::InvalidCapabilitySelection => ApiError::bad_request(
+            "invalid_execution_capability_selection",
+            "requested_capabilities must be a non-empty unique list of executable Task capabilities",
         ),
         ExecutionRequestError::IdempotencyConflict => ApiError::conflict(
             "idempotency_conflict",
@@ -1356,9 +1361,10 @@ pub(super) struct DelayTaskRequest {
     delayed_until: Timestamp,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExecuteTaskRequest {
+    requested_capabilities: Vec<TaskCapability>,
     submission_draft_id: Option<String>,
 }
 

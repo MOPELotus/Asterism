@@ -22,6 +22,7 @@ use crate::{
 pub struct ExecuteTaskCommand {
     pub owner_id: UserId,
     pub task_id: TaskId,
+    pub requested_capabilities: Vec<TaskCapability>,
     pub submission_draft_id: Option<SubmissionDraftId>,
     pub request_source: RequestSource,
     pub actor: AuditActor,
@@ -88,8 +89,10 @@ where
     /// persistence failures.
     pub async fn execute(
         &self,
-        command: ExecuteTaskCommand,
+        mut command: ExecuteTaskCommand,
     ) -> Result<ExecutionRequestResult, ExecutionRequestError> {
+        command.requested_capabilities =
+            normalize_requested_capabilities(command.requested_capabilities)?;
         let scope = format!("user:{}", command.owner_id);
         if let Some(existing) = self
             .executions
@@ -98,6 +101,7 @@ where
         {
             return if existing.task_id == command.task_id
                 && existing.requested_by == Some(command.owner_id)
+                && existing.requested_capabilities == command.requested_capabilities
                 && existing.submission_draft_id == command.submission_draft_id
             {
                 Ok(ExecutionRequestResult {
@@ -114,19 +118,28 @@ where
             .find_owned_task(command.owner_id, command.task_id)
             .await?
             .ok_or(ExecutionRequestError::TaskNotFound)?;
-        validate_task(&task, self.formal_policy)?;
+        validate_task(&task, &command.requested_capabilities, self.formal_policy)?;
         let (runtime_settings, runtime_settings_schema) = self
             .resolve_runtime_settings(command.owner_id, &task, command.requested_at)
             .await?;
-        validate_execution_verification_contract(
+        let verification_required = validate_execution_verification_contract(
             &task,
+            &command.requested_capabilities,
             &self.providers,
             &runtime_settings.provider_id,
         )?;
+        if !remote_state_is_executable(
+            &task,
+            &command.requested_capabilities,
+            verification_required,
+        ) {
+            return Err(ExecutionRequestError::RemoteStateNotExecutable);
+        }
         let submission_draft = self
             .resolve_submission_draft(
                 command.owner_id,
                 &task,
+                &command.requested_capabilities,
                 command.submission_draft_id,
                 &runtime_settings,
             )
@@ -134,6 +147,7 @@ where
         let mut execution = Execution {
             id: ExecutionId::new(),
             task_id: task.id,
+            requested_capabilities: command.requested_capabilities,
             submission_draft_id: submission_draft.as_ref().map(|draft| draft.id),
             requested_by: Some(command.owner_id),
             request_source: command.request_source,
@@ -194,12 +208,11 @@ where
         &self,
         owner_id: UserId,
         task: &Task,
+        requested_capabilities: &[TaskCapability],
         submission_draft_id: Option<SubmissionDraftId>,
         runtime_settings: &ExecutionRuntimeSettingsSnapshot,
     ) -> Result<Option<SubmissionDraft>, ExecutionRequestError> {
-        let submission = task
-            .capabilities
-            .contains(&TaskCapability::SubmissionExecute);
+        let submission = requested_capabilities == [TaskCapability::SubmissionExecute];
         if !submission {
             return if submission_draft_id.is_some() {
                 Err(ExecutionRequestError::UnexpectedSubmissionDraft)
@@ -304,6 +317,7 @@ where
 
 fn validate_task(
     task: &Task,
+    requested_capabilities: &[TaskCapability],
     formal_policy: FormalAssessmentPolicy,
 ) -> Result<(), ExecutionRequestError> {
     if !matches!(
@@ -312,47 +326,39 @@ fn validate_task(
     ) {
         return Err(ExecutionRequestError::TaskStateConflict);
     }
-    if !remote_state_is_executable(task) {
-        return Err(ExecutionRequestError::RemoteStateNotExecutable);
-    }
-    if !task
-        .capabilities
-        .iter()
-        .copied()
-        .any(is_execution_capability)
+    if requested_capabilities.is_empty()
+        || requested_capabilities
+            .iter()
+            .any(|capability| !task.capabilities.contains(capability))
     {
         return Err(ExecutionRequestError::UnsupportedTask);
     }
     authorize_task_action(task, TaskAction::Execute, formal_policy)?;
-    if task
-        .capabilities
-        .contains(&TaskCapability::SubmissionExecute)
-    {
+    if requested_capabilities.contains(&TaskCapability::SubmissionExecute) {
         authorize_task_action(task, TaskAction::Submit, formal_policy)?;
     }
-    if task.capabilities.contains(&TaskCapability::ExecutionVerify)
-        && (!task.capabilities.contains(&TaskCapability::ProgressRead)
-            || execution_actions(task).len() != 1
-            || task
-                .capabilities
-                .contains(&TaskCapability::SubmissionExecute))
+    if requested_capabilities.contains(&TaskCapability::SubmissionExecute)
+        && requested_capabilities != [TaskCapability::SubmissionExecute]
     {
         return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
     }
     Ok(())
 }
 
-fn remote_state_is_executable(task: &Task) -> bool {
-    let actions = execution_actions(task);
+fn remote_state_is_executable(
+    task: &Task,
+    requested_capabilities: &[TaskCapability],
+    verification_required: bool,
+) -> bool {
     matches!(
         task.remote_state,
         RemoteState::Pending | RemoteState::InProgress
-    ) || (actions == [TaskCapability::DurationReport]
+    ) || (requested_capabilities == [TaskCapability::DurationReport]
         && matches!(
             task.remote_state,
             RemoteState::Completed | RemoteState::Unknown
         ))
-        || (safe_verification_action(task, &actions)
+        || (safe_verification_action(task, requested_capabilities, verification_required)
             && matches!(
                 task.remote_state,
                 RemoteState::Unknown | RemoteState::Completed
@@ -370,32 +376,31 @@ const fn is_execution_capability(capability: TaskCapability) -> bool {
     )
 }
 
-fn execution_actions(task: &Task) -> Vec<TaskCapability> {
-    task.capabilities
-        .iter()
-        .copied()
-        .filter(|capability| is_execution_capability(*capability))
-        .collect()
-}
-
-fn safe_verification_action(task: &Task, actions: &[TaskCapability]) -> bool {
+fn safe_verification_action(
+    task: &Task,
+    actions: &[TaskCapability],
+    verification_required: bool,
+) -> bool {
     (actions == [TaskCapability::SubmissionExecute]
         && task
             .capabilities
             .contains(&TaskCapability::SubmissionVerify))
-        || (actions.len() == 1
-            && actions != [TaskCapability::SubmissionExecute]
-            && task.capabilities.contains(&TaskCapability::ExecutionVerify)
-            && task.capabilities.contains(&TaskCapability::ProgressRead))
+        || verification_required
 }
 
 fn validate_execution_verification_contract(
     task: &Task,
+    requested_capabilities: &[TaskCapability],
     providers: &ProviderRegistry,
     provider_id: &asterism_domain::ProviderId,
-) -> Result<(), ExecutionRequestError> {
-    if !task.capabilities.contains(&TaskCapability::ExecutionVerify) {
-        return Ok(());
+) -> Result<bool, ExecutionRequestError> {
+    if !task.capabilities.contains(&TaskCapability::ExecutionVerify)
+        || requested_capabilities == [TaskCapability::SubmissionExecute]
+    {
+        return Ok(false);
+    }
+    if requested_capabilities.len() != 1 {
+        return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
     }
     let provider = providers
         .get(provider_id)
@@ -404,11 +409,33 @@ fn validate_execution_verification_contract(
         .metadata
         .advertises(ProviderCapability::ExecutionVerify)
         || provider.task_execution.is_none()
-        || provider.task_progress.is_none()
     {
         return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
     }
-    Ok(())
+    Ok(provider
+        .task_execution
+        .as_ref()
+        .expect("validated TaskExecution capability")
+        .requires_execution_verification(requested_capabilities))
+}
+
+fn normalize_requested_capabilities(
+    mut capabilities: Vec<TaskCapability>,
+) -> Result<Vec<TaskCapability>, ExecutionRequestError> {
+    if capabilities.is_empty()
+        || capabilities.len() > 5
+        || capabilities
+            .iter()
+            .copied()
+            .any(|capability| !is_execution_capability(capability))
+    {
+        return Err(ExecutionRequestError::InvalidCapabilitySelection);
+    }
+    capabilities.sort_unstable();
+    if capabilities.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ExecutionRequestError::InvalidCapabilitySelection);
+    }
+    Ok(capabilities)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -421,6 +448,8 @@ pub enum ExecutionRequestError {
     RemoteStateNotExecutable,
     #[error("task advertises no executable capability")]
     UnsupportedTask,
+    #[error("requested capabilities must be a non-empty unique executable action set")]
+    InvalidCapabilitySelection,
     #[error("the idempotency key is already bound to another execution request")]
     IdempotencyConflict,
     #[error("a SubmissionDraft is required for this task")]
@@ -484,46 +513,42 @@ mod tests {
 
     #[test]
     fn unknown_or_completed_remote_state_requires_a_safe_verification_action() {
-        assert!(remote_state_is_executable(&task(
-            RemoteState::Completed,
-            vec![TaskCapability::DurationReport],
-        )));
-        assert!(!remote_state_is_executable(&task(
+        let duration = task(RemoteState::Completed, vec![TaskCapability::DurationReport]);
+        assert!(remote_state_is_executable(
+            &duration,
+            &[TaskCapability::DurationReport],
+            false,
+        ));
+        let resource = task(
             RemoteState::Completed,
             vec![TaskCapability::ResourceExecution],
-        )));
-        assert!(remote_state_is_executable(&task(
+        );
+        assert!(!remote_state_is_executable(
+            &resource,
+            &[TaskCapability::ResourceExecution],
+            false,
+        ));
+        assert!(remote_state_is_executable(
+            &resource,
+            &[TaskCapability::ResourceExecution],
+            true,
+        ));
+        let submission = task(
             RemoteState::Unknown,
-            vec![TaskCapability::DurationReport],
-        )));
-        assert!(!remote_state_is_executable(&task(
-            RemoteState::Completed,
             vec![
-                TaskCapability::DurationReport,
-                TaskCapability::ResourceExecution,
+                TaskCapability::SubmissionExecute,
+                TaskCapability::SubmissionVerify,
             ],
-        )));
-        for state in [RemoteState::Unknown, RemoteState::Completed] {
-            assert!(remote_state_is_executable(&task(
-                state,
-                vec![
-                    TaskCapability::ProgressRead,
-                    TaskCapability::ResourceExecution,
-                    TaskCapability::ExecutionVerify,
-                ],
-            )));
-            assert!(remote_state_is_executable(&task(
-                state,
-                vec![
-                    TaskCapability::SubmissionExecute,
-                    TaskCapability::SubmissionVerify,
-                ],
-            )));
-        }
+        );
+        assert!(remote_state_is_executable(
+            &submission,
+            &[TaskCapability::SubmissionExecute],
+            false,
+        ));
     }
 
     #[test]
-    fn execution_verification_requires_one_non_submission_action_and_progress() {
+    fn task_validation_uses_only_the_explicit_action_selection() {
         let valid = task(
             RemoteState::Pending,
             vec![
@@ -532,31 +557,97 @@ mod tests {
                 TaskCapability::ExecutionVerify,
             ],
         );
-        assert!(validate_task(&valid, FormalAssessmentPolicy::default()).is_ok());
+        assert!(
+            validate_task(
+                &valid,
+                &[TaskCapability::ResourceExecution],
+                FormalAssessmentPolicy::default(),
+            )
+            .is_ok()
+        );
 
-        let missing_progress = task(
+        let without_progress = task(
             RemoteState::Pending,
             vec![
                 TaskCapability::ResourceExecution,
                 TaskCapability::ExecutionVerify,
             ],
         );
-        assert!(matches!(
-            validate_task(&missing_progress, FormalAssessmentPolicy::default()),
-            Err(ExecutionRequestError::ExecutionVerificationUnavailable)
-        ));
+        assert!(
+            validate_task(
+                &without_progress,
+                &[TaskCapability::ResourceExecution],
+                FormalAssessmentPolicy::default(),
+            )
+            .is_ok()
+        );
+
+        let multiple_actions = task(
+            RemoteState::Pending,
+            vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ],
+        );
+        assert!(
+            validate_task(
+                &multiple_actions,
+                &[TaskCapability::DurationReport],
+                FormalAssessmentPolicy::default(),
+            )
+            .is_ok()
+        );
 
         let submission = task(
             RemoteState::Pending,
             vec![
                 TaskCapability::ProgressRead,
+                TaskCapability::ResourceExecution,
                 TaskCapability::SubmissionExecute,
                 TaskCapability::ExecutionVerify,
             ],
         );
         assert!(matches!(
-            validate_task(&submission, FormalAssessmentPolicy::default()),
+            validate_task(
+                &submission,
+                &[
+                    TaskCapability::ResourceExecution,
+                    TaskCapability::SubmissionExecute,
+                ],
+                FormalAssessmentPolicy::default(),
+            ),
             Err(ExecutionRequestError::ExecutionVerificationUnavailable)
+        ));
+    }
+
+    #[test]
+    fn capability_selection_is_non_empty_unique_and_canonical() {
+        assert_eq!(
+            normalize_requested_capabilities(vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ])
+            .unwrap(),
+            vec![
+                TaskCapability::ResourceExecution,
+                TaskCapability::DurationReport,
+            ]
+        );
+        assert!(matches!(
+            normalize_requested_capabilities(vec![]),
+            Err(ExecutionRequestError::InvalidCapabilitySelection)
+        ));
+        assert!(matches!(
+            normalize_requested_capabilities(vec![
+                TaskCapability::ResourceExecution,
+                TaskCapability::ResourceExecution,
+            ]),
+            Err(ExecutionRequestError::InvalidCapabilitySelection)
+        ));
+        assert!(matches!(
+            normalize_requested_capabilities(vec![TaskCapability::ProgressRead]),
+            Err(ExecutionRequestError::InvalidCapabilitySelection)
         ));
     }
 }

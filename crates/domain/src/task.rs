@@ -69,9 +69,9 @@ pub enum TaskCapability {
     ProgressRead,
     ResourceExecution,
     /// Marks a potentially non-idempotent `TaskExecution` mutation whose
-    /// outcome must be confirmed through an independent progress read. Core
-    /// invokes the mutation at most once per Execution and uses verify-only
-    /// recovery after every ambiguous outcome.
+    /// outcome must be confirmed against the same frozen execution goal. Core
+    /// invokes the mutation at most once per Execution and uses the Provider's
+    /// non-mutating verify path after every ambiguous outcome.
     ExecutionVerify,
     QuestionInventory,
     QuestionParse,
