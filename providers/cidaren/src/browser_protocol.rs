@@ -585,4 +585,39 @@ mod tests {
             ProviderErrorKind::RemoteChanged
         );
     }
+
+    #[test]
+    fn committed_capture_result_fixtures_match_typed_commands() {
+        let token_command = command(CidarenCaptureMode::TokenOnly);
+        let token_event = parse_browser_event(
+            include_str!(
+                "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
+            ),
+            &token_command,
+            CIDAREN_ORIGIN,
+        )
+        .unwrap();
+        let token_snapshot = token_event
+            .into_capture_snapshot(&token_command, CIDAREN_ORIGIN)
+            .unwrap();
+        assert_eq!(token_snapshot.user_token(), Some("synthetic-user-token"));
+        assert!(token_snapshot.login_info().is_none());
+
+        let composite_command = command(CidarenCaptureMode::Composite);
+        let composite_event = parse_browser_event(
+            include_str!(
+                "../../../fixtures/providers/cidaren/browser/capture-snapshot-composite.json"
+            ),
+            &composite_command,
+            CIDAREN_ORIGIN,
+        )
+        .unwrap();
+        let composite_snapshot = composite_event
+            .into_capture_snapshot(&composite_command, CIDAREN_ORIGIN)
+            .unwrap();
+        assert_eq!(
+            composite_snapshot.login_info_source(),
+            Some(CidarenCaptureStorageSource::LocalStorage)
+        );
+    }
 }

@@ -72,8 +72,9 @@ payload is copied into the repository. Counter tests keep the remote
 completed/total observation separate from local attempt position and reject
 inconsistent or unbounded values.
 
-The BrowserBridge fixtures are synthetic transport documents generated from
-the Provider typed boundary. The token-only fixture is recipe version 1 and
+The BrowserBridge fixtures are synthetic result transport documents generated
+from the Provider typed boundary; tests pair each one with a constructor-built
+command carrying the same binding. The token-only fixture is recipe version 1 and
 contains a request-header `UserToken` with all Composite fields absent. The
 Composite fixture is recipe version 2 and contains a placeholder request-header
 token plus a structurally valid, non-secret `CDR_LOGIN_INFO` object using the
