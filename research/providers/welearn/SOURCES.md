@@ -22,8 +22,9 @@ pending.
 ## Upstream refresh
 
 The 2026-08-13 refresh fetched every default branch and tag before the next
-implementation checkpoint and again before the Unit/batch capability-family
-audit. Default heads remain `afa87fb7c86d` (Fanyuchang
+implementation checkpoint, again before the Unit/batch capability-family
+audit, and once more after batch target-allocation and bounded-input
+hardening. Default heads remain `afa87fb7c86d` (Fanyuchang
 `master`), `bd160e91d045` (YZBRH `main`) and `85918caaccd9` (Auto_WeLearn
 `master`), so no revision delta was available to port. Fanyuchang tag `v4.0.0`
 was also fetched; it resolves to older commit `5d1df60cb007` (2026-05-24), not a
@@ -34,6 +35,8 @@ returned the same heads; the subsequent duration-wire, browser-auth, exact
 batch-semantics, heartbeat-receipt and heartbeat-cadence checks did as well. These
 revisions remain reproducible snapshots; future
 checkpoints must fetch again rather than treating them as permanent bounds.
+The latest post-hardening refresh again found no donor revision, tag/release
+or capability delta.
 
 ## Source selection
 
