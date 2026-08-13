@@ -58,7 +58,7 @@ pub(crate) enum WellearnDurationTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WellearnDurationProtocolMode {
     /// YZBRH sends an immediate preserved-state keep, interval keeps and a
-    /// preserve-only final save.
+    /// final preservation save.
     PreserveFresh,
     /// Current Fanyuchang sends one client-counter keep per second and leaves
     /// final completion to the following `ResourceExecution` step.
