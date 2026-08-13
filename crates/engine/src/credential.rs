@@ -575,6 +575,7 @@ mod tests {
                 waiting_for: asterism_domain::WaitingUserState::SessionImport,
                 user_action: None,
                 expires_at: None,
+                external_oauth: None,
             })
         }
 

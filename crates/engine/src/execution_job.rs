@@ -356,6 +356,8 @@ where
                 execution.id,
                 task,
                 &execution.requested_capabilities,
+                &execution.requested_capabilities,
+                1,
                 correlation_id,
             )
             .await?
@@ -457,6 +459,7 @@ where
                 )
                 .await;
         }
+        let capability_plan = steps.iter().map(|step| step.capability).collect::<Vec<_>>();
         let Some(step) = steps
             .iter()
             .find(|step| step.state != ExecutionCapabilityStepState::Succeeded)
@@ -490,7 +493,14 @@ where
                 .await;
         };
         let prepared = match self
-            .prepare_provider_call(execution.id, task, &[step.capability], correlation_id)
+            .prepare_provider_call(
+                execution.id,
+                task,
+                &[step.capability],
+                &capability_plan,
+                step.position,
+                correlation_id,
+            )
             .await?
         {
             Ok(prepared) if prepared.verification => prepared,
@@ -1283,6 +1293,8 @@ where
                 attempt.execution_id,
                 task,
                 &execution.requested_capabilities,
+                &execution.requested_capabilities,
+                1,
                 correlation_id,
             )
             .await?
@@ -1388,7 +1400,8 @@ where
                 )
                 .await;
         }
-        for step in steps {
+        let capability_plan = steps.iter().map(|step| step.capability).collect::<Vec<_>>();
+        for step in &steps {
             if step.state == ExecutionCapabilityStepState::Succeeded {
                 continue;
             }
@@ -1403,7 +1416,14 @@ where
                     .await;
             }
             let prepared = match self
-                .prepare_provider_call(execution.id, task, &[step.capability], correlation_id)
+                .prepare_provider_call(
+                    execution.id,
+                    task,
+                    &[step.capability],
+                    &capability_plan,
+                    step.position,
+                    correlation_id,
+                )
                 .await?
             {
                 Ok(prepared) => prepared,
@@ -1671,71 +1691,62 @@ where
         )
         .is_err()
         {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Authorization,
-                disposition: FailureDisposition::HumanRequired,
-            }));
+            return Ok(Err(prepared_failure(
+                ProviderErrorClass::Authorization,
+                FailureDisposition::HumanRequired,
+            )));
         }
         if requested_capabilities != [TaskCapability::SubmissionExecute]
             || !task
                 .capabilities
                 .contains(&TaskCapability::SubmissionVerify)
         {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::UnsupportedTask,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(prepared_failure(
+                ProviderErrorClass::UnsupportedTask,
+                FailureDisposition::Failed,
+            )));
         }
         let Some(account) = self
             .accounts
             .find_runtime_provider_account(task.provider_account_id)
             .await?
         else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Internal,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(internal_prepared_failure()));
         };
         if account.auth_state != AuthState::Authenticated {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Authentication,
-                disposition: FailureDisposition::HumanRequired,
-            }));
+            return Ok(Err(prepared_failure(
+                ProviderErrorClass::Authentication,
+                FailureDisposition::HumanRequired,
+            )));
         }
         let Some(entry) = self.registry.get(&account.provider_id) else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::UnsupportedTask,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(prepared_failure(
+                ProviderErrorClass::UnsupportedTask,
+                FailureDisposition::Failed,
+            )));
         };
         let (Some(execute), Some(verify)) = (
             entry.submission_execute.clone(),
             entry.submission_verify.clone(),
         ) else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::UnsupportedTask,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(prepared_failure(
+                ProviderErrorClass::UnsupportedTask,
+                FailureDisposition::Failed,
+            )));
         };
         let Some(runtime_settings) = self
             .executions
             .find_execution_runtime_settings(execution_id)
             .await?
         else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Internal,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(internal_prepared_failure()));
         };
         let Some(draft) = self
             .executions
             .find_execution_submission_draft(execution_id)
             .await?
         else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Internal,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(internal_prepared_failure()));
         };
         if runtime_settings.provider_id != account.provider_id
             || draft.task_id != task.id
@@ -1752,10 +1763,7 @@ where
             .runtime_settings
             .execution_concurrency(&runtime_settings.resolved)
         else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Internal,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(internal_prepared_failure()));
         };
         Ok(Ok(PreparedSubmissionCall {
             execute,
@@ -1779,6 +1787,8 @@ where
         execution_id: ExecutionId,
         task: &Task,
         requested_capabilities: &[TaskCapability],
+        capability_plan: &[TaskCapability],
+        capability_step_position: u8,
         correlation_id: &str,
     ) -> Result<Result<PreparedProviderCall, PreparedFailure>, ScheduledExecutionRunError> {
         if authorize_execution(
@@ -1805,28 +1815,25 @@ where
             .find_runtime_provider_account(task.provider_account_id)
             .await?
         else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Internal,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(internal_prepared_failure()));
         };
         if account.auth_state != AuthState::Authenticated {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Authentication,
-                disposition: FailureDisposition::HumanRequired,
-            }));
+            return Ok(Err(prepared_failure(
+                ProviderErrorClass::Authentication,
+                FailureDisposition::HumanRequired,
+            )));
         }
         let Some(entry) = self.registry.get(&account.provider_id) else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::UnsupportedTask,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(prepared_failure(
+                ProviderErrorClass::UnsupportedTask,
+                FailureDisposition::Failed,
+            )));
         };
         let Some(capability) = entry.task_execution.clone() else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::UnsupportedTask,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(prepared_failure(
+                ProviderErrorClass::UnsupportedTask,
+                FailureDisposition::Failed,
+            )));
         };
         let verification = match execution_verification(task, &capabilities, entry, &capability) {
             Ok(verification) => verification,
@@ -1837,26 +1844,30 @@ where
             .find_execution_runtime_settings(execution_id)
             .await?
         else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Internal,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(internal_prepared_failure()));
         };
         if runtime_settings.provider_id != account.provider_id {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Internal,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(internal_prepared_failure()));
         }
         let Ok(concurrency) = entry
             .runtime_settings
             .execution_concurrency(&runtime_settings.resolved)
         else {
-            return Ok(Err(PreparedFailure {
-                error_class: ProviderErrorClass::Internal,
-                disposition: FailureDisposition::Failed,
-            }));
+            return Ok(Err(internal_prepared_failure()));
         };
+        let request = ProviderExecutionRequest {
+            execution_id,
+            task_id: task.id,
+            remote_task_id: task.remote_id.clone(),
+            course_id: task.course_id,
+            requested_capabilities: capabilities,
+            capability_plan: capability_plan.to_vec(),
+            capability_step_position,
+            runtime_settings: runtime_settings.resolved,
+        };
+        if !request.has_valid_capability_step() {
+            return Ok(Err(internal_prepared_failure()));
+        }
         Ok(Ok(PreparedProviderCall {
             capability,
             verification,
@@ -1866,14 +1877,7 @@ where
                 credential_refs: account.credential_refs,
                 correlation_id: correlation_id.to_owned(),
             },
-            request: ProviderExecutionRequest {
-                execution_id,
-                task_id: task.id,
-                remote_task_id: task.remote_id.clone(),
-                course_id: task.course_id,
-                requested_capabilities: capabilities,
-                runtime_settings: runtime_settings.resolved,
-            },
+            request,
             concurrency,
         }))
     }
@@ -2536,6 +2540,20 @@ struct PreparedProgressRecoveryCall {
 struct PreparedFailure {
     error_class: ProviderErrorClass,
     disposition: FailureDisposition,
+}
+
+const fn prepared_failure(
+    error_class: ProviderErrorClass,
+    disposition: FailureDisposition,
+) -> PreparedFailure {
+    PreparedFailure {
+        error_class,
+        disposition,
+    }
+}
+
+const fn internal_prepared_failure() -> PreparedFailure {
+    prepared_failure(ProviderErrorClass::Internal, FailureDisposition::Failed)
 }
 
 struct PersistedExecutionEventSink<'a, E> {

@@ -12,14 +12,17 @@ use asterism_engine::{
     ImportLocalAnswerCandidatesCommand, LocalAnswerCacheError, LocalAnswerCacheService,
     ManualAnswerCandidateError, ManualAnswerCandidateService, ProviderAnswerResolveError,
     ProviderAnswerResolveService, ProviderQuestionReadError, ProviderQuestionReadService,
-    ProviderTaskDetailError, ProviderTaskDetailService, ProviderTaskDurationError,
-    ProviderTaskDurationService, ProviderTaskProgressError, ProviderTaskProgressService,
+    ProviderTaskBrowserSessionError, ProviderTaskBrowserSessionService, ProviderTaskDetailError,
+    ProviderTaskDetailService, ProviderTaskDurationError, ProviderTaskDurationService,
+    ProviderTaskProgressError, ProviderTaskProgressService, ReadTaskBrowserSessionCommand,
     ReadTaskDetailCommand, ReadTaskDurationCommand, ReadTaskProgressCommand,
     ReadTaskQuestionsCommand, ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand,
     SubmissionDraftBuildError, SubmissionDraftBuildService, TaskLifecycleCommand,
     TaskLifecycleError, TaskLifecycleService,
 };
-use asterism_provider_api::{ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail};
+use asterism_provider_api::{
+    BrowserSessionSpec, ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail,
+};
 use asterism_storage::{
     AnswerCandidateRepository, QuestionSnapshotRepository, SqliteExecutionRepository,
     SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
@@ -126,6 +129,39 @@ pub(super) async fn get_task_detail(
             provider_id: result.provider_id,
             provider_version: result.provider_version,
             detail: result.detail,
+        })
+        .into_response(),
+    ))
+}
+
+pub(super) async fn get_task_browser_session_spec(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let correlation_id = required_header(&headers, "x-request-id", 128)?;
+    let result = ProviderTaskBrowserSessionService::new(
+        state.providers,
+        SqliteTaskQueryRepository::new(state.database.clone()),
+        SqliteProviderAccountRepository::new(state.database),
+    )
+    .read(ReadTaskBrowserSessionCommand {
+        owner_id,
+        task_id,
+        correlation_id: correlation_id.to_owned(),
+    })
+    .await
+    .map_err(map_task_browser_session_error)?;
+    Ok(crate::auth::no_store(
+        Json(TaskBrowserSessionSpecResponse {
+            task_id: result.task_id,
+            provider_id: result.provider_id,
+            provider_version: result.provider_version,
+            spec: result.spec,
         })
         .into_response(),
     ))
@@ -918,6 +954,74 @@ fn map_task_detail_error(error: ProviderTaskDetailError) -> ApiError {
     }
 }
 
+fn map_task_browser_session_error(error: ProviderTaskBrowserSessionError) -> ApiError {
+    match error {
+        ProviderTaskBrowserSessionError::TaskNotFound => ApiError::not_found("task_not_found"),
+        ProviderTaskBrowserSessionError::TaskCapabilityUnavailable
+        | ProviderTaskBrowserSessionError::CapabilityUnavailable(_) => ApiError::conflict(
+            "task_browser_bridge_unavailable",
+            "the task does not expose a BrowserBridge session policy",
+        ),
+        ProviderTaskBrowserSessionError::AccountNotAuthenticated => ApiError::conflict(
+            "provider_account_not_authenticated",
+            "the Provider account must be authenticated before preparing BrowserBridge",
+        ),
+        ProviderTaskBrowserSessionError::ProviderNotRegistered(_) => ApiError::conflict(
+            "provider_not_registered",
+            "the task Provider is not registered",
+        ),
+        ProviderTaskBrowserSessionError::InvalidCorrelationId => ApiError::bad_request(
+            "invalid_request_id",
+            "the request correlation ID is invalid",
+        ),
+        ProviderTaskBrowserSessionError::ProviderResponseInvalid => {
+            tracing::warn!(%error, "Provider returned invalid BrowserBridge session policy");
+            ApiError::bad_gateway(
+                "provider_browser_session_invalid",
+                "the Provider returned an unsafe BrowserBridge session policy",
+            )
+        }
+        ProviderTaskBrowserSessionError::Provider(provider_error) => match provider_error.kind {
+            ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
+                provider_error
+                    .retry_after_seconds
+                    .unwrap_or(60)
+                    .clamp(1, 86_400),
+            ),
+            ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable => {
+                tracing::warn!(error = %provider_error, "Provider BrowserBridge policy is temporarily unavailable");
+                ApiError::service_unavailable(
+                    "provider_unavailable",
+                    "the Provider is temporarily unavailable",
+                )
+            }
+            ProviderErrorKind::Authentication
+            | ProviderErrorKind::Authorization
+            | ProviderErrorKind::HumanRequired => ApiError::conflict(
+                "provider_action_required",
+                "the Provider requires authentication or user action",
+            ),
+            ProviderErrorKind::RemoteChanged => ApiError::conflict(
+                "task_remote_changed",
+                "the remote task no longer matches the stored task",
+            ),
+            ProviderErrorKind::UnsupportedTask => ApiError::conflict(
+                "task_browser_bridge_unavailable",
+                "the Provider cannot prepare BrowserBridge for this task",
+            ),
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse => {
+                tracing::warn!(error = %provider_error, "Provider returned invalid BrowserBridge policy");
+                ApiError::bad_gateway(
+                    "provider_browser_session_invalid",
+                    "the Provider returned an unsafe BrowserBridge session policy",
+                )
+            }
+            ProviderErrorKind::Internal => ApiError::internal(provider_error),
+        },
+        ProviderTaskBrowserSessionError::Storage(error) => ApiError::internal(error),
+    }
+}
+
 fn map_task_progress_error(error: ProviderTaskProgressError) -> ApiError {
     match error {
         ProviderTaskProgressError::TaskNotFound => ApiError::not_found("task_not_found"),
@@ -1374,6 +1478,14 @@ struct TaskDetailResponse {
     provider_id: ProviderId,
     provider_version: String,
     detail: RemoteTaskDetail,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskBrowserSessionSpecResponse {
+    task_id: TaskId,
+    provider_id: ProviderId,
+    provider_version: String,
+    spec: BrowserSessionSpec,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

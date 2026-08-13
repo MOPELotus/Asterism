@@ -6,6 +6,7 @@ mod auth_session;
 mod credit;
 mod database;
 mod execution;
+mod external_oauth;
 mod lease;
 mod outbox;
 mod provider_account;
@@ -47,17 +48,18 @@ pub use repository::{
     ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionRecoveryFinishRequest,
     ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
     ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, OutboxRepository, PriorAnswerEvidence,
-    ProviderAccountRepository, ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
-    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
-    ProviderRuntimeSettingsWriteOutcome, ProviderRuntimeSettingsWriteRequest, QuestionSnapshot,
-    QuestionSnapshotRepository, ScanScheduleRepository, SchedulerRepository, ServiceTokenPage,
-    ServiceTokenQueryRepository, SessionRepository, SubmissionDraftRepository,
-    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
-    TaskLifecycleMutation, TaskLifecycleMutationOutcome, TaskLifecycleReceipt,
-    TaskLifecycleRepository, TaskPage, TaskQueryRepository, TaskRepository, TaskRuntimeRepository,
-    UserAdminCreate, UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate,
-    UserAdminUpdateOutcome, UserProfilePage, UserRepository, VerificationRecoveryStartRequest,
+    ExecutionVerificationRecoveryRepository, ExternalOauthClaim, OutboxRepository,
+    PriorAnswerEvidence, ProviderAccountRepository, ProviderAccountRuntimeRepository,
+    ProviderRuntimeSettingsRecord, ProviderRuntimeSettingsRepository,
+    ProviderRuntimeSettingsTarget, ProviderRuntimeSettingsWriteOutcome,
+    ProviderRuntimeSettingsWriteRequest, QuestionSnapshot, QuestionSnapshotRepository,
+    ScanScheduleRepository, SchedulerRepository, ServiceTokenPage, ServiceTokenQueryRepository,
+    SessionRepository, SubmissionDraftRepository, SubmissionReceiptPersistRequest,
+    SubmissionResultPersistRequest, SubmissionResultRepository, TaskLifecycleMutation,
+    TaskLifecycleMutationOutcome, TaskLifecycleReceipt, TaskLifecycleRepository, TaskPage,
+    TaskQueryRepository, TaskRepository, TaskRuntimeRepository, UserAdminCreate,
+    UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate, UserAdminUpdateOutcome,
+    UserProfilePage, UserRepository, VerificationRecoveryStartRequest,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

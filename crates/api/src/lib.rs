@@ -144,6 +144,14 @@ pub fn build_router(state: ApiState) -> Router {
             axum::routing::put(account::put_auth_session_credentials),
         )
         .route(
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/external-oauth",
+            get(account::get_external_oauth_pending),
+        )
+        .route(
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/external-oauth/callback",
+            post(account::submit_external_oauth_callback),
+        )
+        .route(
             "/api/v1/provider-accounts/{account_id}/scan-schedule",
             get(account::get_scan_schedule).put(account::configure_scan_schedule),
         )
@@ -265,6 +273,10 @@ fn task_routes() -> Router<ApiState> {
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
         .route("/api/v1/tasks/{task_id}/detail", get(task::get_task_detail))
+        .route(
+            "/api/v1/tasks/{task_id}/browser-session-spec",
+            get(task::get_task_browser_session_spec),
+        )
         .route(
             "/api/v1/tasks/{task_id}/progress",
             get(task::get_task_progress),
@@ -583,6 +595,36 @@ pub fn openapi_document() -> Value {
                     }
                 }
             },
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/external-oauth": {"get": {
+                "operationId": "getProviderAccountExternalOauthPending",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [
+                    {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                    {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+                ],
+                "responses": {
+                    "200": {"description": "Sanitized owner-scoped one-shot OAuth state"},
+                    "404": {"description": "Pending OAuth session not found"}
+                }
+            }},
+            "/api/v1/provider-accounts/{account_id}/auth-sessions/{session_id}/external-oauth/callback": {"post": {
+                "operationId": "submitProviderAccountExternalOauthCallback",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [
+                    {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+                    {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+                ],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SubmitExternalOauthCallback"}}}},
+                "responses": {
+                    "200": {"description": "OAuth callback consumed once, credentials validated and committed"},
+                    "400": {"description": "Invalid callback URL"},
+                    "404": {"description": "Provider account or OAuth session not found"},
+                    "409": {"description": "OAuth callback is expired, consumed, terminal, or changed concurrently"},
+                    "429": {"description": "Provider rate limit reached"},
+                    "502": {"description": "Provider rejected the callback or protocol drifted"},
+                    "503": {"description": "Provider, network, or encrypted credential store unavailable"}
+                }
+            }},
             "/api/v1/provider-accounts/{account_id}/scan-schedule": {
                 "get": {
                     "operationId": "getProviderAccountScanSchedule",
@@ -746,6 +788,14 @@ pub fn openapi_document() -> Value {
                     },
                     "additionalProperties": false
                 },
+                "SubmitExternalOauthCallback": {
+                    "type": "object",
+                    "required": ["callback_url"],
+                    "properties": {
+                        "callback_url": {"type": "string", "format": "uri", "minLength": 1, "maxLength": 8192, "writeOnly": true}
+                    },
+                    "additionalProperties": false
+                },
                 "ConfigureScanSchedule": {
                     "type": "object",
                     "required": ["enabled"],
@@ -861,6 +911,13 @@ pub fn openapi_document() -> Value {
         .insert(
             "/api/v1/tasks/{task_id}/detail".to_owned(),
             task_detail_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/tasks/{task_id}/browser-session-spec".to_owned(),
+            task_browser_session_spec_path(),
         );
     document["paths"]
         .as_object_mut()
@@ -1393,6 +1450,26 @@ fn task_detail_path() -> Value {
             "409": {"description": "Provider account, capability, user action, or remote binding conflict"},
             "429": {"description": "Provider rate limited"},
             "502": {"description": "Provider returned inconsistent detail"},
+            "503": {"description": "Provider temporarily unavailable"}
+        }
+    }})
+}
+
+fn task_browser_session_spec_path() -> Value {
+    json!({"get": {
+        "operationId": "getTaskBrowserSessionSpec",
+        "description": "Freshly rebinds an owner-scoped Task and returns only the bounded credential-free BrowserBridge session policy. It does not launch a helper, inject credentials, interact with the remote page, or claim task completion.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Fresh bounded BrowserBridge session policy"},
+            "400": {"description": "Invalid Task or request ID"},
+            "404": {"description": "Task not found"},
+            "409": {"description": "Task/Provider capability, account, user action, or remote binding conflict"},
+            "429": {"description": "Provider rate limited"},
+            "502": {"description": "Provider returned an unsafe browser policy"},
             "503": {"description": "Provider temporarily unavailable"}
         }
     }})
@@ -2209,6 +2286,7 @@ mod tests {
                 waiting_for: asterism_domain::WaitingUserState::SessionImport,
                 user_action: None,
                 expires_at: None,
+                external_oauth: None,
             })
         }
 
@@ -4744,6 +4822,7 @@ mod tests {
             .unwrap();
         for path in [
             "/api/v1/tasks/not-a-task/detail",
+            "/api/v1/tasks/not-a-task/browser-session-spec",
             "/api/v1/tasks/not-a-task/progress",
             "/api/v1/tasks/not-a-task/duration",
             "/api/v1/tasks/not-a-task/questions",
@@ -5656,6 +5735,7 @@ mod tests {
             "/api/v1/tasks",
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/detail",
+            "/api/v1/tasks/{task_id}/browser-session-spec",
             "/api/v1/tasks/{task_id}/progress",
             "/api/v1/tasks/{task_id}/duration",
             "/api/v1/tasks/{task_id}/questions",
@@ -5685,6 +5765,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/detail"]["get"]["operationId"],
             "getTaskDetail"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/browser-session-spec"]["get"]["operationId"],
+            "getTaskBrowserSessionSpec"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/progress"]["get"]["operationId"],

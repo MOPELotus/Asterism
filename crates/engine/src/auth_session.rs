@@ -2,13 +2,17 @@ use std::sync::Arc;
 
 use asterism_domain::{
     AuditActor, AuthMethod, AuthSession, AuthSessionError, AuthSessionId, AuthState,
-    HumanRequiredReason, ProviderAccountId, ProviderId, Timestamp, UserId,
+    ExternalOauthPending, ExternalOauthPendingCreate, ExternalOauthState, HumanRequiredReason,
+    ProviderAccountId, ProviderId, Timestamp, UserId,
 };
 use asterism_provider_api::{
-    AuthChallenge, ProviderAuthContext, ProviderError, ProviderErrorKind, ProviderRegistry,
-    SessionStatus,
+    AuthChallenge, ExternalOauthCallbackBinding, ProviderAuthContext, ProviderError,
+    ProviderErrorKind, ProviderRegistry, SessionStatus,
 };
-use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
+use asterism_secrets::{
+    CredentialAcquisition, CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError,
+    SecretString,
+};
 use asterism_storage::{
     AuthSessionRepository, AuthenticatedCredentialRepository, ProviderAccountRepository,
     StorageError,
@@ -48,6 +52,10 @@ where
     /// Provider challenge, state transition, or persistence operation is
     /// invalid. Provider failures are classified into an observable session
     /// state before the error is returned.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "authentication start keeps Provider failure classification and durable challenge creation in one auditable state flow"
+    )]
     pub async fn begin(
         &self,
         request: AuthSessionStartRequest,
@@ -88,6 +96,7 @@ where
         self.sessions
             .create_auth_session(&session, actor, &correlation_id)
             .await?;
+        let provider_id = account.provider_id.clone();
         let context = ProviderAuthContext {
             provider_id: account.provider_id,
             account_id: account.id,
@@ -133,14 +142,36 @@ where
             .await?;
             return Err(AuthSessionServiceError::InvalidChallenge(session.id));
         }
-        transition_once(
-            &self.sessions,
-            &mut session,
-            AuthState::WaitingUser(challenge.waiting_for),
-            actor,
-            &correlation_id,
-        )
-        .await?;
+        let expected_revision = session.revision;
+        session.transition(AuthState::WaitingUser(challenge.waiting_for), Utc::now())?;
+        if let Some(authorization) = &challenge.external_oauth {
+            let binding = authorization.callback_binding;
+            let pending = ExternalOauthPending::pending(ExternalOauthPendingCreate {
+                auth_session_id: session.id,
+                owner_user_id,
+                provider_account_id,
+                provider_id,
+                state_digest: binding.state_digest(),
+                provider_context_digest: binding.provider_context_digest(),
+                created_at: session.created_at,
+                expires_at: session.expires_at,
+            })?;
+            self.sessions
+                .create_external_oauth_pending(
+                    &pending,
+                    &session,
+                    expected_revision,
+                    actor,
+                    &correlation_id,
+                )
+                .await?;
+        } else if !self
+            .sessions
+            .update_auth_session(&session, expected_revision, actor, &correlation_id)
+            .await?
+        {
+            return Err(AuthSessionServiceError::RevisionConflict(session.id));
+        }
         Ok(AuthSessionBegin { session, challenge })
     }
 
@@ -180,6 +211,37 @@ where
             return Err(AuthSessionServiceError::RevisionConflict(session_id));
         }
         Ok(session)
+    }
+
+    /// Returns the durable external OAuth callback status after reconciling
+    /// any crash window. Recovery never calls the Provider or replays a
+    /// consumed callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or state error when the owner-scoped callback and
+    /// authentication session cannot be reconciled safely.
+    pub async fn recover_external_oauth_pending(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        session_id: AuthSessionId,
+        actor: AuditActor,
+        correlation_id: &str,
+        at: Timestamp,
+    ) -> Result<Option<ExternalOauthPending>, AuthSessionServiceError> {
+        Ok(self
+            .sessions
+            .recover_external_oauth_pending(
+                owner_user_id,
+                provider_account_id,
+                session_id,
+                at,
+                actor,
+                correlation_id,
+            )
+            .await?
+            .map(|claim| claim.pending))
     }
 
     /// Submits one in-memory candidate through Provider validation and commits
@@ -293,6 +355,218 @@ where
         })
     }
 
+    /// Claims and consumes one owner/account/AuthSession-bound external OAuth
+    /// callback, invokes the Provider exactly once, validates its replacement
+    /// credential, and commits it through the existing atomic secret boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed conflict for missing/stale claims, preserves Provider
+    /// errors after recording a consumed terminal pending state, and never
+    /// reopens or retries a callback after the claim succeeds.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the one-shot OAuth exchange keeps claim, Provider call, validation, credential commit and terminal receipt ordering visible together"
+    )]
+    pub async fn submit_external_oauth_callback<C>(
+        &self,
+        credential_store: &C,
+        request: ExternalOauthCallbackRequest,
+    ) -> Result<AuthSessionCredentialCommit, AuthSessionServiceError>
+    where
+        C: AuthenticatedCredentialRepository,
+    {
+        let ExternalOauthCallbackRequest {
+            owner_user_id,
+            provider_account_id,
+            session_id,
+            callback_url,
+            access,
+        } = request;
+        if !access.authorizes(owner_user_id) {
+            return Err(AuthSessionServiceError::Credential(
+                CredentialProvisionError::Unauthorized,
+            ));
+        }
+        let actor = audit_actor_from_access(&access)?;
+        let account = self
+            .accounts
+            .find_provider_account(owner_user_id, provider_account_id)
+            .await?
+            .ok_or(AuthSessionServiceError::AccountNotFound(
+                provider_account_id,
+            ))?;
+        let entry = self.registry.get(&account.provider_id).ok_or_else(|| {
+            AuthSessionServiceError::ProviderNotRegistered(account.provider_id.clone())
+        })?;
+        let authentication = entry
+            .authentication
+            .as_ref()
+            .ok_or(AuthSessionServiceError::AuthenticationUnavailable)?;
+        let Some(mut claim) = self
+            .sessions
+            .claim_external_oauth_pending(
+                owner_user_id,
+                provider_account_id,
+                session_id,
+                Utc::now(),
+                actor,
+                &access.correlation_id,
+            )
+            .await?
+        else {
+            return Err(AuthSessionServiceError::RevisionConflict(session_id));
+        };
+        if !matches!(
+            claim.auth_session.method,
+            AuthMethod::ExternalBrowserOauth | AuthMethod::AssistedSession
+        ) || claim.pending.provider_id != account.provider_id
+        {
+            return Err(AuthSessionServiceError::InvalidSessionState(session_id));
+        }
+        let context = ProviderAuthContext {
+            provider_id: account.provider_id.clone(),
+            account_id: account.id,
+            auth_session_id: Some(session_id),
+            correlation_id: access.correlation_id.clone(),
+        };
+        let binding = ExternalOauthCallbackBinding::from_digests(
+            claim.pending.state_digest,
+            claim.pending.provider_context_digest,
+        );
+        let replacement = match authentication
+            .exchange_external_oauth_callback(&context, callback_url, binding)
+            .await
+        {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                finish_oauth_provider_failure(
+                    &self.sessions,
+                    &mut claim.pending,
+                    &mut claim.auth_session,
+                    &error,
+                    actor,
+                    &access.correlation_id,
+                )
+                .await?;
+                return Err(AuthSessionServiceError::Provider {
+                    session_id,
+                    source: error,
+                });
+            }
+        };
+        transition_once(
+            &self.sessions,
+            &mut claim.auth_session,
+            AuthState::ValidatingCredential,
+            actor,
+            &access.correlation_id,
+        )
+        .await?;
+        let bundle = CredentialBundle {
+            provider_id: account.provider_id,
+            tenant: account.tenant,
+            auth_method: claim.auth_session.method,
+            acquired_via: CredentialAcquisition::NativeProviderLogin,
+            captured_at: Utc::now(),
+            expires_at: None,
+            session_kind: replacement.session_kind,
+            fields: replacement.fields,
+            user_id_hint: None,
+        };
+        let (bundle, status) = match validate_candidate(
+            self.registry.as_ref(),
+            &self.accounts,
+            owner_user_id,
+            provider_account_id,
+            bundle,
+            Some(session_id),
+            &access,
+        )
+        .await
+        {
+            Ok(validated) => validated,
+            Err(error) => {
+                finish_oauth_credential_failure(
+                    &self.sessions,
+                    &mut claim.pending,
+                    &mut claim.auth_session,
+                    &error,
+                    actor,
+                    &access.correlation_id,
+                )
+                .await?;
+                return Err(AuthSessionServiceError::Credential(error));
+            }
+        };
+        let validating_session = claim.auth_session.clone();
+        let validating_revision = validating_session.revision;
+        claim
+            .auth_session
+            .transition(AuthState::Authenticated, Utc::now())?;
+        let credentials = match credential_store
+            .commit_authenticated_credentials(
+                owner_user_id,
+                provider_account_id,
+                bundle,
+                &claim.auth_session,
+                validating_revision,
+                &access,
+            )
+            .await
+        {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                claim.auth_session = validating_session;
+                finish_oauth_pending(
+                    &self.sessions,
+                    &mut claim.pending,
+                    ExternalOauthState::Failed,
+                    actor,
+                    &access.correlation_id,
+                )
+                .await?;
+                if !matches!(&error, SecretStoreError::VersionConflict) {
+                    transition_once(
+                        &self.sessions,
+                        &mut claim.auth_session,
+                        AuthState::ProviderUnavailable,
+                        actor,
+                        &access.correlation_id,
+                    )
+                    .await?;
+                }
+                return Err(match error {
+                    SecretStoreError::VersionConflict => {
+                        AuthSessionServiceError::RevisionConflict(session_id)
+                    }
+                    other => AuthSessionServiceError::CredentialStore(other),
+                });
+            }
+        };
+        let expected_pending_revision = claim.pending.revision;
+        claim
+            .pending
+            .finish(ExternalOauthState::Succeeded, Utc::now())?;
+        if !self
+            .sessions
+            .update_external_oauth_pending(
+                &claim.pending,
+                expected_pending_revision,
+                actor,
+                &access.correlation_id,
+            )
+            .await?
+        {
+            return Err(AuthSessionServiceError::RevisionConflict(session_id));
+        }
+        Ok(AuthSessionCredentialCommit {
+            session: claim.auth_session,
+            status,
+            credentials,
+        })
+    }
+
     async fn enter_credential_validation(
         &self,
         owner_user_id: UserId,
@@ -368,6 +642,15 @@ pub struct AuthSessionCredentialCommit {
     pub credentials: Vec<ProviderCredential>,
 }
 
+#[derive(Debug)]
+pub struct ExternalOauthCallbackRequest {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub session_id: AuthSessionId,
+    pub callback_url: SecretString,
+    pub access: SecretAccess,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AuthSessionServiceError {
     #[error("Provider account `{0}` does not exist for this owner")]
@@ -401,6 +684,8 @@ pub enum AuthSessionServiceError {
     #[error(transparent)]
     Domain(#[from] AuthSessionError),
     #[error(transparent)]
+    ExternalOauthDomain(#[from] asterism_domain::ExternalOauthPendingError),
+    #[error(transparent)]
     Storage(#[from] StorageError),
 }
 
@@ -413,6 +698,16 @@ fn valid_challenge(session: &AuthSession, challenge: &AuthChallenge) -> bool {
         && challenge.user_action.as_deref().is_none_or(|action| {
             !action.is_empty() && action.len() <= 4096 && !action.chars().any(char::is_control)
         })
+        && challenge
+            .external_oauth
+            .as_ref()
+            .is_none_or(|authorization| {
+                matches!(
+                    challenge.method,
+                    AuthMethod::ExternalBrowserOauth | AuthMethod::AssistedSession
+                ) && challenge.waiting_for == asterism_domain::WaitingUserState::BrowserCallback
+                    && authorization.validate()
+            })
 }
 
 async fn transition_provider_failure<S: AuthSessionRepository>(
@@ -471,6 +766,84 @@ fn credential_failure_state(error: &CredentialProvisionError) -> AuthState {
     }
 }
 
+async fn finish_oauth_provider_failure<S: AuthSessionRepository>(
+    sessions: &S,
+    pending: &mut ExternalOauthPending,
+    session: &mut AuthSession,
+    error: &ProviderError,
+    actor: AuditActor,
+    correlation_id: &str,
+) -> Result<(), AuthSessionServiceError> {
+    let outcome = if matches!(
+        error.kind,
+        ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable
+    ) {
+        ExternalOauthState::Ambiguous
+    } else {
+        ExternalOauthState::Failed
+    };
+    finish_oauth_pending(sessions, pending, outcome, actor, correlation_id).await?;
+    transition_once(
+        sessions,
+        session,
+        provider_failure_state(error),
+        actor,
+        correlation_id,
+    )
+    .await
+}
+
+async fn finish_oauth_credential_failure<S: AuthSessionRepository>(
+    sessions: &S,
+    pending: &mut ExternalOauthPending,
+    session: &mut AuthSession,
+    error: &CredentialProvisionError,
+    actor: AuditActor,
+    correlation_id: &str,
+) -> Result<(), AuthSessionServiceError> {
+    let outcome = match error {
+        CredentialProvisionError::Provider(error)
+            if matches!(
+                error.kind,
+                ProviderErrorKind::Network | ProviderErrorKind::ProviderUnavailable
+            ) =>
+        {
+            ExternalOauthState::Ambiguous
+        }
+        _ => ExternalOauthState::Failed,
+    };
+    finish_oauth_pending(sessions, pending, outcome, actor, correlation_id).await?;
+    transition_once(
+        sessions,
+        session,
+        credential_failure_state(error),
+        actor,
+        correlation_id,
+    )
+    .await
+}
+
+async fn finish_oauth_pending<S: AuthSessionRepository>(
+    sessions: &S,
+    pending: &mut ExternalOauthPending,
+    outcome: ExternalOauthState,
+    actor: AuditActor,
+    correlation_id: &str,
+) -> Result<(), AuthSessionServiceError> {
+    let expected_revision = pending.revision;
+    pending.finish(outcome, Utc::now())?;
+    if sessions
+        .update_external_oauth_pending(pending, expected_revision, actor, correlation_id)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(AuthSessionServiceError::RevisionConflict(
+            pending.auth_session_id,
+        ))
+    }
+}
+
 fn audit_actor_from_access(access: &SecretAccess) -> Result<AuditActor, AuthSessionServiceError> {
     match access.actor {
         asterism_secrets::SecretActor::User(user_id) => Ok(AuditActor::User(user_id)),
@@ -513,14 +886,18 @@ async fn transition_once<S: AuthSessionRepository>(
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use asterism_domain::{ProviderAccount, Role, SessionKind, WaitingUserState};
     use asterism_provider_api::{
-        AuthenticationCapability, CredentialValidation, ProviderCapability, ProviderContext,
-        ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult, SessionStatus,
-        VerificationLevel,
+        AuthenticationCapability, CredentialReplacement, CredentialValidation,
+        ExternalOauthAuthorization, ExternalOauthCallbackBinding, ProviderCapability,
+        ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
+        SessionStatus, VerificationLevel,
     };
     use asterism_secrets::{
         CredentialAcquisition, CredentialBundle, CredentialField, SecretAccess, SecretActor,
@@ -684,7 +1061,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_credentials_fail_the_session_without_storing_plaintext() {
-        let fixture = fixture_with_validation(true, false, None).await;
+        let fixture = fixture_with_validation(true, false, None, false).await;
         let started = begin_session(&fixture, "auth-rejected-start").await;
         let error = fixture
             .service
@@ -729,6 +1106,7 @@ mod tests {
             true,
             true,
             Some((Arc::clone(&entered), Arc::clone(&release))),
+            false,
         )
         .await;
         let first = begin_session(&fixture, "auth-race-first").await;
@@ -780,6 +1158,127 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn external_oauth_callback_is_claimed_once_validated_and_committed() {
+        let fixture = fixture_with_validation(true, true, None, false).await;
+        let now = Utc::now();
+        let started = fixture
+            .service
+            .begin(AuthSessionStartRequest {
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                method: AuthMethod::ExternalBrowserOauth,
+                created_at: now,
+                expires_at: now + Duration::minutes(5),
+                actor: AuditActor::User(fixture.owner),
+                correlation_id: "oauth-start".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert!(started.challenge.external_oauth.is_some());
+        let committed = fixture
+            .service
+            .submit_external_oauth_callback(
+                &fixture.store,
+                ExternalOauthCallbackRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    callback_url: SecretString::new(
+                        "https://provider.example/callback?code=one-time",
+                    ),
+                    access: secret_access(fixture.owner, "oauth-submit"),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(committed.session.state, AuthState::Authenticated);
+        assert_eq!(committed.credentials.len(), 2);
+        let pending = fixture
+            .sessions
+            .find_external_oauth_pending(fixture.owner, fixture.account, started.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.state, ExternalOauthState::Succeeded);
+        assert!(pending.consumed_at.is_some());
+        assert_eq!(fixture.oauth_calls.load(Ordering::SeqCst), 1);
+
+        let replay = fixture
+            .service
+            .submit_external_oauth_callback(
+                &fixture.store,
+                ExternalOauthCallbackRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    callback_url: SecretString::new(
+                        "https://provider.example/callback?code=one-time",
+                    ),
+                    access: secret_access(fixture.owner, "oauth-replay"),
+                },
+            )
+            .await;
+        assert!(
+            matches!(replay, Err(AuthSessionServiceError::RevisionConflict(id)) if id == started.session.id)
+        );
+        assert_eq!(fixture.oauth_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_oauth_exchange_is_consumed_and_never_replayed() {
+        let fixture = fixture_with_validation(true, true, None, true).await;
+        let now = Utc::now();
+        let started = fixture
+            .service
+            .begin(AuthSessionStartRequest {
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                method: AuthMethod::ExternalBrowserOauth,
+                created_at: now,
+                expires_at: now + Duration::minutes(5),
+                actor: AuditActor::User(fixture.owner),
+                correlation_id: "oauth-ambiguous-start".to_owned(),
+            })
+            .await
+            .unwrap();
+        let result = fixture
+            .service
+            .submit_external_oauth_callback(
+                &fixture.store,
+                ExternalOauthCallbackRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    session_id: started.session.id,
+                    callback_url: SecretString::new(
+                        "https://provider.example/callback?code=uncertain",
+                    ),
+                    access: secret_access(fixture.owner, "oauth-ambiguous-submit"),
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AuthSessionServiceError::Provider { source, .. })
+                if source.kind == ProviderErrorKind::Network
+        ));
+        let pending = fixture
+            .sessions
+            .find_external_oauth_pending(fixture.owner, fixture.account, started.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.state, ExternalOauthState::Ambiguous);
+        assert_eq!(fixture.oauth_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM secret_blobs")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
     struct Fixture {
         database: Database,
         owner: UserId,
@@ -788,16 +1287,18 @@ mod tests {
         sessions: SqliteAuthSessionRepository,
         store: SqliteSecretStore,
         service: AuthSessionService<SqliteProviderAccountRepository, SqliteAuthSessionRepository>,
+        oauth_calls: Arc<AtomicUsize>,
     }
 
     async fn fixture(echo_session_id: bool) -> Fixture {
-        fixture_with_validation(echo_session_id, true, None).await
+        fixture_with_validation(echo_session_id, true, None, false).await
     }
 
     async fn fixture_with_validation(
         echo_session_id: bool,
         credential_valid: bool,
         validation_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+        oauth_network_failure: bool,
     ) -> Fixture {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
@@ -845,14 +1346,17 @@ mod tests {
             scan_min_interval_seconds: None,
             capture_recipe_version: None,
             capabilities: BTreeSet::from([ProviderCapability::Authentication]),
-            auth_methods: BTreeSet::from([AuthMethod::QrCode]),
-            session_kinds: BTreeSet::from([SessionKind::Cookie]),
+            auth_methods: BTreeSet::from([AuthMethod::QrCode, AuthMethod::ExternalBrowserOauth]),
+            session_kinds: BTreeSet::from([SessionKind::Cookie, SessionKind::Composite]),
         };
+        let oauth_calls = Arc::new(AtomicUsize::new(0));
         let authentication = Arc::new(TestAuthentication {
             metadata: metadata.clone(),
             echo_session_id,
             credential_valid,
             validation_gate,
+            oauth_calls: Arc::clone(&oauth_calls),
+            oauth_network_failure,
         });
         let mut registry = ProviderRegistry::default();
         registry
@@ -882,6 +1386,7 @@ mod tests {
             sessions,
             store,
             service,
+            oauth_calls,
         }
     }
 
@@ -933,6 +1438,8 @@ mod tests {
         echo_session_id: bool,
         credential_valid: bool,
         validation_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+        oauth_calls: Arc<AtomicUsize>,
+        oauth_network_failure: bool,
     }
 
     impl ProviderIdentity for TestAuthentication {
@@ -948,6 +1455,11 @@ mod tests {
             context: &ProviderAuthContext,
             method: AuthMethod,
         ) -> ProviderResult<AuthChallenge> {
+            let external_oauth =
+                (method == AuthMethod::ExternalBrowserOauth).then(|| ExternalOauthAuthorization {
+                    authorization_url: "https://provider.example/oauth?opaque=redacted".to_owned(),
+                    callback_binding: ExternalOauthCallbackBinding::from_digests([1; 32], [2; 32]),
+                });
             Ok(AuthChallenge {
                 session_id: if self.echo_session_id {
                     context.auth_session_id.expect("Core session")
@@ -955,16 +1467,55 @@ mod tests {
                     AuthSessionId::new()
                 },
                 method,
-                waiting_for: WaitingUserState::QrScan,
+                waiting_for: if external_oauth.is_some() {
+                    WaitingUserState::BrowserCallback
+                } else {
+                    WaitingUserState::QrScan
+                },
                 user_action: Some("https://example.invalid/auth".to_owned()),
                 expires_at: None,
+                external_oauth,
+            })
+        }
+
+        async fn exchange_external_oauth_callback(
+            &self,
+            _context: &ProviderAuthContext,
+            callback_url: SecretString,
+            binding: ExternalOauthCallbackBinding,
+        ) -> ProviderResult<CredentialReplacement> {
+            self.oauth_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                callback_url
+                    .expose_secret()
+                    .starts_with("https://provider.example/")
+            );
+            assert!(binding.validate());
+            if self.oauth_network_failure {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "synthetic ambiguous exchange",
+                ));
+            }
+            Ok(CredentialReplacement {
+                session_kind: SessionKind::Composite,
+                fields: vec![
+                    CredentialField {
+                        purpose: SecretPurpose::ProviderAccessToken,
+                        value: SecretValue::new(b"oauth-token".to_vec()),
+                    },
+                    CredentialField {
+                        purpose: SecretPurpose::ProviderCompositeSession,
+                        value: SecretValue::new(b"oauth-crypto".to_vec()),
+                    },
+                ],
             })
         }
 
         async fn validate_credential(
             &self,
             context: &ProviderAuthContext,
-            _credential: &CredentialBundle,
+            credential: &CredentialBundle,
         ) -> ProviderResult<CredentialValidation> {
             assert!(context.auth_session_id.is_some());
             if let Some((entered, release)) = &self.validation_gate {
@@ -973,7 +1524,7 @@ mod tests {
             }
             Ok(CredentialValidation::accepted(SessionStatus {
                 valid: self.credential_valid,
-                kind: SessionKind::Cookie,
+                kind: credential.session_kind,
                 expires_at: None,
                 account_hint: None,
             }))

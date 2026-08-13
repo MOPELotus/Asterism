@@ -18,6 +18,7 @@ mod scan;
 mod scan_job;
 mod scan_worker;
 mod submission_build;
+mod task_browser;
 mod task_detail;
 mod task_duration;
 mod task_lifecycle;
@@ -48,6 +49,7 @@ pub use auth_bootstrap_credential::{
 pub use auth_session::{
     AuthSessionBegin, AuthSessionCredentialCommit, AuthSessionCredentialRequest,
     AuthSessionService, AuthSessionServiceError, AuthSessionStartRequest,
+    ExternalOauthCallbackRequest,
 };
 pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredentialService};
 pub use execution_job::{
@@ -82,6 +84,10 @@ pub use scan_worker::{ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedule
 pub use submission_build::{
     BuildSubmissionDraftCommand, SubmissionDraftBuildError, SubmissionDraftBuildResult,
     SubmissionDraftBuildService,
+};
+pub use task_browser::{
+    ProviderTaskBrowserSessionError, ProviderTaskBrowserSessionResult,
+    ProviderTaskBrowserSessionService, ReadTaskBrowserSessionCommand,
 };
 pub use task_detail::{
     ProviderTaskDetailError, ProviderTaskDetailResult, ProviderTaskDetailService,

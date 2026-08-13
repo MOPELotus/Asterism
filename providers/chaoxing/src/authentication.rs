@@ -194,6 +194,7 @@ impl AuthenticationCapability for ChaoxingAuthentication {
             waiting_for,
             user_action: None,
             expires_at: None,
+            external_oauth: None,
         })
     }
 

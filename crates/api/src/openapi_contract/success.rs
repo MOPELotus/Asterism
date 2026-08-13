@@ -37,6 +37,14 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
         "submitProviderAccountAuthSessionCredentials",
         "PutAuthSessionCredentialsResponse",
     ),
+    (
+        "getProviderAccountExternalOauthPending",
+        "ExternalOauthPendingResponse",
+    ),
+    (
+        "submitProviderAccountExternalOauthCallback",
+        "PutAuthSessionCredentialsResponse",
+    ),
     ("getProviderAccountScanSchedule", "ScanScheduleResponse"),
     (
         "configureProviderAccountScanSchedule",
@@ -67,6 +75,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("listTasks", "TaskPageResponse"),
     ("getTask", "Task"),
     ("getTaskDetail", "TaskDetailResponse"),
+    (
+        "getTaskBrowserSessionSpec",
+        "TaskBrowserSessionSpecResponse",
+    ),
     ("getTaskProgress", "TaskProgressResponse"),
     ("getTaskDuration", "TaskDurationResponse"),
     ("getTaskQuestions", "TaskQuestionsResponse"),
@@ -590,6 +602,13 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             ),
         ),
         (
+            "ExternalOauthAuthorization",
+            object(
+                &["authorization_url"],
+                json!({"authorization_url": {"type": "string", "format": "uri", "maxLength": 4096}}),
+            ),
+        ),
+        (
             "AuthChallenge",
             object(
                 &[
@@ -598,13 +617,15 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                     "waiting_for",
                     "user_action",
                     "expires_at",
+                    "external_oauth",
                 ],
                 json!({
                     "session_id": uuid(),
                     "method": schema_ref("AuthMethod"),
                     "waiting_for": string_enum(&["credential_input", "qr_scan", "qr_confirm", "browser_callback", "sms_code", "session_import"]),
                     "user_action": nullable_string(),
-                    "expires_at": nullable_timestamp()
+                    "expires_at": nullable_timestamp(),
+                    "external_oauth": nullable_schema_ref("ExternalOauthAuthorization")
                 }),
             ),
         ),
@@ -613,6 +634,25 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             object(
                 &["session", "challenge"],
                 json!({"session": schema_ref("AuthSession"), "challenge": schema_ref("AuthChallenge")}),
+            ),
+        ),
+        (
+            "ExternalOauthPendingResponse",
+            object(
+                &[
+                    "auth_session_id",
+                    "state",
+                    "expires_at",
+                    "consumed_at",
+                    "revision",
+                ],
+                json!({
+                    "auth_session_id": uuid(),
+                    "state": string_enum(&["pending", "completing", "succeeded", "failed", "ambiguous", "expired", "cancelled"]),
+                    "expires_at": timestamp(),
+                    "consumed_at": nullable_timestamp(),
+                    "revision": unsigned_integer()
+                }),
             ),
         ),
         (
@@ -748,6 +788,28 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         (
             "TaskDetailResponse",
             provider_task_read_response("detail", "RemoteTaskDetail"),
+        ),
+        (
+            "BrowserSessionSpec",
+            object(
+                &["version", "isolation_key", "allowed_origins", "headless"],
+                json!({
+                    "version": {"type": "integer", "minimum": 1, "maximum": u32::MAX},
+                    "isolation_key": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "allowed_origins": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "uniqueItems": true,
+                        "items": {"type": "string", "format": "uri", "maxLength": 256}
+                    },
+                    "headless": {"type": "boolean"}
+                }),
+            ),
+        ),
+        (
+            "TaskBrowserSessionSpecResponse",
+            provider_task_read_response("spec", "BrowserSessionSpec"),
         ),
         (
             "TaskProgressResponse",

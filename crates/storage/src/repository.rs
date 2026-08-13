@@ -6,13 +6,13 @@ use asterism_domain::{
     AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId, AuthSession,
     AuthSessionId, CreditAccount, CreditReservation, CreditReservationId, CreditTransaction,
     CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId, ExecutionId,
-    ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, LogLevel,
-    OrchestrationState, PriceQuote, ProviderAccount, ProviderAccountId, ProviderErrorClass,
-    ProviderId, ProviderRuntimeSettingsId, Question, QuestionContentFingerprint,
-    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
-    SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
-    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
-    UserProfile, UserStatus, WebSession, WebSessionId,
+    ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState,
+    ExternalOauthPending, LogLevel, OrchestrationState, PriceQuote, ProviderAccount,
+    ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
+    QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId,
+    SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
+    SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
+    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -428,6 +428,69 @@ pub trait AuthSessionRepository: Send + Sync {
         actor: AuditActor,
         correlation_id: &str,
     ) -> Result<bool, StorageError>;
+
+    /// Persists a hash-only external OAuth callback binding together with the
+    /// authentication session's first waiting-user transition.
+    async fn create_external_oauth_pending(
+        &self,
+        pending: &ExternalOauthPending,
+        waiting_session: &AuthSession,
+        expected_auth_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<(), StorageError>;
+
+    async fn find_external_oauth_pending(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        auth_session_id: AuthSessionId,
+    ) -> Result<Option<ExternalOauthPending>, StorageError>;
+
+    async fn find_external_oauth_pending_by_state(
+        &self,
+        owner_user_id: UserId,
+        provider_id: &ProviderId,
+        state_digest: [u8; 32],
+    ) -> Result<Option<ExternalOauthPending>, StorageError>;
+
+    /// Atomically consumes the pending callback and moves its exact
+    /// `AuthSession` from `WaitingUser` to `ExchangingCredential`.
+    async fn claim_external_oauth_pending(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        auth_session_id: AuthSessionId,
+        at: Timestamp,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<Option<ExternalOauthClaim>, StorageError>;
+
+    /// Reconciles a durable callback with its authentication session without
+    /// ever replaying the one-shot Provider exchange.
+    async fn recover_external_oauth_pending(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        auth_session_id: AuthSessionId,
+        at: Timestamp,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<Option<ExternalOauthClaim>, StorageError>;
+
+    async fn update_external_oauth_pending(
+        &self,
+        pending: &ExternalOauthPending,
+        expected_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<bool, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalOauthClaim {
+    pub pending: ExternalOauthPending,
+    pub auth_session: AuthSession,
 }
 
 /// Short-lived Capture pairing sessions with one-time token rotation at claim.

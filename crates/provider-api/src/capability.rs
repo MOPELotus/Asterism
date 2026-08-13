@@ -6,7 +6,7 @@ use asterism_domain::{
     SessionKind, SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
     SubmissionVerificationSnapshot, TaskCapability, TaskId, Timestamp, WaitingUserState,
 };
-use asterism_secrets::{CredentialBundle, CredentialField, SecretPurpose};
+use asterism_secrets::{CredentialBundle, CredentialField, SecretPurpose, SecretString};
 use async_trait::async_trait;
 use http::Uri;
 use serde::{Deserialize, Serialize};
@@ -598,6 +598,22 @@ pub trait AuthenticationCapability: ProviderIdentity {
         credential: &CredentialBundle,
     ) -> ProviderResult<CredentialValidation>;
 
+    /// Consumes one already Core-claimed external OAuth callback exactly once
+    /// and returns Provider credential material for Core validation/storage.
+    /// The default keeps the exchange opt-in even when a Provider advertises
+    /// another interactive authentication method.
+    async fn exchange_external_oauth_callback(
+        &self,
+        _context: &ProviderAuthContext,
+        _callback_url: SecretString,
+        _binding: ExternalOauthCallbackBinding,
+    ) -> ProviderResult<CredentialReplacement> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement an external OAuth callback exchange",
+        ))
+    }
+
     async fn validate_session(&self, context: &ProviderContext) -> ProviderResult<SessionStatus>;
 }
 
@@ -804,6 +820,78 @@ pub trait ExecutionEventSink {
     async fn log(&self, event: ProviderExecutionLog) -> ProviderResult<()>;
 }
 
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+pub struct ExternalOauthCallbackBinding {
+    state_digest: [u8; 32],
+    provider_context_digest: [u8; 32],
+}
+
+impl ExternalOauthCallbackBinding {
+    pub const fn from_digests(state_digest: [u8; 32], provider_context_digest: [u8; 32]) -> Self {
+        Self {
+            state_digest,
+            provider_context_digest,
+        }
+    }
+
+    pub const fn state_digest(self) -> [u8; 32] {
+        self.state_digest
+    }
+
+    pub const fn provider_context_digest(self) -> [u8; 32] {
+        self.provider_context_digest
+    }
+
+    pub fn validate(self) -> bool {
+        self.state_digest != [0; 32]
+            && self.provider_context_digest != [0; 32]
+            && self.state_digest != self.provider_context_digest
+    }
+}
+
+impl fmt::Debug for ExternalOauthCallbackBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExternalOauthCallbackBinding([HASHED])")
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExternalOauthAuthorization {
+    pub authorization_url: String,
+    #[serde(skip)]
+    pub callback_binding: ExternalOauthCallbackBinding,
+}
+
+impl ExternalOauthAuthorization {
+    pub fn validate(&self) -> bool {
+        if self.authorization_url.is_empty()
+            || self.authorization_url.len() > 4_096
+            || self.authorization_url.trim() != self.authorization_url
+            || self.authorization_url.chars().any(char::is_control)
+            || !self.callback_binding.validate()
+        {
+            return false;
+        }
+        let Ok(uri) = self.authorization_url.parse::<Uri>() else {
+            return false;
+        };
+        uri.scheme_str() == Some("https")
+            && uri
+                .authority()
+                .is_some_and(|authority| !authority.as_str().contains('@'))
+    }
+}
+
+impl fmt::Debug for ExternalOauthAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExternalOauthAuthorization")
+            .field("authorization_url", &"[REDACTED]")
+            .field("callback_binding", &self.callback_binding)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuthChallenge {
     pub session_id: AuthSessionId,
@@ -811,6 +899,7 @@ pub struct AuthChallenge {
     pub waiting_for: WaitingUserState,
     pub user_action: Option<String>,
     pub expires_at: Option<Timestamp>,
+    pub external_oauth: Option<ExternalOauthAuthorization>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1081,10 +1170,77 @@ pub struct ExecutionRequest {
     pub task_id: TaskId,
     pub remote_task_id: String,
     pub course_id: Option<CourseId>,
+    /// Exact capability set authorized for this Provider call. Composite
+    /// executions deliberately narrow this to the current mutation step so a
+    /// Provider cannot use plan context as authority to issue a later step.
     pub requested_capabilities: Vec<TaskCapability>,
+    /// Immutable, Core-validated capability plan persisted with the parent
+    /// Execution. This preserves donor step semantics across retry/recovery
+    /// without broadening `requested_capabilities`.
+    pub capability_plan: Vec<TaskCapability>,
+    /// One-based position of the active Provider call in `capability_plan`.
+    pub capability_step_position: u8,
     /// Immutable Core-resolved settings captured when this Execution was
     /// scheduled. Retries receive the same versioned values.
     pub runtime_settings: ResolvedProviderRuntimeSettings,
+}
+
+impl ExecutionRequest {
+    /// Validates that active mutation authority is an exact, bounded slice of
+    /// the immutable execution plan and that the current step is unambiguous.
+    pub fn has_valid_capability_step(&self) -> bool {
+        !self.requested_capabilities.is_empty()
+            && !self.capability_plan.is_empty()
+            && self.capability_plan.len() <= 5
+            && usize::from(self.capability_step_position) <= self.capability_plan.len()
+            && self.capability_step_position != 0
+            && (self.capability_plan.len() == 1
+                && self.requested_capabilities == self.capability_plan
+                || self.requested_capabilities.len() == 1
+                    && self.capability_plan[usize::from(self.capability_step_position) - 1]
+                        == self.requested_capabilities[0])
+    }
+}
+
+#[cfg(test)]
+mod execution_request_tests {
+    use super::*;
+
+    fn request() -> ExecutionRequest {
+        ExecutionRequest {
+            execution_id: ExecutionId::new(),
+            task_id: TaskId::new(),
+            remote_task_id: "remote-task".to_owned(),
+            course_id: None,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ],
+            capability_step_position: 2,
+            runtime_settings: ResolvedProviderRuntimeSettings {
+                schema_version: 1,
+                values: BTreeMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn active_step_is_bound_to_the_immutable_plan_without_broadening_authority() {
+        assert!(request().has_valid_capability_step());
+
+        let mut wrong_position = request();
+        wrong_position.capability_step_position = 1;
+        assert!(!wrong_position.has_valid_capability_step());
+
+        let mut broad_authority = request();
+        broad_authority.requested_capabilities = broad_authority.capability_plan.clone();
+        assert!(!broad_authority.has_valid_capability_step());
+
+        let mut missing_plan = request();
+        missing_plan.capability_plan.clear();
+        assert!(!missing_plan.has_valid_capability_step());
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1315,7 +1471,95 @@ pub enum ExecutionOutcomeError {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BrowserSessionSpec {
+    /// Provider-owned wire revision for the browser policy represented by this
+    /// immutable snapshot.
+    pub version: u32,
     pub isolation_key: String,
     pub allowed_origins: Vec<String>,
     pub headless: bool,
+}
+
+impl BrowserSessionSpec {
+    /// Validates a credential-free, bounded and exact browser-session policy.
+    /// An allowed origin grants navigation authority only; credential
+    /// injection remains a separate Core-owned contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowserSessionSpecError::Invalid`] for a zero revision,
+    /// malformed isolation key, unsafe origin or duplicate/unbounded origin
+    /// set.
+    pub fn validate(&self) -> Result<(), BrowserSessionSpecError> {
+        if self.version == 0
+            || self.isolation_key.is_empty()
+            || self.isolation_key.len() > 128
+            || self.isolation_key.trim() != self.isolation_key
+            || !self.isolation_key.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'-' | b'_' | b'.')
+            })
+            || self.allowed_origins.is_empty()
+            || self.allowed_origins.len() > MAX_CAPTURE_ORIGINS
+        {
+            return Err(BrowserSessionSpecError::Invalid);
+        }
+        let mut origins = self.allowed_origins.clone();
+        for origin in &origins {
+            if https_origin(origin, true).map_err(|_| BrowserSessionSpecError::Invalid)? != *origin
+            {
+                return Err(BrowserSessionSpecError::Invalid);
+            }
+        }
+        origins.sort_unstable();
+        if origins.windows(2).any(|pair| pair[0] == pair[1])
+            || serde_json::to_vec(self).map_or(true, |encoded| encoded.len() > 4 * 1_024)
+        {
+            Err(BrowserSessionSpecError::Invalid)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum BrowserSessionSpecError {
+    #[error("Browser session specification is unsafe, unbounded, or internally inconsistent")]
+    Invalid,
+}
+
+#[cfg(test)]
+mod browser_session_spec_tests {
+    use super::*;
+
+    fn spec() -> BrowserSessionSpec {
+        BrowserSessionSpec {
+            version: 1,
+            isolation_key: "provider-task-a1".to_owned(),
+            allowed_origins: vec!["https://provider.example".to_owned()],
+            headless: false,
+        }
+    }
+
+    #[test]
+    fn exact_https_origins_and_bounded_isolation_are_required() {
+        assert_eq!(spec().validate(), Ok(()));
+
+        let mut duplicate = spec();
+        duplicate
+            .allowed_origins
+            .push("https://provider.example".to_owned());
+        assert_eq!(duplicate.validate(), Err(BrowserSessionSpecError::Invalid));
+
+        let mut route = spec();
+        route.allowed_origins[0].push_str("/task");
+        assert_eq!(route.validate(), Err(BrowserSessionSpecError::Invalid));
+
+        let mut secret_shaped = spec();
+        secret_shaped.isolation_key = "Provider:token".to_owned();
+        assert_eq!(
+            secret_shaped.validate(),
+            Err(BrowserSessionSpecError::Invalid)
+        );
+    }
 }

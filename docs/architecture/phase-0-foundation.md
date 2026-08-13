@@ -3075,3 +3075,43 @@ Provider execution requests also carry the immutable Core `ExecutionId`.
 Providers can derive bounded random-duration or score choices per Execution
 while keeping retries and verification stable; unlike Task-only hashing, a
 future authorized Execution of the same Task receives a distinct identity.
+
+## One-hundred-and-seventy-ninth Phase 0 slice
+
+BrowserBridge is now reachable through the first shared Core/API boundary
+instead of existing only as a registry slot. `BrowserSessionSpec` has an exact
+Provider wire revision and validates a bounded credential-free isolation key,
+unique canonical HTTPS navigation origins and a finite serialized shape.
+Navigation authority does not imply credential injection authority.
+
+The owner-scoped Task service requires the persisted Task to advertise
+BrowserBridge, rebinds the same authenticated Provider account, passes only
+opaque credential references, invokes the Provider's fresh detail-backed
+session policy and rejects unsafe output before returning it. The corresponding
+`GET /api/v1/tasks/{task_id}/browser-session-spec` route and generated OpenAPI
+schema expose this policy without launching a browser, injecting a Secret,
+performing DOM actions or claiming Task completion. Durable helper sessions,
+one-time credential delivery, typed Provider command/result exchange and
+verification-only recovery remain subsequent shared execution slices rather
+than being falsely implied by this read boundary.
+
+## One-hundred-and-eightieth Phase 0 slice
+
+External browser OAuth now has a shared one-shot Core boundary. A Provider
+returns a bounded authorization URL plus redacted state/context digests; Core
+persists only those digests in an owner/account/AuthSession-bound short-lived
+pending record. Callback submission atomically claims that record before the
+Provider exchange, passes the callback URL only as an in-memory Secret, then
+uses the existing Provider validation and atomic credential commit boundary.
+The callback itself, authorization code, state and runtime crypto context are
+never persisted or returned by the status API.
+
+Pending callback state is distinct from `AuthSession` state and from the
+credential receipt. `Pending -> Completing` is single-use; Provider/network
+ambiguity consumes the callback and cannot trigger an automatic replay.
+Owner-scoped status reads run a transactional fail-closed reconciliation: an
+authenticated session completes a stranded pending record as `Succeeded`,
+while a stale in-flight exchange becomes `Ambiguous` and
+`ProviderUnavailable` without invoking the Provider again. The OpenAPI surface
+therefore exposes only sanitized state, expiry, consumption and revision, and
+marks the submitted callback URL as write-only.

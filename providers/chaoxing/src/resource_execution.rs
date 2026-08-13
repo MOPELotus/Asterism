@@ -1223,6 +1223,8 @@ mod tests {
             remote_task_id: remote_task_id.to_owned(),
             course_id: None,
             requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: vec![TaskCapability::ResourceExecution],
+            capability_step_position: 1,
             runtime_settings: crate::runtime_settings::runtime_settings_schema()
                 .resolve(None, None, None)
                 .unwrap(),
@@ -1244,6 +1246,8 @@ mod tests {
             remote_task_id: remote_task_id.to_owned(),
             course_id: None,
             requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: vec![TaskCapability::ResourceExecution],
+            capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
         }
     }

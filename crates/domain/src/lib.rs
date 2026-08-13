@@ -9,6 +9,7 @@ pub mod auth_bootstrap_event;
 pub mod automation;
 pub mod credits;
 pub mod execution;
+pub mod external_oauth;
 pub mod id;
 pub mod question;
 pub mod submission;
@@ -43,6 +44,10 @@ pub use credits::{
 pub use execution::{
     AttemptResult, Execution, ExecutionAttempt, ExecutionLease, ExecutionLogEvent,
     ExecutionProgress, ExecutionStage, ExecutionState, LogLevel, ProviderErrorClass, RequestSource,
+};
+pub use external_oauth::{
+    ExternalOauthPending, ExternalOauthPendingCreate, ExternalOauthPendingError,
+    ExternalOauthState, MAX_EXTERNAL_OAUTH_TTL_SECONDS,
 };
 pub use id::*;
 pub use question::{

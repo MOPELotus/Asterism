@@ -129,6 +129,114 @@ impl AuthSessionRepository for SqliteAuthSessionRepository {
         transaction.commit().await?;
         Ok(true)
     }
+
+    async fn create_external_oauth_pending(
+        &self,
+        pending: &asterism_domain::ExternalOauthPending,
+        waiting_session: &AuthSession,
+        expected_auth_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<(), StorageError> {
+        crate::external_oauth::create_pending(
+            &self.database,
+            pending,
+            waiting_session,
+            expected_auth_revision,
+            actor,
+            correlation_id,
+        )
+        .await
+    }
+
+    async fn find_external_oauth_pending(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        auth_session_id: AuthSessionId,
+    ) -> Result<Option<asterism_domain::ExternalOauthPending>, StorageError> {
+        crate::external_oauth::find_pending(
+            &self.database,
+            owner_user_id,
+            provider_account_id,
+            auth_session_id,
+        )
+        .await
+    }
+
+    async fn find_external_oauth_pending_by_state(
+        &self,
+        owner_user_id: UserId,
+        provider_id: &asterism_domain::ProviderId,
+        state_digest: [u8; 32],
+    ) -> Result<Option<asterism_domain::ExternalOauthPending>, StorageError> {
+        crate::external_oauth::find_pending_by_state(
+            &self.database,
+            owner_user_id,
+            provider_id,
+            state_digest,
+        )
+        .await
+    }
+
+    async fn claim_external_oauth_pending(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        auth_session_id: AuthSessionId,
+        at: Timestamp,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<Option<crate::ExternalOauthClaim>, StorageError> {
+        crate::external_oauth::claim_pending(
+            &self.database,
+            owner_user_id,
+            provider_account_id,
+            auth_session_id,
+            at,
+            actor,
+            correlation_id,
+        )
+        .await
+    }
+
+    async fn recover_external_oauth_pending(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        auth_session_id: AuthSessionId,
+        at: Timestamp,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<Option<crate::ExternalOauthClaim>, StorageError> {
+        crate::external_oauth::recover_pending(
+            &self.database,
+            owner_user_id,
+            provider_account_id,
+            auth_session_id,
+            at,
+            actor,
+            correlation_id,
+        )
+        .await
+    }
+
+    async fn update_external_oauth_pending(
+        &self,
+        pending: &asterism_domain::ExternalOauthPending,
+        expected_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<bool, StorageError> {
+        crate::external_oauth::update_pending(
+            &self.database,
+            pending,
+            expected_revision,
+            actor,
+            correlation_id,
+        )
+        .await
+    }
 }
 
 pub(crate) async fn update_auth_session_in_transaction(
@@ -221,7 +329,7 @@ fn validate_updated_session(
     Ok(())
 }
 
-async fn fetch_auth_session(
+pub(crate) async fn fetch_auth_session(
     transaction: &mut Transaction<'_, Sqlite>,
     session_id: AuthSessionId,
 ) -> Result<Option<AuthSession>, StorageError> {
@@ -287,7 +395,7 @@ async fn ensure_owned_account(
     }
 }
 
-async fn mirror_account_state(
+pub(crate) async fn mirror_account_state(
     transaction: &mut Transaction<'_, Sqlite>,
     session: &AuthSession,
 ) -> Result<(), StorageError> {
@@ -370,11 +478,11 @@ fn decode_auth_session(row: &SqliteRow) -> Result<AuthSession, StorageError> {
     Ok(session)
 }
 
-fn encode_timestamp(value: Timestamp) -> String {
+pub(crate) fn encode_timestamp(value: Timestamp) -> String {
     value.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
-fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
+pub(crate) fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|_| StorageError::InvalidData("invalid auth session timestamp".to_owned()))
@@ -382,7 +490,10 @@ fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
 
 #[cfg(test)]
 mod tests {
-    use asterism_domain::{AuthMethod, ProviderId, Role, WaitingUserState};
+    use asterism_domain::{
+        AuthMethod, ExternalOauthPending, ExternalOauthPendingCreate, ExternalOauthState,
+        ProviderId, Role, WaitingUserState,
+    };
     use chrono::Duration;
 
     use super::*;
@@ -468,6 +579,230 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audit_count, 2);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the storage integration test exercises hash-only creation, one-shot claim and post-commit crash recovery as one lifecycle"
+    )]
+    async fn external_oauth_callback_is_hash_only_owner_bound_and_claimed_once() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner = insert_user(&database).await;
+        let account = insert_account(&database, owner).await;
+        let repository = SqliteAuthSessionRepository::new(database.clone());
+        let now = Utc::now();
+        let mut session = AuthSession::starting(
+            owner,
+            account,
+            AuthMethod::ExternalBrowserOauth,
+            now,
+            now + Duration::minutes(5),
+        )
+        .unwrap();
+        repository
+            .create_auth_session(&session, AuditActor::User(owner), "oauth-create")
+            .await
+            .unwrap();
+        session
+            .transition(
+                AuthState::WaitingUser(WaitingUserState::BrowserCallback),
+                now + Duration::seconds(1),
+            )
+            .unwrap();
+        let pending = ExternalOauthPending::pending(ExternalOauthPendingCreate {
+            auth_session_id: session.id,
+            owner_user_id: owner,
+            provider_account_id: account,
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            state_digest: [1; 32],
+            provider_context_digest: [2; 32],
+            created_at: now,
+            expires_at: now + Duration::minutes(5),
+        })
+        .unwrap();
+        repository
+            .create_external_oauth_pending(
+                &pending,
+                &session,
+                1,
+                AuditActor::User(owner),
+                "oauth-create",
+            )
+            .await
+            .unwrap();
+
+        let stored = repository
+            .find_external_oauth_pending(owner, account, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, pending);
+        assert!(
+            repository
+                .find_external_oauth_pending(UserId::new(), account, session.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let claim = repository
+            .claim_external_oauth_pending(
+                owner,
+                account,
+                session.id,
+                now + Duration::seconds(2),
+                AuditActor::User(owner),
+                "oauth-claim",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.pending.state, ExternalOauthState::Completing);
+        assert_eq!(claim.auth_session.state, AuthState::ExchangingCredential);
+        assert!(
+            repository
+                .claim_external_oauth_pending(
+                    owner,
+                    account,
+                    session.id,
+                    now + Duration::seconds(3),
+                    AuditActor::User(owner),
+                    "oauth-replay",
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let digest_bytes: Vec<u8> = sqlx::query_scalar(
+            "SELECT state_digest FROM external_oauth_pending WHERE auth_session_id = ?",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(digest_bytes, vec![1; 32]);
+
+        let mut authenticated = claim.auth_session;
+        authenticated
+            .transition(AuthState::ValidatingCredential, now + Duration::seconds(3))
+            .unwrap();
+        assert!(
+            repository
+                .update_auth_session(
+                    &authenticated,
+                    3,
+                    AuditActor::User(owner),
+                    "oauth-validating",
+                )
+                .await
+                .unwrap()
+        );
+        authenticated
+            .transition(AuthState::Authenticated, now + Duration::seconds(4))
+            .unwrap();
+        assert!(
+            repository
+                .update_auth_session(
+                    &authenticated,
+                    4,
+                    AuditActor::User(owner),
+                    "oauth-authenticated",
+                )
+                .await
+                .unwrap()
+        );
+        let recovered = repository
+            .recover_external_oauth_pending(
+                owner,
+                account,
+                session.id,
+                now + Duration::seconds(5),
+                AuditActor::User(owner),
+                "oauth-recover-success",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.pending.state, ExternalOauthState::Succeeded);
+        assert_eq!(recovered.auth_session.state, AuthState::Authenticated);
+    }
+
+    #[tokio::test]
+    async fn stale_external_oauth_exchange_recovers_ambiguously_without_replay() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner = insert_user(&database).await;
+        let account = insert_account(&database, owner).await;
+        let repository = SqliteAuthSessionRepository::new(database);
+        let now = Utc::now();
+        let mut session = AuthSession::starting(
+            owner,
+            account,
+            AuthMethod::ExternalBrowserOauth,
+            now,
+            now + Duration::minutes(5),
+        )
+        .unwrap();
+        repository
+            .create_auth_session(&session, AuditActor::User(owner), "oauth-stale-create")
+            .await
+            .unwrap();
+        session
+            .transition(
+                AuthState::WaitingUser(WaitingUserState::BrowserCallback),
+                now + Duration::seconds(1),
+            )
+            .unwrap();
+        let pending = ExternalOauthPending::pending(ExternalOauthPendingCreate {
+            auth_session_id: session.id,
+            owner_user_id: owner,
+            provider_account_id: account,
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            state_digest: [3; 32],
+            provider_context_digest: [4; 32],
+            created_at: now,
+            expires_at: now + Duration::minutes(5),
+        })
+        .unwrap();
+        repository
+            .create_external_oauth_pending(
+                &pending,
+                &session,
+                1,
+                AuditActor::User(owner),
+                "oauth-stale-create",
+            )
+            .await
+            .unwrap();
+        repository
+            .claim_external_oauth_pending(
+                owner,
+                account,
+                session.id,
+                now + Duration::seconds(2),
+                AuditActor::User(owner),
+                "oauth-stale-claim",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let recovered = repository
+            .recover_external_oauth_pending(
+                owner,
+                account,
+                session.id,
+                now + Duration::seconds(123),
+                AuditActor::User(owner),
+                "oauth-stale-recover",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.pending.state, ExternalOauthState::Ambiguous);
+        assert_eq!(recovered.auth_session.state, AuthState::ProviderUnavailable);
     }
 
     async fn insert_user(database: &Database) -> UserId {

@@ -1,13 +1,13 @@
 use std::{fmt, str::FromStr};
 
 use asterism_domain::{
-    AuthMethod, AuthSession, AuthSessionId, AuthState, ProviderAccount, ProviderAccountId,
-    ProviderId, SessionKind, Timestamp, UserId,
+    AuthMethod, AuthSession, AuthSessionId, AuthState, ExternalOauthState, ProviderAccount,
+    ProviderAccountId, ProviderId, SessionKind, Timestamp, UserId,
 };
 use asterism_engine::{
     AuthSessionCredentialRequest, AuthSessionService, AuthSessionServiceError,
-    AuthSessionStartRequest, CredentialProvisionError, ProviderCredentialService,
-    ProviderScanError, ProviderScanService,
+    AuthSessionStartRequest, CredentialProvisionError, ExternalOauthCallbackRequest,
+    ProviderCredentialService, ProviderScanError, ProviderScanService,
 };
 use asterism_provider_api::{
     ProviderCapability, ProviderEntry, ProviderError, ProviderErrorKind, SessionStatus,
@@ -15,7 +15,7 @@ use asterism_provider_api::{
 use asterism_scheduler::{ScanSchedule, ScanScheduleError};
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, CredentialField, SecretAccess, SecretPurpose,
-    SecretStoreError, SecretValue,
+    SecretStoreError, SecretString, SecretValue,
 };
 use asterism_storage::{
     AuthSessionRepository, ProviderAccountRepository, ProviderAccountRuntimeRepository,
@@ -330,6 +330,92 @@ pub(super) async fn get_auth_session(
     Ok(crate::auth::no_store(Json(session).into_response()))
 }
 
+pub(super) async fn get_external_oauth_pending(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((account_id, session_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_read()?;
+    let account_id = parse_account_id(&account_id)?;
+    let session_id = parse_auth_session_id(&session_id)?;
+    let pending = AuthSessionService::new(
+        state.providers,
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteAuthSessionRepository::new(state.database),
+    )
+    .recover_external_oauth_pending(
+        owner_id,
+        account_id,
+        session_id,
+        auth.audit_actor(),
+        request_id(&headers)?,
+        Utc::now(),
+    )
+    .await
+    .map_err(map_auth_session_error)?
+    .ok_or_else(|| ApiError::not_found("external_oauth_pending_not_found"))?;
+    Ok(crate::auth::no_store(
+        Json(ExternalOauthPendingResponse {
+            auth_session_id: pending.auth_session_id,
+            state: pending.state,
+            expires_at: pending.expires_at,
+            consumed_at: pending.consumed_at,
+            revision: pending.revision,
+        })
+        .into_response(),
+    ))
+}
+
+pub(super) async fn submit_external_oauth_callback(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((account_id, session_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    payload: Result<Json<SubmitExternalOauthCallbackRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_manage()?;
+    let account_id = parse_account_id(&account_id)?;
+    let session_id = parse_auth_session_id(&session_id)?;
+    let request = api_json(payload)?;
+    let secret_store = state.secret_store.ok_or_else(|| {
+        ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "the encrypted credential store is not configured",
+        )
+    })?;
+    let access = SecretAccess {
+        actor: auth.secret_actor(),
+        correlation_id: request_id(&headers)?.to_owned(),
+        reason: "complete external OAuth authentication session".to_owned(),
+    };
+    let committed = AuthSessionService::new(
+        state.providers,
+        SqliteProviderAccountRepository::new(state.database.clone()),
+        SqliteAuthSessionRepository::new(state.database),
+    )
+    .submit_external_oauth_callback(
+        &secret_store,
+        ExternalOauthCallbackRequest {
+            owner_user_id: owner_id,
+            provider_account_id: account_id,
+            session_id,
+            callback_url: request.into_secret(),
+            access,
+        },
+    )
+    .await
+    .map_err(map_auth_session_error)?;
+    Ok(crate::auth::no_store(
+        Json(PutAuthSessionCredentialsResponse {
+            session: committed.session,
+            credential_count: committed.credentials.len(),
+            status: committed.status,
+        })
+        .into_response(),
+    ))
+}
+
 pub(super) async fn cancel_auth_session(
     State(state): State<ApiState>,
     Extension(auth): Extension<AuthContext>,
@@ -536,6 +622,64 @@ pub(super) struct BeginAuthSessionRequest {
 pub(super) struct AuthSessionBeginResponse {
     session: AuthSession,
     challenge: asterism_provider_api::AuthChallenge,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct ExternalOauthPendingResponse {
+    auth_session_id: AuthSessionId,
+    state: ExternalOauthState,
+    expires_at: Timestamp,
+    consumed_at: Option<Timestamp>,
+    revision: u32,
+}
+
+pub(super) struct SubmitExternalOauthCallbackRequest {
+    callback_url: String,
+}
+
+impl SubmitExternalOauthCallbackRequest {
+    fn into_secret(mut self) -> SecretString {
+        SecretString::new(std::mem::take(&mut self.callback_url))
+    }
+}
+
+impl fmt::Debug for SubmitExternalOauthCallbackRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SubmitExternalOauthCallbackRequest")
+            .field("callback_url", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for SubmitExternalOauthCallbackRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            callback_url: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.callback_url.is_empty()
+            || wire.callback_url.len() > 8 * 1_024
+            || wire.callback_url.trim() != wire.callback_url
+            || wire.callback_url.chars().any(char::is_control)
+        {
+            return Err(serde::de::Error::custom("callback_url is invalid"));
+        }
+        Ok(Self {
+            callback_url: wire.callback_url,
+        })
+    }
+}
+
+impl Drop for SubmitExternalOauthCallbackRequest {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.callback_url);
+    }
 }
 
 pub(super) struct PutProviderCredentialsRequest {
@@ -911,6 +1055,9 @@ fn map_auth_session_error(error: AuthSessionServiceError) -> ApiError {
         AuthSessionServiceError::CredentialStore(error) => map_secret_store_error(error),
         AuthSessionServiceError::Domain(error) => {
             ApiError::bad_request("invalid_auth_session", error.to_string())
+        }
+        AuthSessionServiceError::ExternalOauthDomain(error) => {
+            ApiError::bad_gateway("provider_external_oauth_invalid", error.to_string())
         }
         AuthSessionServiceError::Storage(error) => ApiError::internal(error),
     }
