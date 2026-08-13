@@ -58,6 +58,13 @@ pub struct ParsedCidarenReadingCard {
 }
 
 impl ParsedCidarenReadingCard {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used by the Provider-private lifecycle awaiting durable QuestionSession integration"
+        )
+    )]
     pub(crate) fn topic_code(&self) -> &str {
         self.topic_code.as_str()
     }
@@ -132,6 +139,13 @@ pub fn parse_attempt_step(
 }
 
 impl ParsedCidarenAttemptQuestion {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used by the Provider-private lifecycle awaiting durable QuestionSession integration"
+        )
+    )]
     pub(crate) fn topic_code(&self) -> &str {
         self.topic_code.as_str()
     }

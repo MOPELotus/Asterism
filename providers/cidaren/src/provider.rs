@@ -99,8 +99,10 @@ pub fn build_development_provider_with_stored_session(
 mod tests {
     use asterism_networking::NetworkProfile;
     use asterism_provider_api::{
-        ProviderContext, ProviderError, ProviderErrorKind, ProviderRegistry,
+        CredentialReplacement, ExternalOauthCallbackBinding, ProviderContext, ProviderError,
+        ProviderErrorKind, ProviderRegistry,
     };
+    use asterism_secrets::SecretString;
     use asterism_secrets::{
         ProviderCredentialResolution, ResolvedProviderCredential, SecretStoreError,
     };
@@ -125,6 +127,21 @@ mod tests {
     #[async_trait]
     impl CidarenAuthenticationTransport for UnusedBoundaries {
         async fn validate_token(&self, _session: &CidarenTokenSession) -> ProviderResult<()> {
+            Err(unused())
+        }
+
+        async fn validate_native_oauth_session(
+            &self,
+            _session: &CidarenTokenSession,
+        ) -> ProviderResult<()> {
+            Err(unused())
+        }
+
+        async fn exchange_external_oauth_callback(
+            &self,
+            _callback_url: SecretString,
+            _binding: ExternalOauthCallbackBinding,
+        ) -> ProviderResult<CredentialReplacement> {
             Err(unused())
         }
     }

@@ -245,9 +245,11 @@ fn optional_evidence_array<'a>(
 /// Resolves one parsed Cidaren Question from a fresh bounded word-evidence
 /// snapshot using the audited donor behavior for its topic mode.
 ///
-/// Mode 13 preserves the donor's fixed fourth-choice fallback and marks it low
-/// confidence. Other supported modes require matching vocabulary evidence and
-/// fail closed rather than inventing an answer.
+/// Every donor-observed fallback remains explicit: mode 13 uses the fixed
+/// fourth choice, meaning/sentence misses use the third choice, word-to-meaning
+/// misses use stable pseudo-random selection, and completion misses use the
+/// last fresh Task word. Each fallback is marked with low confidence and
+/// sanitized provenance; malformed protocol evidence still fails closed.
 ///
 /// # Errors
 ///

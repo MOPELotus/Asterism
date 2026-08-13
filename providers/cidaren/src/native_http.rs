@@ -1,7 +1,11 @@
 use std::{fmt, sync::Arc};
 
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
-use asterism_provider_api::{ProviderContext, ProviderError, ProviderErrorKind, ProviderResult};
+use asterism_provider_api::{
+    CredentialReplacement, ExternalOauthCallbackBinding, ProviderContext, ProviderError,
+    ProviderErrorKind, ProviderResult,
+};
+use asterism_secrets::SecretString;
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::{
@@ -14,15 +18,18 @@ use reqwest::{
 use serde::Serialize;
 use zeroize::Zeroize;
 
-use crate::oauth_exchange::{CidarenOauthBootstrap, CidarenOauthLoginRequest};
+use crate::oauth_authorization::{CidarenOauthCallbackBinding, parse_oauth_callback};
+use crate::oauth_exchange::{
+    CidarenOauthBootstrap, CidarenOauthClientContext, CidarenOauthCode, CidarenOauthLoginMaterial,
+    CidarenOauthLoginRequest, LOGIN_VERSION,
+};
 use crate::{
     CidarenAnswerEvidenceBinding, CidarenAnswerEvidenceTransport, CidarenAssessmentBinding,
     CidarenAssessmentResponse, CidarenAssessmentTransport, CidarenAuthenticationTransport,
     CidarenClassTaskPageDocument, CidarenClassTaskTransport, CidarenMutationRequest,
-    CidarenOauthClientContext, CidarenOauthCode, CidarenOauthLoginMaterial, CidarenSessionResolver,
-    CidarenStartAnswerRequest, CidarenStudyTaskDocument, CidarenStudyTaskTransport,
-    CidarenTokenSession, CidarenWireAnswer, CidarenWordEvidence, CidarenWordInfoRequest,
-    CidarenWordInventory, CidarenWordInventoryRequest, CidarenWordLookup,
+    CidarenSessionResolver, CidarenStartAnswerRequest, CidarenStudyTaskDocument,
+    CidarenStudyTaskTransport, CidarenTokenSession, CidarenWireAnswer, CidarenWordEvidence,
+    CidarenWordInfoRequest, CidarenWordInventory, CidarenWordInventoryRequest, CidarenWordLookup,
     CidarenWordPrototypeRequest, CidarenWordSelectionPlan,
     answer_evidence_protocol::fresh_course_id, assessment_protocol::CidarenMutationAuthorization,
     authentication::selected_course_id, build_skip_answer_request, build_start_answer_request,
@@ -43,6 +50,7 @@ const ASSESSMENT_BASE_URL: &str = "https://app.vocabgo.com/student/api/Student";
 const STUDENT_REFERER: &str = "https://app.vocabgo.com/student/";
 const STUDENT_ORIGIN: &str = "https://app.vocabgo.com";
 const DONOR_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 8.1.2; LIO-AN00 Build/LIO-AN00; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/92.0.4515.131 Safari/537.36 MMWEBID/4462 MicroMessenger/8.0.20.2100(0x28001438) Process/toolsmp WeChat/arm64 Weixin Android Tablet NetType/WIFI Language/zh_CN ABI/arm64";
+const OAUTH_BOOTSTRAP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
 const ABC_HEADER_VALUE: &str = "60cd4becac3c293c3107d9a8087e7f47";
 const AUTHORIZATION_V_READ: &str = "cfcd208495d565ef66e7dff9f98764da";
 const AUTHORIZATION_V_SUBMIT: &str = "c4ca4238a0b923820dcc509a6f75849b";
@@ -90,20 +98,32 @@ impl NativeCidarenTransport {
         Ok(Self { client, sessions })
     }
 
-    /// Executes the current native V2 exchange exactly once, authenticates
+    /// Validates one manually returned `WeChat` callback against the pending
+    /// login's hash-only binding, executes the current native V2 exchange
+    /// exactly once, authenticates
     /// its P-256/HKDF/AES-GCM response and performs a fresh `Student/Main`
     /// readback before returning persistable Composite material.
     ///
-    /// Core must claim the OAuth code before this call and must not replay the
-    /// call after an ambiguous network failure. `client_context` is the
-    /// callback/helper-bound current Cidaren device code plus exact User-Agent,
-    /// not a stored account credential.
+    /// Core must atomically claim the owner/AuthSession-bound pending login
+    /// before this call and must not replay it after an ambiguous network
+    /// failure. `client_context` is short-lived browser request context, not a
+    /// stored account credential.
     ///
     /// # Errors
     ///
     /// Returns typed Authentication, Network, `InvalidResponse` or
     /// `ProtocolDrift` errors. It never retries the single-use mutation.
-    pub async fn exchange_wechat_oauth_code(
+    pub(crate) async fn exchange_wechat_oauth_callback(
+        &self,
+        callback_url: impl Into<String>,
+        callback_binding: &CidarenOauthCallbackBinding,
+        client_context: &CidarenOauthClientContext,
+    ) -> ProviderResult<CidarenOauthLoginMaterial> {
+        let code = parse_oauth_callback(callback_url, callback_binding)?;
+        self.exchange_wechat_oauth_code(code, client_context).await
+    }
+
+    async fn exchange_wechat_oauth_code(
         &self,
         code: CidarenOauthCode,
         client_context: &CidarenOauthClientContext,
@@ -124,11 +144,45 @@ impl NativeCidarenTransport {
         document.zeroize();
         let material = material?;
         let session = material.token_session()?;
-        let mut account = self.fetch_account_document(&session).await?;
+        self.validate_oauth_session(&session, client_context)
+            .await?;
+        Ok(material)
+    }
+
+    async fn validate_oauth_session(
+        &self,
+        session: &CidarenTokenSession,
+        client_context: &CidarenOauthClientContext,
+    ) -> ProviderResult<()> {
+        let mut account = self
+            .fetch_oauth_account_document(session, client_context)
+            .await?;
         let validation = classify_token_validation_response(account.as_bytes());
         account.zeroize();
-        validation?;
-        Ok(material)
+        validation
+    }
+
+    async fn fetch_oauth_account_document(
+        &self,
+        session: &CidarenTokenSession,
+        client_context: &CidarenOauthClientContext,
+    ) -> ProviderResult<String> {
+        let timestamp = current_timestamp_millis()?;
+        let request = self.client.get(STUDENT_MAIN_URL).query(&[
+            ("timestamp", timestamp.to_string()),
+            ("version", LOGIN_VERSION.to_owned()),
+            ("app_type", "1".to_owned()),
+        ]);
+        let response = oauth_authenticated_request(request, session, client_context)?
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error, ResponseRoute::AccountValidation))?;
+        read_json_response(
+            response,
+            ResponseRoute::AccountValidation,
+            MAX_AUTH_RESPONSE_BYTES,
+        )
+        .await
     }
 
     async fn fetch_account_document(
@@ -211,11 +265,14 @@ fn native_oauth_request(
     client_context: &CidarenOauthClientContext,
 ) -> ProviderResult<RequestBuilder> {
     let body = request.body_bytes()?;
+    let mut empty_user_token = HeaderValue::from_static("");
+    empty_user_token.set_sensitive(true);
     Ok(client
         .post(WECHAT_V2_LOGIN_URL)
         .header(ACCEPT, "application/json, text/plain, */*")
         .header(ABC, client_context.abc_header()?)
         .header(AUTHORIZATION_V, client_context.authorization_header()?)
+        .header(USER_TOKEN, empty_user_token)
         .header(X_REQUESTED_WITH, "XMLHttpRequest")
         .header(USER_AGENT, client_context.user_agent_header()?)
         .header(ACCEPT_LANGUAGE, "*")
@@ -242,6 +299,32 @@ impl CidarenAuthenticationTransport for NativeCidarenTransport {
         let result = classify_token_validation_response(document.as_bytes());
         document.zeroize();
         result
+    }
+
+    async fn validate_native_oauth_session(
+        &self,
+        session: &CidarenTokenSession,
+    ) -> ProviderResult<()> {
+        let client_context =
+            CidarenOauthClientContext::try_for_oauth_bootstrap(OAUTH_BOOTSTRAP_USER_AGENT)?;
+        self.validate_oauth_session(session, &client_context).await
+    }
+
+    async fn exchange_external_oauth_callback(
+        &self,
+        callback_url: SecretString,
+        binding: ExternalOauthCallbackBinding,
+    ) -> ProviderResult<CredentialReplacement> {
+        let callback_binding = CidarenOauthCallbackBinding::from_external(binding)?;
+        let client_context =
+            CidarenOauthClientContext::try_for_oauth_bootstrap(OAUTH_BOOTSTRAP_USER_AGENT)?;
+        self.exchange_wechat_oauth_callback(
+            callback_url.expose_secret().to_owned(),
+            &callback_binding,
+            &client_context,
+        )
+        .await
+        .map(CidarenOauthLoginMaterial::into_credential_replacement)
     }
 }
 
@@ -580,13 +663,7 @@ fn authenticated_request_with_authorization(
     session: &CidarenTokenSession,
     authorization: &'static str,
 ) -> ProviderResult<RequestBuilder> {
-    let mut token = HeaderValue::from_str(session.expose_token()).map_err(|_| {
-        ProviderError::new(
-            ProviderErrorKind::Authentication,
-            "Cidaren stored token cannot be encoded as a request header",
-        )
-    })?;
-    token.set_sensitive(true);
+    let token = token_header(session)?;
     Ok(request
         .header(ACCEPT, "application/json, text/plain, */*")
         .header(ABC, ABC_HEADER_VALUE)
@@ -596,6 +673,34 @@ fn authenticated_request_with_authorization(
         .header(ACCEPT_LANGUAGE, "*")
         .header(REFERER, STUDENT_REFERER)
         .header(USER_TOKEN, token))
+}
+
+fn oauth_authenticated_request(
+    request: RequestBuilder,
+    session: &CidarenTokenSession,
+    client_context: &CidarenOauthClientContext,
+) -> ProviderResult<RequestBuilder> {
+    Ok(request
+        .header(ACCEPT, "application/json, text/plain, */*")
+        .header(ABC, client_context.abc_header()?)
+        .header(AUTHORIZATION_V, client_context.authorization_header()?)
+        .header(X_REQUESTED_WITH, "XMLHttpRequest")
+        .header(USER_AGENT, client_context.user_agent_header()?)
+        .header(ACCEPT_LANGUAGE, "*")
+        .header(REFERER, STUDENT_REFERER)
+        .header(CONTENT_TYPE, "application/json;charset=UTF-8")
+        .header(USER_TOKEN, token_header(session)?))
+}
+
+fn token_header(session: &CidarenTokenSession) -> ProviderResult<HeaderValue> {
+    let mut token = HeaderValue::from_str(session.expose_token()).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Cidaren stored token cannot be encoded as a request header",
+        )
+    })?;
+    token.set_sensitive(true);
+    Ok(token)
 }
 
 fn native_start_answer_request(
@@ -964,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_request_is_single_route_device_bound_and_has_no_stale_token() {
+    fn oauth_request_is_single_route_bootstrap_bound_and_has_no_stale_token() {
         let bootstrap = CidarenOauthBootstrap::generate().unwrap();
         let request = bootstrap
             .build_request(
@@ -972,8 +1077,7 @@ mod tests {
                 1_786_444_968_188,
             )
             .unwrap();
-        let client_context = CidarenOauthClientContext::try_new(
-            "synthetic-device-code",
+        let client_context = CidarenOauthClientContext::try_for_oauth_bootstrap(
             "Mozilla/5.0 synthetic-cidaren-client",
         )
         .unwrap();
@@ -985,13 +1089,24 @@ mod tests {
             request.url().as_str(),
             "https://app.vocabgo.com/student/api/Auth/Wechat/V2/LoginByWechatCode"
         );
-        assert!(request.headers().get(USER_TOKEN).is_none());
+        let bootstrap_token = request.headers().get(USER_TOKEN).unwrap();
+        assert!(bootstrap_token.is_sensitive());
+        assert!(bootstrap_token.as_bytes().is_empty());
         assert!(
             request
                 .headers()
                 .get(AUTHORIZATION_V)
                 .unwrap()
                 .is_sensitive()
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get(AUTHORIZATION_V)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "00"
         );
         assert_eq!(
             request.headers().get(ABC).unwrap().to_str().unwrap(),
@@ -1009,6 +1124,47 @@ mod tests {
         assert_eq!(body["code"], "synthetic-oauth-code");
         assert_eq!(body["version"], "2.7.0.260715_01");
         assert_eq!(body["app_type"], 1);
+    }
+
+    #[test]
+    fn oauth_fresh_readback_keeps_current_bootstrap_context() {
+        let client_context =
+            CidarenOauthClientContext::try_for_oauth_bootstrap(OAUTH_BOOTSTRAP_USER_AGENT).unwrap();
+        let session = CidarenTokenSession::try_new("synthetic-user-token").unwrap();
+        let request = oauth_authenticated_request(
+            Client::new().get(STUDENT_MAIN_URL).query(&[
+                ("timestamp", "1786444968188"),
+                ("version", LOGIN_VERSION),
+                ("app_type", "1"),
+            ]),
+            &session,
+            &client_context,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(request.url().path(), "/student/api/Student/Main");
+        assert_eq!(
+            request
+                .url()
+                .query_pairs()
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .get("version")
+                .map(AsRef::as_ref),
+            Some("2.7.0.260715_01")
+        );
+        assert_eq!(request.headers().get(AUTHORIZATION_V).unwrap(), "00");
+        assert_eq!(
+            request.headers().get(USER_AGENT).unwrap(),
+            OAUTH_BOOTSTRAP_USER_AGENT
+        );
+        assert_eq!(
+            request.headers().get(ABC).unwrap().to_str().unwrap(),
+            format!("{:x}", md5::compute(OAUTH_BOOTSTRAP_USER_AGENT))
+        );
+        let token = request.headers().get(USER_TOKEN).unwrap();
+        assert!(token.is_sensitive());
+        assert_eq!(token, "synthetic-user-token");
     }
 
     #[test]
@@ -1071,10 +1227,17 @@ mod tests {
             .expect("built-in network profile");
         let client = build_http_client(&network).unwrap();
         let session = CidarenTokenSession::try_new("synthetic-user-token").unwrap();
+        assert_class_assessment_requests(&client, &session);
+        assert_study_assessment_requests(&client, &session);
+        assert!(assessment_url("ClassTask/UnmappedMutation").is_err());
+        assert!(assessment_url("ForeignTask/StartAnswer").is_err());
+    }
+
+    fn assert_class_assessment_requests(client: &Client, session: &CidarenTokenSession) {
         let binding = assessment_binding();
 
         let start = build_start_answer_request(&binding, 1_730_000_000_000);
-        let start = native_start_answer_request(&client, &session, &start)
+        let start = native_start_answer_request(client, session, &start)
             .unwrap()
             .build()
             .unwrap();
@@ -1094,7 +1257,7 @@ mod tests {
             1_730_000_000_000,
         )
         .unwrap();
-        let verify = native_mutation_request(&client, &session, &verify)
+        let verify = native_mutation_request(client, session, &verify)
             .unwrap()
             .build()
             .unwrap();
@@ -1114,19 +1277,74 @@ mod tests {
         let body = verify.body().and_then(reqwest::Body::as_bytes).unwrap();
         assert_eq!(serde_json::from_slice::<Value>(body).unwrap()["answer"], 2);
 
+        for mutation in [
+            build_submit_answer_and_save_request(
+                &binding,
+                "synthetic-topic",
+                25_000,
+                1_730_000_000_000,
+            )
+            .unwrap(),
+            build_skip_answer_request(&binding, "synthetic-topic", 20_000, 1_730_000_000_000)
+                .unwrap(),
+        ] {
+            let expected_operation = mutation.path().rsplit('/').next().unwrap().to_owned();
+            let request = native_mutation_request(client, session, &mutation)
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(
+                request.url().path(),
+                format!("/student/api/Student/ClassTask/{expected_operation}")
+            );
+            assert_eq!(
+                request.headers().get(AUTHORIZATION_V).unwrap(),
+                AUTHORIZATION_V_SUBMIT
+            );
+        }
+    }
+
+    fn assert_study_assessment_requests(client: &Client, session: &CidarenTokenSession) {
+        let study_binding = study_assessment_binding();
         let chose = build_submit_chose_word_request(
-            &binding,
+            &study_binding,
             &serde_json::json!(["alpha", "beta"]),
             1_730_000_000_000,
         )
         .unwrap();
-        let chose = native_mutation_request(&client, &session, &chose)
+        let chose = native_mutation_request(client, session, &chose)
             .unwrap()
             .build()
             .unwrap();
         assert_eq!(
             chose.headers().get(AUTHORIZATION_V).unwrap(),
             AUTHORIZATION_V_READ
+        );
+        assert_eq!(
+            chose.url().path(),
+            "/student/api/Student/StudyTask/SubmitChoseWord"
+        );
+
+        let study_start = build_start_answer_request(&study_binding, 1_730_000_000_000);
+        let study_start = native_start_answer_request(client, session, &study_start)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            study_start.url().path(),
+            "/student/api/Student/StudyTask/StartAnswer"
+        );
+        let query = study_start
+            .url()
+            .query_pairs()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            query.get("task_type").map(std::convert::AsRef::as_ref),
+            Some("3")
+        );
+        assert_eq!(
+            query.get("course_id").map(std::convert::AsRef::as_ref),
+            Some("course-a")
         );
     }
 
@@ -1282,6 +1500,44 @@ mod tests {
                 normalized_detail: serde_json::json!({
                     "schema": "cidaren.class-task.detail.v1",
                     "release_id": "2002",
+                    "task": normalized,
+                }),
+            },
+        )
+        .unwrap()
+    }
+
+    fn study_assessment_binding() -> CidarenAssessmentBinding {
+        let normalized = serde_json::json!({
+            "schema": "cidaren.study-task.v1",
+            "task_id": 71002,
+            "course_id": "course-a",
+            "list_id": "list-a",
+            "task_type": "study",
+            "progress": 35,
+        });
+        CidarenAssessmentBinding::from_fresh_detail(
+            "study-task:course-a:list-a",
+            &RemoteTaskDetail {
+                task: RemoteTask {
+                    remote_id: "study-task:course-a:list-a".to_owned(),
+                    course_remote_id: Some("course:course-a".to_owned()),
+                    title: "Synthetic Study Task".to_owned(),
+                    source_type: SourceType::Practice,
+                    assessment_class: AssessmentClass::Routine,
+                    remote_state: RemoteState::InProgress,
+                    opens_at: None,
+                    due_at: None,
+                    closes_at: None,
+                    capabilities: Vec::new(),
+                    fingerprint: "synthetic-study-fingerprint".to_owned(),
+                    normalized: normalized.clone(),
+                    raw_sanitized: Value::Object(serde_json::Map::new()),
+                },
+                normalized_detail: serde_json::json!({
+                    "schema": "cidaren.study-task.detail.v1",
+                    "course_id": "course-a",
+                    "list_id": "list-a",
                     "task": normalized,
                 }),
             },

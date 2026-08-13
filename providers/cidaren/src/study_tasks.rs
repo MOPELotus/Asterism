@@ -66,7 +66,9 @@ pub fn parse_study_course(document: &CidarenStudyTaskDocument) -> ProviderResult
     })
 }
 
-/// Parses ordinary self-study units into stable read-only Tasks.
+/// Parses ordinary self-study units into stable Tasks. Their donor-observed
+/// answer mutations are modeled by the same Provider-private attempt lifecycle
+/// as class Tasks; registry advertisement follows durable Core integration.
 ///
 /// Stable identity is `study-task:{course_id}:{list_id}` because audited
 /// responses may expose `task_id == -1` for every uninitialized unit.

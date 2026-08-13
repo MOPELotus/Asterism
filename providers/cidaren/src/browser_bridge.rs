@@ -75,6 +75,7 @@ impl BrowserBridgeCapability for CidarenBrowserBridge {
             ));
         }
         Ok(BrowserSessionSpec {
+            version: 1,
             isolation_key: isolation_key(context, remote_task_id),
             allowed_origins: vec![CIDAREN_ORIGIN.to_owned()],
             // WeChat authorization and browser-storage capture both require a

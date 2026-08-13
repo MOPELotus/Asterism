@@ -55,6 +55,43 @@ code into its signature and remains lineage only. A frozen first-party
 provide coherent current evidence:
 
 ```text
+GET https://open.weixin.qq.com/connect/oauth2/authorize
+    ?appid=wx2a694105a6abbe6d
+    &redirect_uri=urlencode(https://app.vocabgo.com/student/?authorize={marker})
+    &response_type=code
+    &scope=snsapi_userinfo
+    &state={state}
+    #wechat_redirect
+```
+
+Provider generates `state` from 32 CSPRNG bytes and an independent opaque
+marker from 16 CSPRNG bytes. The marker is structurally prefixed and must never
+equal the official frontend sentinel `"2"`; this prevents the current Cidaren
+SPA from automatically consuming the callback code. The authorization URL is
+redacted/zeroized as short-lived secret-bearing output. Outside that URL the
+Provider returns only independently domain-separated SHA-256 digests of state
+and marker for Core's pending-login record.
+
+The user may open the same URL in an applicable WeChat environment and return
+the final URL manually. This flow has authorized Windows desktop WeChat and
+Android evidence and does not require MITM or XWeb debug provisioning. The
+callback parser is bounded to 16 KiB and accepts only:
+
+```text
+scheme = https
+host   = app.vocabgo.com
+port   = absent
+path   = /student or /student/
+code, state, authorize = each present exactly once
+```
+
+Both ordinary query parameters and the observed SPA `fragment?...` parameter
+form are supported. Required values are bounded ASCII unreserved tokens;
+userinfo, lookalike origins, explicit ports, duplicate fields, marker `"2"`
+and digest mismatches fail closed. The callback URL and extracted code are
+zeroized and never become a public Provider API type.
+
+```text
 POST /student/api/Auth/Wechat/V2/LoginByWechatCode
 
 code={single-use OAuth callback code}
@@ -66,25 +103,36 @@ sign=md5(sorted non-empty fields + donor suffix)
 app_type=1                 # interceptor-added, not signed
 ```
 
-The callback helper must also preserve the current `Authorization-v` device
-code and exact browser User-Agent; Asterism derives `Abc=md5(User-Agent)` and
-does not mix a callback from one browser identity with donor's unrelated fixed
-mobile headers. The response supplies `spub_k` and `salt`; the client performs P-256 ECDH,
+The verified assisted-bootstrap exchange sends `Authorization-v: 00` and an
+exact bounded User-Agent; Asterism derives `Abc=md5(User-Agent)` locally. An
+explicit bounded `Authorization-v` constructor remains for the alternate
+Capture/browser path, without treating that context as a durable credential.
+The login request also sends a sensitive empty `UserToken`, matching the
+current interceptor's `current token or empty string` shape without ever
+inheriting a stale account token.
+The response supplies `spub_k` and `salt`; the client performs P-256 ECDH,
 HKDF-SHA256 with `info="vcg-auth-aes"`, then AES-256-GCM with exact AAD
 `vcg-auth:POST:/Wechat/V2/LoginByWechatCode`. The decrypted object supplies the
-new `token`. Asterism implements this entire code-to-Composite path in Rust,
-zeroizes owned code/key/plaintext material, sends the exchange once, and
-requires a fresh `Student/Main` read before persistence. The redacted live-safe
-test removed the old `vcg_refresh_token`; V2 still succeeded, issued a new
-refresh cookie and passed the account readback.
+new `token`. Asterism implements this entire callback-to-Composite path in
+Rust, zeroizes owned callback/code/key/plaintext material, sends the exchange
+once, and requires a fresh `Student/Main` read before persistence. The
+redacted live-safe test removed the old `vcg_refresh_token`; V2 still
+succeeded, issued a new refresh cookie and passed the account readback.
 
-What remains is earlier in the flow: securely obtaining the callback code from
-the authenticated PC WeChat XWeb page. The generic `asterism-capture` helper
-launches an isolated Edge/Chrome profile and therefore cannot honestly claim
-that it observes the WeChat XWeb session. Core still needs a bounded,
-owner/account/AuthSession-bound, single-use authorization-artifact handoff
-(`code` plus bounded device code and exact User-Agent) and
-a callback-only XWeb/Capture helper. An ambiguous POST is never replayed.
+Core still owns a bounded owner/account/AuthSession-bound pending-login record,
+TTL, two hash fields and atomic `pending -> completing` claim/consume before
+calling Provider. It then records success/failure without retrying an ambiguous
+POST. The resulting two-field Composite replacement is validated and stored as
+`NativeProviderLogin`; the stored-session resolver accepts that atomic origin
+in addition to same-snapshot CaptureTool/BrowserExtension pairs. The separate
+donor Capture path remains valid, but generic isolated desktop Chromium must
+not be claimed to observe PC WeChat XWeb storage.
+
+Core validates the replacement again before its atomic credential commit.
+Cidaren routes that `NativeProviderLogin` validation through the same current
+OAuth version/User-Agent/`Abc`/`Authorization-v: 00` context rather than the
+older mobile Capture headers; Capture-origin Composite sessions retain their
+own audited header path.
 
 ## Course, class-task and ordinary study inventory
 

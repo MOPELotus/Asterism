@@ -1,11 +1,11 @@
 //! `Cidaren` Provider implementation.
 //!
-//! The current Development checkpoint exposes manual and Capture-assisted
-//! authentication, account-isolated `BrowserBridge`, class/ordinary-study
-//! inventory and fresh task reads. It also implements the current `jv=99`
-//! crypto boundary, task-bound answer evidence and a one-shot assessment state
-//! machine. Public durable attempt integration and live compatibility remain
-//! in progress.
+//! The current Development checkpoint exposes manual, Capture-assisted and
+//! structured external OAuth authentication, account-isolated `BrowserBridge`,
+//! class/ordinary-study inventory and fresh task reads. It also implements the
+//! current `jv=99` crypto boundary, task-bound answer evidence and a one-shot
+//! assessment state machine. Public durable attempt integration and live
+//! compatibility remain in progress.
 
 mod answer_evidence_loader;
 mod answer_evidence_protocol;
@@ -14,6 +14,10 @@ mod answer_resolve;
 mod assessment_protocol;
 mod assessment_response;
 mod assessment_transport;
+#[expect(
+    dead_code,
+    reason = "Provider-private audited lifecycle awaits Main-owned durable QuestionSession trait integration"
+)]
 mod attempt_flow;
 mod authentication;
 mod browser_bridge;
@@ -24,6 +28,7 @@ mod duration_read;
 mod inventory;
 mod metadata;
 mod native_http;
+mod oauth_authorization;
 mod oauth_exchange;
 mod provider;
 mod question_parser;
@@ -57,10 +62,6 @@ pub use assessment_response::{
     parse_assessment_response, parse_word_selection_response,
 };
 pub use assessment_transport::CidarenAssessmentTransport;
-pub use attempt_flow::{
-    CidarenAttemptFlow, CidarenAttemptFlowStatus, CidarenAttemptOperation, CidarenIssuedCommand,
-    CidarenIssuedOutcome,
-};
 pub use authentication::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenSessionResolver,
     CidarenTokenSession, classify_token_validation_response,
@@ -76,7 +77,6 @@ pub use inventory::{
 };
 pub use metadata::development_metadata;
 pub use native_http::NativeCidarenTransport;
-pub use oauth_exchange::{CidarenOauthClientContext, CidarenOauthCode, CidarenOauthLoginMaterial};
 pub use provider::{
     build_development_provider, build_development_provider_native,
     build_development_provider_with_stored_session,

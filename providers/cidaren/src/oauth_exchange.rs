@@ -24,7 +24,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::CidarenTokenSession;
 
-const LOGIN_VERSION: &str = "2.7.0.260715_01";
+pub(crate) const LOGIN_VERSION: &str = "2.7.0.260715_01";
 const CRYPTO_VERSION: &str = "v1";
 #[cfg(test)]
 const LOGIN_PATH: &str = "/Wechat/V2/LoginByWechatCode";
@@ -43,7 +43,7 @@ const AES_256_KEY_BYTES: usize = 32;
 ///
 /// Core owns durable claim/consume semantics. This Provider value only keeps
 /// the plaintext code redacted and zeroized while constructing one request.
-pub struct CidarenOauthCode(SecretString);
+pub(crate) struct CidarenOauthCode(SecretString);
 
 impl CidarenOauthCode {
     /// Validates the callback artifact without assuming its current 32-byte
@@ -53,7 +53,7 @@ impl CidarenOauthCode {
     ///
     /// Returns Authentication for empty, oversized, whitespace-padded or
     /// header/query-unsafe callback material.
-    pub fn try_new(code: impl Into<String>) -> ProviderResult<Self> {
+    pub(crate) fn try_new(code: impl Into<String>) -> ProviderResult<Self> {
         let mut code = code.into();
         let valid = !code.is_empty()
             && code.len() <= MAX_OAUTH_CODE_BYTES
@@ -69,7 +69,7 @@ impl CidarenOauthCode {
         Ok(Self(SecretString::new(code)))
     }
 
-    fn expose_secret(&self) -> &str {
+    pub(crate) fn expose_secret(&self) -> &str {
         self.0.expose_secret()
     }
 }
@@ -80,23 +80,35 @@ impl fmt::Debug for CidarenOauthCode {
     }
 }
 
-/// Bounded browser/device facts which the current H5 request interceptor binds
-/// to the V2 exchange. They are captured with the callback but are not durable
+/// Bounded browser/client facts which the current H5 request interceptor binds
+/// to the V2 exchange. They are short-lived request context, not durable
 /// account credentials.
-pub struct CidarenOauthClientContext {
+pub(crate) struct CidarenOauthClientContext {
     authorization_v: SecretString,
     user_agent: String,
     abc: String,
 }
 
 impl CidarenOauthClientContext {
-    /// Validates a callback's current device code and exact browser User-Agent.
-    /// `Abc` is derived locally as the first-party client does.
+    /// Builds the verified OAuth bootstrap context. The current V2 login sends
+    /// `Authorization-v: 00`; `Abc` is derived from the exact User-Agent as the
+    /// first-party client does.
+    ///
+    /// # Errors
+    ///
+    /// Returns Authentication for an empty, oversized or header-unsafe
+    /// User-Agent.
+    pub(crate) fn try_for_oauth_bootstrap(user_agent: impl Into<String>) -> ProviderResult<Self> {
+        Self::try_new("00", user_agent)
+    }
+
+    /// Validates an explicit Capture/browser `Authorization-v` value and exact
+    /// User-Agent. `Abc` is derived locally as the first-party client does.
     ///
     /// # Errors
     ///
     /// Returns Authentication for empty, oversized or header-unsafe values.
-    pub fn try_new(
+    pub(crate) fn try_new(
         authorization_v: impl Into<String>,
         user_agent: impl Into<String>,
     ) -> ProviderResult<Self> {
@@ -426,7 +438,7 @@ impl fmt::Debug for CidarenOauthLoginRequest {
 
 /// Authenticated token plus standard crypto material produced by one native
 /// V2 OAuth exchange. Both fields remain zeroizing secrets.
-pub struct CidarenOauthLoginMaterial {
+pub(crate) struct CidarenOauthLoginMaterial {
     token: SecretString,
     crypto_document: SecretValue,
 }
@@ -439,7 +451,7 @@ impl CidarenOauthLoginMaterial {
     ///
     /// Returns Authentication if the decrypted result does not form the exact
     /// Composite session shape.
-    pub fn token_session(&self) -> ProviderResult<CidarenTokenSession> {
+    pub(crate) fn token_session(&self) -> ProviderResult<CidarenTokenSession> {
         CidarenTokenSession::try_new_captured(
             self.token.expose_secret().to_owned(),
             self.crypto_document.expose_secret(),
@@ -448,7 +460,7 @@ impl CidarenOauthLoginMaterial {
 
     /// Converts a freshly validated login into Core's atomic replacement
     /// shape. Core still owns persistence and `AuthSession` binding.
-    pub fn into_credential_replacement(self) -> CredentialReplacement {
+    pub(crate) fn into_credential_replacement(self) -> CredentialReplacement {
         CredentialReplacement {
             session_kind: asterism_domain::SessionKind::Composite,
             fields: vec![
@@ -600,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn callback_client_context_derives_exact_abc_and_redacts_device_code() {
+    fn oauth_client_context_derives_exact_abc_and_redacts_header_context() {
         let context = CidarenOauthClientContext::try_new(
             "synthetic-device-code",
             "Mozilla/5.0 synthetic-cidaren-client",
@@ -619,6 +631,15 @@ mod tests {
             "Mozilla/5.0 synthetic-cidaren-client"
         );
         assert!(!format!("{context:?}").contains("synthetic"));
+        let bootstrap = CidarenOauthClientContext::try_for_oauth_bootstrap(
+            "Mozilla/5.0 synthetic-cidaren-client",
+        )
+        .unwrap();
+        assert_eq!(bootstrap.authorization_header().unwrap(), "00");
+        assert_eq!(
+            bootstrap.abc_header().unwrap(),
+            context.abc_header().unwrap()
+        );
         for (authorization, user_agent) in [
             ("", "Mozilla/5.0"),
             (" padded ", "Mozilla/5.0"),
@@ -627,6 +648,8 @@ mod tests {
         ] {
             assert!(CidarenOauthClientContext::try_new(authorization, user_agent).is_err());
         }
+        assert!(CidarenOauthClientContext::try_new("x".repeat(513), "Mozilla/5.0").is_err());
+        assert!(CidarenOauthClientContext::try_new("device", "x".repeat(4 * 1_024 + 1)).is_err());
     }
 
     #[test]
@@ -705,6 +728,21 @@ mod tests {
                 .kind,
             ProviderErrorKind::ProtocolDrift
         );
+
+        for (code, token) in [
+            ("code-empty-token", ""),
+            ("code-control-token", "bad\ntoken"),
+        ] {
+            let bootstrap = CidarenOauthBootstrap::generate().unwrap();
+            let request = bootstrap
+                .build_request(CidarenOauthCode::try_new(code).unwrap(), 3)
+                .unwrap();
+            let response = encrypted_response(request.public_key_spki(), token);
+            assert_eq!(
+                bootstrap.complete(response).unwrap_err().kind,
+                ProviderErrorKind::Authentication
+            );
+        }
     }
 
     fn encrypted_response(client_spki: &str, token: &str) -> Vec<u8> {

@@ -123,6 +123,7 @@ impl CidarenSessionResolver for StoredCidarenSessionResolver {
                         resolved.credential.acquired_via,
                         CredentialAcquisition::CaptureTool
                             | CredentialAcquisition::BrowserExtension
+                            | CredentialAcquisition::NativeProviderLogin
                     )
             })
         {
@@ -154,7 +155,7 @@ fn map_resolution_error(error: &SecretStoreError) -> ProviderError {
 fn invalid_stored_session() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Authentication,
-        "Cidaren account has no usable bound manual or captured session",
+        "Cidaren account has no usable bound manual, native or captured session",
     )
 }
 
@@ -185,6 +186,7 @@ mod tests {
         Expired,
         InvalidUtf8,
         Composite,
+        CompositeNative,
         CompositeWrongOrigin,
         CompositeMalformedCrypto,
         StorageFailure,
@@ -292,6 +294,11 @@ mod tests {
                     CredentialAcquisition::CaptureTool,
                     valid_crypto_document().as_bytes(),
                 )),
+                FixtureBehavior::CompositeNative => Ok(composite_credentials(
+                    &request,
+                    CredentialAcquisition::NativeProviderLogin,
+                    valid_crypto_document().as_bytes(),
+                )),
                 FixtureBehavior::CompositeWrongOrigin => {
                     let mut credentials = composite_credentials(
                         &request,
@@ -348,6 +355,13 @@ mod tests {
         assert_eq!(session.expose_token(), "synthetic-captured-token");
         assert_eq!(session.session_kind(), SessionKind::Composite);
         assert!(session.crypto_context().is_some());
+
+        let native = fixture_resolver(FixtureBehavior::CompositeNative)
+            .resolve_session(&composite_context())
+            .await
+            .unwrap();
+        assert_eq!(native.session_kind(), SessionKind::Composite);
+        assert!(native.crypto_context().is_some());
 
         for behavior in [
             FixtureBehavior::CompositeWrongOrigin,

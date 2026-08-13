@@ -2,9 +2,10 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::{AuthMethod, SessionKind, WaitingUserState};
 use asterism_provider_api::{
-    AuthChallenge, AuthenticationCapability, CaptureRecipe, CredentialValidation,
-    ProviderAuthContext, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, SessionStatus,
+    AuthChallenge, AuthenticationCapability, CaptureRecipe, CredentialReplacement,
+    CredentialValidation, ExternalOauthCallbackBinding, ProviderAuthContext, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
+    SessionStatus,
 };
 use asterism_secrets::{CredentialAcquisition, CredentialBundle, SecretPurpose, SecretString};
 use async_trait::async_trait;
@@ -12,7 +13,10 @@ use http::HeaderValue;
 use serde_json::Value;
 use zeroize::Zeroize;
 
-use crate::{CidarenCryptoContext, cidaren_capture_recipe_v2, metadata::development_metadata};
+use crate::{
+    CidarenCryptoContext, cidaren_capture_recipe_v2, metadata::development_metadata,
+    oauth_authorization::CidarenOauthAuthorization,
+};
 
 const MAX_TOKEN_BYTES: usize = 64 * 1_024;
 const MAX_VALIDATION_RESPONSE_BYTES: usize = 64 * 1_024;
@@ -91,6 +95,21 @@ impl fmt::Debug for CidarenTokenSession {
 #[async_trait]
 pub trait CidarenAuthenticationTransport: Send + Sync {
     async fn validate_token(&self, session: &CidarenTokenSession) -> ProviderResult<()>;
+
+    /// Revalidates native OAuth material with the exact current bootstrap
+    /// request context before Core commits the replacement.
+    async fn validate_native_oauth_session(
+        &self,
+        session: &CidarenTokenSession,
+    ) -> ProviderResult<()>;
+
+    /// Consumes a callback already claimed by Core and returns the exact
+    /// native Composite replacement without persisting it.
+    async fn exchange_external_oauth_callback(
+        &self,
+        callback_url: SecretString,
+        binding: ExternalOauthCallbackBinding,
+    ) -> ProviderResult<CredentialReplacement>;
 }
 
 /// Resolves one account-bound stored Cidaren token.
@@ -163,7 +182,13 @@ impl CidarenAuthentication {
             .ok_or_else(invalid_credential_shape)?;
         let token = std::str::from_utf8(bytes).map_err(|_| invalid_credential_shape())?;
         let session = CidarenTokenSession::try_new(token.to_owned())?;
-        self.transport.validate_token(&session).await?;
+        if credential.acquired_via == CredentialAcquisition::NativeProviderLogin {
+            self.transport
+                .validate_native_oauth_session(&session)
+                .await?;
+        } else {
+            self.transport.validate_token(&session).await?;
+        }
         Ok(CredentialValidation::accepted(valid_session(
             SessionKind::ProviderSpecific,
         )))
@@ -173,11 +198,20 @@ impl CidarenAuthentication {
         &self,
         credential: &CredentialBundle,
     ) -> ProviderResult<CredentialValidation> {
-        if credential.session_kind != SessionKind::Composite
-            || !matches!(
+        let valid_acquisition = match credential.auth_method {
+            AuthMethod::AssistedSession => matches!(
                 credential.acquired_via,
-                CredentialAcquisition::CaptureTool | CredentialAcquisition::BrowserExtension
-            )
+                CredentialAcquisition::CaptureTool
+                    | CredentialAcquisition::BrowserExtension
+                    | CredentialAcquisition::NativeProviderLogin
+            ),
+            AuthMethod::ExternalBrowserOauth => {
+                credential.acquired_via == CredentialAcquisition::NativeProviderLogin
+            }
+            _ => false,
+        };
+        if credential.session_kind != SessionKind::Composite
+            || !valid_acquisition
             || credential.fields.len() != 2
         {
             return Err(invalid_credential_shape());
@@ -236,6 +270,11 @@ impl AuthenticationCapability for CidarenAuthentication {
                 "Cidaren authentication requires a Core AuthSession",
             )
         })?;
+        let external_oauth = if method == AuthMethod::ImportedToken {
+            None
+        } else {
+            Some(CidarenOauthAuthorization::generate()?.into_external()?)
+        };
         Ok(AuthChallenge {
             session_id,
             method,
@@ -245,11 +284,30 @@ impl AuthenticationCapability for CidarenAuthentication {
                 WaitingUserState::BrowserCallback
             },
             user_action: (method != AuthMethod::ImportedToken).then(|| {
-                "Open https://app.vocabgo.com/student/ inside authenticated WeChat and complete the Capture bootstrap"
+                "Open the generated URL in WeChat, authorize, then return the final Cidaren callback URL"
                     .to_owned()
             }),
             expires_at: None,
+            external_oauth,
         })
+    }
+
+    async fn exchange_external_oauth_callback(
+        &self,
+        context: &ProviderAuthContext,
+        callback_url: SecretString,
+        binding: ExternalOauthCallbackBinding,
+    ) -> ProviderResult<CredentialReplacement> {
+        self.validate_provider(&context.provider_id)?;
+        if context.auth_session_id.is_none() || !binding.validate() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Cidaren OAuth callback has no valid Core AuthSession binding",
+            ));
+        }
+        self.transport
+            .exchange_external_oauth_callback(callback_url, binding)
+            .await
     }
 
     async fn validate_credential(
@@ -412,6 +470,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FixtureBoundaries {
         validations: AtomicUsize,
+        oauth_exchanges: AtomicUsize,
     }
 
     #[async_trait]
@@ -420,6 +479,39 @@ mod tests {
             self.validations.fetch_add(1, Ordering::SeqCst);
             assert_eq!(session.expose_token(), "synthetic-user-token");
             classify_token_validation_response(TOKEN_SUCCESS)
+        }
+
+        async fn exchange_external_oauth_callback(
+            &self,
+            callback_url: SecretString,
+            binding: ExternalOauthCallbackBinding,
+        ) -> ProviderResult<CredentialReplacement> {
+            self.oauth_exchanges.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                callback_url.expose_secret(),
+                "https://app.vocabgo.com/student/?synthetic-callback"
+            );
+            assert!(binding.validate());
+            Ok(CredentialReplacement {
+                session_kind: SessionKind::Composite,
+                fields: vec![
+                    CredentialField {
+                        purpose: SecretPurpose::ProviderAccessToken,
+                        value: SecretValue::new(b"synthetic-user-token".to_vec()),
+                    },
+                    CredentialField {
+                        purpose: SecretPurpose::ProviderCompositeSession,
+                        value: SecretValue::new(b"synthetic-crypto".to_vec()),
+                    },
+                ],
+            })
+        }
+
+        async fn validate_native_oauth_session(
+            &self,
+            session: &CidarenTokenSession,
+        ) -> ProviderResult<()> {
+            self.validate_token(session).await
         }
     }
 
@@ -478,21 +570,61 @@ mod tests {
         assert_eq!(captured.status.kind, SessionKind::Composite);
         assert!(captured.replacement.is_none());
 
+        for method in [
+            AuthMethod::AssistedSession,
+            AuthMethod::ExternalBrowserOauth,
+        ] {
+            let mut oauth = captured_bundle();
+            oauth.auth_method = method;
+            oauth.acquired_via = CredentialAcquisition::NativeProviderLogin;
+            assert_eq!(
+                capability
+                    .validate_credential(&auth_context(), &oauth)
+                    .await
+                    .unwrap()
+                    .status
+                    .kind,
+                SessionKind::Composite
+            );
+        }
+        let mut mislabeled_oauth = captured_bundle();
+        mislabeled_oauth.auth_method = AuthMethod::ExternalBrowserOauth;
+        assert!(
+            capability
+                .validate_credential(&auth_context(), &mislabeled_oauth)
+                .await
+                .is_err()
+        );
+
         let stored = capability
             .validate_session(&provider_context())
             .await
             .unwrap();
         assert_eq!(stored.kind, SessionKind::ProviderSpecific);
-        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 3);
+        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 5);
 
-        assert_eq!(
+        let mut malformed = imported_bundle();
+        malformed.session_kind = SessionKind::BearerToken;
+        assert!(
             capability
-                .begin_authentication(&auth_context(), AuthMethod::ImportedToken)
+                .validate_credential(&auth_context(), &malformed)
                 .await
-                .unwrap()
-                .waiting_for,
-            WaitingUserState::SessionImport
+                .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn external_oauth_challenge_and_exchange_require_core_binding() {
+        let boundaries = Arc::new(FixtureBoundaries::default());
+        let capability =
+            CidarenAuthentication::try_new(boundaries.clone(), boundaries.clone()).unwrap();
+
+        let imported = capability
+            .begin_authentication(&auth_context(), AuthMethod::ImportedToken)
+            .await
+            .unwrap();
+        assert_eq!(imported.waiting_for, WaitingUserState::SessionImport);
+        assert!(imported.external_oauth.is_none());
         for method in [
             AuthMethod::AssistedSession,
             AuthMethod::ExternalBrowserOauth,
@@ -503,19 +635,54 @@ mod tests {
                 .unwrap();
             assert_eq!(challenge.waiting_for, WaitingUserState::BrowserCallback);
             assert!(challenge.user_action.is_some());
+            let oauth = challenge.external_oauth.unwrap();
+            assert!(oauth.validate());
+            assert!(oauth.authorization_url.contains("open.weixin.qq.com"));
+            assert!(!format!("{oauth:?}").contains("open.weixin.qq.com"));
         }
+        let replacement = capability
+            .exchange_external_oauth_callback(
+                &auth_context(),
+                SecretString::new("https://app.vocabgo.com/student/?synthetic-callback"),
+                ExternalOauthCallbackBinding::from_digests([1; 32], [2; 32]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replacement.session_kind, SessionKind::Composite);
+        assert_eq!(replacement.fields.len(), 2);
+        assert_eq!(boundaries.oauth_exchanges.load(Ordering::SeqCst), 1);
+        let mut unbound = auth_context();
+        unbound.auth_session_id = None;
         assert!(
             capability
-                .begin_authentication(&auth_context(), AuthMethod::Password)
+                .begin_authentication(&unbound, AuthMethod::ExternalBrowserOauth)
                 .await
                 .is_err()
         );
-
-        let mut malformed = imported_bundle();
-        malformed.session_kind = SessionKind::BearerToken;
         assert!(
             capability
-                .validate_credential(&auth_context(), &malformed)
+                .exchange_external_oauth_callback(
+                    &unbound,
+                    SecretString::new("https://app.vocabgo.com/student/?unbound"),
+                    ExternalOauthCallbackBinding::from_digests([1; 32], [2; 32]),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            capability
+                .exchange_external_oauth_callback(
+                    &auth_context(),
+                    SecretString::new("https://app.vocabgo.com/student/?invalid-binding"),
+                    ExternalOauthCallbackBinding::default(),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(boundaries.oauth_exchanges.load(Ordering::SeqCst), 1);
+        assert!(
+            capability
+                .begin_authentication(&auth_context(), AuthMethod::Password)
                 .await
                 .is_err()
         );

@@ -3,8 +3,8 @@
 | Risk | Static evidence | Required response |
 |---|---|---|
 | Imported token format changes | Current donor treats `UserToken` as opaque | Validate only bounded header safety; do not require historical hex length |
-| Token expires after another login | Donor warns another device login can refresh token | Classify authenticated-read rejection as Authentication, then acquire a fresh manual or Capture-assisted composite session |
-| WeChat OAuth callback acquisition changes | Current authorization callback is delivered inside PC WeChat XWeb; the generic helper only launches isolated desktop Chromium | Keep callback/helper acquisition explicit and fail closed. Do not claim that a declarative Edge/Chrome recipe observes the WeChat session, and do not persist or replay the single-use code |
+| Token expires after another login | Donor warns another device login can refresh token | Classify authenticated-read rejection as Authentication, then acquire a fresh manual, random-marker OAuth or Capture-assisted Composite session |
+| WeChat OAuth callback acquisition changes | Authorized Windows/Android probes establish manual return of a random-marker callback; pure Web iframe/popup relay and the earlier XWeb-only assumption do not hold | Generate independent CSPRNG state/marker (`marker != "2"`), persist only domain-separated hashes, accept only exact HTTPS Cidaren student callbacks in audited query/SPA forms, and never persist or replay the single-use code |
 | Historical native WeChat exchange is copied as current | Original donor `LoginByWechatCode` signs a stale hard-coded code; the frozen first-party `2.7.0.260715_01` H5 and redacted live-safe V2 exchange establish the replacement | Use only the current P-256/SPKI, sorted MD5, ECDH, HKDF `vcg-auth-aes` and AES-GCM/AAD flow; fail closed on handshake/version/AAD drift and fresh-read the resulting account before persistence |
 | OAuth exchange is retried after an ambiguous failure | WeChat callback code is single-use and the V2 POST mutates authentication state | Core must durably claim and consume an owner/account/AuthSession-bound artifact; Provider sends once and never retries a Network-ambiguous result |
 | Account validation returns HTML/redirect | Donor assumes JSON | Shared native client disables redirects, bounds the body and requires JSON before parsing |
@@ -45,6 +45,7 @@ After the product UI/plugin stage and account delivery:
 6. exercise Capture/BrowserBridge and `jv=99` with ephemeral crypto material;
 7. validate mutation families only under explicit live-test authorization,
    preserving attempt/receipt/verification separation.
-8. validate one PC WeChat callback-only acquisition into the native V2
-   exchange, including cancellation, expiry and ambiguous-failure recovery,
-   without retaining the OAuth code in a fixture or log.
+8. validate the assisted random-marker OAuth URL and manually returned callback
+   through the native V2 exchange on the applicable Windows/Android paths,
+   including cancellation, expiry, duplicate delivery and ambiguous-failure
+   recovery, without retaining raw state, marker or code in a fixture or log.

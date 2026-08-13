@@ -11,6 +11,7 @@ default branches and release binaries are not evidence for this checkpoint.
 | User-supplied Cidaren H5 asset snapshot | SHA-256 `65b9c80f2dbc0775fb61813f89f254128c03d7dca928b4af8694bff4fe61fefe` | First-party `2.7.0.260715_01` OAuth callback, P-256 bootstrap, V2 exchange, HKDF/AES-GCM and browser session behavior | Reference | Protocol observation only; not redistributed |
 | User-supplied redacted WeChat flow capture | SHA-256 `0d937e9c621429bac6cc6e1892e43a9e5758dff8e79c4f5d56d35f052c199ec7` | Live-safe callback, exact V2 request/response envelope, new refresh-cookie issuance and fresh `Student/Main` success with the old refresh cookie removed | Reference | Sanitized protocol evidence only; not redistributed |
 | User-supplied PC WeChat XWeb research snapshot | SHA-256 `883d48ee513cd03397f95734363c7482a00bc4c267fa8c0a6fda09d1d53f7c8e` | XWeb remote-debug/CDP protocol, callback acquisition research and the unresolved provisioning boundary | Reference | Protocol observation only; not redistributed |
+| [User-supplied OAuth V2 assisted-bootstrap handoff](handoffs/2026-08-13-oauth-v2/IMPORT.md) | Archive SHA-256 `5c09f74d5c73df6339ad4daac48f51dff218f10219c9cdf417d9f2aa12384f70` | Random-marker OAuth callback preservation, strict one-shot callback handoff, current V2 exchange, and authorized Windows/Android device-flow validation | Reference | Documentation and manifest imported; raw evidence, probes and reference code remain external |
 
 The private donor is the primary automation behavior source supplied by the
 repository owner. It is one protocol/crypto update ahead of the public branch
@@ -43,3 +44,14 @@ The separately supplied redacted capture is sufficient protocol evidence for
 the V2 exchange and cookieless result, but does not replace future Asterism
 end-to-end validation. Live Provider validation remains pending for account
 binding, helper callback delivery, inventory and authorized mutation flows.
+
+The 2026-08-13 assisted-bootstrap handoff refines the earlier XWeb-only
+acquisition hypothesis: using an independent random `authorize_marker != "2"`
+prevents the Cidaren frontend from consuming the callback, so an explicitly
+returned callback URL can feed the native V2 exchange without MITM or XWeb
+debug provisioning. Its source manifest verified all 16 archive entries before
+the documentation slice was imported. Provider-side URL construction,
+hash-only binding, strict callback parsing and the native exchange are now
+implemented. The shared hash-only owner/account/AuthSession-bound pending
+record, atomic claim/consume, Provider callback exchange and credential commit
+are also implemented; end-to-end live validation remains pending.

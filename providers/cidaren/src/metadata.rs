@@ -50,7 +50,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn development_metadata_advertises_captured_and_manual_authentication() {
+    fn development_metadata_advertises_manual_capture_and_external_oauth() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
