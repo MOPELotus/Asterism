@@ -7,6 +7,7 @@
 mod authentication;
 mod chapter_inventory;
 mod course_inventory;
+mod exam_attempt;
 mod inventory;
 mod metadata;
 mod native_http;
@@ -34,6 +35,7 @@ pub use chapter_inventory::parse_chapter_inventory;
 pub use course_inventory::{
     ChaoxingCourseInventory, ChaoxingCourseInventoryTransport, parse_course_inventory,
 };
+pub(crate) use exam_attempt::ChaoxingExamQuestionRequest;
 pub use inventory::{
     ChaoxingCourseScope, classify_work_detail, parse_exam_inventory, parse_work_inventory,
 };

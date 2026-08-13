@@ -41,6 +41,7 @@ impl ProviderIdentity for ChaoxingSubmissionBuild {
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl SubmissionBuildCapability for ChaoxingSubmissionBuild {
     async fn build_submission_preview(
         &self,
@@ -105,16 +106,53 @@ impl SubmissionBuildCapability for ChaoxingSubmissionBuild {
                 ));
             }
             validate_answer_shape(question, &selected.answer)?;
-            fields.extend([
-                SubmissionPayloadFieldPreview {
-                    question_id: question.id,
-                    field_name: format!("answer{remote_question_id}"),
-                },
-                SubmissionPayloadFieldPreview {
-                    question_id: question.id,
-                    field_name: format!("answertype{remote_question_id}"),
-                },
-            ]);
+            if task_kind == SubmissionTaskKind::Exam {
+                fields.extend([
+                    SubmissionPayloadFieldPreview {
+                        question_id: question.id,
+                        field_name: format!("type{remote_question_id}"),
+                    },
+                    SubmissionPayloadFieldPreview {
+                        question_id: question.id,
+                        field_name: format!("typeName{remote_question_id}"),
+                    },
+                ]);
+                match (&question.kind, &selected.answer) {
+                    (QuestionKind::MultipleChoice, NormalizedAnswer::Selections(_)) => {
+                        fields.push(SubmissionPayloadFieldPreview {
+                            question_id: question.id,
+                            field_name: format!("answers{remote_question_id}"),
+                        });
+                    }
+                    (QuestionKind::FillBlank, NormalizedAnswer::Texts(values)) => {
+                        for index in 1..=values.len() {
+                            fields.push(SubmissionPayloadFieldPreview {
+                                question_id: question.id,
+                                field_name: format!("answer{remote_question_id}{index}"),
+                            });
+                        }
+                        fields.push(SubmissionPayloadFieldPreview {
+                            question_id: question.id,
+                            field_name: format!("blankNum{remote_question_id}"),
+                        });
+                    }
+                    _ => fields.push(SubmissionPayloadFieldPreview {
+                        question_id: question.id,
+                        field_name: format!("answer{remote_question_id}"),
+                    }),
+                }
+            } else {
+                fields.extend([
+                    SubmissionPayloadFieldPreview {
+                        question_id: question.id,
+                        field_name: format!("answer{remote_question_id}"),
+                    },
+                    SubmissionPayloadFieldPreview {
+                        question_id: question.id,
+                        field_name: format!("answertype{remote_question_id}"),
+                    },
+                ]);
+            }
         }
         if selected_by_question.len() != question_ids.len() {
             return Err(invalid_input(
@@ -153,7 +191,7 @@ fn validate_answer_shape(question: &Question, answer: &NormalizedAnswer) -> Prov
             _,
         ) => Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
-            "Chaoxing Work preview does not yet encode this Question kind",
+            "Chaoxing Exam/Work preview does not yet encode this Question kind",
         )),
         _ => Err(invalid_input(
             "Chaoxing Work answer type does not match its Question kind",
@@ -202,6 +240,7 @@ fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> P
 enum SubmissionTaskKind {
     IndependentWork,
     ChapterWork,
+    Exam,
 }
 
 impl SubmissionTaskKind {
@@ -209,6 +248,7 @@ impl SubmissionTaskKind {
         match self {
             Self::IndependentWork => "work_preview",
             Self::ChapterWork => "chapter_work_mobile",
+            Self::Exam => "exam_mobile",
         }
     }
 
@@ -216,6 +256,7 @@ impl SubmissionTaskKind {
         match self {
             Self::IndependentWork => "chaoxing.work.form.v1",
             Self::ChapterWork => "chaoxing.chapter-work.form.v1",
+            Self::Exam => "chaoxing.exam.form.v1",
         }
     }
 }
@@ -243,9 +284,16 @@ fn submission_task_kind(remote_task_id: &str) -> ProviderResult<SubmissionTaskKi
         {
             Ok(SubmissionTaskKind::ChapterWork)
         }
+        ["exam", course, class, exam]
+            if [course, class, exam]
+                .into_iter()
+                .all(|value| valid_component(value, 128)) =>
+        {
+            Ok(SubmissionTaskKind::Exam)
+        }
         _ => Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
-            "Chaoxing submission preview supports Work and Chapter Work tasks",
+            "Chaoxing submission preview received an unsupported task family",
         )),
     }
 }
@@ -270,13 +318,16 @@ mod tests {
 
     use super::*;
     use crate::question_parser::{
-        parse_chapter_work_question_page, parse_work_preview_question_page,
+        parse_chapter_work_question_page, parse_exam_question_page,
+        parse_work_preview_question_page,
     };
 
     const WORK_PREVIEW: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/work-preview-mixed.html");
     const CHAPTER_WORK: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
+    const EXAM_MOBILE: &str =
+        include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
 
     #[tokio::test]
     async fn independent_work_preview_is_typed_bounded_and_value_free() {
@@ -351,11 +402,32 @@ mod tests {
             .unwrap_err();
         assert_eq!(mismatch.kind, ProviderErrorKind::InvalidResponse);
 
+        let exam_questions = parse_exam_question_page(EXAM_MOBILE)
+            .unwrap()
+            .iter()
+            .take(2)
+            .map(|question| question.to_question(task_id).unwrap())
+            .collect::<Vec<_>>();
+        let exam_selected = vec![
+            selection(
+                exam_questions[0].id,
+                NormalizedAnswer::Selections(vec!["A".to_owned()]),
+            ),
+            selection(exam_questions[1].id, NormalizedAnswer::Boolean(true)),
+        ];
         let exam = capability
-            .build_submission_preview(&context(), "exam:100:200:exam-1", &questions, &selected)
+            .build_submission_preview(
+                &context(),
+                "exam:100:200:exam-1",
+                &exam_questions,
+                &exam_selected,
+            )
             .await
-            .unwrap_err();
-        assert_eq!(exam.kind, ProviderErrorKind::UnsupportedTask);
+            .unwrap();
+        assert_eq!(exam.format, "chaoxing.exam.form.v1");
+        assert_eq!(exam.fields[0].field_name, "typeexam-q-1");
+        assert_eq!(exam.fields[1].field_name, "typeNameexam-q-1");
+        assert_eq!(exam.fields[2].field_name, "answerexam-q-1");
 
         questions[0].kind = QuestionKind::Ordering;
         let selected = vec![

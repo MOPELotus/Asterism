@@ -16,11 +16,15 @@ use zeroize::Zeroize;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
-    ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingInventoryDocument,
-    ChaoxingInventoryTransport, ChaoxingQuestionTransport, ChaoxingSubmissionPlan,
-    ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
+    ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingExamQuestionRequest,
+    ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingQuestionTransport,
+    ChaoxingSubmissionPlan, ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
     ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
-    ChaoxingWorkVerificationRoute, classify_work_detail, parse_submission_receipt,
+    ChaoxingWorkVerificationRoute, classify_work_detail,
+    exam_attempt::{
+        parse_exam_attempt, parse_exam_cover, valid_exam_question_url, valid_exam_start_redirect,
+    },
+    parse_submission_receipt,
     resource_execution::{
         ChaoxingImmediateResourceTransport, ChaoxingVideoStatus, ChaoxingVideoTransport,
     },
@@ -50,6 +54,10 @@ const VIDEO_REFERER: &str =
     "https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2025-0725-1842";
 const COURSE_LIST_REFERER: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans";
 const EXAM_LIST_BASE: &str = "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list";
+const EXAM_COVER_BASE: &str = "https://mooc1-api.chaoxing.com/exam-ans/exam/phone/task-exam";
+const EXAM_START_BASE: &str = "https://mooc1-api.chaoxing.com/exam-ans/exam/phone/start";
+const EXAM_QUESTION_BASE: &str =
+    "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const WORK_LIST_PATH: &str = "/mooc2/work/list";
 const WORK_SUBMISSION_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/work/addStudentWorkNew";
@@ -398,6 +406,128 @@ impl NativeChaoxingInventoryTransport {
             .await?
             .1
             .into_inventory_document()
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn fetch_exam_question_document_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        request: ChaoxingExamQuestionRequest<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        let cover_url = build_url(
+            EXAM_COVER_BASE,
+            &[
+                ("redo", "1"),
+                ("taskrefId", request.exam_id()),
+                ("courseId", request.route().course_id()),
+                ("classId", request.route().class_id()),
+                ("source", "0"),
+                ("enc_task", request.enc_task()),
+                ("cpi", request.route().cpi()),
+                ("examsignal", "1"),
+            ],
+        )?;
+        let cover = self.get_html(session, cover_url).await?;
+        let cover_facts = parse_exam_cover(cover.as_str())?;
+        if cover_facts.need_code || cover_facts.need_face || cover_facts.need_captcha {
+            return Err(ProviderError::human_required(
+                "Chaoxing Exam requires browser or human verification before start",
+                HumanRequiredReason::BrowserRequired,
+            ));
+        }
+        let start_url = build_url(
+            EXAM_START_BASE,
+            &[
+                ("courseId", request.route().course_id()),
+                ("classId", request.route().class_id()),
+                ("examId", request.exam_id()),
+                ("source", "0"),
+                ("examAnswerId", &cover_facts.exam_answer_id),
+                ("cpi", request.route().cpi()),
+                ("keyboardDisplayRequiresUserAction", "1"),
+                ("imei", "asterism-native"),
+                ("faceDetection", "0"),
+                ("facekey", ""),
+                ("faceDetectionResult", ""),
+                ("captchavalidate", ""),
+                ("jt", "0"),
+                ("code", ""),
+            ],
+        )?;
+        let response = self
+            .client
+            .get(start_url.clone())
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "text/html,application/xhtml+xml")
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let status = response.status();
+        if status.is_redirection() {
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| protocol_drift("Chaoxing Exam start redirect has no location"))?;
+            let url = start_url
+                .join(location)
+                .map_err(|_| protocol_drift("Chaoxing Exam start redirect is invalid"))?;
+            if !valid_exam_start_redirect(&url, request.route(), request.exam_id()) {
+                return Err(protocol_drift(
+                    "Chaoxing Exam start redirect crossed its route boundary",
+                ));
+            }
+            let document = self.get_html(session, url.clone()).await?;
+            let material =
+                parse_exam_attempt(&url, document.as_str(), &cover_facts.exam_answer_id)?;
+            let question_url = build_url(
+                EXAM_QUESTION_BASE,
+                &[
+                    ("courseId", request.route().course_id()),
+                    ("classId", request.route().class_id()),
+                    ("tId", request.exam_id()),
+                    ("id", &material.exam_answer_id),
+                    ("source", "0"),
+                    ("p", "1"),
+                    ("isphone", "true"),
+                    ("tag", "1"),
+                    ("cpi", request.route().cpi()),
+                    ("imei", "asterism-native"),
+                    ("start", "0"),
+                    ("enc", material.enc.expose_secret()),
+                    ("keyboardDisplayRequiresUserAction", "1"),
+                    ("monitorStatus", "0"),
+                    ("monitorOp", "-1"),
+                    ("remainTimeParam", &material.enc_remain_time.to_string()),
+                    (
+                        "relationAnswerLastUpdateTime",
+                        &material.last_update_time.to_string(),
+                    ),
+                ],
+            )?;
+            let question = self.get_html(session, question_url.clone()).await?;
+            if !valid_exam_question_url(
+                &question_url,
+                request.route(),
+                request.exam_id(),
+                &material.exam_answer_id,
+            ) {
+                return Err(protocol_drift(
+                    "Chaoxing Exam Question route lost attempt binding",
+                ));
+            }
+            return question.into_inventory_document();
+        }
+        if status.is_success() {
+            return Err(ProviderError::human_required(
+                "Chaoxing Exam start requires an exam code or browser verification",
+                HumanRequiredReason::BrowserRequired,
+            ));
+        }
+        Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Chaoxing Exam start returned an unexpected status",
+        ))
     }
 
     async fn fetch_chapter_work_page(
@@ -783,6 +913,16 @@ impl ChaoxingQuestionTransport for NativeChaoxingInventoryTransport {
         // happen before sending, but an ambiguous response must never replay it.
         let (session, _) = self.session_for_operation(context).await?;
         self.fetch_chapter_work_question_document_once(&session, route, request, target)
+            .await
+    }
+
+    async fn fetch_exam_question_document(
+        &self,
+        context: &ProviderContext,
+        request: ChaoxingExamQuestionRequest<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        let (session, _) = self.session_for_operation(context).await?;
+        self.fetch_exam_question_document_once(&session, request)
             .await
     }
 }

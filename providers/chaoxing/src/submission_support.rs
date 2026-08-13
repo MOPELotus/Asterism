@@ -88,7 +88,7 @@ impl<'a> WorkSubmissionIdentity<'a> {
             }
             _ => {
                 return Err(unsupported(
-                    "Chaoxing submission supports Work and Chapter Work tasks",
+                    "Chaoxing submission received an unsupported task family",
                 ));
             }
         };
@@ -172,7 +172,7 @@ impl ChaoxingSubmissionPlan {
                         .metadata_sanitized
                         .get("page_kind")
                         .and_then(serde_json::Value::as_str),
-                    Some("work_preview" | "chapter_work_mobile")
+                    Some("work_preview" | "chapter_work_mobile" | "exam_mobile")
                 )
                 || !remote_ids.insert(remote_question_id.to_owned())
                 || !positions.insert(question.position)

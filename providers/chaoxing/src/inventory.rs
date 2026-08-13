@@ -124,6 +124,13 @@ pub fn parse_exam_inventory(
         .collect())
 }
 
+pub(crate) fn parse_exam_inventory_entries(
+    html: &str,
+    scope: &ChaoxingCourseScope,
+) -> ProviderResult<Vec<ChaoxingParsedInventoryTask>> {
+    parse_inventory(html, scope, SourceType::Exam)
+}
+
 /// Classifies a followed Work detail response instead of trusting `未交` on the
 /// list page.
 ///
@@ -227,6 +234,19 @@ fn parse_inventory(
             "time_text": time_text,
             "entry_kind": entry_kind,
         });
+        let capabilities = if source_type == SourceType::Exam
+            && remote_state == RemoteState::Pending
+            && entry.to_ascii_lowercase().contains("gotest(")
+        {
+            vec![
+                TaskCapability::ProgressRead,
+                TaskCapability::QuestionInventory,
+                TaskCapability::QuestionParse,
+                TaskCapability::SubmissionBuild,
+            ]
+        } else {
+            vec![TaskCapability::ProgressRead]
+        };
         let task = RemoteTask {
             remote_id,
             course_remote_id: Some(scope.course_remote.clone()),
@@ -237,7 +257,7 @@ fn parse_inventory(
             opens_at: None,
             due_at: None,
             closes_at: None,
-            capabilities: vec![asterism_domain::TaskCapability::ProgressRead],
+            capabilities,
             fingerprint: fingerprint(&normalized)?,
             normalized,
             raw_sanitized: json!({
@@ -559,10 +579,28 @@ mod tests {
         assert!(tasks.iter().all(|task| {
             task.source_type == SourceType::Exam
                 && task.assessment_class == AssessmentClass::Unknown
-                && task.capabilities == [asterism_domain::TaskCapability::ProgressRead]
                 && task.fingerprint.starts_with("v1:")
                 && task.fingerprint.len() == 67
         }));
+        let pending = tasks
+            .iter()
+            .find(|task| task.remote_id.ends_with(":exam-1"))
+            .unwrap();
+        assert_eq!(
+            pending.capabilities,
+            [
+                TaskCapability::ProgressRead,
+                TaskCapability::QuestionInventory,
+                TaskCapability::QuestionParse,
+                TaskCapability::SubmissionBuild,
+            ]
+        );
+        assert!(
+            tasks
+                .iter()
+                .filter(|task| !task.remote_id.ends_with(":exam-1"))
+                .all(|task| task.capabilities == [TaskCapability::ProgressRead])
+        );
         let not_open = tasks
             .iter()
             .find(|task| task.remote_id.ends_with(":exam-4"))

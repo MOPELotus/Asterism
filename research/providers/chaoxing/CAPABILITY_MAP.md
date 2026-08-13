@@ -15,8 +15,8 @@ source modules even when their assessments share field names or HTML shapes.
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
-| QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; Exam remains parse-only and all live behavior is pending |
-| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts; Chapter Work adds donor-evidenced fill-blank/short-answer encoding, fresh seven-card attempt rebinding and one-shot attempt GET plus `addStudentWorkNew` POST. JSON success remains only a Receipt |
+| QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks with a structural `goTest` entry now use a separate cover -> one-shot start -> attempt-bound mobile Question path, while exam-code/face/captcha gates return typed BrowserRequired |
+| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts; pending Exam now has a separate value-free form preview for donor `type/typeName`, choice, true/false and fill-blank field families. Exam one-shot answer/save/submit execution remains a distinct active family and is not routed through Work's payload or mutation transport |
 | SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work independently refreshes seven cards and confirms only exact task completion, retaining per-Question facts as Unverified when no answer readback exists |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
 | BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
@@ -140,6 +140,14 @@ policy and remains independently guarded.
   Receipt as proof and confirms only a fresh exact card with `isPassed=true`;
   per-Question facts stay Unverified because a completion card is not answer
   readback. This synthetic/offline checkpoint does not stop further work.
+- Pending independent Exam rows with a structural `goTest` entry now advertise
+  `QuestionInventory` and `QuestionParse`. The fresh read rebinds the exact
+  course/class/exam identity and `enc_task`, obtains the donor cover, performs
+  one non-replayed `phone/start`, validates the resulting `examAnswerId` and
+  dynamic `enc`, then fetches the bounded mobile Question page. Start material
+  never enters a Task snapshot; exam-code, face and captcha gates return typed
+  `HumanRequired` for BrowserBridge/Capture continuation. Exam remains separate
+  from Work payload and submission semantics.
 
 ## Completion boundary
 

@@ -316,6 +316,17 @@ needed Capture/BrowserBridge or human-interaction handoff as a separate first-
 batch capability family. The start receipt is not proof of completion, and an
 ambiguous non-idempotent start/submit is never blindly replayed.
 
+The first native Exam Question slice now follows that boundary: a fresh
+`exam:course:class:exam` task must resolve to one current Exam list row with a
+structural `goTest` entry and bounded `enc_task`. The Provider obtains the
+cover, rejects completed/not-started states, and performs exactly one
+`phone/start` before accepting the returned `examAnswerId` and dynamic `enc`.
+It then reads the mobile Question route with exact course/class/exam/attempt
+binding. Cover or start responses requiring an exam code, face check or captcha
+return `HumanRequired` for BrowserBridge/Capture handoff; dynamic material is
+never persisted or reused across attempts. Synthetic fixtures and 81 Provider
+tests cover this boundary; live account validation remains pending.
+
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.
 - The offline parser checkpoint keeps three donor modes distinct: CxKitty's

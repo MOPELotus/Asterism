@@ -15,8 +15,8 @@ use async_trait::async_trait;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingChapterWorkTarget,
-    ChaoxingCourseRoute, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
-    ChaoxingWorkDetailRequest,
+    ChaoxingCourseRoute, ChaoxingExamQuestionRequest, ChaoxingInventoryDocument,
+    ChaoxingInventoryTransport, ChaoxingWorkDetailRequest,
     inventory::parse_work_inventory_entries,
     metadata::development_metadata,
     parse_chapter_inventory,
@@ -50,6 +50,15 @@ pub trait ChaoxingQuestionTransport: Send + Sync {
         route: ChaoxingCourseRoute<'_>,
         request: &ChaoxingChapterResourceRequest,
         target: &ChaoxingChapterWorkTarget,
+    ) -> ProviderResult<ChaoxingInventoryDocument>;
+
+    /// Starts one fresh Exam attempt and returns a bounded question document.
+    /// The start may mutate remote state and must never be replayed after an
+    /// ambiguous response.
+    async fn fetch_exam_question_document(
+        &self,
+        context: &ProviderContext,
+        request: ChaoxingExamQuestionRequest<'_>,
     ) -> ProviderResult<ChaoxingInventoryDocument>;
 }
 
@@ -102,7 +111,44 @@ impl ChaoxingQuestionRead {
                 self.discover_chapter_work_questions(context, route, identity)
                     .await
             }
+            QuestionTaskIdentity::Exam(identity) => {
+                self.discover_exam_questions(context, route, identity).await
+            }
         }
+    }
+
+    async fn discover_exam_questions(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        identity: &ScopedQuestionIdentity<'_>,
+    ) -> ProviderResult<Vec<ParsedChaoxingQuestion>> {
+        let document = self.inventory.fetch_exam_inventory(context, route).await?;
+        let entries = crate::inventory::parse_exam_inventory_entries(
+            document.as_str(),
+            &route.parser_scope()?,
+        )?;
+        let mut matching = entries
+            .iter()
+            .filter(|entry| entry.task().remote_id == identity.remote_task);
+        let entry = matching.next().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Exam task is no longer present in fresh inventory",
+            )
+        })?;
+        if matching.next().is_some() {
+            return Err(protocol_drift(
+                "Chaoxing Exam inventory contains duplicate task identity",
+            ));
+        }
+        let request =
+            ChaoxingExamQuestionRequest::try_new(route, identity.remote_task, entry.entry())?;
+        let document = self
+            .transport
+            .fetch_exam_question_document(context, request)
+            .await?;
+        crate::question_parser::parse_exam_question_page(document.as_str())
     }
 
     async fn discover_independent_work_questions(
@@ -334,6 +380,7 @@ struct ChapterWorkIdentity<'a> {
 enum QuestionTaskIdentity<'a> {
     IndependentWork(ScopedQuestionIdentity<'a>),
     ChapterWork(ChapterWorkIdentity<'a>),
+    Exam(ScopedQuestionIdentity<'a>),
 }
 
 impl<'a> QuestionTaskIdentity<'a> {
@@ -369,23 +416,34 @@ impl<'a> QuestionTaskIdentity<'a> {
                     knowledge,
                 }))
             }
+            ["exam", course, class, exam]
+                if [course, class, exam]
+                    .into_iter()
+                    .all(|component| valid_component(component)) =>
+            {
+                Ok(Self::Exam(ScopedQuestionIdentity {
+                    remote_task: remote_task_id,
+                    course,
+                    class,
+                }))
+            }
             _ => Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
-                "Chaoxing Question read supports Work and Chapter Work tasks",
+                "Chaoxing Question read received an unsupported task family",
             )),
         }
     }
 
     const fn course(self) -> &'a str {
         match self {
-            Self::IndependentWork(identity) => identity.course,
+            Self::IndependentWork(identity) | Self::Exam(identity) => identity.course,
             Self::ChapterWork(identity) => identity.course,
         }
     }
 
     const fn class(self) -> &'a str {
         match self {
-            Self::IndependentWork(identity) => identity.class,
+            Self::IndependentWork(identity) | Self::Exam(identity) => identity.class,
             Self::ChapterWork(identity) => identity.class,
         }
     }
@@ -394,6 +452,7 @@ impl<'a> QuestionTaskIdentity<'a> {
         match self {
             Self::IndependentWork(_) => "work_preview",
             Self::ChapterWork(_) => "chapter_work_mobile",
+            Self::Exam(_) => "exam_mobile",
         }
     }
 }
@@ -535,6 +594,10 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/resources/cards-mixed.html");
     const CHAPTER_QUESTIONS: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
+    const EXAM_LIST: &str =
+        include_str!("../../../fixtures/providers/chaoxing/exam/list-mixed.html");
+    const EXAM_QUESTIONS: &str =
+        include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
 
     #[derive(Debug)]
     struct FixtureCourses {
@@ -569,6 +632,7 @@ mod tests {
     struct FixtureTransport {
         work: WorkCounters,
         chapter: ChapterCounters,
+        exam: ExamCounters,
     }
 
     #[derive(Debug, Default)]
@@ -581,6 +645,12 @@ mod tests {
     struct ChapterCounters {
         inventory: AtomicUsize,
         resources: AtomicUsize,
+        question: AtomicUsize,
+    }
+
+    #[derive(Debug, Default)]
+    struct ExamCounters {
+        inventory: AtomicUsize,
         question: AtomicUsize,
     }
 
@@ -635,7 +705,8 @@ mod tests {
             _context: &ProviderContext,
             _route: ChaoxingCourseRoute<'_>,
         ) -> ProviderResult<ChaoxingInventoryDocument> {
-            Err(unsupported_fixture_call())
+            self.exam.inventory.fetch_add(1, Ordering::Relaxed);
+            ChaoxingInventoryDocument::try_new(EXAM_LIST)
         }
 
         async fn fetch_work_detail_states(
@@ -668,6 +739,15 @@ mod tests {
         ) -> ProviderResult<ChaoxingInventoryDocument> {
             self.chapter.question.fetch_add(1, Ordering::Relaxed);
             ChaoxingInventoryDocument::try_new(CHAPTER_QUESTIONS)
+        }
+
+        async fn fetch_exam_question_document(
+            &self,
+            _context: &ProviderContext,
+            _request: ChaoxingExamQuestionRequest<'_>,
+        ) -> ProviderResult<ChaoxingInventoryDocument> {
+            self.exam.question.fetch_add(1, Ordering::Relaxed);
+            ChaoxingInventoryDocument::try_new(EXAM_QUESTIONS)
         }
     }
 
@@ -734,7 +814,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chapter_work_is_freshly_rebound_and_exam_remains_a_separate_family() {
+    async fn chapter_work_is_freshly_rebound_and_exam_uses_its_attempt_family() {
         let transport = Arc::new(FixtureTransport::default());
         let capability = ChaoxingQuestionRead::try_new(
             Arc::new(FixtureCourses::new()),
@@ -763,11 +843,30 @@ mod tests {
         assert_eq!(transport.chapter.resources.load(Ordering::Relaxed), 1);
         assert_eq!(transport.chapter.question.load(Ordering::Relaxed), 1);
 
-        let error = capability
-            .list_question_refs(&context("unsupported"), "exam:100:200:exam-1")
+        let exam_context = context("exam-question");
+        let exam_references = capability
+            .list_question_refs(&exam_context, "exam:100:200:exam-1")
             .await
-            .unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+            .unwrap();
+        assert_eq!(exam_references.len(), 4);
+        assert!(
+            exam_references
+                .iter()
+                .all(|reference| reference.route_context.get("page_kind") == Some("exam_mobile"))
+        );
+        for reference in &exam_references {
+            capability
+                .parse_question(
+                    &exam_context,
+                    TaskId::new(),
+                    "exam:100:200:exam-1",
+                    reference,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(transport.exam.inventory.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.exam.question.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work.inventory.load(Ordering::Relaxed), 0);
         assert_eq!(transport.work.question.load(Ordering::Relaxed), 0);
     }
