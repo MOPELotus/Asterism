@@ -12,7 +12,12 @@ const JV_2_1254: &[usize] = &[0, 1, 2, 4, 5, 36, 47, 48, 59, 96, 107];
 const JV_2_9214: &[usize] = &[0, 1, 2, 4, 5, 6, 7, 48, 49, 66, 149, 150, 284, 374, 375];
 const JV_2_10232: &[usize] = &[0, 1, 2, 5, 6, 7, 8, 46, 65, 66, 199, 270, 328, 329];
 const JV_2_10234: &[usize] = &[0, 1, 2, 4, 5, 6, 7, 46, 65, 66, 198, 270, 328, 329];
-const JV_3_1021: &[usize] = &[0, 1, 2, 4, 5, 6, 7, 48, 49, 66, 150, 151, 284, 374, 375];
+const JV_3_1021_FIXED: &[usize] = &[0, 1, 2, 4, 5, 6, 7, 48, 49, 66, 150, 151, 284, 374, 375];
+const JV_3_1021_SPANS: &[(usize, usize)] = &[(0, 1), (1, 2), (33, 1), (57, 1), (111, 1)];
+const JV_3_1021_ORDER: &[usize; 5] = &[1, 3, 2, 0, 4];
+const JV_3_2265_SPANS: &[(usize, usize)] = &[(0, 2), (1, 3), (33, 1), (57, 1), (121, 1)];
+const JV_3_2277_SPANS: &[(usize, usize)] = &[(0, 3), (1, 3), (32, 2), (50, 1), (110, 1)];
+const JV_3_2265_2277_ORDER: &[usize; 5] = &[3, 1, 0, 4, 2];
 
 /// Strictly decodes Cidaren response data without captured crypto context.
 ///
@@ -45,12 +50,11 @@ pub fn decode_response_data(
     crypto: Option<&CidarenCryptoContext>,
 ) -> ProviderResult<Value> {
     let indices = match jv {
-        "0" => None,
+        "0" | "3_1021" | "3_2265" | "3_2277" => None,
         "2_1254" => Some(JV_2_1254),
         "2_9214" => Some(JV_2_9214),
         "2_10232" => Some(JV_2_10232),
         "2_10234" => Some(JV_2_10234),
-        "3_1021" => Some(JV_3_1021),
         "99" => {
             return crypto
                 .ok_or_else(missing_crypto_context)?
@@ -77,13 +81,37 @@ pub fn decode_response_data(
     if let Some(decoded) = decode_json(encoded.as_bytes()) {
         return Ok(decoded);
     }
+    match jv {
+        "3_1021" => {
+            return decode_unique_candidates([
+                remove_confusion_bytes(encoded.as_bytes(), JV_3_1021_FIXED),
+                remove_confusion_and_unshuffle(
+                    encoded.as_bytes(),
+                    JV_3_1021_SPANS,
+                    JV_3_1021_ORDER,
+                ),
+            ]);
+        }
+        "3_2265" => {
+            return decode_transformed(remove_confusion_and_unshuffle(
+                encoded.as_bytes(),
+                JV_3_2265_SPANS,
+                JV_3_2265_2277_ORDER,
+            )?);
+        }
+        "3_2277" => {
+            return decode_transformed(remove_confusion_and_unshuffle(
+                encoded.as_bytes(),
+                JV_3_2277_SPANS,
+                JV_3_2265_2277_ORDER,
+            )?);
+        }
+        _ => {}
+    }
     let Some(indices) = indices else {
         return Err(invalid_encoded_response());
     };
-    let mut normalized = remove_confusion_bytes(encoded.as_bytes(), indices)?;
-    let decoded = decode_json(&normalized).ok_or_else(invalid_encoded_response);
-    normalized.zeroize();
-    decoded
+    decode_transformed(remove_confusion_bytes(encoded.as_bytes(), indices)?)
 }
 
 fn missing_crypto_context() -> ProviderError {
@@ -116,6 +144,28 @@ fn decode_json(encoded: &[u8]) -> Option<Value> {
     parsed
 }
 
+fn decode_transformed(mut normalized: Vec<u8>) -> ProviderResult<Value> {
+    let decoded = decode_json(&normalized).ok_or_else(invalid_encoded_response);
+    normalized.zeroize();
+    decoded
+}
+
+fn decode_unique_candidates<const N: usize>(
+    candidates: [ProviderResult<Vec<u8>>; N],
+) -> ProviderResult<Value> {
+    let mut accepted: Option<Value> = None;
+    for candidate in candidates.into_iter().flatten() {
+        let decoded = decode_transformed(candidate).ok();
+        match (&accepted, decoded) {
+            (_, None) => {}
+            (None, Some(value)) => accepted = Some(value),
+            (Some(existing), Some(value)) if *existing == value => {}
+            (Some(_), Some(_)) => return Err(invalid_encoded_response()),
+        }
+    }
+    accepted.ok_or_else(invalid_encoded_response)
+}
+
 fn remove_confusion_bytes(encoded: &[u8], indices: &[usize]) -> ProviderResult<Vec<u8>> {
     if indices
         .last()
@@ -136,6 +186,43 @@ fn remove_confusion_bytes(encoded: &[u8], indices: &[usize]) -> ProviderResult<V
         normalized.zeroize();
         return Err(invalid_encoded_response());
     }
+    Ok(normalized)
+}
+
+fn remove_confusion_and_unshuffle(
+    encoded: &[u8],
+    spans: &[(usize, usize)],
+    order: &[usize; 5],
+) -> ProviderResult<Vec<u8>> {
+    let mut stripped = encoded.to_vec();
+    for &(start, count) in spans {
+        let end = start
+            .checked_add(count)
+            .filter(|end| count > 0 && *end <= stripped.len())
+            .ok_or_else(invalid_encoded_response)?;
+        let mut next = Vec::with_capacity(stripped.len() - count);
+        next.extend_from_slice(&stripped[..start]);
+        next.extend_from_slice(&stripped[end..]);
+        stripped.zeroize();
+        stripped = next;
+    }
+
+    let chunk = stripped.len() / order.len();
+    if chunk == 0 {
+        stripped.zeroize();
+        return Err(invalid_encoded_response());
+    }
+    let mut normalized = Vec::with_capacity(stripped.len());
+    for destination in 0..order.len() {
+        let source = order
+            .iter()
+            .position(|candidate| *candidate == destination)
+            .ok_or_else(invalid_encoded_response)?;
+        let start = source * chunk;
+        normalized.extend_from_slice(&stripped[start..start + chunk]);
+    }
+    normalized.extend_from_slice(&stripped[chunk * order.len()..]);
+    stripped.zeroize();
     Ok(normalized)
 }
 
@@ -180,9 +267,34 @@ mod tests {
             ("2_9214", JV_2_9214),
             ("2_10232", JV_2_10232),
             ("2_10234", JV_2_10234),
-            ("3_1021", JV_3_1021),
+            ("3_1021", JV_3_1021_FIXED),
         ] {
             let confused = insert_confusion_bytes(encoded.as_bytes(), indices);
+            assert_eq!(
+                decode_legacy_response_data(
+                    &Value::String(String::from_utf8(confused).unwrap()),
+                    jv,
+                )
+                .unwrap(),
+                value,
+                "variant {jv}",
+            );
+        }
+    }
+
+    #[test]
+    fn current_public_jv3_variants_decode_exact_donor_transform() {
+        let value = serde_json::json!({
+            "schema": "synthetic.cidaren.jv3.v1",
+            "padding": "x".repeat(512),
+            "items": [{"id": "synthetic-1", "score": 96.5}],
+        });
+        for (jv, spans, order) in [
+            ("3_1021", JV_3_1021_SPANS, JV_3_1021_ORDER),
+            ("3_2265", JV_3_2265_SPANS, JV_3_2265_2277_ORDER),
+            ("3_2277", JV_3_2277_SPANS, JV_3_2265_2277_ORDER),
+        ] {
+            let confused = encode_jv3_fixture(&value, spans, order);
             assert_eq!(
                 decode_legacy_response_data(
                     &Value::String(String::from_utf8(confused).unwrap()),
@@ -229,5 +341,26 @@ mod tests {
             }
         }
         confused
+    }
+
+    fn encode_jv3_fixture(value: &Value, spans: &[(usize, usize)], order: &[usize; 5]) -> Vec<u8> {
+        let mut document = serde_json::to_vec(value).unwrap();
+        let encoded = loop {
+            let encoded = STANDARD.encode(&document);
+            if encoded.len().is_multiple_of(order.len()) {
+                break encoded.into_bytes();
+            }
+            document.push(b' ');
+        };
+        let chunk = encoded.len() / order.len();
+        let mut shuffled = Vec::with_capacity(encoded.len());
+        for source in order {
+            let start = *source * chunk;
+            shuffled.extend_from_slice(&encoded[start..start + chunk]);
+        }
+        for &(start, count) in spans.iter().rev() {
+            shuffled.splice(start..start, std::iter::repeat_n(b'!', count));
+        }
+        shuffled
     }
 }

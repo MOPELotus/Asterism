@@ -274,13 +274,19 @@ jv=2_9214
 jv=2_10232
 jv=2_10234
 jv=3_1021
+jv=3_2265
+jv=3_2277
 jv=99 (fresh captured or native-login HKDF/AES-GCM context required)
 ```
 
 It bounds encoded and decoded data to 2 MiB, accepts only JSON objects/arrays,
-removes only the fixed inserted-byte positions for the declared variant,
-zeroizes temporary decoded bytes and rejects unknown versions instead of
-guessing indices. Public issue 43 establishes the `2_1254` family, but its
+removes only the exact fixed inserted-byte positions or sequential spans for
+the declared variant, reverses the public donor's exact five-chunk permutation
+for `3_*`, zeroizes temporary decoded bytes and rejects unknown versions
+instead of guessing. The two frozen donors disagree on the `3_1021` transform,
+so Asterism evaluates only those two exact candidates and accepts one unique
+JSON value (or equal results), failing closed on ambiguity. Public issue 43
+establishes the `2_1254` family, but its
 textbook word payload is not retained as a fixture. Missing `jv=99` context is
 Authentication; malformed framing/tag/plaintext is InvalidResponse.
 

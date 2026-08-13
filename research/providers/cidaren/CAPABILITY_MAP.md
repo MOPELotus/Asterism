@@ -10,12 +10,12 @@
 | TaskDetail | Current donor + Asterism Core | FromScratch | Offline/native-boundary covered: freshly re-list the matching class or study endpoint and require one exact stable identity before returning details; never trust a stale `task_id` |
 | TaskProgressRead | Current/private task rows | PortSource | Offline/native-boundary covered for class and ordinary study Tasks: fresh rows expose bounded percent/state plus independently converted duration when present; score and completion remain separate |
 | DurationRead | Current donor + public issue 6 | PortSource | Registered and fresh-read for class/study Tasks with `time_spent`: non-zero public rows, millisecond epoch/duration fields in the same envelope and donor mutation values establish millisecond wire semantics; values are bounded to 100 years and truncated only at the Domain seconds boundary |
-| QuestionInventory / QuestionParse | Current donor + public issue 43 | PortSource | Legacy and current `jv=99` decoding plus strict single/matching/text/nested-tag parsing are offline-covered; `topic_code` stays ephemeral. The Provider-private attempt machine consumes `StartAnswer` as a one-shot mutation; public slot integration waits only for durable Core AttemptStart/QuestionSession |
+| QuestionInventory / QuestionParse | Current donors + public issue 43 | PortSource | Fixed-index `jv=2_*`, both evidenced `jv=3_1021` transforms, public `jv=3_2265/3_2277` and current authenticated `jv=99` decoding plus strict single/matching/text/nested-tag parsing are offline-covered; conflicting `3_1021` candidates must yield one unique/equal JSON value. `topic_code` stays ephemeral. The Provider-private attempt machine consumes `StartAnswer` as a one-shot mutation; public slot integration waits only for durable Core AttemptStart/QuestionSession |
 | AnswerResolve | Current donor | PortSource | Native task-bound inventory, `StudyWordInfo` and bounded `Course/SearchWord` prototype lookup are implemented. Donor strategies resolve bidirectional meaning, ordered matching, separately-scoped phrase/example evidence and completion/example behavior; audited random/fixed-third/last-word failure fallbacks are retained with stable Draft-safe selection and explicit low confidence, including well-formed empty evidence families. Sentence modes load evidence once per top-level parent, preserve donor ordering, resolve exact nested child wire tags and retain the donor's third-parent fallback |
 | SubmissionBuild | Current donor | Reference | Registry-advertised one-current-Question immutable Draft preview is implemented for selection/text/matching; it exposes field names only and never persists topic codes, signatures or endpoints |
 | SubmissionExecute | Current donor | PortSource | Native transports plus a one-shot Provider-private state machine cover `SubmitChoseWord`, `StartAnswer`, sequential `VerifyAnswer`, `SubmitAnswerAndSave` and `SkipAnswer`. Issued/ambiguous/failed-closed states prevent replay, matching consumes each rotated token serially, and only a terminal Completed state can emit a bounded receipt for later fresh verification. Durable public execution awaits the shared AttemptStart/QuestionSession slot |
 | SubmissionVerify | Fresh class task/detail read | FromScratch | The read-only verifier is implemented and Draft/preview/task bound: a receipt or localized completion message is insufficient, fresh exact release/list completion is required, and per-Question status remains honestly `Unverified` because no answer-history endpoint is evidenced. Registry integration remains paired with durable SubmissionExecute |
-| Capture bootstrap | Current donor + PC WeChat XWeb audit | PortSource + Reference | Composite ingestion and the bounded browser-storage recipe are implemented. The generic helper's isolated Edge/Chrome profile still cannot observe an authenticated PC WeChat XWeb storage context, so that alternate donor Capture path needs shared helper execution rather than a false end-to-end claim. OAuth bootstrap no longer depends on XWeb/MITM: users can return the preserved random-marker callback URL from an audited WeChat device flow |
+| Capture bootstrap | Current donors + PC WeChat XWeb audit | PortSource + Reference | Composite ingestion and the bounded browser-storage recipe are implemented. The current public donor also has a token-only system-proxy helper; Core's single fixed-session-kind Capture recipe cannot yet advertise that as an alternative beside the Composite recipe. The generic helper's isolated Edge/Chrome profile still cannot observe an authenticated PC WeChat XWeb storage context, so those alternate donor Capture paths need shared helper/multi-recipe execution rather than a false end-to-end claim. OAuth bootstrap no longer depends on XWeb/MITM: users can return the preserved random-marker callback URL from an audited WeChat device flow |
 | BrowserBridge | Current donor | PortSource | Provider policy is implemented and advertised for freshly rebound class/study Tasks: visible, account/task hash-isolated and restricted to `https://app.vocabgo.com`. The shared `BrowserSessionSpec` currently carries only isolation/origin/headless policy and no executable start route/action/result contract, so Engine/API execution is a recorded Main-owned gap rather than a completed fallback |
 
 ## Current implementation checkpoint
@@ -83,7 +83,8 @@ The current checkpoint (not a completion boundary):
     mandatory fresh account readback, with no ambiguous retry.
 
 The remaining work is durable shared attempt/submission registration, shared
-execution for the alternate Capture/BrowserBridge paths and live validation.
+execution for the alternate Capture/BrowserBridge paths (including a second
+token-only Capture recipe) and live validation.
 Fresh post-mutation verification and the durable one-shot External OAuth path
 are already implemented. A checkpoint or Core Gap is not a Provider stopping
 condition.
@@ -95,8 +96,9 @@ BrowserBridge, protocol work or a Main-owned Core change.
 
 ## Frozen donor executable-surface parity
 
-The frozen `a74b4a2` donor was re-audited by executable call site rather than
-GUI labels. Its platform-facing surface maps as follows:
+The frozen `a74b4a2` owner donor and `bce9559` current public donor were
+re-audited by executable call site rather than GUI labels. Their
+platform-facing surface maps as follows:
 
 | Donor call site | Wire operation | Asterism implementation |
 |---|---|---|
@@ -112,7 +114,8 @@ GUI labels. Its platform-facing surface maps as follows:
 | `main_api.submit_result` | `VerifyAnswer` | single-answer and sequential rotated-token matching mutations |
 | `main_api.next_exam` | `SubmitAnswerAndSave` | signed answer/reading-card advance with stable reported duration |
 | `main_api.skip_exam` | `SkipAnswer` | explicit signed skip with stable reported duration |
-| capture helper | proxy-observed `UserToken` plus `CDR_LOGIN_INFO` | Composite ingestion and bounded storage recipe; alternate XWeb acquisition remains a shared helper-execution gap, while OAuth uses the implemented random-marker callback path |
+| response decoder | fixed-index `jv=2_*`/owner `3_1021`, public span/chunk `3_1021/3_2265/3_2277`, owner `jv=99` | all exact transforms implemented with bounded unique-result semantics and authenticated crypto context for `jv=99` |
+| capture helpers | public proxy-observed token-only `UserToken`; owner `UserToken` plus `CDR_LOGIN_INFO` | Composite ingestion and bounded storage recipe implemented; token-only alternative and XWeb acquisition remain shared multi-recipe/helper-execution gaps, while OAuth uses the implemented random-marker callback path |
 
 Donor update checks, GUI controls, logging/export, completion sound and the
 unrelated Gitee access-log probe do not express Cidaren platform protocol

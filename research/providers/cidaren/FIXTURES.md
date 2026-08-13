@@ -58,8 +58,11 @@ Inline negative tests must cover empty/oversized/non-JSON responses, non-object
 records, unsupported task types/status values, duplicate release identities,
 conflicting duplicate Course titles, inconsistent totals, missing pages,
 oversized page/row counts, invalid percentages and unsafe remote components.
-Legacy decoder tests generate synthetic JSON/base64 and insert the exact
-versioned confusion bytes in memory. The synthetic StartAnswer fixture freezes
+Legacy decoder tests generate synthetic JSON/base64 and apply the exact
+versioned fixed-index or sequential-span/five-chunk donor transform in memory.
+They cover `3_1021` under both divergent donor algorithms plus public
+`3_2265`/`3_2277`, accepting the dual-evidence identifier only when decoding
+has one unique result. The synthetic StartAnswer fixture freezes
 only the donor-read topic/stem/option shape; no published or real word/question
 payload is copied into the repository.
 
