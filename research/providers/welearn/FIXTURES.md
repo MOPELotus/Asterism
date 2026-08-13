@@ -116,6 +116,10 @@ only structural field names, response codes and bounded placeholder shapes.
 - Hidden Units/SCOs remain visible as `NotOpen` observations rather than being
   silently deleted. They still advertise the current donor's execution,
   verification and duration capabilities; visibility is not a capability ban.
+- The normalized completion observation remains independent from derived
+  `NotOpen`: Fanyuchang keeps hidden/completed rows, while YZBRH and
+  Auto_WeLearn completion plans admit only the donor's raw `未完成` branch
+  (`Pending`) and skip `Unknown`, `InProgress` and `Completed` rows.
 - `iscomplete` alone never supplies duration.
 - `learntime` alone never marks a task completed.
 - CMI completion and decimal progress remain independent observations.
