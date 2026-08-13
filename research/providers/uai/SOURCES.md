@@ -56,7 +56,8 @@ against their default remote branches. Apache `bef0d29155ce`, MIT
 required an incremental port at this checkpoint. These revisions remain
 reproducible audit snapshots, not permanent update ceilings.
 The same four default branches and tag tips were fetched and confirmed at zero
-delta again after the independent Course-progress checkpoint.
+delta again after the independent Course-progress checkpoint and the Micro
+progress identity checkpoint on 2026-08-13.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
@@ -89,6 +90,15 @@ The same current progress model exposes per-leaf `required`, `min_score_pct`,
 `start_time`, `end_time` and `statistic_mode_out`; Asterism retains those facts
 for Task selection and applies the donor time-window rule to every native
 mutation rather than relying on stale tree labels.
+
+The 2026-08-13 re-audit also checked the current Rust donor's media path. It
+downloads audio/video and invokes local Whisper transcription for answer
+generation, but adds no new UAI platform route or mutation shape beyond the
+already audited encrypted content/answer and media-source fields. Asterism
+therefore keeps the bounded opaque attachment/transcript boundary in the
+Provider; the Task-bound downloader, model credential and external
+AnswerResolve execution remain a shared Core contract gap rather than a
+Provider-side omission.
 
 The current Rust donor also performs a separate Course-level progress read at
 `course_progress/{courseInstanceId}/{openid}/default` before the per-Unit
