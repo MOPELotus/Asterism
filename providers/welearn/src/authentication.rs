@@ -230,6 +230,7 @@ impl AuthenticationCapability for WellearnAuthentication {
             waiting_for,
             user_action: None,
             expires_at: None,
+            external_oauth: None,
         })
     }
 

@@ -10,10 +10,9 @@ use async_trait::async_trait;
 use crate::metadata::development_metadata;
 
 /// Dispatches `WELearn`'s independent `ResourceExecution` and `DurationReport`
-/// capabilities through the single shared `TaskExecution` registry slot. When
-/// Core requests both advertised task actions, duration is reported first and
-/// the completion/progress/score preset is applied only after its fresh
-/// preservation verification succeeds.
+/// capabilities through the single shared `TaskExecution` registry slot. Core
+/// persists a composite plan and calls this boundary once per exact mutation
+/// step; the immutable full plan remains context, never mutation authority.
 pub struct WellearnTaskExecution {
     metadata: ProviderMetadata,
     resource: Arc<dyn TaskExecutionCapability>,
@@ -123,57 +122,18 @@ impl TaskExecutionCapability for WellearnTaskExecution {
         request: &ExecutionRequest,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome> {
+        if !request.has_valid_capability_step() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn execution received an invalid capability step binding",
+            ));
+        }
         match request.requested_capabilities.as_slice() {
             [TaskCapability::ResourceExecution] => {
                 self.resource.execute(context, request, events).await
             }
             [TaskCapability::DurationReport] => {
                 self.duration.execute(context, request, events).await
-            }
-            [
-                TaskCapability::ResourceExecution,
-                TaskCapability::DurationReport,
-            ]
-            | [
-                TaskCapability::DurationReport,
-                TaskCapability::ResourceExecution,
-            ] => {
-                let mut duration_request = request.clone();
-                duration_request.requested_capabilities = vec![TaskCapability::DurationReport];
-                let duration = self
-                    .duration
-                    .execute(context, &duration_request, events)
-                    .await?;
-                if !duration.verified {
-                    return Err(ProviderError::new(
-                        ProviderErrorKind::InvalidResponse,
-                        "WELearn combined execution received an unverified duration result",
-                    ));
-                }
-
-                let mut resource_request = request.clone();
-                resource_request.requested_capabilities = vec![TaskCapability::ResourceExecution];
-                let resource = self
-                    .resource
-                    .execute(context, &resource_request, events)
-                    .await?;
-                if !resource.verified {
-                    return Err(ProviderError::new(
-                        ProviderErrorKind::InvalidResponse,
-                        "WELearn combined execution received an unverified resource result",
-                    ));
-                }
-
-                Ok(ExecutionOutcome {
-                    remote_state: resource.remote_state,
-                    verified: true,
-                    result_sanitized: serde_json::json!({
-                        "schema": "welearn.combined-execution.v1",
-                        "order": ["duration_report", "resource_execution"],
-                        "duration": duration.result_sanitized,
-                        "resource": resource.result_sanitized,
-                    }),
-                })
             }
             _ => Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
@@ -187,6 +147,12 @@ impl TaskExecutionCapability for WellearnTaskExecution {
         context: &ProviderContext,
         request: &ExecutionRequest,
     ) -> ProviderResult<ExecutionOutcome> {
+        if !request.has_valid_capability_step() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn verification received an invalid capability step binding",
+            ));
+        }
         match request.requested_capabilities.as_slice() {
             [TaskCapability::ResourceExecution] => {
                 self.resource.verify_execution(context, request).await
@@ -266,7 +232,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn combined_execution_reports_duration_before_applying_completion() {
+    async fn composite_plan_dispatches_only_each_core_authorized_step() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let metadata = development_metadata().unwrap();
         let resource = Arc::new(FixtureCapability {
@@ -287,13 +253,38 @@ mod tests {
             TaskCapability::DurationReport,
         ]));
 
-        let outcome = execution
-            .execute(&context(), &request(), &FixtureEvents)
+        assert_eq!(
+            execution
+                .execution_plan(&[
+                    TaskCapability::ResourceExecution,
+                    TaskCapability::DurationReport,
+                ])
+                .unwrap(),
+            [
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ]
+        );
+        let duration = execution
+            .execute(
+                &context(),
+                &request(TaskCapability::DurationReport, 1),
+                &FixtureEvents,
+            )
+            .await
+            .unwrap();
+        let resource = execution
+            .execute(
+                &context(),
+                &request(TaskCapability::ResourceExecution, 2),
+                &FixtureEvents,
+            )
             .await
             .unwrap();
 
-        assert_eq!(outcome.remote_state, RemoteState::Completed);
-        assert!(outcome.verified);
+        assert_eq!(duration.remote_state, RemoteState::Pending);
+        assert_eq!(resource.remote_state, RemoteState::Completed);
+        assert!(duration.verified && resource.verified);
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             &[
@@ -301,7 +292,6 @@ mod tests {
                 TaskCapability::ResourceExecution,
             ]
         );
-        assert_eq!(outcome.result_sanitized["order"][0], "duration_report");
     }
 
     #[test]
@@ -349,16 +339,18 @@ mod tests {
         }
     }
 
-    fn request() -> ExecutionRequest {
+    fn request(capability: TaskCapability, position: u8) -> ExecutionRequest {
         ExecutionRequest {
             execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,
-            requested_capabilities: vec![
-                TaskCapability::ResourceExecution,
+            requested_capabilities: vec![capability],
+            capability_plan: vec![
                 TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
             ],
+            capability_step_position: position,
             runtime_settings: ProviderRuntimeSettingsSchema::empty()
                 .resolve(None, None, None)
                 .unwrap(),

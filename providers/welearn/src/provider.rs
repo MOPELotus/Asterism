@@ -269,8 +269,7 @@ mod tests {
             _context: &ProviderContext,
             _course_id: &str,
             _sco_id: &str,
-            _duration_seconds: u64,
-            _heartbeat_interval_seconds: u64,
+            _plan: crate::WellearnDurationReportPlan,
             _events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<WellearnDurationReportDocuments> {
             Err(unused())
@@ -284,7 +283,7 @@ mod tests {
             _context: &ProviderContext,
             _course_id: &str,
             _sco_id: &str,
-            _score_percent: u8,
+            _plan: crate::WellearnResourceExecutionPlan,
         ) -> ProviderResult<WellearnResourceExecutionDocuments> {
             Err(unused())
         }
@@ -320,8 +319,8 @@ mod tests {
         assert!(entry.duration_read.is_some());
         assert!(entry.task_execution.is_some());
         assert!(entry.browser_bridge.is_none());
-        assert_eq!(entry.runtime_settings.version, 7);
-        assert_eq!(entry.runtime_settings.definitions.len(), 12);
+        assert_eq!(entry.runtime_settings.version, 12);
+        assert_eq!(entry.runtime_settings.definitions.len(), 17);
 
         let mut registry = ProviderRegistry::default();
         registry.register(entry).unwrap();

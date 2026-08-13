@@ -1,0 +1,39 @@
+{
+  "cmi": {
+    "completion_status": "completed",
+    "interactions": [],
+    "launch_data": "",
+    "progress_measure": "1",
+    "score": {
+      "scaled": "100",
+      "raw": "100"
+    },
+    "session_time": "15",
+    "success_status": "unknown",
+    "total_time": "45",
+    "mode": "normal"
+  },
+  "adl": {
+    "data": []
+  },
+  "cci": {
+    "data": [],
+    "service": {
+      "dictionary": {
+        "headword": "",
+        "short_cuts": ""
+      },
+      "new_words": [],
+      "notes": [],
+      "writing_marking": [],
+      "record": {
+        "files": []
+      },
+      "play": {
+        "offline_media_id": "9999"
+      }
+    },
+    "retry_count": "0",
+    "submit_time": ""
+  }
+}

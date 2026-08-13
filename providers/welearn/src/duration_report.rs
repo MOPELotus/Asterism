@@ -13,7 +13,9 @@ use crate::{
     cmi::{parse_cmi_snapshot, parse_sco_identity},
     execution_selection::uniform_u64,
     metadata::development_metadata,
-    runtime_settings::{WellearnDurationTarget, WellearnRuntimeSettings},
+    runtime_settings::{
+        WellearnDurationProtocolMode, WellearnDurationTarget, WellearnRuntimeSettings,
+    },
     task_detail::validate_fresh_execution_detail,
 };
 
@@ -44,6 +46,14 @@ impl WellearnDurationReportDocuments {
     }
 }
 
+/// Immutable, bounded donor wire plan selected from one frozen execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WellearnDurationReportPlan {
+    pub duration_seconds: u64,
+    pub heartbeat_interval_seconds: u64,
+    pub protocol_mode: WellearnDurationProtocolMode,
+}
+
 /// High-level transport boundary for an atomic read → optional start → keep →
 /// finalize → fresh-read lifecycle. Implementations must not replay mutations
 /// after an authentication failure.
@@ -54,8 +64,7 @@ pub trait WellearnDurationReportTransport: Send + Sync {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
-        duration_seconds: u64,
-        heartbeat_interval_seconds: u64,
+        plan: WellearnDurationReportPlan,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnDurationReportDocuments>;
 }
@@ -111,6 +120,12 @@ impl TaskExecutionCapability for WellearnDurationReport {
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome> {
         validate_context(context, &self.metadata)?;
+        if !request.has_valid_capability_step() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn duration received an invalid capability step binding",
+            ));
+        }
         if request.requested_capabilities != [TaskCapability::DurationReport] {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
@@ -141,8 +156,11 @@ impl TaskExecutionCapability for WellearnDurationReport {
                 context,
                 &course_id,
                 &sco_id,
-                duration_seconds,
-                settings.duration_heartbeat_interval_seconds,
+                WellearnDurationReportPlan {
+                    duration_seconds,
+                    heartbeat_interval_seconds: settings.duration_heartbeat_interval_seconds,
+                    protocol_mode: settings.duration_protocol_mode,
+                },
                 events,
             )
             .await?;
@@ -177,6 +195,7 @@ impl TaskExecutionCapability for WellearnDurationReport {
                     "heartbeat_count": documents.heartbeat_count,
                     "duration_report_seconds": duration_seconds,
                     "duration_report_mode": duration_mode(settings.duration_report),
+                    "duration_protocol_mode": settings.duration_protocol_mode.as_str(),
                     "duration_observation_changed": true,
                 })),
             })
@@ -190,6 +209,7 @@ impl TaskExecutionCapability for WellearnDurationReport {
                 "heartbeat_count": documents.heartbeat_count,
                 "duration_report_seconds": duration_seconds,
                 "duration_report_mode": duration_mode(settings.duration_report),
+                "duration_protocol_mode": settings.duration_protocol_mode.as_str(),
                 "completion_preserved": true,
                 "progress_preserved": true,
                 "score_preserved": true,
@@ -382,7 +402,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FixtureTransport {
         calls: AtomicUsize,
-        settings: Mutex<Option<(u64, u64)>>,
+        settings: Mutex<Option<(u64, u64, WellearnDurationProtocolMode)>>,
         drift_completion: bool,
         unchanged_duration: bool,
         incomplete_verification: bool,
@@ -395,14 +415,17 @@ mod tests {
             _context: &ProviderContext,
             course_id: &str,
             sco_id: &str,
-            duration_seconds: u64,
-            heartbeat_interval_seconds: u64,
+            plan: WellearnDurationReportPlan,
             _events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<WellearnDurationReportDocuments> {
             assert_eq!(course_id, "1001");
             assert_eq!(sco_id, "301");
             self.calls.fetch_add(1, Ordering::Relaxed);
-            *self.settings.lock().unwrap() = Some((duration_seconds, heartbeat_interval_seconds));
+            *self.settings.lock().unwrap() = Some((
+                plan.duration_seconds,
+                plan.heartbeat_interval_seconds,
+                plan.protocol_mode,
+            ));
             let after = if self.drift_completion {
                 AFTER.replace("incomplete", "completed")
             } else if self.unchanged_duration {
@@ -458,7 +481,14 @@ mod tests {
             asterism_domain::RemoteState::InProgress
         );
         assert_eq!(outcome.result_sanitized["completion_preserved"], true);
-        assert_eq!(*transport.settings.lock().unwrap(), Some((120, 30)));
+        assert_eq!(
+            *transport.settings.lock().unwrap(),
+            Some((120, 30, WellearnDurationProtocolMode::PreserveFresh))
+        );
+        assert_eq!(
+            outcome.result_sanitized["duration_protocol_mode"],
+            "preserve_fresh"
+        );
         assert_eq!(events.progress.load(Ordering::Relaxed), 1);
         assert_eq!(events.logs.load(Ordering::Relaxed), 1);
         assert_eq!(details.calls.load(Ordering::Relaxed), 1);
@@ -613,6 +643,8 @@ mod tests {
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,
             requested_capabilities: vec![TaskCapability::DurationReport],
+            capability_plan: vec![TaskCapability::DurationReport],
+            capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
         }
     }
@@ -646,6 +678,8 @@ mod tests {
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,
             requested_capabilities: vec![TaskCapability::DurationReport],
+            capability_plan: vec![TaskCapability::DurationReport],
+            capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
         }
     }

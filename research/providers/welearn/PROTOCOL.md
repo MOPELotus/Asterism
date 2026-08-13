@@ -185,25 +185,31 @@ Completion != Progress != Session Time != Total Time
 ```
 
 The implemented `DurationReport` lifecycle acquires a fresh Course route and
-CMI document using one resolved Cookie. If a valid response explicitly has no
-`cmi`, it calls `startsco160928` once and re-reads the baseline. Malformed or
-ambiguous reads never trigger a start fallback. The post-start read must expose
-the complete audited CMI preservation set; a still-absent or partial CMI stops
-before any heartbeat or finalization rather than synthesizing defaults. The
-baseline preserves bounded `completion_status`, `progress_measure`,
+CMI document using one resolved Cookie. Malformed or ambiguous reads never
+trigger a start fallback. Every mode establishes a post-start baseline and
+requires the complete audited CMI preservation set; a still-absent or partial
+CMI stops before any heartbeat or finalization rather than synthesizing
+defaults. The baseline binds bounded `completion_status`, `progress_measure`,
 `score.scaled`, `success_status`, `session_time` and `total_time` values.
 
-The lifecycle sends an initial and then one
-`keepsco_with_getticket_with_updatecmitime` heartbeat after each complete
-configured interval, with real elapsed waits and the preserved session/total
-observations, before `savescoinfo160928` finalizes the session. A trailing
-partial interval is still waited but does not invent an extra keep; this
-matches the preservation-mode YZBRH donor. The final form carries the preserved completion,
-progress, score and success values and does not call `setscoinfo`; this is the
-independent preservation-mode DurationReport capability, not a boundary on
-other mutations. Start/finalize require
-integer `ret=0`; heartbeat accepts only the two donor-observed integer values
-`0` and `1`.
+Three donor wire modes remain separate:
+
+- `preserve_fresh` matches YZBRH: start only when CMI is absent, send one
+  immediate keep plus one preserved-time keep after each complete configured
+  interval, wait a trailing partial interval without inventing another keep,
+  then save the preserved completion/progress/score/success tuple;
+- `client_counter` matches current Fanyuchang: always start, send exactly one
+  keep per real second with `session_time` and `total_time` progressing from 0,
+  and leave completion to the following ResourceExecution step;
+- `implicit_server` matches Auto_WeLearn: always start, wait before each
+  60-second keep, omit explicit time fields, wait any trailing partial interval,
+  then issue the donor's bare save.
+
+The client-counter and implicit modes require their evidenced 1-second and
+60-second intervals respectively. Start and finalization require integer
+`ret=0`; heartbeat accepts only the two donor-observed integer values `0` and
+`1`. None of these duration modes calls `setscoinfo`; completion remains a
+separate capability.
 
 After finalization, a fresh CMI read must preserve completion, progress, score
 and success status with the same explicit field presence while changing at
@@ -230,8 +236,8 @@ TaskProgress deliberately remains free of duration; the dedicated capability
 owns this normalization.
 
 Master-owned runtime settings expose platform defaults and account/task
-overrides for fixed or donor-observed bounded-random report seconds and the
-heartbeat interval. One-second granularity is accepted within a bounded
+overrides for fixed or donor-observed bounded-random report seconds, heartbeat
+interval and wire mode. One-second granularity is accepted within a bounded
 1–7,200 second report and 1–90 second heartbeat range: the current donor emits
 one heartbeat per second and documents 10–30 second sessions, while the older
 duration donor emits a 60-second cadence. Conservative defaults remain 600 and
@@ -246,16 +252,62 @@ global admission and durable leases remain the final scheduling bounds.
 
 ## Completion, progress and score execution
 
-All three pinned donors expose direct SCO execution behavior; the two current
-donors agree on the essential sequence:
+All three pinned donors expose direct SCO execution behavior and agree on this
+common sequence:
 
 ```text
 fresh Course/SCO rebind
 → startsco160928
 → setscoinfo(completion_status=completed, progress_measure=1, score.scaled=selected)
 → savescoinfo160928(progress=100, crate=selected, cstatus=completed)
-→ fresh getscoinfo_v7
 ```
+
+The `setscoinfo.data` envelope has two audited forms. Current Fanyuchang sends
+the serialized CMI JSON directly. YZBRH and Auto_WeLearn append the exact
+literal `[INTERACTIONINFO]` immediately after that JSON. Runtime setting
+`execution.completion_cmi_format` keeps `json` and
+`interaction_info_suffix` explicit; the latter does not alter or parse the CMI
+body before appending the marker.
+
+Mutation family is also explicit. Exercise completion uses `set_then_save`.
+Auto_WeLearn's duration worker instead uses `save_only`, directly sending the
+completed/progress-100/score-0 tuple after its duration lifecycle. Both still
+issue `startsco160928` and end with the same goal-bound fresh CMI verification.
+The native transport prepares any CMI document before the first mutation and
+omits it entirely for `save_only`.
+
+Current Fanyuchang then unconditionally performs another
+`savescoinfo160928(progress=100, crate=100, cstatus=completed)`, even when the
+selected score was different or already 100. YZBRH and Auto_WeLearn stop after
+the selected-score save. Asterism exposes these as separate `selected_score`
+and `current_donor_dual_save_100` execution-sequence settings rather than
+silently dropping the current donor's extra mutation. Both end with a fresh
+`getscoinfo_v7`; their exact verified goals are respectively selected and 100.
+
+The donors also evidence two distinct CMI time shapes. Ordinary completion in
+Fanyuchang, YZBRH and Auto_WeLearn writes `session_time=0` and `total_time=0`.
+Current Fanyuchang's duration path instead accumulates both fields during its
+heartbeat loop and carries them into the completion `setscoinfo`. Asterism
+therefore exposes `zero_time` and `preserve_fresh_time` completion-time modes.
+The latter reads the current CMI after the independent duration phase, requires
+both bounded scalar fields before starting any mutation, writes them unchanged,
+and compares them with the immediate fresh readback. It does not synthesize
+missing time values.
+
+The completion-time setting defaults to `auto`. It consults Core's immutable
+capability plan without broadening the current step's mutation authority: only
+the exact second step of `DurationReport → ResourceExecution` selects
+`preserve_fresh_time`; standalone completion selects `zero_time`. An explicit
+task setting overrides this inference, including Auto_WeLearn's composite
+zero-time profile. Malformed plan/position bindings fail before fresh detail or
+transport calls.
+
+This also leaves Auto_WeLearn's separate duration-completion behavior
+expressible without a private flow: its duration worker starts and heartbeats,
+then saves `completed`, progress 100 and score 0 without `setscoinfo`. Asterism's
+durable `DurationReport → ResourceExecution` plan with fixed score 0,
+`selected_score` and `zero_time` reaches the same externally observed final CMI
+goal, while retaining fresh rediscovery and verification around both phases.
 
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or
@@ -272,14 +324,26 @@ The Provider performs a complete fresh TaskDetail rebind before mutation. If
 the baseline CMI is already Completed, it skips all mutation and verifies that
 fact. Otherwise it builds the bounded CMI document before the first mutation,
 uses exact fresh `uid`/`classid` routing, accepts only integer `ret=0` from each
-write, and finally requires a fresh CMI showing exactly Completed, progress 100
-percent and the selected score. HTTP acceptance alone is not success.
+write, emits the configured CMI envelope, performs the configured one- or
+two-save sequence, and finally requires
+a fresh CMI showing exactly Completed, progress 100 percent and the configured
+sequence's final score. Fresh-time mode additionally requires the two CMI time
+fields to survive that immediate readback. HTTP acceptance alone is not
+success.
 
 No start/setscoinfo/save call is replayed after an ambiguous outcome. The
+donors do continue their later independent mutation when a previous endpoint
+returns a well-formed, explicit non-success `ret`; Asterism records each such
+acceptance boolean and continues the configured write plan, but still requires
+the exact fresh CMI goal. A malformed response, transport failure or other
+ambiguous outcome stops immediately as HumanRequired. Thus a receipt remains
+diagnostic evidence rather than success.
+The
 goal-bound `ExecutionVerify` implementation receives Core's same frozen
 ExecutionRequest, repeats the full TaskDetail identity rebind and calls only a
-fresh `getscoinfo_v7`. It recomputes the selected score from the frozen goal and
-requires the exact completion/progress/score tuple. Transient verification
+fresh `getscoinfo_v7`. It recomputes the selected and final scores from the
+frozen goal and requires the exact completion/progress/final-score tuple.
+Transient verification
 reads may be retried by Core, but the mutation path is never entered.
 
 ## Batch selection and duration allocation

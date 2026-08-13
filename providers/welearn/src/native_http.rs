@@ -342,8 +342,15 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
-        score_percent: u8,
+        plan: crate::WellearnResourceExecutionPlan,
     ) -> ProviderResult<WellearnResourceExecutionDocuments> {
+        let crate::WellearnResourceExecutionPlan {
+            score_percent,
+            sequence,
+            time_mode,
+            cmi_format,
+            write_mode,
+        } = plan;
         if score_percent > 100 {
             return Err(ProviderError::new(
                 ProviderErrorKind::Internal,
@@ -364,7 +371,7 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
             result => result?,
         };
         let baseline = parse_cmi_snapshot(before.as_str())?;
-        let expected_score = score_percent.to_string();
+        let expected_score = sequence.final_score(score_percent).to_string();
         if baseline.remote_state() == asterism_domain::RemoteState::Completed
             && baseline.percent() == Some(100)
             && baseline.score_scaled_raw() == Some(expected_score.as_str())
@@ -375,8 +382,16 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
         }
 
         let referer = study_course_url(&route, sco_id)?;
-        let score = score_percent.to_string();
-        let cmi = resource_completion_cmi(score_percent)?;
+        let cmi = if resource_requires_set(write_mode) {
+            Some(resource_completion_cmi(
+                score_percent,
+                time_mode,
+                cmi_format,
+                &baseline,
+            )?)
+        } else {
+            None
+        };
         let start = self
             .send_sco_form_with_referer(
                 &session,
@@ -393,49 +408,43 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
             )
             .await
             .map_err(resource_mutation_error)?;
-        parse_mutation_response(start.as_str(), MutationResponseKind::StrictSuccess)
+        let start_accepted = mutation_accepted(start.as_str(), MutationResponseKind::StrictSuccess)
             .map_err(resource_mutation_error)?;
 
-        let set = self
-            .send_sco_form_with_referer(
-                &session,
-                &route,
-                &referer,
-                &[
-                    ("action", "setscoinfo"),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                    ("uid", route.user_id()),
-                    ("data", cmi.as_str()),
-                    ("isend", "False"),
-                ],
+        let set_accepted = if let Some(cmi) = cmi.as_ref() {
+            let set = self
+                .send_sco_form_with_referer(
+                    &session,
+                    &route,
+                    &referer,
+                    &[
+                        ("action", "setscoinfo"),
+                        ("cid", route.course_id()),
+                        ("scoid", sco_id),
+                        ("uid", route.user_id()),
+                        ("data", cmi.as_str()),
+                        ("isend", "False"),
+                    ],
+                )
+                .await
+                .map_err(resource_mutation_error)?;
+            Some(
+                mutation_accepted(set.as_str(), MutationResponseKind::StrictSuccess)
+                    .map_err(resource_mutation_error)?,
             )
-            .await
-            .map_err(resource_mutation_error)?;
-        parse_mutation_response(set.as_str(), MutationResponseKind::StrictSuccess)
-            .map_err(resource_mutation_error)?;
+        } else {
+            None
+        };
 
-        let save = self
-            .send_sco_form_with_referer(
-                &session,
-                &route,
-                &referer,
-                &[
-                    ("action", "savescoinfo160928"),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                    ("uid", route.user_id()),
-                    ("progress", "100"),
-                    ("crate", &score),
-                    ("status", "unknown"),
-                    ("cstatus", "completed"),
-                    ("trycount", "0"),
-                ],
-            )
-            .await
-            .map_err(resource_mutation_error)?;
-        parse_mutation_response(save.as_str(), MutationResponseKind::StrictSuccess)
-            .map_err(resource_mutation_error)?;
+        let mut save_acceptances = Vec::new();
+        for save_score in resource_save_scores(sequence, score_percent) {
+            let save_score = save_score.to_string();
+            save_acceptances.push(
+                self.save_resource_completion(&session, &route, &referer, sco_id, &save_score)
+                    .await
+                    .map_err(resource_mutation_error)?,
+            );
+        }
 
         let after = match self.fetch_cmi_for_route(&session, &route, sco_id).await {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
@@ -455,7 +464,12 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
             result => result.map_err(resource_mutation_error)?,
         };
         Ok(WellearnResourceExecutionDocuments::submitted(
-            before, after, true,
+            before,
+            after,
+            true,
+            start_accepted,
+            set_accepted,
+            save_acceptances,
         ))
     }
 
@@ -498,10 +512,14 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
-        duration_seconds: u64,
-        heartbeat_interval_seconds: u64,
+        plan: crate::WellearnDurationReportPlan,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnDurationReportDocuments> {
+        let crate::WellearnDurationReportPlan {
+            duration_seconds,
+            heartbeat_interval_seconds,
+            protocol_mode,
+        } = plan;
         if !(MIN_DURATION_REPORT_SECONDS..=MAX_DURATION_REPORT_SECONDS).contains(&duration_seconds)
             || !(MIN_DURATION_HEARTBEAT_SECONDS..=MAX_DURATION_HEARTBEAT_SECONDS)
                 .contains(&heartbeat_interval_seconds)
@@ -509,6 +527,16 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             return Err(ProviderError::new(
                 ProviderErrorKind::Internal,
                 "WELearn duration transport received out-of-range runtime settings",
+            ));
+        }
+        if (protocol_mode == crate::WellearnDurationProtocolMode::ClientCounter
+            && heartbeat_interval_seconds != 1)
+            || (protocol_mode == crate::WellearnDurationProtocolMode::ImplicitServer
+                && heartbeat_interval_seconds != 60)
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn duration transport received a protocol/interval mismatch",
             ));
         }
         let (mut session, mut renewed) = self.session_for_operation(context).await?;
@@ -526,7 +554,8 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         };
         let mut snapshot = parse_cmi_snapshot(before.as_str())?;
         let mut started = false;
-        if !snapshot.cmi_present() {
+        let must_start = duration_requires_start(protocol_mode, snapshot.cmi_present());
+        if must_start {
             events
                 .log(duration_log(
                     "duration_start",
@@ -571,49 +600,70 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                 Some(serde_json::json!({
                     "duration_report_seconds": duration_seconds,
                     "heartbeat_interval_seconds": heartbeat_interval_seconds,
+                    "duration_protocol_mode": protocol_mode.as_str(),
                 })),
             ))
             .await?;
 
         let mut heartbeat_count = 0_u32;
-        self.keep_duration(&session, &route, sco_id, &state).await?;
-        heartbeat_count = heartbeat_count.saturating_add(1);
-        let mut elapsed = 0_u64;
-        let (complete_intervals, trailing_seconds) =
-            duration_heartbeat_plan(duration_seconds, heartbeat_interval_seconds);
-        for _ in 0..complete_intervals {
-            tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
-            elapsed = elapsed.saturating_add(heartbeat_interval_seconds);
-            self.keep_duration(&session, &route, sco_id, &state).await?;
-            heartbeat_count = heartbeat_count.saturating_add(1);
-            let percent = u8::try_from(elapsed.saturating_mul(90) / duration_seconds)
-                .unwrap_or(90)
-                .min(90);
-            events
-                .report(ProviderProgress {
-                    percent: Some(percent),
-                    stage: "duration_execute".to_owned(),
-                    status_text: Some("学习时长心跳已上报".to_owned()),
-                    completed_items: Some(0),
-                    total_items: Some(1),
-                })
-                .await?;
-        }
-        if trailing_seconds != 0 {
-            tokio::time::sleep(Duration::from_secs(trailing_seconds)).await;
-            elapsed = elapsed.saturating_add(trailing_seconds);
-            let percent = u8::try_from(elapsed.saturating_mul(90) / duration_seconds)
-                .unwrap_or(90)
-                .min(90);
-            events
-                .report(ProviderProgress {
-                    percent: Some(percent),
-                    stage: "duration_execute".to_owned(),
-                    status_text: Some("学习时长尾段已完成".to_owned()),
-                    completed_items: Some(0),
-                    total_items: Some(1),
-                })
-                .await?;
+        match protocol_mode {
+            crate::WellearnDurationProtocolMode::PreserveFresh => {
+                self.keep_duration_preserved(&session, &route, sco_id, &state)
+                    .await?;
+                heartbeat_count = heartbeat_count.saturating_add(1);
+                let (complete_intervals, trailing_seconds) =
+                    duration_heartbeat_plan(duration_seconds, heartbeat_interval_seconds);
+                for completed in 1..=complete_intervals {
+                    tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
+                    self.keep_duration_preserved(&session, &route, sco_id, &state)
+                        .await?;
+                    heartbeat_count = heartbeat_count.saturating_add(1);
+                    report_duration_heartbeat(
+                        events,
+                        completed.saturating_mul(heartbeat_interval_seconds),
+                        duration_seconds,
+                    )
+                    .await?;
+                }
+                if trailing_seconds != 0 {
+                    tokio::time::sleep(Duration::from_secs(trailing_seconds)).await;
+                    report_duration_tail(events).await?;
+                }
+                self.finalize_duration_preserved(&session, &route, sco_id, &state)
+                    .await?;
+            }
+            crate::WellearnDurationProtocolMode::ClientCounter => {
+                for elapsed in 0..duration_seconds {
+                    self.keep_duration_counter(&session, &route, sco_id, elapsed)
+                        .await?;
+                    heartbeat_count = heartbeat_count.saturating_add(1);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    report_duration_heartbeat(events, elapsed.saturating_add(1), duration_seconds)
+                        .await?;
+                }
+            }
+            crate::WellearnDurationProtocolMode::ImplicitServer => {
+                let (complete_intervals, trailing_seconds) =
+                    duration_heartbeat_plan(duration_seconds, heartbeat_interval_seconds);
+                for completed in 1..=complete_intervals {
+                    tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
+                    self.keep_duration_implicit(&session, &route, sco_id)
+                        .await?;
+                    heartbeat_count = heartbeat_count.saturating_add(1);
+                    report_duration_heartbeat(
+                        events,
+                        completed.saturating_mul(heartbeat_interval_seconds),
+                        duration_seconds,
+                    )
+                    .await?;
+                }
+                if trailing_seconds != 0 {
+                    tokio::time::sleep(Duration::from_secs(trailing_seconds)).await;
+                    report_duration_tail(events).await?;
+                }
+                self.finalize_duration_implicit(&session, &route, sco_id)
+                    .await?;
+            }
         }
 
         events
@@ -625,9 +675,6 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                 total_items: Some(1),
             })
             .await?;
-        self.finalize_duration(&session, &route, sco_id, &state)
-            .await?;
-
         let after = match self.fetch_cmi_for_route(&session, &route, sco_id).await {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 session = self.sessions.renew_session(context).await?;
@@ -655,7 +702,85 @@ const fn duration_heartbeat_plan(
     )
 }
 
+const fn duration_requires_start(
+    mode: crate::WellearnDurationProtocolMode,
+    cmi_present: bool,
+) -> bool {
+    match mode {
+        crate::WellearnDurationProtocolMode::PreserveFresh => !cmi_present,
+        crate::WellearnDurationProtocolMode::ClientCounter
+        | crate::WellearnDurationProtocolMode::ImplicitServer => true,
+    }
+}
+
+fn duration_counter_fields(elapsed_seconds: u64) -> (String, String) {
+    let elapsed = elapsed_seconds.to_string();
+    (elapsed.clone(), elapsed)
+}
+
+async fn report_duration_heartbeat(
+    events: &(dyn ExecutionEventSink + Send + Sync),
+    elapsed: u64,
+    duration_seconds: u64,
+) -> ProviderResult<()> {
+    let percent = u8::try_from(elapsed.saturating_mul(90) / duration_seconds)
+        .unwrap_or(90)
+        .min(90);
+    events
+        .report(ProviderProgress {
+            percent: Some(percent),
+            stage: "duration_execute".to_owned(),
+            status_text: Some("学习时长心跳已上报".to_owned()),
+            completed_items: Some(0),
+            total_items: Some(1),
+        })
+        .await
+}
+
+async fn report_duration_tail(
+    events: &(dyn ExecutionEventSink + Send + Sync),
+) -> ProviderResult<()> {
+    events
+        .report(ProviderProgress {
+            percent: Some(90),
+            stage: "duration_execute".to_owned(),
+            status_text: Some("学习时长尾段已完成".to_owned()),
+            completed_items: Some(0),
+            total_items: Some(1),
+        })
+        .await
+}
+
 impl NativeWellearnInventoryTransport {
+    async fn save_resource_completion(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        referer: &Url,
+        sco_id: &str,
+        score: &str,
+    ) -> ProviderResult<bool> {
+        let response = self
+            .send_sco_form_with_referer(
+                session,
+                route,
+                referer,
+                &[
+                    ("action", "savescoinfo160928"),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("uid", route.user_id()),
+                    ("progress", "100"),
+                    ("crate", score),
+                    ("status", "unknown"),
+                    ("cstatus", "completed"),
+                    ("trycount", "0"),
+                ],
+            )
+            .await?;
+        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
+    }
+
     async fn read_duration_baseline(
         &self,
         session: &crate::WellearnCookieSession,
@@ -667,7 +792,7 @@ impl NativeWellearnInventoryTransport {
         Ok((route, document))
     }
 
-    async fn keep_duration(
+    async fn keep_duration_preserved(
         &self,
         session: &crate::WellearnCookieSession,
         route: &crate::WellearnCourseContext,
@@ -693,7 +818,55 @@ impl NativeWellearnInventoryTransport {
         parse_mutation_response(response.as_str(), MutationResponseKind::Heartbeat)
     }
 
-    async fn finalize_duration(
+    async fn keep_duration_counter(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        sco_id: &str,
+        elapsed_seconds: u64,
+    ) -> ProviderResult<()> {
+        let (session_time, total_time) = duration_counter_fields(elapsed_seconds);
+        let response = self
+            .send_sco_form(
+                session,
+                route,
+                &[
+                    ("action", "keepsco_with_getticket_with_updatecmitime"),
+                    ("uid", route.user_id()),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("session_time", session_time.as_str()),
+                    ("total_time", total_time.as_str()),
+                    ("timelimitsec", "0"),
+                    ("endcaltime", "false"),
+                ],
+            )
+            .await?;
+        parse_mutation_response(response.as_str(), MutationResponseKind::Heartbeat)
+    }
+
+    async fn keep_duration_implicit(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        sco_id: &str,
+    ) -> ProviderResult<()> {
+        let response = self
+            .send_sco_form(
+                session,
+                route,
+                &[
+                    ("action", "keepsco_with_getticket_with_updatecmitime"),
+                    ("uid", route.user_id()),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                ],
+            )
+            .await?;
+        parse_mutation_response(response.as_str(), MutationResponseKind::Heartbeat)
+    }
+
+    async fn finalize_duration_preserved(
         &self,
         session: &crate::WellearnCookieSession,
         route: &crate::WellearnCourseContext,
@@ -714,6 +887,27 @@ impl NativeWellearnInventoryTransport {
                     ("status", &state.success_status),
                     ("cstatus", &state.completion_status),
                     ("trycount", "0"),
+                ],
+            )
+            .await?;
+        parse_mutation_response(response.as_str(), MutationResponseKind::StrictSuccess)
+    }
+
+    async fn finalize_duration_implicit(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        sco_id: &str,
+    ) -> ProviderResult<()> {
+        let response = self
+            .send_sco_form(
+                session,
+                route,
+                &[
+                    ("action", "savescoinfo160928"),
+                    ("uid", route.user_id()),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
                 ],
             )
             .await?;
@@ -775,6 +969,17 @@ enum MutationResponseKind {
 }
 
 fn parse_mutation_response(document: &str, kind: MutationResponseKind) -> ProviderResult<()> {
+    if mutation_accepted(document, kind)? {
+        Ok(())
+    } else {
+        Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "WELearn SCO mutation was not accepted",
+        ))
+    }
+}
+
+fn mutation_accepted(document: &str, kind: MutationResponseKind) -> ProviderResult<bool> {
     let value: serde_json::Value = serde_json::from_str(document).map_err(|_| {
         ProviderError::new(
             ProviderErrorKind::InvalidResponse,
@@ -791,17 +996,15 @@ fn parse_mutation_response(document: &str, kind: MutationResponseKind) -> Provid
                 "WELearn SCO mutation response has no integer result",
             )
         })?;
-    let accepted = result == 0 || matches!(kind, MutationResponseKind::Heartbeat) && result == 1;
-    if !accepted {
-        return Err(ProviderError::new(
-            ProviderErrorKind::RemoteChanged,
-            "WELearn SCO mutation was not accepted",
-        ));
-    }
-    Ok(())
+    Ok(result == 0 || matches!(kind, MutationResponseKind::Heartbeat) && result == 1)
 }
 
-fn resource_completion_cmi(score_percent: u8) -> ProviderResult<Zeroizing<String>> {
+fn resource_completion_cmi(
+    score_percent: u8,
+    time_mode: crate::WellearnResourceCompletionTimeMode,
+    cmi_format: crate::WellearnResourceCompletionCmiFormat,
+    baseline: &WellearnCmiSnapshot,
+) -> ProviderResult<Zeroizing<String>> {
     if score_percent > 100 {
         return Err(ProviderError::new(
             ProviderErrorKind::Internal,
@@ -809,16 +1012,47 @@ fn resource_completion_cmi(score_percent: u8) -> ProviderResult<Zeroizing<String
         ));
     }
     let score = score_percent.to_string();
-    serde_json::to_string(&serde_json::json!({
+    let (session_time, total_time) = match time_mode {
+        crate::WellearnResourceCompletionTimeMode::Auto => {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn resource transport received an unresolved completion time mode",
+            ));
+        }
+        crate::WellearnResourceCompletionTimeMode::ZeroTime => ("0", "0"),
+        crate::WellearnResourceCompletionTimeMode::PreserveFreshTime => {
+            if !baseline.cmi_present() {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "WELearn cannot preserve completion time without fresh CMI",
+                ));
+            }
+            (
+                baseline.session_time_raw().ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::ProtocolDrift,
+                        "WELearn completion baseline has no session time",
+                    )
+                })?,
+                baseline.total_time_raw().ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::ProtocolDrift,
+                        "WELearn completion baseline has no total time",
+                    )
+                })?,
+            )
+        }
+    };
+    let mut document = serde_json::to_string(&serde_json::json!({
         "cmi": {
             "completion_status": "completed",
             "interactions": [],
             "launch_data": "",
             "progress_measure": "1",
             "score": {"scaled": score, "raw": "100"},
-            "session_time": "0",
+            "session_time": session_time,
             "success_status": "unknown",
-            "total_time": "0",
+            "total_time": total_time,
             "mode": "normal"
         },
         "adl": {"data": []},
@@ -836,13 +1070,38 @@ fn resource_completion_cmi(score_percent: u8) -> ProviderResult<Zeroizing<String
             "submit_time": ""
         }
     }))
-    .map(Zeroizing::new)
     .map_err(|_| {
         ProviderError::new(
             ProviderErrorKind::Internal,
             "WELearn completion CMI serialization failed",
         )
-    })
+    })?;
+    match cmi_format {
+        crate::WellearnResourceCompletionCmiFormat::Json => {}
+        crate::WellearnResourceCompletionCmiFormat::InteractionInfoSuffix => {
+            document.push_str("[INTERACTIONINFO]");
+        }
+    }
+    Ok(Zeroizing::new(document))
+}
+
+fn resource_save_scores(
+    sequence: crate::WellearnResourceCompletionSequence,
+    selected_score: u8,
+) -> Vec<u8> {
+    match sequence {
+        crate::WellearnResourceCompletionSequence::SelectedScore => vec![selected_score],
+        crate::WellearnResourceCompletionSequence::CurrentDonorDualSave100 => {
+            vec![selected_score, 100]
+        }
+    }
+}
+
+const fn resource_requires_set(mode: crate::WellearnResourceCompletionWriteMode) -> bool {
+    match mode {
+        crate::WellearnResourceCompletionWriteMode::SetThenSave => true,
+        crate::WellearnResourceCompletionWriteMode::SaveOnly => false,
+    }
 }
 
 fn duration_log(
@@ -1242,6 +1501,7 @@ mod tests {
             );
         }
         assert!(parse_mutation_response(r#"{"ret":2}"#, MutationResponseKind::Heartbeat).is_err());
+        assert!(!mutation_accepted(r#"{"ret":7}"#, MutationResponseKind::StrictSuccess).unwrap());
     }
 
     #[test]
@@ -1253,8 +1513,38 @@ mod tests {
     }
 
     #[test]
+    fn donor_duration_wire_plans_remain_distinct() {
+        use crate::WellearnDurationProtocolMode::{ClientCounter, ImplicitServer, PreserveFresh};
+
+        assert!(!duration_requires_start(PreserveFresh, true));
+        assert!(duration_requires_start(PreserveFresh, false));
+        assert!(duration_requires_start(ClientCounter, true));
+        assert!(duration_requires_start(ImplicitServer, true));
+
+        assert_eq!(
+            (0..3).map(duration_counter_fields).collect::<Vec<_>>(),
+            [
+                ("0".to_owned(), "0".to_owned()),
+                ("1".to_owned(), "1".to_owned()),
+                ("2".to_owned(), "2".to_owned()),
+            ]
+        );
+        assert_eq!(duration_heartbeat_plan(61, 60), (1, 1));
+    }
+
+    #[test]
     fn resource_completion_cmi_is_bounded_and_matches_the_current_donor_shape() {
-        let document = resource_completion_cmi(82).unwrap();
+        let baseline = parse_cmi_snapshot(
+            r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.25\",\"session_time\":\"15\",\"total_time\":\"45\",\"score\":{\"scaled\":\"20\"},\"success_status\":\"unknown\"}}"}"#,
+        )
+        .unwrap();
+        let document = resource_completion_cmi(
+            82,
+            crate::WellearnResourceCompletionTimeMode::ZeroTime,
+            crate::WellearnResourceCompletionCmiFormat::Json,
+            &baseline,
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(document.as_str()).unwrap();
         let expected: serde_json::Value = serde_json::from_str(include_str!(
             "../../../fixtures/providers/welearn/cmi/resource-completion-cmi.expected.json"
@@ -1267,7 +1557,100 @@ mod tests {
         assert_eq!(value["cmi"]["score"]["raw"], "100");
         assert_eq!(value["cmi"]["session_time"], "0");
         assert_eq!(value["cmi"]["total_time"], "0");
-        assert!(resource_completion_cmi(101).is_err());
+        assert!(
+            resource_completion_cmi(
+                101,
+                crate::WellearnResourceCompletionTimeMode::ZeroTime,
+                crate::WellearnResourceCompletionCmiFormat::Json,
+                &baseline,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resource_completion_can_preserve_fresh_duration_times() {
+        let baseline = parse_cmi_snapshot(
+            r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.25\",\"session_time\":\"15\",\"total_time\":\"45\",\"score\":{\"scaled\":\"20\"},\"success_status\":\"unknown\"}}"}"#,
+        )
+        .unwrap();
+        let document = resource_completion_cmi(
+            100,
+            crate::WellearnResourceCompletionTimeMode::PreserveFreshTime,
+            crate::WellearnResourceCompletionCmiFormat::Json,
+            &baseline,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(document.as_str()).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/providers/welearn/cmi/resource-completion-cmi-preserve-time.expected.json"
+        ))
+        .unwrap();
+        assert_eq!(value, expected);
+        assert_eq!(value["cmi"]["session_time"], "15");
+        assert_eq!(value["cmi"]["total_time"], "45");
+
+        let missing = parse_cmi_snapshot(r#"{"ret":0,"comment":"{}"}"#).unwrap();
+        let error = resource_completion_cmi(
+            100,
+            crate::WellearnResourceCompletionTimeMode::PreserveFreshTime,
+            crate::WellearnResourceCompletionCmiFormat::Json,
+            &missing,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+    }
+
+    #[test]
+    fn resource_completion_cmi_supports_the_interaction_info_envelope() {
+        let baseline = parse_cmi_snapshot(
+            r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.25\",\"session_time\":\"15\",\"total_time\":\"45\",\"score\":{\"scaled\":\"20\"},\"success_status\":\"unknown\"}}"}"#,
+        )
+        .unwrap();
+        let document = resource_completion_cmi(
+            82,
+            crate::WellearnResourceCompletionTimeMode::ZeroTime,
+            crate::WellearnResourceCompletionCmiFormat::InteractionInfoSuffix,
+            &baseline,
+        )
+        .unwrap();
+        let json = document
+            .strip_suffix("[INTERACTIONINFO]")
+            .expect("audited literal suffix");
+        let actual: serde_json::Value = serde_json::from_str(json).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/providers/welearn/cmi/resource-completion-cmi.expected.json"
+        ))
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn resource_save_plan_covers_both_donor_sequences_exactly() {
+        assert_eq!(
+            resource_save_scores(crate::WellearnResourceCompletionSequence::SelectedScore, 82,),
+            [82]
+        );
+        assert_eq!(
+            resource_save_scores(
+                crate::WellearnResourceCompletionSequence::CurrentDonorDualSave100,
+                82,
+            ),
+            [82, 100]
+        );
+        assert_eq!(
+            resource_save_scores(
+                crate::WellearnResourceCompletionSequence::CurrentDonorDualSave100,
+                100,
+            ),
+            [100, 100]
+        );
+        assert!(resource_requires_set(
+            crate::WellearnResourceCompletionWriteMode::SetThenSave
+        ));
+        assert!(!resource_requires_set(
+            crate::WellearnResourceCompletionWriteMode::SaveOnly
+        ));
     }
 
     #[test]

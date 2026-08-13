@@ -38,7 +38,8 @@ pub use course_context::{WellearnCourseContext, parse_course_context};
 pub use course_inventory::parse_course_inventory;
 pub use duration_read::WellearnDurationRead;
 pub use duration_report::{
-    WellearnDurationReport, WellearnDurationReportDocuments, WellearnDurationReportTransport,
+    WellearnDurationReport, WellearnDurationReportDocuments, WellearnDurationReportPlan,
+    WellearnDurationReportTransport,
 };
 pub use execution::WellearnTaskExecution;
 pub use inventory_capabilities::{
@@ -54,8 +55,13 @@ pub use provider::{
     build_development_provider_with_stored_session,
 };
 pub use resource_execution::{
-    WellearnResourceExecution, WellearnResourceExecutionDocuments,
+    WellearnResourceExecution, WellearnResourceExecutionDocuments, WellearnResourceExecutionPlan,
     WellearnResourceExecutionTransport,
+};
+pub use runtime_settings::{
+    WellearnDurationProtocolMode, WellearnResourceCompletionCmiFormat,
+    WellearnResourceCompletionSequence, WellearnResourceCompletionTimeMode,
+    WellearnResourceCompletionWriteMode,
 };
 pub use stored_session::StoredWellearnSessionResolver;
 pub use task_detail::WellearnTaskDetail;

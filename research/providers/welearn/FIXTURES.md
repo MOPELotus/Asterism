@@ -52,13 +52,33 @@ observations. Injected lifecycle tests freeze provider/task runtime overrides,
 reject completion/score drift, reject absent/partial preservation fields and
 reject a final read with no time change.
 Native-boundary tests separately reject malformed or unsupported mutation result
-codes and prove the preserved CMI form state.
+codes and prove the preserved CMI form state. Wire-plan regressions keep
+YZBRH's conditional start/initial keep, current Fanyuchang's unconditional
+start and `0,1,2...` paired client counters, and Auto_WeLearn's delayed
+60-second implicit plan distinct.
 
 The ResourceExecution fixtures prove the independently written bounded CMI
 preset and the nested fresh-read goal used by immediate verification and crash
 recovery. Tests require the exact selected completion/progress/score tuple,
 prove fixed and bounded-random settings stay stable for the frozen Task, and
 prove recovery calls only the non-mutating CMI reader.
+Native plan and injected-boundary tests cover both the YZBRH/Auto selected-score
+save and current Fanyuchang selected-score-then-100 dual-save sequence. The
+second sequence exposes selected and final score separately, requires a final
+100 readback and still emits two saves when the selected value is already 100.
+The completion-CMI fixtures also cover the ordinary zero-time document and the
+duration-then-completion fresh-time document. Injected transport tests require
+fresh `session_time` and `total_time` to remain identical after completion and
+reject missing or changed values instead of falling back to zero.
+The same bounded CMI fixture is serialized both as current Fanyuchang plain
+JSON and as YZBRH/Auto_WeLearn JSON followed by the exact
+`[INTERACTIONINFO]` marker; the suffix variant strips only that audited literal
+in the test before comparing the unchanged JSON structure.
+Injected execution fixtures separately prove `set_then_save` and `save_only`.
+They also return explicit negative receipts while presenting an exact fresh CMI
+goal: execution succeeds only because the readback matches, and exposes false
+start/set/save acceptance fields for diagnostics. Malformed or ambiguous
+responses remain covered by HumanRequired no-replay tests.
 
 ## Required live-sanitized fixtures
 
@@ -116,11 +136,25 @@ only structural field names, response codes and bounded placeholder shapes.
 - Authentication failure after a mutation never replays the lifecycle.
 - ResourceExecution requires fresh identity rebind, exact completion/progress/
   selected-score readback and goal-bound recovery with no mutation replay.
+- ResourceExecution exposes ordinary zero-time and duration-then-completion
+  fresh-time CMI semantics separately; the preservation mode verifies both
+  time fields against its immediate fresh readback.
+- ResourceExecution can emit either plain JSON or the exact donor
+  `[INTERACTIONINFO]` CMI suffix without changing the underlying document.
+- ResourceExecution distinguishes set-then-save from save-only and treats
+  per-call acceptance as a receipt, never the success predicate; an explicit
+  rejection may continue to the donor's next write, while ambiguity stops.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior inside explicit bounded ranges.
 - The preservation-mode schedule sends an initial keep and one keep per full
   interval, while a trailing partial interval adds elapsed time but no
   unevidenced final keep.
+- Client-counter mode always starts and sends exactly one paired counter keep
+  per real second; implicit-server mode always starts, sends no initial keep,
+  uses the evidenced 60-second cadence and ends with a bare save.
+- Completion `auto` uses immutable plan/position only as context, selects fresh
+  time for exact ResourceExecution step 2 after DurationReport, and rejects a
+  malformed binding before Provider transport.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

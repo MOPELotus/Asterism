@@ -9,7 +9,8 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 
 use crate::{
-    WellearnCmiDocument,
+    WellearnCmiDocument, WellearnResourceCompletionCmiFormat, WellearnResourceCompletionSequence,
+    WellearnResourceCompletionTimeMode,
     cmi::{parse_cmi_snapshot, parse_sco_identity},
     execution_selection::{clamped_gaussian_u8, uniform_u8},
     metadata::development_metadata,
@@ -27,6 +28,9 @@ pub struct WellearnResourceExecutionDocuments {
     after: Option<WellearnCmiDocument>,
     mutation_submitted: bool,
     started: bool,
+    start_accepted: Option<bool>,
+    set_accepted: Option<bool>,
+    save_acceptances: Vec<bool>,
 }
 
 impl WellearnResourceExecutionDocuments {
@@ -36,6 +40,9 @@ impl WellearnResourceExecutionDocuments {
             after: None,
             mutation_submitted: false,
             started: false,
+            start_accepted: None,
+            set_accepted: None,
+            save_acceptances: Vec::new(),
         }
     }
 
@@ -43,14 +50,30 @@ impl WellearnResourceExecutionDocuments {
         before: WellearnCmiDocument,
         after: WellearnCmiDocument,
         started: bool,
+        start_accepted: bool,
+        set_accepted: Option<bool>,
+        save_acceptances: Vec<bool>,
     ) -> Self {
         Self {
             before,
             after: Some(after),
             mutation_submitted: true,
             started,
+            start_accepted: Some(start_accepted),
+            set_accepted,
+            save_acceptances,
         }
     }
+}
+
+/// Immutable donor completion wire plan selected from one frozen execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WellearnResourceExecutionPlan {
+    pub score_percent: u8,
+    pub sequence: WellearnResourceCompletionSequence,
+    pub time_mode: WellearnResourceCompletionTimeMode,
+    pub cmi_format: WellearnResourceCompletionCmiFormat,
+    pub write_mode: crate::WellearnResourceCompletionWriteMode,
 }
 
 /// Native boundary for the donor-audited SCO completion preset.
@@ -64,7 +87,7 @@ pub trait WellearnResourceExecutionTransport: Send + Sync {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
-        score_percent: u8,
+        plan: WellearnResourceExecutionPlan,
     ) -> ProviderResult<WellearnResourceExecutionDocuments>;
 
     /// Reads one fresh CMI document without starting, setting or saving the
@@ -124,6 +147,10 @@ impl ProviderIdentity for WellearnResourceExecution {
 
 #[async_trait]
 impl TaskExecutionCapability for WellearnResourceExecution {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "execution keeps selection, fresh rebind, write-plan and exact final verification visible"
+    )]
     async fn execute(
         &self,
         context: &ProviderContext,
@@ -131,6 +158,7 @@ impl TaskExecutionCapability for WellearnResourceExecution {
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome> {
         validate_context(context, &self.metadata)?;
+        validate_capability_step(request)?;
         if request.requested_capabilities != [TaskCapability::ResourceExecution] {
             return Err(unsupported(
                 "WELearn resource execution accepts only ResourceExecution",
@@ -138,7 +166,12 @@ impl TaskExecutionCapability for WellearnResourceExecution {
         }
         let (course_id, sco_id) = parse_sco_identity(&request.remote_task_id)?;
         let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
-        let score_percent = select_score(settings.resource_score, request);
+        let selected_score_percent = select_score(settings.resource_score, request);
+        let verified_score_percent = settings
+            .resource_completion_sequence
+            .final_score(selected_score_percent);
+        let completion_time_mode =
+            effective_completion_time_mode(settings.resource_completion_time_mode, request);
         let detail = self
             .details
             .task_detail(context, &request.remote_task_id)
@@ -163,8 +196,10 @@ impl TaskExecutionCapability for WellearnResourceExecution {
                 provider_trace_id: None,
                 metadata_sanitized: Some(serde_json::json!({
                     "preset": "completed_progress_score",
-                    "score_percent": score_percent,
+                    "selected_score_percent": selected_score_percent,
+                    "verified_score_percent": verified_score_percent,
                     "score_mode": score_mode(settings.resource_score),
+                    "completion_sequence": settings.resource_completion_sequence.as_str(),
                     "verification": "provider_fresh_cmi",
                 })),
             })
@@ -172,19 +207,35 @@ impl TaskExecutionCapability for WellearnResourceExecution {
 
         let documents = self
             .transport
-            .complete_resource(context, &course_id, &sco_id, score_percent)
+            .complete_resource(
+                context,
+                &course_id,
+                &sco_id,
+                WellearnResourceExecutionPlan {
+                    score_percent: selected_score_percent,
+                    sequence: settings.resource_completion_sequence,
+                    time_mode: completion_time_mode,
+                    cmi_format: settings.resource_completion_cmi_format,
+                    write_mode: settings.resource_completion_write_mode,
+                },
+            )
             .await?;
         let before = parse_cmi_snapshot(documents.before.as_str())?;
         let already_completed = !documents.mutation_submitted;
         if already_completed {
-            verify_completed_preset(&before, score_percent)?;
+            verify_completed_preset(&before, verified_score_percent)?;
         }
-        let immediate_verified = if let Some(after) = documents.after.as_ref() {
+        let time_preservation_verified = if let Some(after) = documents.after.as_ref() {
             let after = parse_cmi_snapshot(after.as_str())?;
-            verify_completed_preset(&after, score_percent)?;
-            true
+            verify_completed_preset(&after, verified_score_percent)?;
+            if completion_time_mode == WellearnResourceCompletionTimeMode::PreserveFreshTime {
+                verify_preserved_completion_times(&before, &after)?;
+                Some(true)
+            } else {
+                None
+            }
         } else {
-            true
+            None
         };
 
         events
@@ -215,12 +266,23 @@ impl TaskExecutionCapability for WellearnResourceExecution {
             result_sanitized: serde_json::json!({
                 "schema": "welearn.resource-completion.v1",
                 "preset": "completed_progress_score",
-                "score_percent": score_percent,
+                "score_percent": verified_score_percent,
+                "selected_score_percent": selected_score_percent,
+                "verified_score_percent": verified_score_percent,
                 "score_mode": score_mode(settings.resource_score),
+                "completion_sequence": settings.resource_completion_sequence.as_str(),
+                "configured_completion_time_mode": settings.resource_completion_time_mode.as_str(),
+                "completion_time_mode": completion_time_mode.as_str(),
+                "completion_cmi_format": settings.resource_completion_cmi_format.as_str(),
+                "completion_write_mode": settings.resource_completion_write_mode.as_str(),
                 "mutation_submitted": documents.mutation_submitted,
                 "started": documents.started,
+                "start_accepted": documents.start_accepted,
+                "set_accepted": documents.set_accepted,
+                "save_acceptances": documents.save_acceptances,
                 "already_completed": already_completed,
-                "immediate_cmi_verified": immediate_verified,
+                "immediate_cmi_verified": true,
+                "time_preservation_verified": time_preservation_verified,
                 "verification": "provider_fresh_cmi",
             }),
         })
@@ -232,6 +294,7 @@ impl TaskExecutionCapability for WellearnResourceExecution {
         request: &ExecutionRequest,
     ) -> ProviderResult<ExecutionOutcome> {
         validate_context(context, &self.metadata)?;
+        validate_capability_step(request)?;
         if request.requested_capabilities != [TaskCapability::ResourceExecution] {
             return Err(unsupported(
                 "WELearn resource verification accepts only ResourceExecution",
@@ -239,7 +302,12 @@ impl TaskExecutionCapability for WellearnResourceExecution {
         }
         let (course_id, sco_id) = parse_sco_identity(&request.remote_task_id)?;
         let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
-        let score_percent = select_score(settings.resource_score, request);
+        let selected_score_percent = select_score(settings.resource_score, request);
+        let verified_score_percent = settings
+            .resource_completion_sequence
+            .final_score(selected_score_percent);
+        let completion_time_mode =
+            effective_completion_time_mode(settings.resource_completion_time_mode, request);
         let detail = self
             .details
             .task_detail(context, &request.remote_task_id)
@@ -260,15 +328,22 @@ impl TaskExecutionCapability for WellearnResourceExecution {
             .verify_resource(context, &course_id, &sco_id)
             .await?;
         let snapshot = parse_cmi_snapshot(document.as_str())?;
-        verify_completed_preset(&snapshot, score_percent)?;
+        verify_completed_preset(&snapshot, verified_score_percent)?;
         Ok(ExecutionOutcome {
             remote_state: RemoteState::Completed,
             verified: true,
             result_sanitized: serde_json::json!({
                 "schema": "welearn.resource-completion-verification.v1",
                 "preset": "completed_progress_score",
-                "score_percent": score_percent,
+                "score_percent": verified_score_percent,
+                "selected_score_percent": selected_score_percent,
+                "verified_score_percent": verified_score_percent,
                 "score_mode": score_mode(settings.resource_score),
+                "completion_sequence": settings.resource_completion_sequence.as_str(),
+                "configured_completion_time_mode": settings.resource_completion_time_mode.as_str(),
+                "completion_time_mode": completion_time_mode.as_str(),
+                "completion_cmi_format": settings.resource_completion_cmi_format.as_str(),
+                "completion_write_mode": settings.resource_completion_write_mode.as_str(),
                 "goal_matched": true,
                 "verification": "fresh_cmi_no_mutation",
             }),
@@ -291,6 +366,26 @@ fn select_score(configured: WellearnResourceScore, request: &ExecutionRequest) -
             minimum,
             maximum,
         ),
+    }
+}
+
+fn effective_completion_time_mode(
+    configured: WellearnResourceCompletionTimeMode,
+    request: &ExecutionRequest,
+) -> WellearnResourceCompletionTimeMode {
+    if configured != WellearnResourceCompletionTimeMode::Auto {
+        return configured;
+    }
+    if request.capability_plan
+        == [
+            TaskCapability::DurationReport,
+            TaskCapability::ResourceExecution,
+        ]
+        && request.capability_step_position == 2
+    {
+        WellearnResourceCompletionTimeMode::PreserveFreshTime
+    } else {
+        WellearnResourceCompletionTimeMode::ZeroTime
     }
 }
 
@@ -319,6 +414,24 @@ fn verify_completed_preset(
     Ok(())
 }
 
+fn verify_preserved_completion_times(
+    before: &crate::WellearnCmiSnapshot,
+    after: &crate::WellearnCmiSnapshot,
+) -> ProviderResult<()> {
+    let preserved = before.cmi_present()
+        && after.cmi_present()
+        && before.session_time_raw().is_some()
+        && before.total_time_raw().is_some()
+        && before.session_time_raw() == after.session_time_raw()
+        && before.total_time_raw() == after.total_time_raw();
+    if !preserved {
+        return Err(remote_changed(
+            "WELearn completion did not preserve the fresh CMI time fields",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
     if context.provider_id != metadata.id {
         return Err(ProviderError::new(
@@ -330,6 +443,16 @@ fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> P
         return Err(ProviderError::new(
             ProviderErrorKind::Authentication,
             "WELearn resource execution requires an authenticated session",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_capability_step(request: &ExecutionRequest) -> ProviderResult<()> {
+    if !request.has_valid_capability_step() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "WELearn resource execution received an invalid capability step binding",
         ));
     }
     Ok(())
@@ -365,6 +488,16 @@ mod tests {
     const BEFORE: &str = r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.25\",\"session_time\":\"15\",\"total_time\":\"45\",\"score\":{\"scaled\":\"20\"},\"success_status\":\"unknown\"}}"}"#;
     const AFTER: &str =
         include_str!("../../../fixtures/providers/welearn/cmi/resource-completed.json");
+
+    type CompletionCall = (
+        String,
+        String,
+        u8,
+        WellearnResourceCompletionSequence,
+        WellearnResourceCompletionTimeMode,
+        WellearnResourceCompletionCmiFormat,
+        crate::WellearnResourceCompletionWriteMode,
+    );
 
     #[derive(Debug)]
     struct FixtureDetail {
@@ -430,10 +563,11 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct FixtureTransport {
-        calls: Mutex<Vec<(String, String, u8)>>,
+        calls: Mutex<Vec<CompletionCall>>,
         verifications: Mutex<Vec<(String, String)>>,
         already_completed: bool,
         drift_score: bool,
+        explicit_rejections: bool,
     }
 
     #[async_trait]
@@ -443,35 +577,52 @@ mod tests {
             _context: &ProviderContext,
             course_id: &str,
             sco_id: &str,
-            score_percent: u8,
+            plan: WellearnResourceExecutionPlan,
         ) -> ProviderResult<WellearnResourceExecutionDocuments> {
             self.calls.lock().unwrap().push((
                 course_id.to_owned(),
                 sco_id.to_owned(),
-                score_percent,
+                plan.score_percent,
+                plan.sequence,
+                plan.time_mode,
+                plan.cmi_format,
+                plan.write_mode,
             ));
             if self.already_completed {
                 return Ok(WellearnResourceExecutionDocuments::already_completed(
                     WellearnCmiDocument::try_new(AFTER).unwrap(),
                 ));
             }
+            let final_score = plan.sequence.final_score(plan.score_percent);
             let reflected_score = if self.drift_score {
-                if score_percent == 100 {
+                if final_score == 100 {
                     99
                 } else {
-                    score_percent + 1
+                    final_score + 1
                 }
             } else {
-                score_percent
+                final_score
             };
             let after = AFTER.replace(
                 "\\\"scaled\\\":\\\"82\\\"",
                 &format!("\\\"scaled\\\":\\\"{reflected_score}\\\""),
             );
+            let accepted = !self.explicit_rejections;
+            let set_accepted = match plan.write_mode {
+                crate::WellearnResourceCompletionWriteMode::SetThenSave => Some(accepted),
+                crate::WellearnResourceCompletionWriteMode::SaveOnly => None,
+            };
+            let save_count = match plan.sequence {
+                WellearnResourceCompletionSequence::SelectedScore => 1,
+                WellearnResourceCompletionSequence::CurrentDonorDualSave100 => 2,
+            };
             Ok(WellearnResourceExecutionDocuments::submitted(
                 WellearnCmiDocument::try_new(BEFORE).unwrap(),
                 WellearnCmiDocument::try_new(after).unwrap(),
                 true,
+                accepted,
+                set_accepted,
+                vec![accepted; save_count],
             ))
         }
 
@@ -525,7 +676,15 @@ mod tests {
         assert_eq!(outcome.result_sanitized["score_percent"], 82);
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
-            &[("1001".to_owned(), "301".to_owned(), 82)]
+            &[(
+                "1001".to_owned(),
+                "301".to_owned(),
+                82,
+                WellearnResourceCompletionSequence::SelectedScore,
+                WellearnResourceCompletionTimeMode::ZeroTime,
+                WellearnResourceCompletionCmiFormat::Json,
+                crate::WellearnResourceCompletionWriteMode::SetThenSave,
+            )]
         );
     }
 
@@ -547,6 +706,59 @@ mod tests {
         assert_eq!(outcome.result_sanitized["already_completed"], true);
         assert_eq!(outcome.result_sanitized["mutation_submitted"], false);
         assert!(outcome.verified);
+    }
+
+    #[tokio::test]
+    async fn explicit_negative_receipts_still_require_and_can_pass_fresh_verification() {
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            Arc::new(FixtureTransport {
+                explicit_rejections: true,
+                ..FixtureTransport::default()
+            }),
+        )
+        .unwrap();
+        let outcome = execution
+            .execute(&context(), &request(), &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert!(outcome.verified);
+        assert_eq!(outcome.result_sanitized["start_accepted"], false);
+        assert_eq!(outcome.result_sanitized["set_accepted"], false);
+        assert_eq!(
+            outcome.result_sanitized["save_acceptances"],
+            serde_json::json!([false])
+        );
+        assert_eq!(
+            outcome.result_sanitized["verification"],
+            "provider_fresh_cmi"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_only_mode_omits_set_receipt_and_still_verifies_the_goal() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            transport.clone(),
+        )
+        .unwrap();
+        let outcome = execution
+            .execute(&context(), &save_only_request(), &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert!(outcome.verified);
+        assert_eq!(
+            outcome.result_sanitized["completion_write_mode"],
+            "save_only"
+        );
+        assert!(outcome.result_sanitized["set_accepted"].is_null());
+        assert_eq!(
+            transport.calls.lock().unwrap()[0].6,
+            crate::WellearnResourceCompletionWriteMode::SaveOnly
+        );
     }
 
     #[tokio::test]
@@ -578,6 +790,40 @@ mod tests {
         assert_eq!(
             transport.calls.lock().unwrap()[0].2,
             u8::try_from(score).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn current_donor_dual_save_sequence_verifies_its_final_hundred_goal() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            transport.clone(),
+        )
+        .unwrap();
+        let outcome = execution
+            .execute(&context(), &current_donor_request(), &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result_sanitized["selected_score_percent"], 82);
+        assert_eq!(outcome.result_sanitized["verified_score_percent"], 100);
+        assert_eq!(outcome.result_sanitized["score_percent"], 100);
+        assert_eq!(
+            outcome.result_sanitized["completion_sequence"],
+            "current_donor_dual_save_100"
+        );
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            &[(
+                "1001".to_owned(),
+                "301".to_owned(),
+                82,
+                WellearnResourceCompletionSequence::CurrentDonorDualSave100,
+                WellearnResourceCompletionTimeMode::ZeroTime,
+                WellearnResourceCompletionCmiFormat::Json,
+                crate::WellearnResourceCompletionWriteMode::SetThenSave,
+            )]
         );
     }
 
@@ -663,8 +909,85 @@ mod tests {
         assert!(outcome.verified);
         assert_eq!(
             hidden_transport.calls.lock().unwrap().as_slice(),
-            &[("1001".to_owned(), "301".to_owned(), 82)]
+            &[(
+                "1001".to_owned(),
+                "301".to_owned(),
+                82,
+                WellearnResourceCompletionSequence::SelectedScore,
+                WellearnResourceCompletionTimeMode::ZeroTime,
+                WellearnResourceCompletionCmiFormat::Json,
+                crate::WellearnResourceCompletionWriteMode::SetThenSave,
+            )]
         );
+    }
+
+    #[tokio::test]
+    async fn duration_then_completion_preserves_fresh_cmi_times() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            transport.clone(),
+        )
+        .unwrap();
+        let outcome = execution
+            .execute(&context(), &preserved_time_request(), &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.result_sanitized["completion_time_mode"],
+            "preserve_fresh_time"
+        );
+        assert_eq!(outcome.result_sanitized["time_preservation_verified"], true);
+        assert_eq!(
+            transport.calls.lock().unwrap()[0].4,
+            WellearnResourceCompletionTimeMode::PreserveFreshTime
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_time_mode_uses_immutable_duration_then_resource_step_context() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            transport.clone(),
+        )
+        .unwrap();
+        let outcome = execution
+            .execute(&context(), &composite_resource_request(), &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.result_sanitized["configured_completion_time_mode"],
+            "auto"
+        );
+        assert_eq!(
+            outcome.result_sanitized["completion_time_mode"],
+            "preserve_fresh_time"
+        );
+        assert_eq!(
+            transport.calls.lock().unwrap()[0].4,
+            WellearnResourceCompletionTimeMode::PreserveFreshTime
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_step_context_fails_before_fresh_detail_or_transport() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            transport.clone(),
+        )
+        .unwrap();
+        let mut request = composite_resource_request();
+        request.capability_step_position = 1;
+        let error = execution
+            .execute(&context(), &request, &FixtureEvents)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
+        assert!(transport.calls.lock().unwrap().is_empty());
     }
 
     fn context() -> ProviderContext {
@@ -691,12 +1014,100 @@ mod tests {
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,
             requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: vec![TaskCapability::ResourceExecution],
+            capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
         }
     }
 
     fn random_request() -> ExecutionRequest {
         random_request_with_mode("random_range", 73, 79)
+    }
+
+    fn current_donor_request() -> ExecutionRequest {
+        let schema = runtime_settings_schema();
+        let task = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: std::collections::BTreeMap::from([
+                (
+                    RESOURCE_SCORE_PERCENT_KEY.to_owned(),
+                    ProviderSettingValue::Integer(82),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("current_donor_dual_save_100".to_owned()),
+                ),
+            ]),
+        };
+        ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
+            task_id: TaskId::new(),
+            remote_task_id: "sco:1001:301".to_owned(),
+            course_id: None,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: vec![TaskCapability::ResourceExecution],
+            capability_step_position: 1,
+            runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+        }
+    }
+
+    fn preserved_time_request() -> ExecutionRequest {
+        let schema = runtime_settings_schema();
+        let task = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: std::collections::BTreeMap::from([(
+                crate::runtime_settings::RESOURCE_COMPLETION_TIME_MODE_KEY.to_owned(),
+                ProviderSettingValue::Choice("preserve_fresh_time".to_owned()),
+            )]),
+        };
+        ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
+            task_id: TaskId::new(),
+            remote_task_id: "sco:1001:301".to_owned(),
+            course_id: None,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: vec![TaskCapability::ResourceExecution],
+            capability_step_position: 1,
+            runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+        }
+    }
+
+    fn save_only_request() -> ExecutionRequest {
+        let schema = runtime_settings_schema();
+        let task = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: std::collections::BTreeMap::from([(
+                crate::runtime_settings::RESOURCE_COMPLETION_WRITE_MODE_KEY.to_owned(),
+                ProviderSettingValue::Choice("save_only".to_owned()),
+            )]),
+        };
+        ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
+            task_id: TaskId::new(),
+            remote_task_id: "sco:1001:301".to_owned(),
+            course_id: None,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: vec![TaskCapability::ResourceExecution],
+            capability_step_position: 1,
+            runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+        }
+    }
+
+    fn composite_resource_request() -> ExecutionRequest {
+        let schema = runtime_settings_schema();
+        ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
+            task_id: TaskId::new(),
+            remote_task_id: "sco:1001:301".to_owned(),
+            course_id: None,
+            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ],
+            capability_step_position: 2,
+            runtime_settings: schema.resolve(None, None, None).unwrap(),
+        }
     }
 
     fn random_request_with_mode(mode: &str, minimum: i64, maximum: i64) -> ExecutionRequest {
@@ -724,6 +1135,8 @@ mod tests {
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,
             requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: vec![TaskCapability::ResourceExecution],
+            capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
         }
     }
