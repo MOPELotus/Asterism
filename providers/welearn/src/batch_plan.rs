@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 use asterism_domain::{RemoteState, TaskCapability};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTask};
@@ -35,6 +36,8 @@ pub enum WellearnBatchTargetStrategy {
     SharedConfigured,
     AggregateEqualFloor,
 }
+
+const MAX_BATCH_TASKS: usize = 8_192;
 
 impl WellearnBatchFlow {
     pub const fn dispatch(self) -> WellearnBatchDispatch {
@@ -128,6 +131,12 @@ pub fn build_batch_plan(
             "WELearn batch selection contains no SCO tasks",
         ));
     }
+    if tasks.len() > MAX_BATCH_TASKS {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "WELearn batch selection exceeds the item limit",
+        ));
+    }
     if flow != WellearnBatchFlow::AutoDuration && auto_duration_minutes.is_some() {
         return Err(ProviderError::new(
             ProviderErrorKind::Internal,
@@ -150,7 +159,14 @@ pub fn build_batch_plan(
                 "WELearn batch selection has no Course binding",
             )
         })?;
+    let mut seen_remote_ids = BTreeSet::new();
     for task in tasks {
+        if !seen_remote_ids.insert(task.remote_id.as_str()) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn batch selection contains a duplicate SCO identity",
+            ));
+        }
         if task.course_remote_id.as_deref() != Some(course_remote_id) {
             return Err(ProviderError::new(
                 ProviderErrorKind::RemoteChanged,
@@ -479,5 +495,25 @@ mod tests {
         let mut task = tasks().remove(0);
         task.normalized["sco_index"] = serde_json::Value::Null;
         assert!(build_batch_plan(&[task], WellearnBatchFlow::AutoCompletion, None).is_err());
+    }
+
+    #[test]
+    fn duplicate_remote_tasks_fail_closed() {
+        let tasks = tasks();
+        assert!(build_batch_plan(
+            &[tasks[0].clone(), tasks[0].clone()],
+            WellearnBatchFlow::FanyuchangCompletion,
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn oversized_batch_fails_before_membership_planning() {
+        let task = tasks().remove(0);
+        let oversized = vec![task; MAX_BATCH_TASKS + 1];
+        assert!(
+            build_batch_plan(&oversized, WellearnBatchFlow::FanyuchangCompletion, None).is_err()
+        );
     }
 }
