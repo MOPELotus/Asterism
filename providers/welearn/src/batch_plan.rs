@@ -94,22 +94,24 @@ pub fn build_batch_plan(
 
     let mut ordered = tasks.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| compare_task_order(left, right));
-    let mut entries = ordered
-        .into_iter()
-        .filter_map(|task| {
-            let visible = normalized_bool(task, "visible")
-                .expect("validated complete normalized observation above");
-            let unit_visible = normalized_bool(task, "unit_visible")
-                .expect("validated complete normalized observation above");
-            let completion = task.remote_state;
-            let keep = (flow.keeps_hidden() || visible)
-                && (!flow.skips_completed() || completion != RemoteState::Completed);
-            if !keep || (!unit_visible && !flow.keeps_hidden()) {
-                return None;
-            }
-            Some((task, visible, completion))
-        })
-        .map(|(task, visible, completion)| WellearnBatchEntry {
+    let mut entries = Vec::with_capacity(ordered.len());
+    for task in ordered {
+        let visible = normalized_bool(task, "visible")
+            .expect("validated complete normalized observation above");
+        let unit_visible = normalized_bool(task, "unit_visible")
+            .expect("validated complete normalized observation above");
+        let completion = normalized_completion(task).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn batch selection has no independent completion observation",
+            )
+        })?;
+        let keep = (flow.keeps_hidden() || visible)
+            && (!flow.skips_completed() || completion != RemoteState::Completed);
+        if !keep || (!unit_visible && !flow.keeps_hidden()) {
+            continue;
+        }
+        entries.push(WellearnBatchEntry {
             remote_task_id: task.remote_id.clone(),
             unit_index: normalized_u32(task, "unit_index")
                 .expect("validated complete normalized observation above"),
@@ -118,8 +120,8 @@ pub fn build_batch_plan(
             visible,
             completion,
             target_seconds: None,
-        })
-        .collect::<Vec<_>>();
+        });
+    }
 
     let (aggregate_duration_seconds, discarded_remainder_seconds) =
         if flow == WellearnBatchFlow::AutoDuration {
@@ -202,6 +204,23 @@ fn normalized_usize(task: &RemoteTask, key: &str) -> Option<usize> {
         .get(key)
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
+}
+
+fn normalized_completion(task: &RemoteTask) -> Option<RemoteState> {
+    match task
+        .normalized
+        .get("completion_observation")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("unknown") => Some(RemoteState::Unknown),
+        Some("not_open") => Some(RemoteState::NotOpen),
+        Some("pending") => Some(RemoteState::Pending),
+        Some("in_progress") => Some(RemoteState::InProgress),
+        Some("completed") => Some(RemoteState::Completed),
+        Some("expired") => Some(RemoteState::Expired),
+        Some("removed") => Some(RemoteState::Removed),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
