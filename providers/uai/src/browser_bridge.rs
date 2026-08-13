@@ -2041,8 +2041,29 @@ mod tests {
             },
         )
         .unwrap();
-        let document = include_str!("../../../fixtures/providers/uai/browser/residence-control-restart.json")
-            .replace("{{target_task_handle}}", &target.entry().handle);
+        for control in [
+            UaiBrowserResidenceControl::Pause,
+            UaiBrowserResidenceControl::Resume,
+        ] {
+            let control_command = UaiBrowserCommandEnvelope::residence_control(
+                &plan,
+                &binding,
+                7,
+                &target,
+                control,
+            )
+            .unwrap();
+            assert!(matches!(
+                control_command.command,
+                UaiBrowserCommand::ResidenceControl {
+                    seconds: 1_200,
+                    ..
+                }
+            ));
+        }
+        let document =
+            include_str!("../../../fixtures/providers/uai/browser/residence-control-restart.json")
+                .replace("{{target_task_handle}}", &target.entry().handle);
         assert!(parse_browser_event(&document, &plan, &command, UCONTENT_ORIGIN).is_ok());
         assert!(
             parse_browser_event(
