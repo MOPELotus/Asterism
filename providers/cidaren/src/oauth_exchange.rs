@@ -452,7 +452,7 @@ impl CidarenOauthLoginMaterial {
     /// Returns Authentication if the decrypted result does not form the exact
     /// Composite session shape.
     pub(crate) fn token_session(&self) -> ProviderResult<CidarenTokenSession> {
-        CidarenTokenSession::try_new_captured(
+        CidarenTokenSession::try_new_native_oauth(
             self.token.expose_secret().to_owned(),
             self.crypto_document.expose_secret(),
         )
@@ -666,6 +666,7 @@ mod tests {
         let session = material.token_session().unwrap();
         assert_eq!(session.expose_token(), "synthetic-user-token");
         assert!(session.crypto_context().is_some());
+        assert!(session.requires_native_oauth_validation());
         assert!(!format!("{material:?}").contains("synthetic"));
         let replacement = material.into_credential_replacement();
         assert_eq!(replacement.fields.len(), 2);

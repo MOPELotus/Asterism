@@ -113,7 +113,9 @@ placeholder identities, result codes, status values and pagination shape.
   `NativeProviderLogin`, and the account-bound stored-session resolver accepts
   the same atomic two-field acquisition without mixing origins or timestamps.
   Core's post-exchange validation repeats fresh `Student/Main` with the same
-  OAuth context, while Capture-origin validation keeps its donor header family.
+  OAuth context; persisted NativeProviderLogin resolution retains that context
+  for later validation, while Capture-origin validation keeps its donor header
+  family.
 - Public-donor token-only Capture validates and resolves only as one
   ProviderSpecific `ProviderAccessToken` from CaptureTool/BrowserExtension;
   unrelated helper origins and token/Composite relabelling fail closed.

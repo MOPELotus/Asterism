@@ -26,6 +26,13 @@ const MAX_SELECTED_COURSE_ID_BYTES: usize = 256;
 pub struct CidarenTokenSession {
     token: SecretString,
     crypto: Option<CidarenCryptoContext>,
+    validation_context: CidarenSessionValidationContext,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CidarenSessionValidationContext {
+    DonorHeaders,
+    NativeOauthHeaders,
 }
 
 impl CidarenTokenSession {
@@ -49,6 +56,7 @@ impl CidarenTokenSession {
         Ok(Self {
             token: SecretString::new(token),
             crypto: None,
+            validation_context: CidarenSessionValidationContext::DonorHeaders,
         })
     }
 
@@ -64,6 +72,17 @@ impl CidarenTokenSession {
     ) -> ProviderResult<Self> {
         let mut session = Self::try_new(token)?;
         session.crypto = Some(CidarenCryptoContext::parse(crypto_document)?);
+        Ok(session)
+    }
+
+    /// Builds one native V2 OAuth Composite session whose future account
+    /// validation must retain the current bootstrap header family.
+    pub(crate) fn try_new_native_oauth(
+        token: impl Into<String>,
+        crypto_document: &[u8],
+    ) -> ProviderResult<Self> {
+        let mut session = Self::try_new_captured(token, crypto_document)?;
+        session.validation_context = CidarenSessionValidationContext::NativeOauthHeaders;
         Ok(session)
     }
 
@@ -83,6 +102,13 @@ impl CidarenTokenSession {
             SessionKind::ProviderSpecific
         }
     }
+
+    pub(crate) const fn requires_native_oauth_validation(&self) -> bool {
+        matches!(
+            self.validation_context,
+            CidarenSessionValidationContext::NativeOauthHeaders
+        )
+    }
 }
 
 impl fmt::Debug for CidarenTokenSession {
@@ -97,7 +123,8 @@ pub trait CidarenAuthenticationTransport: Send + Sync {
     async fn validate_token(&self, session: &CidarenTokenSession) -> ProviderResult<()>;
 
     /// Revalidates native OAuth material with the exact current bootstrap
-    /// request context before Core commits the replacement.
+    /// request context before Core commits the replacement and after later
+    /// account-bound stored-session resolution.
     async fn validate_native_oauth_session(
         &self,
         session: &CidarenTokenSession,
@@ -182,13 +209,7 @@ impl CidarenAuthentication {
             .ok_or_else(invalid_credential_shape)?;
         let token = std::str::from_utf8(bytes).map_err(|_| invalid_credential_shape())?;
         let session = CidarenTokenSession::try_new(token.to_owned())?;
-        if credential.acquired_via == CredentialAcquisition::NativeProviderLogin {
-            self.transport
-                .validate_native_oauth_session(&session)
-                .await?;
-        } else {
-            self.transport.validate_token(&session).await?;
-        }
+        self.transport.validate_token(&session).await?;
         Ok(CredentialValidation::accepted(valid_session(
             SessionKind::ProviderSpecific,
         )))
@@ -235,8 +256,18 @@ impl CidarenAuthentication {
         let token = exact_field(credential, SecretPurpose::ProviderAccessToken)?;
         let crypto = exact_field(credential, SecretPurpose::ProviderCompositeSession)?;
         let token = std::str::from_utf8(token).map_err(|_| invalid_credential_shape())?;
-        let session = CidarenTokenSession::try_new_captured(token.to_owned(), crypto)?;
-        self.transport.validate_token(&session).await?;
+        let session = if credential.acquired_via == CredentialAcquisition::NativeProviderLogin {
+            CidarenTokenSession::try_new_native_oauth(token.to_owned(), crypto)?
+        } else {
+            CidarenTokenSession::try_new_captured(token.to_owned(), crypto)?
+        };
+        if session.requires_native_oauth_validation() {
+            self.transport
+                .validate_native_oauth_session(&session)
+                .await?;
+        } else {
+            self.transport.validate_token(&session).await?;
+        }
         Ok(CredentialValidation::accepted(valid_session(
             SessionKind::Composite,
         )))
@@ -363,7 +394,13 @@ impl AuthenticationCapability for CidarenAuthentication {
             ));
         }
         let session = self.sessions.resolve_session(context).await?;
-        self.transport.validate_token(&session).await?;
+        if session.requires_native_oauth_validation() {
+            self.transport
+                .validate_native_oauth_session(&session)
+                .await?;
+        } else {
+            self.transport.validate_token(&session).await?;
+        }
         Ok(valid_session(session.session_kind()))
     }
 }
@@ -493,6 +530,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FixtureBoundaries {
         validations: AtomicUsize,
+        native_oauth_validations: AtomicUsize,
         oauth_exchanges: AtomicUsize,
     }
 
@@ -534,7 +572,10 @@ mod tests {
             &self,
             session: &CidarenTokenSession,
         ) -> ProviderResult<()> {
-            self.validate_token(session).await
+            self.native_oauth_validations.fetch_add(1, Ordering::SeqCst);
+            assert!(session.requires_native_oauth_validation());
+            assert_eq!(session.expose_token(), "synthetic-user-token");
+            classify_token_validation_response(TOKEN_SUCCESS)
         }
     }
 
@@ -545,6 +586,22 @@ mod tests {
             _context: &ProviderContext,
         ) -> ProviderResult<CidarenTokenSession> {
             CidarenTokenSession::try_new("synthetic-user-token")
+        }
+    }
+
+    #[derive(Debug)]
+    struct NativeOauthSessions;
+
+    #[async_trait]
+    impl CidarenSessionResolver for NativeOauthSessions {
+        async fn resolve_session(
+            &self,
+            _context: &ProviderContext,
+        ) -> ProviderResult<CidarenTokenSession> {
+            CidarenTokenSession::try_new_native_oauth(
+                "synthetic-user-token",
+                &native_crypto_document(),
+            )
         }
     }
 
@@ -567,6 +624,19 @@ mod tests {
     fn token_is_opaque_bounded_redacted_and_header_safe() {
         let session = CidarenTokenSession::try_new("synthetic-user-token").unwrap();
         assert_eq!(session.expose_token(), "synthetic-user-token");
+        assert!(!session.requires_native_oauth_validation());
+        let native_crypto = serde_json::to_vec(&serde_json::json!({
+            "login_info": {
+                "a": "hc3ludGhldGljLXNoYXJlZC1zZWNyZXQ=",
+                "b": "ac3ludGhldGljLXNhbHQ="
+            }
+        }))
+        .unwrap();
+        let native =
+            CidarenTokenSession::try_new_native_oauth("synthetic-user-token", &native_crypto)
+                .unwrap();
+        assert!(native.requires_native_oauth_validation());
+        assert_eq!(native.session_kind(), SessionKind::Composite);
         assert!(!format!("{session:?}").contains("synthetic"));
         assert!(CidarenTokenSession::try_new("").is_err());
         assert!(CidarenTokenSession::try_new(" padded ").is_err());
@@ -648,7 +718,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.kind, SessionKind::ProviderSpecific);
-        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 6);
+        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            boundaries.native_oauth_validations.load(Ordering::SeqCst),
+            2
+        );
 
         let mut malformed = imported_bundle();
         malformed.session_kind = SessionKind::BearerToken;
@@ -657,6 +731,27 @@ mod tests {
                 .validate_credential(&auth_context(), &malformed)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_native_oauth_session_keeps_current_validation_context() {
+        let boundaries = Arc::new(FixtureBoundaries::default());
+        let capability =
+            CidarenAuthentication::try_new(boundaries.clone(), Arc::new(NativeOauthSessions))
+                .unwrap();
+        assert_eq!(
+            capability
+                .validate_session(&provider_context())
+                .await
+                .unwrap()
+                .kind,
+            SessionKind::Composite
+        );
+        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            boundaries.native_oauth_validations.load(Ordering::SeqCst),
+            1
         );
     }
 
@@ -829,5 +924,15 @@ mod tests {
             }],
             user_id_hint: None,
         }
+    }
+
+    fn native_crypto_document() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "login_info": {
+                "a": "hc3ludGhldGljLXNoYXJlZC1zZWNyZXQ=",
+                "b": "ac3ludGhldGljLXNhbHQ="
+            }
+        }))
+        .unwrap()
     }
 }

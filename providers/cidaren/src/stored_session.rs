@@ -134,10 +134,12 @@ impl CidarenSessionResolver for StoredCidarenSessionResolver {
         {
             return Err(invalid_stored_session());
         }
-        CidarenTokenSession::try_new_captured(
-            token.to_owned(),
-            credentials[crypto_index].value.expose_secret(),
-        )
+        let crypto = credentials[crypto_index].value.expose_secret();
+        if captured_acquisition == CredentialAcquisition::NativeProviderLogin {
+            CidarenTokenSession::try_new_native_oauth(token.to_owned(), crypto)
+        } else {
+            CidarenTokenSession::try_new_captured(token.to_owned(), crypto)
+        }
         .map_err(|_| invalid_stored_session())
     }
 }
@@ -381,6 +383,7 @@ mod tests {
         assert_eq!(session.expose_token(), "synthetic-captured-token");
         assert_eq!(session.session_kind(), SessionKind::Composite);
         assert!(session.crypto_context().is_some());
+        assert!(!session.requires_native_oauth_validation());
 
         let native = fixture_resolver(FixtureBehavior::CompositeNative)
             .resolve_session(&composite_context())
@@ -388,6 +391,7 @@ mod tests {
             .unwrap();
         assert_eq!(native.session_kind(), SessionKind::Composite);
         assert!(native.crypto_context().is_some());
+        assert!(native.requires_native_oauth_validation());
 
         for behavior in [
             FixtureBehavior::CompositeWrongOrigin,

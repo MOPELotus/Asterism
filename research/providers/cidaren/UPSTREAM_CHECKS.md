@@ -63,6 +63,26 @@ Post-implementation fetch resolved the same two full revisions and the same
 `1.5.4` tag target; no new donor diff entered while the 105-test Provider,
 all-target clippy and scoped diff checks completed.
 
+### 2026-08-13 persisted native-OAuth validation checkpoint
+
+The pre-implementation fetch again resolved `ularch/master@bce9559` and
+`MOPELotus/master@a74b4a2`, with ularch release/tag `1.5.4` unchanged. The
+OAuth V2 handoff documents remained the same imported manifest. No donor or
+handoff delta preceded this incremental authentication audit.
+
+The audit found that initial and Core pre-commit NativeProviderLogin checks
+used the current OAuth V2 User-Agent/derived `Abc`/`Authorization-v: 00`
+context, while a later stored-session validation discarded the non-secret
+acquisition distinction and fell back to legacy donor headers. The resolved
+Cidaren session now retains only that validation-context enum alongside its
+zeroizing token/crypto material; NativeProviderLogin reuses the current OAuth
+readback path, while manual and Capture origins remain on their evidenced
+donor-header path.
+
+Post-implementation fetch retained the same two donor revisions and ularch
+tag target. The 106-test Provider suite, all-target clippy and scoped diff
+checks completed without a new upstream delta.
+
 ## Check procedure
 
 For the next checkpoint:

@@ -146,7 +146,10 @@ Core validates the replacement again before its atomic credential commit.
 Cidaren routes that `NativeProviderLogin` validation through the same current
 OAuth version/User-Agent/`Abc`/`Authorization-v: 00` context rather than the
 older mobile Capture headers; Capture-origin Composite sessions retain their
-own audited header path.
+own audited header path. The acquisition context remains a non-secret property
+of the resolved Provider session, so later stored-session validation also uses
+the same current OAuth header family instead of silently changing semantics
+after persistence.
 
 ## Course, class-task and ordinary study inventory
 
