@@ -3090,10 +3090,11 @@ opaque credential references, invokes the Provider's fresh detail-backed
 session policy and rejects unsafe output before returning it. The corresponding
 `GET /api/v1/tasks/{task_id}/browser-session-spec` route and generated OpenAPI
 schema expose this policy without launching a browser, injecting a Secret,
-performing DOM actions or claiming Task completion. Durable helper sessions,
-one-time credential delivery, typed Provider command/result exchange and
-verification-only recovery remain subsequent shared execution slices rather
-than being falsely implied by this read boundary.
+performing DOM actions or claiming Task completion. Durable helper sessions and
+the internal typed Provider command/result ledger are now shared Core
+boundaries; actual helper dispatch, result transport, credential commit and
+verification-only recovery remain separate execution slices rather than being
+falsely implied by this read boundary.
 
 ## One-hundred-and-eightieth Phase 0 slice
 
@@ -3158,6 +3159,23 @@ owner-scoped snapshot and cancel it. The helper API can claim once and poll the
 exact frozen policy under the `BrowserBridge` authorization scheme. OpenAPI
 describes all four operations and one-time sensitive response fields. This
 slice establishes identity, policy and token transport; typed Provider
-commands/results, credential injection, durable Artifact/Attempt binding and
+commands/results now have an internal bounded type/digest ledger. Public helper
+command delivery, credential injection, durable Artifact/Attempt binding and
 verification-only recovery remain explicit following slices rather than an
 arbitrary-script surface.
+
+## One-hundred-and-eighty-third Phase 0 slice
+
+BrowserBridge exchanges now have a shared durable command/result boundary.
+Core accepts only a positive contiguous sequence, a bounded lowercase message
+type and a non-zero SHA-256 digest for each Provider-validated typed payload.
+SQLite binds each Core-issued command to a live claimed BrowserBridge session,
+then accepts results only through that session's helper access token. It permits
+an identical retry without replay, rejects sequence or immutable command/result
+conflicts, and stores only sanitized audit metadata. No public endpoint is
+advertised until Core can deliver the actual typed payload rather than accept a
+helper-supplied digest as command authority. Provider-specific Cidaren Capture
+and UAI residence envelopes remain in their Provider crates; helper dispatch,
+result transport, credential commit, DOM execution,
+durable Attempt/QuestionSession binding and fresh verification continue as
+separate Core work.

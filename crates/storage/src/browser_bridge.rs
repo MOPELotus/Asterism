@@ -2,15 +2,16 @@ use std::str::FromStr;
 
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AuditActor, AuditRecordId, BrowserBridgeSession, BrowserBridgeSessionId,
-    BrowserBridgeSessionState, ProviderAccountId, ProviderId, TaskId, Timestamp, UserId,
+    AuditActor, AuditRecordId, BrowserBridgeExchange, BrowserBridgeExchangeState,
+    BrowserBridgeSession, BrowserBridgeSessionId, BrowserBridgeSessionState, ProviderAccountId,
+    ProviderId, TaskId, Timestamp, UserId,
 };
 use asterism_provider_api::BrowserSessionSpec;
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
-use crate::{BrowserBridgeSessionRepository, Database, StorageError};
+use crate::{BrowserBridgeExchangeRecord, BrowserBridgeSessionRepository, Database, StorageError};
 
 const SESSION_SELECT: &str = "SELECT id, owner_user_id, provider_account_id, task_id, provider_id, \
     provider_version, spec_version, spec_digest, spec_json, state_json, revision, expires_at, \
@@ -268,6 +269,313 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
         transaction.commit().await?;
         Ok(true)
     }
+
+    async fn issue_browser_bridge_exchange(
+        &self,
+        exchange: &BrowserBridgeExchange,
+        correlation_id: &str,
+    ) -> Result<BrowserBridgeExchangeRecord, StorageError> {
+        exchange
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if exchange.state != BrowserBridgeExchangeState::Issued {
+            return Err(StorageError::InvalidData(
+                "new BrowserBridge exchange must be issued".to_owned(),
+            ));
+        }
+        validate_correlation_id(correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let Some(session) = find_claimed_session_for_exchange(
+            &mut transaction,
+            exchange.session_id,
+            exchange.issued_at,
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(BrowserBridgeExchangeRecord::AccessRejected);
+        };
+        let last_sequence: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM browser_bridge_exchanges WHERE session_id = ?",
+        )
+        .bind(exchange.session_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let expected = last_sequence.map_or(1, |value| value.saturating_add(1));
+        let sequence = i64::try_from(exchange.sequence)
+            .map_err(|_| StorageError::InvalidData("invalid exchange sequence".to_owned()))?;
+        if sequence != expected {
+            if let Some(existing) =
+                fetch_exchange(&mut transaction, exchange.session_id, sequence).await?
+            {
+                transaction.rollback().await?;
+                return Ok(
+                    if existing.command_type == exchange.command_type
+                        && existing.command_digest == exchange.command_digest
+                    {
+                        BrowserBridgeExchangeRecord::Duplicate(existing)
+                    } else {
+                        BrowserBridgeExchangeRecord::SequenceConflict
+                    },
+                );
+            }
+            transaction.rollback().await?;
+            return Ok(BrowserBridgeExchangeRecord::SequenceConflict);
+        }
+        sqlx::query(
+            "INSERT INTO browser_bridge_exchanges \
+             (session_id, sequence, command_type, command_digest, state, issued_at) \
+             VALUES (?, ?, ?, ?, 'issued', ?)",
+        )
+        .bind(exchange.session_id.to_string())
+        .bind(sequence)
+        .bind(&exchange.command_type)
+        .bind(exchange.command_digest.as_slice())
+        .bind(encode_timestamp(exchange.issued_at))
+        .execute(&mut *transaction)
+        .await?;
+        insert_exchange_audit(
+            &mut transaction,
+            correlation_id,
+            &session,
+            exchange,
+            "issued",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(BrowserBridgeExchangeRecord::Inserted(exchange.clone()))
+    }
+
+    async fn complete_browser_bridge_exchange(
+        &self,
+        exchange: &BrowserBridgeExchange,
+        access_token_digest: &TokenDigest,
+        correlation_id: &str,
+    ) -> Result<BrowserBridgeExchangeRecord, StorageError> {
+        exchange
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if !matches!(
+            exchange.state,
+            BrowserBridgeExchangeState::Completed | BrowserBridgeExchangeState::Rejected
+        ) {
+            return Err(StorageError::InvalidData(
+                "completed BrowserBridge exchange must have a terminal result".to_owned(),
+            ));
+        }
+        validate_correlation_id(correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let Some(session) = authenticate_session_for_exchange(
+            &mut transaction,
+            exchange.session_id,
+            access_token_digest,
+            exchange.completed_at.unwrap_or(exchange.issued_at),
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(BrowserBridgeExchangeRecord::AccessRejected);
+        };
+        let sequence = i64::try_from(exchange.sequence)
+            .map_err(|_| StorageError::InvalidData("invalid exchange sequence".to_owned()))?;
+        let Some(existing) =
+            fetch_exchange(&mut transaction, exchange.session_id, sequence).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(BrowserBridgeExchangeRecord::SequenceConflict);
+        };
+        if existing.command_type != exchange.command_type
+            || existing.command_digest != exchange.command_digest
+            || existing.issued_at != exchange.issued_at
+        {
+            transaction.rollback().await?;
+            return Ok(BrowserBridgeExchangeRecord::SequenceConflict);
+        }
+        if existing.state != BrowserBridgeExchangeState::Issued {
+            let same_result = existing.state == exchange.state
+                && existing.result_type == exchange.result_type
+                && existing.result_digest == exchange.result_digest;
+            transaction.rollback().await?;
+            return Ok(if same_result {
+                BrowserBridgeExchangeRecord::Duplicate(existing)
+            } else {
+                BrowserBridgeExchangeRecord::SequenceConflict
+            });
+        }
+        sqlx::query(
+            "UPDATE browser_bridge_exchanges SET result_type = ?, result_digest = ?, \
+             state = ?, completed_at = ? WHERE session_id = ? AND sequence = ? AND state = 'issued'",
+        )
+        .bind(exchange.result_type.as_deref())
+        .bind(exchange.result_digest.map(|digest| digest.to_vec()))
+        .bind(match exchange.state {
+            BrowserBridgeExchangeState::Completed => "completed",
+            BrowserBridgeExchangeState::Rejected => "rejected",
+            BrowserBridgeExchangeState::Issued => unreachable!(),
+        })
+        .bind(exchange.completed_at.map(encode_timestamp))
+        .bind(exchange.session_id.to_string())
+        .bind(sequence)
+        .execute(&mut *transaction)
+        .await?;
+        insert_exchange_audit(
+            &mut transaction,
+            correlation_id,
+            &session,
+            exchange,
+            "completed",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(BrowserBridgeExchangeRecord::Inserted(exchange.clone()))
+    }
+}
+
+async fn authenticate_session_for_exchange(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: BrowserBridgeSessionId,
+    access_token_digest: &TokenDigest,
+    at: Timestamp,
+) -> Result<Option<BrowserBridgeSession>, StorageError> {
+    let query = format!(
+        "{SESSION_SELECT} WHERE id = ? AND access_token_hash = ? \
+         AND pairing_token_hash IS NULL AND state_json = ? AND expires_at > ?"
+    );
+    let Some(row) = sqlx::query(&query)
+        .bind(session_id.to_string())
+        .bind(access_token_digest.as_bytes().as_slice())
+        .bind(serde_json::to_string(&BrowserBridgeSessionState::Claimed)?)
+        .bind(encode_timestamp(at))
+        .fetch_optional(&mut **transaction)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let (session, _) = decode_session(&row)?;
+    if binding_is_valid(transaction, &session).await? {
+        Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn find_claimed_session_for_exchange(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: BrowserBridgeSessionId,
+    at: Timestamp,
+) -> Result<Option<BrowserBridgeSession>, StorageError> {
+    let query = format!(
+        "{SESSION_SELECT} WHERE id = ? AND pairing_token_hash IS NULL \
+         AND access_token_hash IS NOT NULL AND state_json = ? AND expires_at > ?"
+    );
+    let Some(row) = sqlx::query(&query)
+        .bind(session_id.to_string())
+        .bind(serde_json::to_string(&BrowserBridgeSessionState::Claimed)?)
+        .bind(encode_timestamp(at))
+        .fetch_optional(&mut **transaction)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let (session, _) = decode_session(&row)?;
+    if binding_is_valid(transaction, &session).await? {
+        Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn fetch_exchange(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: BrowserBridgeSessionId,
+    sequence: i64,
+) -> Result<Option<BrowserBridgeExchange>, StorageError> {
+    sqlx::query(
+        "SELECT command_type, command_digest, result_type, result_digest, state, issued_at, completed_at \
+         FROM browser_bridge_exchanges WHERE session_id = ? AND sequence = ?",
+    )
+    .bind(session_id.to_string())
+    .bind(sequence)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .map(|row| {
+        let command_digest: [u8; 32] = row
+            .get::<Vec<u8>, _>("command_digest")
+            .try_into()
+            .map_err(|_| StorageError::InvalidData("invalid exchange command digest".to_owned()))?;
+        let result_digest = row
+            .get::<Option<Vec<u8>>, _>("result_digest")
+            .map(|value| {
+                value.try_into().map_err(|_| {
+                    StorageError::InvalidData("invalid exchange result digest".to_owned())
+                })
+            })
+            .transpose()?;
+        let state = match row.get::<String, _>("state").as_str() {
+            "issued" => BrowserBridgeExchangeState::Issued,
+            "completed" => BrowserBridgeExchangeState::Completed,
+            "rejected" => BrowserBridgeExchangeState::Rejected,
+            _ => return Err(StorageError::InvalidData("invalid exchange state".to_owned())),
+        };
+        let exchange = BrowserBridgeExchange {
+            session_id,
+            sequence: u64::try_from(sequence)
+                .map_err(|_| StorageError::InvalidData("invalid exchange sequence".to_owned()))?,
+            command_type: row.get("command_type"),
+            command_digest,
+            result_type: row.get("result_type"),
+            result_digest,
+            state,
+            issued_at: decode_timestamp(&row.get::<String, _>("issued_at"))?,
+            completed_at: row
+                .get::<Option<String>, _>("completed_at")
+                .as_deref()
+                .map(decode_timestamp)
+                .transpose()?,
+        };
+        exchange
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        Ok(exchange)
+    })
+    .transpose()
+}
+
+async fn insert_exchange_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    correlation_id: &str,
+    session: &BrowserBridgeSession,
+    exchange: &BrowserBridgeExchange,
+    action: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) VALUES (?, ?, 'browser_bridge', ?, ?, \
+          'browser_bridge_exchange', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(
+        exchange.completed_at.unwrap_or(exchange.issued_at),
+    ))
+    .bind(session.id.to_string())
+    .bind(format!("browser_bridge_exchange_{action}"))
+    .bind(format!("{}:{}", session.id, exchange.sequence))
+    .bind(correlation_id)
+    .bind(
+        serde_json::json!({
+            "sequence": exchange.sequence,
+            "command_type": exchange.command_type,
+            "command_digest": "[HASHED]",
+            "result_type": exchange.result_type,
+            "result_digest": exchange.result_digest.map(|_| "[HASHED]"),
+            "state": exchange.state,
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn fetch_session(
@@ -581,6 +889,113 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn exchange_is_contiguous_idempotent_and_result_bound() {
+        let fixture = fixture().await;
+        let now = Utc::now();
+        let spec = spec();
+        let session = session(&fixture, &spec, now);
+        let pairing_tokens = OpaqueTokenService::new("ast_bridge_pair").unwrap();
+        let (pairing, pairing_digest) = pairing_tokens.generate();
+        let access_tokens = OpaqueTokenService::new("ast_bridge").unwrap();
+        let (access, access_digest) = access_tokens.generate();
+        fixture
+            .repository
+            .create_browser_bridge_session(
+                &session,
+                &spec,
+                &pairing_digest,
+                AuditActor::User(fixture.owner),
+                "exchange-create",
+            )
+            .await
+            .unwrap();
+        fixture
+            .repository
+            .claim_browser_bridge_session(
+                session.id,
+                &pairing_tokens.digest(&pairing),
+                &access_digest,
+                now + Duration::seconds(1),
+                "exchange-claim",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let issued = BrowserBridgeExchange::issue(
+            session.id,
+            1,
+            "cidaren.capture.snapshot".to_owned(),
+            [1; 32],
+            now + Duration::seconds(2),
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture
+                .repository
+                .issue_browser_bridge_exchange(&issued, "exchange-issue")
+                .await
+                .unwrap(),
+            BrowserBridgeExchangeRecord::Inserted(_)
+        ));
+        assert!(matches!(
+            fixture
+                .repository
+                .issue_browser_bridge_exchange(&issued, "exchange-duplicate")
+                .await
+                .unwrap(),
+            BrowserBridgeExchangeRecord::Duplicate(_)
+        ));
+        let mut completed = issued.clone();
+        completed
+            .complete(
+                "cidaren.capture.snapshot.result".to_owned(),
+                [2; 32],
+                now + Duration::seconds(3),
+            )
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .repository
+                .complete_browser_bridge_exchange(
+                    &completed,
+                    &access_tokens.digest(&access),
+                    "exchange-complete",
+                )
+                .await
+                .unwrap(),
+            BrowserBridgeExchangeRecord::Inserted(_)
+        ));
+        assert!(matches!(
+            fixture
+                .repository
+                .complete_browser_bridge_exchange(
+                    &completed,
+                    &access_tokens.digest(&access),
+                    "exchange-complete-duplicate",
+                )
+                .await
+                .unwrap(),
+            BrowserBridgeExchangeRecord::Duplicate(_)
+        ));
+        let mut conflicting = completed.clone();
+        conflicting.result_digest = Some([3; 32]);
+        assert!(matches!(
+            fixture
+                .repository
+                .complete_browser_bridge_exchange(
+                    &conflicting,
+                    &access_tokens.digest(&access),
+                    "exchange-conflict",
+                )
+                .await
+                .unwrap(),
+            BrowserBridgeExchangeRecord::SequenceConflict
+        ));
     }
 
     struct Fixture {

@@ -1,11 +1,12 @@
 use asterism_auth::{OpaqueTokenService, TokenError};
 use asterism_domain::{
-    AuditActor, BrowserBridgeSession, BrowserBridgeSessionCreate, BrowserBridgeSessionError,
-    BrowserBridgeSessionId, ProviderAccountId, ProviderId, TaskId, Timestamp, UserId,
+    AuditActor, BrowserBridgeExchange, BrowserBridgeSession, BrowserBridgeSessionCreate,
+    BrowserBridgeSessionError, BrowserBridgeSessionId, ProviderAccountId, ProviderId, TaskId,
+    Timestamp, UserId,
 };
 use asterism_provider_api::{BrowserSessionSpec, BrowserSessionSpecError};
 use asterism_secrets::SecretString;
-use asterism_storage::{BrowserBridgeSessionRepository, StorageError};
+use asterism_storage::{BrowserBridgeExchangeRecord, BrowserBridgeSessionRepository, StorageError};
 
 #[derive(Debug)]
 pub struct BrowserBridgeHelperSessionService<R> {
@@ -186,6 +187,46 @@ where
         }
         Ok(BrowserBridgeSessionSnapshot { session, spec })
     }
+
+    /// Persists one Core-issued provider-validated command metadata record.
+    /// Provider payloads stay typed and in-process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata is invalid or persistence detects a
+    /// session binding/sequence conflict.
+    pub async fn issue_exchange(
+        &self,
+        request: BrowserBridgeExchangeIssueRequest,
+    ) -> Result<BrowserBridgeExchangeRecord, BrowserBridgeHelperSessionError> {
+        Ok(self
+            .repository
+            .issue_browser_bridge_exchange(&request.exchange, &request.correlation_id)
+            .await?)
+    }
+
+    /// Completes one issued command with a typed provider result digest. A
+    /// duplicate identical result is returned as `Duplicate`; a conflicting
+    /// result is never replayed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the access token is rejected, metadata is invalid,
+    /// or persistence detects a binding/sequence conflict.
+    pub async fn complete_exchange(
+        &self,
+        request: BrowserBridgeExchangeRequest,
+    ) -> Result<BrowserBridgeExchangeRecord, BrowserBridgeHelperSessionError> {
+        let access_digest = self.access_tokens.digest(&request.access_token);
+        Ok(self
+            .repository
+            .complete_browser_bridge_exchange(
+                &request.exchange,
+                &access_digest,
+                &request.correlation_id,
+            )
+            .await?)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -243,6 +284,19 @@ pub struct BrowserBridgeSessionCancelRequest {
     pub session_id: BrowserBridgeSessionId,
     pub cancelled_at: Timestamp,
     pub actor: AuditActor,
+    pub correlation_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeExchangeIssueRequest {
+    pub exchange: BrowserBridgeExchange,
+    pub correlation_id: String,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeExchangeRequest {
+    pub exchange: BrowserBridgeExchange,
+    pub access_token: SecretString,
     pub correlation_id: String,
 }
 

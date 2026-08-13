@@ -4,13 +4,14 @@ use asterism_auth::TokenDigest;
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor, AuditRecord,
     AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId, AuthSession,
-    AuthSessionId, BrowserBridgeSession, BrowserBridgeSessionId, CreditAccount, CreditReservation,
-    CreditReservationId, CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt,
-    ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
-    ExecutionStage, ExecutionState, ExternalOauthPending, LogLevel, OrchestrationState, PriceQuote,
-    ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
-    Question, QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken,
-    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
+    AuthSessionId, BrowserBridgeExchange, BrowserBridgeSession, BrowserBridgeSessionId,
+    CreditAccount, CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId,
+    Execution, ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease,
+    ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
+    LogLevel, OrchestrationState, PriceQuote, ProviderAccount, ProviderAccountId,
+    ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
+    QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId,
+    SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
     SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
     Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
@@ -591,6 +592,27 @@ pub trait BrowserBridgeSessionRepository: Send + Sync {
         actor: AuditActor,
         correlation_id: &str,
     ) -> Result<bool, StorageError>;
+
+    async fn issue_browser_bridge_exchange(
+        &self,
+        exchange: &BrowserBridgeExchange,
+        correlation_id: &str,
+    ) -> Result<BrowserBridgeExchangeRecord, StorageError>;
+
+    async fn complete_browser_bridge_exchange(
+        &self,
+        exchange: &BrowserBridgeExchange,
+        access_token_digest: &TokenDigest,
+        correlation_id: &str,
+    ) -> Result<BrowserBridgeExchangeRecord, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserBridgeExchangeRecord {
+    Inserted(BrowserBridgeExchange),
+    Duplicate(BrowserBridgeExchange),
+    AccessRejected,
+    SequenceConflict,
 }
 
 #[derive(Debug)]

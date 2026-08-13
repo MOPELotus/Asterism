@@ -53,6 +53,7 @@ pub use auth_session::{
     ExternalOauthCallbackRequest,
 };
 pub use browser_bridge_session::{
+    BrowserBridgeExchangeIssueRequest, BrowserBridgeExchangeRequest,
     BrowserBridgeHelperSessionError, BrowserBridgeHelperSessionService,
     BrowserBridgeSessionAccessRequest, BrowserBridgeSessionCancelRequest,
     BrowserBridgeSessionClaimRequest, BrowserBridgeSessionClaimed,
