@@ -22,15 +22,16 @@ pending.
 ## Upstream refresh
 
 The 2026-08-13 refresh fetched every default branch and tag before the next
-implementation checkpoint. Default heads remain `afa87fb7c86d` (Fanyuchang
+implementation checkpoint and again before the Unit/batch capability-family
+audit. Default heads remain `afa87fb7c86d` (Fanyuchang
 `master`), `bd160e91d045` (YZBRH `main`) and `85918caaccd9` (Auto_WeLearn
 `master`), so no revision delta was available to port. Fanyuchang tag `v4.0.0`
 was also fetched; it resolves to older commit `5d1df60cb007` (2026-05-24), not a
 newer capability surface than the audited default head, and is the repository's
 only GitHub release. YZBRH and Auto_WeLearn expose neither fetched tags nor
 GitHub releases. A second `ls-remote`/release check after the endpoint port
-returned the same heads; the subsequent duration-wire and browser-auth family
-checks did as well. These revisions remain reproducible snapshots; future
+returned the same heads; the subsequent duration-wire, browser-auth and exact
+batch-semantics family checks did as well. These revisions remain reproducible snapshots; future
 checkpoints must fetch again rather than treating them as permanent bounds.
 
 ## Source selection

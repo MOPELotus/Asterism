@@ -384,20 +384,35 @@ reads may be retried by Core, but the mutation path is never entered.
 
 ## Batch selection and duration allocation
 
-The current donor selects one, several or every Unit and concurrently applies
-the per-SCO duration or completion operation. Auto_WeLearn also exposes a
-selected-range total-minute target with a bounded random perturbation, divides
-the resulting seconds across all visible SCOs, and executes those SCOs with a
-bounded worker count. These are orchestration semantics over the native SCO
-operations, not new WELearn endpoints.
+The three donors do not share one batch algorithm. Their exact audited
+orchestration semantics are:
+
+| Donor flow | Selection and membership | Per-child target | Dispatch |
+|---|---|---|---|
+| Current Fanyuchang completion | one, several or every Unit; every returned SCO is retained, including hidden and already-completed rows | fixed score or one clamped-Gaussian score sampled independently for each SCO | one thread per selected SCO |
+| Current Fanyuchang duration | one, several or every Unit; every returned SCO is retained | fixed seconds or one inclusive uniform-range duration sampled independently for each SCO | one thread per selected SCO |
+| YZBRH completion | one Unit or every Unit; hidden and already-completed SCOs are skipped | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | sequential SCO mutations |
+| YZBRH duration | one Unit or every Unit; every returned SCO is retained | fixed seconds or one inclusive uniform-range duration sampled independently for each SCO | all SCO coroutines share one wall-clock heartbeat window |
+| Auto_WeLearn completion | one or several Units; hidden and already-completed SCOs are skipped | one configured score is applied to every remaining SCO | Units and SCOs are processed sequentially |
+| Auto_WeLearn duration | one or several Units; all visible SCOs are first collected into one membership set | sample `actual_minutes = max(1, configured_minutes + uniform(-range,+range))` once, then give every child `floor(actual_minutes * 60 / child_count)` seconds; the remainder is deliberately discarded | bounded thread pool, configured from 1 through 100 |
+
+These are orchestration semantics over the already implemented native SCO
+operations, not new WELearn endpoints. In particular, Auto's minutes value is
+one selected-range budget rather than a per-Unit value despite the current UI
+log text calling it “每单元”; the worker collects every selected Unit before it
+samples and divides the budget.
 
 Asterism currently retains Unit index/title/code in each fresh Task observation
 and exposes per-Task runtime settings, but Unit is not yet a shared first-class
 selection scope and execution creation is single-Task. The complete donor
 behavior therefore requires Core/API to freeze the selected Unit/all-task set,
+the donor-flow discriminator, selection-time membership and visibility facts,
 derive and persist each child target, apply provider/account concurrency, and
 recover children independently. The Provider must not create its own task
-scheduler or silently recompute the distribution after a crash.
+scheduler or silently recompute the distribution after a crash. Auto's integer
+division remainder and the one sampled aggregate budget are frozen attempt
+facts; a rescan that adds, removes or changes visibility of SCOs must not
+redistribute an already scheduled batch.
 
 ## Sanitization and routing
 
