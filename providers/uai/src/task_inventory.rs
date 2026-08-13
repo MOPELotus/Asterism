@@ -67,6 +67,7 @@ pub fn parse_task_inventory(
     if outer.get("code").and_then(Value::as_i64) != Some(0) {
         return Err(protocol_drift("UAI Task-tree read did not succeed"));
     }
+    let course_publish_version = optional_publish_version(outer.get("publish_version"))?;
     let nested = outer
         .get("course")
         .and_then(Value::as_str)
@@ -88,10 +89,14 @@ pub fn parse_task_inventory(
 
     let mut tasks = BTreeMap::new();
     let mut node_count = 0_usize;
+    let binding = CourseTreeBinding {
+        course,
+        resource_id: &resource_id,
+        course_publish_version,
+    };
     for unit in units {
         visit_node(
-            course,
-            &resource_id,
+            binding,
             unit,
             &Hierarchy::default(),
             1,
@@ -102,9 +107,15 @@ pub fn parse_task_inventory(
     Ok(tasks.into_values().collect())
 }
 
+#[derive(Clone, Copy)]
+struct CourseTreeBinding<'a> {
+    course: &'a RemoteCourse,
+    resource_id: &'a str,
+    course_publish_version: Option<u64>,
+}
+
 fn visit_node(
-    course: &RemoteCourse,
-    resource_id: &str,
+    binding: CourseTreeBinding<'_>,
     value: &Value,
     hierarchy: &Hierarchy,
     depth: usize,
@@ -155,7 +166,7 @@ fn visit_node(
         }
         "node" => next.micro = Some(label),
         "group" => {
-            let task = build_task(course, resource_id, object, hierarchy, &id, title)?;
+            let task = build_task(binding, object, hierarchy, &id, title)?;
             if tasks.insert(task.remote_id.clone(), task).is_some() {
                 return Err(protocol_drift(
                     "UAI Task tree contains a duplicate Group identity",
@@ -170,23 +181,14 @@ fn visit_node(
             .as_array()
             .ok_or_else(|| protocol_drift("UAI Task-tree children field is not an array"))?;
         for child in children {
-            visit_node(
-                course,
-                resource_id,
-                child,
-                &next,
-                depth + 1,
-                node_count,
-                tasks,
-            )?;
+            visit_node(binding, child, &next, depth + 1, node_count, tasks)?;
         }
     }
     Ok(())
 }
 
 fn build_task(
-    course: &RemoteCourse,
-    resource_id: &str,
+    binding: CourseTreeBinding<'_>,
     object: &Map<String, Value>,
     hierarchy: &Hierarchy,
     group_id: &str,
@@ -223,20 +225,21 @@ fn build_task(
             TaskCapability::SubmissionVerify,
         ]);
     }
-    let remote_id = format!("group:{resource_id}:{}:{group_id}", unit.id);
+    let remote_id = format!("group:{}:{}:{group_id}", binding.resource_id, unit.id);
     let normalized = serde_json::json!({
         "schema": "uai.group-task.v1",
-        "course_resource_id": resource_id,
+        "course_resource_id": binding.resource_id,
         "unit": {"id": unit.id, "title": unit.title},
         "section": hierarchy.section.as_ref().map(|value| serde_json::json!({"id": value.id, "title": value.title})),
         "micro": hierarchy.micro.as_ref().map(|value| serde_json::json!({"id": value.id, "title": value.title})),
         "group_id": group_id,
+        "course_publish_version": binding.course_publish_version,
         "task_types": task_types,
         "question_count": question_count,
     });
     Ok(RemoteTask {
         remote_id,
-        course_remote_id: Some(course.remote_id.clone()),
+        course_remote_id: Some(binding.course.remote_id.clone()),
         title,
         source_type: SourceType::Resource,
         assessment_class: AssessmentClass::Routine,
@@ -309,6 +312,22 @@ fn question_count(value: Option<&Value>) -> ProviderResult<Option<u32>> {
         .transpose()
 }
 
+fn optional_publish_version(value: Option<&Value>) -> ProviderResult<Option<u64>> {
+    const MAX_SIGNED_64_BIT_VALUE: u64 = 9_223_372_036_854_775_807;
+
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let version = match value {
+        Value::Number(value) => value.as_u64(),
+        Value::String(value) => value.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+    .filter(|value| (1..=MAX_SIGNED_64_BIT_VALUE).contains(value))
+    .ok_or_else(|| protocol_drift("UAI Task tree has an invalid Course publish version"))?;
+    Ok(Some(version))
+}
+
 fn supports_submission_execution(task_types: &[String], question_count: Option<u32>) -> bool {
     supports_question_read(task_types, question_count)
 }
@@ -351,6 +370,7 @@ mod tests {
         assert_eq!(tasks[0].normalized["unit"]["id"], "unit-1");
         assert_eq!(tasks[0].normalized["section"]["id"], "section-1");
         assert_eq!(tasks[0].normalized["micro"]["id"], "micro-1");
+        assert_eq!(tasks[0].normalized["course_publish_version"], 123_290);
         assert_eq!(tasks[0].normalized["task_types"][0], "rich-text-read");
         assert_eq!(tasks[0].normalized["question_count"], 1);
         assert_eq!(tasks[1].normalized["question_count"], 2);
@@ -358,6 +378,18 @@ mod tests {
         let encoded = serde_json::to_string(&tasks).unwrap();
         assert!(!encoded.contains("must-be-dropped"));
         assert!(!encoded.contains(context.course_instance_id()));
+    }
+
+    #[test]
+    fn parser_accepts_the_donor_observed_string_publish_version_shape() {
+        let course = parse_course_inventory(COURSES).unwrap().remove(0);
+        let context = parse_course_context(&course, DETAIL).unwrap();
+        let tree = TREE.replace(
+            r#""publish_version": 123290"#,
+            r#""publish_version": "123290""#,
+        );
+        let tasks = parse_task_inventory(&course, &context, &tree).unwrap();
+        assert_eq!(tasks[0].normalized["course_publish_version"], 123_290);
     }
 
     #[test]
@@ -375,6 +407,7 @@ mod tests {
             )
             .is_err()
         );
+        assert!(parse_task_inventory(&courses[0], &context, &TREE.replace("123290", "0")).is_err());
         assert!(
             parse_task_inventory(
                 &courses[0],
@@ -421,6 +454,12 @@ mod tests {
         ] {
             assert!(fillblank_tasks[0].capabilities.contains(&capability));
         }
+        let writing = TREE.replace("rich-text-read", "writing");
+        let writing_tasks = parse_task_inventory(&course, &context, &writing).unwrap();
+        assert_question_capabilities(&writing_tasks[0], true);
+        let video_popup = TREE.replace("rich-text-read", "video-popup");
+        let video_popup_tasks = parse_task_inventory(&course, &context, &video_popup).unwrap();
+        assert_question_capabilities(&video_popup_tasks[0], true);
         assert_question_capabilities(&tasks[1], false);
 
         let multiple = TREE.replace(

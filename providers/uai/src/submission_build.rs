@@ -12,7 +12,7 @@ use async_trait::async_trait;
 
 use crate::{
     metadata::development_metadata,
-    task_type::{audited_question_kind, question_kind_matches_task_type},
+    task_type::{question_kind_matches_task_type, supports_audited_question_type},
 };
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
@@ -165,7 +165,7 @@ fn validate_answer_shape(
     task_type: &str,
     answer: &NormalizedAnswer,
 ) -> ProviderResult<()> {
-    if audited_question_kind(task_type).is_none() {
+    if !supports_audited_question_type(task_type) {
         return Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
             "UAI submission preview does not support this Question type",

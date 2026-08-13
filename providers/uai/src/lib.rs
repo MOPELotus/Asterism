@@ -47,8 +47,8 @@ pub use browser_bridge::{
     UaiBrowserEventEnvelope, UaiBrowserMenuEntry, UaiBrowserMessageSecurity, UaiBrowserPageEntry,
     UaiBrowserPageScope, UaiBrowserResidencePlan, UaiBrowserResidenceResult,
     UaiBrowserSessionBinding, UaiBrowserTarget, UaiBrowserTargetMenuEntry,
-    UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy, parse_browser_event,
-    parse_browser_residence_result,
+    UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy, browser_start_url_from_detail,
+    parse_browser_event, parse_browser_residence_result,
 };
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
 pub use discussion::{
@@ -86,8 +86,9 @@ pub use resource_execution::{
 pub use stored_session::StoredUaiSessionResolver;
 pub use submission_build::UaiSubmissionBuild;
 pub use submission_execute::{
-    UaiSubmissionExecute, UaiSubmissionJudgePlan, UaiSubmissionPlan, UaiSubmissionQuestionPlan,
-    UaiSubmissionResponseDocument, UaiSubmissionTransport, parse_submission_receipt,
+    UaiSubmissionExecute, UaiSubmissionJudgePlan, UaiSubmissionPlan, UaiSubmissionProtocolVersions,
+    UaiSubmissionQuestionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    parse_submission_receipt,
 };
 pub use submission_verify::{
     UaiSubmissionVerify, UaiVerificationDocument, UaiVerificationTransport,

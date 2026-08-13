@@ -950,12 +950,15 @@ mod tests {
     }
 
     fn request() -> ExecutionRequest {
+        let requested_capabilities = vec![TaskCapability::ResourceExecution];
         ExecutionRequest {
             execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: "group:2001:unit-1:group-1".to_owned(),
             course_id: Some(CourseId::new()),
-            requested_capabilities: vec![TaskCapability::ResourceExecution],
+            capability_plan: requested_capabilities.clone(),
+            capability_step_position: 1,
+            requested_capabilities,
             runtime_settings: runtime_settings_schema().resolve(None, None, None).unwrap(),
         }
     }

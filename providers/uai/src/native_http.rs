@@ -1284,6 +1284,16 @@ fn ucontent_session_headers(session: &UaiJwtSession) -> ProviderResult<HeaderMap
         "referer",
         HeaderValue::from_static("https://ucontent.unipus.cn/_explorationpc_default/pc.html"),
     );
+    if let Some(school) = session.expose_school_header() {
+        let mut school = HeaderValue::from_str(school).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "UAI browser compatibility school header is invalid",
+            )
+        })?;
+        school.set_sensitive(true);
+        headers.insert("u-school", school);
+    }
     if let Some(cookie) = session.expose_browser_cookie() {
         let mut cookie = HeaderValue::from_str(cookie).map_err(|_| {
             ProviderError::new(
@@ -1621,6 +1631,7 @@ fn build_submission_body(
     } else {
         (1, 1)
     };
+    let protocol_versions = plan.protocol_versions();
     let mut question_data = ZeroizingJsonValue::new(serde_json::Value::Array(Vec::with_capacity(
         plan.questions().len(),
     )));
@@ -1674,10 +1685,10 @@ fn build_submission_body(
                     "question_type": judge.question_type(),
                     "reply_type": judge.reply_type(),
                     "versions": {
-                        "course": 0,
+                        "course": protocol_versions.course(),
                         "group": 1,
                         "template": 1,
-                        "answer": 0,
+                        "answer": protocol_versions.answer(),
                         "content": 0,
                     },
                     "payloads": [],
@@ -1692,7 +1703,7 @@ fn build_submission_body(
         "groupId": group_id,
         "isCompleted": is_completed,
         "thirdPartyJudges": judges.as_str(),
-        "submitType": 1,
+        "submitType": plan.submit_type(),
         "hideLoading": false,
         "associationGroupId": "",
         "courseId": course_instance_id,
@@ -2041,6 +2052,10 @@ mod tests {
     fn captured_browser_cookie_and_donor_client_headers_are_ucontent_only() {
         let session = UaiJwtSession::try_new("open-id", "HEADER.PAYLOAD.SIGNATURE")
             .unwrap()
+            .attach_school_header(Some(asterism_secrets::SecretString::new(
+                "school-42".to_owned(),
+            )))
+            .unwrap()
             .attach_browser_cookie(Some(asterism_secrets::SecretString::new(
                 "session=synthetic; csrf=synthetic".to_owned(),
             )))
@@ -2052,11 +2067,14 @@ mod tests {
         assert_eq!(ucontent["u-app-id"], "39");
         assert_eq!(ucontent["u-platform"], "2");
         assert_eq!(ucontent["appid"], "undefined");
+        assert!(ucontent["u-school"].is_sensitive());
+        assert_eq!(ucontent["u-school"], "school-42");
 
         let management = authorization_headers(&session).unwrap();
         assert!(management.contains_key(AUTHORIZATION));
         assert!(!management.contains_key(COOKIE));
         assert!(!management.contains_key("u-openid"));
+        assert!(!management.contains_key("u-school"));
     }
 
     #[test]
@@ -2155,6 +2173,48 @@ mod tests {
         assert_eq!(judges[0]["value"], "A,B");
         assert_eq!(judges[0]["question_type"], "multichoice");
         assert_eq!(judges[0]["reply_type"], "objective");
+        assert_eq!(judges[0]["versions"]["course"], 0);
+        assert_eq!(judges[0]["versions"]["answer"], 0);
+    }
+
+    #[test]
+    fn submission_body_uses_the_fresh_current_course_publish_version() {
+        let plan = UaiSubmissionPlan::fixture_current(
+            "1001",
+            "multichoice",
+            vec![vec!["A".to_owned()]],
+            123_290,
+        );
+        let body = build_submission_body(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-1",
+            &plan,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let judges: serde_json::Value =
+            serde_json::from_str(body["thirdPartyJudges"].as_str().unwrap()).unwrap();
+
+        assert_eq!(judges[0]["versions"]["course"], 123_290);
+        assert_eq!(judges[0]["versions"]["answer"], 3);
+    }
+
+    #[test]
+    fn video_popup_answer_submission_uses_the_donor_study_submit_type() {
+        let plan = UaiSubmissionPlan::fixture("2101", "video-popup", vec![vec!["A".to_owned()]]);
+        let body = build_submission_body(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-video-popup",
+            &plan,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["submitType"], 2);
+        assert_eq!(body["quesDatas"][0]["instanceId"], "2101");
+        assert_eq!(body["isCompleted"], serde_json::json!([true]));
     }
 
     #[test]

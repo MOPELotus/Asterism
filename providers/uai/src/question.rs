@@ -24,7 +24,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     encrypted::{ZeroizingJsonValue, decrypt_unipus_payload},
     metadata::development_metadata,
-    task_type::{audited_question_kind, supports_audited_question_type},
+    task_type::{audited_question_kind, audited_reply_kind, supports_audited_question_type},
 };
 
 const MAX_QUESTION_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -485,12 +485,7 @@ fn parse_question_entry(
         .ok_or_else(|| protocol_drift("UAI Question has no explicit remote identity"))?;
     valid_question_identity(&remote_id)?;
     let stem = question_stem(content)?;
-    let base_kind = audited_question_kind(task_type).ok_or_else(|| {
-        ProviderError::new(
-            ProviderErrorKind::UnsupportedTask,
-            "UAI Question read does not support this audited task type",
-        )
-    })?;
+    let base_kind = question_kind_from_content(content, task_type)?;
     let composite_children = choice_composite_children(content, base_kind)?;
     let kind = if composite_children.is_some() {
         QuestionKind::Composite
@@ -541,6 +536,67 @@ fn parse_question_entry(
     };
     question.to_question(TaskId::new())?;
     Ok(question)
+}
+
+fn question_kind_from_content(
+    content: &Map<String, Value>,
+    task_type: &str,
+) -> ProviderResult<QuestionKind> {
+    if let Some(kind) = audited_question_kind(task_type) {
+        return Ok(kind);
+    }
+    if task_type != "video-popup" {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI Question read does not support this audited task type",
+        ));
+    }
+
+    let module_reply = content
+        .get("replyType")
+        .map(|value| {
+            value.as_str().and_then(audited_reply_kind).ok_or_else(|| {
+                protocol_drift("UAI video-popup module has an unsupported reply type")
+            })
+        })
+        .transpose()?;
+    let children = content
+        .get("children")
+        .and_then(Value::as_array)
+        .filter(|children| !children.is_empty() && children.len() <= MAX_QUESTION_CHILDREN)
+        .ok_or_else(|| protocol_drift("UAI video-popup module has no bounded Question children"))?;
+    let mut child_kinds = Vec::with_capacity(children.len());
+    for child in children {
+        let child = child
+            .as_object()
+            .ok_or_else(|| protocol_drift("UAI video-popup child is not an object"))?;
+        let kind = child
+            .get("replyType")
+            .map(|value| {
+                value.as_str().and_then(audited_reply_kind).ok_or_else(|| {
+                    protocol_drift("UAI video-popup child has an unsupported reply type")
+                })
+            })
+            .transpose()?
+            .or(module_reply)
+            .unwrap_or(QuestionKind::FillBlank);
+        child_kinds.push(kind);
+    }
+    let first = child_kinds[0];
+    if child_kinds.iter().all(|kind| *kind == first) {
+        return Ok(first);
+    }
+    if child_kinds.iter().all(|kind| {
+        matches!(
+            kind,
+            QuestionKind::SingleChoice | QuestionKind::MultipleChoice
+        )
+    }) {
+        return Ok(QuestionKind::SingleChoice);
+    }
+    Err(protocol_drift(
+        "UAI video-popup module mixes incompatible child answer shapes",
+    ))
 }
 
 fn choice_composite_children(
@@ -1416,6 +1472,108 @@ mod tests {
                 {"question_type": "basic", "reply_type": "text-area"},
             ])
         );
+    }
+
+    #[test]
+    fn donor_writing_content_maps_losslessly_to_short_answer() {
+        let questions = parse_question_content(
+            MIXED_CONTENT,
+            "group:2001:unit-1:group-writing",
+            &["multichoice".to_owned(), "writing".to_owned()],
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(questions[1].kind, QuestionKind::ShortAnswer);
+        assert_eq!(questions[1].metadata_sanitized["task_type"], "writing");
+        assert_eq!(
+            questions[1].metadata_sanitized["judge_types"],
+            json!([
+                {"question_type": "basic", "reply_type": "text-area"},
+                {"question_type": "basic", "reply_type": "text-area"},
+            ])
+        );
+    }
+
+    #[test]
+    fn donor_video_popup_derives_its_answer_shape_from_fresh_content() {
+        let choice = parse_question_entry(
+            &json!({
+                "id": "2101",
+                "content": {
+                    "type": "video-popup",
+                    "replyType": "multichoice",
+                    "direction": {"text": "Watch and choose"},
+                    "children": [{
+                        "type": "basic",
+                        "replyType": "multichoice",
+                        "options": [
+                            {"name": "A", "text": "First"},
+                            {"name": "B", "text": "Second"},
+                        ],
+                    }],
+                },
+            }),
+            1,
+            "video-popup",
+            "group:2001:unit-1:group-video-popup",
+        )
+        .unwrap();
+        assert_eq!(choice.kind, QuestionKind::MultipleChoice);
+        assert_eq!(choice.options.len(), 2);
+        assert_eq!(choice.metadata_sanitized["task_type"], "video-popup");
+        assert_eq!(
+            choice.metadata_sanitized["judge_types"][0],
+            json!({"question_type": "basic", "reply_type": "multichoice"})
+        );
+
+        let text = parse_question_entry(
+            &json!({
+                "id": "2102",
+                "content": {
+                    "type": "video-popup",
+                    "direction": {"text": "Watch and complete"},
+                    "children": [
+                        {"type": "basic", "replyType": "text-area"},
+                        {"type": "basic", "replyType": "fillblank"},
+                    ],
+                },
+            }),
+            1,
+            "video-popup",
+            "group:2001:unit-1:group-video-popup-text",
+        )
+        .unwrap();
+        assert_eq!(text.kind, QuestionKind::FillBlank);
+        assert_eq!(
+            text.metadata_sanitized["judge_types"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn video_popup_with_incompatible_child_shapes_fails_closed() {
+        let error = parse_question_entry(
+            &json!({
+                "id": "2103",
+                "content": {
+                    "type": "video-popup",
+                    "children": [
+                        {"type": "basic", "replyType": "singlechoice", "options": [
+                            {"name": "A"}, {"name": "B"},
+                        ]},
+                        {"type": "basic", "replyType": "text-area"},
+                    ],
+                },
+            }),
+            1,
+            "video-popup",
+            "group:2001:unit-1:group-video-popup-mixed",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
     }
 
     #[test]

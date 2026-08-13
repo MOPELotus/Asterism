@@ -299,6 +299,13 @@ fn clone_session(session: &UaiJwtSession) -> ProviderResult<UaiJwtSession> {
         session.expose_authorization().to_owned(),
     )
     .and_then(|cloned| {
+        cloned.attach_school_header(
+            session
+                .expose_school_header()
+                .map(|school| SecretString::new(school.to_owned())),
+        )
+    })
+    .and_then(|cloned| {
         cloned.attach_browser_cookie(
             session
                 .expose_browser_cookie()
@@ -455,6 +462,14 @@ mod tests {
     }
 
     impl FixtureCredentialResolver {
+        fn session_document(&self) -> &'static [u8] {
+            if matches!(self.behavior, FixtureBehavior::CaptureCookie) {
+                br#"{"openid":"stored-open-id","jwt":"STORED_HEADER.STORED_PAYLOAD.STORED_SIGNATURE","school":"school-42"}"#
+            } else {
+                br#"{"openid":"stored-open-id","jwt":"STORED_HEADER.STORED_PAYLOAD.STORED_SIGNATURE"}"#
+            }
+        }
+
         fn resolve_cookie(
             &self,
             request: &ProviderCredentialResolution,
@@ -611,7 +626,7 @@ mod tests {
                     value,
                 )
             };
-            let document = br#"{"openid":"stored-open-id","jwt":"STORED_HEADER.STORED_PAYLOAD.STORED_SIGNATURE"}"#;
+            let document = self.session_document();
             match self.behavior {
                 FixtureBehavior::Imported => Ok(vec![valid(
                     SessionKind::Jwt,
@@ -737,7 +752,9 @@ mod tests {
             session.expose_browser_cookie(),
             Some("session=synthetic; csrf=synthetic")
         );
+        assert_eq!(session.expose_school_header(), Some("school-42"));
         assert!(!format!("{session:?}").contains("session=synthetic"));
+        assert!(!format!("{session:?}").contains("school-42"));
     }
 
     #[tokio::test]

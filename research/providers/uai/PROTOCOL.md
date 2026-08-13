@@ -23,7 +23,7 @@ a transient `ProviderSpecific` candidate or one imported provider session
 document from ManualImport, CaptureTool or BrowserExtension:
 
 ```json
-{"openid":"...","jwt":"header.payload.signature"}
+{"openid":"...","jwt":"header.payload.signature","school":"optional-u-school"}
 ```
 
 The document rejects unknown fields, unsafe open IDs and non-JWT shapes. Native
@@ -37,11 +37,14 @@ resolves an account-bound composite and validates the JWT through the transport;
 the concrete Core adapter requests only `ProviderCompositeSession`, verifies
 the exact account/reference/purpose/expiry tuple, and accepts only
 NativeProviderLogin+Composite or one of the three imported authorities paired
-with Jwt metadata. Capture recipe v3 uses `AssistedSession` and reads
-`u-openid`, the raw `Authorization` value and the Cookie header from one
-`ucontent.unipus.cn` request snapshot. Its required outputs are one
-`ProviderCompositeSession` JSON object with `openid` and `jwt` fields, not two
-independently commit-able secrets, plus one purpose-bound `ProviderCookie`.
+with Jwt metadata. Capture recipe v4 uses `AssistedSession` and reads
+`u-openid`, the raw `Authorization` value, an optional current-donor `u-school`
+header and the Cookie header from one `ucontent.unipus.cn` request snapshot. Its
+required outputs are one `ProviderCompositeSession` JSON object with `openid`,
+`jwt` and, when observed, `school` fields—not independently commit-able
+secrets—plus one purpose-bound `ProviderCookie`. Ordered composite-source
+alternatives preserve the school header when present without making it a
+requirement for accounts whose authenticated request omits it.
 The declarative recipe starts at `https://ucontent.unipus.cn/`, polls at 500 ms,
 navigates only the `ucontent`/`ipub` HTTPS origins observed by the browser donor
 and reads request material only from `ucontent`. Browser
@@ -253,6 +256,23 @@ The independently implemented submission route does not report duration. HTTP
 success or 100% completion cannot satisfy any future duration-report acceptance
 gate.
 
+The rendered start route is constructed independently from session
+credentials. Frozen donor behavior and real upstream issue evidence establish
+the minimal current route as:
+
+```text
+https://ucontent.unipus.cn/_explorationpc_default/pc.html?cid={courseResourceId}
+```
+
+The Provider derives `cid` only after fresh Group detail rebinds its normalized
+Course-resource identity and rejects a disagreement between the Course, Group
+remote ID and normalized route. The URL validator requires HTTPS, the exact
+host/path, one `cid` query pair, no userinfo and no fragment. Cookie, JWT,
+openid and Capture material never enter the URL. Optional observed
+`theme`/`aitutorialId`/`cloudCurriculaId`/`source` parameters and the
+courseware hash are not guessed: the bounded DOM protocol selects the exact
+fresh Unit/Section/Micro/Task after the minimal Course page renders.
+
 ## Question, answer, submission and verification audit
 
 The frozen backend donors expose four distinct protocol stages:
@@ -309,7 +329,7 @@ to the exact Task and AnswerResolve attempt.
 Execution is advertised only when a fresh Group has a bounded positive
 `question_num` and either one homogeneous type or exactly one positional type
 per Question. The currently lossless mappings cover `single-choice`,
-`multichoice`, `short_answer`, `translation`, `revise-mistake`,
+`multichoice`, `short_answer`, `writing`, `translation`, `revise-mistake`,
 `material-banked-cloze`, `basic-scoop-content-dropdown`,
 `fillblank-scoop-dropdown`, `sequence` and `basic-scoop-content`. They preserve
 Text, FillBlank, Ordering and Matching semantics instead of flattening every
@@ -318,7 +338,18 @@ children becomes one Composite Question whose per-child choice kind and option
 set remain in sanitized metadata; its Provider-native Composite answer and
 execution plan preserve every child instead of flattening duplicate A/B option
 labels across parts. Immutable draft items remain in exact positions `1..n`.
-The donor's short-answer fallback accepts a bounded plain
+`video-popup` is a donor-audited media container rather than a fixed answer
+kind. The MIT donor reads its standard-answer children, while the current Rust
+donor dispatches on the freshly decrypted module `replyType`. Asterism therefore
+advertises the capability from the tree label but derives the actual Question
+as single choice, multiple choice, multi-child composite choice or ordered
+FillBlank text from the bounded module/child reply labels. Missing reply labels
+follow the current donor's `text-area` default; unknown labels, empty children
+and choice/text mixtures fail closed as protocol drift.
+The MIT donor's `writing` path reads the same bounded standard-answer analysis
+shape and emits one textual answer, so it maps losslessly to the shared
+ShortAnswer semantic instead of being dropped as an unknown type. The donor's
+short-answer fallback accepts a bounded plain
 `analysis` string, a top-level JSON `analysis` string or ordered child analysis
 rows when the standard `answer` document is absent; all three normalize to
 Text answers before leaving the zeroizing decrypted owner. Across choice,
@@ -332,24 +363,38 @@ constructed only inside the execution boundary and preserves module order,
 per-module answer children and globally flattened completion/judge order. Every
 body requires the bounded child/module `type` and child `replyType` facts
 retained by the answer-free parser, using the current donor's exact per-child
-judge labels instead of guessing them from the Group `base`. The single-module
-compatibility body retains the MIT minimal `0/0` version with those current
-labels; multi-module bodies use the current Rust donor's coherent minimal `1/1`
-plus content-derived judge shape
-rather than fabricating the MIT donor's client-authored score maps. A code-`0`,
+judge labels instead of guessing them from the Group `base`. `quesDatas`
+retains the independently observed cardinality-specific client versions:
+single-module compatibility uses `contextVersion=0`/`answerVersion=0`, while
+multi-module uses the current Rust donor's coherent minimal `1/1`. This is
+separate from `thirdPartyJudges[].versions`: the current donor reads the fresh
+Course `publish_version` and emits it as `course` with `answer=3`; the MIT
+compatibility builder independently evidences `course=0`/`answer=0`. Asterism
+normalizes a bounded positive numeric or numeric-string publish version into
+every fresh Group Task and uses the current pair when that fact is present. If
+the tree omits the field it uses only the legacy pair; it never fabricates a
+Course version or the MIT donor's client-authored score maps. A code-`0`,
 version-bearing response becomes an accepted receipt; `600001` and `600002`
 become typed retry state without a receipt, and the mutation is not implicitly
 repeated. A Network failure from the mutation boundary is likewise returned
 after one attempt so Core can retain verify-only recovery authority without
 replaying the POST.
 
+The MIT donor classifies `video-popup` as answer-bearing but its submit builder
+places that exact base in the study-mode set; the Apache donor independently
+uses the same rule. Consequently, Asterism preserves its complete `quesDatas`,
+completion and judge rows while emitting `submitType=2` when every Question in
+the plan is `video-popup`. Any mixed ordinary/video plan uses `submitType=1`.
+This answer-bearing type-2 path is distinct from the empty preset completion
+body and remains under ordinary SubmissionExecute/SubmissionVerify recovery.
+
 The native mutation client sends the account-bound JWT and annotator token.
-Capture recipe v3 additionally preserves the donor-proven browser Cookie. The
-native transport injects that optional Cookie only into `ucontent` requests,
-along with the exact account-bound `u-openid`/`x-csrftoken`, app/platform and
-Origin/Referer headers; it never forwards browser Cookie material to `uai` or
-`ucloud`. The donor's optional school header still needs a typed structured
-browser-session contract rather than being misclassified as an access token.
+Capture recipe v4 additionally preserves the donor-proven browser Cookie and
+optional `u-school` header. The native transport injects those optional values
+only into `ucontent` requests, along with the exact account-bound
+`u-openid`/`x-csrftoken`, app/platform and Origin/Referer headers; it never
+forwards Cookie or school material to `uai` or `ucloud`, and never
+misclassifies the school identifier as an access token.
 Captured fields remain purpose-bound, allowlisted and zeroized; the Provider
 stays Development until both native and fallback paths receive live validation.
 

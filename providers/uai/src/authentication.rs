@@ -24,15 +24,16 @@ pub(crate) const MAX_USERNAME_BYTES: usize = 512;
 pub(crate) const MAX_PASSWORD_BYTES: usize = 4 * 1_024;
 const MAX_JWT_BYTES: usize = 64 * 1_024;
 const MAX_OPEN_ID_BYTES: usize = 512;
+const MAX_SCHOOL_HEADER_BYTES: usize = 512;
 const MAX_SESSION_DOCUMENT_BYTES: usize = 96 * 1_024;
 pub(crate) const MAX_BROWSER_COOKIE_BYTES: usize = 64 * 1_024;
 const CAPTURE_START_URL: &str = "https://ucontent.unipus.cn/";
 const UCONTENT_ORIGIN: &str = "https://ucontent.unipus.cn";
 const IPUB_ORIGIN: &str = "https://ipub.unipus.cn";
 
-fn capture_recipe_v3() -> CaptureRecipe {
+fn capture_recipe_v4() -> CaptureRecipe {
     CaptureRecipe {
-        version: 3,
+        version: 4,
         start_url: CAPTURE_START_URL.to_owned(),
         navigation_origins: vec![UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()],
         read_origins: vec![UCONTENT_ORIGIN.to_owned()],
@@ -44,24 +45,14 @@ fn capture_recipe_v3() -> CaptureRecipe {
             CaptureCredentialOutput {
                 purpose: SecretPurpose::ProviderCompositeSession,
                 required: true,
-                sources: vec![CaptureValueSource::JsonObject {
-                    fields: vec![
-                        CaptureJsonField {
-                            name: "openid".to_owned(),
-                            sources: vec![CaptureScalarSource::RequestHeader {
-                                origin: UCONTENT_ORIGIN.to_owned(),
-                                name: "u-openid".to_owned(),
-                            }],
-                        },
-                        CaptureJsonField {
-                            name: "jwt".to_owned(),
-                            sources: vec![CaptureScalarSource::RequestHeader {
-                                origin: UCONTENT_ORIGIN.to_owned(),
-                                name: "Authorization".to_owned(),
-                            }],
-                        },
-                    ],
-                }],
+                sources: vec![
+                    CaptureValueSource::JsonObject {
+                        fields: captured_session_fields(true),
+                    },
+                    CaptureValueSource::JsonObject {
+                        fields: captured_session_fields(false),
+                    },
+                ],
             },
             CaptureCredentialOutput {
                 purpose: SecretPurpose::ProviderCookie,
@@ -72,6 +63,35 @@ fn capture_recipe_v3() -> CaptureRecipe {
             },
         ],
     }
+}
+
+fn captured_session_fields(include_school: bool) -> Vec<CaptureJsonField> {
+    let mut fields = vec![
+        CaptureJsonField {
+            name: "openid".to_owned(),
+            sources: vec![CaptureScalarSource::RequestHeader {
+                origin: UCONTENT_ORIGIN.to_owned(),
+                name: "u-openid".to_owned(),
+            }],
+        },
+        CaptureJsonField {
+            name: "jwt".to_owned(),
+            sources: vec![CaptureScalarSource::RequestHeader {
+                origin: UCONTENT_ORIGIN.to_owned(),
+                name: "Authorization".to_owned(),
+            }],
+        },
+    ];
+    if include_school {
+        fields.push(CaptureJsonField {
+            name: "school".to_owned(),
+            sources: vec![CaptureScalarSource::RequestHeader {
+                origin: UCONTENT_ORIGIN.to_owned(),
+                name: "u-school".to_owned(),
+            }],
+        });
+    }
+    fields
 }
 
 pub(crate) const fn is_imported_session_acquisition(acquisition: CredentialAcquisition) -> bool {
@@ -90,6 +110,7 @@ pub struct UaiJwtSession {
     authorization: SecretString,
     expires_at: Option<Timestamp>,
     browser_cookie: Option<SecretString>,
+    school_header: Option<SecretString>,
 }
 
 impl UaiJwtSession {
@@ -112,6 +133,7 @@ impl UaiJwtSession {
             authorization: SecretString::new(jwt),
             expires_at,
             browser_cookie: None,
+            school_header: None,
         })
     }
 
@@ -126,6 +148,20 @@ impl UaiJwtSession {
             return Err(invalid_credential_shape());
         }
         self.browser_cookie = cookie;
+        Ok(self)
+    }
+
+    pub(crate) fn attach_school_header(
+        mut self,
+        school_header: Option<SecretString>,
+    ) -> ProviderResult<Self> {
+        if school_header
+            .as_ref()
+            .is_some_and(|value| !valid_school_header(value.expose_secret()))
+        {
+            return Err(invalid_credential_shape());
+        }
+        self.school_header = school_header;
         Ok(self)
     }
 
@@ -144,6 +180,14 @@ impl UaiJwtSession {
             std::mem::take(&mut envelope.open_id),
             std::mem::take(&mut envelope.jwt),
         )
+        .and_then(|session| {
+            session.attach_school_header(
+                envelope
+                    .school
+                    .take()
+                    .map(asterism_secrets::SecretString::new),
+            )
+        })
     }
 
     /// Exposes the JWT only to the bounded native transport.
@@ -162,6 +206,12 @@ impl UaiJwtSession {
             .map(asterism_secrets::SecretString::expose_secret)
     }
 
+    pub(crate) fn expose_school_header(&self) -> Option<&str> {
+        self.school_header
+            .as_ref()
+            .map(asterism_secrets::SecretString::expose_secret)
+    }
+
     /// Returns the standard JWT expiry claim when it can be decoded. The
     /// claim is only a conservative lifecycle hint; native user-info remains
     /// the authority for session validity.
@@ -174,6 +224,10 @@ impl UaiJwtSession {
         let envelope = BorrowedSessionEnvelope {
             open_id: self.open_id.expose_secret(),
             jwt: self.authorization.expose_secret(),
+            school: self
+                .school_header
+                .as_ref()
+                .map(asterism_secrets::SecretString::expose_secret),
         };
         serde_json::to_vec(&envelope)
             .map(SecretValue::new)
@@ -197,6 +251,8 @@ struct BorrowedSessionEnvelope<'a> {
     #[serde(rename = "openid")]
     open_id: &'a str,
     jwt: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    school: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -205,12 +261,14 @@ struct StoredSessionEnvelope {
     #[serde(rename = "openid")]
     open_id: String,
     jwt: String,
+    school: Option<String>,
 }
 
 impl Drop for StoredSessionEnvelope {
     fn drop(&mut self) {
         self.open_id.zeroize();
         self.jwt.zeroize();
+        self.school.zeroize();
     }
 }
 
@@ -362,7 +420,7 @@ impl ProviderIdentity for UaiAuthentication {
 #[async_trait]
 impl AuthenticationCapability for UaiAuthentication {
     fn capture_recipe(&self) -> Option<CaptureRecipe> {
-        Some(capture_recipe_v3())
+        Some(capture_recipe_v4())
     }
 
     async fn begin_authentication(
@@ -393,6 +451,7 @@ impl AuthenticationCapability for UaiAuthentication {
                     .to_owned()
             }),
             expires_at: None,
+            external_oauth: None,
         })
     }
 
@@ -576,6 +635,14 @@ pub(crate) fn valid_browser_cookie(value: &str) -> bool {
         && !value.bytes().any(|byte| byte.is_ascii_control())
 }
 
+fn valid_school_header(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SCHOOL_HEADER_BYTES
+        && value.is_ascii()
+        && value.trim() == value
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
 fn jwt_expiry(value: &str) -> Option<Timestamp> {
     let payload = value.split('.').nth(1)?;
     let mut decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
@@ -742,9 +809,10 @@ mod tests {
     }
 
     #[test]
-    fn capture_recipe_builds_atomic_openid_jwt_and_cookie_outputs() {
-        let recipe = capture_recipe_v3();
+    fn capture_recipe_builds_atomic_openid_jwt_optional_school_and_cookie_outputs() {
+        let recipe = capture_recipe_v4();
         recipe.validate().unwrap();
+        assert_eq!(recipe.version, 4);
         assert_eq!(recipe.start_url, CAPTURE_START_URL);
         assert_eq!(recipe.auth_method, AuthMethod::AssistedSession);
         assert_eq!(recipe.session_kind, SessionKind::Jwt);
@@ -760,25 +828,36 @@ mod tests {
             SecretPurpose::ProviderCompositeSession
         );
         assert!(recipe.outputs[0].required);
+        let [
+            CaptureValueSource::JsonObject {
+                fields: with_school,
+            },
+            CaptureValueSource::JsonObject {
+                fields: without_school,
+            },
+        ] = recipe.outputs[0].sources.as_slice()
+        else {
+            panic!("UAI Capture composite output must have two JSON alternatives");
+        };
         assert_eq!(
-            recipe.outputs[0].sources,
-            [CaptureValueSource::JsonObject {
-                fields: vec![
-                    CaptureJsonField {
-                        name: "openid".to_owned(),
-                        sources: vec![CaptureScalarSource::RequestHeader {
-                            origin: UCONTENT_ORIGIN.to_owned(),
-                            name: "u-openid".to_owned(),
-                        }],
-                    },
-                    CaptureJsonField {
-                        name: "jwt".to_owned(),
-                        sources: vec![CaptureScalarSource::RequestHeader {
-                            origin: UCONTENT_ORIGIN.to_owned(),
-                            name: "Authorization".to_owned(),
-                        }],
-                    },
-                ],
+            with_school
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["openid", "jwt", "school"]
+        );
+        assert_eq!(
+            without_school
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["openid", "jwt"]
+        );
+        assert_eq!(
+            with_school[2].sources,
+            [CaptureScalarSource::RequestHeader {
+                origin: UCONTENT_ORIGIN.to_owned(),
+                name: "u-school".to_owned(),
             }]
         );
         assert_eq!(recipe.outputs[1].purpose, SecretPurpose::ProviderCookie);
@@ -788,6 +867,22 @@ mod tests {
             [CaptureValueSource::CookieHeader {
                 origin: UCONTENT_ORIGIN.to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn composite_session_accepts_bounded_optional_school_header_only() {
+        let session = UaiJwtSession::try_from_composite(
+            br#"{"openid":"synthetic-open-id","jwt":"SAFE.HEADER.SIGNATURE","school":"school-42"}"#,
+        )
+        .unwrap();
+        assert_eq!(session.expose_school_header(), Some("school-42"));
+        assert!(!format!("{session:?}").contains("school-42"));
+        assert!(
+            UaiJwtSession::try_from_composite(
+                br#"{"openid":"synthetic-open-id","jwt":"SAFE.HEADER.SIGNATURE","school":"bad\nschool"}"#,
+            )
+            .is_err()
         );
     }
 
@@ -989,6 +1084,10 @@ mod tests {
     fn captured_bundle() -> CredentialBundle {
         let mut bundle = imported_bundle(CredentialAcquisition::CaptureTool);
         bundle.auth_method = AuthMethod::AssistedSession;
+        bundle.fields[0].value = SecretValue::new(
+            br#"{"openid":"synthetic-open-id","jwt":"SAFE_HEADER.SAFE_PAYLOAD.SAFE_SIGNATURE","school":"school-42"}"#
+                .to_vec(),
+        );
         bundle.fields.push(CredentialField {
             purpose: SecretPurpose::ProviderCookie,
             value: SecretValue::new(b"session=synthetic; csrf=synthetic".to_vec()),

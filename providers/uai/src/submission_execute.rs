@@ -20,7 +20,7 @@ use crate::{
     metadata::development_metadata,
     runtime_settings::runtime_settings_schema,
     submission_build::composite_selections_bound,
-    task_type::{audited_question_kind, question_kind_matches_task_type},
+    task_type::{question_kind_matches_task_type, supports_audited_question_type},
 };
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
@@ -192,7 +192,7 @@ impl UaiSubmissionQuestionPlan {
             ));
         }
         let judges = submission_judges(item, answer_children.len())?;
-        if audited_question_kind(task_type).is_none() {
+        if !supports_audited_question_type(task_type) {
             return Err(unsupported(
                 "UAI submission execution does not support this Group task type",
             ));
@@ -392,12 +392,65 @@ impl Drop for UaiSubmissionQuestionPlan {
 /// on drop.
 pub struct UaiSubmissionPlan {
     questions: Vec<UaiSubmissionQuestionPlan>,
+    protocol_versions: UaiSubmissionProtocolVersions,
+}
+
+/// Donor-observed `thirdPartyJudges[].versions` protocol material. A fresh
+/// Course publish version selects the current donor's `answer=3` shape; an
+/// absent publish version retains the independently evidenced MIT `0/0`
+/// compatibility shape. Arbitrary mixed values are not accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UaiSubmissionProtocolVersions {
+    course: u64,
+    answer: u64,
+}
+
+impl UaiSubmissionProtocolVersions {
+    const fn legacy() -> Self {
+        Self {
+            course: 0,
+            answer: 0,
+        }
+    }
+
+    fn current(course_publish_version: u64) -> ProviderResult<Self> {
+        const MAX_SIGNED_64_BIT_VALUE: u64 = 9_223_372_036_854_775_807;
+
+        if (1..=MAX_SIGNED_64_BIT_VALUE).contains(&course_publish_version) {
+            Ok(Self {
+                course: course_publish_version,
+                answer: 3,
+            })
+        } else {
+            Err(remote_changed(
+                "UAI fresh Course publish version is invalid",
+            ))
+        }
+    }
+
+    #[must_use]
+    pub const fn course(&self) -> u64 {
+        self.course
+    }
+
+    #[must_use]
+    pub const fn answer(&self) -> u64 {
+        self.answer
+    }
 }
 
 impl UaiSubmissionPlan {
     pub(crate) fn from_draft(
         draft: &SubmissionDraft,
         task_types: &[String],
+    ) -> ProviderResult<Self> {
+        Self::from_draft_with_versions(draft, task_types, UaiSubmissionProtocolVersions::legacy())
+    }
+
+    fn from_draft_with_versions(
+        draft: &SubmissionDraft,
+        task_types: &[String],
+        protocol_versions: UaiSubmissionProtocolVersions,
     ) -> ProviderResult<Self> {
         if draft.items.is_empty() || draft.items.len() > MAX_QUESTIONS_PER_SUBMISSION {
             return Err(unsupported(
@@ -408,7 +461,7 @@ impl UaiSubmissionPlan {
             || (task_types.len() != 1 && task_types.len() != draft.items.len())
             || task_types
                 .iter()
-                .any(|value| audited_question_kind(value).is_none())
+                .any(|value| !supports_audited_question_type(value))
         {
             return Err(unsupported(
                 "UAI submission execution requires one shared or one-per-Question audited type",
@@ -426,12 +479,37 @@ impl UaiSubmissionPlan {
                 UaiSubmissionQuestionPlan::from_draft_item(item, task_type, expected_position)
             })
             .collect::<ProviderResult<Vec<_>>>()?;
-        Ok(Self { questions })
+        Ok(Self {
+            questions,
+            protocol_versions,
+        })
     }
 
     #[must_use]
     pub fn questions(&self) -> &[UaiSubmissionQuestionPlan] {
         &self.questions
+    }
+
+    #[must_use]
+    pub const fn protocol_versions(&self) -> UaiSubmissionProtocolVersions {
+        self.protocol_versions
+    }
+
+    /// Donor `video-popup` is answer-bearing but remains a study-mode submit.
+    /// Mixed ordinary/video groups use the ordinary submit type, matching the
+    /// donor rule that every question type must be a study mode before type 2
+    /// is selected.
+    #[must_use]
+    pub fn submit_type(&self) -> u8 {
+        if self
+            .questions
+            .iter()
+            .all(|question| question.task_type == "video-popup")
+        {
+            2
+        } else {
+            1
+        }
     }
 
     #[cfg(test)]
@@ -447,6 +525,7 @@ impl UaiSubmissionPlan {
             })
             .collect();
         Self {
+            protocol_versions: UaiSubmissionProtocolVersions::legacy(),
             questions: vec![UaiSubmissionQuestionPlan {
                 remote_question_id: remote_question_id.to_owned(),
                 task_type: task_type.to_owned(),
@@ -457,8 +536,22 @@ impl UaiSubmissionPlan {
     }
 
     #[cfg(test)]
+    pub(crate) fn fixture_current(
+        remote_question_id: &str,
+        task_type: &str,
+        answer_children: Vec<Vec<String>>,
+        course_publish_version: u64,
+    ) -> Self {
+        let mut plan = Self::fixture(remote_question_id, task_type, answer_children);
+        plan.protocol_versions = UaiSubmissionProtocolVersions::current(course_publish_version)
+            .expect("synthetic current Course publish version must be valid");
+        plan
+    }
+
+    #[cfg(test)]
     pub(crate) fn fixture_multiple(questions: Vec<UaiSubmissionFixture<'_>>) -> Self {
         Self {
+            protocol_versions: UaiSubmissionProtocolVersions::legacy(),
             questions: questions
                 .into_iter()
                 .map(|(remote_question_id, task_type, answer_children, judges)| {
@@ -641,9 +734,12 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
         }
 
         let detail = self.details.task_detail(context, remote_task_id).await?;
-        let task_types =
-            validate_fresh_detail(&detail, &identity, remote_task_id, draft.items.len())?;
-        let plan = UaiSubmissionPlan::from_draft(draft, &task_types)?;
+        let fresh = validate_fresh_detail(&detail, &identity, remote_task_id, draft.items.len())?;
+        let plan = UaiSubmissionPlan::from_draft_with_versions(
+            draft,
+            &fresh.task_types,
+            fresh.protocol_versions,
+        )?;
         let receipt = self
             .transport
             .submit(context, &identity.course_resource, &identity.group, &plan)
@@ -665,12 +761,17 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
     }
 }
 
+struct FreshSubmissionShape {
+    task_types: Vec<String>,
+    protocol_versions: UaiSubmissionProtocolVersions,
+}
+
 fn validate_fresh_detail(
     detail: &asterism_provider_api::RemoteTaskDetail,
     identity: &GroupIdentity,
     remote_task_id: &str,
     expected_question_count: usize,
-) -> ProviderResult<Vec<String>> {
+) -> ProviderResult<FreshSubmissionShape> {
     if detail.task.remote_id != remote_task_id
         || !detail
             .task
@@ -718,16 +819,32 @@ fn validate_fresh_detail(
             "UAI submission execution requires one shared or one-per-Question task type",
         ));
     }
-    task_types
+    let task_types = task_types
         .iter()
         .map(|value| {
             value
                 .as_str()
-                .filter(|value| audited_question_kind(value).is_some())
+                .filter(|value| supports_audited_question_type(value))
                 .map(str::to_owned)
                 .ok_or_else(|| unsupported("UAI fresh Group task type is not executable"))
         })
-        .collect()
+        .collect::<ProviderResult<Vec<_>>>()?;
+    let protocol_versions = match task.get("course_publish_version") {
+        None | Some(Value::Null) => UaiSubmissionProtocolVersions::legacy(),
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .ok_or_else(|| remote_changed("UAI fresh Course publish version is invalid"))
+            .and_then(UaiSubmissionProtocolVersions::current)?,
+        _ => {
+            return Err(remote_changed(
+                "UAI fresh Course publish version has an unsupported shape",
+            ));
+        }
+    };
+    Ok(FreshSubmissionShape {
+        task_types,
+        protocol_versions,
+    })
 }
 
 fn selections_exist(question: &asterism_domain::Question, values: &[String]) -> bool {
@@ -938,7 +1055,14 @@ mod tests {
     }
 
     type RecordedQuestion = (String, String, Vec<Vec<String>>);
-    type RecordedSubmission = (String, String, Vec<RecordedQuestion>);
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct RecordedSubmission {
+        course_resource_id: String,
+        group_id: String,
+        protocol_versions: UaiSubmissionProtocolVersions,
+        questions: Vec<RecordedQuestion>,
+    }
 
     #[async_trait]
     impl UaiSubmissionTransport for FixtureTransport {
@@ -949,10 +1073,12 @@ mod tests {
             group_id: &str,
             plan: &UaiSubmissionPlan,
         ) -> ProviderResult<SubmissionReceipt> {
-            self.calls.lock().unwrap().push((
-                course_resource_id.to_owned(),
-                group_id.to_owned(),
-                plan.questions()
+            self.calls.lock().unwrap().push(RecordedSubmission {
+                course_resource_id: course_resource_id.to_owned(),
+                group_id: group_id.to_owned(),
+                protocol_versions: plan.protocol_versions(),
+                questions: plan
+                    .questions()
                     .iter()
                     .map(|question| {
                         (
@@ -962,7 +1088,7 @@ mod tests {
                         )
                     })
                     .collect(),
-            ));
+            });
             Ok(SubmissionReceipt {
                 remote_status: "accepted".to_owned(),
                 message_sanitized: Some(
@@ -1089,15 +1215,19 @@ mod tests {
         assert_eq!(receipt.remote_status, "accepted");
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
-            &[(
-                "2001".to_owned(),
-                "group-1".to_owned(),
-                vec![(
+            &[RecordedSubmission {
+                course_resource_id: "2001".to_owned(),
+                group_id: "group-1".to_owned(),
+                protocol_versions: UaiSubmissionProtocolVersions {
+                    course: 123_290,
+                    answer: 3,
+                },
+                questions: vec![(
                     "1001".to_owned(),
                     "multichoice".to_owned(),
                     vec![vec!["A".to_owned(), "B".to_owned()]],
                 )],
-            )]
+            }]
         );
     }
 
@@ -1120,10 +1250,14 @@ mod tests {
         assert_eq!(receipt.remote_status, "accepted");
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
-            &[(
-                "2001".to_owned(),
-                "group-1".to_owned(),
-                vec![
+            &[RecordedSubmission {
+                course_resource_id: "2001".to_owned(),
+                group_id: "group-1".to_owned(),
+                protocol_versions: UaiSubmissionProtocolVersions {
+                    course: 123_290,
+                    answer: 3,
+                },
+                questions: vec![
                     (
                         "1001".to_owned(),
                         "multichoice".to_owned(),
@@ -1135,8 +1269,39 @@ mod tests {
                         vec![vec!["first".to_owned()], vec!["second".to_owned()]],
                     ),
                 ],
-            )]
+            }]
         );
+    }
+
+    #[tokio::test]
+    async fn donor_writing_draft_builds_a_bound_text_submission_plan() {
+        let mut draft = multiple_draft().await;
+        draft.items[1].question.metadata_sanitized["task_type"] = serde_json::json!("writing");
+        let plan = UaiSubmissionPlan::from_draft(
+            &draft,
+            &["multichoice".to_owned(), "writing".to_owned()],
+        )
+        .unwrap();
+
+        assert_eq!(plan.questions()[1].task_type(), "writing");
+        assert_eq!(
+            plan.questions()[1].answer_children(),
+            &[vec!["first".to_owned()], vec!["second".to_owned()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn donor_video_popup_draft_keeps_answer_children_and_study_submit_type() {
+        let mut draft = draft().await;
+        draft.items[0].question.metadata_sanitized["task_type"] = serde_json::json!("video-popup");
+        let plan = UaiSubmissionPlan::from_draft(&draft, &["video-popup".to_owned()]).unwrap();
+
+        assert_eq!(plan.questions()[0].task_type(), "video-popup");
+        assert_eq!(
+            plan.questions()[0].answer_children(),
+            &[vec!["A".to_owned(), "B".to_owned()]]
+        );
+        assert_eq!(plan.submit_type(), 2);
     }
 
     #[tokio::test]

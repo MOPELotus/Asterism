@@ -1041,6 +1041,26 @@ mod tests {
     }
 
     #[test]
+    fn donor_writing_analysis_resolves_as_bound_text() {
+        let task_id = TaskId::new();
+        let questions = parse_question_content(
+            MIXED_CONTENT,
+            "group:2001:unit-1:group-writing",
+            &["multichoice".to_owned(), "writing".to_owned()],
+            Some(2),
+        )
+        .unwrap()
+        .iter()
+        .map(|question| question.to_question(task_id).unwrap())
+        .collect::<Vec<_>>();
+        let candidates = parse_answer_candidates(MIXED_ANSWER, &questions).unwrap();
+        assert_eq!(
+            candidates[1].answer,
+            NormalizedAnswer::Texts(vec!["first".to_owned(), "second".to_owned()])
+        );
+    }
+
+    #[test]
     fn donor_fillblank_standard_answers_preserve_child_order() {
         let question = Question {
             id: asterism_domain::QuestionId::new(),
@@ -1061,6 +1081,34 @@ mod tests {
             r#"[{"id":"2001","answer":"{\"children\":[{\"answers\":[\"first\"]},{\"value\":[\"second\"]}]}"}]"#,
         );
         let candidates = parse_answer_candidates(&document, &[question]).unwrap();
+        assert_eq!(
+            candidates[0].answer,
+            NormalizedAnswer::Texts(vec!["first".to_owned(), "second".to_owned()])
+        );
+    }
+
+    #[test]
+    fn donor_video_popup_standard_answers_follow_the_content_derived_shape() {
+        let question = Question {
+            id: asterism_domain::QuestionId::new(),
+            task_id: TaskId::new(),
+            remote_question_id: Some("2102".to_owned()),
+            kind: QuestionKind::FillBlank,
+            stem: "Watch and complete".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: json!({
+                "schema": "uai.encrypted-question.v1",
+                "task_type": "video-popup",
+                "remote_task_id": "group:2001:unit-1:group-video-popup",
+            }),
+            position: 1,
+        };
+        let document = encrypted_answer_for_test(
+            r#"[{"id":"2102","answer":"{\"children\":[{\"answers\":[\"first\"]},{\"value\":[\"second\"]}]}"}]"#,
+        );
+        let candidates = parse_answer_candidates(&document, &[question]).unwrap();
+
         assert_eq!(
             candidates[0].answer,
             NormalizedAnswer::Texts(vec!["first".to_owned(), "second".to_owned()])

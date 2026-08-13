@@ -28,12 +28,24 @@ annotator-token contract across content, progress and submission routes;
 Asterism reimplements that bounded protocol without copying donor
 implementation code.
 
+The rendered entry-route audit also uses two corroborating behaviors without
+copying implementation code: the current Rust donor sends
+`https://ucontent.unipus.cn/_explorationpc_default/pc.html` as the browser
+Referer, and Duster-Cule/UnipusHelper issue `#26` records a real 2025 page with
+that path and `cid={CourseResourceId}` before optional UI parameters and a
+courseware hash. Asterism retains only that minimal stable HTTPS route; the
+fresh hierarchy protocol performs the exact Task selection after navigation.
+
 The current Rust donor additionally documents that a normal authenticated
-`ucontent` request carries both raw `Authorization` and `u-openid`. Capture
-recipe v1 maps those two same-snapshot headers into one strict
-`ProviderCompositeSession` JSON output under `AssistedSession`, with only the
-two browser-donor origins allowlisted. This is sufficient Provider-side recipe
-evidence; executing the declarative recipe remains shared Capture-helper work.
+`ucontent` request carries raw `Authorization`, `u-openid` and optionally
+`u-school`. Capture recipe v4 maps those same-snapshot headers plus the exact
+`ucontent` Cookie into a strict `ProviderCompositeSession` JSON output and a
+separately purpose-bound `ProviderCookie` under `AssistedSession`. Its ordered
+composite alternatives retain `u-school` when observed and remain complete
+when the optional header is absent; navigation stays limited to the two
+browser-donor origins and request reads to `ucontent`.
+This is sufficient Provider-side recipe evidence; executing the declarative
+recipe remains shared Capture-helper work.
 
 The 2026-08-10 Rust donor is the newest frozen execution reference. Its actual
 runner classifies fresh progress leaves with `tab_type=text|video` as mark-seen
@@ -48,14 +60,21 @@ For answer-bearing Groups, the current Rust and MIT donors both serialize one
 ordered `quesDatas` row per native module and flatten child completion/judge
 rows in the same order. The current Rust donor also solves every child inside a
 choice module independently, which is the evidence for Asterism's Composite
-Question mapping and per-child option/answer binding. Their client-authored auxiliary fields differ: the
-current donor uses a minimal `1/1` context/answer version pair, whereas the MIT
-multi builder uses `1/0` plus fabricated course-answer score maps. Asterism
-records the common ordered contract, uses the current minimal multi body with
-content-derived per-child judge labels, never copies or fabricates score maps,
-and retains Development verification.
+Question mapping and per-child option/answer binding. Their client-authored
+auxiliary fields differ: the current donor uses a minimal `1/1` context/answer
+version pair, whereas the MIT multi builder uses `1/0` plus fabricated
+course-answer score maps. Independently, the current donor reads Course
+`publish_version` from fresh progress and emits it as each judge's Course
+version with `answer=3`; the MIT builder evidences a legacy judge `0/0` pair.
+Asterism records the common ordered contract, uses the current minimal multi
+body and fresh publish-bound judge versions when supplied, retains the legacy
+judge pair only when that Course field is absent, never copies or fabricates
+score maps, and retains Development verification.
 
-The Apache donor audit additionally confirms the objective label set
+The MIT donor additionally implements `writing` by reading the standard-answer
+analysis as text and submitting it through the ordinary answer-bearing route;
+Asterism maps that exact semantic to ShortAnswer. The Apache donor audit
+additionally confirms the objective label set
 `material-banked-cloze`, `basic-scoop-content`,
 `basic-scoop-content-dropdown`, `fillblank-scoop-dropdown`, `sequence`,
 `translation` and `revise-mistake`, plus discussion topic/reply APIs,
@@ -63,3 +82,12 @@ exit-ticket/oral empty submission and CMS-token/object-store upload. These are
 implementation scope. Where the shared Core cannot yet express a reply draft,
 artifact handle or external resolver, that is a Core Gap rather than a Provider
 policy exclusion.
+
+The MIT donor also treats `video-popup` as an answer-bearing type, reads the
+first standard-answer value from every child and selects `submitType=2` because
+the exact base remains a study mode. The current Rust donor independently
+parses `video-popup` module/child `replyType`, solves its choice/text/banked
+children and serializes their exact judge labels. Asterism combines those
+compatible facts: content determines the typed answer shape, all answer rows
+are retained, and an all-`video-popup` plan uses type 2 rather than the empty
+preset body.

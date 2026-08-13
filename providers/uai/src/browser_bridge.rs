@@ -17,6 +17,7 @@ use crate::{
 
 const UCONTENT_ORIGIN: &str = "https://ucontent.unipus.cn";
 const IPUB_ORIGIN: &str = "https://ipub.unipus.cn";
+const EXPLORATION_PC_PATH: &str = "/_explorationpc_default/pc.html";
 const MAX_DISCOVERED_MICROS: u32 = 2_048;
 const MAX_TABS_PER_MICRO: u32 = 64;
 const MAX_TASKS_PER_TAB: u32 = 128;
@@ -44,6 +45,7 @@ pub enum UaiMenuDiscoveryStrategy {
 pub struct UaiBrowserResidencePlan {
     pub version: u32,
     pub target_remote_task_id: String,
+    pub start_url: String,
     pub target: UaiBrowserTarget,
     pub allowed_origins: Vec<String>,
     pub discovery_strategies: Vec<UaiMenuDiscoveryStrategy>,
@@ -120,6 +122,67 @@ impl UaiBrowserTarget {
             && self.section.as_deref().unwrap_or_default() == entry.section
             && self.micro == entry.micro
     }
+}
+
+/// Constructs the donor-observed rendered Course entry from a freshly
+/// rebound Group detail. The URL carries only the public Course-resource
+/// route identity; browser credentials remain in the isolated session.
+///
+/// The exact Group is selected after navigation through the plan's freshly
+/// bound Unit/Section/Micro/Task hierarchy. Optional client/theme/tutorial
+/// parameters are deliberately omitted because the audited page accepts the
+/// Course-resource `cid` as its minimal stable route.
+///
+/// # Errors
+///
+/// Returns a typed drift error when the fresh detail does not bind one exact
+/// Course-resource identity, or an internal error if the static route cannot
+/// be constructed safely.
+pub fn browser_start_url_from_detail(detail: &RemoteTaskDetail) -> ProviderResult<String> {
+    let task = detail
+        .normalized_detail
+        .get("task")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI BrowserBridge fresh detail has no normalized Task route",
+            )
+        })?;
+    let course_resource_id = task
+        .get("course_resource_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| is_route_component(value))
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI BrowserBridge fresh detail has no valid Course-resource route",
+            )
+        })?;
+    let expected_course_remote_id = format!("course-resource:{course_resource_id}");
+    if detail.task.course_remote_id.as_deref() != Some(expected_course_remote_id.as_str())
+        || !detail
+            .task
+            .remote_id
+            .starts_with(&format!("group:{course_resource_id}:"))
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "UAI BrowserBridge Course-resource route is foreign to its fresh Group",
+        ));
+    }
+
+    let mut url =
+        reqwest::Url::parse(&format!("{UCONTENT_ORIGIN}{EXPLORATION_PC_PATH}")).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "UAI BrowserBridge static start route is invalid",
+            )
+        })?;
+    url.query_pairs_mut().append_pair("cid", course_resource_id);
+    let start_url = url.to_string();
+    validate_start_url(&start_url)?;
+    Ok(start_url)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1129,6 +1192,42 @@ fn is_browser_page_handle(handle: &str) -> bool {
         })
 }
 
+fn is_route_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_BROWSER_BINDING_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn validate_start_url(value: &str) -> ProviderResult<()> {
+    let url = reqwest::Url::parse(value).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "UAI BrowserBridge start route is not a valid URL",
+        )
+    })?;
+    let query = url.query_pairs().collect::<Vec<_>>();
+    let valid = url.scheme() == "https"
+        && url.host_str() == Some("ucontent.unipus.cn")
+        && url.port().is_none()
+        && url.path() == EXPLORATION_PC_PATH
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && query.len() == 1
+        && query[0].0 == "cid"
+        && is_route_component(query[0].1.as_ref());
+    if valid {
+        Ok(())
+    } else {
+        Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "UAI BrowserBridge start route is not the bounded donor route",
+        ))
+    }
+}
+
 impl UaiBrowserResidencePlan {
     /// Validates one complete bounded donor-derived plan.
     ///
@@ -1138,6 +1237,7 @@ impl UaiBrowserResidencePlan {
     /// origin or message-security invariant is weakened.
     pub fn validate(&self) -> ProviderResult<()> {
         self.target.validate()?;
+        validate_start_url(&self.start_url)?;
         let valid = self.version == 1
             && self.target_remote_task_id.starts_with("group:")
             && self.allowed_origins == [UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()]
@@ -1333,6 +1433,7 @@ fn residence_plan_from_detail(
     let plan = UaiBrowserResidencePlan {
         version: 1,
         target_remote_task_id: detail.task.remote_id.clone(),
+        start_url: browser_start_url_from_detail(detail)?,
         target: UaiBrowserTarget::from_detail(detail)?,
         allowed_origins: vec![UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()],
         discovery_strategies: vec![
@@ -1406,6 +1507,7 @@ impl BrowserBridgeCapability for UaiBrowserBridge {
         }
 
         Ok(BrowserSessionSpec {
+            version: 1,
             isolation_key: isolation_key(context, remote_task_id),
             allowed_origins: vec![UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()],
             // The audited donor depends on a real rendered page, DOM events,
@@ -1600,6 +1702,12 @@ mod tests {
 
         assert_eq!(plan.residence_seconds, 1_200);
         assert!(plan.play_video);
+        assert_eq!(
+            plan.start_url,
+            "https://ucontent.unipus.cn/_explorationpc_default/pc.html?cid=2001"
+        );
+        assert!(!plan.start_url.contains("openid"));
+        assert!(!plan.start_url.contains("token"));
         assert_eq!(plan.discovery_strategies.len(), 4);
         assert_eq!(plan.tab_selectors.len(), 2);
         assert_eq!(plan.max_video_seconds, 1_800);
@@ -1616,6 +1724,27 @@ mod tests {
         let mut unsafe_plan = plan;
         unsafe_plan.allowed_origins.pop();
         assert!(unsafe_plan.validate().is_err());
+    }
+
+    #[test]
+    fn start_url_is_fresh_course_bound_https_and_secret_free() {
+        let detail = fixture_remote_detail("group:2001:unit-1:group-1", true);
+        let url = browser_start_url_from_detail(&detail).unwrap();
+        assert_eq!(
+            url,
+            "https://ucontent.unipus.cn/_explorationpc_default/pc.html?cid=2001"
+        );
+
+        let mut foreign = detail;
+        foreign.task.course_remote_id = Some("course-resource:2002".to_owned());
+        assert!(browser_start_url_from_detail(&foreign).is_err());
+
+        let unsafe_url = url.replace("cid=2001", "cid=2001&Authorization=secret");
+        assert!(validate_start_url(&unsafe_url).is_err());
+        assert!(
+            validate_start_url("http://ucontent.unipus.cn/_explorationpc_default/pc.html?cid=2001")
+                .is_err()
+        );
     }
 
     #[test]
