@@ -15,6 +15,7 @@ fixtures/providers/uai/
   courses/resource-detail.json
   tasks/tree-mixed.json
   progress/unit-mixed.json
+  progress/course-unit-summary.json
   duration/unit-mixed.json
   questions/content-multiple-choice.json
   questions/content-mixed-simple.json
@@ -33,7 +34,8 @@ Unit/Section/Micro/Group identity separation, bounded task type/question count,
 numeric and numeric-string Course publish versions, versioned Task fingerprints,
 identity-bound per-Unit flags, required/minimum-score/statistic-mode strategy,
 strict bounded availability windows, raw progress duration and bounded
-text/video tab type, and exact
+text/video tab type, independent Course/Unit aggregate finish-progress,
+learning-seconds, score and required facts, and exact
 CourseResource/Unit/Group-bound learning seconds. Inline negative tests cover
 malformed/extra composite
 fields, duplicate
@@ -102,6 +104,7 @@ field names, placeholder identities and response/result codes.
 - Unknown tree roles fail closed.
 - Progress duration remains untyped and independent from completion.
 - Study-record duration seconds require one exact unique CourseResource/Unit/Group binding.
+- Aggregate progress requires an exact CourseResource and fresh app-user binding, one bounded Course total and unique `role=unit` rows; out-of-range/negative metrics, duplicate Units, foreign users and invalid required/role shapes fail closed while personal and path noise is discarded.
 - Content and standard answers remain independent fresh documents; neither may be reused as submission evidence.
 - Nested content encoded as JSON text or supplied as an inline object normalizes identically under one size/zeroization boundary; rich `text`/`pcText` and per-component stems are preserved without HTML markup.
 - Short-answer standard-answer fallback accepts bounded plain analysis text, a top-level JSON analysis string and ordered child analysis rows, but never arbitrary JSON shapes.

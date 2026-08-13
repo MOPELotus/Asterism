@@ -18,15 +18,15 @@ use reqwest::{
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    UaiAnswerDocument, UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport,
-    UaiDiscussionBinding, UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport,
-    UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument, UaiJwtSession,
-    UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiProgressDocument,
-    UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport, UaiSessionResolver,
-    UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
-    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
-    UaiUploadIntent, UaiUploadTransport, UaiUploadedArtifact, UaiVerificationDocument,
-    UaiVerificationTransport,
+    UaiAggregateProgressDocument, UaiAggregateProgressTransport, UaiAnswerDocument,
+    UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport, UaiDiscussionBinding,
+    UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument,
+    UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult,
+    UaiPresetCompletionTransport, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
+    UaiQuestionTransport, UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument,
+    UaiSubmissionTransport, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+    UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadTransport, UaiUploadedArtifact,
+    UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_discussion_reply_page_request, build_discussion_reply_request,
     build_discussion_topic_request, build_upload_multipart,
@@ -288,6 +288,31 @@ impl NativeUaiInventoryTransport {
             )
             .await?;
         UaiDurationDocument::try_new(document)
+    }
+
+    async fn fetch_aggregate_progress_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+    ) -> ProviderResult<UaiAggregateProgressDocument> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "aggregate-progress Course-resource ID",
+        )?;
+        let mut user_info = self
+            .send_get_with_session(session, static_url(USER_INFO_URL)?, ResponseRoute::UserInfo)
+            .await?;
+        let identity = parse_user_identity(user_info.as_bytes());
+        user_info.zeroize();
+        let identity = identity?;
+        let document = self
+            .send_get_with_session(
+                session,
+                aggregate_progress_url(&course_resource_id, identity.app_user_id())?,
+                ResponseRoute::AggregateProgress,
+            )
+            .await?;
+        UaiAggregateProgressDocument::try_new(course_resource_id, identity.app_user_id(), document)
     }
 
     async fn fetch_question_content_with_session(
@@ -968,6 +993,28 @@ impl UaiProgressTransport for NativeUaiInventoryTransport {
 }
 
 #[async_trait]
+impl UaiAggregateProgressTransport for NativeUaiInventoryTransport {
+    async fn fetch_aggregate_progress(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+    ) -> ProviderResult<UaiAggregateProgressDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_aggregate_progress_with_session(&session, course_resource_id)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_aggregate_progress_with_session(&session, course_resource_id)
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
 impl UaiDurationTransport for NativeUaiInventoryTransport {
     async fn fetch_duration(
         &self,
@@ -1372,6 +1419,7 @@ enum ResponseRoute {
     Progress,
     UserInfo,
     Duration,
+    AggregateProgress,
     QuestionContent,
     StandardAnswer,
     Submission,
@@ -1392,6 +1440,7 @@ impl ResponseRoute {
             Self::Progress => "Task progress",
             Self::UserInfo => "User info",
             Self::Duration => "Task duration",
+            Self::AggregateProgress => "Course and Unit aggregate progress",
             Self::QuestionContent => "Question content",
             Self::StandardAnswer => "standard answer",
             Self::Submission => "submission",
@@ -1408,7 +1457,7 @@ impl ResponseRoute {
         match self {
             Self::Progress => MAX_PROGRESS_RESPONSE_BYTES,
             Self::UserInfo => MAX_USER_INFO_RESPONSE_BYTES,
-            Self::Duration => MAX_DURATION_RESPONSE_BYTES,
+            Self::Duration | Self::AggregateProgress => MAX_DURATION_RESPONSE_BYTES,
             Self::QuestionContent => MAX_QUESTION_RESPONSE_BYTES,
             Self::StandardAnswer => MAX_ANSWER_RESPONSE_BYTES,
             Self::Submission => MAX_SUBMISSION_RESPONSE_BYTES,
@@ -1599,6 +1648,23 @@ fn course_progress_url(
             "default",
         ],
     )
+}
+
+fn aggregate_progress_url(course_resource_id: &str, app_user_id: &str) -> ProviderResult<Url> {
+    let mut url = route_url(
+        UAI_ORIGIN,
+        &[
+            "api",
+            "tla",
+            "learningDetail",
+            "studyRecord",
+            "totalAndUnitSituation",
+        ],
+    )?;
+    url.query_pairs_mut()
+        .append_pair("id", course_resource_id)
+        .append_pair("appUserId", app_user_id);
+    Ok(url)
 }
 
 fn question_content_url(course_instance_id: &str, group_id: &str) -> ProviderResult<Url> {
@@ -2203,6 +2269,10 @@ mod tests {
             "https://ucontent.unipus.cn/course/api/v2/course_progress/course-v2:synthetic+rw/unit-1/open-id/default"
         );
         assert_eq!(
+            aggregate_progress_url("2001", "app-42").unwrap().as_str(),
+            "https://uai.unipus.cn/api/tla/learningDetail/studyRecord/totalAndUnitSituation?id=2001&appUserId=app-42"
+        );
+        assert_eq!(
             question_content_url("course-v2:synthetic+rw/guard", "group/1")
                 .unwrap()
                 .as_str(),
@@ -2246,6 +2316,10 @@ mod tests {
         );
         assert_eq!(ResponseRoute::UserInfo.maximum_bytes(), 64 * 1_024);
         assert_eq!(ResponseRoute::Duration.maximum_bytes(), 1_024 * 1_024);
+        assert_eq!(
+            ResponseRoute::AggregateProgress.maximum_bytes(),
+            1_024 * 1_024
+        );
     }
 
     #[test]

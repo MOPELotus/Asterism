@@ -7,6 +7,7 @@
 //! verify-only recovery for pure-study preset completion over the shared
 //! network policy. It makes no claim of live compatibility.
 
+mod aggregate_progress;
 mod annotator;
 mod answer;
 mod authentication;
@@ -34,6 +35,10 @@ mod task_type;
 mod upload;
 mod user_identity;
 
+pub use aggregate_progress::{
+    UaiAggregateProgressDocument, UaiAggregateProgressMetric, UaiAggregateProgressTransport,
+    UaiCourseAggregateProgress, UaiUnitAggregateProgress, parse_course_aggregate_progress,
+};
 pub use answer::{
     UaiAnswerDocument, UaiAnswerDocuments, UaiAnswerResolve, UaiAnswerTransport,
     parse_answer_candidates,

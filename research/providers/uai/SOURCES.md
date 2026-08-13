@@ -30,6 +30,20 @@ annotator-token contract across content, progress and submission routes;
 Asterism reimplements that bounded protocol without copying donor
 implementation code.
 
+The same MIT donor treats
+`studyRecord/totalAndUnitSituation?id={CourseResourceId}&appUserId={appUserId}`
+as a separate Course/Unit read. The response carries Course total and Unit
+finish progress, seconds, score and required state; Asterism therefore keeps a
+dedicated Provider-private snapshot instead of collapsing those aggregates
+into Task progress. Shared exposure remains a Core contract item.
+
+On 2026-08-13, all four UAI source checkouts were fetched with tags and compared
+against their default remote branches. Apache `bef0d29155ce`, MIT
+`590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and current Rust
+`40ead69c7dabf` were each at zero divergence; no new default-branch or tag delta
+required an incremental port at this checkpoint. These revisions remain
+reproducible audit snapshots, not permanent update ceilings.
+
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
 `https://ucontent.unipus.cn/_explorationpc_default/pc.html` as the browser

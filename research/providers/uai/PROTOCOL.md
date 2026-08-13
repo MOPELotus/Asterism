@@ -194,6 +194,20 @@ unsigned duration. Unknown roles, duplicate IDs, missing/negative/overflow
 duration and every identity mismatch fail closed. An Authentication failure
 restarts the whole user-info + duration pair once after atomic renewal.
 
+`totalAndUnitSituation` is also a first-class donor read rather than merely an
+internal skip optimization. The Provider-private native transport first reads
+fresh bounded user info, then calls the exact CourseResource/app-user route and
+binds the response's `value.user.appUserId` back to that request. Its strict
+parser preserves the Course `totalDetail` and unique `role=unit` rows as
+separate aggregates: finish progress and score are finite percentages in
+`0..=100`, duration is an unsigned donor-documented second count, and each Unit
+retains its required flag plus bounded ID/caption/name. Duplicate IDs, foreign
+users, unknown roles and malformed metrics fail closed; real names, student
+codes, images and route paths are dropped and the response owner is zeroized.
+The current shared API has only Task-scoped progress/duration, so exposing this
+Course/Unit snapshot remains an accepted independent Core capability gap rather
+than a lossy mapping.
+
 The separate progress response can also contain numeric `duration`. Asterism
 retains it only as `duration_raw`; it never populates `duration_seconds` from
 that field.
