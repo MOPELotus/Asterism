@@ -244,8 +244,9 @@ authorized ResourceExecution step. The historical modes record every
 well-formed integer receipt and continue their donor sequence. Missing,
 string, malformed, authentication or network outcomes remain ambiguous and
 stop with no replay or later-mutation authority.
-None of these duration modes calls `setscoinfo`; completion remains a separate
-capability.
+These duration modes keep their heartbeat/final-save wire lifecycle separate
+from the completion capability's `setscoinfo` boundary; both capabilities
+remain independently available and auditable.
 
 After finalization, a fresh CMI read must preserve completion, progress, score
 and success status with the same explicit field presence while changing at

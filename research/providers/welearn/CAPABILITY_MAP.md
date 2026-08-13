@@ -66,8 +66,9 @@ keep plus complete-interval keeps and a preserved save; current Fanyuchang
 always starts and sends exactly one client-counter keep per second without a
 duration final save; Auto always starts, sends delayed implicit 60-second keeps
 and a bare save. Every mode preserves completion, progress, score and success
-status, does not call `setscoinfo`, and re-reads CMI before returning a verified
-outcome. Missing baseline/readback preservation fields fail closed
+status, keeps its duration wire mutations independent from the completion
+`setscoinfo` boundary, and re-reads CMI before returning a verified outcome.
+Missing baseline/readback preservation fields fail closed
 instead of becoming synthetic defaults. Authentication before mutation may
 renew once; no mutation is replayed after an authentication failure.
 DurationRead remains independent from this write lifecycle and never starts a
