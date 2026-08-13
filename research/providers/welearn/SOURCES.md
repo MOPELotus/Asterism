@@ -29,9 +29,9 @@ was also fetched; it resolves to older commit `5d1df60cb007` (2026-05-24), not a
 newer capability surface than the audited default head, and is the repository's
 only GitHub release. YZBRH and Auto_WeLearn expose neither fetched tags nor
 GitHub releases. A second `ls-remote`/release check after the endpoint port
-returned the same heads; the subsequent duration-wire checkpoint check did as
-well. These revisions remain reproducible snapshots; future checkpoints must
-fetch again rather than treating them as permanent bounds.
+returned the same heads; the subsequent duration-wire and browser-auth family
+checks did as well. These revisions remain reproducible snapshots; future
+checkpoints must fetch again rather than treating them as permanent bounds.
 
 ## Source selection
 
@@ -64,7 +64,9 @@ task Referer for exercise completion. The current route appends `?uid=...` to
 `/Ajax/SCO.aspx`; both historical donors use the plain endpoint. These are
 explicit profiles rather than one merged superset request. They
 also detect authentication challenges but contain no reliable automated solver
-or task BrowserBridge implementation to port. Asterism still provides Capture
-recipe v4 for an AssistedSession Cookie obtained in browser context and
-validates it natively. Automated challenge behavior remains evidence-gated, not
-policy-excluded; later donor/live evidence reopens the map.
+or task BrowserBridge implementation to port. Asterism provides immutable
+Capture v4/v5 alternatives for AssistedSession and ExternalBrowserOauth Cookies
+obtained in browser context and validates both natively. The external method
+records the flow family without inventing a callback-to-Cookie exchange or a
+QQ/WeChat/Apple discriminator. Automated challenge behavior remains
+evidence-gated, not policy-excluded; later donor/live evidence reopens the map.

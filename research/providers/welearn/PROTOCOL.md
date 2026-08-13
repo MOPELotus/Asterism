@@ -22,20 +22,23 @@ POST https://sso.sflep.com/idsvr/account/login
 The returned redirect must be followed to complete Cookie establishment.
 Authentication responses may signal image captcha or SMS verification. Those
 states currently become typed `HumanRequired` and automated password retry must
-stop. Capture recipe v4 exposes a first-batch AssistedSession path: a local
-Capture/browser helper may submit the resulting bounded Cookie, which the
-Provider validates against the authenticated Course endpoint before Core stores
-it. The current donor's browser implementation posts image-captcha `icode` and
+stop. Capture recipe v4 exposes `AssistedSession`, while recipe v5 separately
+records `ExternalBrowserOauth`; both let a local Capture/browser helper submit
+the resulting bounded Cookie, which the Provider validates against the
+authenticated Course endpoint before Core stores it. The current donor's
+browser implementation posts image-captcha `icode` and
 `sign`, or SMS `vcode` and `vcToken`, from the interactive SSO page. Those
 same-origin manual challenge paths can finish under the current recipe. The
 page also exposes dynamically supplied QQ, WeChat and Apple third-party login
 URLs. A 2026-08-13 read-only audit of the public SSO bundle and unauthenticated
 challenge redirects established the exact first-hop HTTPS origins
-`graph.qq.com`, `open.weixin.qq.com` and `appleid.apple.com`; recipe v4
-allowlists them for top-level navigation while restricting credential reads to
-the WELearn origin. Authenticated callbacks have not been live
-validated, and the current shared recipe reports the generic AssistedSession
-method rather than which browser choice the user made. The donors contain no
+`graph.qq.com`, `open.weixin.qq.com` and `appleid.apple.com`; both recipes
+allowlist them for top-level navigation while restricting credential reads to
+the WELearn origin. Recipe v5 records the external-provider path without
+claiming which of QQ/WeChat/Apple was selected because Capture has no evidenced
+discriminator. Authenticated callbacks have not been live validated, and no
+callback URL is treated as independently exchangeable for a Cookie. The donors
+contain no
 reliable headless solver protocol, so native Password stops as typed
 HumanRequired when challenged instead of guessing requests.
 
@@ -44,7 +47,7 @@ The public prelogin response itself sets anonymous `acw_tc` and
 Cookie header is not an authentication readiness signal: automatic Capture can
 otherwise submit before the user completes SSO. A 2026-08-13 public no-account
 check proved an anonymous prelogin session can issue the Course-list request
-and receive `200 text/html` login script. Recipe v4 therefore requires the
+and receive `200 text/html` login script. Both recipes therefore require the
 current loader's exact `GET /ajax/authCourse.aspx?action=gmc` response to be
 `200 application/json` while collecting the whole WELearn Cookie header. The
 Capture helper enforces this response gate, and native Course parsing remains
@@ -65,7 +68,10 @@ Set-Cookie values are collected in a bounded redacted jar. Only `sflep.com`,
 matching are checked before each request, and deletion removes any retained
 value. The final Cookie is accepted only after the Course-list endpoint returns
 a parseable authenticated response. Password, ImportedCookie and
-Capture-assisted Cookie continue through the common Authentication capability.
+Capture-assisted and external-browser-OAuth Cookies continue through the common
+Authentication capability. The immutable v4/v5 recipe alternatives both emit
+only the final WELearn Cookie; Core freezes one acquisition method and never
+combines outputs. Captcha fields, SMS tokens and OAuth state remain browser-local.
 Stored Cookie reads now use only
 Core's provider-scoped resolver and require an exact account, requested secret
 reference, Cookie purpose, supported session kind and unexpired metadata before
@@ -405,7 +411,7 @@ scheduler or silently recompute the distribution after a crash.
   by the public SSO redirects. No credential source reads their headers,
   storage or Cookies; only the final WELearn Cookie is emitted.
 - Anonymous prelogin Cookies never satisfy Capture readiness: their exact
-  Course-list request returns `200 text/html`, while recipe v4 requires `200
+  Course-list request returns `200 text/html`, while both recipes require `200
   application/json` under the current loader. Native Course parsing validates
   the resulting Cookie again before storage.
 - Course percentage and SCO duration are remote observations, not proof of a

@@ -171,8 +171,9 @@ only structural field names, response codes and bounded placeholder shapes.
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility
   observation before mutation; it never rewrites `NotOpen` as an open state.
-- Capture-assisted Cookie credentials must originate from CaptureTool or a
-  BrowserExtension and pass the same authenticated Course-read validation.
+- Capture-assisted and external-browser-OAuth Cookie credentials must originate
+  from CaptureTool or a BrowserExtension and pass the same authenticated
+  Course-read validation; their immutable recipe versions/methods stay distinct.
 - The Capture recipe must keep both WELearn and SSO origins explicit, start at
   the audited prelogin route, and emit only the final WELearn Cookie; browser
   captcha/SMS route material never enters fixtures or credentials. QQ, WeChat

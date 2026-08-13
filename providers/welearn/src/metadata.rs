@@ -44,6 +44,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             AuthMethod::Password,
             AuthMethod::ImportedCookie,
             AuthMethod::AssistedSession,
+            AuthMethod::ExternalBrowserOauth,
         ]),
         session_kinds: BTreeSet::from([
             SessionKind::Cookie,
@@ -82,6 +83,7 @@ mod tests {
                 AuthMethod::Password,
                 AuthMethod::ImportedCookie,
                 AuthMethod::AssistedSession,
+                AuthMethod::ExternalBrowserOauth,
             ])
         );
         assert_eq!(metadata.capture_recipe_version, Some(4));

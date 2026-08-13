@@ -2,7 +2,7 @@
 
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
-| Authentication | Fanyuchang 2026 | Reference | Native Password/OIDC, ImportedCookie and Capture-assisted Cookie validation are offline/native-boundary covered; scoped redirects/Cookies and typed captcha/SMS outcomes; live pending |
+| Authentication | Fanyuchang 2026 | Reference | Native Password/OIDC, ImportedCookie, Capture-assisted Cookie and external-browser-OAuth Cookie validation are offline/native-boundary covered; immutable Capture v4/v5 alternatives distinguish assisted versus external-provider acquisition while keeping captcha/SMS/OAuth state browser-local; scoped redirects/Cookies and typed captcha/SMS outcomes; live pending |
 | Stored session validation | Fanyuchang 2026 | Reference | Core-scoped Cookie resolution, authenticated Course-list validation and atomic Password/Composite renewal are native-boundary covered; live pending |
 | CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Native authenticated `authCourse.aspx?action=gmc` read is implemented behind shared NetworkProfile; live pending |
 | TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Native Course page → POST `courseunits` with GET compatibility only after explicit 404/405 → one `scoLeaves` response per Unit is implemented all-or-nothing; live pending |
@@ -13,7 +13,7 @@
 | DurationReport | YZBRH + Fanyuchang 2026 + Auto_WeLearn | Reference | Native fresh-read → donor-specific start → complete preservation baseline → bounded real-time heartbeat → donor-specific finalization → strict fresh-read lifecycle is offline/native-boundary covered. Settings expose YZBRH preserve-fresh, current donor client-counter and Auto implicit-server wire plans plus fixed/bounded-random duration; endpoint/start payload, keep fields, YZBRH fixed request gaps and receipt-continuation behavior follow the selected evidenced mode; fresh verification remains authoritative and live validation is pending |
 | Assessment/exercise behavior | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Audited donors do not expose Question/Answer endpoints; their exercise behavior is the direct SCO completion/progress/score preset mapped to `ResourceExecution`, now implemented offline/native-boundary; audit remains open to new evidence |
 | Result verification | Fresh Course/SCO/CMI reads | FromScratch | DurationReport verifies preservation plus changed time; ResourceExecution implements goal-bound `verify_execution` over the frozen settings and exact completion/progress/score tuple, so Core recovery fresh-reads without replay |
-| BrowserBridge / Capture | Fanyuchang 2026 Cookie mode + SSO browser implementation + 2026-08-13 public login audit | Reference | Capture recipe v4 separates five exact navigation origins from the sole WELearn credential-read origin, and requires the current loader's exact `GET /ajax/authCourse.aspx?action=gmc` to receive `200 application/json` before resolving the Cookie. The helper enforces that response gate, so the audited anonymous `200 text/html` login script cannot complete Capture; native Course parsing remains the final authority. Manual captcha/SMS navigation is evidenced; OAuth callback/live validation and accurate per-flow acquisition-method reporting remain pending |
+| BrowserBridge / Capture | Fanyuchang 2026 Cookie mode + SSO browser implementation + 2026-08-13 public login audit | Reference | Capture recipes v4/v5 separate five exact navigation origins from the sole WELearn credential-read origin, distinguish assisted versus external-browser-OAuth acquisition, and require the current loader's exact `GET /ajax/authCourse.aspx?action=gmc` to receive `200 application/json` before resolving the Cookie. The helper enforces that response gate, so the audited anonymous `200 text/html` login script cannot complete Capture; native Course parsing remains final authority. Manual captcha/SMS and QQ/WeChat/Apple navigation are evidenced; exact third-party choice and callback live validation remain pending, while no Task BrowserBridge behavior exists in the donors |
 | Unit/all-task bulk orchestration | Fanyuchang 2026 + Auto_WeLearn | Reference | Provider primitives and Unit observations exist, but shared Core/API still need first-class Unit/selection scopes and a durable batch plan. Auto_WeLearn additionally allocates a selected-range duration budget across visible SCOs; this remains an explicit shared orchestration gap, not a reason to stop the Provider |
 
 ## Implementation checkpoint
@@ -33,7 +33,7 @@ completion boundary. Current implemented code covers:
    `ResourceExecution`, including fixed and bounded-random score configuration.
 
 The crate now provides this parser boundary and synthetic fixtures. It also
-implements Password/ImportedCookie/AssistedSession orchestration behind
+implements Password/ImportedCookie/AssistedSession/ExternalBrowserOauth orchestration behind
 injected transport and stored-session resolver contracts. Metadata remains
 `Development` and advertises Authentication, CourseInventory, TaskInventory,
 TaskDetail, TaskProgressRead, DurationRead, ResourceExecution,

@@ -152,6 +152,38 @@ impl WellearnAuthentication {
         }
         Ok(())
     }
+
+    fn capture_recipe_for(version: u32, auth_method: AuthMethod) -> CaptureRecipe {
+        CaptureRecipe {
+            version,
+            start_url: WELEARN_CAPTURE_START_URL.to_owned(),
+            navigation_origins: vec![
+                WELEARN_ORIGIN.to_owned(),
+                SSO_ORIGIN.to_owned(),
+                QQ_OAUTH_ORIGIN.to_owned(),
+                WECHAT_OAUTH_ORIGIN.to_owned(),
+                APPLE_OAUTH_ORIGIN.to_owned(),
+            ],
+            read_origins: vec![WELEARN_ORIGIN.to_owned()],
+            poll_interval_millis: 500,
+            auth_method,
+            session_kind: SessionKind::Cookie,
+            readiness: CaptureReadiness::ResponseObserved {
+                origin: WELEARN_ORIGIN.to_owned(),
+                method: "GET".to_owned(),
+                path_and_query: "/ajax/authCourse.aspx?action=gmc".to_owned(),
+                status: 200,
+                mime_type: "application/json".to_owned(),
+            },
+            outputs: vec![CaptureCredentialOutput {
+                purpose: SecretPurpose::ProviderCookie,
+                required: true,
+                sources: vec![CaptureValueSource::CookieHeader {
+                    origin: WELEARN_ORIGIN.to_owned(),
+                }],
+            }],
+        }
+    }
 }
 
 impl fmt::Debug for WellearnAuthentication {
@@ -174,35 +206,14 @@ impl ProviderIdentity for WellearnAuthentication {
 #[async_trait]
 impl AuthenticationCapability for WellearnAuthentication {
     fn capture_recipe(&self) -> Option<CaptureRecipe> {
-        Some(CaptureRecipe {
-            version: 4,
-            start_url: WELEARN_CAPTURE_START_URL.to_owned(),
-            navigation_origins: vec![
-                WELEARN_ORIGIN.to_owned(),
-                SSO_ORIGIN.to_owned(),
-                QQ_OAUTH_ORIGIN.to_owned(),
-                WECHAT_OAUTH_ORIGIN.to_owned(),
-                APPLE_OAUTH_ORIGIN.to_owned(),
-            ],
-            read_origins: vec![WELEARN_ORIGIN.to_owned()],
-            poll_interval_millis: 500,
-            auth_method: AuthMethod::AssistedSession,
-            session_kind: SessionKind::Cookie,
-            readiness: CaptureReadiness::ResponseObserved {
-                origin: WELEARN_ORIGIN.to_owned(),
-                method: "GET".to_owned(),
-                path_and_query: "/ajax/authCourse.aspx?action=gmc".to_owned(),
-                status: 200,
-                mime_type: "application/json".to_owned(),
-            },
-            outputs: vec![CaptureCredentialOutput {
-                purpose: SecretPurpose::ProviderCookie,
-                required: true,
-                sources: vec![CaptureValueSource::CookieHeader {
-                    origin: WELEARN_ORIGIN.to_owned(),
-                }],
-            }],
-        })
+        Some(Self::capture_recipe_for(4, AuthMethod::AssistedSession))
+    }
+
+    fn capture_recipes(&self) -> Vec<CaptureRecipe> {
+        vec![
+            Self::capture_recipe_for(4, AuthMethod::AssistedSession),
+            Self::capture_recipe_for(5, AuthMethod::ExternalBrowserOauth),
+        ]
     }
 
     async fn begin_authentication(
@@ -217,18 +228,24 @@ impl AuthenticationCapability for WellearnAuthentication {
                 "WELearn authentication requires a Core AuthSession",
             )
         })?;
-        let waiting_for = match method {
-            AuthMethod::Password => WaitingUserState::CredentialInput,
-            AuthMethod::ImportedCookie | AuthMethod::AssistedSession => {
-                WaitingUserState::SessionImport
-            }
+        let (waiting_for, user_action) = match method {
+            AuthMethod::Password => (WaitingUserState::CredentialInput, None),
+            AuthMethod::ImportedCookie => (WaitingUserState::SessionImport, None),
+            AuthMethod::AssistedSession => (
+                WaitingUserState::SessionImport,
+                Some("在浏览器中完成 WELearn/SSO 登录；图片验证码或短信验证可在同一页面手工完成，课程列表加载后 Capture 会提交 Cookie".to_owned()),
+            ),
+            AuthMethod::ExternalBrowserOauth => (
+                WaitingUserState::SessionImport,
+                Some("在 WELearn SSO 页面选择 QQ、微信或 Apple 登录并完成授权；返回课程列表后 Capture 会提交 WELearn Cookie".to_owned()),
+            ),
             _ => return Err(unsupported_auth_method()),
         };
         Ok(AuthChallenge {
             session_id,
             method,
             waiting_for,
-            user_action: None,
+            user_action,
             expires_at: None,
             external_oauth: None,
         })
@@ -249,7 +266,9 @@ impl AuthenticationCapability for WellearnAuthentication {
         match credential.auth_method {
             AuthMethod::Password => self.validate_password(credential).await,
             AuthMethod::ImportedCookie => self.validate_imported_cookie(credential).await,
-            AuthMethod::AssistedSession => self.validate_captured_cookie(credential).await,
+            AuthMethod::AssistedSession | AuthMethod::ExternalBrowserOauth => {
+                self.validate_captured_cookie(credential).await
+            }
             _ => Err(unsupported_auth_method()),
         }
     }
@@ -891,6 +910,15 @@ mod tests {
                 origin: WELEARN_ORIGIN.to_owned(),
             }]
         );
+        let recipes = authentication.capture_recipes();
+        assert_eq!(recipes.len(), 2);
+        assert_eq!(recipes[0], recipe);
+        recipes[1].validate().unwrap();
+        assert_eq!(recipes[1].version, 5);
+        assert_eq!(recipes[1].auth_method, AuthMethod::ExternalBrowserOauth);
+        assert_eq!(recipes[1].navigation_origins, recipe.navigation_origins);
+        assert_eq!(recipes[1].read_origins, [WELEARN_ORIGIN]);
+        assert_eq!(recipes[1].readiness, recipe.readiness);
     }
 
     #[test]
@@ -937,6 +965,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(captured.status.kind, SessionKind::Cookie);
+        let oauth = authentication
+            .validate_credential(&auth_context(), &external_oauth_cookie_bundle())
+            .await
+            .unwrap();
+        assert_eq!(oauth.status.kind, SessionKind::Cookie);
         let mut mislabeled = captured_cookie_bundle();
         mislabeled.acquired_via = CredentialAcquisition::ManualImport;
         assert!(
@@ -946,7 +979,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(transport.exchanges.load(Ordering::SeqCst), 1);
-        assert_eq!(transport.validations.load(Ordering::SeqCst), 3);
+        assert_eq!(transport.validations.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]
@@ -972,6 +1005,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(captured.waiting_for, WaitingUserState::SessionImport);
+        assert!(captured.user_action.is_some());
+        let oauth = authentication
+            .begin_authentication(&auth_context(), AuthMethod::ExternalBrowserOauth)
+            .await
+            .unwrap();
+        assert_eq!(oauth.waiting_for, WaitingUserState::SessionImport);
+        assert!(oauth.user_action.is_some());
+        assert!(oauth.external_oauth.is_none());
         assert!(
             authentication
                 .begin_authentication(&auth_context(), AuthMethod::QrCode)
@@ -1064,6 +1105,13 @@ mod tests {
         let mut credential = cookie_bundle();
         credential.auth_method = AuthMethod::AssistedSession;
         credential.acquired_via = CredentialAcquisition::CaptureTool;
+        credential
+    }
+
+    fn external_oauth_cookie_bundle() -> CredentialBundle {
+        let mut credential = captured_cookie_bundle();
+        credential.auth_method = AuthMethod::ExternalBrowserOauth;
+        credential.acquired_via = CredentialAcquisition::BrowserExtension;
         credential
     }
 }
