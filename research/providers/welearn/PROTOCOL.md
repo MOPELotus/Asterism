@@ -407,7 +407,7 @@ orchestration semantics are:
 | Current Fanyuchang duration | one, several or every Unit; every returned SCO is retained | fixed seconds or one inclusive uniform-range duration sampled independently for each SCO | one thread per selected SCO |
 | YZBRH completion | one Unit or every Unit; hidden SCOs and any SCO whose raw completion does not contain the donor's `未` marker are skipped | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | sequential SCO mutations |
 | YZBRH duration | one Unit or every Unit; every returned SCO is retained, including hidden and completed rows | fixed seconds or one inclusive uniform-range duration sampled independently for each selected SCO | all SCO coroutines share one wall-clock heartbeat window |
-| Auto_WeLearn completion | one or several Units; hidden SCOs and any SCO outside the raw `iscomplete` contains `未` branch are skipped | one configured score is applied to every remaining SCO | Units and SCOs are processed sequentially |
+| Auto_WeLearn completion | one or several Units; hidden SCOs and any SCO outside the raw `iscomplete` contains `未` branch are skipped | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | Units and SCOs are processed sequentially |
 | Auto_WeLearn duration | one or several Units; all visible SCOs are first collected into one membership set | sample `actual_minutes = max(1, configured_minutes + uniform(-range,+range))` once, then give every child `floor(actual_minutes * 60 / child_count)` seconds; the remainder is deliberately discarded | bounded thread pool, configured from 1 through 100 |
 
 These are orchestration semantics over the already implemented native SCO
@@ -432,10 +432,10 @@ value with the immutable flow, membership and derived targets; it must not let
 a crash recovery silently switch dispatch semantics.
 
 `WellearnBatchPlan.target_strategy` records the corresponding target boundary:
-Fanyuchang and YZBRH resolve targets per child from their fixed or independent
-random settings, Auto completion applies one configured value to every child,
-and Auto duration derives one equal floor target from its frozen aggregate
-budget. The aggregate strategy also persists the discarded remainder.
+Fanyuchang, YZBRH and Auto completion resolve score or duration targets per
+child from their fixed or independent random settings, while Auto duration
+derives one equal floor target from its frozen aggregate budget. The aggregate
+strategy also persists the discarded remainder.
 
 Asterism currently retains Unit index/title/code in each fresh Task observation
 and exposes per-Task runtime settings, but Unit is not yet a shared first-class

@@ -53,12 +53,12 @@ impl WellearnBatchFlow {
 
     pub const fn target_strategy(self) -> WellearnBatchTargetStrategy {
         match self {
-            Self::AutoCompletion => WellearnBatchTargetStrategy::SharedConfigured,
-            Self::AutoDuration => WellearnBatchTargetStrategy::AggregateEqualFloor,
-            Self::FanyuchangCompletion
+            Self::AutoCompletion
+            | Self::FanyuchangCompletion
             | Self::FanyuchangDuration
             | Self::YzbrhCompletion
             | Self::YzbrhDuration => WellearnBatchTargetStrategy::PerChild,
+            Self::AutoDuration => WellearnBatchTargetStrategy::AggregateEqualFloor,
         }
     }
 
@@ -355,7 +355,7 @@ fn normalized_completion(task: &RemoteTask) -> Option<RemoteState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse_course_inventory, parse_task_inventory, WellearnScoLeavesDocument};
+    use crate::{WellearnScoLeavesDocument, parse_course_inventory, parse_task_inventory};
 
     const COURSES: &str =
         include_str!("../../../fixtures/providers/welearn/courses/list-mixed.json");
@@ -441,10 +441,11 @@ mod tests {
             plan.target_strategy,
             WellearnBatchTargetStrategy::AggregateEqualFloor
         );
-        assert!(plan
-            .entries
-            .iter()
-            .all(|entry| entry.target_seconds == Some(30)));
+        assert!(
+            plan.entries
+                .iter()
+                .all(|entry| entry.target_seconds == Some(30))
+        );
     }
 
     #[test]
@@ -491,7 +492,7 @@ mod tests {
         );
         assert_eq!(
             WellearnBatchFlow::AutoCompletion.target_strategy(),
-            WellearnBatchTargetStrategy::SharedConfigured
+            WellearnBatchTargetStrategy::PerChild
         );
         assert_eq!(
             WellearnBatchFlow::AutoDuration.target_strategy(),
@@ -513,12 +514,14 @@ mod tests {
     #[test]
     fn duplicate_remote_tasks_fail_closed() {
         let tasks = tasks();
-        assert!(build_batch_plan(
-            &[tasks[0].clone(), tasks[0].clone()],
-            WellearnBatchFlow::FanyuchangCompletion,
-            None
-        )
-        .is_err());
+        assert!(
+            build_batch_plan(
+                &[tasks[0].clone(), tasks[0].clone()],
+                WellearnBatchFlow::FanyuchangCompletion,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
