@@ -735,6 +735,9 @@ fn parse_resource_attachment(
             ("chapter_work", RemoteState::Pending) => vec![
                 TaskCapability::QuestionInventory,
                 TaskCapability::QuestionParse,
+                TaskCapability::SubmissionBuild,
+                TaskCapability::SubmissionExecute,
+                TaskCapability::SubmissionVerify,
             ],
             ("document" | "read" | "video", RemoteState::Pending) => vec![
                 TaskCapability::ProgressRead,
@@ -1052,6 +1055,9 @@ mod tests {
                         == [
                             TaskCapability::QuestionInventory,
                             TaskCapability::QuestionParse,
+                            TaskCapability::SubmissionBuild,
+                            TaskCapability::SubmissionExecute,
+                            TaskCapability::SubmissionVerify,
                         ]
                 })
         );

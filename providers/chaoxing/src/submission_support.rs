@@ -44,10 +44,18 @@ const FORWARDED_FORM_FIELDS: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SubmissionModule {
+    IndependentWork,
+    ChapterWork,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WorkSubmissionIdentity<'a> {
     remote_task: &'a str,
     course: &'a str,
     class: &'a str,
+    knowledge: Option<&'a str>,
+    module: SubmissionModule,
 }
 
 impl<'a> WorkSubmissionIdentity<'a> {
@@ -58,22 +66,43 @@ impl<'a> WorkSubmissionIdentity<'a> {
         {
             return Err(invalid_response("Chaoxing remote Work identity is invalid"));
         }
-        let mut components = remote_task_id.split(':');
-        if components.next() != Some("work") {
-            return Err(unsupported(
-                "Chaoxing submission supports independent Work tasks only",
+        let components = remote_task_id.split(':').collect::<Vec<_>>();
+        let (module, course_id, class_id, knowledge) = match components.as_slice() {
+            ["work", course, class, work] => {
+                valid_component(Some(course))?;
+                valid_component(Some(class))?;
+                valid_component(Some(work))?;
+                (SubmissionModule::IndependentWork, *course, *class, None)
+            }
+            ["resource", course, class, knowledge, job] => {
+                valid_component(Some(course))?;
+                valid_component(Some(class))?;
+                valid_component(Some(knowledge))?;
+                valid_component(Some(job))?;
+                (
+                    SubmissionModule::ChapterWork,
+                    *course,
+                    *class,
+                    Some(*knowledge),
+                )
+            }
+            _ => {
+                return Err(unsupported(
+                    "Chaoxing submission supports Work and Chapter Work tasks",
+                ));
+            }
+        };
+        if remote_task_id.chars().any(char::is_control) {
+            return Err(invalid_response(
+                "Chaoxing remote submission identity is invalid",
             ));
-        }
-        let course_id = valid_component(components.next())?;
-        let class_id = valid_component(components.next())?;
-        let _work_id = valid_component(components.next())?;
-        if components.next().is_some() {
-            return Err(invalid_response("Chaoxing remote Work identity is invalid"));
         }
         Ok(Self {
             remote_task: remote_task_id,
             course: course_id,
             class: class_id,
+            knowledge,
+            module,
         })
     }
 
@@ -87,6 +116,14 @@ impl<'a> WorkSubmissionIdentity<'a> {
 
     pub(crate) const fn class_id(self) -> &'a str {
         self.class
+    }
+
+    pub(crate) const fn knowledge_id(self) -> Option<&'a str> {
+        self.knowledge
+    }
+
+    pub(crate) const fn module(self) -> SubmissionModule {
+        self.module
     }
 }
 
@@ -130,11 +167,13 @@ impl ChaoxingSubmissionPlan {
                 || item.selected.question_id != question.id
                 || question.validate().is_err()
                 || item.selected.answer.validate().is_err()
-                || question
-                    .metadata_sanitized
-                    .get("page_kind")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("work_preview")
+                || !matches!(
+                    question
+                        .metadata_sanitized
+                        .get("page_kind")
+                        .and_then(serde_json::Value::as_str),
+                    Some("work_preview" | "chapter_work_mobile")
+                )
                 || !remote_ids.insert(remote_question_id.to_owned())
                 || !positions.insert(question.position)
             {
@@ -591,7 +630,7 @@ fn parse_remote_question_types(form: ElementRef<'_>) -> ProviderResult<BTreeMap<
         let type_code = input
             .value()
             .attr("value")
-            .filter(|value| matches!(*value, "0" | "1" | "3"))
+            .filter(|value| matches!(*value, "0" | "1" | "2" | "3" | "4"))
             .ok_or_else(|| protocol_drift("Chaoxing Work editor Question type is unsupported"))?;
         if types
             .insert(remote_id.to_owned(), type_code.to_owned())
@@ -618,9 +657,11 @@ fn provider_type_code(kind: QuestionKind, metadata: &serde_json::Value) -> Provi
     match (kind, type_code) {
         (QuestionKind::SingleChoice, 0) => Ok("0"),
         (QuestionKind::MultipleChoice, 1) => Ok("1"),
+        (QuestionKind::FillBlank, 2) => Ok("2"),
         (QuestionKind::TrueFalse, 3) => Ok("3"),
+        (QuestionKind::ShortAnswer, 4) => Ok("4"),
         _ => Err(unsupported(
-            "Chaoxing native submission currently supports choice and true/false Questions only",
+            "Chaoxing native submission does not support this Question type code",
         )),
     }
 }
@@ -650,6 +691,12 @@ fn encode_answer(
         }
         (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(value)) => {
             Ok(if *value { "true" } else { "false" }.to_owned())
+        }
+        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values)) if !values.is_empty() => {
+            Ok(values.concat())
+        }
+        (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) if values.len() == 1 => {
+            Ok(values[0].clone())
         }
         _ => Err(unsupported(
             "Chaoxing native submission cannot encode this answer shape",
@@ -855,7 +902,9 @@ mod tests {
     };
 
     use super::*;
-    use crate::{ChaoxingSubmissionBuild, parse_work_preview_question_page};
+    use crate::{
+        ChaoxingSubmissionBuild, parse_chapter_work_question_page, parse_work_preview_question_page,
+    };
     use asterism_provider_api::{ProviderContext, SubmissionBuildCapability};
 
     const QUESTIONS: &str =
@@ -866,6 +915,10 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/work/submission-prompt.html");
     const VIEW: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/submission-view.html");
+    const CHAPTER_QUESTIONS: &str =
+        include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
+    const CHAPTER_EDITOR: &str =
+        include_str!("../../../fixtures/providers/chaoxing/work/chapter-submission-editor.html");
 
     #[tokio::test]
     async fn fresh_editor_builds_allowlisted_final_submit_form() {
@@ -892,6 +945,30 @@ mod tests {
         );
         assert!(!fields.contains_key("ignoredFutureField"));
         assert!(!format!("{form:?}").contains("SAFE_EPHEMERAL_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn chapter_editor_builds_all_donor_answer_shapes_without_stale_values() {
+        let draft = chapter_draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let identity = WorkSubmissionIdentity::parse("resource:100:200:4001:job-work").unwrap();
+        let form = ChaoxingSubmissionForm::parse(CHAPTER_EDITOR, identity, &plan).unwrap();
+        let fields = form.fields().iter().cloned().collect::<BTreeMap<_, _>>();
+        assert_eq!(fields.get("knowledgeid").map(String::as_str), Some("4001"));
+        assert_eq!(
+            fields.get("answerwqbid").map(String::as_str),
+            Some("work-q-1,work-q-2,work-q-3,work-q-4,")
+        );
+        for (key, expected) in [
+            ("answerwork-q-1", "B"),
+            ("answerwork-q-2", "AC"),
+            ("answerwork-q-3", "bounded answer"),
+            ("answerwork-q-4", "true"),
+        ] {
+            assert_eq!(fields.get(key).map(String::as_str), Some(expected), "{key}");
+        }
+        assert!(!fields.contains_key("ignoredFutureField"));
+        assert!(!format!("{form:?}").contains("SAFE_CHAPTER_EPHEMERAL_TOKEN"));
     }
 
     #[tokio::test]
@@ -1019,6 +1096,75 @@ mod tests {
                 .collect(),
             payload_preview: preview,
             created_at: Utc::now(),
+        }
+    }
+
+    async fn chapter_draft() -> SubmissionDraft {
+        let task_id = TaskId::new();
+        let questions = parse_chapter_work_question_page(CHAPTER_QUESTIONS)
+            .unwrap()
+            .iter()
+            .map(|question| question.to_question(task_id).unwrap())
+            .collect::<Vec<_>>();
+        let selected = vec![
+            selected(
+                questions[0].id,
+                NormalizedAnswer::Selections(vec!["B".to_owned()]),
+            ),
+            selected(
+                questions[1].id,
+                NormalizedAnswer::Selections(vec!["A".to_owned(), "C".to_owned()]),
+            ),
+            selected(
+                questions[2].id,
+                NormalizedAnswer::Texts(vec!["bounded".to_owned(), " answer".to_owned()]),
+            ),
+            selected(questions[3].id, NormalizedAnswer::Boolean(true)),
+        ];
+        let context = ProviderContext {
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            account_id: asterism_domain::ProviderAccountId::new(),
+            credential_refs: vec![asterism_domain::SecretId::new()],
+            correlation_id: "chaoxing-chapter-submission-support".to_owned(),
+        };
+        let preview = ChaoxingSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context,
+                "resource:100:200:4001:job-work",
+                &questions,
+                &selected,
+            )
+            .await
+            .unwrap();
+        SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            provider_version: crate::metadata::development_metadata()
+                .unwrap()
+                .implementation_version,
+            items: questions
+                .into_iter()
+                .zip(selected)
+                .map(|(question, selected)| SubmissionDraftItem { question, selected })
+                .collect(),
+            payload_preview: preview,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn selected(
+        question_id: asterism_domain::QuestionId,
+        answer: NormalizedAnswer,
+    ) -> SelectedAnswer {
+        SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id,
+            answer,
+            source: AnswerSource::Manual,
+            confidence: None,
         }
     }
 }

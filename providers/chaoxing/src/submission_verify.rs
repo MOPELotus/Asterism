@@ -1,22 +1,29 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use asterism_domain::{SubmissionDraft, SubmissionReceipt, SubmissionVerificationSnapshot};
+use asterism_domain::{
+    RemoteState, SubmissionDraft, SubmissionQuestionVerification,
+    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionVerificationSnapshot,
+    SubmissionVerificationStatus,
+};
 use asterism_provider_api::{
     CourseInventoryCapability, ProviderContext, ProviderIdentity, ProviderMetadata, ProviderResult,
     SubmissionBuildCapability, SubmissionVerifyCapability,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 
 use crate::{
-    ChaoxingCourseRoute, ChaoxingInventoryTransport, ChaoxingSubmissionBuild,
-    ChaoxingSubmissionPlan, ChaoxingWorkDetailRequest, ChaoxingWorkVerificationDocument,
+    ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
+    ChaoxingInventoryTransport, ChaoxingSubmissionBuild, ChaoxingSubmissionPlan,
+    ChaoxingWorkDetailRequest, ChaoxingWorkVerificationDocument,
     inventory::parse_work_inventory_entries,
     metadata::development_metadata,
     submission_execute::{
         invalid_response, matching_course, protocol_drift, remote_changed, validate_context,
         validate_draft,
     },
-    submission_support::{WorkSubmissionIdentity, parse_verification_snapshot},
+    submission_support::{SubmissionModule, WorkSubmissionIdentity, parse_verification_snapshot},
+    task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
 };
 
 /// Read-only transport for one freshly rediscovered Work result page.
@@ -126,24 +133,166 @@ impl SubmissionVerifyCapability for ChaoxingSubmissionVerify {
         let courses = self.courses.list_courses(context).await?;
         let course = matching_course(&courses, identity)?;
         let route = ChaoxingCourseRoute::from_remote_course(course)?;
-        let document = self.inventory.fetch_work_inventory(context, route).await?;
-        let entries = parse_work_inventory_entries(document.as_str(), &route.parser_scope()?)?;
-        let mut matching = entries
-            .iter()
-            .filter(|entry| entry.task().remote_id == identity.remote_task_id());
-        let entry = matching.next().ok_or_else(|| {
-            remote_changed("Chaoxing Work is no longer present during verification")
+        match identity.module() {
+            SubmissionModule::IndependentWork => {
+                let document = self.inventory.fetch_work_inventory(context, route).await?;
+                let entries =
+                    parse_work_inventory_entries(document.as_str(), &route.parser_scope()?)?;
+                let mut matching = entries
+                    .iter()
+                    .filter(|entry| entry.task().remote_id == identity.remote_task_id());
+                let entry = matching.next().ok_or_else(|| {
+                    remote_changed("Chaoxing Work is no longer present during verification")
+                })?;
+                if matching.next().is_some() {
+                    return Err(protocol_drift(
+                        "Chaoxing Work verification inventory contains duplicate task identity",
+                    ));
+                }
+                let request =
+                    ChaoxingWorkDetailRequest::try_new(route, remote_task_id, entry.entry())?;
+                let document = self
+                    .transport
+                    .fetch_work_verification(context, request)
+                    .await?;
+                parse_verification_snapshot(&document, &plan, draft)
+            }
+            SubmissionModule::ChapterWork => {
+                let state =
+                    resolve_chapter_work_state(self.inventory.as_ref(), context, route, identity)
+                        .await?;
+                chapter_work_snapshot(draft, state)
+            }
+        }
+    }
+}
+
+async fn resolve_chapter_work_state(
+    inventory: &dyn ChaoxingInventoryTransport,
+    context: &ProviderContext,
+    route: ChaoxingCourseRoute<'_>,
+    identity: WorkSubmissionIdentity<'_>,
+) -> ProviderResult<RemoteState> {
+    let knowledge_id = identity.knowledge_id().ok_or_else(|| {
+        invalid_response("Chaoxing Chapter Work verification has no knowledge identity")
+    })?;
+    let document = inventory.fetch_chapter_inventory(context, route).await?;
+    let scope = route.parser_scope()?;
+    let chapters = crate::parse_chapter_inventory(document.as_str(), &scope)?;
+    let mut matching = chapters.iter().filter(|chapter| {
+        chapter
+            .normalized
+            .get("knowledge_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(knowledge_id)
+    });
+    let chapter = matching.next().ok_or_else(|| {
+        remote_changed("Chaoxing Chapter Work is no longer present during verification")
+    })?;
+    if matching.next().is_some() {
+        return Err(protocol_drift(
+            "Chaoxing Chapter Work verification found duplicate Chapter scope",
+        ));
+    }
+    let request =
+        ChaoxingChapterResourceRequest::try_from_available_chapter(chapter)?.ok_or_else(|| {
+            remote_changed("Chaoxing Chapter Work is no longer readable during verification")
         })?;
-        if matching.next().is_some() {
+    let documents = inventory
+        .fetch_chapter_resource_inventories(context, route, std::slice::from_ref(&request))
+        .await?;
+    locate_chapter_work_state(documents, route, &request, identity.remote_task_id())
+}
+
+fn locate_chapter_work_state(
+    documents: Vec<ChaoxingChapterResourceDocument>,
+    route: ChaoxingCourseRoute<'_>,
+    request: &ChaoxingChapterResourceRequest,
+    remote_task_id: &str,
+) -> ProviderResult<RemoteState> {
+    if documents.len() != usize::from(CHAPTER_RESOURCE_CARD_COUNT) {
+        return Err(protocol_drift(
+            "Chaoxing Chapter Work verification received an incomplete card set",
+        ));
+    }
+    let mut indexed = BTreeMap::new();
+    for document in documents {
+        if document.knowledge_id() != request.knowledge_id()
+            || indexed.insert(document.card_index(), document).is_some()
+        {
             return Err(protocol_drift(
-                "Chaoxing Work verification inventory contains duplicate task identity",
+                "Chaoxing Chapter Work verification received a foreign or duplicate card",
             ));
         }
-        let request = ChaoxingWorkDetailRequest::try_new(route, remote_task_id, entry.entry())?;
-        let document = self
-            .transport
-            .fetch_work_verification(context, request)
-            .await?;
-        parse_verification_snapshot(&document, &plan, draft)
     }
+    let scope = route.parser_scope()?;
+    let mut found = None;
+    for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+        let document = indexed
+            .remove(&card_index)
+            .ok_or_else(|| protocol_drift("Chaoxing Chapter Work verification omitted a card"))?;
+        for task in crate::parse_chapter_resource_inventory(
+            document.as_str(),
+            &scope,
+            request.knowledge_id(),
+            card_index,
+        )? {
+            if task.remote_id != remote_task_id {
+                continue;
+            }
+            if task
+                .normalized
+                .get("resource_kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("chapter_work")
+            {
+                return Err(protocol_drift(
+                    "Chaoxing Chapter Work verification resolved another resource kind",
+                ));
+            }
+            if found.replace(task.remote_state).is_some() {
+                return Err(protocol_drift(
+                    "Chaoxing Chapter Work verification target appears on multiple cards",
+                ));
+            }
+        }
+    }
+    found.ok_or_else(|| {
+        remote_changed("Chaoxing Chapter Work target disappeared during verification")
+    })
+}
+
+fn chapter_work_snapshot(
+    draft: &SubmissionDraft,
+    remote_state: RemoteState,
+) -> ProviderResult<SubmissionVerificationSnapshot> {
+    let (status, progress_percent) = match remote_state {
+        RemoteState::Completed => (SubmissionVerificationStatus::Confirmed, Some(100)),
+        RemoteState::Pending | RemoteState::InProgress => {
+            (SubmissionVerificationStatus::Pending, None)
+        }
+        RemoteState::Unknown
+        | RemoteState::NotOpen
+        | RemoteState::Expired
+        | RemoteState::Removed => (SubmissionVerificationStatus::Inconclusive, None),
+    };
+    let snapshot = SubmissionVerificationSnapshot {
+        status,
+        remote_state: Some(remote_state),
+        score: None,
+        progress_percent,
+        questions: draft
+            .items
+            .iter()
+            .map(|item| SubmissionQuestionVerification {
+                question_id: item.question.id,
+                status: SubmissionQuestionVerificationStatus::Unverified,
+            })
+            .collect(),
+        verified_at: Utc::now(),
+    };
+    snapshot
+        .validate()
+        .map_err(|_| invalid_response("Chaoxing Chapter Work verification snapshot is invalid"))?;
+    Ok(snapshot)
 }

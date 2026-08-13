@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use asterism_domain::{RemoteState, SubmissionDraft, SubmissionReceipt};
 use asterism_provider_api::{
@@ -10,10 +10,16 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 
 use crate::{
+    ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingChapterWorkTarget,
     ChaoxingCourseRoute, ChaoxingInventoryTransport, ChaoxingSubmissionBuild,
-    ChaoxingSubmissionPlan, ChaoxingWorkDetailRequest, inventory::parse_work_inventory_entries,
-    metadata::development_metadata, runtime_settings::runtime_settings_schema,
-    submission_support::WorkSubmissionIdentity,
+    ChaoxingSubmissionPlan, ChaoxingWorkDetailRequest,
+    inventory::parse_work_inventory_entries,
+    metadata::development_metadata,
+    parse_chapter_inventory,
+    resource_inventory::locate_chapter_work_target,
+    runtime_settings::runtime_settings_schema,
+    submission_support::{SubmissionModule, WorkSubmissionIdentity},
+    task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
 };
 
 /// Mutation boundary for exactly one Chaoxing Work submission attempt.
@@ -24,6 +30,15 @@ pub trait ChaoxingSubmissionTransport: Send + Sync {
         &self,
         context: &ProviderContext,
         request: ChaoxingWorkDetailRequest<'_>,
+        plan: &ChaoxingSubmissionPlan,
+    ) -> ProviderResult<SubmissionReceipt>;
+
+    async fn submit_chapter_work(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        request: &ChaoxingChapterResourceRequest,
+        target: &ChaoxingChapterWorkTarget,
         plan: &ChaoxingSubmissionPlan,
     ) -> ProviderResult<SubmissionReceipt>;
 }
@@ -122,19 +137,33 @@ impl SubmissionExecuteCapability for ChaoxingSubmissionExecute {
         let courses = self.courses.list_courses(context).await?;
         let course = matching_course(&courses, identity)?;
         let route = ChaoxingCourseRoute::from_remote_course(course)?;
-        let document = self.inventory.fetch_work_inventory(context, route).await?;
-        let entries = parse_work_inventory_entries(document.as_str(), &route.parser_scope()?)?;
-        let entry = matching_work_entry(&entries, identity)?;
-        if !matches!(
-            entry.task().remote_state,
-            RemoteState::Pending | RemoteState::InProgress
-        ) {
-            return Err(remote_changed(
-                "Chaoxing Work is no longer pending before submission",
-            ));
-        }
-        let request = ChaoxingWorkDetailRequest::try_new(route, remote_task_id, entry.entry())?;
-        let receipt = self.transport.submit_work(context, request, &plan).await?;
+        let receipt = match identity.module() {
+            SubmissionModule::IndependentWork => {
+                let document = self.inventory.fetch_work_inventory(context, route).await?;
+                let entries =
+                    parse_work_inventory_entries(document.as_str(), &route.parser_scope()?)?;
+                let entry = matching_work_entry(&entries, identity)?;
+                if !matches!(
+                    entry.task().remote_state,
+                    RemoteState::Pending | RemoteState::InProgress
+                ) {
+                    return Err(remote_changed(
+                        "Chaoxing Work is no longer pending before submission",
+                    ));
+                }
+                let request =
+                    ChaoxingWorkDetailRequest::try_new(route, remote_task_id, entry.entry())?;
+                self.transport.submit_work(context, request, &plan).await
+            }
+            SubmissionModule::ChapterWork => {
+                let (request, target) =
+                    resolve_chapter_work_target(self.inventory.as_ref(), context, route, identity)
+                        .await?;
+                self.transport
+                    .submit_chapter_work(context, route, &request, &target, &plan)
+                    .await
+            }
+        }?;
         receipt
             .validate()
             .map_err(|_| invalid_response("Chaoxing submission receipt is invalid"))?;
@@ -178,6 +207,90 @@ fn matching_work_entry<'a>(
         ));
     }
     Ok(entry)
+}
+
+pub(crate) async fn resolve_chapter_work_target(
+    inventory: &dyn ChaoxingInventoryTransport,
+    context: &ProviderContext,
+    route: ChaoxingCourseRoute<'_>,
+    identity: WorkSubmissionIdentity<'_>,
+) -> ProviderResult<(ChaoxingChapterResourceRequest, ChaoxingChapterWorkTarget)> {
+    let knowledge_id = identity.knowledge_id().ok_or_else(|| {
+        invalid_response("Chaoxing Chapter Work submission has no knowledge identity")
+    })?;
+    let document = inventory.fetch_chapter_inventory(context, route).await?;
+    let scope = route.parser_scope()?;
+    let chapters = parse_chapter_inventory(document.as_str(), &scope)?;
+    let mut matching = chapters.iter().filter(|chapter| {
+        chapter
+            .normalized
+            .get("knowledge_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(knowledge_id)
+    });
+    let chapter = matching.next().ok_or_else(|| {
+        remote_changed("Chaoxing Chapter Work is no longer present before submission")
+    })?;
+    if matching.next().is_some() {
+        return Err(protocol_drift(
+            "Chaoxing Chapter Work inventory contains duplicate submission scope",
+        ));
+    }
+    let request =
+        ChaoxingChapterResourceRequest::try_from_available_chapter(chapter)?.ok_or_else(|| {
+            remote_changed("Chaoxing Chapter Work is no longer available before submission")
+        })?;
+    let documents = inventory
+        .fetch_chapter_resource_inventories(context, route, std::slice::from_ref(&request))
+        .await?;
+    let target = locate_submission_target(documents, route, &request, identity.remote_task_id())?;
+    Ok((request, target))
+}
+
+fn locate_submission_target(
+    documents: Vec<ChaoxingChapterResourceDocument>,
+    route: ChaoxingCourseRoute<'_>,
+    request: &ChaoxingChapterResourceRequest,
+    remote_task_id: &str,
+) -> ProviderResult<ChaoxingChapterWorkTarget> {
+    if documents.len() != usize::from(CHAPTER_RESOURCE_CARD_COUNT) {
+        return Err(protocol_drift(
+            "Chaoxing Chapter Work submission received an incomplete card set",
+        ));
+    }
+    let mut indexed = BTreeMap::new();
+    for document in documents {
+        if document.knowledge_id() != request.knowledge_id()
+            || indexed.insert(document.card_index(), document).is_some()
+        {
+            return Err(protocol_drift(
+                "Chaoxing Chapter Work submission received a foreign or duplicate card",
+            ));
+        }
+    }
+    let scope = route.parser_scope()?;
+    let mut found = None;
+    for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+        let document = indexed
+            .remove(&card_index)
+            .ok_or_else(|| protocol_drift("Chaoxing Chapter Work submission omitted a card"))?;
+        let Some(target) = locate_chapter_work_target(
+            document.as_str(),
+            &scope,
+            request.knowledge_id(),
+            card_index,
+            remote_task_id,
+        )?
+        else {
+            continue;
+        };
+        if found.replace(target).is_some() {
+            return Err(protocol_drift(
+                "Chaoxing Chapter Work submission target appears on multiple cards",
+            ));
+        }
+    }
+    found.ok_or_else(|| remote_changed("Chaoxing Chapter Work target changed before submission"))
 }
 
 pub(crate) fn validate_draft(

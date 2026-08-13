@@ -81,6 +81,12 @@ and exact server-visible answer comparison on the result view. They contain no
 real token, answer, route or account fact and do not prove the endpoint works
 against the current live platform.
 
+`work/chapter-submission-editor.html` adds the primary donor's synthetic
+Chapter Work `form1` shape. Tests prove stale answer inputs and unknown fields
+are discarded, type codes and ordered fill text are encoded from the immutable
+Draft, the mutation occurs once, and a separate completed-card read confirms
+only task-level completion.
+
 ## Required live-sanitized fixture sets
 
 ```text

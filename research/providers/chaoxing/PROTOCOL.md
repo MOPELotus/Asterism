@@ -244,9 +244,21 @@ exclusive aliases with the same required value. The server-generated final
 The bounded mobile page is parsed through the existing Chapter Work grammar and
 stored only as normalized Questions in the same account/correlation/task-bound
 short-lived cache. Page-kind binding prevents an independent Work reference
-from being consumed as Chapter Work. Chapter Work answer resolution,
-SubmissionBuild/Execute/Verify and live validation remain active work. Exam
-still requires its separate attempt-start, gate and verification lifecycle.
+from being consumed as Chapter Work.
+
+`SubmissionBuild` keeps selected values out of the preview and maps donor type
+codes 0/1/2/3/4 to single-choice, multiple-choice, fill-blank, true/false and
+short-answer. Ordered fill texts are concatenated exactly as the donor does;
+short-answer accepts one text value and other shapes fail closed.
+
+`SubmissionExecute` rebuilds from the immutable Draft, rebinds the exact
+Course/Chapter/seven-card target, acquires one fresh editor and forwards only
+audited form fields before one `addStudentWorkNew` POST. Neither attempt GET nor
+POST is replayed after an ambiguous send, and the JSON success flag is only a
+Receipt. Independent `SubmissionVerify` refetches seven cards and confirms only
+when the exact attachment is Completed. Per-Question facts stay Unverified when
+the card exposes no answer readback. Answer resolution and live validation
+remain active work; Exam keeps its separate attempt/gate/verification family.
 
 ## Native independent Work submission
 

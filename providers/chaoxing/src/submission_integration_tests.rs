@@ -19,12 +19,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::{
-    ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
-    ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingSubmissionBuild,
-    ChaoxingSubmissionExecute, ChaoxingSubmissionPlan, ChaoxingSubmissionTransport,
-    ChaoxingSubmissionVerificationTransport, ChaoxingSubmissionVerify, ChaoxingWorkDetailRequest,
-    ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute,
-    metadata::development_metadata, parse_work_preview_question_page,
+    ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingChapterWorkTarget,
+    ChaoxingCourseRoute, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
+    ChaoxingSubmissionBuild, ChaoxingSubmissionExecute, ChaoxingSubmissionPlan,
+    ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport, ChaoxingSubmissionVerify,
+    ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
+    ChaoxingWorkVerificationRoute, metadata::development_metadata,
+    parse_chapter_work_question_page, parse_work_preview_question_page,
     runtime_settings::runtime_settings_schema,
 };
 
@@ -33,6 +34,12 @@ const WORK_QUESTIONS: &str =
     include_str!("../../../fixtures/providers/chaoxing/questions/work-preview-mixed.html");
 const WORK_VIEW: &str =
     include_str!("../../../fixtures/providers/chaoxing/work/submission-view.html");
+const CHAPTER_LIST: &str =
+    include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
+const CHAPTER_CARDS: &str =
+    include_str!("../../../fixtures/providers/chaoxing/resources/cards-mixed.html");
+const CHAPTER_QUESTIONS: &str =
+    include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
 
 #[derive(Debug)]
 struct FixtureCourses {
@@ -86,7 +93,7 @@ impl ChaoxingInventoryTransport for FixturePlatform {
         _context: &ProviderContext,
         _route: ChaoxingCourseRoute<'_>,
     ) -> ProviderResult<ChaoxingInventoryDocument> {
-        Err(unexpected_call())
+        ChaoxingInventoryDocument::try_new(CHAPTER_LIST)
     }
 
     async fn fetch_work_inventory(
@@ -102,9 +109,30 @@ impl ChaoxingInventoryTransport for FixturePlatform {
         &self,
         _context: &ProviderContext,
         _route: ChaoxingCourseRoute<'_>,
-        _requests: &[ChaoxingChapterResourceRequest],
+        requests: &[ChaoxingChapterResourceRequest],
     ) -> ProviderResult<Vec<ChaoxingChapterResourceDocument>> {
-        Err(unexpected_call())
+        let request = requests.first().ok_or_else(unexpected_call)?;
+        if requests.len() != 1 || request.knowledge_id() != "4001" {
+            return Err(unexpected_call());
+        }
+        let completed = self.submissions.load(Ordering::Relaxed) > 0;
+        (0..crate::task_inventory::CHAPTER_RESOURCE_CARD_COUNT)
+            .map(|card_index| {
+                let document = if card_index == 0 {
+                    if completed {
+                        CHAPTER_CARDS.replace(
+                            "\"jobid\":\"job-work\",\"isPassed\":false",
+                            "\"jobid\":\"job-work\",\"isPassed\":true",
+                        )
+                    } else {
+                        CHAPTER_CARDS.to_owned()
+                    }
+                } else {
+                    "<script>mArg={\"defaults\":{},\"attachments\":[]};</script>".to_owned()
+                };
+                ChaoxingChapterResourceDocument::for_request(request, card_index, document)
+            })
+            .collect()
     }
 
     async fn fetch_exam_inventory(
@@ -140,6 +168,29 @@ impl ChaoxingSubmissionTransport for FixturePlatform {
             vec![
                 ("work-preview-q-1", "0", "B"),
                 ("work-preview-q-2", "1", "AC"),
+            ]
+        );
+        Ok(receipt())
+    }
+
+    async fn submit_chapter_work(
+        &self,
+        _context: &ProviderContext,
+        _route: ChaoxingCourseRoute<'_>,
+        request: &ChaoxingChapterResourceRequest,
+        target: &ChaoxingChapterWorkTarget,
+        plan: &ChaoxingSubmissionPlan,
+    ) -> ProviderResult<SubmissionReceipt> {
+        self.submissions.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(request.knowledge_id(), "4001");
+        assert_eq!(target.job_id(), "job-work");
+        assert_eq!(
+            plan.answers().collect::<Vec<_>>(),
+            vec![
+                ("work-q-1", "0", "B"),
+                ("work-q-2", "1", "AC"),
+                ("work-q-3", "2", "bounded answer"),
+                ("work-q-4", "3", "true"),
             ]
         );
         Ok(receipt())
@@ -231,6 +282,51 @@ async fn execute_and_verify_use_independent_native_slots() {
 }
 
 #[tokio::test]
+async fn chapter_work_execute_refetches_target_and_verifies_fresh_card_state() {
+    let courses = Arc::new(FixtureCourses::new());
+    let platform = Arc::new(FixturePlatform::default());
+    let execute =
+        ChaoxingSubmissionExecute::try_new(courses.clone(), platform.clone(), platform.clone())
+            .unwrap();
+    let verify =
+        ChaoxingSubmissionVerify::try_new(courses, platform.clone(), platform.clone()).unwrap();
+    let draft = chapter_draft().await;
+    let remote_task_id = "resource:100:200:4001:job-work";
+
+    let acknowledgement = execute
+        .execute_submission(
+            &context(),
+            remote_task_id,
+            &draft,
+            &runtime_settings_schema().resolve(None, None, None).unwrap(),
+            &NoopEvents,
+        )
+        .await
+        .unwrap();
+    assert_eq!(acknowledgement.remote_status, "accepted");
+    assert_eq!(platform.submissions.load(Ordering::Relaxed), 1);
+    assert_eq!(platform.verifications.load(Ordering::Relaxed), 0);
+
+    let snapshot = verify
+        .verify_submission(&context(), remote_task_id, &draft, Some(&acknowledgement))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+    assert_eq!(
+        snapshot.remote_state,
+        Some(asterism_domain::RemoteState::Completed)
+    );
+    assert_eq!(snapshot.progress_percent, Some(100));
+    assert!(
+        snapshot.questions.iter().all(|question| {
+            question.status == SubmissionQuestionVerificationStatus::Unverified
+        })
+    );
+    assert_eq!(platform.submissions.load(Ordering::Relaxed), 1);
+    assert_eq!(platform.verifications.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn stale_preview_fails_before_the_mutation_slot() {
     let platform = Arc::new(FixturePlatform::default());
     let execute = ChaoxingSubmissionExecute::try_new(
@@ -313,6 +409,64 @@ async fn draft() -> SubmissionDraft {
             .collect(),
         payload_preview: preview,
         created_at: Utc::now(),
+    }
+}
+
+async fn chapter_draft() -> SubmissionDraft {
+    let task_id = TaskId::new();
+    let questions = parse_chapter_work_question_page(CHAPTER_QUESTIONS)
+        .unwrap()
+        .iter()
+        .map(|question| question.to_question(task_id).unwrap())
+        .collect::<Vec<_>>();
+    let selected = vec![
+        selected(
+            questions[0].id,
+            NormalizedAnswer::Selections(vec!["B".to_owned()]),
+        ),
+        selected(
+            questions[1].id,
+            NormalizedAnswer::Selections(vec!["C".to_owned(), "A".to_owned()]),
+        ),
+        selected(
+            questions[2].id,
+            NormalizedAnswer::Texts(vec!["bounded".to_owned(), " answer".to_owned()]),
+        ),
+        selected(questions[3].id, NormalizedAnswer::Boolean(true)),
+    ];
+    let preview = ChaoxingSubmissionBuild::try_new()
+        .unwrap()
+        .build_submission_preview(
+            &context(),
+            "resource:100:200:4001:job-work",
+            &questions,
+            &selected,
+        )
+        .await
+        .unwrap();
+    SubmissionDraft {
+        id: SubmissionDraftId::new(),
+        task_id,
+        question_snapshot_id: QuestionSnapshotId::new(),
+        provider_id: ProviderId::new("chaoxing").unwrap(),
+        provider_version: development_metadata().unwrap().implementation_version,
+        items: questions
+            .into_iter()
+            .zip(selected)
+            .map(|(question, selected)| SubmissionDraftItem { question, selected })
+            .collect(),
+        payload_preview: preview,
+        created_at: Utc::now(),
+    }
+}
+
+fn selected(question_id: asterism_domain::QuestionId, answer: NormalizedAnswer) -> SelectedAnswer {
+    SelectedAnswer {
+        candidate_id: AnswerCandidateId::new(),
+        question_id,
+        answer,
+        source: AnswerSource::Manual,
+        confidence: None,
     }
 }
 

@@ -50,7 +50,7 @@ impl SubmissionBuildCapability for ChaoxingSubmissionBuild {
         selected_answers: &[SelectedAnswer],
     ) -> ProviderResult<SubmissionPayloadPreview> {
         validate_context(context, &self.metadata)?;
-        validate_work_identity(remote_task_id)?;
+        let task_kind = submission_task_kind(remote_task_id)?;
         if questions.is_empty() || questions.len() != selected_answers.len() {
             return Err(invalid_input(
                 "Chaoxing Work preview requires one selection per Question",
@@ -95,7 +95,7 @@ impl SubmissionBuildCapability for ChaoxingSubmissionBuild {
                     .metadata_sanitized
                     .get("page_kind")
                     .and_then(|value| value.as_str())
-                    != Some("work_preview")
+                    != Some(task_kind.page_kind())
                 || !question_ids.insert(question.id)
                 || !positions.insert(question.position)
                 || selected.question_id != question.id
@@ -124,7 +124,7 @@ impl SubmissionBuildCapability for ChaoxingSubmissionBuild {
 
         Ok(SubmissionPayloadPreview {
             encoding: SubmissionPayloadEncoding::Form,
-            format: "chaoxing.work.form.v1".to_owned(),
+            format: task_kind.preview_format().to_owned(),
             fields,
         })
     }
@@ -143,10 +143,10 @@ fn validate_answer_shape(question: &Question, answer: &NormalizedAnswer) -> Prov
             Ok(())
         }
         (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_)) => Ok(()),
+        (QuestionKind::FillBlank, NormalizedAnswer::Texts(values)) if !values.is_empty() => Ok(()),
+        (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) if values.len() == 1 => Ok(()),
         (
-            QuestionKind::FillBlank
-            | QuestionKind::ShortAnswer
-            | QuestionKind::Matching
+            QuestionKind::Matching
             | QuestionKind::Ordering
             | QuestionKind::Composite
             | QuestionKind::Unknown,
@@ -198,7 +198,29 @@ fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> P
     Ok(())
 }
 
-fn validate_work_identity(remote_task_id: &str) -> ProviderResult<()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubmissionTaskKind {
+    IndependentWork,
+    ChapterWork,
+}
+
+impl SubmissionTaskKind {
+    const fn page_kind(self) -> &'static str {
+        match self {
+            Self::IndependentWork => "work_preview",
+            Self::ChapterWork => "chapter_work_mobile",
+        }
+    }
+
+    const fn preview_format(self) -> &'static str {
+        match self {
+            Self::IndependentWork => "chaoxing.work.form.v1",
+            Self::ChapterWork => "chaoxing.chapter-work.form.v1",
+        }
+    }
+}
+
+fn submission_task_kind(remote_task_id: &str) -> ProviderResult<SubmissionTaskKind> {
     if remote_task_id.is_empty()
         || remote_task_id.len() > MAX_REMOTE_TASK_ID_BYTES
         || remote_task_id.chars().any(char::is_control)
@@ -206,16 +228,26 @@ fn validate_work_identity(remote_task_id: &str) -> ProviderResult<()> {
         return Err(invalid_input("Chaoxing remote Work identity is invalid"));
     }
     let parts = remote_task_id.split(':').collect::<Vec<_>>();
-    if parts.len() != 4
-        || parts[0] != "work"
-        || parts[1..].iter().any(|value| !valid_component(value, 128))
-    {
-        return Err(ProviderError::new(
+    match parts.as_slice() {
+        ["work", course, class, work]
+            if [course, class, work]
+                .into_iter()
+                .all(|value| valid_component(value, 128)) =>
+        {
+            Ok(SubmissionTaskKind::IndependentWork)
+        }
+        ["resource", course, class, knowledge, job]
+            if [course, class, knowledge, job]
+                .into_iter()
+                .all(|value| valid_component(value, 128)) =>
+        {
+            Ok(SubmissionTaskKind::ChapterWork)
+        }
+        _ => Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
-            "Chaoxing submission preview supports independent Work tasks only",
-        ));
+            "Chaoxing submission preview supports Work and Chapter Work tasks",
+        )),
     }
-    Ok(())
 }
 
 fn valid_component(value: &str, maximum: usize) -> bool {
@@ -237,10 +269,14 @@ mod tests {
     };
 
     use super::*;
-    use crate::question_parser::parse_work_preview_question_page;
+    use crate::question_parser::{
+        parse_chapter_work_question_page, parse_work_preview_question_page,
+    };
 
     const WORK_PREVIEW: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/work-preview-mixed.html");
+    const CHAPTER_WORK: &str =
+        include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
 
     #[tokio::test]
     async fn independent_work_preview_is_typed_bounded_and_value_free() {
@@ -337,6 +373,52 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(unsupported.kind, ProviderErrorKind::UnsupportedTask);
+    }
+
+    #[tokio::test]
+    async fn chapter_work_preview_supports_donor_question_encodings() {
+        let task_id = TaskId::new();
+        let questions = parse_chapter_work_question_page(CHAPTER_WORK)
+            .unwrap()
+            .iter()
+            .map(|question| question.to_question(task_id).unwrap())
+            .collect::<Vec<_>>();
+        let selected = vec![
+            selection(
+                questions[0].id,
+                NormalizedAnswer::Selections(vec!["B".to_owned()]),
+            ),
+            selection(
+                questions[1].id,
+                NormalizedAnswer::Selections(vec!["A".to_owned(), "C".to_owned()]),
+            ),
+            selection(
+                questions[2].id,
+                NormalizedAnswer::Texts(vec!["bounded".to_owned(), " answer".to_owned()]),
+            ),
+            selection(questions[3].id, NormalizedAnswer::Boolean(true)),
+        ];
+        let preview = ChaoxingSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context(),
+                "resource:100:200:4001:job-work",
+                &questions,
+                &selected,
+            )
+            .await
+            .unwrap();
+        assert_eq!(preview.format, "chaoxing.chapter-work.form.v1");
+        assert_eq!(preview.fields.len(), 8);
+        assert!(
+            preview
+                .fields
+                .iter()
+                .any(|field| field.field_name == "answerwork-q-3")
+        );
+        let encoded = serde_json::to_string(&preview).unwrap();
+        assert!(!encoded.contains("bounded"));
+        assert!(!encoded.contains("PRIVATE"));
     }
 
     fn selection(

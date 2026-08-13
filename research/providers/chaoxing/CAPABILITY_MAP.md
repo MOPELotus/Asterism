@@ -16,8 +16,8 @@ source modules even when their assessments share field names or HTML shapes.
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; Exam remains parse-only and all live behavior is pending |
-| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work rebuilds choice/true-false values from an immutable Draft, reopens one fresh editor, forwards only audited form fields and POSTs `addStudentWorkNew` once; the JSON success flag is only a Receipt, never completion |
-| SubmissionVerify | agent skill | `chaoxing-exam`, OCS | PortSource | Independent read-only slot re-discovers the same Work without requiring a Receipt; editor/prompt remain Pending and only a result view whose server-visible per-Question answers exactly match the Draft becomes Confirmed |
+| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts; Chapter Work adds donor-evidenced fill-blank/short-answer encoding, fresh seven-card attempt rebinding and one-shot attempt GET plus `addStudentWorkNew` POST. JSON success remains only a Receipt |
+| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work independently refreshes seven cards and confirms only exact task completion, retaining per-Question facts as Unverified when no answer readback exists |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
 | BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
 
@@ -133,6 +133,13 @@ policy and remains independently guarded.
   a result view must expose the exact submitted answer for every Draft
   Question. This is synthetic/offline evidence only and does not raise the
   Provider above Development.
+- Pending Chapter Work also advertises `SubmissionBuild`, `SubmissionExecute`
+  and `SubmissionVerify`. Build supports donor type codes 0-4; Execute rechecks
+  the immutable Draft and fresh Course/Chapter/seven-card target, then sends one
+  attempt GET and one final POST without ambiguous replay. Verify ignores the
+  Receipt as proof and confirms only a fresh exact card with `isPassed=true`;
+  per-Question facts stay Unverified because a completion card is not answer
+  readback. This synthetic/offline checkpoint does not stop further work.
 
 ## Completion boundary
 

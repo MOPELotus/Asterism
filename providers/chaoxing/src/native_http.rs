@@ -394,6 +394,19 @@ impl NativeChaoxingInventoryTransport {
         request: &ChaoxingChapterResourceRequest,
         target: &ChaoxingChapterWorkTarget,
     ) -> ProviderResult<ChaoxingInventoryDocument> {
+        self.fetch_chapter_work_page(session, route, request, target)
+            .await?
+            .1
+            .into_inventory_document()
+    }
+
+    async fn fetch_chapter_work_page(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+        request: &ChaoxingChapterResourceRequest,
+        target: &ChaoxingChapterWorkTarget,
+    ) -> ProviderResult<(Url, SensitiveHtml)> {
         let mut url = chapter_work_url(route, request, target)?;
         for redirect_count in 0..=MAX_WORK_DETAIL_REDIRECTS {
             let response = self
@@ -440,7 +453,7 @@ impl NativeChaoxingInventoryTransport {
                 url = next;
                 continue;
             }
-            return classify_response(response).await?.into_inventory_document();
+            return Ok((url, classify_response(response).await?));
         }
         unreachable!("bounded Chapter Work redirect loop always returns")
     }
@@ -795,6 +808,33 @@ impl ChaoxingSubmissionTransport for NativeChaoxingInventoryTransport {
             result => result?,
         };
         self.post_work_submission_once(&session, &prepared.0, &prepared.1)
+            .await
+    }
+
+    async fn submit_chapter_work(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        request: &ChaoxingChapterResourceRequest,
+        target: &ChaoxingChapterWorkTarget,
+        plan: &ChaoxingSubmissionPlan,
+    ) -> ProviderResult<asterism_domain::SubmissionReceipt> {
+        // Both the attempt GET and final POST can mutate remote state. Resolve
+        // authentication before either and never replay after a send.
+        let (session, _) = self.session_for_operation(context).await?;
+        let (referer, document) = self
+            .fetch_chapter_work_page(&session, route, request, target)
+            .await?;
+        let remote_task_id = format!(
+            "resource:{}:{}:{}:{}",
+            route.course_id(),
+            route.class_id(),
+            request.knowledge_id(),
+            target.job_id()
+        );
+        let identity = crate::submission_support::WorkSubmissionIdentity::parse(&remote_task_id)?;
+        let form = ChaoxingSubmissionForm::parse(document.as_str(), identity, plan)?;
+        self.post_work_submission_once(&session, &referer, &form)
             .await
     }
 }
