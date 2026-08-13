@@ -259,7 +259,14 @@ fn classify_completion(value: Option<&str>) -> RemoteState {
     let Some(value) = value else {
         return RemoteState::Unknown;
     };
-    match value.trim().to_ascii_lowercase().as_str() {
+    let value = value.trim().to_ascii_lowercase();
+    // YZBRH and Auto completion workers use the donor's literal `"未" in
+    // iscomplete` branch, so preserve that broad marker before normalizing
+    // the common exact states used by the other flows.
+    if value.contains('未') {
+        return RemoteState::Pending;
+    }
+    match value.as_str() {
         "已完成" | "completed" | "complete" | "true" | "1" => RemoteState::Completed,
         "学习中" | "进行中" | "in_progress" => RemoteState::InProgress,
         "未完成" | "未学习" | "not_attempted" | "incomplete" | "false" | "0" => {
@@ -403,6 +410,20 @@ mod tests {
         let tasks = parse_task_inventory(course, UNITS, &[document, empty_locked]).unwrap();
         assert_eq!(tasks[0].remote_state, RemoteState::Unknown);
         assert_eq!(tasks[0].normalized["duration_raw"], "600");
+    }
+
+    #[test]
+    fn donor_unfinished_marker_keeps_any未_completion_branch_pending() {
+        let course = &parse_course_inventory(COURSES).unwrap()[0];
+        let document = WellearnScoLeavesDocument::try_new(
+            0,
+            r#"{"info":[{"id":"unfinished-marker","location":"Practice","iscomplete":"未开始"}]}"#,
+        )
+        .unwrap();
+        let empty_locked = WellearnScoLeavesDocument::try_new(1, r#"{"info":[]}"#).unwrap();
+        let tasks = parse_task_inventory(course, UNITS, &[document, empty_locked]).unwrap();
+        assert_eq!(tasks[0].remote_state, RemoteState::Pending);
+        assert_eq!(tasks[0].normalized["completion_observation"], "pending");
     }
 
     #[test]
