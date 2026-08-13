@@ -176,10 +176,13 @@ fn validate_recipe_binding(
     let recipe = registry
         .get(&session.provider_id)
         .and_then(|entry| entry.authentication.as_ref())
-        .and_then(|authentication| authentication.capture_recipe())
-        .filter(|recipe| {
-            recipe.version == session.required_recipe_version && recipe.validate().is_ok()
+        .and_then(|authentication| {
+            authentication
+                .capture_recipes()
+                .into_iter()
+                .find(|recipe| recipe.version == session.required_recipe_version)
         })
+        .filter(|recipe| recipe.validate().is_ok())
         .ok_or(AuthBootstrapCredentialServiceError::RecipeMismatch)?;
     validate_bundle_against_recipe(&recipe, bundle)
 }

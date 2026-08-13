@@ -11,6 +11,8 @@ use crate::{
     TaskInventoryCapability, TaskProgressCapability,
 };
 
+const MAX_CAPTURE_RECIPE_ALTERNATIVES: usize = 8;
+
 #[derive(Clone)]
 pub struct ProviderEntry {
     pub metadata: ProviderMetadata,
@@ -97,20 +99,31 @@ impl ProviderEntry {
                 provider_id: self.metadata.id.clone(),
             });
         }
-        let capture_recipe = self
+        let capture_recipes = self
             .authentication
             .as_ref()
-            .and_then(|authentication| authentication.capture_recipe());
+            .map_or_else(Vec::new, |authentication| authentication.capture_recipes());
         let capture_recipe_valid = match (
             self.metadata.capture_recipe_version,
-            capture_recipe.as_ref(),
+            capture_recipes.first(),
         ) {
             (None, None) => true,
             (Some(version), Some(recipe)) => {
                 version == recipe.version
-                    && recipe.validate().is_ok()
-                    && self.metadata.auth_methods.contains(&recipe.auth_method)
-                    && self.metadata.session_kinds.contains(&recipe.session_kind)
+                    && capture_recipes.len() <= MAX_CAPTURE_RECIPE_ALTERNATIVES
+                    && capture_recipes.iter().all(|recipe| {
+                        recipe.validate().is_ok()
+                            && self.metadata.auth_methods.contains(&recipe.auth_method)
+                            && self.metadata.session_kinds.contains(&recipe.session_kind)
+                    })
+                    && capture_recipes
+                        .iter()
+                        .enumerate()
+                        .all(|(position, recipe)| {
+                            capture_recipes[..position]
+                                .iter()
+                                .all(|earlier| earlier.version != recipe.version)
+                        })
             }
             (None, Some(_)) | (Some(_), None) => false,
         };

@@ -35,6 +35,12 @@ is beyond the current milestone. Native Rust HTTP is preferred, but an
 incomplete native path must continue into the smallest necessary
 BrowserBridge/Capture fallback.
 
+Pinned upstream revisions are reproducible audit snapshots, not permanent
+freeze points. At each meaningful Provider checkpoint, re-check the recorded
+donors' default branches, tags/releases and relevant new commits. Record the
+new revision and protocol/capability delta, then continue incremental audit,
+porting, fixtures and regression coverage when upstream behavior changed.
+
 ## Architecture invariants
 
 Capability completeness does not weaken reliability. Preserve Thick Core,

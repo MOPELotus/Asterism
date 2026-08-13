@@ -17,6 +17,7 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("recordAuthBootstrapEvent", "AuthBootstrapEventResponse"),
     ("pollAuthBootstrapStream", "AuthBootstrapSession"),
     ("listProviders", "ProviderMetadataListResponse"),
+    ("listProviderCaptureRecipes", "CaptureRecipeListResponse"),
     ("listProviderAccounts", "ProviderAccountListResponse"),
     ("createProviderAccount", "ProviderAccountResponse"),
     ("getProviderAccount", "ProviderAccountResponse"),
@@ -514,6 +515,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 }),
             ),
         ),
+        ("CaptureRecipeListResponse", list_response("CaptureRecipe")),
         (
             "AuthBootstrapCreateResponse",
             object(

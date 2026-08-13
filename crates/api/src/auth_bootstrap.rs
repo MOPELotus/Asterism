@@ -44,7 +44,8 @@ pub(super) async fn create_auth_bootstrap_session(
     let request = api_json(payload)?;
     let provider_id = ProviderId::new(request.provider_id)
         .map_err(|error| ApiError::bad_request("invalid_provider_id", error.to_string()))?;
-    let required_recipe_version = provider_capture_recipe(&state, &provider_id, None)?.version;
+    let required_recipe_version =
+        provider_capture_recipe(&state, &provider_id, request.recipe_version)?.version;
     let provider_account_id = request
         .provider_account_id
         .as_deref()
@@ -286,15 +287,18 @@ fn provider_capture_recipe(
     provider_id: &ProviderId,
     expected_version: Option<u32>,
 ) -> Result<CaptureRecipe, ApiError> {
-    let recipe = state
+    let recipes = state
         .providers
         .get(provider_id)
         .and_then(|entry| entry.authentication.as_ref())
-        .and_then(|authentication| authentication.capture_recipe())
-        .filter(|recipe| {
-            recipe.validate().is_ok()
-                && expected_version.is_none_or(|version| version == recipe.version)
-        })
+        .map_or_else(Vec::new, |authentication| authentication.capture_recipes());
+    let recipe = expected_version
+        .map_or_else(
+            || recipes.first(),
+            |version| recipes.iter().find(|recipe| recipe.version == version),
+        )
+        .filter(|recipe| recipe.validate().is_ok())
+        .cloned()
         .ok_or_else(|| {
             ApiError::conflict(
                 "capture_recipe_unavailable",
@@ -434,6 +438,7 @@ pub(super) struct CreateAuthBootstrapSessionRequest {
     provider_id: String,
     provider_account_id: Option<String>,
     purpose: AuthBootstrapPurpose,
+    recipe_version: Option<u32>,
 }
 
 pub(super) struct CreateAuthBootstrapSessionResponse {

@@ -3115,3 +3115,22 @@ while a stale in-flight exchange becomes `Ambiguous` and
 `ProviderUnavailable` without invoking the Provider again. The OpenAPI surface
 therefore exposes only sanitized state, expiry, consumption and revision, and
 marks the submitted callback URL as write-only.
+
+## One-hundred-and-eighty-first Phase 0 slice
+
+Capture acquisition is no longer restricted to one fixed recipe per
+Provider. `AuthenticationCapability` may return a bounded ordered set of
+complete alternative recipes; registry validation requires unique positive
+versions, validates every recipe independently and keeps the metadata version
+as the default first choice. Alternatives describe separate atomic credential
+bundles and may differ in authentication method, session kind, readiness and
+output shape. A helper may not merge fields or browser snapshots across them.
+
+Authenticated clients can discover the ordered alternatives through
+`GET /api/v1/providers/{provider_id}/capture-recipes` and may select a specific
+`recipe_version` when creating a bootstrap session. Core freezes that exact
+version into the durable session, returns only the matching recipe at claim,
+and validates the submitted credential bundle against the same version before
+any Provider validation or Secret write. Omitting the selection preserves the
+Provider's audited default recipe. This permits Cidaren's token-only and
+Composite Capture routes to coexist without weakening recipe/session binding.

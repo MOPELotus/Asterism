@@ -15,12 +15,13 @@ mod task;
 
 use std::sync::Arc;
 
+use asterism_domain::ProviderId;
 use asterism_events::EventBus;
-use asterism_provider_api::{ProviderMetadata, ProviderRegistry};
+use asterism_provider_api::{CaptureRecipe, ProviderMetadata, ProviderRegistry};
 use asterism_storage::{Database, SqliteSecretStore};
 use axum::{
     Extension, Json, Router,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{HeaderName, HeaderValue, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
@@ -100,6 +101,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/auth/session", get(auth::current_identity))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/providers", get(list_providers))
+        .route(
+            "/api/v1/providers/{provider_id}/capture-recipes",
+            get(list_provider_capture_recipes),
+        )
         .route(
             "/api/v1/auth-bootstrap/sessions",
             post(auth_bootstrap::create_auth_bootstrap_session),
@@ -368,6 +373,28 @@ async fn list_providers(
     }))
 }
 
+async fn list_provider_capture_recipes(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<auth::AuthContext>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<ListResponse<CaptureRecipe>>, ApiError> {
+    auth::require_provider_read(&auth)?;
+    let provider_id = ProviderId::new(provider_id)
+        .map_err(|error| ApiError::bad_request("invalid_provider_id", error.to_string()))?;
+    let entry = state
+        .providers
+        .get(&provider_id)
+        .ok_or_else(|| ApiError::not_found("provider_not_found"))?;
+    let items = entry
+        .authentication
+        .as_ref()
+        .map_or_else(Vec::new, |authentication| authentication.capture_recipes());
+    Ok(Json(ListResponse {
+        total: items.len(),
+        items,
+    }))
+}
+
 async fn openapi() -> Json<Value> {
     Json(openapi_document())
 }
@@ -416,6 +443,12 @@ pub fn openapi_document() -> Value {
                 "responses": {"204": {"description": "Web session revoked"}, "400": {"description": "Not a Web session"}, "401": {"description": "Authentication required"}}
             }},
             "/api/v1/providers": {"get": {"operationId": "listProviders", "security": [{"cookieAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Registered provider metadata"}}}},
+            "/api/v1/providers/{provider_id}/capture-recipes": {"get": {
+                "operationId": "listProviderCaptureRecipes",
+                "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+                "parameters": [{"name": "provider_id", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"}}],
+                "responses": {"200": {"description": "Ordered Capture recipe alternatives"}, "400": {"description": "Invalid Provider ID"}, "404": {"description": "Provider not found"}}
+            }},
             "/api/v1/auth-bootstrap/sessions": {"post": {
                 "operationId": "createAuthBootstrapSession",
                 "security": [{"cookieAuth": []}, {"bearerAuth": []}],
@@ -723,7 +756,8 @@ pub fn openapi_document() -> Value {
                     "properties": {
                         "provider_id": {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"},
                         "provider_account_id": {"type": ["string", "null"], "format": "uuid"},
-                        "purpose": {"type": "string", "enum": ["add_account", "reauthenticate", "repair_session"]}
+                        "purpose": {"type": "string", "enum": ["add_account", "reauthenticate", "repair_session"]},
+                        "recipe_version": {"type": ["integer", "null"], "minimum": 1}
                     },
                     "additionalProperties": false
                 },
@@ -2271,8 +2305,8 @@ mod tests {
 
     #[async_trait]
     impl AuthenticationCapability for ApiCredentialAuthentication {
-        fn capture_recipe(&self) -> Option<CaptureRecipe> {
-            Some(test_capture_recipe(3))
+        fn capture_recipes(&self) -> Vec<CaptureRecipe> {
+            vec![test_capture_recipe(3), test_capture_recipe(4)]
         }
 
         async fn begin_authentication(
@@ -2897,6 +2931,53 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audit_count, 2);
+    }
+
+    #[tokio::test]
+    async fn capture_recipe_alternatives_are_discoverable_and_frozen_by_version() {
+        let (app, _) = credential_test_app(true).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let recipes = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/providers/provider-alpha/capture-recipes")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recipes.status(), StatusCode::OK);
+        let recipes = response_json(recipes).await;
+        assert_eq!(recipes["total"], 2);
+        assert_eq!(recipes["items"][0]["version"], 3);
+        assert_eq!(recipes["items"][1]["version"], 4);
+
+        let selected = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth-bootstrap/sessions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        r#"{"provider_id":"provider-alpha","purpose":"add_account","recipe_version":4}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected.status(), StatusCode::CREATED);
+        assert_eq!(
+            response_json(selected).await["session"]["required_recipe_version"],
+            4
+        );
     }
 
     #[tokio::test]

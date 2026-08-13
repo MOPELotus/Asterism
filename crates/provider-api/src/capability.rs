@@ -578,11 +578,19 @@ pub trait ProviderIdentity: Send + Sync {
 
 #[async_trait]
 pub trait AuthenticationCapability: ProviderIdentity {
-    /// Returns the exact declarative Capture recipe advertised by metadata.
-    /// The default makes Capture opt-in and prevents metadata alone from
-    /// claiming an executable helper contract.
+    /// Returns the legacy/default declarative Capture recipe advertised by
+    /// metadata. New Providers with more than one valid acquisition route
+    /// should override [`AuthenticationCapability::capture_recipes`] instead.
     fn capture_recipe(&self) -> Option<CaptureRecipe> {
         None
+    }
+
+    /// Returns ordered alternative Capture recipes. Every recipe is a
+    /// complete atomic credential-bundle contract; Core freezes exactly one
+    /// recipe version into each bootstrap session and never combines outputs
+    /// between alternatives.
+    fn capture_recipes(&self) -> Vec<CaptureRecipe> {
+        self.capture_recipe().into_iter().collect()
     }
 
     async fn begin_authentication(
