@@ -17,7 +17,10 @@ pub enum WellearnBatchFlow {
 
 impl WellearnBatchFlow {
     const fn keeps_hidden(self) -> bool {
-        matches!(self, Self::FanyuchangCompletion | Self::FanyuchangDuration)
+        matches!(
+            self,
+            Self::FanyuchangCompletion | Self::FanyuchangDuration | Self::YzbrhDuration
+        )
     }
 
     const fn skips_completed(self) -> bool {
@@ -328,14 +331,14 @@ mod tests {
     }
 
     #[test]
-    fn yzbrh_duration_skips_hidden_but_keeps_completed() {
+    fn yzbrh_duration_keeps_hidden_and_completed_rows() {
         let plan = build_batch_plan(&tasks(), WellearnBatchFlow::YzbrhDuration, None).unwrap();
         assert_eq!(
             plan.entries
                 .iter()
                 .map(|entry| entry.remote_task_id.as_str())
                 .collect::<Vec<_>>(),
-            ["sco:1001:301", "sco:1001:302"]
+            ["sco:1001:301", "sco:1001:302", "sco:1001:401"]
         );
     }
 
