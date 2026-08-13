@@ -196,7 +196,7 @@ mod tests {
         assert!(entry.submission_build.is_some());
         assert!(entry.submission_execute.is_none());
         assert!(entry.browser_bridge.is_some());
-        assert_eq!(entry.runtime_settings.version, 1);
+        assert_eq!(entry.runtime_settings.version, 2);
         assert_eq!(entry.runtime_settings.definitions.len(), 8);
 
         let mut registry = ProviderRegistry::default();

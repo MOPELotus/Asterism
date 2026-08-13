@@ -27,6 +27,7 @@
 | Matching relations are submitted with one stale token | Donor updates `topic_code` after every `VerifyAnswer` | Issue exactly one relation, accept its decoded rotated code, then issue the next; never batch or replay the sequence |
 | `SubmitChoseWord` is parsed as a Question response | Donor validates it but does not decode a next step | Use the separate acknowledgement-only parser and require decoded data for Start/Verify/advance |
 | Random timing changes across recovery | Donor chooses delay and reported duration from ranges | Resolve immutable bounded settings and derive a stable value for the bound attempt step; Core schedules delay and persists issued mutation facts |
+| Runtime default bypasses donor timing floor | Reopened donor config defaults `min_time=max_time=2` and both UI controls enforce a 2-second minimum | Runtime schema revision 2 uses the same 2-second defaults/minima at Provider/account/Task scope; invalid legacy zero-delay patches fail schema validation instead of silently changing execution behavior |
 | Mutation success text is accepted as verification | Donor stops on localized completion strings | Re-list exact release identity and verify fresh progress/state after mutation |
 | Development Provider activates accidentally | No live account verification exists | Keep registration disabled by default and metadata at Development |
 

@@ -83,6 +83,23 @@ Post-implementation fetch retained the same two donor revisions and ularch
 tag target. The 106-test Provider suite, all-target clippy and scoped diff
 checks completed without a new upstream delta.
 
+### 2026-08-13 runtime-timing parity checkpoint
+
+The pre-implementation fetch again retained `ularch/master@bce9559`,
+`MOPELotus/master@a74b4a2` and ularch tag/release `1.5.4`. Reopened donor
+`config/config.json` defaults `min_time=max_time=2`; `PublicInfo` replaces any
+lower value with 2, and both settings controls also enforce a minimum of 2.
+The Asterism schema had incorrectly defaulted and allowed both values at zero.
+
+Runtime schema revision 2 now freezes the evidenced 2-second defaults and
+minimum while preserving Provider/account/Task overrides, range validation and
+stable step-bound selection. The independently evidenced reported-answer and
+skip duration settings are unchanged.
+
+Post-implementation fetch retained both donor revisions and the same ularch
+tag target. The 106-test Provider suite, all-target clippy and scoped diff
+checks passed without an intervening upstream delta.
+
 ## Check procedure
 
 For the next checkpoint:

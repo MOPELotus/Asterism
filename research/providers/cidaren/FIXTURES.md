@@ -162,6 +162,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Attempt tests freeze one-operation-at-a-time start/verify/advance/skip,
   sequential rotated tokens for matching, reading-card execution, word
   selection acknowledgement, ambiguity no-replay and semantic fail-closed.
+- Runtime-setting tests freeze schema revision 2, donor-default 2-second
+  inter-question delay and its UI-evidenced lower bound, while retaining
+  Provider/account/Task overrides and stable per-step selection.
 - Submission verification replays no mutation: fresh 100%/Completed confirms
   the Task goal while per-Question answer history stays explicitly Unverified;
   a terminal receipt with incomplete readback remains Pending, and stale

@@ -69,8 +69,10 @@ The current checkpoint (not a completion boundary):
     selection must be acknowledged before start, matching Verify calls consume
     rotated topic codes sequentially, reading/skip/advance remain distinct,
     and ambiguous or semantically invalid results cannot be replayed;
-18. exposes eight provider/account/task runtime settings for scheduler
-    concurrency/scan policy and donor answer delay/reported-duration behavior,
+18. exposes runtime schema revision 2 with eight provider/account/task settings
+    for scheduler concurrency/scan policy and donor answer
+    delay/reported-duration behavior, including the evidenced 2-second delay
+    default and lower bound,
     with stable per-step range selection;
 19. retains donor failure fallbacks without hiding their quality: random choice
     is stable for an immutable Question, fixed-third and last-word paths remain

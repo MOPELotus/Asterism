@@ -374,7 +374,8 @@ evidence so the donor's explicit failure strategy can run.
 
 Donor timing configuration is represented by immutable runtime settings. The
 default reported answer range is 2500-7500 ms, skip reports 20000 ms, and the
-default inter-step delay is zero. Range choices are stable for one bound step
+default inter-step delay is exactly 2 seconds, matching both the reopened
+donor config and its UI-enforced lower bound. Range choices are stable for one bound step
 so crash recovery cannot silently choose a different mutation payload; Core
 will schedule real delays instead of sleeping inside Provider mutation code.
 

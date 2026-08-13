@@ -103,7 +103,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
     let mut definitions = scheduling_definitions(&provider_account_task);
     definitions.extend(answer_definitions(provider_account_task));
     ProviderRuntimeSettingsSchema {
-        version: 1,
+        version: 2,
         definitions,
     }
 }
@@ -169,11 +169,11 @@ fn answer_definitions(
             description: "提交一题并进入下一题前的最短真实等待秒数，保留 donor 可配置行为。"
                 .to_owned(),
             kind: ProviderSettingKind::DurationSeconds {
-                minimum: 0,
+                minimum: 2,
                 maximum: 300,
                 step: 1,
             },
-            default: ProviderSettingValue::DurationSeconds(0),
+            default: ProviderSettingValue::DurationSeconds(2),
             scopes: provider_account_task.clone(),
             core_behavior: None,
         },
@@ -182,11 +182,11 @@ fn answer_definitions(
             display_name: "题间最长等待".to_owned(),
             description: "提交一题并进入下一题前的最长真实等待秒数，不得小于最短等待。".to_owned(),
             kind: ProviderSettingKind::DurationSeconds {
-                minimum: 0,
+                minimum: 2,
                 maximum: 300,
                 step: 1,
             },
-            default: ProviderSettingValue::DurationSeconds(0),
+            default: ProviderSettingValue::DurationSeconds(2),
             scopes: provider_account_task.clone(),
             core_behavior: None,
         },
@@ -268,6 +268,7 @@ mod tests {
     fn donor_timing_settings_are_bounded_and_task_overridable() {
         let schema = runtime_settings_schema();
         schema.validate().unwrap();
+        assert_eq!(schema.version, 2);
         let task = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
             values: BTreeMap::from([
@@ -290,16 +291,18 @@ mod tests {
             ]),
         };
         let resolved = schema.resolve(None, None, Some(&task)).unwrap();
+        let task_settings = CidarenRuntimeSettings::resolve(&resolved).unwrap();
         assert_eq!(
-            CidarenRuntimeSettings::resolve(&resolved).unwrap(),
+            task_settings,
             CidarenRuntimeSettings {
-                answer_delay_min_seconds: 0,
+                answer_delay_min_seconds: 2,
                 answer_delay_max_seconds: 4,
                 answer_time_min_millis: 5_000,
                 answer_time_max_millis: 10_000,
                 skip_time_millis: 20_000,
             }
         );
+        assert!((2..=4).contains(&task_settings.answer_delay_seconds(b"synthetic-step")));
         assert_eq!(
             schema.execution_concurrency(&resolved).unwrap(),
             asterism_provider_api::ProviderExecutionConcurrency {
@@ -327,5 +330,14 @@ mod tests {
         };
         let resolved = schema.resolve(None, None, Some(&inverted)).unwrap();
         assert!(CidarenRuntimeSettings::resolve(&resolved).is_err());
+
+        let zero_delay = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: BTreeMap::from([(
+                ANSWER_DELAY_MIN_SECONDS_KEY.to_owned(),
+                ProviderSettingValue::DurationSeconds(0),
+            )]),
+        };
+        assert!(schema.resolve(None, None, Some(&zero_delay)).is_err());
     }
 }

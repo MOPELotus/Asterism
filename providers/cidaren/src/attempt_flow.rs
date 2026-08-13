@@ -1434,8 +1434,8 @@ mod tests {
 
     fn settings() -> CidarenRuntimeSettings {
         CidarenRuntimeSettings {
-            answer_delay_min_seconds: 0,
-            answer_delay_max_seconds: 0,
+            answer_delay_min_seconds: 2,
+            answer_delay_max_seconds: 2,
             answer_time_min_millis: 2_500,
             answer_time_max_millis: 7_500,
             skip_time_millis: 20_000,
