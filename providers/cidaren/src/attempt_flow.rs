@@ -16,7 +16,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     CidarenAssessmentBinding, CidarenAssessmentReceiptKind, CidarenAssessmentResponse,
-    CidarenAssessmentTransport, CidarenRuntimeSettings, CidarenWireAnswer,
+    CidarenAssessmentTransport, CidarenAttemptProgress, CidarenRuntimeSettings, CidarenWireAnswer,
     CidarenWordSelectionPlan, ParsedCidarenAttemptQuestion, ParsedCidarenAttemptStep,
     ParsedCidarenReadingCard, parse_attempt_step,
 };
@@ -223,6 +223,16 @@ impl CidarenAttemptFlow {
     pub fn current_reading_card(&self) -> Option<&ParsedCidarenReadingCard> {
         match self.phase() {
             CidarenAttemptPhase::CurrentReadingCard(card) => Some(card),
+            _ => None,
+        }
+    }
+
+    /// Returns the donor-observed completed/total counters for the current
+    /// remote step, independently from this machine's local position.
+    pub fn current_remote_progress(&self) -> Option<CidarenAttemptProgress> {
+        match self.phase() {
+            CidarenAttemptPhase::CurrentQuestion(current) => current.parsed.remote_progress(),
+            CidarenAttemptPhase::CurrentReadingCard(card) => card.remote_progress(),
             _ => None,
         }
     }
@@ -1086,6 +1096,9 @@ mod tests {
         );
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
+        let remote_progress = flow.current_remote_progress().unwrap();
+        assert_eq!(remote_progress.completed(), 1);
+        assert_eq!(remote_progress.total(), 127);
         let question = flow.current_question().unwrap().clone();
         let selected = SelectedAnswer {
             candidate_id: AnswerCandidateId::new(),
@@ -1273,6 +1286,9 @@ mod tests {
             .unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::CurrentReadingCard);
+        let remote_progress = flow.current_remote_progress().unwrap();
+        assert_eq!(remote_progress.completed(), 0);
+        assert_eq!(remote_progress.total(), 2);
         let command = flow.issue_advance(&settings()).unwrap();
         assert!((1..=3).contains(&command.delay_before_execute_seconds()));
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
@@ -1420,6 +1436,8 @@ mod tests {
         json!({
             "topic_code": "reading-topic",
             "topic_mode": 0,
+            "topic_done_num": 0,
+            "topic_total": 2,
             "stem": {"content": "Synthetic reading card", "remark": ""},
             "options": []
         })

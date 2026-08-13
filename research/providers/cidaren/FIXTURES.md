@@ -63,9 +63,12 @@ Legacy decoder tests generate synthetic JSON/base64 and apply the exact
 versioned fixed-index or sequential-span/five-chunk donor transform in memory.
 They cover `3_1021` under both divergent donor algorithms plus public
 `3_2265`/`3_2277`, accepting the dual-evidence identifier only when decoding
-has one unique result. The synthetic StartAnswer fixture freezes
-only the donor-read topic/stem/option shape; no published or real word/question
-payload is copied into the repository.
+has one unique result. The synthetic StartAnswer fixture freezes only the
+donor-read topic/stem/option shape plus synthetic
+`topic_done_num/topic_total` counters; no published or real word/question
+payload is copied into the repository. Counter tests keep the remote
+completed/total observation separate from local attempt position and reject
+inconsistent or unbounded values.
 
 ## Required live-sanitized fixtures
 
@@ -143,6 +146,9 @@ placeholder identities, result codes, status values and pagination shape.
   plaintext buffers.
 - `topic_code` appears only in ephemeral zeroizing route/attempt state and is
   absent from serialized Question fixtures and immutable Drafts.
+- Optional `topic_done_num/topic_total` are bounded integers, completed never
+  exceeds total, missing legacy payloads remain valid, and the counters neither
+  alter Question fingerprints nor drive the local mutation position.
 - Request-vector tests freeze `StartAnswer`, `VerifyAnswer`,
   `SubmitAnswerAndSave`, `SkipAnswer` and `SubmitChoseWord` field/sign order.
 - Native-boundary tests cover both `ClassTask` and `StudyTask` route families,

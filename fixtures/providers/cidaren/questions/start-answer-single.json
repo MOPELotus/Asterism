@@ -1,6 +1,8 @@
 {
   "topic_code": "synthetic-topic-code",
   "topic_mode": 17,
+  "topic_done_num": 1,
+  "topic_total": 127,
   "stem": {
     "content": "合成释义",
     "remark": ""

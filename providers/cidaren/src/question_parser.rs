@@ -15,6 +15,26 @@ const MAX_ANSWER_TAG_BYTES: usize = 256;
 const MAX_OPTIONS: usize = 256;
 const MAX_RELATIONS: usize = 256;
 const MAX_POSITION: u32 = 100_000;
+const MAX_REMOTE_TOPIC_TOTAL: u32 = 100_000;
+
+/// Sanitized progress counters returned with the donor's current attempt
+/// payload. These counters are remote observations and deliberately remain
+/// distinct from the local durable state-machine position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CidarenAttemptProgress {
+    completed: u32,
+    total: u32,
+}
+
+impl CidarenAttemptProgress {
+    pub const fn completed(self) -> u32 {
+        self.completed
+    }
+
+    pub const fn total(self) -> u32 {
+        self.total
+    }
+}
 
 /// One decoded current Cidaren question bound to the remote attempt token.
 ///
@@ -29,6 +49,7 @@ pub struct ParsedCidarenAttemptQuestion {
     options: Vec<QuestionOption>,
     metadata_sanitized: Value,
     position: u32,
+    remote_progress: Option<CidarenAttemptProgress>,
 }
 
 /// One decoded donor attempt step. Reading cards are executable advance stages
@@ -55,6 +76,7 @@ pub struct ParsedCidarenReadingCard {
     remote_id: String,
     stem_sanitized: String,
     position: u32,
+    remote_progress: Option<CidarenAttemptProgress>,
 }
 
 impl ParsedCidarenReadingCard {
@@ -93,6 +115,10 @@ impl ParsedCidarenReadingCard {
     pub const fn position(&self) -> u32 {
         self.position
     }
+
+    pub const fn remote_progress(&self) -> Option<CidarenAttemptProgress> {
+        self.remote_progress
+    }
 }
 
 impl fmt::Debug for ParsedCidarenReadingCard {
@@ -102,6 +128,7 @@ impl fmt::Debug for ParsedCidarenReadingCard {
             .field("topic_code", &"[REDACTED]")
             .field("remote_id", &self.remote_id)
             .field("position", &self.position)
+            .field("remote_progress", &self.remote_progress)
             .finish_non_exhaustive()
     }
 }
@@ -197,6 +224,10 @@ impl ParsedCidarenAttemptQuestion {
             .map_err(|_| invalid_response("Cidaren normalized Question is invalid"))?;
         Ok(question)
     }
+
+    pub const fn remote_progress(&self) -> Option<CidarenAttemptProgress> {
+        self.remote_progress
+    }
 }
 
 impl fmt::Debug for ParsedCidarenAttemptQuestion {
@@ -207,6 +238,7 @@ impl fmt::Debug for ParsedCidarenAttemptQuestion {
             .field("remote_id", &self.remote_id)
             .field("kind", &self.kind)
             .field("position", &self.position)
+            .field("remote_progress", &self.remote_progress)
             .finish_non_exhaustive()
     }
 }
@@ -251,6 +283,7 @@ pub fn parse_attempt_question(
     let object = payload
         .as_object()
         .ok_or_else(|| protocol_drift("Cidaren attempt payload is not an object"))?;
+    let remote_progress = parse_remote_progress(object)?;
     let mut topic_code =
         required_text(object.get("topic_code"), MAX_TOPIC_CODE_BYTES, "topic code")?;
     let mode = object
@@ -278,6 +311,7 @@ pub fn parse_attempt_question(
         options,
         metadata_sanitized,
         position,
+        remote_progress,
     };
     // Validate through both public contracts before handing the ephemeral
     // attempt material to a caller.
@@ -297,6 +331,7 @@ fn parse_reading_card(
     let object = payload
         .as_object()
         .ok_or_else(|| protocol_drift("Cidaren reading-card payload is not an object"))?;
+    let remote_progress = parse_remote_progress(object)?;
     if object.get("topic_mode").and_then(Value::as_i64) != Some(0) {
         return Err(protocol_drift(
             "Cidaren reading-card parser received another topic mode",
@@ -333,6 +368,7 @@ fn parse_reading_card(
         remote_id,
         stem_sanitized,
         position,
+        remote_progress,
     };
     card.route_context()?;
     Ok(card)
@@ -351,6 +387,50 @@ fn question_kind(topic_mode: i64) -> ProviderResult<QuestionKind> {
             ProviderErrorKind::UnsupportedTask,
             "Cidaren attempt uses an unaudited topic mode",
         )),
+    }
+}
+
+fn parse_remote_progress(
+    object: &Map<String, Value>,
+) -> ProviderResult<Option<CidarenAttemptProgress>> {
+    let completed = optional_remote_counter(object.get("topic_done_num"), "completed")?;
+    let total = optional_remote_counter(object.get("topic_total"), "total")?;
+    match total {
+        None | Some(0) => match completed {
+            None | Some(0) => Ok(None),
+            Some(completed) => Err(protocol_drift(format!(
+                "Cidaren attempt reports {completed} completed topics without a total"
+            ))),
+        },
+        Some(total) => {
+            let completed = completed.unwrap_or(0);
+            if completed > total {
+                return Err(protocol_drift(
+                    "Cidaren attempt completed-topic count exceeds its total",
+                ));
+            }
+            Ok(Some(CidarenAttemptProgress { completed, total }))
+        }
+    }
+}
+
+fn optional_remote_counter(
+    value: Option<&Value>,
+    label: &'static str,
+) -> ProviderResult<Option<u32>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value <= MAX_REMOTE_TOPIC_TOTAL)
+            .map(Some)
+            .ok_or_else(|| {
+                protocol_drift(format!("Cidaren attempt {label}-topic count is invalid"))
+            }),
+        _ => Err(protocol_drift(format!(
+            "Cidaren attempt {label}-topic count is invalid"
+        ))),
     }
 }
 
@@ -726,6 +806,9 @@ mod tests {
     fn single_choice_is_sanitized_and_topic_code_stays_ephemeral() {
         let payload: Value = serde_json::from_str(SINGLE).unwrap();
         let parsed = parse_attempt_question(&payload, "class-task:2002", 1).unwrap();
+        let progress = parsed.remote_progress().unwrap();
+        assert_eq!(progress.completed(), 1);
+        assert_eq!(progress.total(), 127);
         let reference = parsed.question_ref().unwrap();
         assert_eq!(reference.kind_hint, QuestionKind::SingleChoice);
         assert_eq!(
@@ -827,6 +910,8 @@ mod tests {
         };
         assert!(card.remote_id().starts_with("reading-card:"));
         assert_eq!(card.position(), 1);
+        assert_eq!(card.remote_progress().unwrap().completed(), 1);
+        assert_eq!(card.remote_progress().unwrap().total(), 127);
         assert!(!card.stem_sanitized().is_empty());
         assert_eq!(
             card.route_context().unwrap().get("cidaren.topic_code"),
@@ -852,5 +937,61 @@ mod tests {
         );
         assert!(parse_attempt_question(&payload, "foreign-task", 1).is_err());
         assert!(parse_attempt_question(&payload, "class-task:2002", 0).is_err());
+    }
+
+    #[test]
+    fn remote_attempt_progress_is_optional_bounded_and_consistent() {
+        let mut payload: Value = serde_json::from_str(SINGLE).unwrap();
+        payload.as_object_mut().unwrap().remove("topic_done_num");
+        payload.as_object_mut().unwrap().remove("topic_total");
+        assert_eq!(
+            parse_attempt_question(&payload, "class-task:2002", 1)
+                .unwrap()
+                .remote_progress(),
+            None
+        );
+
+        payload["topic_done_num"] = json!(0);
+        payload["topic_total"] = json!(12);
+        let progress = parse_attempt_question(&payload, "class-task:2002", 1)
+            .unwrap()
+            .remote_progress()
+            .unwrap();
+        assert_eq!(progress.completed(), 0);
+        assert_eq!(progress.total(), 12);
+
+        payload["topic_done_num"] = json!(13);
+        assert_eq!(
+            parse_attempt_question(&payload, "class-task:2002", 1)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        payload["topic_done_num"] = json!(1);
+        payload["topic_total"] = json!(100_001);
+        assert_eq!(
+            parse_attempt_question(&payload, "class-task:2002", 1)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        payload["topic_total"] = json!(12.5);
+        assert_eq!(
+            parse_attempt_question(&payload, "class-task:2002", 1)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        payload["topic_done_num"] = json!(1);
+        payload.as_object_mut().unwrap().remove("topic_total");
+        assert_eq!(
+            parse_attempt_question(&payload, "class-task:2002", 1)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
     }
 }

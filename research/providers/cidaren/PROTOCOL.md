@@ -315,9 +315,21 @@ The current clean-room protocol layer additionally freezes:
 - `SubmitAnswerAndSave` and `SkipAnswer` duration/topic signing;
 - compact `SubmitChoseWord` word-map signing;
 - donor-observed topic modes for single-choice, matching and text Questions;
+- optional integer `topic_done_num/topic_total` progress counters observed by
+  the reopened donor for its live progress display;
 - nested answer-tag flattening without persisting executable topic codes,
   while retaining sanitized top-level order, parent tag and child wire content
   needed to reproduce the donor's sentence-selection semantics exactly.
+
+The remote topic counters are not the state machine's local `position` and do
+not participate in Question identity, answer selection or mutation routing.
+When `topic_total > 0`, Asterism accepts an absent completed count as zero and
+requires `0 <= topic_done_num <= topic_total <= 100000`; absent/zero pairs mean
+the donor did not publish progress. Positive-without-total, negative,
+fractional, textual, oversized or inverted counters are protocol drift. The
+same observation is retained for ordinary Questions and mode-0 reading cards.
+Core's durable QuestionSession contract must persist/expose it separately from
+the one-shot attempt position when the public capability is integrated.
 
 `SubmitChoseWord` is acknowledgement-only in the donor: it validates the
 success envelope but does not decode a next Question. Asterism therefore uses

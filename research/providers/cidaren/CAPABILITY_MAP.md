@@ -14,7 +14,7 @@ differences are frozen in [`DONOR_DIFFERENCES.md`](DONOR_DIFFERENCES.md).
 | TaskDetail | Current donor + Asterism Core | FromScratch | Offline/native-boundary covered: freshly re-list the matching class or study endpoint and require one exact stable identity before returning details; never trust a stale `task_id` |
 | TaskProgressRead | Current/private task rows | PortSource | Offline/native-boundary covered for class and ordinary study Tasks: fresh rows expose bounded percent/state plus independently converted duration when present; score and completion remain separate |
 | DurationRead | Current donor + public issue 6 | PortSource | Registered and fresh-read for class/study Tasks with `time_spent`: non-zero public rows, millisecond epoch/duration fields in the same envelope and donor mutation values establish millisecond wire semantics; values are bounded to 100 years and truncated only at the Domain seconds boundary |
-| QuestionInventory / QuestionParse | Current donors + public issue 43 | PortSource | Fixed-index `jv=2_*`, both evidenced `jv=3_1021` transforms, public `jv=3_2265/3_2277` and current authenticated `jv=99` decoding plus strict single/matching/text/nested-tag parsing are offline-covered; conflicting `3_1021` candidates must yield one unique/equal JSON value. `topic_code` stays ephemeral. The Provider-private attempt machine consumes `StartAnswer` as a one-shot mutation; public slot integration waits only for durable Core AttemptStart/QuestionSession |
+| QuestionInventory / QuestionParse | Current donors + public issue 43 | PortSource | Fixed-index `jv=2_*`, both evidenced `jv=3_1021` transforms, public `jv=3_2265/3_2277` and current authenticated `jv=99` decoding plus strict single/matching/text/nested-tag parsing are offline-covered; conflicting `3_1021` candidates must yield one unique/equal JSON value. `topic_code` stays ephemeral. Public-donor `topic_done_num/topic_total` are retained as an optional bounded remote progress observation distinct from local attempt position. The Provider-private attempt machine consumes `StartAnswer` as a one-shot mutation; public slot integration waits only for durable Core AttemptStart/QuestionSession |
 | AnswerResolve | Current donor | PortSource | Native task-bound inventory, `StudyWordInfo` and bounded `Course/SearchWord` prototype lookup are implemented. Donor strategies resolve bidirectional meaning, ordered matching, separately-scoped phrase/example evidence and completion/example behavior; audited random/fixed-third/last-word failure fallbacks are retained with stable Draft-safe selection and explicit low confidence, including well-formed empty evidence families. Sentence modes load evidence once per top-level parent, preserve donor ordering, resolve exact nested child wire tags and retain the donor's third-parent fallback |
 | SubmissionBuild | Current donor | Reference | Registry-advertised one-current-Question immutable Draft preview is implemented for selection/text/matching; it exposes field names only and never persists topic codes, signatures or endpoints |
 | SubmissionExecute | Current donor | PortSource | Native transports plus a one-shot Provider-private state machine cover `SubmitChoseWord`, `StartAnswer`, sequential `VerifyAnswer`, `SubmitAnswerAndSave` and `SkipAnswer`. Issued/ambiguous/failed-closed states prevent replay, matching consumes each rotated token serially, verified-answer and reading-card advance commands carry distinct stable donor pre-execution residence times, and only a terminal Completed state can emit a bounded receipt for later fresh verification. Durable public execution awaits the shared AttemptStart/QuestionSession slot |
@@ -87,6 +87,9 @@ The current checkpoint (not a completion boundary):
     sorted signed request,
     ECDH/HKDF/AES-GCM authenticated response, exact Composite material and
     mandatory fresh account readback, with no ambiguous retry.
+21. retains the reopened donor's bounded current-attempt completed/total
+    counters on Question and reading-card steps without folding them into the
+    local position, Question fingerprint or mutation transition.
 
 The remaining work is durable shared attempt/submission registration, shared
 execution for the alternate Capture/BrowserBridge helper paths and live
@@ -116,7 +119,7 @@ platform-facing surface maps as follows:
 | `main_api.query_word` | `Course/StudyWordInfo` | bounded meaning, phrase and example evidence |
 | `basic_api.use_api_get_prototype` | `Course/SearchWord` | bounded prototype alias resolution |
 | `main_api.select_all_word` | `SubmitChoseWord` | signed one-shot word-selection mutation and acknowledgement parsing |
-| `main_api.get_exam` | `StartAnswer` | signed non-idempotent attempt start plus legacy/current response decoding |
+| `main_api.get_exam` | `StartAnswer` | signed non-idempotent attempt start plus legacy/current response decoding; optional `topic_done_num/topic_total` are exposed as an independently bounded remote progress observation |
 | `main_api.submit_result` | `VerifyAnswer` | single-answer and sequential rotated-token matching mutations |
 | `main_api.next_exam` | `SubmitAnswerAndSave` | signed answer/reading-card advance with stable reported duration |
 | `main_api.skip_exam` | `SkipAnswer` | explicit signed skip with stable reported duration |

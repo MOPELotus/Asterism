@@ -121,6 +121,25 @@ Post-implementation fetch of both remotes retained the same revisions and
 ularch tag target. The 106-test Provider suite, all-target clippy and scoped
 diff checks passed without an intervening donor delta.
 
+### 2026-08-13 current-attempt-progress checkpoint
+
+The pre-implementation fetch resolved `ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`
+and `MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`. The latest
+ularch tag/release remained `1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`,
+and neither default branch had a new commit or release delta.
+
+The reopened public payload publishes optional `topic_done_num` and
+`topic_total` counters on both ordinary question and mode-0 reading-card
+steps. The Provider now parses them as bounded, conflict-checked remote
+observations, exposes them from the private attempt flow, and keeps them
+separate from local position, Question identity and mutation routing. Missing
+or zero pairs remain valid legacy payloads; inconsistent, fractional, negative,
+oversized or inverted counters fail closed as protocol drift.
+
+Post-implementation ref checks retained both revisions and the same ularch
+release. The 107-test Provider suite, all-target clippy and scoped diff checks
+passed without an intervening upstream delta.
+
 ## Check procedure
 
 For the next checkpoint:

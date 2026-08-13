@@ -51,7 +51,7 @@ either Python donor.
 | Task detail/progress/duration | Task rows and Info reads | Same | No | Implemented through fresh identity rebinding |
 | Post-run task score | Calls `ClassTask/Info` or `StudyTask/Info`, trying `score/task_score/grade`; its dedicated requests session accidentally omits `UserToken` | No dedicated caller; inventory retains score | No | Exact authenticated Native HTTP route implemented after fresh rebinding; aliases are conflict-checked and mapped to Core thousandth-points, with fresh-list fallback for absent score or ambiguous study `task_id=-1` |
 | Word inventory/evidence | `StudyTask/Info`, Course page, `StudyWordInfo`, `SearchWord` | Same, with encrypted lookup fix | Supplies crypto needed by current responses | Implemented |
-| Question and answer strategy | Single, matching, reading and text families; donor fallback behavior | Same plus current encrypted response support | Supplies crypto/login context only | Implemented privately with immutable Draft-safe answer evidence |
+| Question and answer strategy | Single, matching, reading and text families; donor fallback behavior; current payload completed/total counters displayed as remote progress | Same plus current encrypted response support | Supplies crypto/login context only | Implemented privately with immutable Draft-safe answer evidence and bounded remote progress kept separate from local attempt position |
 | `SubmitChoseWord` | Yes | Yes | No | Implemented one-shot transport/state edge |
 | `StartAnswer` | Yes | Yes | No | Implemented as non-idempotent attempt start; public durable slot awaits Core QuestionSession |
 | `VerifyAnswer` | Yes | Yes | No | Implemented sequentially, including rotated matching topic codes |
@@ -60,7 +60,9 @@ either Python donor.
 | Fresh submission verification | Reads task completion/score after run but has no answer history | Fresh task row available; no answer history | No | Fresh Task completion/progress/score implemented; per-Question result remains honestly Unverified |
 | Executable BrowserBridge | Donor operates in WeChat/browser context | Capture injects into authenticated H5 | Authorization URL can be rendered/copied/QR-displayed | Provider origin/isolation policy exists; shared start/action/result execution contract remains a Core Gap |
 
-UI progress bars, logging/export, completion sound, update checks, device-ID
-display and the unrelated Gitee access-log probe are executable application
-features but not Cidaren platform protocol capabilities. They remain audited
-so their absence is not mistaken for an unreviewed donor surface.
+UI widgets, logging/export, completion sound, update checks, device-ID display
+and the unrelated Gitee access-log probe are executable application features
+but not Cidaren platform protocol capabilities. The underlying
+`topic_done_num/topic_total` response facts used by the progress widget are
+nonetheless retained by the Provider. The remaining application-only features
+stay audited so their absence is not mistaken for an unreviewed donor surface.
