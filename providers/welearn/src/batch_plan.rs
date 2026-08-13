@@ -100,6 +100,8 @@ pub struct WellearnBatchEntry {
     pub remote_task_id: String,
     pub unit_index: u32,
     pub sco_index: usize,
+    pub unit_visible: bool,
+    pub sco_visible: Option<bool>,
     pub visible: bool,
     pub completion: RemoteState,
     pub target_seconds: Option<u64>,
@@ -244,6 +246,11 @@ pub fn build_batch_plan(
                 .expect("validated complete normalized observation above"),
             sco_index: normalized_usize(task, "sco_index")
                 .expect("validated complete normalized observation above"),
+            unit_visible,
+            sco_visible: task
+                .normalized
+                .get("sco_visible")
+                .and_then(serde_json::Value::as_bool),
             visible,
             completion,
             target_seconds: None,
@@ -355,7 +362,7 @@ fn normalized_completion(task: &RemoteTask) -> Option<RemoteState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse_course_inventory, parse_task_inventory, WellearnScoLeavesDocument};
+    use crate::{WellearnScoLeavesDocument, parse_course_inventory, parse_task_inventory};
 
     const COURSES: &str =
         include_str!("../../../fixtures/providers/welearn/courses/list-mixed.json");
@@ -396,6 +403,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["sco:1001:301", "sco:1001:302", "sco:1001:401"]
         );
+        assert!(plan.entries[0].unit_visible);
+        assert_eq!(plan.entries[0].sco_visible, Some(true));
+        assert!(!plan.entries[2].unit_visible);
+        assert_eq!(plan.entries[2].sco_visible, Some(true));
         assert_eq!(plan.dispatch, WellearnBatchDispatch::PerChildConcurrent);
         assert_eq!(plan.target_strategy, WellearnBatchTargetStrategy::PerChild);
     }
@@ -441,10 +452,11 @@ mod tests {
             plan.target_strategy,
             WellearnBatchTargetStrategy::AggregateEqualFloor
         );
-        assert!(plan
-            .entries
-            .iter()
-            .all(|entry| entry.target_seconds == Some(30)));
+        assert!(
+            plan.entries
+                .iter()
+                .all(|entry| entry.target_seconds == Some(30))
+        );
     }
 
     #[test]
@@ -461,10 +473,11 @@ mod tests {
         let plan = build_batch_plan(&many, WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
         assert_eq!(plan.aggregate_duration_seconds, Some(60));
         assert_eq!(plan.discarded_remainder_seconds, 60);
-        assert!(plan
-            .entries
-            .iter()
-            .all(|entry| entry.target_seconds == Some(0)));
+        assert!(
+            plan.entries
+                .iter()
+                .all(|entry| entry.target_seconds == Some(0))
+        );
     }
 
     #[test]
@@ -533,12 +546,14 @@ mod tests {
     #[test]
     fn duplicate_remote_tasks_fail_closed() {
         let tasks = tasks();
-        assert!(build_batch_plan(
-            &[tasks[0].clone(), tasks[0].clone()],
-            WellearnBatchFlow::FanyuchangCompletion,
-            None
-        )
-        .is_err());
+        assert!(
+            build_batch_plan(
+                &[tasks[0].clone(), tasks[0].clone()],
+                WellearnBatchFlow::FanyuchangCompletion,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
