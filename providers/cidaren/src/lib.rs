@@ -7,6 +7,7 @@
 //! assessment state machine. Public durable attempt integration and live
 //! compatibility remain in progress.
 
+mod answer;
 mod answer_evidence_loader;
 mod answer_evidence_protocol;
 mod answer_evidence_transport;
@@ -42,6 +43,7 @@ mod submission_build;
 mod submission_verify;
 mod task_read;
 
+pub use answer::CidarenAnswerResolve;
 pub use answer_evidence_loader::load_answer_evidence;
 pub use answer_evidence_protocol::{
     CidarenAnswerEvidenceBinding, CidarenWordInfoRequest, CidarenWordInventory,

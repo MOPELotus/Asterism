@@ -190,6 +190,21 @@ tag movement occurred. The two committed synthetic Capture result fixtures
 now run through the same typed command/result parser; the 111-test Provider
 suite, all-target clippy and scoped diff checks passed.
 
+The next Provider-only registration checkpoint found no donor revision delta.
+The existing native answer-evidence loader and fresh Task score verifier were
+already complete and independent of remote mutation, so Cidaren now registers
+`AnswerResolve` and `SubmissionVerify` publicly. Task rows advertise both
+capabilities; the resolver binds fresh StudyTask/Course evidence and preserves
+all audited fallback semantics, while verification remains a separate
+completion/progress/score read and leaves each Question `Unverified`. The
+public QuestionInventory/QuestionParse and SubmissionExecute slots remain
+explicitly tied to the Main-owned durable Attempt/QuestionSession contract.
+
+Post-registration refs remained `ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`,
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and
+`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`. The 113-test Provider suite,
+all-target clippy and scoped diff checks passed.
+
 ## Check procedure
 
 For the next checkpoint:

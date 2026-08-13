@@ -34,7 +34,9 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
             ProviderCapability::DurationRead,
+            ProviderCapability::AnswerResolve,
             ProviderCapability::SubmissionBuild,
+            ProviderCapability::SubmissionVerify,
         ]),
         auth_methods: BTreeSet::from([
             AuthMethod::ImportedToken,
@@ -63,8 +65,10 @@ mod tests {
                 ProviderCapability::TaskInventory,
                 ProviderCapability::TaskDetail,
                 ProviderCapability::TaskProgressRead,
+                ProviderCapability::AnswerResolve,
                 ProviderCapability::DurationRead,
                 ProviderCapability::SubmissionBuild,
+                ProviderCapability::SubmissionVerify,
             ])
         );
         assert_eq!(

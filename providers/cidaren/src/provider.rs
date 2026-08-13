@@ -5,11 +5,13 @@ use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::ProviderCredentialResolver;
 
 use crate::{
-    CidarenAuthentication, CidarenAuthenticationTransport, CidarenBrowserBridge,
-    CidarenClassTaskTransport, CidarenCourseInventory, CidarenDurationRead, CidarenSessionResolver,
-    CidarenStudyTaskTransport, CidarenSubmissionBuild, CidarenTaskDetail, CidarenTaskInventory,
-    CidarenTaskProgress, metadata::development_metadata, native_http::NativeCidarenTransport,
-    runtime_settings::runtime_settings_schema, stored_session::StoredCidarenSessionResolver,
+    CidarenAnswerEvidenceTransport, CidarenAnswerResolve, CidarenAuthentication,
+    CidarenAuthenticationTransport, CidarenBrowserBridge, CidarenClassTaskTransport,
+    CidarenCourseInventory, CidarenDurationRead, CidarenSessionResolver, CidarenStudyTaskTransport,
+    CidarenSubmissionBuild, CidarenSubmissionVerify, CidarenTaskDetail, CidarenTaskInventory,
+    CidarenTaskProgress, CidarenTaskScoreTransport, metadata::development_metadata,
+    native_http::NativeCidarenTransport, runtime_settings::runtime_settings_schema,
+    stored_session::StoredCidarenSessionResolver,
 };
 
 /// Composes the Development entry around injected token/session and complete
@@ -21,6 +23,8 @@ use crate::{
 /// Returns a sanitized Provider error if compile-time metadata is invalid.
 pub fn build_development_provider(
     authentication_transport: Arc<dyn CidarenAuthenticationTransport>,
+    answer_evidence_transport: Arc<dyn CidarenAnswerEvidenceTransport>,
+    score_transport: Arc<dyn CidarenTaskScoreTransport>,
     sessions: Arc<dyn CidarenSessionResolver>,
     class_tasks: Arc<dyn CidarenClassTaskTransport>,
     study_tasks: Arc<dyn CidarenStudyTaskTransport>,
@@ -32,6 +36,14 @@ pub fn build_development_provider(
     let task_progress = Arc::new(CidarenTaskProgress::try_new(
         class_tasks.clone(),
         study_tasks.clone(),
+    )?);
+    let answer_resolve = Arc::new(CidarenAnswerResolve::try_new(
+        task_detail.clone(),
+        answer_evidence_transport,
+    )?);
+    let submission_verify = Arc::new(CidarenSubmissionVerify::try_new(
+        task_detail.clone(),
+        score_transport,
     )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
@@ -53,10 +65,10 @@ pub fn build_development_provider(
         duration_read: Some(Arc::new(CidarenDurationRead::try_new(task_detail.clone())?)),
         question_inventory: None,
         question_parse: None,
-        answer_resolve: None,
+        answer_resolve: Some(answer_resolve),
         submission_build: Some(Arc::new(CidarenSubmissionBuild::try_new()?)),
         submission_execute: None,
-        submission_verify: None,
+        submission_verify: Some(submission_verify),
         task_execution: None,
         browser_bridge: Some(Arc::new(CidarenBrowserBridge::try_new(task_detail)?)),
     })
@@ -75,7 +87,14 @@ pub fn build_development_provider_native(
     sessions: Arc<dyn CidarenSessionResolver>,
 ) -> ProviderResult<ProviderEntry> {
     let native = Arc::new(NativeCidarenTransport::try_new(network, sessions.clone())?);
-    build_development_provider(native.clone(), sessions, native.clone(), native)
+    build_development_provider(
+        native.clone(),
+        native.clone(),
+        native.clone(),
+        sessions,
+        native.clone(),
+        native,
+    )
 }
 
 /// Composes the native Development entry around Core's provider-scoped stored
@@ -176,10 +195,60 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl CidarenAnswerEvidenceTransport for UnusedBoundaries {
+        async fn bind_answer_evidence(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+            _detail: &asterism_provider_api::RemoteTaskDetail,
+        ) -> ProviderResult<crate::CidarenAnswerEvidenceBinding> {
+            Err(unused())
+        }
+
+        async fn fetch_word_inventory(
+            &self,
+            _context: &ProviderContext,
+            _binding: &crate::CidarenAnswerEvidenceBinding,
+        ) -> ProviderResult<crate::CidarenWordInventory> {
+            Err(unused())
+        }
+
+        async fn fetch_word_evidence(
+            &self,
+            _context: &ProviderContext,
+            _lookup: &crate::CidarenWordLookup,
+        ) -> ProviderResult<crate::CidarenWordEvidence> {
+            Err(unused())
+        }
+
+        async fn resolve_word_prototype(
+            &self,
+            _context: &ProviderContext,
+            _word: &str,
+        ) -> ProviderResult<Option<String>> {
+            Err(unused())
+        }
+    }
+
+    #[async_trait]
+    impl CidarenTaskScoreTransport for UnusedBoundaries {
+        async fn fetch_task_score(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+            _detail: &asterism_provider_api::RemoteTaskDetail,
+        ) -> ProviderResult<Option<asterism_domain::SubmissionScore>> {
+            Err(unused())
+        }
+    }
+
     #[test]
     fn development_factory_is_registry_consistent_without_extra_slots() {
         let boundaries = Arc::new(UnusedBoundaries);
         let entry = build_development_provider(
+            boundaries.clone(),
+            boundaries.clone(),
             boundaries.clone(),
             boundaries.clone(),
             boundaries.clone(),
@@ -193,8 +262,10 @@ mod tests {
         assert!(entry.task_progress.is_some());
         assert!(entry.duration_read.is_some());
         assert!(entry.question_inventory.is_none());
+        assert!(entry.answer_resolve.is_some());
         assert!(entry.submission_build.is_some());
         assert!(entry.submission_execute.is_none());
+        assert!(entry.submission_verify.is_some());
         assert!(entry.browser_bridge.is_some());
         assert_eq!(entry.runtime_settings.version, 2);
         assert_eq!(entry.runtime_settings.definitions.len(), 8);

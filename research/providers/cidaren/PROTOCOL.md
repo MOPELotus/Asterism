@@ -497,3 +497,13 @@ observation.
 The platform exposes no audited answer-history readback, so the Task goal may
 be confirmed while each Question remains explicitly Unverified; incomplete
 readback stays Pending even after a terminal acknowledgement.
+
+`AnswerResolve` and `SubmissionVerify` are independent public Provider
+capabilities. Answer resolution freshly binds the Task's Course/unit inventory,
+loads only the evidence needed by each normalized Question and returns bounded
+`AnswerCandidate` values without issuing assessment mutations. Submission
+verification recomputes the immutable preview, rebinds the Task and reads
+completion/progress/score without replaying any mutation. Only the public
+`QuestionInventory`/`QuestionParse` and `SubmissionExecute` slots remain
+blocked on Main-owned durable QuestionSession/Attempt contracts; this is a
+shared contract boundary, not a Provider capability exclusion.
