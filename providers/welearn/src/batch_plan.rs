@@ -227,6 +227,25 @@ mod tests {
     }
 
     #[test]
+    fn yzbrh_duration_skips_hidden_but_keeps_completed() {
+        let plan = build_batch_plan(&tasks(), WellearnBatchFlow::YzbrhDuration, None).unwrap();
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| entry.remote_task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["sco:1001:301", "sco:1001:302"]
+        );
+    }
+
+    #[test]
+    fn auto_completion_skips_hidden_and_completed() {
+        let plan = build_batch_plan(&tasks(), WellearnBatchFlow::AutoCompletion, None).unwrap();
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].remote_task_id, "sco:1001:302");
+    }
+
+    #[test]
     fn auto_duration_freezes_one_budget_and_discards_remainder() {
         let plan = build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
         assert_eq!(plan.entries.len(), 2);
