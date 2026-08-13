@@ -212,6 +212,7 @@ pub fn build_batch_plan(
             || normalized_bool(task, "unit_visible").is_none()
             || normalized_u32(task, "unit_index").is_none()
             || normalized_usize(task, "sco_index").is_none()
+            || !has_valid_optional_bool(task, "sco_visible")
         {
             return Err(ProviderError::new(
                 ProviderErrorKind::ProtocolDrift,
@@ -326,6 +327,12 @@ fn normalized_bool(task: &RemoteTask, key: &str) -> Option<bool> {
     task.normalized
         .get(key)
         .and_then(serde_json::Value::as_bool)
+}
+
+fn has_valid_optional_bool(task: &RemoteTask, key: &str) -> bool {
+    task.normalized
+        .get(key)
+        .is_some_and(|value| value.is_null() || value.is_boolean())
 }
 
 fn normalized_u32(task: &RemoteTask, key: &str) -> Option<u32> {
@@ -540,6 +547,13 @@ mod tests {
     fn incomplete_normalized_task_fails_closed() {
         let mut task = tasks().remove(0);
         task.normalized["sco_index"] = serde_json::Value::Null;
+        assert!(build_batch_plan(&[task], WellearnBatchFlow::AutoCompletion, None).is_err());
+    }
+
+    #[test]
+    fn malformed_optional_sco_visibility_fails_closed() {
+        let mut task = tasks().remove(0);
+        task.normalized["sco_visible"] = serde_json::json!("false");
         assert!(build_batch_plan(&[task], WellearnBatchFlow::AutoCompletion, None).is_err());
     }
 
