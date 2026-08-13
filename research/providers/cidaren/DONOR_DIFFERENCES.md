@@ -58,7 +58,7 @@ either Python donor.
 | `SubmitAnswerAndSave` | Yes | Yes | No | Implemented one-shot advance |
 | `SkipAnswer` | Yes | Yes | No | Implemented distinct one-shot skip |
 | Fresh submission verification | Reads task completion/score after run but has no answer history | Fresh task row available; no answer history | No | Fresh Task completion/progress/score implemented; per-Question result remains honestly Unverified |
-| Executable BrowserBridge | Donor operates in WeChat/browser context | Capture injects into authenticated H5 | Authorization URL can be rendered/copied/QR-displayed | Provider origin/isolation policy exists; shared start/action/result execution contract remains a Core Gap |
+| Executable BrowserBridge | Donor operates in WeChat/browser context | Capture injects into authenticated H5 | Authorization URL can be rendered/copied/QR-displayed | Provider now has a typed, recipe-versioned CaptureSnapshot command/result with exact origin/frame/Task/sequence binding and `jv=99` validation. Core helper dispatch, durable one-shot correlation and credential commit remain a shared gap; no donor browser action replaces the native assessment mutations |
 
 UI widgets, logging/export, completion sound, update checks, device-ID display
 and the unrelated Gitee access-log probe are executable application features

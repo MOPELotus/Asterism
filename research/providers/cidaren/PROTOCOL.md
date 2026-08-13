@@ -53,6 +53,65 @@ to Authentication, 429 retains a bounded Retry-After, redirects/404 map to
 ProtocolDrift and server failures remain ProviderUnavailable. Response bodies
 are zeroized after validation.
 
+## BrowserBridge Capture command/result boundary
+
+The Provider-side helper protocol is deliberately narrower than a browser
+automation API. A Core-owned BrowserBridge session may issue exactly one typed
+`capture_snapshot` command for the selected Capture recipe:
+
+```json
+{
+  "version": 2,
+  "session_nonce": "opaque-session-binding",
+  "origin": "https://app.vocabgo.com",
+  "frame_id": "frame-1",
+  "remote_task_id": "class-task:2002",
+  "sequence": 1,
+  "command": {"kind": "capture_snapshot", "mode": "composite"}
+}
+```
+
+The envelope version is fixed by the mode (`token_only` v1 or `composite` v2).
+The visible origin, frame and stable class/study Task identity must match the
+Core session, and sequence zero or replayed/foreign values fail closed. The
+result uses the same binding and contains the declared fields only:
+
+```json
+{
+  "version": 2,
+  "session_nonce": "opaque-session-binding",
+  "origin": "https://app.vocabgo.com",
+  "frame_id": "frame-1",
+  "remote_task_id": "class-task:2002",
+  "reply_to_sequence": 1,
+  "event": {
+    "kind": "capture_snapshot",
+    "user_token": "synthetic-token",
+    "user_token_source": "request_header",
+    "login_info": "{\"login_info\":{\"a\":\"...\",\"b\":\"...\"}}",
+    "login_info_source": "local_storage",
+    "user_session": null
+  }
+}
+```
+
+`token_only` rejects `login_info`, its source and `user_session`. `composite`
+requires `login_info` to be a bounded JSON object accepted by
+`CidarenCryptoContext::parse` (including the exact current `jv=99` prefixes),
+and accepts `user_session` only as an optional bounded JSON observation. Every
+secret-bearing field is redacted in Debug and zeroized when the Provider-owned
+transport value is dropped.
+
+This is a transport-only Provider type. It intentionally does not become a
+`CredentialBundle`, Domain credential, durable receipt, selector/script,
+arbitrary browser command or persisted event. Core must validate the already
+paired Capture recipe and session, durably correlate the one-shot sequence,
+then commit the resulting account-bound token/crypto material through the
+Capture credential service. Cidaren's StartAnswer, VerifyAnswer,
+SubmitAnswerAndSave, SkipAnswer and SubmitChoseWord remain native HTTP
+mutations; no donor evidence justifies inventing a BrowserBridge replacement
+for those routes.
+
 The Core adapter resolves either one exact manual or token-only Capture
 `ProviderAccessToken`, or an exact two-record Composite binding containing
 `ProviderAccessToken` plus `ProviderCompositeSession`. Every record must match

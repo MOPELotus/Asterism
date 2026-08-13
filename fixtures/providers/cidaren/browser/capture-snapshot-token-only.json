@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "session_nonce": "synthetic-session-nonce",
+  "origin": "https://app.vocabgo.com",
+  "frame_id": "frame-1",
+  "remote_task_id": "class-task:2002",
+  "reply_to_sequence": 1,
+  "event": {
+    "kind": "capture_snapshot",
+    "user_token": "synthetic-user-token",
+    "user_token_source": "request_header",
+    "login_info": null,
+    "login_info_source": null,
+    "user_session": null
+  }
+}

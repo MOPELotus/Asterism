@@ -148,6 +148,40 @@ was found. `MOPELotus/Easy_Cidaren` was re-read in parallel and still only adds
 the known `crypto.json` capture writer and `jv=99` context around that same
 surface. No additional Provider capability delta entered this checkpoint.
 
+### 2026-08-13 BrowserBridge Capture command checkpoint
+
+The pre-implementation ref check again resolved `ularch/master` to
+`bce9559f536ebbdad791f41ed4e111b30accb05d` and `MOPELotus/master` to
+`a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`. The latest public tag/release
+remained `1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`; MOPELotus still
+published no release. A complete source-tree audit found no new platform route,
+assessment operation, Capture field, or crypto transform beyond the mapped
+token-only proxy recipe, Composite `CDR_LOGIN_INFO`/optional
+`CDR_USER_SESSION`, and authenticated `jv=99` path. The donors do not expose a
+separate browser action for Start/Verify/Submit; those operations remain native
+HTTP mutations and their durable continuation is a Core Attempt contract.
+
+Cidaren now has a Provider-private typed `CaptureSnapshot` command/result
+boundary. Commands are recipe-versioned (`TokenOnly` v1 or `Composite` v2),
+restricted to the audited `https://app.vocabgo.com` origin, and bound to Core's
+session nonce, frame, stable remote Task identity and one-shot sequence. A
+TokenOnly result requires only a bounded `UserToken` and rejects Composite
+fields. A Composite result requires bounded object-shaped `login_info` that
+successfully parses through the exact `jv=99` HKDF/AES-GCM context; optional
+`CDR_USER_SESSION` is observed but not required. Result/event debug output
+redacts values and owned strings are zeroized on drop. The transport document
+is bounded and rejects unknown fields, foreign binding, arbitrary selectors or
+scripts; it is a one-shot observation, not a persisted credential or receipt.
+
+The shared Core BrowserBridge session boundary still needs to carry this typed
+opaque command/result, persist issued sequence/result correlation and route the
+validated snapshot through the Capture credential commit. Cidaren does not
+serialize the snapshot into Domain state or claim executable helper completion.
+
+Post-implementation refs retained both full donor revisions and the same
+`1.5.4` release. The 110-test Provider suite, all-target clippy and scoped diff
+checks passed without an upstream delta.
+
 ## Check procedure
 
 For the next checkpoint:

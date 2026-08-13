@@ -22,6 +22,8 @@ fixtures/providers/cidaren/
   answers/study-word-info-means.json
   questions/start-answer-envelope.json
   questions/start-answer-single.json
+  browser/capture-snapshot-token-only.json
+  browser/capture-snapshot-composite.json
 ```
 
 The class fixture includes multiple Courses, learning and test rows, pending,
@@ -69,6 +71,20 @@ donor-read topic/stem/option shape plus synthetic
 payload is copied into the repository. Counter tests keep the remote
 completed/total observation separate from local attempt position and reject
 inconsistent or unbounded values.
+
+The BrowserBridge fixtures are synthetic transport documents generated from
+the Provider typed boundary. The token-only fixture is recipe version 1 and
+contains a request-header `UserToken` with all Composite fields absent. The
+Composite fixture is recipe version 2 and contains a placeholder request-header
+token plus a structurally valid, non-secret `CDR_LOGIN_INFO` object using the
+audited `a`/`b` prefixes; optional `CDR_USER_SESSION` remains null. Both bind
+the same placeholder origin, frame, stable Task identity and sequence on the
+command and result. Tests must also cover oversized documents, unknown fields,
+wrong origin, frame/Task/nonce/sequence mismatch, token-only/Composite field
+mixing, malformed JSON objects and crypto-context parse failure. Fixture values
+are never real tokens, cookies, browser storage or answer material, and these
+documents are observations only until Core performs its own session validation
+and credential commit.
 
 ## Required live-sanitized fixtures
 
