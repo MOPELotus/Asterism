@@ -120,6 +120,19 @@ pub struct WellearnBatchPlan {
 /// Builds the exact audited donor membership rule from a fresh inventory.
 /// `auto_duration_minutes` is the already-frozen aggregate sample for the
 /// Auto duration flow; this function never samples or re-distributes it.
+///
+/// # Errors
+///
+/// Returns a typed error when the input is empty, oversized, duplicated,
+/// cross-course, capability-incompatible, unavailable, incomplete, or when
+/// the selected donor flow has no eligible entries or invalid duration input.
+///
+/// # Panics
+///
+/// The internal `expect` calls are guarded by the normalized SCO v2 completeness
+/// checks at the start of the function; malformed observations return an error
+/// before membership planning reaches those reads.
+#[allow(clippy::too_many_lines)]
 pub fn build_batch_plan(
     tasks: &[RemoteTask],
     flow: WellearnBatchFlow,
