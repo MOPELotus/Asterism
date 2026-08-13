@@ -423,14 +423,17 @@ mod tests {
                 ));
             }
             let normalized = serde_json::json!({
-                "schema": "welearn.sco.v1",
+                "schema": "welearn.sco.v2",
                 "course_id": "1001",
                 "unit_index": 0,
                 "unit_title": "Unit",
                 "unit_code": null,
                 "sco_id": "301",
                 "visible": true,
-                "completion": "in_progress",
+                "completion_observation": "in_progress",
+                "sco_index": 0,
+                "unit_visible": true,
+                "sco_visible": true,
                 "duration_raw": "45",
             });
             Ok(RemoteTaskDetail {
@@ -453,10 +456,10 @@ mod tests {
                     ],
                     fingerprint: "v1:fixture".to_owned(),
                     normalized: normalized.clone(),
-                    raw_sanitized: serde_json::json!({"schema": "welearn.sco.raw.v1"}),
+                    raw_sanitized: serde_json::json!({"schema": "welearn.sco.raw.v2"}),
                 },
                 normalized_detail: serde_json::json!({
-                    "schema": "welearn.sco-task-detail.v1",
+                    "schema": "welearn.sco-task-detail.v2",
                     "task": normalized,
                 }),
             })

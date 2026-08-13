@@ -64,7 +64,7 @@ pub(crate) fn validate_fresh_execution_detail(
         .normalized_detail
         .get("schema")
         .and_then(Value::as_str)
-        != Some("welearn.sco-task-detail.v1")
+        != Some("welearn.sco-task-detail.v2")
     {
         return Err(protocol_drift(
             "WELearn fresh SCO detail has an unknown schema",
@@ -75,7 +75,7 @@ pub(crate) fn validate_fresh_execution_detail(
         .get("task")
         .and_then(Value::as_object)
         .ok_or_else(|| protocol_drift("WELearn fresh SCO detail has no normalized Task"))?;
-    if normalized.get("schema").and_then(Value::as_str) != Some("welearn.sco.v1")
+    if normalized.get("schema").and_then(Value::as_str) != Some("welearn.sco.v2")
         || normalized.get("course_id").and_then(Value::as_str) != Some(course_id)
         || normalized.get("sco_id").and_then(Value::as_str) != Some(sco_id)
         || normalized.get("visible").and_then(Value::as_bool).is_none()
@@ -217,7 +217,7 @@ fn normalized_detail(
         .normalized
         .as_object()
         .ok_or_else(|| protocol_drift("WELearn SCO has invalid normalized detail"))?;
-    if normalized.get("schema").and_then(Value::as_str) != Some("welearn.sco.v1")
+    if normalized.get("schema").and_then(Value::as_str) != Some("welearn.sco.v2")
         || normalized.get("course_id").and_then(Value::as_str) != Some(identity.course_id.as_str())
         || normalized.get("sco_id").and_then(Value::as_str) != Some(identity.sco_id.as_str())
     {
@@ -226,7 +226,7 @@ fn normalized_detail(
         ));
     }
     let mut detail = Map::new();
-    detail.insert("schema".to_owned(), json!("welearn.sco-task-detail.v1"));
+    detail.insert("schema".to_owned(), json!("welearn.sco-task-detail.v2"));
     detail.insert("task".to_owned(), Value::Object(normalized.clone()));
     Ok(Value::Object(detail))
 }
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(detail.task.remote_id, "sco:1001:301");
         assert_eq!(
             detail.normalized_detail["schema"],
-            "welearn.sco-task-detail.v1"
+            "welearn.sco-task-detail.v2"
         );
         assert_eq!(detail.normalized_detail["task"], detail.task.normalized);
         assert!(detail.task.fingerprint.starts_with("v1:"));

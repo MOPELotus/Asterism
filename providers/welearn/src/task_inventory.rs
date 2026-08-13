@@ -191,33 +191,37 @@ fn parse_leaves(
         .and_then(Value::as_array)
         .ok_or_else(|| protocol_drift("WELearn SCO-leaves response has no info array"))?;
     let mut tasks = Vec::with_capacity(rows.len());
-    for row in rows {
+    for (sco_index, row) in rows.iter().enumerate() {
         let object = row.as_object().ok_or_else(|| {
             protocol_drift("WELearn SCO-leaves response contains a non-object row")
         })?;
         let sco_id = required_remote_component(object.get("id"), "SCO ID")?;
         let title = optional_bounded_text(object.get("location"), MAX_TITLE_BYTES, "SCO title")?
             .unwrap_or_else(|| sco_id.clone());
-        let leaf_visible =
-            optional_bool_like(object.get("isvisible"), "SCO visibility")?.unwrap_or(unit.visible);
+        let leaf_visibility = optional_bool_like(object.get("isvisible"), "SCO visibility")?;
+        let leaf_visible = leaf_visibility.unwrap_or(unit.visible);
         let visible = unit.visible && leaf_visible;
         let completion_raw = optional_scalar_text(object.get("iscomplete"), "SCO completion")?;
+        let completion_observation = classify_completion(completion_raw.as_deref());
         let duration_raw = optional_scalar_text(object.get("learntime"), "SCO learning time")?;
         let remote_state = if visible {
-            classify_completion(completion_raw.as_deref())
+            completion_observation
         } else {
             RemoteState::NotOpen
         };
         let remote_id = format!("sco:{course_id}:{sco_id}");
         let normalized = serde_json::json!({
-            "schema": "welearn.sco.v1",
+            "schema": "welearn.sco.v2",
             "course_id": course_id,
             "unit_index": unit.index,
+            "sco_index": sco_index,
             "unit_title": unit.title,
             "unit_code": unit.code,
             "sco_id": sco_id,
+            "unit_visible": unit.visible,
+            "sco_visible": leaf_visibility,
             "visible": visible,
-            "completion": remote_state,
+            "completion_observation": completion_observation,
             "duration_raw": duration_raw,
         });
         let capabilities = vec![
@@ -241,7 +245,7 @@ fn parse_leaves(
             fingerprint: fingerprint(&normalized)?,
             normalized,
             raw_sanitized: serde_json::json!({
-                "schema": "welearn.sco.raw.v1",
+                "schema": "welearn.sco.raw.v2",
                 "completion_raw": completion_raw,
                 "visibility_raw": object.get("isvisible").map(sanitized_scalar).transpose()?,
                 "duration_raw": duration_raw,
@@ -378,6 +382,13 @@ mod tests {
         );
         assert_eq!(tasks[2].capabilities, tasks[0].capabilities);
         assert!(tasks.iter().all(|task| task.fingerprint.starts_with("v1:")));
+        assert_eq!(tasks[1].normalized["sco_visible"], Value::Null);
+        assert_eq!(tasks[2].normalized["unit_visible"], false);
+        assert_eq!(tasks[2].normalized["sco_visible"], true);
+        assert_eq!(
+            tasks[2].normalized["completion_observation"],
+            serde_json::json!("completed")
+        );
     }
 
     #[test]

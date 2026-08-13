@@ -16,20 +16,23 @@
       "duration_read",
       "duration_report"
     ],
-    "fingerprint": "v1:295edce22d5503624048c1c5a67aaf5dfe16d848c57ecd75830739c99e0b37c7",
+    "fingerprint": "v1:6bd5bbfccea2b2a51f4510df741a055d1a2737a4090efd689aead59ec6178749",
     "normalized": {
-      "schema": "welearn.sco.v1",
+      "schema": "welearn.sco.v2",
       "course_id": "1001",
       "unit_index": 0,
+      "sco_index": 0,
       "unit_title": "Unit 1 Getting Started",
       "unit_code": "U1",
       "sco_id": "301",
+      "unit_visible": true,
+      "sco_visible": true,
       "visible": true,
-      "completion": "completed",
+      "completion_observation": "completed",
       "duration_raw": "180"
     },
     "raw_sanitized": {
-      "schema": "welearn.sco.raw.v1",
+      "schema": "welearn.sco.raw.v2",
       "completion_raw": "已完成",
       "visibility_raw": "true",
       "duration_raw": "180"
@@ -52,20 +55,23 @@
       "duration_read",
       "duration_report"
     ],
-    "fingerprint": "v1:3a8b21e6ea036bda992da49163b5f848fc08349360f42152b639562627caac0b",
+    "fingerprint": "v1:f6206b8324422dd7693cafa6d846afa4f9b73ae8bb802ec13ca991bf1d5a903d",
     "normalized": {
-      "schema": "welearn.sco.v1",
+      "schema": "welearn.sco.v2",
       "course_id": "1001",
       "unit_index": 0,
+      "sco_index": 1,
       "unit_title": "Unit 1 Getting Started",
       "unit_code": "U1",
       "sco_id": "302",
+      "unit_visible": true,
+      "sco_visible": null,
       "visible": true,
-      "completion": "unknown",
+      "completion_observation": "unknown",
       "duration_raw": "45"
     },
     "raw_sanitized": {
-      "schema": "welearn.sco.raw.v1",
+      "schema": "welearn.sco.raw.v2",
       "completion_raw": "服务端新状态",
       "visibility_raw": null,
       "duration_raw": "45"
@@ -88,20 +94,23 @@
       "duration_read",
       "duration_report"
     ],
-    "fingerprint": "v1:845536d30d715cbdde80a6142b7bc7d0f6f42847a1966cb735a2208178c37459",
+    "fingerprint": "v1:312382cf6ccaf74d0f9dd8d2cba828aec3e271c83208458be4cdcbe692c08f42",
     "normalized": {
-      "schema": "welearn.sco.v1",
+      "schema": "welearn.sco.v2",
       "course_id": "1001",
       "unit_index": 1,
+      "sco_index": 0,
       "unit_title": "Unit 2 Locked",
       "unit_code": "U2",
       "sco_id": "401",
+      "unit_visible": false,
+      "sco_visible": true,
       "visible": false,
-      "completion": "not_open",
+      "completion_observation": "completed",
       "duration_raw": "900"
     },
     "raw_sanitized": {
-      "schema": "welearn.sco.raw.v1",
+      "schema": "welearn.sco.raw.v2",
       "completion_raw": "已完成",
       "visibility_raw": true,
       "duration_raw": "900"

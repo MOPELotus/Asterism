@@ -7,6 +7,7 @@
 //! of live compatibility.
 
 mod authentication;
+mod batch_plan;
 mod cmi;
 mod course_context;
 mod course_inventory;
@@ -30,6 +31,7 @@ pub use authentication::{
     WellearnLoginRedirect, WellearnPasswordCipher, WellearnSessionResolver,
     classify_password_login_response, encode_password_at,
 };
+pub use batch_plan::{WellearnBatchEntry, WellearnBatchFlow, WellearnBatchPlan, build_batch_plan};
 pub use cmi::{
     WellearnCmiDocument, WellearnCmiSnapshot, WellearnCmiTransport, WellearnTaskProgress,
     parse_cmi_snapshot,

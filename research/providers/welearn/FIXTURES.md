@@ -127,7 +127,10 @@ only structural field names, response codes and bounded placeholder shapes.
   nested `comment` document can be treated as an observation.
 - A post-start baseline or final readback without the complete preservation set
   fails closed; missing facts are never replaced with mutation defaults.
-- Unknown fields are dropped from sanitized normalized data.
+- Unknown fields are dropped from sanitized normalized data. The normalized
+  `welearn.sco.v2` fixture retains only bounded response-order, Unit/SCO
+  visibility and completion-observation facts needed by donor batch planning;
+  the derived `visible`/`NotOpen` state remains separate.
 - Fresh detail re-lists the Course and exact SCO instead of echoing a persisted
   scan payload; malformed or disappeared identities fail closed.
 - Every normalized Task fingerprint uses an explicit version prefix.
