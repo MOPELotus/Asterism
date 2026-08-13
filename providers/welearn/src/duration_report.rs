@@ -27,6 +27,18 @@ pub struct WellearnDurationReportDocuments {
     after: WellearnCmiDocument,
     started: bool,
     heartbeat_count: u32,
+    start_accepted: Option<bool>,
+    heartbeat_accepted: u32,
+    heartbeat_rejected: u32,
+    final_accepted: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WellearnDurationReportReceipts {
+    pub(crate) start_accepted: Option<bool>,
+    pub(crate) heartbeat_accepted: u32,
+    pub(crate) heartbeat_rejected: u32,
+    pub(crate) final_accepted: Option<bool>,
 }
 
 impl WellearnDurationReportDocuments {
@@ -42,6 +54,29 @@ impl WellearnDurationReportDocuments {
             after,
             started,
             heartbeat_count,
+            start_accepted: if started { Some(true) } else { None },
+            heartbeat_accepted: heartbeat_count,
+            heartbeat_rejected: 0,
+            final_accepted: Some(true),
+        }
+    }
+
+    pub(crate) const fn with_receipts(
+        before: WellearnCmiDocument,
+        after: WellearnCmiDocument,
+        started: bool,
+        heartbeat_count: u32,
+        receipts: WellearnDurationReportReceipts,
+    ) -> Self {
+        Self {
+            before,
+            after,
+            started,
+            heartbeat_count,
+            start_accepted: receipts.start_accepted,
+            heartbeat_accepted: receipts.heartbeat_accepted,
+            heartbeat_rejected: receipts.heartbeat_rejected,
+            final_accepted: receipts.final_accepted,
         }
     }
 }
@@ -113,6 +148,10 @@ impl ProviderIdentity for WellearnDurationReport {
 
 #[async_trait]
 impl TaskExecutionCapability for WellearnDurationReport {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "duration verification keeps receipt diagnostics and preservation predicates adjacent"
+    )]
     async fn execute(
         &self,
         context: &ProviderContext,
@@ -193,6 +232,14 @@ impl TaskExecutionCapability for WellearnDurationReport {
                 metadata_sanitized: Some(serde_json::json!({
                     "started": documents.started,
                     "heartbeat_count": documents.heartbeat_count,
+                    "start_accepted": documents.start_accepted,
+                    "heartbeat_accepted": documents.heartbeat_accepted,
+                    "heartbeat_rejected": documents.heartbeat_rejected,
+                    "final_accepted": documents.final_accepted,
+                    "donor_request_delay_seconds": donor_request_delay_seconds(
+                        settings.duration_protocol_mode,
+                        documents.started,
+                    ),
                     "duration_report_seconds": duration_seconds,
                     "duration_report_mode": duration_mode(settings.duration_report),
                     "duration_protocol_mode": settings.duration_protocol_mode.as_str(),
@@ -207,6 +254,14 @@ impl TaskExecutionCapability for WellearnDurationReport {
                 "schema": "welearn.duration-report.v1",
                 "started": documents.started,
                 "heartbeat_count": documents.heartbeat_count,
+                "start_accepted": documents.start_accepted,
+                "heartbeat_accepted": documents.heartbeat_accepted,
+                "heartbeat_rejected": documents.heartbeat_rejected,
+                "final_accepted": documents.final_accepted,
+                "donor_request_delay_seconds": donor_request_delay_seconds(
+                    settings.duration_protocol_mode,
+                    documents.started,
+                ),
                 "duration_report_seconds": duration_seconds,
                 "duration_report_mode": duration_mode(settings.duration_report),
                 "duration_protocol_mode": settings.duration_protocol_mode.as_str(),
@@ -216,6 +271,15 @@ impl TaskExecutionCapability for WellearnDurationReport {
                 "duration_observation_changed": true,
             }),
         })
+    }
+}
+
+const fn donor_request_delay_seconds(mode: WellearnDurationProtocolMode, started: bool) -> u64 {
+    if matches!(mode, WellearnDurationProtocolMode::PreserveFresh) {
+        crate::runtime_settings::LEGACY_DURATION_REQUEST_INTERVAL_SECONDS
+            * if started { 4 } else { 3 }
+    } else {
+        0
     }
 }
 
@@ -399,13 +463,21 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    enum FixtureBehavior {
+        #[default]
+        Normal,
+        DriftCompletion,
+        UnchangedDuration,
+        IncompleteVerification,
+        ExplicitRejections,
+    }
+
     #[derive(Debug, Default)]
     struct FixtureTransport {
         calls: AtomicUsize,
         settings: Mutex<Option<(u64, u64, WellearnDurationProtocolMode)>>,
-        drift_completion: bool,
-        unchanged_duration: bool,
-        incomplete_verification: bool,
+        behavior: FixtureBehavior,
     }
 
     #[async_trait]
@@ -426,20 +498,24 @@ mod tests {
                 plan.heartbeat_interval_seconds,
                 plan.protocol_mode,
             ));
-            let after = if self.drift_completion {
-                AFTER.replace("incomplete", "completed")
-            } else if self.unchanged_duration {
-                BEFORE.to_owned()
-            } else if self.incomplete_verification {
-                r#"{"ret":0,"comment":"{}"}"#.to_owned()
-            } else {
-                AFTER.to_owned()
+            let after = match self.behavior {
+                FixtureBehavior::DriftCompletion => AFTER.replace("incomplete", "completed"),
+                FixtureBehavior::UnchangedDuration => BEFORE.to_owned(),
+                FixtureBehavior::IncompleteVerification => r#"{"ret":0,"comment":"{}"}"#.to_owned(),
+                FixtureBehavior::Normal | FixtureBehavior::ExplicitRejections => AFTER.to_owned(),
             };
-            Ok(WellearnDurationReportDocuments::new(
+            let accepted = self.behavior != FixtureBehavior::ExplicitRejections;
+            Ok(WellearnDurationReportDocuments::with_receipts(
                 WellearnCmiDocument::try_new(BEFORE).unwrap(),
                 WellearnCmiDocument::try_new(after).unwrap(),
                 false,
                 3,
+                WellearnDurationReportReceipts {
+                    start_accepted: None,
+                    heartbeat_accepted: if accepted { 3 } else { 0 },
+                    heartbeat_rejected: if accepted { 0 } else { 3 },
+                    final_accepted: Some(accepted),
+                },
             ))
         }
     }
@@ -489,20 +565,45 @@ mod tests {
             outcome.result_sanitized["duration_protocol_mode"],
             "preserve_fresh"
         );
+        assert_eq!(outcome.result_sanitized["heartbeat_accepted"], 3);
+        assert_eq!(outcome.result_sanitized["heartbeat_rejected"], 0);
+        assert_eq!(outcome.result_sanitized["final_accepted"], true);
+        assert_eq!(outcome.result_sanitized["donor_request_delay_seconds"], 6);
         assert_eq!(events.progress.load(Ordering::Relaxed), 1);
         assert_eq!(events.logs.load(Ordering::Relaxed), 1);
         assert_eq!(details.calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
+    async fn explicit_negative_legacy_receipts_still_require_fresh_verification() {
+        let capability = WellearnDurationReport::try_new(
+            Arc::new(FixtureDetail::present()),
+            Arc::new(FixtureTransport {
+                behavior: FixtureBehavior::ExplicitRejections,
+                ..FixtureTransport::default()
+            }),
+        )
+        .unwrap();
+        let outcome = capability
+            .execute(&context(), &request(), &FixtureEvents::default())
+            .await
+            .unwrap();
+
+        assert!(outcome.verified);
+        assert_eq!(outcome.result_sanitized["heartbeat_accepted"], 0);
+        assert_eq!(outcome.result_sanitized["heartbeat_rejected"], 3);
+        assert_eq!(outcome.result_sanitized["final_accepted"], false);
+    }
+
+    #[tokio::test]
     async fn duration_report_rejects_state_drift_or_missing_time_change() {
         for transport in [
             FixtureTransport {
-                drift_completion: true,
+                behavior: FixtureBehavior::DriftCompletion,
                 ..FixtureTransport::default()
             },
             FixtureTransport {
-                unchanged_duration: true,
+                behavior: FixtureBehavior::UnchangedDuration,
                 ..FixtureTransport::default()
             },
         ] {
@@ -524,7 +625,7 @@ mod tests {
         let capability = WellearnDurationReport::try_new(
             Arc::new(FixtureDetail::present()),
             Arc::new(FixtureTransport {
-                incomplete_verification: true,
+                behavior: FixtureBehavior::IncompleteVerification,
                 ..FixtureTransport::default()
             }),
         )

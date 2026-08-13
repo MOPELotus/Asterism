@@ -23,8 +23,8 @@ use crate::{
     course_context::{parse_course_context, parse_course_context_for_id},
     course_inventory::course_id_from_remote,
     runtime_settings::{
-        MAX_DURATION_HEARTBEAT_SECONDS, MAX_DURATION_REPORT_SECONDS,
-        MIN_DURATION_HEARTBEAT_SECONDS, MIN_DURATION_REPORT_SECONDS,
+        LEGACY_DURATION_REQUEST_INTERVAL_SECONDS, MAX_DURATION_HEARTBEAT_SECONDS,
+        MAX_DURATION_REPORT_SECONDS, MIN_DURATION_HEARTBEAT_SECONDS, MIN_DURATION_REPORT_SECONDS,
     },
     task_inventory::unit_count,
 };
@@ -625,6 +625,12 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         }
         let endpoint = duration_endpoint(protocol_mode);
         let (mut session, mut renewed) = self.session_for_operation(context).await?;
+        if protocol_mode == crate::WellearnDurationProtocolMode::PreserveFresh {
+            tokio::time::sleep(Duration::from_secs(
+                LEGACY_DURATION_REQUEST_INTERVAL_SECONDS,
+            ))
+            .await;
+        }
         let (mut route, mut before) = match self
             .read_duration_baseline(&session, course_id, sco_id, endpoint)
             .await
@@ -639,6 +645,7 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         };
         let mut snapshot = parse_cmi_snapshot(before.as_str())?;
         let mut started = false;
+        let mut start_accepted = None;
         let must_start = duration_requires_start(protocol_mode, snapshot.cmi_present());
         if must_start {
             events
@@ -648,6 +655,12 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     None,
                 ))
                 .await?;
+            if protocol_mode == crate::WellearnDurationProtocolMode::PreserveFresh {
+                tokio::time::sleep(Duration::from_secs(
+                    LEGACY_DURATION_REQUEST_INTERVAL_SECONDS,
+                ))
+                .await;
+            }
             let start_fields = sco_start_fields(
                 &route,
                 sco_id,
@@ -660,12 +673,28 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             let start = self
                 .send_sco_form_at_endpoint(&session, &route, endpoint, &start_fields)
                 .await?;
-            parse_mutation_response(start.as_str(), MutationResponseKind::StrictSuccess)?;
+            let accepted = mutation_accepted(start.as_str(), MutationResponseKind::StrictSuccess)?;
+            if protocol_mode == crate::WellearnDurationProtocolMode::ClientCounter && !accepted {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::RemoteChanged,
+                    "WELearn current-donor duration start was not accepted",
+                ));
+            }
+            start_accepted = Some(accepted);
             started = true;
             before = self
                 .fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
                 .await?;
             snapshot = parse_cmi_snapshot(before.as_str())?;
+        }
+
+        if protocol_mode == crate::WellearnDurationProtocolMode::PreserveFresh
+            && snapshot.success_status_raw() != Some("unknown")
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn historical duration donor requires unknown success status",
+            ));
         }
 
         let state = PreservedCmiState::try_from_snapshot(&snapshot)?;
@@ -691,17 +720,32 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             .await?;
 
         let mut heartbeat_count = 0_u32;
+        let mut heartbeat_accepted = 0_u32;
+        let mut heartbeat_rejected = 0_u32;
+        let mut final_accepted = None;
         match protocol_mode {
             crate::WellearnDurationProtocolMode::PreserveFresh => {
-                self.keep_duration_preserved(&session, &route, endpoint, sco_id, &state)
+                tokio::time::sleep(Duration::from_secs(
+                    LEGACY_DURATION_REQUEST_INTERVAL_SECONDS,
+                ))
+                .await;
+                let accepted = self
+                    .keep_duration_preserved(&session, &route, endpoint, sco_id, &state)
                     .await?;
+                record_duration_receipt(accepted, &mut heartbeat_accepted, &mut heartbeat_rejected);
                 heartbeat_count = heartbeat_count.saturating_add(1);
                 let (complete_intervals, trailing_seconds) =
                     duration_heartbeat_plan(duration_seconds, heartbeat_interval_seconds);
                 for completed in 1..=complete_intervals {
                     tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
-                    self.keep_duration_preserved(&session, &route, endpoint, sco_id, &state)
+                    let accepted = self
+                        .keep_duration_preserved(&session, &route, endpoint, sco_id, &state)
                         .await?;
+                    record_duration_receipt(
+                        accepted,
+                        &mut heartbeat_accepted,
+                        &mut heartbeat_rejected,
+                    );
                     heartbeat_count = heartbeat_count.saturating_add(1);
                     report_duration_heartbeat(
                         events,
@@ -714,13 +758,25 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     tokio::time::sleep(Duration::from_secs(trailing_seconds)).await;
                     report_duration_tail(events).await?;
                 }
-                self.finalize_duration_preserved(&session, &route, endpoint, sco_id, &state)
-                    .await?;
+                tokio::time::sleep(Duration::from_secs(
+                    LEGACY_DURATION_REQUEST_INTERVAL_SECONDS,
+                ))
+                .await;
+                final_accepted = Some(
+                    self.finalize_duration_preserved(&session, &route, endpoint, sco_id, &state)
+                        .await?,
+                );
             }
             crate::WellearnDurationProtocolMode::ClientCounter => {
                 for elapsed in 0..duration_seconds {
-                    self.keep_duration_counter(&session, &route, endpoint, sco_id, elapsed)
+                    let accepted = self
+                        .keep_duration_counter(&session, &route, endpoint, sco_id, elapsed)
                         .await?;
+                    record_duration_receipt(
+                        accepted,
+                        &mut heartbeat_accepted,
+                        &mut heartbeat_rejected,
+                    );
                     heartbeat_count = heartbeat_count.saturating_add(1);
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     report_duration_heartbeat(events, elapsed.saturating_add(1), duration_seconds)
@@ -732,8 +788,14 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     duration_heartbeat_plan(duration_seconds, heartbeat_interval_seconds);
                 for completed in 1..=complete_intervals {
                     tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
-                    self.keep_duration_implicit(&session, &route, endpoint, sco_id)
+                    let accepted = self
+                        .keep_duration_implicit(&session, &route, endpoint, sco_id)
                         .await?;
+                    record_duration_receipt(
+                        accepted,
+                        &mut heartbeat_accepted,
+                        &mut heartbeat_rejected,
+                    );
                     heartbeat_count = heartbeat_count.saturating_add(1);
                     report_duration_heartbeat(
                         events,
@@ -746,8 +808,10 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     tokio::time::sleep(Duration::from_secs(trailing_seconds)).await;
                     report_duration_tail(events).await?;
                 }
-                self.finalize_duration_implicit(&session, &route, endpoint, sco_id)
-                    .await?;
+                final_accepted = Some(
+                    self.finalize_duration_implicit(&session, &route, endpoint, sco_id)
+                        .await?,
+                );
             }
         }
 
@@ -772,11 +836,17 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             }
             result => result?,
         };
-        Ok(WellearnDurationReportDocuments::new(
+        Ok(WellearnDurationReportDocuments::with_receipts(
             before,
             after,
             started,
             heartbeat_count,
+            crate::duration_report::WellearnDurationReportReceipts {
+                start_accepted,
+                heartbeat_accepted,
+                heartbeat_rejected,
+                final_accepted,
+            },
         ))
     }
 }
@@ -789,6 +859,14 @@ const fn duration_heartbeat_plan(
         duration_seconds / heartbeat_interval_seconds,
         duration_seconds % heartbeat_interval_seconds,
     )
+}
+
+fn record_duration_receipt(accepted: bool, accepted_count: &mut u32, rejected_count: &mut u32) {
+    if accepted {
+        *accepted_count = accepted_count.saturating_add(1);
+    } else {
+        *rejected_count = rejected_count.saturating_add(1);
+    }
 }
 
 const fn duration_requires_start(
@@ -893,7 +971,7 @@ impl NativeWellearnInventoryTransport {
         endpoint: ScoEndpoint,
         sco_id: &str,
         state: &PreservedCmiState,
-    ) -> ProviderResult<()> {
+    ) -> ProviderResult<bool> {
         let response = self
             .send_sco_form_at_endpoint(
                 session,
@@ -906,12 +984,10 @@ impl NativeWellearnInventoryTransport {
                     ("scoid", sco_id),
                     ("session_time", &state.session_time),
                     ("total_time", &state.total_time),
-                    ("timelimitsec", "0"),
-                    ("endcaltime", "false"),
                 ],
             )
             .await?;
-        parse_mutation_response(response.as_str(), MutationResponseKind::Heartbeat)
+        mutation_accepted(response.as_str(), MutationResponseKind::Heartbeat)
     }
 
     async fn keep_duration_counter(
@@ -921,7 +997,7 @@ impl NativeWellearnInventoryTransport {
         endpoint: ScoEndpoint,
         sco_id: &str,
         elapsed_seconds: u64,
-    ) -> ProviderResult<()> {
+    ) -> ProviderResult<bool> {
         let (session_time, total_time) = duration_counter_fields(elapsed_seconds);
         let response = self
             .send_sco_form_at_endpoint(
@@ -940,7 +1016,8 @@ impl NativeWellearnInventoryTransport {
                 ],
             )
             .await?;
-        parse_mutation_response(response.as_str(), MutationResponseKind::Heartbeat)
+        parse_mutation_response(response.as_str(), MutationResponseKind::Heartbeat)?;
+        Ok(true)
     }
 
     async fn keep_duration_implicit(
@@ -949,7 +1026,7 @@ impl NativeWellearnInventoryTransport {
         route: &crate::WellearnCourseContext,
         endpoint: ScoEndpoint,
         sco_id: &str,
-    ) -> ProviderResult<()> {
+    ) -> ProviderResult<bool> {
         let response = self
             .send_sco_form_at_endpoint(
                 session,
@@ -963,7 +1040,7 @@ impl NativeWellearnInventoryTransport {
                 ],
             )
             .await?;
-        parse_mutation_response(response.as_str(), MutationResponseKind::Heartbeat)
+        mutation_accepted(response.as_str(), MutationResponseKind::Heartbeat)
     }
 
     async fn finalize_duration_preserved(
@@ -973,7 +1050,7 @@ impl NativeWellearnInventoryTransport {
         endpoint: ScoEndpoint,
         sco_id: &str,
         state: &PreservedCmiState,
-    ) -> ProviderResult<()> {
+    ) -> ProviderResult<bool> {
         let response = self
             .send_sco_form_at_endpoint(
                 session,
@@ -986,13 +1063,13 @@ impl NativeWellearnInventoryTransport {
                     ("scoid", sco_id),
                     ("progress", &state.progress),
                     ("crate", &state.score_scaled),
-                    ("status", &state.success_status),
+                    ("status", "unknown"),
                     ("cstatus", &state.completion_status),
                     ("trycount", "0"),
                 ],
             )
             .await?;
-        parse_mutation_response(response.as_str(), MutationResponseKind::StrictSuccess)
+        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
     }
 
     async fn finalize_duration_implicit(
@@ -1001,7 +1078,7 @@ impl NativeWellearnInventoryTransport {
         route: &crate::WellearnCourseContext,
         endpoint: ScoEndpoint,
         sco_id: &str,
-    ) -> ProviderResult<()> {
+    ) -> ProviderResult<bool> {
         let response = self
             .send_sco_form_at_endpoint(
                 session,
@@ -1015,7 +1092,7 @@ impl NativeWellearnInventoryTransport {
                 ],
             )
             .await?;
-        parse_mutation_response(response.as_str(), MutationResponseKind::StrictSuccess)
+        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
     }
 }
 
@@ -1715,6 +1792,11 @@ mod tests {
         }
         assert!(parse_mutation_response(r#"{"ret":2}"#, MutationResponseKind::Heartbeat).is_err());
         assert!(!mutation_accepted(r#"{"ret":7}"#, MutationResponseKind::StrictSuccess).unwrap());
+
+        let (mut accepted, mut rejected) = (0, 0);
+        record_duration_receipt(true, &mut accepted, &mut rejected);
+        record_duration_receipt(false, &mut accepted, &mut rejected);
+        assert_eq!((accepted, rejected), (1, 1));
     }
 
     #[test]

@@ -46,6 +46,7 @@ pub(crate) const MIN_DURATION_REPORT_SECONDS: u64 = 1;
 pub(crate) const MAX_DURATION_REPORT_SECONDS: u64 = 7_200;
 pub(crate) const MIN_DURATION_HEARTBEAT_SECONDS: u64 = 1;
 pub(crate) const MAX_DURATION_HEARTBEAT_SECONDS: u64 = 90;
+pub(crate) const LEGACY_DURATION_REQUEST_INTERVAL_SECONDS: u64 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WellearnDurationTarget {

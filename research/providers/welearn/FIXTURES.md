@@ -158,6 +158,12 @@ only structural field names, response codes and bounded placeholder shapes.
 - Client-counter mode always starts and sends exactly one paired counter keep
   per real second; implicit-server mode always starts, sends no initial keep,
   uses the evidenced 60-second cadence and ends with a bare save.
+- Preservation mode retains YZBRH's two-second pre-read/start/first-keep/final
+  gaps outside the requested duration, omits current-only keep fields, writes
+  literal final `status=unknown`, and exposes accepted/rejected receipt counts.
+- Well-formed negative historical duration receipts may continue and can only
+  succeed after exact fresh preservation/readback; malformed or network-
+  ambiguous receipts still stop with no replay.
 - Completion `auto` uses immutable plan/position only as context, selects fresh
   time for exact ResourceExecution step 2 after DurationReport, and rejects a
   malformed binding before Provider transport.

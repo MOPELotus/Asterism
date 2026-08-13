@@ -29,8 +29,9 @@ was also fetched; it resolves to older commit `5d1df60cb007` (2026-05-24), not a
 newer capability surface than the audited default head, and is the repository's
 only GitHub release. YZBRH and Auto_WeLearn expose neither fetched tags nor
 GitHub releases. A second `ls-remote`/release check after the endpoint port
-returned the same heads. These revisions remain reproducible snapshots; future
-checkpoints must fetch again rather than treating them as permanent bounds.
+returned the same heads; the subsequent duration-wire checkpoint check did as
+well. These revisions remain reproducible snapshots; future checkpoints must
+fetch again rather than treating them as permanent bounds.
 
 ## Source selection
 

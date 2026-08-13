@@ -212,11 +212,23 @@ Current Fanyuchang addresses `/Ajax/SCO.aspx?uid=...`; the two historical modes
 address plain `/Ajax/SCO.aspx` for CMI read, start, keep, save and final read.
 These are exact protocol distinctions, not optional-field optimizations.
 
+YZBRH also spaces the baseline read, conditional start retry, first keep and
+final save with its fixed two-second request interval. Asterism preserves those
+delays around the configured learning duration; they are not counted as
+reported duration. Its keep form contains only the two preserved time fields
+beyond common identity (unlike current Fanyuchang's additional
+`timelimitsec/endcaltime` fields), and its final save writes literal
+`status=unknown`. Well-formed integer negative receipts are diagnostic and do
+not suppress the donor's next independent write; all acceptance counts are
+reported, while only the final fresh CMI preservation/readback proves success.
+
 The client-counter and implicit modes require their evidenced 1-second and
-60-second intervals respectively. Start and finalization require integer
-`ret=0`; heartbeat accepts only the two donor-observed integer values `0` and
-`1`. None of these duration modes calls `setscoinfo`; completion remains a
-separate capability.
+60-second intervals respectively. Current Fanyuchang requires accepted
+integer `ret=0` at start and accepts heartbeat `ret=0/1`; the historical modes
+record every well-formed integer receipt and continue their donor sequence.
+Missing/string/malformed receipts remain ambiguous and stop with no replay.
+None of these duration modes calls `setscoinfo`; completion remains a separate
+capability.
 
 After finalization, a fresh CMI read must preserve completion, progress, score
 and success status with the same explicit field presence while changing at
