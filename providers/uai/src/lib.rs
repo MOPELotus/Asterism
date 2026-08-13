@@ -13,6 +13,7 @@ mod answer;
 mod authentication;
 mod browser_bridge;
 mod course_inventory;
+mod course_policy;
 mod discussion;
 mod duration;
 mod encrypted;
@@ -56,6 +57,10 @@ pub use browser_bridge::{
     parse_browser_event, parse_browser_residence_result,
 };
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
+pub use course_policy::{
+    UaiCoursePolicy, UaiCoursePolicyDocument, UaiCoursePolicyTransport, UaiUnitCoursePolicy,
+    parse_course_policy,
+};
 pub use discussion::{
     UaiDiscussionBinding, UaiDiscussionReply, UaiDiscussionReplyDraft, UaiDiscussionReplyPage,
     UaiDiscussionTransport, build_discussion_reply_page_request, build_discussion_reply_request,

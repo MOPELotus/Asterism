@@ -19,14 +19,15 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     UaiAggregateProgressDocument, UaiAggregateProgressTransport, UaiAnswerDocument,
-    UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport, UaiDiscussionBinding,
-    UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument,
-    UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult,
-    UaiPresetCompletionTransport, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
-    UaiQuestionTransport, UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument,
-    UaiSubmissionTransport, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
-    UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadTransport, UaiUploadedArtifact,
-    UaiVerificationDocument, UaiVerificationTransport,
+    UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport, UaiCoursePolicyDocument,
+    UaiCoursePolicyTransport, UaiDiscussionBinding, UaiDiscussionReplyDraft,
+    UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument, UaiDurationTransport,
+    UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult, UaiPresetCompletionTransport,
+    UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
+    UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
+    UaiUploadIntent, UaiUploadTransport, UaiUploadedArtifact, UaiVerificationDocument,
+    UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_discussion_reply_page_request, build_discussion_reply_request,
     build_discussion_topic_request, build_upload_multipart,
@@ -313,6 +314,45 @@ impl NativeUaiInventoryTransport {
             )
             .await?;
         UaiAggregateProgressDocument::try_new(course_resource_id, identity.app_user_id(), document)
+    }
+
+    async fn fetch_course_policy_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+    ) -> ProviderResult<UaiCoursePolicyDocument> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "Course-policy Course-resource ID",
+        )?;
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let body = Zeroizing::new(build_course_policy_request_body(
+            route.course_resource_id(),
+            route.strategy_id(),
+        )?);
+        let response = self
+            .client
+            .post(course_policy_url()?)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .headers(authorization_headers(session)?)
+            .body(body.as_bytes().to_vec())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        UaiCoursePolicyDocument::try_new(
+            route.course_resource_id(),
+            route.strategy_id(),
+            read_json_response(response, ResponseRoute::CoursePolicy).await?,
+        )
     }
 
     async fn fetch_question_content_with_session(
@@ -1015,6 +1055,28 @@ impl UaiAggregateProgressTransport for NativeUaiInventoryTransport {
 }
 
 #[async_trait]
+impl UaiCoursePolicyTransport for NativeUaiInventoryTransport {
+    async fn fetch_course_policy(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+    ) -> ProviderResult<UaiCoursePolicyDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .fetch_course_policy_with_session(&session, course_resource_id)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_course_policy_with_session(&session, course_resource_id)
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
 impl UaiDurationTransport for NativeUaiInventoryTransport {
     async fn fetch_duration(
         &self,
@@ -1420,6 +1482,7 @@ enum ResponseRoute {
     UserInfo,
     Duration,
     AggregateProgress,
+    CoursePolicy,
     QuestionContent,
     StandardAnswer,
     Submission,
@@ -1441,6 +1504,7 @@ impl ResponseRoute {
             Self::UserInfo => "User info",
             Self::Duration => "Task duration",
             Self::AggregateProgress => "Course and Unit aggregate progress",
+            Self::CoursePolicy => "required Course policy",
             Self::QuestionContent => "Question content",
             Self::StandardAnswer => "standard answer",
             Self::Submission => "submission",
@@ -1457,7 +1521,9 @@ impl ResponseRoute {
         match self {
             Self::Progress => MAX_PROGRESS_RESPONSE_BYTES,
             Self::UserInfo => MAX_USER_INFO_RESPONSE_BYTES,
-            Self::Duration | Self::AggregateProgress => MAX_DURATION_RESPONSE_BYTES,
+            Self::Duration | Self::AggregateProgress | Self::CoursePolicy => {
+                MAX_DURATION_RESPONSE_BYTES
+            }
             Self::QuestionContent => MAX_QUESTION_RESPONSE_BYTES,
             Self::StandardAnswer => MAX_ANSWER_RESPONSE_BYTES,
             Self::Submission => MAX_SUBMISSION_RESPONSE_BYTES,
@@ -1665,6 +1731,32 @@ fn aggregate_progress_url(course_resource_id: &str, app_user_id: &str) -> Provid
         .append_pair("id", course_resource_id)
         .append_pair("appUserId", app_user_id);
     Ok(url)
+}
+
+fn course_policy_url() -> ProviderResult<Url> {
+    route_url(UAI_ORIGIN, &["api", "tla", "courseStudyStrategy", "detail"])
+}
+
+fn build_course_policy_request_body(
+    course_resource_id: &str,
+    strategy_id: u64,
+) -> ProviderResult<String> {
+    if strategy_id == 0 {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "UAI Course-policy request has an invalid strategy ID",
+        ));
+    }
+    serde_json::to_string(&serde_json::json!({
+        "id": strategy_id,
+        "courseResourceId": course_resource_id,
+    }))
+    .map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "UAI Course-policy request serialization failed",
+        )
+    })
 }
 
 fn question_content_url(course_instance_id: &str, group_id: &str) -> ProviderResult<Url> {
@@ -2273,6 +2365,17 @@ mod tests {
             "https://uai.unipus.cn/api/tla/learningDetail/studyRecord/totalAndUnitSituation?id=2001&appUserId=app-42"
         );
         assert_eq!(
+            course_policy_url().unwrap().as_str(),
+            "https://uai.unipus.cn/api/tla/courseStudyStrategy/detail"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &build_course_policy_request_body("2001", 3001).unwrap(),
+            )
+            .unwrap(),
+            serde_json::json!({"id": 3001, "courseResourceId": "2001"})
+        );
+        assert_eq!(
             question_content_url("course-v2:synthetic+rw/guard", "group/1")
                 .unwrap()
                 .as_str(),
@@ -2320,6 +2423,7 @@ mod tests {
             ResponseRoute::AggregateProgress.maximum_bytes(),
             1_024 * 1_024
         );
+        assert_eq!(ResponseRoute::CoursePolicy.maximum_bytes(), 1_024 * 1_024);
     }
 
     #[test]

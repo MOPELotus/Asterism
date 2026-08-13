@@ -13,17 +13,22 @@ const MAX_TITLE_BYTES: usize = 240;
 
 /// Fresh route facts resolved from one Course-resource detail response.
 pub struct UaiCourseContext {
-    course_resource_id: String,
-    course_instance_id: String,
+    course_resource: String,
+    course_instance: String,
+    strategy: u64,
 }
 
 impl UaiCourseContext {
     pub fn course_resource_id(&self) -> &str {
-        &self.course_resource_id
+        &self.course_resource
     }
 
     pub fn course_instance_id(&self) -> &str {
-        &self.course_instance_id
+        &self.course_instance
+    }
+
+    pub const fn strategy_id(&self) -> u64 {
+        self.strategy
     }
 }
 
@@ -31,8 +36,9 @@ impl fmt::Debug for UaiCourseContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UaiCourseContext")
-            .field("course_resource_id", &self.course_resource_id)
-            .field("course_instance_id", &"[ROUTE]")
+            .field("course_resource", &self.course_resource)
+            .field("course_instance", &"[ROUTE]")
+            .field("strategy", &self.strategy)
             .finish()
     }
 }
@@ -149,9 +155,15 @@ pub(crate) fn parse_course_context_for_resource_id(
     }
     let course_instance_id =
         required_route_value(detail.get("courseInstanceId"), "Course-instance route")?;
+    let strategy_id = detail
+        .get("strategyId")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| protocol_drift("UAI Course-resource detail has no valid strategy ID"))?;
     Ok(UaiCourseContext {
-        course_resource_id: resource_id,
-        course_instance_id,
+        course_resource: resource_id,
+        course_instance: course_instance_id,
+        strategy: strategy_id,
     })
 }
 
@@ -343,6 +355,7 @@ mod tests {
             context.course_instance_id(),
             "course-v2:synthetic+rw+20260809"
         );
+        assert_eq!(context.strategy_id(), 3001);
         assert!(!format!("{context:?}").contains("course-v2"));
     }
 

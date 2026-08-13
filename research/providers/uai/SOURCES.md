@@ -1,7 +1,8 @@
 # UAI research sources
 
-Audit dates: 2026-08-09 and 2026-08-11. Revisions are frozen before implementation; moving
-default branches are not evidence for this checkpoint.
+Audit dates: 2026-08-09, 2026-08-11 and 2026-08-13. Recorded revisions are
+reproducible implementation snapshots; each checkpoint also refreshes default
+branches, tags/releases and relevant protocol commits for incremental audit.
 
 | Source | Revision | Capability evidence | Use | License |
 |---|---|---|---|---|
@@ -36,6 +37,14 @@ as a separate Course/Unit read. The response carries Course total and Unit
 finish progress, seconds, score and required state; Asterism therefore keeps a
 dedicated Provider-private snapshot instead of collapsing those aggregates
 into Task progress. Shared exposure remains a Core contract item.
+
+The MIT donor separately calls `courseStudyStrategy/detail` with the fresh
+CourseResource strategy ID, then uses the returned per-Unit `requiredTask`
+lists as its execution selection set. The same response evidences Unit and
+Course windows, pass-score/score-type and unlock/scoring modes. Asterism ports
+that route as an independent Provider-private policy snapshot; it does not
+erase the current Rust donor's independently evidenced progress-leaf required
+flag.
 
 On 2026-08-13, all four UAI source checkouts were fetched with tags and compared
 against their default remote branches. Apache `bef0d29155ce`, MIT

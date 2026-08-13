@@ -10,6 +10,7 @@
 | TaskProgressRead | Backend donors + current Rust donor | Reference | Native fresh-detail + signed per-Unit read and identity-bound Group parser are offline/native-boundary covered; pass/pass2/perm, tab type and donor strategy facts remain separate, only all three completion flags map to completed, and nonzero start/end define the strict mutation window |
 | DurationRead | UnipusHelperPro | Reference | Native user-info + per-Unit study-record read binds CourseResource/Unit/Group exactly; donor-documented Task duration seconds are offline/native-boundary covered |
 | Course/Unit aggregate progress | UnipusHelperPro | Reference | Provider-private bounded parser and native transport cover the independent `totalAndUnitSituation` Course total plus unique Unit finish-progress, learning-seconds, score and required facts, bound to fresh app-user and CourseResource identities. Shared Course/Unit aggregate capability, Scheduler and API exposure are an accepted Core Gap; these semantics are not forced into TaskProgressRead or DurationRead |
+| Course/Unit required policy | UnipusHelperPro | Reference | Provider-private bounded parser and native POST cover `courseStudyStrategy/detail` after fresh detail binds the CourseResource and strategy ID. It preserves Course unlock/scoring/time facts plus ordered unique Unit strategies, required Task IDs, pass-score/score-type and Unit windows; it remains distinct from per-leaf progress `required` and awaits the shared aggregate/policy contract |
 | Daemon composition | Asterism Core | FromScratch | Complete Development entry is registered only through an independent disabled-by-default opt-in and configured SecretStore |
 | QuestionInventory / QuestionParse | AutoFinish + UnipusHelperPro + current Rust donor | Reference | Fresh encrypted content read, bounded framing/decryption and typed choice, multi-child composite choice, short-answer, writing, translation/revise, fillblank/banked-cloze, ordering and matching semantics are offline covered. The donor `video-popup` media container is also covered without a guessed fixed kind: its fresh module/child `replyType` derives choice, composite-choice or ordered text-blank semantics and incompatible mixtures fail closed. Per-child option sets, content-derived judge labels and matching-left order remain bound. Donor media paths/subtitle tracks and embedded WEBVTT are also parsed: Questions persist only opaque attachment IDs and bounded transcript text, while exact HTTPS routes remain zeroizing Provider-private inputs for the future Task-bound transcription resolver |
 | AnswerResolve | Both backend donors | Reference | A separate fresh encrypted standard-answer read is independently bound to the same Group/question snapshot; ciphertext, keys and route context are not returned |
@@ -69,7 +70,9 @@ checkpoint, not a Provider completion boundary. It:
     Core can authorize the two independent read paths; separately implements
     the donor Course/Unit aggregate study-record parser and native transport
     with exact CourseResource/app-user binding while its shared capability
-    contract is added by Main;
+    contract is added by Main; also refreshes Course detail before the separate
+    required-policy POST and binds its response to the exact CourseResource and
+    strategy ID without replacing progress-leaf required facts;
 14. reads and decrypts fresh content and standard-answer documents separately,
     binds every normalized question and candidate to the exact stable remote
     Group Task snapshot,

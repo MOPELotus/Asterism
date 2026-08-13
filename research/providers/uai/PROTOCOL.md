@@ -208,6 +208,28 @@ The current shared API has only Task-scoped progress/duration, so exposing this
 Course/Unit snapshot remains an accepted independent Core capability gap rather
 than a lossy mapping.
 
+The MIT donor also performs an independent required-policy read before choosing
+work:
+
+```text
+POST https://uai.unipus.cn/api/tla/courseStudyStrategy/detail
+{"id": freshStrategyId, "courseResourceId": stableCourseResourceId}
+```
+
+The native transport first refreshes Course-resource detail and obtains its
+positive strategy ID; neither the strategy ID nor the Course instance is taken
+from a persisted Task. The bounded response must repeat that CourseResource and
+strategy on both the Course policy and every Unit strategy. The parser retains
+binary Unit/inner-Unit unlock modes, bounded scoring mode and the Course window;
+each uniquely sorted Unit retains bounded ID/caption/name, decimal-string pass
+score in `0..=100`, numeric-string score type, an ordered unique required-Task
+list, `requireNodeType=task`, and its own millisecond window. Either zero
+endpoint means unbounded; positive endpoints must be ordered. Personal Course
+metadata and instance/resource routes are discarded. This policy is kept
+separate from current-Rust-donor per-leaf `strategies.required`: both are real
+observations with different scope, and reconciliation belongs in the future
+shared Course/Unit policy capability rather than silently overwriting one.
+
 The separate progress response can also contain numeric `duration`. Asterism
 retains it only as `duration_raw`; it never populates `duration_seconds` from
 that field.
