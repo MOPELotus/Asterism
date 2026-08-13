@@ -208,7 +208,9 @@ Three donor wire modes remain separate:
 The start payload also follows that selected wire mode. Current Fanyuchang
 sends `uid/cid/scoid/classid/tid=-1`; YZBRH and Auto_WeLearn send only
 `uid/cid/scoid`. All three duration donors use the simple StudyCourse Referer.
-This is an exact protocol distinction, not an optional-field optimization.
+Current Fanyuchang addresses `/Ajax/SCO.aspx?uid=...`; the two historical modes
+address plain `/Ajax/SCO.aspx` for CMI read, start, keep, save and final read.
+These are exact protocol distinctions, not optional-field optimizations.
 
 The client-counter and implicit modes require their evidenced 1-second and
 60-second intervals respectively. Start and finalization require integer
@@ -287,8 +289,10 @@ Referers. Current Fanyuchang sends the full
 YZBRH and Auto_WeLearn send only `uid/cid/scoid` with the task-specific
 `StudyCourse.aspx?cid=...&classid=...&sco=...` Referer. Runtime setting
 `execution.mutation_profile` exposes exactly these two evidenced families,
-applies the selected Referer to start/set/save alike, and does not synthesize
-the previously unevidenced full-payload/task-Referer mixture.
+applies the selected endpoint and Referer to baseline read, start, set, save and
+verification alike, and does not synthesize the previously unevidenced
+full-payload/task-Referer mixture. Current Fanyuchang uses
+`/Ajax/SCO.aspx?uid=...`; YZBRH/Auto use plain `/Ajax/SCO.aspx`.
 
 Current Fanyuchang then unconditionally performs another
 `savescoinfo160928(progress=100, crate=100, cstatus=completed)`, even when the

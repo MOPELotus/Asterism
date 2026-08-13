@@ -98,6 +98,7 @@ pub trait WellearnResourceExecutionTransport: Send + Sync {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
+        mutation_profile: crate::WellearnResourceMutationProfile,
     ) -> ProviderResult<WellearnCmiDocument>;
 }
 
@@ -328,7 +329,12 @@ impl TaskExecutionCapability for WellearnResourceExecution {
         )?;
         let document = self
             .transport
-            .verify_resource(context, &course_id, &sco_id)
+            .verify_resource(
+                context,
+                &course_id,
+                &sco_id,
+                settings.resource_mutation_profile,
+            )
             .await?;
         let snapshot = parse_cmi_snapshot(document.as_str())?;
         verify_completed_preset(&snapshot, verified_score_percent)?;
@@ -636,6 +642,7 @@ mod tests {
             _context: &ProviderContext,
             course_id: &str,
             sco_id: &str,
+            _mutation_profile: crate::WellearnResourceMutationProfile,
         ) -> ProviderResult<WellearnCmiDocument> {
             self.verifications
                 .lock()

@@ -197,9 +197,20 @@ impl NativeWellearnInventoryTransport {
         route: &crate::WellearnCourseContext,
         sco_id: &str,
     ) -> ProviderResult<WellearnCmiDocument> {
+        self.fetch_cmi_for_route_at_endpoint(session, route, sco_id, ScoEndpoint::QueryUserId)
+            .await
+    }
+
+    async fn fetch_cmi_for_route_at_endpoint(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        sco_id: &str,
+        endpoint: ScoEndpoint,
+    ) -> ProviderResult<WellearnCmiDocument> {
         let response = self
             .client
-            .post(sco_url(route.user_id())?)
+            .post(sco_endpoint_url(route, endpoint)?)
             .header(COOKIE, session.expose_secret())
             .header(REFERER, STUDY_COURSE_REFERER)
             .form(&[
@@ -233,16 +244,15 @@ impl NativeWellearnInventoryTransport {
         read_inventory_response(response, ResponseContent::Json).await
     }
 
-    async fn send_sco_form_with_referer(
+    async fn send_plain_sco_form_with_referer(
         &self,
         session: &crate::WellearnCookieSession,
-        route: &crate::WellearnCourseContext,
         referer: &Url,
         fields: &[(&str, &str)],
     ) -> ProviderResult<WellearnInventoryDocument> {
         let response = self
             .client
-            .post(sco_url(route.user_id())?)
+            .post(static_url(SCO_URL)?)
             .header(COOKIE, session.expose_secret())
             .header(REFERER, referer.as_str())
             .form(fields)
@@ -265,10 +275,29 @@ impl NativeWellearnInventoryTransport {
                 self.send_sco_form(session, route, fields).await
             }
             crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer => {
-                self.send_sco_form_with_referer(session, route, task_referer, fields)
+                self.send_plain_sco_form_with_referer(session, task_referer, fields)
                     .await
             }
         }
+    }
+
+    async fn send_sco_form_at_endpoint(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        endpoint: ScoEndpoint,
+        fields: &[(&str, &str)],
+    ) -> ProviderResult<WellearnInventoryDocument> {
+        let response = self
+            .client
+            .post(sco_endpoint_url(route, endpoint)?)
+            .header(COOKIE, session.expose_secret())
+            .header(REFERER, STUDY_COURSE_REFERER)
+            .form(fields)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        read_inventory_response(response, ResponseContent::Json).await
     }
 }
 
@@ -377,15 +406,16 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
                 "WELearn resource transport received an out-of-range score",
             ));
         }
+        let endpoint = resource_endpoint(mutation_profile);
         let (mut session, mut renewed) = self.session_for_operation(context).await?;
         let (route, before) = match self
-            .read_duration_baseline(&session, course_id, sco_id)
+            .read_duration_baseline(&session, course_id, sco_id, endpoint)
             .await
         {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 session = self.sessions.renew_session(context).await?;
                 renewed = true;
-                self.read_duration_baseline(&session, course_id, sco_id)
+                self.read_duration_baseline(&session, course_id, sco_id, endpoint)
                     .await?
             }
             result => result?,
@@ -480,7 +510,10 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
             );
         }
 
-        let after = match self.fetch_cmi_for_route(&session, &route, sco_id).await {
+        let after = match self
+            .fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
+            .await
+        {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 session = self
                     .sessions
@@ -491,7 +524,7 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
                     .resolve_course_route(&session, course_id)
                     .await
                     .map_err(resource_mutation_error)?;
-                self.fetch_cmi_for_route(&session, &route, sco_id)
+                self.fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
                     .await
                     .map_err(resource_mutation_error)?
             }
@@ -512,8 +545,25 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
         context: &ProviderContext,
         course_id: &str,
         sco_id: &str,
+        mutation_profile: crate::WellearnResourceMutationProfile,
     ) -> ProviderResult<WellearnCmiDocument> {
-        WellearnCmiTransport::fetch_cmi(self, context, course_id, sco_id).await
+        let (mut session, renewed) = self.session_for_operation(context).await?;
+        let endpoint = resource_endpoint(mutation_profile);
+        let first = async {
+            let route = self.resolve_course_route(&session, course_id).await?;
+            self.fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
+                .await
+        }
+        .await;
+        match first {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                session = self.sessions.renew_session(context).await?;
+                let route = self.resolve_course_route(&session, course_id).await?;
+                self.fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
+                    .await
+            }
+            result => result,
+        }
     }
 }
 
@@ -573,15 +623,16 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                 "WELearn duration transport received a protocol/interval mismatch",
             ));
         }
+        let endpoint = duration_endpoint(protocol_mode);
         let (mut session, mut renewed) = self.session_for_operation(context).await?;
         let (mut route, mut before) = match self
-            .read_duration_baseline(&session, course_id, sco_id)
+            .read_duration_baseline(&session, course_id, sco_id, endpoint)
             .await
         {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 session = self.sessions.renew_session(context).await?;
                 renewed = true;
-                self.read_duration_baseline(&session, course_id, sco_id)
+                self.read_duration_baseline(&session, course_id, sco_id, endpoint)
                     .await?
             }
             result => result?,
@@ -606,10 +657,14 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     ScoStartPayload::MinimalIdentity
                 },
             );
-            let start = self.send_sco_form(&session, &route, &start_fields).await?;
+            let start = self
+                .send_sco_form_at_endpoint(&session, &route, endpoint, &start_fields)
+                .await?;
             parse_mutation_response(start.as_str(), MutationResponseKind::StrictSuccess)?;
             started = true;
-            before = self.fetch_cmi_for_route(&session, &route, sco_id).await?;
+            before = self
+                .fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
+                .await?;
             snapshot = parse_cmi_snapshot(before.as_str())?;
         }
 
@@ -638,14 +693,14 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         let mut heartbeat_count = 0_u32;
         match protocol_mode {
             crate::WellearnDurationProtocolMode::PreserveFresh => {
-                self.keep_duration_preserved(&session, &route, sco_id, &state)
+                self.keep_duration_preserved(&session, &route, endpoint, sco_id, &state)
                     .await?;
                 heartbeat_count = heartbeat_count.saturating_add(1);
                 let (complete_intervals, trailing_seconds) =
                     duration_heartbeat_plan(duration_seconds, heartbeat_interval_seconds);
                 for completed in 1..=complete_intervals {
                     tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
-                    self.keep_duration_preserved(&session, &route, sco_id, &state)
+                    self.keep_duration_preserved(&session, &route, endpoint, sco_id, &state)
                         .await?;
                     heartbeat_count = heartbeat_count.saturating_add(1);
                     report_duration_heartbeat(
@@ -659,12 +714,12 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     tokio::time::sleep(Duration::from_secs(trailing_seconds)).await;
                     report_duration_tail(events).await?;
                 }
-                self.finalize_duration_preserved(&session, &route, sco_id, &state)
+                self.finalize_duration_preserved(&session, &route, endpoint, sco_id, &state)
                     .await?;
             }
             crate::WellearnDurationProtocolMode::ClientCounter => {
                 for elapsed in 0..duration_seconds {
-                    self.keep_duration_counter(&session, &route, sco_id, elapsed)
+                    self.keep_duration_counter(&session, &route, endpoint, sco_id, elapsed)
                         .await?;
                     heartbeat_count = heartbeat_count.saturating_add(1);
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -677,7 +732,7 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     duration_heartbeat_plan(duration_seconds, heartbeat_interval_seconds);
                 for completed in 1..=complete_intervals {
                     tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
-                    self.keep_duration_implicit(&session, &route, sco_id)
+                    self.keep_duration_implicit(&session, &route, endpoint, sco_id)
                         .await?;
                     heartbeat_count = heartbeat_count.saturating_add(1);
                     report_duration_heartbeat(
@@ -691,7 +746,7 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     tokio::time::sleep(Duration::from_secs(trailing_seconds)).await;
                     report_duration_tail(events).await?;
                 }
-                self.finalize_duration_implicit(&session, &route, sco_id)
+                self.finalize_duration_implicit(&session, &route, endpoint, sco_id)
                     .await?;
             }
         }
@@ -705,11 +760,15 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                 total_items: Some(1),
             })
             .await?;
-        let after = match self.fetch_cmi_for_route(&session, &route, sco_id).await {
+        let after = match self
+            .fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
+            .await
+        {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 session = self.sessions.renew_session(context).await?;
                 route = self.resolve_course_route(&session, course_id).await?;
-                self.fetch_cmi_for_route(&session, &route, sco_id).await?
+                self.fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
+                    .await?
             }
             result => result?,
         };
@@ -818,9 +877,12 @@ impl NativeWellearnInventoryTransport {
         session: &crate::WellearnCookieSession,
         course_id: &str,
         sco_id: &str,
+        endpoint: ScoEndpoint,
     ) -> ProviderResult<(crate::WellearnCourseContext, WellearnCmiDocument)> {
         let route = self.resolve_course_route(session, course_id).await?;
-        let document = self.fetch_cmi_for_route(session, &route, sco_id).await?;
+        let document = self
+            .fetch_cmi_for_route_at_endpoint(session, &route, sco_id, endpoint)
+            .await?;
         Ok((route, document))
     }
 
@@ -828,13 +890,15 @@ impl NativeWellearnInventoryTransport {
         &self,
         session: &crate::WellearnCookieSession,
         route: &crate::WellearnCourseContext,
+        endpoint: ScoEndpoint,
         sco_id: &str,
         state: &PreservedCmiState,
     ) -> ProviderResult<()> {
         let response = self
-            .send_sco_form(
+            .send_sco_form_at_endpoint(
                 session,
                 route,
+                endpoint,
                 &[
                     ("action", "keepsco_with_getticket_with_updatecmitime"),
                     ("uid", route.user_id()),
@@ -854,14 +918,16 @@ impl NativeWellearnInventoryTransport {
         &self,
         session: &crate::WellearnCookieSession,
         route: &crate::WellearnCourseContext,
+        endpoint: ScoEndpoint,
         sco_id: &str,
         elapsed_seconds: u64,
     ) -> ProviderResult<()> {
         let (session_time, total_time) = duration_counter_fields(elapsed_seconds);
         let response = self
-            .send_sco_form(
+            .send_sco_form_at_endpoint(
                 session,
                 route,
+                endpoint,
                 &[
                     ("action", "keepsco_with_getticket_with_updatecmitime"),
                     ("uid", route.user_id()),
@@ -881,12 +947,14 @@ impl NativeWellearnInventoryTransport {
         &self,
         session: &crate::WellearnCookieSession,
         route: &crate::WellearnCourseContext,
+        endpoint: ScoEndpoint,
         sco_id: &str,
     ) -> ProviderResult<()> {
         let response = self
-            .send_sco_form(
+            .send_sco_form_at_endpoint(
                 session,
                 route,
+                endpoint,
                 &[
                     ("action", "keepsco_with_getticket_with_updatecmitime"),
                     ("uid", route.user_id()),
@@ -902,13 +970,15 @@ impl NativeWellearnInventoryTransport {
         &self,
         session: &crate::WellearnCookieSession,
         route: &crate::WellearnCourseContext,
+        endpoint: ScoEndpoint,
         sco_id: &str,
         state: &PreservedCmiState,
     ) -> ProviderResult<()> {
         let response = self
-            .send_sco_form(
+            .send_sco_form_at_endpoint(
                 session,
                 route,
+                endpoint,
                 &[
                     ("action", "savescoinfo160928"),
                     ("uid", route.user_id()),
@@ -929,12 +999,14 @@ impl NativeWellearnInventoryTransport {
         &self,
         session: &crate::WellearnCookieSession,
         route: &crate::WellearnCourseContext,
+        endpoint: ScoEndpoint,
         sco_id: &str,
     ) -> ProviderResult<()> {
         let response = self
-            .send_sco_form(
+            .send_sco_form_at_endpoint(
                 session,
                 route,
+                endpoint,
                 &[
                     ("action", "savescoinfo160928"),
                     ("uid", route.user_id()),
@@ -1346,6 +1418,39 @@ fn sco_url(user_id: &str) -> ProviderResult<Url> {
     Ok(url)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScoEndpoint {
+    QueryUserId,
+    Plain,
+}
+
+fn sco_endpoint_url(
+    route: &crate::WellearnCourseContext,
+    endpoint: ScoEndpoint,
+) -> ProviderResult<Url> {
+    match endpoint {
+        ScoEndpoint::QueryUserId => sco_url(route.user_id()),
+        ScoEndpoint::Plain => static_url(SCO_URL),
+    }
+}
+
+const fn resource_endpoint(profile: crate::WellearnResourceMutationProfile) -> ScoEndpoint {
+    match profile {
+        crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer => {
+            ScoEndpoint::QueryUserId
+        }
+        crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer => ScoEndpoint::Plain,
+    }
+}
+
+const fn duration_endpoint(mode: crate::WellearnDurationProtocolMode) -> ScoEndpoint {
+    match mode {
+        crate::WellearnDurationProtocolMode::ClientCounter => ScoEndpoint::QueryUserId,
+        crate::WellearnDurationProtocolMode::PreserveFresh
+        | crate::WellearnDurationProtocolMode::ImplicitServer => ScoEndpoint::Plain,
+    }
+}
+
 fn study_course_url(route: &crate::WellearnCourseContext, sco_id: &str) -> ProviderResult<Url> {
     let mut url = static_url(STUDY_COURSE_REFERER)?;
     url.query_pairs_mut()
@@ -1537,6 +1642,38 @@ mod tests {
         assert_eq!(
             sco_url("user value").unwrap().as_str(),
             "https://welearn.sflep.com/Ajax/SCO.aspx?uid=user+value"
+        );
+        assert_eq!(
+            sco_endpoint_url(&context, ScoEndpoint::Plain)
+                .unwrap()
+                .as_str(),
+            "https://welearn.sflep.com/Ajax/SCO.aspx"
+        );
+        assert_eq!(
+            sco_endpoint_url(&context, ScoEndpoint::QueryUserId)
+                .unwrap()
+                .as_str(),
+            "https://welearn.sflep.com/Ajax/SCO.aspx?uid=7001"
+        );
+        assert_eq!(
+            resource_endpoint(crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer),
+            ScoEndpoint::Plain
+        );
+        assert_eq!(
+            resource_endpoint(crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer),
+            ScoEndpoint::QueryUserId
+        );
+        assert_eq!(
+            duration_endpoint(crate::WellearnDurationProtocolMode::PreserveFresh),
+            ScoEndpoint::Plain
+        );
+        assert_eq!(
+            duration_endpoint(crate::WellearnDurationProtocolMode::ImplicitServer),
+            ScoEndpoint::Plain
+        );
+        assert_eq!(
+            duration_endpoint(crate::WellearnDurationProtocolMode::ClientCounter),
+            ScoEndpoint::QueryUserId
         );
         assert_eq!(
             sco_start_fields(&context, "301", ScoStartPayload::MinimalIdentity),

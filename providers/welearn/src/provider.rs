@@ -293,6 +293,7 @@ mod tests {
             _context: &ProviderContext,
             _course_id: &str,
             _sco_id: &str,
+            _mutation_profile: crate::WellearnResourceMutationProfile,
         ) -> ProviderResult<WellearnCmiDocument> {
             Err(unused())
         }
