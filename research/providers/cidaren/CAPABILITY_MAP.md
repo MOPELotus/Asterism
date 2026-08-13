@@ -87,13 +87,15 @@ The current checkpoint (not a completion boundary):
     sorted signed request,
     ECDH/HKDF/AES-GCM authenticated response, exact Composite material and
     mandatory fresh account readback, with no ambiguous retry.
-21. retains the reopened donor's bounded current-attempt completed/total
+21. registers the independent native AnswerResolve and fresh SubmissionVerify
+    capabilities while retaining the reopened donor's bounded current-attempt
+    completed/total
     counters on Question and reading-card steps without folding them into the
     local position, Question fingerprint or mutation transition.
 
-The remaining work is durable shared attempt/submission registration, shared
-execution for the alternate Capture/BrowserBridge helper paths and live
-validation.
+The remaining work is durable shared QuestionSession/Attempt registration for
+QuestionInventory/QuestionParse and SubmissionExecute, shared execution for
+the alternate Capture/BrowserBridge helper paths and live validation.
 Fresh post-mutation verification and the durable one-shot External OAuth path
 are already implemented. A checkpoint or Core Gap is not a Provider stopping
 condition.
