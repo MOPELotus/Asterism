@@ -16,6 +16,7 @@ asterism-engine = { path = "../../crates/engine" }
 asterism-events = { path = "../../crates/events" }
 asterism-networking = { path = "../../crates/networking" }
 asterism-provider-chaoxing = { path = "../../providers/chaoxing" }
+asterism-provider-cidaren = { path = "../../providers/cidaren" }
 asterism-provider-uai = { path = "../../providers/uai" }
 asterism-provider-welearn = { path = "../../providers/welearn" }
 asterism-provider-api = { path = "../../crates/provider-api" }

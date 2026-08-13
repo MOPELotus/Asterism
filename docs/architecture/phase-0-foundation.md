@@ -552,12 +552,15 @@ instead of misreporting a live cancellation.
 ## Fortieth Phase 0 slice
 
 The fortieth checkpoint lets a registered Provider declare an optional,
-positive `capture_recipe_version`. Core treats this metadata as the authoritative
-server-side requirement when creating a local-helper pairing; clients cannot
-choose or downgrade it in a request.
+positive `capture_recipe_version`. Current Core additionally requires the
+Authentication implementation to return the exact validated declarative recipe;
+metadata alone cannot claim an executable Capture path. Session creation freezes
+the implementation-backed version, and clients cannot choose or downgrade it.
 
 A Capture recipe declaration is valid only when the same Provider advertises
-and implements Authentication. Providers without a bundled recipe remain
+and implements Authentication, the recipe method/session kind are advertised,
+and its bounded HTTPS origins and credential sources pass registry validation.
+Providers without a bundled recipe remain
 usable through their other authentication methods but cannot start a Capture
 bootstrap flow.
 
@@ -2989,3 +2992,33 @@ exact fresh completion/progress/score verifier; DurationReport keeps its own
 one-shot preservation verification and enters HumanRequired after an
 ambiguous write without being mistaken for the resource goal. Submission
 remains a separate single-action Draft/receipt/verification flow.
+
+## One-hundred-and-seventy-sixth Phase 0 slice
+
+Capture is now an executable first-batch authentication boundary rather than a
+metadata-only version marker. An Authentication implementation returns a
+validated, versioned recipe containing its exact HTTPS start URL and origin
+allowlist, polling bound, method/session kind, credential purposes and ordered
+request-header, browser-storage, Cookie or atomic JSON sources. Registry rejects
+version-only claims, undeclared methods, invalid origins, duplicate purposes,
+unbounded recipes and recipes with no required output.
+
+Auth Bootstrap creation freezes the implementation-backed recipe version and a
+successful claim returns that exact recipe. Credential submission is checked on
+both sides: the helper refuses a method, session kind or field set that differs
+from its claimed recipe, while Engine re-resolves the Provider implementation
+and rejects recipe drift before Provider validation or any SecretStore write.
+OpenAPI exposes the complete typed recipe union and all Bootstrap success/event
+responses; Capture no longer has an untyped deferred-operation exception.
+
+`asterism-capture automatic` launches one visible Chromium/Edge instance with a
+unique temporary profile and random loopback DevTools port. Its bounded
+WebSocket client attaches only to an allowlisted page, accepts only declared
+browser facts, binds request headers to origin and top-level document loader,
+handles CDP header-event reordering, confirms the document did not change during
+one snapshot, zeroizes transport/JSON buffers and submits only when every
+required output resolves atomically. Startup failures, cancellation, normal
+completion and CDP close all enter one process-tree/profile reclamation path.
+Unit/contract suites and an ignored real-browser smoke test cover both successful
+allowlisted attachment and zero leftover helper processes/profiles; Provider
+account validation against real platform sessions remains the later live gate.

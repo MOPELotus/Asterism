@@ -14,6 +14,7 @@ url = "sqlite://asterism.db"
 enable_development_chaoxing = false
 enable_development_welearn = false
 enable_development_uai = false
+enable_development_cidaren = false
 
 [scheduler]
 enabled = true

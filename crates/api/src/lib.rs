@@ -1958,12 +1958,12 @@ mod tests {
         SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId,
     };
     use asterism_provider_api::{
-        AuthChallenge, AuthenticationCapability, CourseInventoryCapability, CredentialValidation,
-        ProviderAuthContext, ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity,
-        ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema,
-        ProviderSettingCoreBehavior, ProviderSettingDefinition, ProviderSettingKind,
-        ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask, SessionStatus,
-        TaskInventoryCapability, VerificationLevel,
+        AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureRecipe,
+        CaptureValueSource, CourseInventoryCapability, CredentialValidation, ProviderAuthContext,
+        ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata,
+        ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior,
+        ProviderSettingDefinition, ProviderSettingKind, ProviderSettingScope, ProviderSettingValue,
+        RemoteCourse, RemoteTask, SessionStatus, TaskInventoryCapability, VerificationLevel,
     };
     use asterism_secrets::{CredentialBundle, SecretKey};
     use asterism_storage::{
@@ -2162,6 +2162,10 @@ mod tests {
 
     #[async_trait]
     impl AuthenticationCapability for ApiCredentialAuthentication {
+        fn capture_recipe(&self) -> Option<CaptureRecipe> {
+            Some(test_capture_recipe(3))
+        }
+
         async fn begin_authentication(
             &self,
             context: &ProviderAuthContext,
@@ -2213,7 +2217,7 @@ mod tests {
             scan_min_interval_seconds: None,
             capture_recipe_version: Some(3),
             capabilities: BTreeSet::from([ProviderCapability::Authentication]),
-            auth_methods: BTreeSet::from([AuthMethod::ImportedCookie]),
+            auth_methods: BTreeSet::from([AuthMethod::ImportedCookie, AuthMethod::AssistedSession]),
             session_kinds: BTreeSet::from([SessionKind::Cookie]),
         };
         let authentication = Arc::new(ApiCredentialAuthentication {
@@ -2228,6 +2232,24 @@ mod tests {
             })
             .unwrap();
         registry
+    }
+
+    fn test_capture_recipe(version: u32) -> CaptureRecipe {
+        CaptureRecipe {
+            version,
+            start_url: "https://provider-alpha.example/login".to_owned(),
+            allowed_origins: vec!["https://provider-alpha.example".to_owned()],
+            poll_interval_millis: 500,
+            auth_method: AuthMethod::AssistedSession,
+            session_kind: SessionKind::Cookie,
+            outputs: vec![CaptureCredentialOutput {
+                purpose: asterism_secrets::SecretPurpose::ProviderCookie,
+                required: true,
+                sources: vec![CaptureValueSource::CookieHeader {
+                    origin: "https://provider-alpha.example".to_owned(),
+                }],
+            }],
+        }
     }
 
     async fn credential_test_app(valid: bool) -> (Router, Database) {
@@ -2375,7 +2397,7 @@ mod tests {
         .header(header::AUTHORIZATION, format!("Bootstrap {token}"))
         .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 7], 42_007))))
         .body(Body::from(format!(
-            r#"{{"display_name":"primary","provider_id":"provider-alpha","auth_method":"imported_cookie","session_kind":"cookie","fields":[{{"purpose":"provider_cookie","value":"{value}"}}]}}"#
+            r#"{{"display_name":"primary","provider_id":"provider-alpha","auth_method":"assisted_session","session_kind":"cookie","fields":[{{"purpose":"provider_cookie","value":"{value}"}}]}}"#
         )))
         .unwrap()
     }
@@ -2392,7 +2414,7 @@ mod tests {
         .header(header::AUTHORIZATION, format!("Bootstrap {token}"))
         .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 9], 42_009))))
         .body(Body::from(format!(
-            r#"{{"provider_id":"provider-alpha","auth_method":"imported_cookie","session_kind":"cookie","fields":[{{"purpose":"provider_cookie","value":"{value}"}}]}}"#
+            r#"{{"provider_id":"provider-alpha","auth_method":"assisted_session","session_kind":"cookie","fields":[{{"purpose":"provider_cookie","value":"{value}"}}]}}"#
         )))
         .unwrap()
     }
@@ -2734,6 +2756,13 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("ast_boot_")
+        );
+        assert_eq!(claimed["recipe"]["version"], 3);
+        assert_eq!(claimed["recipe"]["auth_method"], "assisted_session");
+        assert_eq!(claimed["recipe"]["session_kind"], "cookie");
+        assert_eq!(
+            claimed["recipe"]["outputs"][0]["purpose"],
+            "provider_cookie"
         );
         let replay = app
             .clone()

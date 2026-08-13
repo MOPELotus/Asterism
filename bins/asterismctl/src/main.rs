@@ -284,7 +284,7 @@ enum TaskCommand {
     /// Schedule one task through the shared idempotent Core Action.
     Execute {
         task_id: String,
-        /// Exact executable capability subset, for example resource_execution.
+        /// Exact executable capability subset, for example `resource_execution`.
         #[arg(long = "capability", required = true, num_args = 1..)]
         capabilities: Vec<String>,
         /// Stable caller-provided key. Reuse it when retrying the same request.

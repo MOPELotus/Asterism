@@ -11,6 +11,7 @@ use asterism_engine::{
     AuthBootstrapCredentialServiceError, AuthBootstrapEventRequest, AuthBootstrapService,
     AuthBootstrapServiceError,
 };
+use asterism_provider_api::CaptureRecipe;
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, CredentialField, SecretPurpose, SecretString,
     SecretValue,
@@ -43,16 +44,7 @@ pub(super) async fn create_auth_bootstrap_session(
     let request = api_json(payload)?;
     let provider_id = ProviderId::new(request.provider_id)
         .map_err(|error| ApiError::bad_request("invalid_provider_id", error.to_string()))?;
-    let required_recipe_version = state
-        .providers
-        .get(&provider_id)
-        .and_then(|entry| entry.metadata.capture_recipe_version)
-        .ok_or_else(|| {
-            ApiError::conflict(
-                "capture_recipe_unavailable",
-                "the Provider does not expose a bundled Capture recipe",
-            )
-        })?;
+    let required_recipe_version = provider_capture_recipe(&state, &provider_id, None)?.version;
     let provider_account_id = request
         .provider_account_id
         .as_deref()
@@ -156,10 +148,16 @@ pub(super) async fn claim_auth_bootstrap_session(
         })
         .await
         .map_err(map_bootstrap_error)?;
+    let recipe = provider_capture_recipe(
+        &state,
+        &claimed.session.provider_id,
+        Some(claimed.session.required_recipe_version),
+    )?;
     Ok(crate::auth::no_store(
         Json(ClaimAuthBootstrapSessionResponse {
             session: claimed.session,
             access_token: claimed.access_token,
+            recipe,
         })
         .into_response(),
     ))
@@ -283,6 +281,29 @@ fn bootstrap_service(
     .map_err(ApiError::internal)
 }
 
+fn provider_capture_recipe(
+    state: &ApiState,
+    provider_id: &ProviderId,
+    expected_version: Option<u32>,
+) -> Result<CaptureRecipe, ApiError> {
+    let recipe = state
+        .providers
+        .get(provider_id)
+        .and_then(|entry| entry.authentication.as_ref())
+        .and_then(|authentication| authentication.capture_recipe())
+        .filter(|recipe| {
+            recipe.validate().is_ok()
+                && expected_version.is_none_or(|version| version == recipe.version)
+        })
+        .ok_or_else(|| {
+            ApiError::conflict(
+                "capture_recipe_unavailable",
+                "the Provider does not expose the Capture recipe required by this session",
+            )
+        })?;
+    Ok(recipe)
+}
+
 fn bootstrap_authorization(headers: &HeaderMap) -> Option<SecretString> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let mut parts = value.split_ascii_whitespace();
@@ -393,6 +414,10 @@ fn map_bootstrap_credential_error(error: AuthBootstrapCredentialServiceError) ->
             "auth_bootstrap_account_conflict",
             "the Provider account binding changed during credential validation",
         ),
+        AuthBootstrapCredentialServiceError::RecipeMismatch => ApiError::conflict(
+            "capture_recipe_mismatch",
+            "the captured credential does not match the Provider recipe frozen for this session",
+        ),
         AuthBootstrapCredentialServiceError::Credential(error) => {
             crate::account::map_credential_error(error)
         }
@@ -441,6 +466,7 @@ impl Serialize for CreateAuthBootstrapSessionResponse {
 pub(super) struct ClaimAuthBootstrapSessionResponse {
     session: AuthBootstrapSession,
     access_token: SecretString,
+    recipe: CaptureRecipe,
 }
 
 #[derive(Debug, Deserialize)]
@@ -529,6 +555,7 @@ impl fmt::Debug for ClaimAuthBootstrapSessionResponse {
             .debug_struct("ClaimAuthBootstrapSessionResponse")
             .field("session", &self.session)
             .field("access_token", &"[REDACTED]")
+            .field("recipe", &self.recipe)
             .finish()
     }
 }
@@ -538,9 +565,10 @@ impl Serialize for ClaimAuthBootstrapSessionResponse {
     where
         S: serde::Serializer,
     {
-        let mut response = serializer.serialize_struct("ClaimAuthBootstrapSessionResponse", 2)?;
+        let mut response = serializer.serialize_struct("ClaimAuthBootstrapSessionResponse", 3)?;
         response.serialize_field("session", &self.session)?;
         response.serialize_field("access_token", self.access_token.expose_secret())?;
+        response.serialize_field("recipe", &self.recipe)?;
         response.end()
     }
 }

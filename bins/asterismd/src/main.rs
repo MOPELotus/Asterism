@@ -17,6 +17,7 @@ use asterism_events::EventBus;
 use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
 use asterism_provider_api::ProviderRegistry;
 use asterism_provider_chaoxing::build_development_provider_with_renewal;
+use asterism_provider_cidaren::build_development_provider_with_stored_session as build_cidaren_with_stored_session;
 use asterism_provider_uai::build_development_provider_with_renewal as build_uai_with_renewal;
 use asterism_provider_welearn::build_development_provider_with_renewal as build_welearn_with_renewal;
 use asterism_scheduler::RetryPolicy;
@@ -130,6 +131,10 @@ struct Arguments {
     /// Expose the unverified UAI Provider for local validation only.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     enable_development_uai: Option<bool>,
+
+    /// Expose the unverified Cidaren Provider for local validation only.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    enable_development_cidaren: Option<bool>,
 }
 
 #[tokio::main]
@@ -282,6 +287,7 @@ fn load_config(arguments: Arguments) -> anyhow::Result<Config> {
             enable_development_chaoxing: arguments.enable_development_chaoxing,
             enable_development_welearn: arguments.enable_development_welearn,
             enable_development_uai: arguments.enable_development_uai,
+            enable_development_cidaren: arguments.enable_development_cidaren,
         },
     };
     Config::load(&config_file, &environment, &overrides)
@@ -338,6 +344,7 @@ fn build_provider_registry(
     if !config.providers.enable_development_chaoxing
         && !config.providers.enable_development_welearn
         && !config.providers.enable_development_uai
+        && !config.providers.enable_development_cidaren
     {
         return Ok(registry);
     }
@@ -397,6 +404,25 @@ fn build_provider_registry(
             .context("failed to register the development UAI Provider")?;
         tracing::warn!(
             provider = "uai",
+            "unverified development Provider explicitly enabled"
+        );
+    }
+    if config.providers.enable_development_cidaren {
+        let provider_id = ProviderId::new("cidaren")
+            .map_err(|_| anyhow::anyhow!("the compile-time Cidaren Provider ID is invalid"))?;
+        let runtime = Arc::new(SqliteProviderCredentialResolver::new(
+            secret_store.clone(),
+            provider_id,
+        ));
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .context("failed to resolve the development Cidaren network profile")?;
+        let entry = build_cidaren_with_stored_session(&network, runtime)
+            .context("failed to build the development Cidaren Provider")?;
+        registry
+            .register(entry)
+            .context("failed to register the development Cidaren Provider")?;
+        tracing::warn!(
+            provider = "cidaren",
             "unverified development Provider explicitly enabled"
         );
     }
@@ -695,6 +721,7 @@ mod tests {
             "--enable-development-chaoxing=false",
             "--enable-development-welearn=true",
             "--enable-development-uai=true",
+            "--enable-development-cidaren=true",
         ])
         .unwrap();
         assert_eq!(arguments.scheduler_enabled, Some(false));
@@ -705,6 +732,7 @@ mod tests {
         assert_eq!(arguments.enable_development_chaoxing, Some(false));
         assert_eq!(arguments.enable_development_welearn, Some(true));
         assert_eq!(arguments.enable_development_uai, Some(true));
+        assert_eq!(arguments.enable_development_cidaren, Some(true));
     }
 
     #[test]
@@ -751,6 +779,9 @@ mod tests {
         config = Config::default();
         config.providers.enable_development_uai = true;
         assert!(build_provider_registry(&config, None).is_err());
+        config = Config::default();
+        config.providers.enable_development_cidaren = true;
+        assert!(build_provider_registry(&config, None).is_err());
 
         let database = Database::connect("sqlite::memory:").await.unwrap();
         let keyring = load_secret_keyring(
@@ -764,6 +795,8 @@ mod tests {
         .unwrap();
         let store = SqliteSecretStore::new(database.clone(), keyring);
 
+        config = Config::default();
+        config.providers.enable_development_uai = true;
         let uai_only = build_provider_registry(&config, Some(&store)).unwrap();
         assert!(
             uai_only
@@ -772,11 +805,19 @@ mod tests {
         );
         assert!(uai_only.get(&ProviderId::new("welearn").unwrap()).is_none());
         assert!(uai_only.get(&ProviderId::new("uai").unwrap()).is_some());
+        assert!(uai_only.get(&ProviderId::new("cidaren").unwrap()).is_none());
 
         config.providers.enable_development_chaoxing = true;
         config.providers.enable_development_welearn = true;
+        config.providers.enable_development_uai = true;
+        config.providers.enable_development_cidaren = true;
         let registry = build_provider_registry(&config, Some(&store)).unwrap();
         let provider = registry.get(&ProviderId::new("chaoxing").unwrap()).unwrap();
+        assert_eq!(
+            provider.metadata.verification,
+            asterism_provider_api::VerificationLevel::Development
+        );
+        let provider = registry.get(&ProviderId::new("cidaren").unwrap()).unwrap();
         assert_eq!(
             provider.metadata.verification,
             asterism_provider_api::VerificationLevel::Development

@@ -97,13 +97,24 @@ impl ProviderEntry {
                 provider_id: self.metadata.id.clone(),
             });
         }
-        if self
-            .metadata
-            .capture_recipe_version
-            .is_some_and(|version| version == 0)
-            || (self.metadata.capture_recipe_version.is_some()
-                && !self.metadata.advertises(ProviderCapability::Authentication))
-        {
+        let capture_recipe = self
+            .authentication
+            .as_ref()
+            .and_then(|authentication| authentication.capture_recipe());
+        let capture_recipe_valid = match (
+            self.metadata.capture_recipe_version,
+            capture_recipe.as_ref(),
+        ) {
+            (None, None) => true,
+            (Some(version), Some(recipe)) => {
+                version == recipe.version
+                    && recipe.validate().is_ok()
+                    && self.metadata.auth_methods.contains(&recipe.auth_method)
+                    && self.metadata.session_kinds.contains(&recipe.session_kind)
+            }
+            (None, Some(_)) | (Some(_), None) => false,
+        };
+        if !capture_recipe_valid {
             return Err(RegistryError::InvalidCaptureRecipe {
                 provider_id: self.metadata.id.clone(),
             });

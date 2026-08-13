@@ -6,8 +6,9 @@ use asterism_domain::{
     SessionKind, SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
     SubmissionVerificationSnapshot, TaskCapability, TaskId, Timestamp, WaitingUserState,
 };
-use asterism_secrets::{CredentialBundle, CredentialField};
+use asterism_secrets::{CredentialBundle, CredentialField, SecretPurpose};
 use async_trait::async_trait;
+use http::Uri;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -20,6 +21,11 @@ const MAX_ROUTE_CONTEXT_VALUE_BYTES: usize = 4_096;
 const MAX_REMOTE_QUESTION_ID_BYTES: usize = 512;
 const MAX_QUESTION_REF_METADATA_BYTES: usize = 64 * 1_024;
 const MAX_QUESTION_POSITION: u32 = 100_000;
+const MAX_CAPTURE_RECIPE_BYTES: usize = 64 * 1_024;
+const MAX_CAPTURE_ORIGINS: usize = 8;
+const MAX_CAPTURE_OUTPUTS: usize = 16;
+const MAX_CAPTURE_SOURCES: usize = 8;
+const MAX_CAPTURE_JSON_FIELDS: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct ProviderContext {
@@ -38,12 +44,380 @@ pub struct ProviderAuthContext {
     pub correlation_id: String,
 }
 
+/// Declarative, code-free browser-state acquisition contract delivered to a
+/// paired Capture helper. Every required output must be read from one logical
+/// browser snapshot before the resulting credential bundle is submitted.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CaptureRecipe {
+    pub version: u32,
+    pub start_url: String,
+    pub allowed_origins: Vec<String>,
+    pub poll_interval_millis: u64,
+    pub auth_method: AuthMethod,
+    pub session_kind: SessionKind,
+    pub outputs: Vec<CaptureCredentialOutput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CaptureCredentialOutput {
+    pub purpose: SecretPurpose,
+    pub required: bool,
+    /// Ordered alternatives. A helper uses the first complete source available
+    /// in the current snapshot and never combines snapshots across polls.
+    pub sources: Vec<CaptureValueSource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CaptureValueSource {
+    RequestHeader {
+        origin: String,
+        name: String,
+    },
+    LocalStorage {
+        origin: String,
+        key: String,
+    },
+    SessionStorage {
+        origin: String,
+        key: String,
+    },
+    /// Produces the canonical Cookie request-header value visible to the
+    /// selected origin. Cookie attributes never enter the credential value.
+    CookieHeader {
+        origin: String,
+    },
+    /// Builds one bounded JSON object from scalar browser facts without
+    /// executing Provider-supplied JavaScript.
+    JsonObject {
+        fields: Vec<CaptureJsonField>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CaptureJsonField {
+    pub name: String,
+    /// Ordered scalar alternatives for this object field.
+    pub sources: Vec<CaptureScalarSource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CaptureScalarSource {
+    RequestHeader { origin: String, name: String },
+    LocalStorage { origin: String, key: String },
+    SessionStorage { origin: String, key: String },
+}
+
+impl CaptureRecipe {
+    /// Validates bounded origins, output purposes and declarative sources.
+    /// Recipes cannot carry scripts, selectors, proxy configuration or raw log
+    /// instructions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CaptureRecipeError::Invalid`] for an unsafe or inconsistent
+    /// recipe.
+    pub fn validate(&self) -> Result<(), CaptureRecipeError> {
+        let start_origin = https_origin(&self.start_url, false)?;
+        if self.version == 0
+            || self.allowed_origins.is_empty()
+            || self.allowed_origins.len() > MAX_CAPTURE_ORIGINS
+            || !(100..=5_000).contains(&self.poll_interval_millis)
+            || !matches!(
+                self.auth_method,
+                AuthMethod::QrCode | AuthMethod::ExternalBrowserOauth | AuthMethod::AssistedSession
+            )
+            || self.outputs.is_empty()
+            || self.outputs.len() > MAX_CAPTURE_OUTPUTS
+        {
+            return Err(CaptureRecipeError::Invalid);
+        }
+        let mut origins = self.allowed_origins.clone();
+        for origin in &origins {
+            if https_origin(origin, true)? != *origin {
+                return Err(CaptureRecipeError::Invalid);
+            }
+        }
+        origins.sort_unstable();
+        if origins.windows(2).any(|pair| pair[0] == pair[1])
+            || !origins.iter().any(|origin| origin == &start_origin)
+        {
+            return Err(CaptureRecipeError::Invalid);
+        }
+
+        let mut purposes = Vec::with_capacity(self.outputs.len());
+        for output in &self.outputs {
+            if !output.purpose.is_provider_credential()
+                || output.sources.is_empty()
+                || output.sources.len() > MAX_CAPTURE_SOURCES
+            {
+                return Err(CaptureRecipeError::Invalid);
+            }
+            purposes.push(output.purpose);
+            for source in &output.sources {
+                validate_capture_source(source, &origins)?;
+            }
+        }
+        if !self.outputs.iter().any(|output| output.required) {
+            return Err(CaptureRecipeError::Invalid);
+        }
+        purposes.sort_by_key(|purpose| capture_purpose_rank(*purpose));
+        if purposes.windows(2).any(|pair| pair[0] == pair[1])
+            || serde_json::to_vec(self)
+                .map_or(true, |encoded| encoded.len() > MAX_CAPTURE_RECIPE_BYTES)
+        {
+            return Err(CaptureRecipeError::Invalid);
+        }
+        Ok(())
+    }
+}
+
+const fn capture_purpose_rank(purpose: SecretPurpose) -> u8 {
+    match purpose {
+        SecretPurpose::ProviderUsername => 0,
+        SecretPurpose::ProviderPassword => 1,
+        SecretPurpose::ProviderCookie => 2,
+        SecretPurpose::ProviderAccessToken => 3,
+        SecretPurpose::ProviderRefreshToken => 4,
+        SecretPurpose::ProviderCompositeSession => 5,
+        SecretPurpose::WebSessionToken
+        | SecretPurpose::ServiceToken
+        | SecretPurpose::IntegrationCredential
+        | SecretPurpose::BrowserJobCredential => u8::MAX,
+    }
+}
+
+fn validate_capture_source(
+    source: &CaptureValueSource,
+    allowed_origins: &[String],
+) -> Result<(), CaptureRecipeError> {
+    match source {
+        CaptureValueSource::RequestHeader { origin, name } => {
+            validate_source_origin(origin, allowed_origins)?;
+            validate_header_name(name)
+        }
+        CaptureValueSource::LocalStorage { origin, key }
+        | CaptureValueSource::SessionStorage { origin, key } => {
+            validate_storage_source(origin, key, allowed_origins)
+        }
+        CaptureValueSource::CookieHeader { origin } => {
+            validate_source_origin(origin, allowed_origins)
+        }
+        CaptureValueSource::JsonObject { fields } => {
+            if fields.is_empty() || fields.len() > MAX_CAPTURE_JSON_FIELDS {
+                return Err(CaptureRecipeError::Invalid);
+            }
+            let mut names = Vec::with_capacity(fields.len());
+            for field in fields {
+                if !valid_capture_label(&field.name)
+                    || field.sources.is_empty()
+                    || field.sources.len() > MAX_CAPTURE_SOURCES
+                {
+                    return Err(CaptureRecipeError::Invalid);
+                }
+                names.push(field.name.as_str());
+                for scalar in &field.sources {
+                    validate_scalar_source(scalar, allowed_origins)?;
+                }
+            }
+            names.sort_unstable();
+            if names.windows(2).any(|pair| pair[0] == pair[1]) {
+                Err(CaptureRecipeError::Invalid)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn validate_scalar_source(
+    source: &CaptureScalarSource,
+    allowed_origins: &[String],
+) -> Result<(), CaptureRecipeError> {
+    match source {
+        CaptureScalarSource::RequestHeader { origin, name } => {
+            validate_source_origin(origin, allowed_origins)?;
+            validate_header_name(name)
+        }
+        CaptureScalarSource::LocalStorage { origin, key }
+        | CaptureScalarSource::SessionStorage { origin, key } => {
+            validate_storage_source(origin, key, allowed_origins)
+        }
+    }
+}
+
+fn validate_storage_source(
+    origin: &str,
+    key: &str,
+    allowed_origins: &[String],
+) -> Result<(), CaptureRecipeError> {
+    validate_source_origin(origin, allowed_origins)?;
+    if valid_bounded_capture_text(key, 128) {
+        Ok(())
+    } else {
+        Err(CaptureRecipeError::Invalid)
+    }
+}
+
+fn validate_source_origin(
+    origin: &str,
+    allowed_origins: &[String],
+) -> Result<(), CaptureRecipeError> {
+    https_origin(origin, true)?;
+    if allowed_origins.iter().any(|allowed| allowed == origin) {
+        Ok(())
+    } else {
+        Err(CaptureRecipeError::Invalid)
+    }
+}
+
+fn validate_header_name(name: &str) -> Result<(), CaptureRecipeError> {
+    if !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        Ok(())
+    } else {
+        Err(CaptureRecipeError::Invalid)
+    }
+}
+
+fn valid_capture_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_bounded_capture_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+fn https_origin(value: &str, origin_only: bool) -> Result<String, CaptureRecipeError> {
+    if !valid_bounded_capture_text(value, 2_048) {
+        return Err(CaptureRecipeError::Invalid);
+    }
+    let uri = value
+        .parse::<Uri>()
+        .map_err(|_| CaptureRecipeError::Invalid)?;
+    let authority = uri.authority().ok_or(CaptureRecipeError::Invalid)?;
+    if uri.scheme_str() != Some("https") || authority.as_str().contains('@') {
+        return Err(CaptureRecipeError::Invalid);
+    }
+    if origin_only && (uri.path() != "/" && !uri.path().is_empty() || uri.query().is_some()) {
+        return Err(CaptureRecipeError::Invalid);
+    }
+    Ok(format!("https://{authority}"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CaptureRecipeError {
+    #[error("Capture recipe is unsafe, unbounded, or internally inconsistent")]
+    Invalid,
+}
+
+#[cfg(test)]
+mod capture_recipe_tests {
+    use super::*;
+
+    fn recipe() -> CaptureRecipe {
+        CaptureRecipe {
+            version: 1,
+            start_url: "https://provider.example/login".to_owned(),
+            allowed_origins: vec!["https://provider.example".to_owned()],
+            poll_interval_millis: 500,
+            auth_method: AuthMethod::AssistedSession,
+            session_kind: SessionKind::Composite,
+            outputs: vec![CaptureCredentialOutput {
+                purpose: SecretPurpose::ProviderCompositeSession,
+                required: true,
+                sources: vec![CaptureValueSource::JsonObject {
+                    fields: vec![CaptureJsonField {
+                        name: "access_token".to_owned(),
+                        sources: vec![CaptureScalarSource::RequestHeader {
+                            origin: "https://provider.example".to_owned(),
+                            name: "Authorization".to_owned(),
+                        }],
+                    }],
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn recipe_accepts_only_bounded_declarative_origin_bound_sources() {
+        assert_eq!(recipe().validate(), Ok(()));
+
+        let mut foreign_header = recipe();
+        let CaptureValueSource::JsonObject { fields } = &mut foreign_header.outputs[0].sources[0]
+        else {
+            unreachable!();
+        };
+        let CaptureScalarSource::RequestHeader { origin, .. } = &mut fields[0].sources[0] else {
+            unreachable!();
+        };
+        *origin = "https://foreign.example".to_owned();
+        assert_eq!(foreign_header.validate(), Err(CaptureRecipeError::Invalid));
+
+        let mut non_canonical_origin = recipe();
+        non_canonical_origin.allowed_origins[0].push('/');
+        assert_eq!(
+            non_canonical_origin.validate(),
+            Err(CaptureRecipeError::Invalid)
+        );
+
+        let mut script_shaped_field = recipe();
+        let CaptureValueSource::JsonObject { fields } =
+            &mut script_shaped_field.outputs[0].sources[0]
+        else {
+            unreachable!();
+        };
+        fields[0].name = "token);eval(payload)".to_owned();
+        assert_eq!(
+            script_shaped_field.validate(),
+            Err(CaptureRecipeError::Invalid)
+        );
+    }
+
+    #[test]
+    fn recipe_requires_unique_provider_outputs_and_one_required_value() {
+        let mut duplicate = recipe();
+        duplicate.outputs.push(duplicate.outputs[0].clone());
+        assert_eq!(duplicate.validate(), Err(CaptureRecipeError::Invalid));
+
+        let mut optional_only = recipe();
+        optional_only.outputs[0].required = false;
+        assert_eq!(optional_only.validate(), Err(CaptureRecipeError::Invalid));
+
+        let mut non_provider_secret = recipe();
+        non_provider_secret.outputs[0].purpose = SecretPurpose::BrowserJobCredential;
+        assert_eq!(
+            non_provider_secret.validate(),
+            Err(CaptureRecipeError::Invalid)
+        );
+    }
+}
+
 pub trait ProviderIdentity: Send + Sync {
     fn metadata(&self) -> &ProviderMetadata;
 }
 
 #[async_trait]
 pub trait AuthenticationCapability: ProviderIdentity {
+    /// Returns the exact declarative Capture recipe advertised by metadata.
+    /// The default makes Capture opt-in and prevents metadata alone from
+    /// claiming an executable helper contract.
+    fn capture_recipe(&self) -> Option<CaptureRecipe> {
+        None
+    }
+
     async fn begin_authentication(
         &self,
         context: &ProviderAuthContext,

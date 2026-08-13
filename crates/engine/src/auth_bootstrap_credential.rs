@@ -5,7 +5,7 @@ use asterism_domain::{
     AuthBootstrapPurpose, AuthBootstrapSession, AuthBootstrapSessionId, AuthState, ProviderAccount,
     ProviderAccountId, Timestamp,
 };
-use asterism_provider_api::{ProviderRegistry, SessionStatus};
+use asterism_provider_api::{CaptureRecipe, ProviderRegistry, SessionStatus};
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretActor, SecretStoreError, SecretString,
 };
@@ -77,6 +77,7 @@ where
             )
             .await?
             .ok_or(AuthBootstrapCredentialServiceError::AccessRejected)?;
+        validate_recipe_binding(self.registry.as_ref(), &session, &request.bundle)?;
         let access = SecretAccess {
             actor: SecretActor::CoreService("auth-bootstrap"),
             correlation_id: request.correlation_id,
@@ -167,6 +168,51 @@ where
     }
 }
 
+fn validate_recipe_binding(
+    registry: &ProviderRegistry,
+    session: &AuthBootstrapSession,
+    bundle: &CredentialBundle,
+) -> Result<(), AuthBootstrapCredentialServiceError> {
+    let recipe = registry
+        .get(&session.provider_id)
+        .and_then(|entry| entry.authentication.as_ref())
+        .and_then(|authentication| authentication.capture_recipe())
+        .filter(|recipe| {
+            recipe.version == session.required_recipe_version && recipe.validate().is_ok()
+        })
+        .ok_or(AuthBootstrapCredentialServiceError::RecipeMismatch)?;
+    validate_bundle_against_recipe(&recipe, bundle)
+}
+
+fn validate_bundle_against_recipe(
+    recipe: &CaptureRecipe,
+    bundle: &CredentialBundle,
+) -> Result<(), AuthBootstrapCredentialServiceError> {
+    if bundle.auth_method != recipe.auth_method || bundle.session_kind != recipe.session_kind {
+        return Err(AuthBootstrapCredentialServiceError::RecipeMismatch);
+    }
+    let submitted = bundle
+        .fields
+        .iter()
+        .map(|field| field.purpose)
+        .collect::<std::collections::HashSet<_>>();
+    if submitted.len() != bundle.fields.len()
+        || submitted.iter().any(|purpose| {
+            !recipe
+                .outputs
+                .iter()
+                .any(|output| output.purpose == *purpose)
+        })
+        || recipe
+            .outputs
+            .iter()
+            .any(|output| output.required && !submitted.contains(&output.purpose))
+    {
+        return Err(AuthBootstrapCredentialServiceError::RecipeMismatch);
+    }
+    Ok(())
+}
+
 fn valid_display_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -200,6 +246,8 @@ pub enum AuthBootstrapCredentialServiceError {
     InvalidAccountMetadata,
     #[error("authentication bootstrap account binding changed during credential validation")]
     AccountBindingConflict,
+    #[error("captured credential does not match the session's frozen Provider recipe")]
+    RecipeMismatch,
     #[error(transparent)]
     Credential(#[from] CredentialProvisionError),
     #[error(transparent)]
@@ -216,9 +264,10 @@ mod tests {
         AuditActor, AuthBootstrapState, AuthMethod, ProviderId, Role, SessionKind,
     };
     use asterism_provider_api::{
-        AuthChallenge, AuthenticationCapability, CredentialValidation, ProviderAuthContext,
-        ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata,
-        ProviderResult, VerificationLevel,
+        AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureRecipe,
+        CaptureValueSource, CredentialValidation, ProviderAuthContext, ProviderCapability,
+        ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
+        VerificationLevel,
     };
     use asterism_secrets::{
         CredentialAcquisition, CredentialField, SecretKey, SecretPurpose, SecretValue,
@@ -313,6 +362,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.state, AuthBootstrapState::Claimed);
+        assert_eq!(table_count(&fixture.database, "provider_accounts").await, 0);
+        assert_eq!(table_count(&fixture.database, "secret_blobs").await, 0);
+    }
+
+    #[tokio::test]
+    async fn frozen_recipe_rejects_shape_drift_before_provider_or_secret_writes() {
+        let fixture = fixture(true).await;
+        let (session_id, access_token) =
+            claimed_add_session(&fixture, "bootstrap-engine-recipe-drift").await;
+        let mut bundle = credential_bundle(b"captured-cookie");
+        bundle.auth_method = AuthMethod::ImportedCookie;
+        let error = fixture
+            .credentials
+            .submit(AuthBootstrapCredentialRequest {
+                session_id,
+                access_token,
+                display_name: Some("primary".to_owned()),
+                bundle,
+                submitted_at: Utc::now(),
+                correlation_id: "bootstrap-engine-recipe-drift-submit".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthBootstrapCredentialServiceError::RecipeMismatch
+        ));
         assert_eq!(table_count(&fixture.database, "provider_accounts").await, 0);
         assert_eq!(table_count(&fixture.database, "secret_blobs").await, 0);
     }
@@ -422,7 +498,7 @@ mod tests {
             scan_min_interval_seconds: None,
             capture_recipe_version: Some(3),
             capabilities: BTreeSet::from([ProviderCapability::Authentication]),
-            auth_methods: BTreeSet::from([AuthMethod::ImportedCookie]),
+            auth_methods: BTreeSet::from([AuthMethod::ImportedCookie, AuthMethod::AssistedSession]),
             session_kinds: BTreeSet::from([SessionKind::Cookie]),
         }
     }
@@ -432,7 +508,7 @@ mod tests {
         CredentialBundle {
             provider_id: ProviderId::new("provider-alpha").unwrap(),
             tenant: None,
-            auth_method: AuthMethod::ImportedCookie,
+            auth_method: AuthMethod::AssistedSession,
             acquired_via: CredentialAcquisition::CaptureTool,
             captured_at,
             expires_at: None,
@@ -466,6 +542,24 @@ mod tests {
 
     #[async_trait]
     impl AuthenticationCapability for TestAuthentication {
+        fn capture_recipe(&self) -> Option<CaptureRecipe> {
+            Some(CaptureRecipe {
+                version: 3,
+                start_url: "https://provider-alpha.example/login".to_owned(),
+                allowed_origins: vec!["https://provider-alpha.example".to_owned()],
+                poll_interval_millis: 500,
+                auth_method: AuthMethod::AssistedSession,
+                session_kind: SessionKind::Cookie,
+                outputs: vec![CaptureCredentialOutput {
+                    purpose: SecretPurpose::ProviderCookie,
+                    required: true,
+                    sources: vec![CaptureValueSource::CookieHeader {
+                        origin: "https://provider-alpha.example".to_owned(),
+                    }],
+                }],
+            })
+        }
+
         async fn begin_authentication(
             &self,
             _context: &ProviderAuthContext,

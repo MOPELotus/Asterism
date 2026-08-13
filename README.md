@@ -130,19 +130,18 @@ CLI / WebUI / Asterism-Plugin
 | 阶段 | Provider / 交付物 | 状态 |
 |---|---|---|
 | Phase 0 | Core、Storage、Scheduler、Auth、内部 API / CLI | 开发中 |
-| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中（Chaoxing 已建立 Password → Cookie → Course / Chapter / Resource / Work / Exam 的开发验证链路；WELearn 已建立 Password/OIDC → Cookie validation → Course / Unit / SCO → fresh CMI progress / independent duration report 的原生边界；UAI 已建立 Password/JWT → CourseResource → Unit / Section / Micro / Group → fresh detail / progress / duration / encrypted question parse 的原生只读边界；Cidaren 已建立 ImportedToken → class/ordinary-study Course/Task → fresh detail/progress 的原生只读边界；均未完成真实账号验证，真实账号只读联调安排在 WebUI 与 Asterism-Plugin/Yunzai 完成后） |
-| 第一批后交付 | OpenAPI Client Generation Readiness、Refine v5 + shadcn/ui WebUI、Asterism-Plugin | 第一批完成后立即开始 |
+| 第一批 | `chaoxing`、`welearn`、`uai`、`cidaren` | 开发中（Chaoxing 已建立 Password → Cookie → Course / Chapter / Resource / Work / Exam 链路；WELearn 已覆盖 Password/OIDC、Capture Cookie、Course / Unit / SCO、fresh CMI、DurationReport 与 donor completion/progress/score execution；UAI 已覆盖 Password/JWT/Capture、层级 inventory、detail/progress/duration、加密 Question/Answer/Submission、exit-ticket、单一 oral、discussion 与上传前置链；Cidaren 已覆盖 token/composite Capture、class/study inventory、`jv=99` HKDF/AES-GCM、Question/Answer/SubmissionBuild、BrowserBridge 与一次性答题状态机。共享持久 Attempt/Artifact 合约、其余 donor 流程和真实账号验证仍在继续） |
+| 公共交付面 | OpenAPI Client Generation Readiness、Refine v5 + shadcn/ui WebUI、Asterism-Plugin | 已并行开发；不作为第一批 Provider 能力留空或停止的理由 |
 | 第二批 | `zhihuishu`、`zjy`、`icve` | 计划中 |
 | 兼容性收口 | 稳定并冻结 API / OpenAPI 基线，完成 WebUI / Plugin 兼容性收口 | 第二批完成后开始 |
 | 后续批次 | `fif`、`itest`、`utalk` 及其他已分配 Provider ID 的平台 | 规划中 |
 
 第一批不会以 Demo 或功能残缺的 MVP 作为完成状态。Provider 的研究来源、采用方式、许可证和真实验证情况会记录在 [UPSTREAMS.md](UPSTREAMS.md)。
 
-当前开发顺序只推进第一批中不依赖 Capture 的 Native HTTP、手工
-Credential/Session Import 与离线 Fixture 能力。必须启动本地 Capture、浏览器抓取
-或系统代理才能完成的 Provider 路径明确延后；对应验收项保持未完成，也不会因此
-提前标记 Provider 为 `Verified`。仓库中已有的通用 Capture 基座保留，但不在这一
-阶段继续扩展平台专用链路。
+第一批实现以已审计上游能力尽可能完整迁移为完成标准。Native Rust HTTP 仍优先，
+但 Capture、BrowserBridge、浏览器状态、OAuth、动态加密上下文和本地辅助均属于
+当前实现范围；原生路径无法完整表达 donor 行为时，继续实现最小必要 fallback，
+不能以 non-Capture、Native HTTP 或只读里程碑结束 Provider。
 
 WebUI 采用 framework-first 原则，但不为复用而强行套用框架。默认直接复用 Refine v5 与 shadcn/ui 的 Layout、CRUD、DataTable、Form、Auth 和 Theme 基础设施，只调整 Asterism Theme / Branding 并实现必要的领域工作流；现成组件明显不适用时允许最小必要自定义，不进行缺少明确 UX 缺陷依据的主动重设计、美化或像素级循环。
 
@@ -167,7 +166,7 @@ cargo run -p asterismd
 
 `asterismd` 默认监听 `127.0.0.1:8068`，并在当前目录使用 `asterism.db`。配置按 `CLI > 环境变量 > 配置文件 > 默认值` 合并；可复制 `asterism.example.toml` 为本地 `asterism.toml`，也可通过 `--config` 或 `ASTERISM_CONFIG` 指定文件。服务端变量包括 `ASTERISM_BIND`、`ASTERISM_DATABASE_URL`、`ASTERISM_SESSION_TTL_SECONDS` 和 `ASTERISM_SECURE_COOKIES`；统一调度器使用 `ASTERISM_SCHEDULER_*` 对应 `[scheduler]` 字段，并可由 `--scheduler-*` 参数覆盖。`execution_concurrency_limit` 是部署级全局硬上限，Provider/账号的后台设置只能在该上限内进一步收紧。普通配置文件不得保存凭据或其他 Secret。
 
-Chaoxing、WELearn 与 UAI 仍处于 `Development` 且默认不注册。仅在本地真实账号验证时，才可通过 `[providers].enable_development_<provider> = true`、`ASTERISM_ENABLE_DEVELOPMENT_<PROVIDER>=true` 或 `--enable-development-<provider>` 分别显式启用 `chaoxing`、`welearn` 或 `uai`；启用任一平台时必须同时配置 SecretStore keyring。这些开关只开放验证入口，不代表 Supported/Verified，也不会启用 Capture。WELearn 仅能续登由原生 Password 登录形成的完整 Composite 凭据；单独导入的 Cookie 失效后仍需重新认证或导入。UAI 同样只续登完整 NativeProviderLogin username/password/composite 三件套，ManualImport JWT 不可续期。
+Chaoxing、WELearn、UAI 与 Cidaren 仍处于 `Development` 且默认不注册。仅在本地真实账号验证时，才可通过 `[providers].enable_development_<provider> = true`、`ASTERISM_ENABLE_DEVELOPMENT_<PROVIDER>=true` 或 `--enable-development-<provider>` 分别显式启用 `chaoxing`、`welearn`、`uai` 或 `cidaren`；启用任一平台时必须同时配置 SecretStore keyring。这些开关只开放验证入口，不代表 Supported/Verified。具有已注册 Capture recipe 的 Provider 可通过独立 `asterism-capture` 辅助程序执行浏览器认证；该程序仍须使用 owner 创建的短期 Auth Bootstrap 会话。WELearn 仅能续登由原生 Password 登录形成的完整 Composite 凭据；单独导入的 Cookie 失效后仍需重新认证或导入。UAI 同样只续登完整 NativeProviderLogin username/password/composite 三件套，ManualImport JWT 不可续期；Cidaren 使用导入或 Capture 辅助获得的 token/composite session，当前不声明自动续期。
 
 启用后可通过 CLI 完成 Password → Provider 会话 → 扫描的开发验证。先创建账号并启动认证会话，再把返回的 ID 代入后续命令：
 
@@ -222,12 +221,21 @@ cargo run -p asterism-capture -- \
   --url https://asterism.example \
   manual \
   --session-id <session-uuid> \
-  --auth-method imported-cookie \
+  --auth-method assisted-session \
   --session-kind cookie \
   --field cookie
 ```
 
-复合凭据可按输入顺序重复 `--field`，需要 tenant 时添加 `--with-tenant`。Capture 只主动连接配置的 Asterism HTTPS 地址；明文 HTTP 仅能通过显式开发开关连接 loopback。会话到期、服务端拒绝 access token、提交成功或本地按下 Ctrl+C 时，Capture 会立即丢弃本地访问材料；服务端会话取消仍由已认证的 owner 通过 WebUI / CLI 发起。
+Provider 已声明 Capture recipe 时可使用 `automatic`：它启动独立临时 Chromium/Edge profile，连接仅限 loopback 的随机端口 DevTools，在 recipe 的 HTTPS origin allowlist 内采集明确声明的 request header、LocalStorage、SessionStorage 或 Cookie，并在同一 target/document snapshot 完整后提交。未通过命令行传递 pairing token 或浏览器 Secret；显式浏览器路径只用于自动发现不适用的安装位置。
+
+```bash
+cargo run -p asterism-capture -- \
+  --url https://asterism.example \
+  automatic \
+  --session-id <session-uuid>
+```
+
+复合凭据可按输入顺序重复 `--field`，需要 tenant 时添加 `--with-tenant`。`automatic` 同样可加 `--with-tenant`，或以 `--browser-path` 指定 Chromium/Edge。Capture 只主动连接配置的 Asterism HTTPS 地址和自身启动的 loopback DevTools；明文 Asterism HTTP 仅能通过显式开发开关连接 loopback。会话到期、服务端拒绝 access token、提交成功、本地按下 Ctrl+C 或独立浏览器退出时，Capture 会立即丢弃本地访问材料、终止辅助浏览器并尝试删除临时 profile；服务端会话取消仍由已认证的 owner 通过 WebUI / CLI 发起。
 
 Provider Account 的 owner 始终由认证身份决定，CLI 和 API 都不接受调用方指定 `owner_id`。`--provider` 必须使用小写 canonical `ProviderId`；账号展示名属于本地用户数据，不作为项目内的平台名称或标识。
 

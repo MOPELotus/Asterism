@@ -18,6 +18,7 @@ pub const SECURE_COOKIES_ENV: &str = "ASTERISM_SECURE_COOKIES";
 pub const ENABLE_DEVELOPMENT_CHAOXING_ENV: &str = "ASTERISM_ENABLE_DEVELOPMENT_CHAOXING";
 pub const ENABLE_DEVELOPMENT_WELEARN_ENV: &str = "ASTERISM_ENABLE_DEVELOPMENT_WELEARN";
 pub const ENABLE_DEVELOPMENT_UAI_ENV: &str = "ASTERISM_ENABLE_DEVELOPMENT_UAI";
+pub const ENABLE_DEVELOPMENT_CIDAREN_ENV: &str = "ASTERISM_ENABLE_DEVELOPMENT_CIDAREN";
 pub const SCHEDULER_ENABLED_ENV: &str = "ASTERISM_SCHEDULER_ENABLED";
 pub const SCHEDULER_TICK_INTERVAL_SECONDS_ENV: &str = "ASTERISM_SCHEDULER_TICK_INTERVAL_SECONDS";
 pub const SCHEDULER_MATERIALIZE_LIMIT_ENV: &str = "ASTERISM_SCHEDULER_MATERIALIZE_LIMIT";
@@ -160,6 +161,9 @@ pub struct SchedulerConfig {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
+// These are independent opt-in Provider registrations in the public TOML/env
+// schema, not mutually exclusive state flags.
+#[allow(clippy::struct_excessive_bools)]
 pub struct ProviderConfig {
     /// Explicitly exposes the unverified Chaoxing Provider for local
     /// development and real-account validation. This is false by default.
@@ -170,6 +174,9 @@ pub struct ProviderConfig {
     /// Explicitly exposes the unverified UAI Provider for local development
     /// and real-account validation. This is false by default.
     pub enable_development_uai: bool,
+    /// Explicitly exposes the unverified Cidaren Provider for local development
+    /// and real-account validation. This is false by default.
+    pub enable_development_cidaren: bool,
 }
 
 impl ProviderConfig {
@@ -182,6 +189,9 @@ impl ProviderConfig {
         }
         if let Some(value) = overrides.enable_development_uai {
             self.enable_development_uai = value;
+        }
+        if let Some(value) = overrides.enable_development_cidaren {
+            self.enable_development_cidaren = value;
         }
     }
 }
@@ -330,6 +340,7 @@ pub struct ProviderOverrides {
     pub enable_development_chaoxing: Option<bool>,
     pub enable_development_welearn: Option<bool>,
     pub enable_development_uai: Option<bool>,
+    pub enable_development_cidaren: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -403,6 +414,10 @@ impl Environment {
                 }
                 ENABLE_DEVELOPMENT_UAI_ENV => {
                     environment.overrides.providers.enable_development_uai =
+                        Some(parse_bool_env(&name, &value)?);
+                }
+                ENABLE_DEVELOPMENT_CIDAREN_ENV => {
+                    environment.overrides.providers.enable_development_cidaren =
                         Some(parse_bool_env(&name, &value)?);
                 }
                 SCHEDULER_ENABLED_ENV => {
@@ -529,6 +544,7 @@ fn is_supported_environment_name(name: &str) -> bool {
             | ENABLE_DEVELOPMENT_CHAOXING_ENV
             | ENABLE_DEVELOPMENT_WELEARN_ENV
             | ENABLE_DEVELOPMENT_UAI_ENV
+            | ENABLE_DEVELOPMENT_CIDAREN_ENV
             | SCHEDULER_ENABLED_ENV
             | SCHEDULER_TICK_INTERVAL_SECONDS_ENV
             | SCHEDULER_MATERIALIZE_LIMIT_ENV
@@ -578,6 +594,7 @@ execution_concurrency_limit = 8
 enable_development_chaoxing = false
 enable_development_welearn = false
 enable_development_uai = false
+enable_development_cidaren = false
 "#,
         )
         .unwrap();
@@ -591,6 +608,7 @@ enable_development_uai = false
             ),
             (ENABLE_DEVELOPMENT_WELEARN_ENV.to_owned(), "true".to_owned()),
             (ENABLE_DEVELOPMENT_UAI_ENV.to_owned(), "true".to_owned()),
+            (ENABLE_DEVELOPMENT_CIDAREN_ENV.to_owned(), "true".to_owned()),
             (
                 SCHEDULER_TICK_INTERVAL_SECONDS_ENV.to_owned(),
                 "12".to_owned(),
@@ -619,6 +637,7 @@ enable_development_uai = false
                 enable_development_chaoxing: Some(false),
                 enable_development_welearn: Some(false),
                 enable_development_uai: Some(false),
+                enable_development_cidaren: Some(false),
             },
         };
 
@@ -634,6 +653,7 @@ enable_development_uai = false
         assert!(!config.providers.enable_development_chaoxing);
         assert!(!config.providers.enable_development_welearn);
         assert!(!config.providers.enable_development_uai);
+        assert!(!config.providers.enable_development_cidaren);
         fs::remove_file(path).unwrap();
     }
 
@@ -697,6 +717,13 @@ enable_development_uai = false
                 .unwrap();
         assert_eq!(
             environment.overrides.providers.enable_development_uai,
+            Some(true)
+        );
+        let environment =
+            Environment::parse([(ENABLE_DEVELOPMENT_CIDAREN_ENV.to_owned(), "true".to_owned())])
+                .unwrap();
+        assert_eq!(
+            environment.overrides.providers.enable_development_cidaren,
             Some(true)
         );
     }

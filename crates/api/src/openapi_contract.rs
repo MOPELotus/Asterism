@@ -299,7 +299,7 @@ fn validate_responses(operation: &Map<String, Value>, label: &str, failures: &mu
                         "{label} response {status} does not declare text/event-stream"
                     ));
                 }
-            } else if !operation_id.is_some_and(success::is_deferred_capture_operation) {
+            } else {
                 failures.push(format!(
                     "{label} response {status} has no typed success content"
                 ));

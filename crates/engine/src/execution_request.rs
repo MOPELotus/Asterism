@@ -87,6 +87,10 @@ where
     /// Returns [`ExecutionRequestError`] for ownership, capability, remote or
     /// orchestration conflicts, formal-assessment policy, idempotency reuse, or
     /// persistence failures.
+    // Keep authorization, fresh Task validation, frozen settings, pricing and
+    // the single atomic scheduling request adjacent so no preflight result is
+    // accidentally reused across a mutation boundary.
+    #[allow(clippy::too_many_lines)]
     pub async fn execute(
         &self,
         mut command: ExecuteTaskCommand,

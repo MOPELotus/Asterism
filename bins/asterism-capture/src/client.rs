@@ -6,7 +6,7 @@ use asterism_domain::{
     AuthBootstrapSession, AuthBootstrapSessionId, AuthBootstrapState, AuthMethod,
     ProviderAccountId, SessionKind, Timestamp,
 };
-use asterism_provider_api::SessionStatus;
+use asterism_provider_api::{CaptureRecipe, SessionStatus};
 use asterism_secrets::{SecretPurpose, SecretString};
 use bytes::Bytes;
 use chrono::Utc;
@@ -215,6 +215,7 @@ impl CaptureClient {
     ) -> anyhow::Result<CaptureCredentialAccepted> {
         claimed.ensure_live()?;
         submission.validate_for(&claimed.session)?;
+        submission.validate_for_recipe(&claimed.recipe)?;
         let session_id = claimed.session.id;
         let expected_count = submission.fields.len();
         let expected_kind = submission.session_kind;
@@ -269,6 +270,7 @@ pub struct CaptureHealth {
 
 pub struct ClaimedCaptureSession {
     session: AuthBootstrapSession,
+    recipe: CaptureRecipe,
     access_token: SecretString,
     next_sequence: u64,
 }
@@ -276,6 +278,10 @@ pub struct ClaimedCaptureSession {
 impl ClaimedCaptureSession {
     pub fn session(&self) -> &AuthBootstrapSession {
         &self.session
+    }
+
+    pub const fn recipe(&self) -> &CaptureRecipe {
+        &self.recipe
     }
 
     fn ensure_live(&mut self) -> anyhow::Result<()> {
@@ -418,6 +424,30 @@ impl CaptureCredentialSubmission {
         Ok(())
     }
 
+    fn validate_for_recipe(&self, recipe: &CaptureRecipe) -> anyhow::Result<()> {
+        if self.auth_method != recipe.auth_method || self.session_kind != recipe.session_kind {
+            bail!("credential submission does not match the claimed Capture recipe");
+        }
+        let purposes = self
+            .fields
+            .iter()
+            .map(CaptureCredentialField::purpose)
+            .collect::<HashSet<_>>();
+        if purposes.iter().any(|purpose| {
+            !recipe
+                .outputs
+                .iter()
+                .any(|output| output.purpose == *purpose)
+        }) || recipe
+            .outputs
+            .iter()
+            .any(|output| output.required && !purposes.contains(&output.purpose))
+        {
+            bail!("credential fields do not match the claimed Capture recipe");
+        }
+        Ok(())
+    }
+
     fn serialize_for(&self, session: &AuthBootstrapSession) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let fields = self
             .fields
@@ -510,6 +540,7 @@ impl fmt::Debug for ClaimedCaptureSession {
         formatter
             .debug_struct("ClaimedCaptureSession")
             .field("session", &self.session)
+            .field("recipe", &self.recipe)
             .field("access_token", &self.access_token)
             .field("next_sequence", &self.next_sequence)
             .finish()
@@ -520,6 +551,7 @@ impl fmt::Debug for ClaimedCaptureSession {
 struct ClaimResponse {
     session: AuthBootstrapSession,
     access_token: String,
+    recipe: CaptureRecipe,
 }
 
 impl ClaimResponse {
@@ -531,9 +563,16 @@ impl ClaimResponse {
         if self.session.state != AuthBootstrapState::Claimed {
             bail!("Asterism server returned an invalid claimed session");
         }
+        self.recipe
+            .validate()
+            .context("Asterism server returned an invalid Capture recipe")?;
+        if self.recipe.version != self.session.required_recipe_version {
+            bail!("Asterism server returned a mismatched Capture recipe version");
+        }
         validate_bootstrap_token(&self.access_token)?;
         Ok(ClaimedCaptureSession {
             session: self.session.clone(),
+            recipe: self.recipe.clone(),
             access_token: SecretString::new(std::mem::take(&mut self.access_token)),
             next_sequence: 1,
         })
@@ -758,7 +797,8 @@ mod tests {
                                 "claimed_at": now,
                                 "revision": 2
                             },
-                            "access_token": "ast_boot_access_test"
+                            "access_token": "ast_boot_access_test",
+                            "recipe": capture_recipe_json()
                         }))
                     },
                 ),
@@ -910,7 +950,7 @@ mod tests {
         let submission = CaptureCredentialSubmission::new(
             Some("Primary account".to_owned()),
             None,
-            AuthMethod::ImportedCookie,
+            AuthMethod::AssistedSession,
             SessionKind::Cookie,
             None,
             vec![
@@ -983,7 +1023,8 @@ mod tests {
                 "claimed_at": now - ChronoDuration::minutes(19),
                 "revision": 2
             },
-            "access_token": "ast_boot_access_test"
+            "access_token": "ast_boot_access_test",
+            "recipe": capture_recipe_json()
         }))
         .unwrap();
         let mut expired = expired.into_session(session_id).unwrap();
@@ -1010,7 +1051,8 @@ mod tests {
                 "claimed_at": now,
                 "revision": 3
             },
-            "access_token": "ast_boot_access_test"
+            "access_token": "ast_boot_access_test",
+            "recipe": capture_recipe_json()
         }))
         .unwrap();
         let session_id = AuthBootstrapSessionId::from_str(SESSION_ID).unwrap();
@@ -1083,9 +1125,29 @@ mod tests {
     fn claimed_response() -> ClaimResponse {
         serde_json::from_value(json!({
             "session": claimed_session_json(),
-            "access_token": "ast_boot_access_test"
+            "access_token": "ast_boot_access_test",
+            "recipe": capture_recipe_json()
         }))
         .unwrap()
+    }
+
+    fn capture_recipe_json() -> Value {
+        json!({
+            "version": 1,
+            "start_url": "https://app.vocabgo.com/student/",
+            "allowed_origins": ["https://app.vocabgo.com"],
+            "poll_interval_millis": 800,
+            "auth_method": "assisted_session",
+            "session_kind": "cookie",
+            "outputs": [{
+                "purpose": "provider_cookie",
+                "required": true,
+                "sources": [{
+                    "type": "cookie_header",
+                    "origin": "https://app.vocabgo.com"
+                }]
+            }]
+        })
     }
 
     fn claimed_session_json() -> Value {

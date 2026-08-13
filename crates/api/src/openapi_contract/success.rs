@@ -6,6 +6,16 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("bootstrapMaster", "LoginResponse"),
     ("login", "LoginResponse"),
     ("currentIdentity", "IdentityResponse"),
+    ("createAuthBootstrapSession", "AuthBootstrapCreateResponse"),
+    ("getAuthBootstrapSession", "AuthBootstrapSession"),
+    ("cancelAuthBootstrapSession", "AuthBootstrapSession"),
+    ("claimAuthBootstrapSession", "AuthBootstrapClaimResponse"),
+    (
+        "submitAuthBootstrapCredential",
+        "AuthBootstrapCredentialResponse",
+    ),
+    ("recordAuthBootstrapEvent", "AuthBootstrapEventResponse"),
+    ("pollAuthBootstrapStream", "AuthBootstrapSession"),
     ("listProviders", "ProviderMetadataListResponse"),
     ("listProviderAccounts", "ProviderAccountListResponse"),
     ("createProviderAccount", "ProviderAccountResponse"),
@@ -96,26 +106,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("listServiceTokens", "ServiceTokenPageResponse"),
 ];
 
-#[cfg(test)]
-const DEFERRED_CAPTURE_OPERATIONS: &[&str] = &[
-    "createAuthBootstrapSession",
-    "getAuthBootstrapSession",
-    "cancelAuthBootstrapSession",
-    "claimAuthBootstrapSession",
-    "submitAuthBootstrapCredential",
-    "recordAuthBootstrapEvent",
-    "pollAuthBootstrapStream",
-];
-
 pub(super) fn schema_for(operation_id: &str) -> Option<&'static str> {
     JSON_SUCCESS_SCHEMAS
         .iter()
         .find_map(|(operation, schema)| (*operation == operation_id).then_some(*schema))
-}
-
-#[cfg(test)]
-pub(super) fn is_deferred_capture_operation(operation_id: &str) -> bool {
-    DEFERRED_CAPTURE_OPERATIONS.contains(&operation_id)
 }
 
 pub(super) fn register(schemas: &mut Map<String, Value>) {
@@ -442,6 +436,118 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                     "kind": schema_ref("SessionKind"),
                     "expires_at": nullable_timestamp(),
                     "account_hint": nullable_string()
+                }),
+            ),
+        ),
+        ("AuthBootstrapSession", auth_bootstrap_session_schema()),
+        ("CaptureValueSource", capture_value_source_schema()),
+        (
+            "CaptureCredentialOutput",
+            object(
+                &["purpose", "required", "sources"],
+                json!({
+                    "purpose": capture_secret_purpose(),
+                    "required": {"type": "boolean"},
+                    "sources": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "items": schema_ref("CaptureValueSource")
+                    }
+                }),
+            ),
+        ),
+        (
+            "CaptureRecipe",
+            object(
+                &[
+                    "version",
+                    "start_url",
+                    "allowed_origins",
+                    "poll_interval_millis",
+                    "auth_method",
+                    "session_kind",
+                    "outputs",
+                ],
+                json!({
+                    "version": {"type": "integer", "format": "int64", "minimum": 1},
+                    "start_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+                    "allowed_origins": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "uniqueItems": true,
+                        "items": {"type": "string", "format": "uri", "pattern": "^https://[^/]+$"}
+                    },
+                    "poll_interval_millis": {"type": "integer", "format": "int64", "minimum": 100, "maximum": 5000},
+                    "auth_method": schema_ref("AuthMethod"),
+                    "session_kind": schema_ref("SessionKind"),
+                    "outputs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "items": schema_ref("CaptureCredentialOutput")
+                    }
+                }),
+            ),
+        ),
+        (
+            "AuthBootstrapCreateResponse",
+            object(
+                &["session", "pairing_token"],
+                json!({
+                    "session": schema_ref("AuthBootstrapSession"),
+                    "pairing_token": {"type": "string", "minLength": 1, "writeOnly": true}
+                }),
+            ),
+        ),
+        (
+            "AuthBootstrapClaimResponse",
+            object(
+                &["session", "access_token", "recipe"],
+                json!({
+                    "session": schema_ref("AuthBootstrapSession"),
+                    "access_token": {"type": "string", "minLength": 1, "writeOnly": true},
+                    "recipe": schema_ref("CaptureRecipe")
+                }),
+            ),
+        ),
+        (
+            "AuthBootstrapClientEvent",
+            object(
+                &["session_id", "sequence", "kind", "received_at"],
+                json!({
+                    "session_id": uuid(),
+                    "sequence": {"type": "integer", "format": "int64", "minimum": 1},
+                    "kind": auth_bootstrap_event_kind_schema(),
+                    "received_at": timestamp()
+                }),
+            ),
+        ),
+        (
+            "AuthBootstrapEventResponse",
+            object(
+                &["event", "duplicate"],
+                json!({
+                    "event": schema_ref("AuthBootstrapClientEvent"),
+                    "duplicate": {"type": "boolean"}
+                }),
+            ),
+        ),
+        (
+            "AuthBootstrapCredentialResponse",
+            object(
+                &[
+                    "session",
+                    "provider_account_id",
+                    "credential_count",
+                    "status",
+                ],
+                json!({
+                    "session": schema_ref("AuthBootstrapSession"),
+                    "provider_account_id": uuid(),
+                    "credential_count": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 16},
+                    "status": schema_ref("SessionStatus")
                 }),
             ),
         ),
@@ -1516,6 +1622,97 @@ fn auth_state_schema() -> Value {
                 "state": {"const": "human_required"},
                 "detail": string_enum(&["auth_required", "session_expired", "qr_required", "sms_verification", "image_captcha", "browser_callback_required", "session_import_required", "user_confirmation", "browser_required", "unsupported_task", "remote_changed", "manual_intervention"])
             }))
+        ]
+    })
+}
+
+fn auth_bootstrap_session_schema() -> Value {
+    object(
+        &[
+            "id",
+            "owner_user_id",
+            "provider_id",
+            "provider_account_id",
+            "purpose",
+            "required_recipe_version",
+            "state",
+            "created_at",
+            "updated_at",
+            "expires_at",
+            "claimed_at",
+            "revision",
+        ],
+        json!({
+            "id": uuid(),
+            "owner_user_id": uuid(),
+            "provider_id": provider_id(),
+            "provider_account_id": nullable_uuid(),
+            "purpose": string_enum(&["add_account", "reauthenticate", "repair_session"]),
+            "required_recipe_version": {"type": "integer", "format": "int64", "minimum": 1},
+            "state": string_enum(&["awaiting_claim", "claimed", "completed", "failed", "expired", "cancelled"]),
+            "created_at": timestamp(),
+            "updated_at": timestamp(),
+            "expires_at": timestamp(),
+            "claimed_at": nullable_timestamp(),
+            "revision": {"type": "integer", "format": "int64", "minimum": 1}
+        }),
+    )
+}
+
+fn capture_secret_purpose() -> Value {
+    string_enum(&[
+        "provider_username",
+        "provider_password",
+        "provider_cookie",
+        "provider_access_token",
+        "provider_refresh_token",
+        "provider_composite_session",
+    ])
+}
+
+fn capture_scalar_source_schema() -> Value {
+    json!({
+        "oneOf": [
+            object(&["type", "origin", "name"], json!({"type": {"const": "request_header"}, "origin": string(), "name": string()})),
+            object(&["type", "origin", "key"], json!({"type": {"const": "local_storage"}, "origin": string(), "key": string()})),
+            object(&["type", "origin", "key"], json!({"type": {"const": "session_storage"}, "origin": string(), "key": string()}))
+        ]
+    })
+}
+
+fn capture_value_source_schema() -> Value {
+    json!({
+        "oneOf": [
+            object(&["type", "origin", "name"], json!({"type": {"const": "request_header"}, "origin": string(), "name": string()})),
+            object(&["type", "origin", "key"], json!({"type": {"const": "local_storage"}, "origin": string(), "key": string()})),
+            object(&["type", "origin", "key"], json!({"type": {"const": "session_storage"}, "origin": string(), "key": string()})),
+            object(&["type", "origin"], json!({"type": {"const": "cookie_header"}, "origin": string()})),
+            object(&["type", "fields"], json!({
+                "type": {"const": "json_object"},
+                "fields": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "items": object(&["name", "sources"], json!({
+                        "name": string(),
+                        "sources": {"type": "array", "minItems": 1, "maxItems": 8, "items": capture_scalar_source_schema()}
+                    }))
+                }
+            }))
+        ]
+    })
+}
+
+fn auth_bootstrap_event_kind_schema() -> Value {
+    json!({
+        "oneOf": [
+            object(&["type"], json!({"type": {"const": "client_ready"}})),
+            object(&["type", "stage"], json!({"type": {"const": "stage_changed"}, "stage": string()})),
+            object(&["type", "stage", "percent"], json!({"type": {"const": "progress"}, "stage": string(), "percent": {"type": "integer", "minimum": 0, "maximum": 100}})),
+            object(&["type"], json!({"type": {"const": "credential_detected"}})),
+            object(&["type"], json!({"type": {"const": "validating"}})),
+            object(&["type"], json!({"type": {"const": "authenticated"}})),
+            object(&["type", "code"], json!({"type": {"const": "failed"}, "code": string()}))
         ]
     })
 }

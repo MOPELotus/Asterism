@@ -69,6 +69,9 @@ impl CreditRepository for SqliteCreditRepository {
         row.map(|row| decode_account(&row)).transpose()
     }
 
+    // The immediate transaction intentionally keeps idempotency replay, balance
+    // mutation, receipt, Audit and Outbox writes in one visible atomic flow.
+    #[allow(clippy::too_many_lines)]
     async fn grant(&self, grant: &CreditGrant) -> Result<CreditGrantOutcome, StorageError> {
         validate_credit_grant(grant)?;
         let amount = encode_amount(grant.amount)?;

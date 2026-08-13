@@ -2,9 +2,10 @@ use std::{collections::BTreeSet, fmt, fmt::Write as _, sync::Arc};
 
 use asterism_domain::{AuthMethod, HumanRequiredReason, SessionKind, WaitingUserState};
 use asterism_provider_api::{
-    AuthChallenge, AuthenticationCapability, CredentialReplacement, CredentialValidation,
-    ProviderAuthContext, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, SessionStatus,
+    AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureRecipe,
+    CaptureValueSource, CredentialReplacement, CredentialValidation, ProviderAuthContext,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
+    ProviderResult, SessionStatus,
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, CredentialField, SecretPurpose, SecretString,
@@ -27,6 +28,8 @@ const MAX_COOKIE_FIELDS: usize = 128;
 const MAX_COOKIE_NAME_BYTES: usize = 256;
 const SSO_ORIGIN: &str = "https://sso.sflep.com";
 const SSO_CALLBACK_PREFIX: &str = "/idsvr/";
+const WELEARN_ORIGIN: &str = "https://welearn.sflep.com";
+const WELEARN_CAPTURE_START_URL: &str = "https://welearn.sflep.com/user/prelogin.aspx?loginret=http%3a%2f%2fwelearn.sflep.com%2fuser%2floginredirect.aspx";
 
 /// A bounded `WELearn` Cookie header. Plaintext is redacted and zeroized.
 pub struct WellearnCookieSession(SecretString);
@@ -167,6 +170,24 @@ impl ProviderIdentity for WellearnAuthentication {
 
 #[async_trait]
 impl AuthenticationCapability for WellearnAuthentication {
+    fn capture_recipe(&self) -> Option<CaptureRecipe> {
+        Some(CaptureRecipe {
+            version: 1,
+            start_url: WELEARN_CAPTURE_START_URL.to_owned(),
+            allowed_origins: vec![WELEARN_ORIGIN.to_owned(), SSO_ORIGIN.to_owned()],
+            poll_interval_millis: 500,
+            auth_method: AuthMethod::AssistedSession,
+            session_kind: SessionKind::Cookie,
+            outputs: vec![CaptureCredentialOutput {
+                purpose: SecretPurpose::ProviderCookie,
+                required: true,
+                sources: vec![CaptureValueSource::CookieHeader {
+                    origin: WELEARN_ORIGIN.to_owned(),
+                }],
+            }],
+        })
+    }
+
     async fn begin_authentication(
         &self,
         context: &ProviderAuthContext,

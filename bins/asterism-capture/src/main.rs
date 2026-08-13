@@ -1,3 +1,4 @@
+mod automatic;
 mod input;
 mod manual;
 
@@ -8,6 +9,7 @@ use asterism_capture::CaptureClient;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+use crate::automatic::{AutomaticCommand, AutomaticCredentialSummary, run_automatic};
 use crate::manual::{ManualCommand, ManualCredentialSummary, run_manual};
 
 #[derive(Debug, Parser)]
@@ -32,6 +34,9 @@ enum Command {
 
     /// Claim a pairing and submit manually entered credentials without secret argv values.
     Manual(ManualCommand),
+
+    /// Execute the Provider's frozen browser recipe in an isolated Chromium profile.
+    Automatic(AutomaticCommand),
 }
 
 #[tokio::main]
@@ -46,8 +51,24 @@ async fn main() -> anyhow::Result<()> {
         Command::Manual(command) => {
             write_json(&run_manual_until_cancel(&client, command).await?)?;
         }
+        Command::Automatic(command) => {
+            write_json(&run_automatic_until_cancel(&client, command).await?)?;
+        }
     }
     Ok(())
+}
+
+async fn run_automatic_until_cancel(
+    client: &CaptureClient,
+    command: AutomaticCommand,
+) -> anyhow::Result<AutomaticCredentialSummary> {
+    tokio::select! {
+        result = run_automatic(client, command) => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("failed to listen for local cancellation")?;
+            bail!("automatic Capture workflow cancelled locally; browser secrets were discarded and the server session remains owner-controlled")
+        }
+    }
 }
 
 async fn run_manual_until_cancel(
@@ -86,5 +107,9 @@ mod tests {
         assert!(!help.contains("--pairing-token"));
         assert!(!help.contains("--credential-value"));
         assert!(!help.contains("--tenant-value"));
+        let automatic = command.find_subcommand_mut("automatic").unwrap();
+        let help = automatic.render_long_help().to_string();
+        assert!(!help.contains("--pairing-token"));
+        assert!(!help.contains("--credential-value"));
     }
 }
