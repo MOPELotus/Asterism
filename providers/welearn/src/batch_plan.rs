@@ -23,6 +23,10 @@ impl WellearnBatchFlow {
     const fn skips_completed(self) -> bool {
         matches!(self, Self::YzbrhCompletion | Self::AutoCompletion)
     }
+
+    const fn requires_pending_completion(self) -> bool {
+        matches!(self, Self::YzbrhCompletion | Self::AutoCompletion)
+    }
 }
 
 /// One frozen child selection. The Core batch layer owns durable child
@@ -107,7 +111,8 @@ pub fn build_batch_plan(
             )
         })?;
         let keep = (flow.keeps_hidden() || visible)
-            && (!flow.skips_completed() || completion != RemoteState::Completed);
+            && (!flow.skips_completed() || completion != RemoteState::Completed)
+            && (!flow.requires_pending_completion() || completion == RemoteState::Pending);
         if !keep || (!unit_visible && !flow.keeps_hidden()) {
             continue;
         }
@@ -249,6 +254,13 @@ mod tests {
         .unwrap()
     }
 
+    fn pending_tasks() -> Vec<RemoteTask> {
+        let mut tasks = tasks();
+        tasks[1].remote_state = RemoteState::Pending;
+        tasks[1].normalized["completion_observation"] = serde_json::json!("pending");
+        tasks
+    }
+
     #[test]
     fn current_fanyuchang_retains_hidden_and_completed_in_inventory_order() {
         let plan =
@@ -264,7 +276,8 @@ mod tests {
 
     #[test]
     fn yzbrh_completion_skips_hidden_and_completed() {
-        let plan = build_batch_plan(&tasks(), WellearnBatchFlow::YzbrhCompletion, None).unwrap();
+        let plan =
+            build_batch_plan(&pending_tasks(), WellearnBatchFlow::YzbrhCompletion, None).unwrap();
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].remote_task_id, "sco:1001:302");
     }
@@ -283,7 +296,8 @@ mod tests {
 
     #[test]
     fn auto_completion_skips_hidden_and_completed() {
-        let plan = build_batch_plan(&tasks(), WellearnBatchFlow::AutoCompletion, None).unwrap();
+        let plan =
+            build_batch_plan(&pending_tasks(), WellearnBatchFlow::AutoCompletion, None).unwrap();
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].remote_task_id, "sco:1001:302");
     }
@@ -304,6 +318,12 @@ mod tests {
     #[test]
     fn auto_duration_requires_a_frozen_sample() {
         assert!(build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, None).is_err());
+    }
+
+    #[test]
+    fn completion_flows_reject_unknown_or_in_progress_observations() {
+        let plan = build_batch_plan(&tasks(), WellearnBatchFlow::AutoCompletion, None);
+        assert!(plan.is_err());
     }
 
     #[test]
