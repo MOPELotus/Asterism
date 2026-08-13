@@ -2,6 +2,7 @@ use std::fmt;
 
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::CidarenCryptoContext;
@@ -12,6 +13,11 @@ const MAX_SESSION_NONCE_BYTES: usize = 512;
 const MAX_FRAME_ID_BYTES: usize = 256;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 768;
 const MAX_CAPTURE_VALUE_BYTES: usize = 64 * 1_024;
+
+/// Stable Core `BrowserBridge` exchange type for one Cidaren Capture command.
+pub const CIDAREN_CAPTURE_COMMAND_TYPE: &str = "cidaren.capture.snapshot";
+/// Stable Core `BrowserBridge` exchange type for one Cidaren Capture result.
+pub const CIDAREN_CAPTURE_RESULT_TYPE: &str = "cidaren.capture.snapshot.result";
 
 /// Selects one audited Capture recipe without combining its output with any
 /// other recipe. Version 1 is the public donor's token-only proxy path;
@@ -72,6 +78,24 @@ pub struct CidarenBrowserCommandEnvelope {
 }
 
 impl CidarenBrowserCommandEnvelope {
+    /// Returns the stable durable exchange type used by Core.
+    pub const fn exchange_type() -> &'static str {
+        CIDAREN_CAPTURE_COMMAND_TYPE
+    }
+
+    /// Hashes the canonical typed command envelope for Core's durable exchange
+    /// record. The command contains no captured credential material.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if serialization unexpectedly fails.
+    pub fn exchange_digest(&self) -> ProviderResult<[u8; 32]> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(self)
+            .map_err(|_| invalid_response("Cidaren Capture command cannot be hashed"))?;
+        Ok(Sha256::digest(encoded).into())
+    }
+
     /// Builds a recipe-versioned Capture snapshot command.
     ///
     /// # Errors
@@ -173,6 +197,13 @@ pub struct CidarenBrowserEventEnvelope {
     pub remote_task_id: String,
     pub reply_to_sequence: u32,
     pub event: CidarenBrowserEvent,
+}
+
+impl CidarenBrowserEventEnvelope {
+    /// Returns the stable durable exchange type used by Core.
+    pub const fn exchange_type() -> &'static str {
+        CIDAREN_CAPTURE_RESULT_TYPE
+    }
 }
 
 impl CidarenBrowserEventEnvelope {
@@ -354,6 +385,22 @@ pub fn parse_browser_event(
     Ok(event)
 }
 
+/// Hashes one bounded raw result document for Core's durable exchange record.
+/// The document itself remains Provider/Capture-owned and is never persisted
+/// in Domain storage.
+///
+/// # Errors
+///
+/// Returns a typed error when the document is empty or oversized.
+pub fn browser_event_exchange_digest(document: &str) -> ProviderResult<[u8; 32]> {
+    if document.is_empty() || document.len() > MAX_BROWSER_DOCUMENT_BYTES {
+        return Err(invalid_response(
+            "Cidaren BrowserBridge result is empty or oversized",
+        ));
+    }
+    Ok(Sha256::digest(document.as_bytes()).into())
+}
+
 fn validate_capture_values(
     mode: CidarenCaptureMode,
     user_token: Option<&str>,
@@ -514,6 +561,11 @@ mod tests {
     fn capture_command_is_recipe_versioned_and_redacted() {
         let command = command(CidarenCaptureMode::Composite);
         assert_eq!(command.version, 2);
+        assert_eq!(
+            CidarenBrowserCommandEnvelope::exchange_type(),
+            CIDAREN_CAPTURE_COMMAND_TYPE
+        );
+        assert_ne!(command.exchange_digest().unwrap(), [0; 32]);
         assert!(format!("{command:?}").contains("REDACTED"));
         assert!(
             serde_json::to_string(&command)
@@ -571,6 +623,14 @@ mod tests {
             Some(CidarenCaptureStorageSource::LocalStorage)
         );
         assert!(snapshot.user_session().is_none());
+        assert_eq!(
+            CidarenBrowserEventEnvelope::exchange_type(),
+            CIDAREN_CAPTURE_RESULT_TYPE
+        );
+        assert_ne!(
+            browser_event_exchange_digest(&document(CidarenCaptureMode::Composite)).unwrap(),
+            [0; 32]
+        );
 
         let mut foreign_command = command(CidarenCaptureMode::Composite);
         foreign_command.sequence = 2;

@@ -125,6 +125,16 @@ sequence and recipe validation to the typed parser. A stale Task cannot cause
 a previously issued Capture observation to be committed under a new remote
 identity.
 
+For Core's durable BrowserBridge exchange table, the Provider exposes stable
+message types `cidaren.capture.snapshot` and
+`cidaren.capture.snapshot.result`. `CidarenBrowserCommandEnvelope::exchange_digest`
+hashes the validated canonical command JSON; `browser_event_exchange_digest`
+hashes the bounded raw result document after transport-size validation. Core
+persists only these type strings and SHA-256 digests with the session sequence.
+The command/result JSON, token, `login_info`, optional `user_session` and
+validated `CidarenCaptureSnapshot` remain outside Domain storage and are
+zeroized/committed through the existing Capture credential path.
+
 The Core adapter resolves either one exact manual or token-only Capture
 `ProviderAccessToken`, or an exact two-record Composite binding containing
 `ProviderAccessToken` plus `ProviderCompositeSession`. Every record must match
