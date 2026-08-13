@@ -293,7 +293,9 @@ impl UaiBrowserResidenceResult {
             || self.planned_residence_seconds != *seconds
             || self.processed_micros > 1
             || self.processed_tabs > plan.max_tabs_per_micro
-            || self.processed_tasks > self.processed_tabs
+            || self.processed_tabs.checked_mul(plan.max_tasks_per_tab).is_none_or(
+                |max_tasks| self.processed_tasks > max_tasks,
+            )
             || self.video_seconds > plan.max_video_seconds
             || (!play_video && self.video_seconds != 0)
             || self.last_label.as_ref().is_some_and(|label| {
@@ -1911,7 +1913,7 @@ mod tests {
             "observed_active_seconds": 1_200,
             "processed_micros": 1,
             "processed_tabs": 4,
-            "processed_tasks": 4,
+            "processed_tasks": 8,
             "video_seconds": 0,
             "cancelled": false,
             "last_label": "Unit 1 / Section 2 / Micro 3",
