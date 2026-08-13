@@ -26,6 +26,16 @@ pub enum WellearnBatchDispatch {
     BoundedThreadPool,
 }
 
+/// Target allocation contract for a frozen donor batch. The shared durable
+/// layer uses this fact to persist either each child target or the aggregate
+/// derivation without asking the Provider to resample after recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WellearnBatchTargetStrategy {
+    PerChild,
+    SharedConfigured,
+    AggregateEqualFloor,
+}
+
 impl WellearnBatchFlow {
     pub const fn dispatch(self) -> WellearnBatchDispatch {
         match self {
@@ -35,6 +45,17 @@ impl WellearnBatchFlow {
             Self::YzbrhCompletion | Self::AutoCompletion => WellearnBatchDispatch::Sequential,
             Self::YzbrhDuration => WellearnBatchDispatch::SharedHeartbeat,
             Self::AutoDuration => WellearnBatchDispatch::BoundedThreadPool,
+        }
+    }
+
+    pub const fn target_strategy(self) -> WellearnBatchTargetStrategy {
+        match self {
+            Self::AutoCompletion => WellearnBatchTargetStrategy::SharedConfigured,
+            Self::AutoDuration => WellearnBatchTargetStrategy::AggregateEqualFloor,
+            Self::FanyuchangCompletion
+            | Self::FanyuchangDuration
+            | Self::YzbrhCompletion
+            | Self::YzbrhDuration => WellearnBatchTargetStrategy::PerChild,
         }
     }
 
@@ -87,6 +108,7 @@ pub struct WellearnBatchEntry {
 pub struct WellearnBatchPlan {
     pub flow: WellearnBatchFlow,
     pub dispatch: WellearnBatchDispatch,
+    pub target_strategy: WellearnBatchTargetStrategy,
     pub entries: Vec<WellearnBatchEntry>,
     pub aggregate_duration_seconds: Option<u64>,
     pub discarded_remainder_seconds: u64,
@@ -245,6 +267,7 @@ pub fn build_batch_plan(
     Ok(WellearnBatchPlan {
         flow,
         dispatch: flow.dispatch(),
+        target_strategy: flow.target_strategy(),
         entries,
         aggregate_duration_seconds,
         discarded_remainder_seconds,
@@ -345,6 +368,7 @@ mod tests {
             ["sco:1001:301", "sco:1001:302", "sco:1001:401"]
         );
         assert_eq!(plan.dispatch, WellearnBatchDispatch::PerChildConcurrent);
+        assert_eq!(plan.target_strategy, WellearnBatchTargetStrategy::PerChild);
     }
 
     #[test]
@@ -366,6 +390,7 @@ mod tests {
             ["sco:1001:301", "sco:1001:302", "sco:1001:401"]
         );
         assert_eq!(plan.dispatch, WellearnBatchDispatch::SharedHeartbeat);
+        assert_eq!(plan.target_strategy, WellearnBatchTargetStrategy::PerChild);
     }
 
     #[test]
@@ -383,6 +408,10 @@ mod tests {
         assert_eq!(plan.aggregate_duration_seconds, Some(60));
         assert_eq!(plan.discarded_remainder_seconds, 0);
         assert_eq!(plan.dispatch, WellearnBatchDispatch::BoundedThreadPool);
+        assert_eq!(
+            plan.target_strategy,
+            WellearnBatchTargetStrategy::AggregateEqualFloor
+        );
         assert!(plan
             .entries
             .iter()
@@ -430,6 +459,18 @@ mod tests {
         assert_eq!(
             WellearnBatchFlow::AutoDuration.dispatch(),
             WellearnBatchDispatch::BoundedThreadPool
+        );
+        assert_eq!(
+            WellearnBatchFlow::AutoCompletion.target_strategy(),
+            WellearnBatchTargetStrategy::SharedConfigured
+        );
+        assert_eq!(
+            WellearnBatchFlow::AutoDuration.target_strategy(),
+            WellearnBatchTargetStrategy::AggregateEqualFloor
+        );
+        assert_eq!(
+            WellearnBatchFlow::YzbrhDuration.target_strategy(),
+            WellearnBatchTargetStrategy::PerChild
         );
     }
 

@@ -431,6 +431,12 @@ shared-heartbeat, or bounded-thread-pool. The Core layer must persist this
 value with the immutable flow, membership and derived targets; it must not let
 a crash recovery silently switch dispatch semantics.
 
+`WellearnBatchPlan.target_strategy` records the corresponding target boundary:
+Fanyuchang and YZBRH resolve targets per child from their fixed or independent
+random settings, Auto completion applies one configured value to every child,
+and Auto duration derives one equal floor target from its frozen aggregate
+budget. The aggregate strategy also persists the discarded remainder.
+
 Asterism currently retains Unit index/title/code in each fresh Task observation
 and exposes per-Task runtime settings, but Unit is not yet a shared first-class
 selection scope and execution creation is single-Task. The complete donor

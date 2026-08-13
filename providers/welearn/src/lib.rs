@@ -33,7 +33,7 @@ pub use authentication::{
 };
 pub use batch_plan::{
     build_batch_plan, WellearnBatchDispatch, WellearnBatchEntry, WellearnBatchFlow,
-    WellearnBatchPlan,
+    WellearnBatchPlan, WellearnBatchTargetStrategy,
 };
 pub use cmi::{
     parse_cmi_snapshot, WellearnCmiDocument, WellearnCmiSnapshot, WellearnCmiTransport,
