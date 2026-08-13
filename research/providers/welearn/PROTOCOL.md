@@ -205,6 +205,11 @@ Three donor wire modes remain separate:
   60-second keep, omit explicit time fields, wait any trailing partial interval,
   then issue the donor's bare save.
 
+The start payload also follows that selected wire mode. Current Fanyuchang
+sends `uid/cid/scoid/classid/tid=-1`; YZBRH and Auto_WeLearn send only
+`uid/cid/scoid`. All three duration donors use the simple StudyCourse Referer.
+This is an exact protocol distinction, not an optional-field optimization.
+
 The client-counter and implicit modes require their evidenced 1-second and
 60-second intervals respectively. Start and finalization require integer
 `ret=0`; heartbeat accepts only the two donor-observed integer values `0` and
@@ -275,6 +280,15 @@ completed/progress-100/score-0 tuple after its duration lifecycle. Both still
 issue `startsco160928` and end with the same goal-bound fresh CMI verification.
 The native transport prepares any CMI document before the first mutation and
 omits it entirely for `save_only`.
+
+The completion donors also pair two different start forms with different
+Referers. Current Fanyuchang sends the full
+`uid/cid/scoid/classid/tid=-1` payload with the simple StudyCourse Referer.
+YZBRH and Auto_WeLearn send only `uid/cid/scoid` with the task-specific
+`StudyCourse.aspx?cid=...&classid=...&sco=...` Referer. Runtime setting
+`execution.mutation_profile` exposes exactly these two evidenced families,
+applies the selected Referer to start/set/save alike, and does not synthesize
+the previously unevidenced full-payload/task-Referer mixture.
 
 Current Fanyuchang then unconditionally performs another
 `savescoinfo160928(progress=100, crate=100, cstatus=completed)`, even when the

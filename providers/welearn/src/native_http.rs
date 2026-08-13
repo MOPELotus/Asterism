@@ -251,6 +251,25 @@ impl NativeWellearnInventoryTransport {
             .map_err(|error| classify_reqwest_error(&error))?;
         read_inventory_response(response, ResponseContent::Json).await
     }
+
+    async fn send_resource_mutation_form(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        task_referer: &Url,
+        profile: crate::WellearnResourceMutationProfile,
+        fields: &[(&str, &str)],
+    ) -> ProviderResult<WellearnInventoryDocument> {
+        match profile {
+            crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer => {
+                self.send_sco_form(session, route, fields).await
+            }
+            crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer => {
+                self.send_sco_form_with_referer(session, route, task_referer, fields)
+                    .await
+            }
+        }
+    }
 }
 
 impl fmt::Debug for NativeWellearnInventoryTransport {
@@ -350,6 +369,7 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
             time_mode,
             cmi_format,
             write_mode,
+            mutation_profile,
         } = plan;
         if score_percent > 100 {
             return Err(ProviderError::new(
@@ -392,19 +412,25 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
         } else {
             None
         };
+        let start_fields = sco_start_fields(
+            &route,
+            sco_id,
+            match mutation_profile {
+                crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer => {
+                    ScoStartPayload::FullRoute
+                }
+                crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer => {
+                    ScoStartPayload::MinimalIdentity
+                }
+            },
+        );
         let start = self
-            .send_sco_form_with_referer(
+            .send_resource_mutation_form(
                 &session,
                 &route,
                 &referer,
-                &[
-                    ("action", "startsco160928"),
-                    ("uid", route.user_id()),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                    ("classid", route.class_id()),
-                    ("tid", "-1"),
-                ],
+                mutation_profile,
+                &start_fields,
             )
             .await
             .map_err(resource_mutation_error)?;
@@ -413,10 +439,11 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
 
         let set_accepted = if let Some(cmi) = cmi.as_ref() {
             let set = self
-                .send_sco_form_with_referer(
+                .send_resource_mutation_form(
                     &session,
                     &route,
                     &referer,
+                    mutation_profile,
                     &[
                         ("action", "setscoinfo"),
                         ("cid", route.course_id()),
@@ -440,9 +467,16 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
         for save_score in resource_save_scores(sequence, score_percent) {
             let save_score = save_score.to_string();
             save_acceptances.push(
-                self.save_resource_completion(&session, &route, &referer, sco_id, &save_score)
-                    .await
-                    .map_err(resource_mutation_error)?,
+                self.save_resource_completion(
+                    &session,
+                    &route,
+                    &referer,
+                    mutation_profile,
+                    sco_id,
+                    &save_score,
+                )
+                .await
+                .map_err(resource_mutation_error)?,
             );
         }
 
@@ -563,20 +597,16 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     None,
                 ))
                 .await?;
-            let start = self
-                .send_sco_form(
-                    &session,
-                    &route,
-                    &[
-                        ("action", "startsco160928"),
-                        ("uid", route.user_id()),
-                        ("cid", route.course_id()),
-                        ("scoid", sco_id),
-                        ("classid", route.class_id()),
-                        ("tid", "-1"),
-                    ],
-                )
-                .await?;
+            let start_fields = sco_start_fields(
+                &route,
+                sco_id,
+                if protocol_mode == crate::WellearnDurationProtocolMode::ClientCounter {
+                    ScoStartPayload::FullRoute
+                } else {
+                    ScoStartPayload::MinimalIdentity
+                },
+            );
+            let start = self.send_sco_form(&session, &route, &start_fields).await?;
             parse_mutation_response(start.as_str(), MutationResponseKind::StrictSuccess)?;
             started = true;
             before = self.fetch_cmi_for_route(&session, &route, sco_id).await?;
@@ -757,14 +787,16 @@ impl NativeWellearnInventoryTransport {
         session: &crate::WellearnCookieSession,
         route: &crate::WellearnCourseContext,
         referer: &Url,
+        mutation_profile: crate::WellearnResourceMutationProfile,
         sco_id: &str,
         score: &str,
     ) -> ProviderResult<bool> {
         let response = self
-            .send_sco_form_with_referer(
+            .send_resource_mutation_form(
                 session,
                 route,
                 referer,
+                mutation_profile,
                 &[
                     ("action", "savescoinfo160928"),
                     ("cid", route.course_id()),
@@ -1323,6 +1355,30 @@ fn study_course_url(route: &crate::WellearnCourseContext, sco_id: &str) -> Provi
     Ok(url)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScoStartPayload {
+    FullRoute,
+    MinimalIdentity,
+}
+
+fn sco_start_fields<'a>(
+    route: &'a crate::WellearnCourseContext,
+    sco_id: &'a str,
+    payload: ScoStartPayload,
+) -> Vec<(&'static str, &'a str)> {
+    let mut fields = vec![
+        ("action", "startsco160928"),
+        ("uid", route.user_id()),
+        ("cid", route.course_id()),
+        ("scoid", sco_id),
+    ];
+    if payload == ScoStartPayload::FullRoute {
+        fields.push(("classid", route.class_id()));
+        fields.push(("tid", "-1"));
+    }
+    fields
+}
+
 fn static_url(value: &'static str) -> ProviderResult<Url> {
     Url::parse(value).map_err(|_| static_route_error())
 }
@@ -1481,6 +1537,26 @@ mod tests {
         assert_eq!(
             sco_url("user value").unwrap().as_str(),
             "https://welearn.sflep.com/Ajax/SCO.aspx?uid=user+value"
+        );
+        assert_eq!(
+            sco_start_fields(&context, "301", ScoStartPayload::MinimalIdentity),
+            vec![
+                ("action", "startsco160928"),
+                ("uid", "7001"),
+                ("cid", "1001"),
+                ("scoid", "301"),
+            ]
+        );
+        assert_eq!(
+            sco_start_fields(&context, "301", ScoStartPayload::FullRoute),
+            vec![
+                ("action", "startsco160928"),
+                ("uid", "7001"),
+                ("cid", "1001"),
+                ("scoid", "301"),
+                ("classid", "class-8001"),
+                ("tid", "-1"),
+            ]
         );
     }
 

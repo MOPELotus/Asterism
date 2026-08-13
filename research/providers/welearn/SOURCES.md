@@ -44,6 +44,10 @@ Fanyuchang's plain JSON and the YZBRH/Auto_WeLearn `[INTERACTIONINFO]` envelope
 are likewise separate settings. Auto_WeLearn's save-only duration completion
 and the exercise donors' set-then-save mutation family are separately exposed;
 well-formed negative receipts do not suppress later evidenced writes. They
+also preserve distinct start requests: current Fanyuchang uses full route
+identity with a simple Referer, while YZBRH/Auto use minimal SCO identity and a
+task Referer for exercise completion. These are explicit profiles rather than
+one merged superset request. They
 also detect authentication challenges but contain no reliable automated solver
 or task BrowserBridge implementation to port. Asterism still provides Capture
 recipe v4 for an AssistedSession Cookie obtained in browser context and

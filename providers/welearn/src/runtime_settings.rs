@@ -23,6 +23,7 @@ pub(crate) const RESOURCE_COMPLETION_SEQUENCE_KEY: &str = "execution.completion_
 pub(crate) const RESOURCE_COMPLETION_TIME_MODE_KEY: &str = "execution.completion_time_mode";
 pub(crate) const RESOURCE_COMPLETION_CMI_FORMAT_KEY: &str = "execution.completion_cmi_format";
 pub(crate) const RESOURCE_COMPLETION_WRITE_MODE_KEY: &str = "execution.completion_write_mode";
+pub(crate) const RESOURCE_MUTATION_PROFILE_KEY: &str = "execution.mutation_profile";
 
 const RESOURCE_SCORE_FIXED: &str = "fixed";
 const RESOURCE_SCORE_RANDOM_RANGE: &str = "random_range";
@@ -39,6 +40,8 @@ const RESOURCE_COMPLETION_CMI_JSON: &str = "json";
 const RESOURCE_COMPLETION_CMI_INTERACTION_INFO: &str = "interaction_info_suffix";
 const RESOURCE_COMPLETION_SET_THEN_SAVE: &str = "set_then_save";
 const RESOURCE_COMPLETION_SAVE_ONLY: &str = "save_only";
+const RESOURCE_MUTATION_CURRENT_FULL_SIMPLE: &str = "current_full_simple_referer";
+const RESOURCE_MUTATION_LEGACY_MINIMAL_TASK: &str = "legacy_minimal_task_referer";
 pub(crate) const MIN_DURATION_REPORT_SECONDS: u64 = 1;
 pub(crate) const MAX_DURATION_REPORT_SECONDS: u64 = 7_200;
 pub(crate) const MIN_DURATION_HEARTBEAT_SECONDS: u64 = 1;
@@ -166,6 +169,26 @@ impl WellearnResourceCompletionWriteMode {
     }
 }
 
+/// Donor-evidenced `ResourceExecution` payload/Referer family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WellearnResourceMutationProfile {
+    /// Current Fanyuchang sends `classid`/`tid=-1` on start and uses the simple
+    /// `StudyCourse` Referer for every mutation.
+    CurrentFullSimpleReferer,
+    /// YZBRH and `Auto_WeLearn` send only SCO identity on start and use the
+    /// task-specific `StudyCourse` Referer for every mutation.
+    LegacyMinimalTaskReferer,
+}
+
+impl WellearnResourceMutationProfile {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CurrentFullSimpleReferer => RESOURCE_MUTATION_CURRENT_FULL_SIMPLE,
+            Self::LegacyMinimalTaskReferer => RESOURCE_MUTATION_LEGACY_MINIMAL_TASK,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WellearnRuntimeSettings {
     pub(crate) duration_report: WellearnDurationTarget,
@@ -176,6 +199,7 @@ pub(crate) struct WellearnRuntimeSettings {
     pub(crate) resource_completion_time_mode: WellearnResourceCompletionTimeMode,
     pub(crate) resource_completion_cmi_format: WellearnResourceCompletionCmiFormat,
     pub(crate) resource_completion_write_mode: WellearnResourceCompletionWriteMode,
+    pub(crate) resource_mutation_profile: WellearnResourceMutationProfile,
 }
 
 impl WellearnRuntimeSettings {
@@ -342,6 +366,20 @@ impl WellearnRuntimeSettings {
                 ));
             }
         };
+        let resource_mutation_profile = match settings.choice(RESOURCE_MUTATION_PROFILE_KEY) {
+            Some(RESOURCE_MUTATION_CURRENT_FULL_SIMPLE) => {
+                WellearnResourceMutationProfile::CurrentFullSimpleReferer
+            }
+            Some(RESOURCE_MUTATION_LEGACY_MINIMAL_TASK) => {
+                WellearnResourceMutationProfile::LegacyMinimalTaskReferer
+            }
+            _ => {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "WELearn resource mutation profile is unavailable",
+                ));
+            }
+        };
         Ok(Self {
             duration_report,
             duration_heartbeat_interval_seconds,
@@ -351,6 +389,7 @@ impl WellearnRuntimeSettings {
             resource_completion_time_mode,
             resource_completion_cmi_format,
             resource_completion_write_mode,
+            resource_mutation_profile,
         })
     }
 }
@@ -394,7 +433,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 12,
+        version: 13,
         definitions: vec![
             ProviderSettingDefinition {
                 key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
@@ -641,6 +680,23 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                     ]),
                 },
                 default: ProviderSettingValue::Choice(RESOURCE_COMPLETION_SET_THEN_SAVE.to_owned()),
+                scopes: provider_account_task_scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: RESOURCE_MUTATION_PROFILE_KEY.to_owned(),
+                display_name: "完成变更报文".to_owned(),
+                description: "选择当前 donor 全链路的完整启动身份+简单 Referer，或 YZBRH/Auto_WeLearn 的最小启动身份+任务 Referer。"
+                    .to_owned(),
+                kind: ProviderSettingKind::Choice {
+                    options: BTreeSet::from([
+                        RESOURCE_MUTATION_CURRENT_FULL_SIMPLE.to_owned(),
+                        RESOURCE_MUTATION_LEGACY_MINIMAL_TASK.to_owned(),
+                    ]),
+                },
+                default: ProviderSettingValue::Choice(
+                    RESOURCE_MUTATION_CURRENT_FULL_SIMPLE.to_owned(),
+                ),
                 scopes: provider_account_task_scopes,
                 core_behavior: None,
             },
@@ -657,6 +713,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test checks schema bounds, resolution and Core-owned settings together"
+    )]
     fn duration_settings_are_bounded_and_resolve_task_overrides() {
         let schema = runtime_settings_schema();
         schema.validate().unwrap();
@@ -693,6 +753,8 @@ mod tests {
                 resource_completion_time_mode: WellearnResourceCompletionTimeMode::Auto,
                 resource_completion_cmi_format: WellearnResourceCompletionCmiFormat::Json,
                 resource_completion_write_mode: WellearnResourceCompletionWriteMode::SetThenSave,
+                resource_mutation_profile:
+                    WellearnResourceMutationProfile::CurrentFullSimpleReferer,
             }
         );
         assert_eq!(
@@ -791,6 +853,8 @@ mod tests {
                 resource_completion_time_mode: WellearnResourceCompletionTimeMode::Auto,
                 resource_completion_cmi_format: WellearnResourceCompletionCmiFormat::Json,
                 resource_completion_write_mode: WellearnResourceCompletionWriteMode::SetThenSave,
+                resource_mutation_profile:
+                    WellearnResourceMutationProfile::CurrentFullSimpleReferer,
             }
         );
     }
@@ -990,6 +1054,25 @@ mod tests {
                 .unwrap()
                 .resource_completion_write_mode,
             WellearnResourceCompletionWriteMode::SaveOnly
+        );
+    }
+
+    #[test]
+    fn historical_minimal_mutation_profile_is_explicit() {
+        let schema = runtime_settings_schema();
+        let task = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: BTreeMap::from([(
+                RESOURCE_MUTATION_PROFILE_KEY.to_owned(),
+                ProviderSettingValue::Choice(RESOURCE_MUTATION_LEGACY_MINIMAL_TASK.to_owned()),
+            )]),
+        };
+        let resolved = schema.resolve(None, None, Some(&task)).unwrap();
+        assert_eq!(
+            WellearnRuntimeSettings::resolve(&resolved)
+                .unwrap()
+                .resource_mutation_profile,
+            WellearnResourceMutationProfile::LegacyMinimalTaskReferer
         );
     }
 

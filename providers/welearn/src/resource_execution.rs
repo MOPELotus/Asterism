@@ -74,6 +74,7 @@ pub struct WellearnResourceExecutionPlan {
     pub time_mode: WellearnResourceCompletionTimeMode,
     pub cmi_format: WellearnResourceCompletionCmiFormat,
     pub write_mode: crate::WellearnResourceCompletionWriteMode,
+    pub mutation_profile: crate::WellearnResourceMutationProfile,
 }
 
 /// Native boundary for the donor-audited SCO completion preset.
@@ -217,6 +218,7 @@ impl TaskExecutionCapability for WellearnResourceExecution {
                     time_mode: completion_time_mode,
                     cmi_format: settings.resource_completion_cmi_format,
                     write_mode: settings.resource_completion_write_mode,
+                    mutation_profile: settings.resource_mutation_profile,
                 },
             )
             .await?;
@@ -275,6 +277,7 @@ impl TaskExecutionCapability for WellearnResourceExecution {
                 "completion_time_mode": completion_time_mode.as_str(),
                 "completion_cmi_format": settings.resource_completion_cmi_format.as_str(),
                 "completion_write_mode": settings.resource_completion_write_mode.as_str(),
+                "mutation_profile": settings.resource_mutation_profile.as_str(),
                 "mutation_submitted": documents.mutation_submitted,
                 "started": documents.started,
                 "start_accepted": documents.start_accepted,
@@ -497,6 +500,7 @@ mod tests {
         WellearnResourceCompletionTimeMode,
         WellearnResourceCompletionCmiFormat,
         crate::WellearnResourceCompletionWriteMode,
+        crate::WellearnResourceMutationProfile,
     );
 
     #[derive(Debug)]
@@ -587,6 +591,7 @@ mod tests {
                 plan.time_mode,
                 plan.cmi_format,
                 plan.write_mode,
+                plan.mutation_profile,
             ));
             if self.already_completed {
                 return Ok(WellearnResourceExecutionDocuments::already_completed(
@@ -684,6 +689,7 @@ mod tests {
                 WellearnResourceCompletionTimeMode::ZeroTime,
                 WellearnResourceCompletionCmiFormat::Json,
                 crate::WellearnResourceCompletionWriteMode::SetThenSave,
+                crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer,
             )]
         );
     }
@@ -762,6 +768,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn historical_mutation_profile_is_frozen_into_the_transport_plan() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            transport.clone(),
+        )
+        .unwrap();
+        let outcome = execution
+            .execute(&context(), &legacy_mutation_request(), &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.result_sanitized["mutation_profile"],
+            "legacy_minimal_task_referer"
+        );
+        assert_eq!(
+            transport.calls.lock().unwrap()[0].7,
+            crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer
+        );
+    }
+
+    #[tokio::test]
     async fn random_score_mode_is_bounded_and_stable_for_one_frozen_attempt() {
         let transport = Arc::new(FixtureTransport::default());
         let execution = WellearnResourceExecution::try_new(
@@ -823,6 +852,7 @@ mod tests {
                 WellearnResourceCompletionTimeMode::ZeroTime,
                 WellearnResourceCompletionCmiFormat::Json,
                 crate::WellearnResourceCompletionWriteMode::SetThenSave,
+                crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer,
             )]
         );
     }
@@ -917,6 +947,7 @@ mod tests {
                 WellearnResourceCompletionTimeMode::ZeroTime,
                 WellearnResourceCompletionCmiFormat::Json,
                 crate::WellearnResourceCompletionWriteMode::SetThenSave,
+                crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer,
             )]
         );
     }
@@ -1090,6 +1121,21 @@ mod tests {
             capability_plan: vec![TaskCapability::ResourceExecution],
             capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+        }
+    }
+
+    fn legacy_mutation_request() -> ExecutionRequest {
+        let schema = runtime_settings_schema();
+        let task = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: std::collections::BTreeMap::from([(
+                crate::runtime_settings::RESOURCE_MUTATION_PROFILE_KEY.to_owned(),
+                ProviderSettingValue::Choice("legacy_minimal_task_referer".to_owned()),
+            )]),
+        };
+        ExecutionRequest {
+            runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            ..request()
         }
     }
 

@@ -55,7 +55,8 @@ Native-boundary tests separately reject malformed or unsupported mutation result
 codes and prove the preserved CMI form state. Wire-plan regressions keep
 YZBRH's conditional start/initial keep, current Fanyuchang's unconditional
 start and `0,1,2...` paired client counters, and Auto_WeLearn's delayed
-60-second implicit plan distinct.
+60-second implicit plan distinct. Native request tests also keep the audited
+four-field minimal start separate from the six-field full-route start.
 
 The ResourceExecution fixtures prove the independently written bounded CMI
 preset and the nested fresh-read goal used by immediate verification and crash
@@ -144,6 +145,9 @@ only structural field names, response codes and bounded placeholder shapes.
 - ResourceExecution distinguishes set-then-save from save-only and treats
   per-call acceptance as a receipt, never the success predicate; an explicit
   rejection may continue to the donor's next write, while ambiguity stops.
+- ResourceExecution freezes the current full/simple-Referer or historical
+  minimal/task-Referer mutation profile, applies its Referer to start/set/save,
+  and never combines profile halves into an unevidenced request.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior inside explicit bounded ranges.
 - The preservation-mode schedule sends an initial keep and one keep per full

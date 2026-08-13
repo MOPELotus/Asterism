@@ -61,7 +61,7 @@ pub use resource_execution::{
 pub use runtime_settings::{
     WellearnDurationProtocolMode, WellearnResourceCompletionCmiFormat,
     WellearnResourceCompletionSequence, WellearnResourceCompletionTimeMode,
-    WellearnResourceCompletionWriteMode,
+    WellearnResourceCompletionWriteMode, WellearnResourceMutationProfile,
 };
 pub use stored_session::StoredWellearnSessionResolver;
 pub use task_detail::WellearnTaskDetail;
