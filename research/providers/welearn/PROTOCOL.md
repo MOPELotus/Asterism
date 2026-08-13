@@ -435,7 +435,11 @@ a crash recovery silently switch dispatch semantics.
 Fanyuchang, YZBRH and Auto completion resolve score or duration targets per
 child from their fixed or independent random settings, while Auto duration
 derives one equal floor target from its frozen aggregate budget. The aggregate
-strategy also persists the discarded remainder.
+strategy also persists the discarded remainder. The floor is donor-exact and
+may be zero when the selected SCO count exceeds the aggregate seconds; the
+Provider must preserve that zero target rather than silently rounding it up.
+The shared DurationReport contract still needs an explicit decision for
+zero-target children.
 
 Asterism currently retains Unit index/title/code in each fresh Task observation
 and exposes per-Task runtime settings, but Unit is not yet a shared first-class
