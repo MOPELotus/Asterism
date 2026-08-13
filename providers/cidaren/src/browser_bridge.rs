@@ -8,7 +8,7 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-use crate::metadata::development_metadata;
+use crate::{CidarenBrowserCommandEnvelope, CidarenCaptureMode, metadata::development_metadata};
 
 const CIDAREN_ORIGIN: &str = "https://app.vocabgo.com";
 const MAX_REMOTE_COMPONENT_BYTES: usize = 256;
@@ -34,6 +34,42 @@ impl CidarenBrowserBridge {
             metadata: development_metadata()?,
             details,
         })
+    }
+
+    /// Rebinds a fresh Task before creating one typed Capture command.
+    ///
+    /// The helper session nonce, frame and sequence are supplied by Core's
+    /// durable `BrowserBridge` session. This method only validates the current
+    /// Provider Task/BrowserSessionSpec policy and constructs the bounded
+    /// Provider command; it never starts a browser or persists Capture output.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the account/Task binding, visible origin or
+    /// command fields are invalid.
+    pub async fn capture_snapshot_command(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        session_nonce: String,
+        frame_id: String,
+        sequence: u32,
+        mode: CidarenCaptureMode,
+    ) -> ProviderResult<CidarenBrowserCommandEnvelope> {
+        let spec = self.browser_session_spec(context, remote_task_id).await?;
+        if spec.allowed_origins != [CIDAREN_ORIGIN] || spec.headless {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "Cidaren BrowserBridge policy cannot issue a Capture command",
+            ));
+        }
+        CidarenBrowserCommandEnvelope::capture_snapshot(
+            session_nonce,
+            frame_id,
+            remote_task_id.to_owned(),
+            sequence,
+            mode,
+        )
     }
 }
 
@@ -269,6 +305,41 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::ProtocolDrift
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_command_rebinds_fresh_task_before_issue() {
+        let capability = bridge(true);
+        let command = capability
+            .capture_snapshot_command(
+                &context(),
+                "class-task:2002",
+                "synthetic-session-nonce".to_owned(),
+                "frame-1".to_owned(),
+                1,
+                CidarenCaptureMode::TokenOnly,
+            )
+            .await
+            .unwrap();
+        assert_eq!(command.version, 1);
+        assert_eq!(command.remote_task_id, "class-task:2002");
+        assert_eq!(command.sequence, 1);
+
+        assert_eq!(
+            capability
+                .capture_snapshot_command(
+                    &context(),
+                    "class-task:2002",
+                    "synthetic-session-nonce".to_owned(),
+                    "frame-1".to_owned(),
+                    0,
+                    CidarenCaptureMode::TokenOnly,
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::InvalidResponse
         );
     }
 

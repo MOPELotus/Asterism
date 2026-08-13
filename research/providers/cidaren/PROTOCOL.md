@@ -112,6 +112,14 @@ SubmitAnswerAndSave, SkipAnswer and SubmitChoseWord remain native HTTP
 mutations; no donor evidence justifies inventing a BrowserBridge replacement
 for those routes.
 
+Before issuing a command, `CidarenBrowserBridge::capture_snapshot_command`
+freshly calls the existing TaskDetail capability and requires the returned
+Task to advertise `BrowserBridge`, the exact visible Cidaren origin and a
+non-headless session. It then delegates bounded nonce/frame/Task/sequence
+validation to the typed command constructor. This keeps fresh rediscovery and
+identity rebinding in the Provider while leaving browser startup, access-token
+authentication, durable sequence consumption and credential commit to Core.
+
 The Core adapter resolves either one exact manual or token-only Capture
 `ProviderAccessToken`, or an exact two-record Composite binding containing
 `ProviderAccessToken` plus `ProviderCompositeSession`. Every record must match
