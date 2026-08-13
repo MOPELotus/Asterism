@@ -3,14 +3,16 @@
 //! The current Development checkpoint provides native Password/JWT
 //! authentication, Course/Task inventory, fresh Group detail and progress,
 //! identity-bound duration, separate encrypted Question/answer reads, and a
-//! preview/execute/verify submission chain for bounded ordered simple Groups plus
+//! preview/execute/verify submission chain for bounded ordered typed Groups plus
 //! verify-only recovery for pure-study preset completion over the shared
 //! network policy. It makes no claim of live compatibility.
 
 mod annotator;
 mod answer;
 mod authentication;
+mod browser_bridge;
 mod course_inventory;
+mod discussion;
 mod duration;
 mod encrypted;
 mod inventory_capabilities;
@@ -21,12 +23,15 @@ mod progress;
 mod provider;
 mod question;
 mod resource_execution;
+mod runtime_settings;
 mod stored_session;
 mod submission_build;
 mod submission_execute;
 mod submission_verify;
 mod task_detail;
 mod task_inventory;
+mod task_type;
+mod upload;
 mod user_identity;
 
 pub use answer::{
@@ -37,7 +42,14 @@ pub use authentication::{
     UaiAuthentication, UaiAuthenticationTransport, UaiJwtSession, UaiSessionResolver,
     classify_password_login_response,
 };
+pub use browser_bridge::UaiBrowserBridge;
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
+pub use discussion::{
+    UaiDiscussionBinding, UaiDiscussionReply, UaiDiscussionReplyDraft, UaiDiscussionReplyPage,
+    UaiDiscussionTransport, build_discussion_reply_page_request, build_discussion_reply_request,
+    build_discussion_topic_request, parse_discussion_binding, parse_discussion_reply_page,
+    parse_discussion_reply_receipt, parse_discussion_topic,
+};
 pub use duration::{
     UaiDurationDocument, UaiDurationTransport, UaiTaskDuration, parse_task_duration,
 };
@@ -76,3 +88,7 @@ pub use submission_verify::{
 };
 pub use task_detail::UaiTaskDetail;
 pub use task_inventory::parse_task_inventory;
+pub use upload::{
+    UaiMultipartUpload, UaiUploadArtifact, UaiUploadGrant, UaiUploadTransport,
+    build_upload_multipart, parse_upload_grant, parse_upload_result,
+};

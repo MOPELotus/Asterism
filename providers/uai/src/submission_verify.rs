@@ -17,6 +17,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     UaiSubmissionBuild, UaiSubmissionPlan, encrypted::ZeroizingJsonValue,
     metadata::development_metadata, submission_execute::valid_submission_version,
+    task_type::supports_audited_question_type,
 };
 
 const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -512,7 +513,7 @@ fn validate_fresh_detail(
         .map(|value| {
             value
                 .as_str()
-                .filter(|value| matches!(*value, "single-choice" | "multichoice" | "short_answer"))
+                .filter(|value| supports_audited_question_type(value))
                 .map(str::to_owned)
                 .ok_or_else(|| unsupported("UAI fresh Group task type is not verifiable"))
         })
@@ -907,7 +908,7 @@ mod tests {
 
     async fn draft() -> SubmissionDraft {
         let task_id = TaskId::new();
-        let question = parse_question_content(
+        let mut question = parse_question_content(
             CONTENT,
             "group:2001:unit-1:group-1",
             &["multichoice".to_owned()],
@@ -917,6 +918,9 @@ mod tests {
         .remove(0)
         .to_question(task_id)
         .unwrap();
+        question.metadata_sanitized["judge_types"] = serde_json::json!([
+            {"question_type": "multichoice", "reply_type": "multichoice"}
+        ]);
         let selected = SelectedAnswer {
             candidate_id: AnswerCandidateId::new(),
             question_id: question.id,

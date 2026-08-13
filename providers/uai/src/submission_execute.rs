@@ -14,7 +14,14 @@ use chrono::Utc;
 use serde_json::Value;
 use zeroize::Zeroize;
 
-use crate::{UaiSubmissionBuild, encrypted::ZeroizingJsonValue, metadata::development_metadata};
+use crate::{
+    UaiSubmissionBuild,
+    encrypted::ZeroizingJsonValue,
+    metadata::development_metadata,
+    runtime_settings::runtime_settings_schema,
+    submission_build::composite_selections_bound,
+    task_type::{audited_question_kind, question_kind_matches_task_type},
+};
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
@@ -158,7 +165,6 @@ impl UaiSubmissionQuestionPlan {
         item: &asterism_domain::SubmissionDraftItem,
         task_type: &str,
         expected_position: u32,
-        require_current_judges: bool,
     ) -> ProviderResult<Self> {
         if item.question.position != expected_position {
             return Err(invalid_input(
@@ -174,26 +180,7 @@ impl UaiSubmissionQuestionPlan {
                 unsupported("UAI submission execution requires a donor-audited numeric instance ID")
             })?
             .to_owned();
-        let answer_children = match (item.question.kind, &item.selected.answer) {
-            (QuestionKind::SingleChoice, NormalizedAnswer::Selections(values))
-                if values.len() == 1 && selections_exist(&item.question, values) =>
-            {
-                vec![values.clone()]
-            }
-            (QuestionKind::MultipleChoice, NormalizedAnswer::Selections(values))
-                if selections_exist(&item.question, values) =>
-            {
-                vec![values.clone()]
-            }
-            (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) => {
-                values.iter().map(|value| vec![value.clone()]).collect()
-            }
-            _ => {
-                return Err(invalid_input(
-                    "UAI submission execution answer does not match its Question kind",
-                ));
-            }
-        };
+        let answer_children = submission_answer_children(item)?;
         if answer_children.is_empty()
             || answer_children.len() > MAX_ANSWER_CHILDREN
             || answer_children
@@ -204,16 +191,13 @@ impl UaiSubmissionQuestionPlan {
                 "UAI submission execution has an invalid bounded answer shape",
             ));
         }
-        let judges = submission_judges(
-            item,
-            task_type,
-            answer_children.len(),
-            require_current_judges,
-        )?;
-        let expected_kind = question_kind(task_type).ok_or_else(|| {
-            unsupported("UAI submission execution does not support this Group task type")
-        })?;
-        if item.question.kind != expected_kind
+        let judges = submission_judges(item, answer_children.len())?;
+        if audited_question_kind(task_type).is_none() {
+            return Err(unsupported(
+                "UAI submission execution does not support this Group task type",
+            ));
+        }
+        if !question_kind_matches_task_type(item.question.kind, task_type)
             || item
                 .question
                 .metadata_sanitized
@@ -258,6 +242,101 @@ impl UaiSubmissionQuestionPlan {
     pub fn judges(&self) -> &[UaiSubmissionJudgePlan] {
         &self.judges
     }
+}
+
+fn submission_answer_children(
+    item: &asterism_domain::SubmissionDraftItem,
+) -> ProviderResult<Vec<Vec<String>>> {
+    match (item.question.kind, &item.selected.answer) {
+        (QuestionKind::SingleChoice, NormalizedAnswer::Selections(values))
+            if values.len() == 1 && selections_exist(&item.question, values) =>
+        {
+            Ok(vec![values.clone()])
+        }
+        (QuestionKind::MultipleChoice, NormalizedAnswer::Selections(values))
+            if selections_exist(&item.question, values) =>
+        {
+            Ok(vec![values.clone()])
+        }
+        (QuestionKind::ShortAnswer | QuestionKind::FillBlank, NormalizedAnswer::Texts(values)) => {
+            Ok(values.iter().map(|value| vec![value.clone()]).collect())
+        }
+        (QuestionKind::Ordering, NormalizedAnswer::Ordering(values)) => {
+            ordering_answer_children(item, values)
+        }
+        (QuestionKind::Matching, NormalizedAnswer::Pairs(values)) => {
+            matching_answer_children(item, values)
+        }
+        (QuestionKind::Composite, NormalizedAnswer::Composite(values))
+            if composite_selections_bound(&item.question, values) =>
+        {
+            values
+                .iter()
+                .map(|value| match value {
+                    NormalizedAnswer::Selections(selections) => Ok(selections.clone()),
+                    _ => Err(invalid_input(
+                        "UAI composite submission child is not a selection",
+                    )),
+                })
+                .collect()
+        }
+        _ => Err(invalid_input(
+            "UAI submission execution answer does not match its Question kind",
+        )),
+    }
+}
+
+fn ordering_answer_children(
+    item: &asterism_domain::SubmissionDraftItem,
+    values: &[String],
+) -> ProviderResult<Vec<Vec<String>>> {
+    let child_count = item
+        .question
+        .metadata_sanitized
+        .get("judge_types")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| {
+            invalid_input("UAI ordering submission requires current child judge metadata")
+        })?;
+    if child_count == 1 {
+        Ok(vec![values.to_vec()])
+    } else if child_count == values.len() {
+        Ok(values.iter().map(|value| vec![value.clone()]).collect())
+    } else {
+        Err(invalid_input(
+            "UAI ordering answer cardinality differs from current child metadata",
+        ))
+    }
+}
+
+fn matching_answer_children(
+    item: &asterism_domain::SubmissionDraftItem,
+    values: &[asterism_domain::AnswerPair],
+) -> ProviderResult<Vec<Vec<String>>> {
+    item.question
+        .metadata_sanitized
+        .get("matching_lefts")
+        .and_then(serde_json::Value::as_array)
+        .filter(|lefts| lefts.len() == values.len())
+        .ok_or_else(|| invalid_input("UAI matching submission has no exact bound left values"))?
+        .iter()
+        .map(|left| {
+            let left = left.as_str().ok_or_else(|| {
+                invalid_input("UAI matching submission has an invalid left value")
+            })?;
+            let mut matches = values.iter().filter(|pair| pair.left == left);
+            let pair = matches
+                .next()
+                .ok_or_else(|| invalid_input("UAI matching submission is missing a bound pair"))?;
+            if matches.next().is_some() {
+                return Err(invalid_input(
+                    "UAI matching submission contains duplicate bound pairs",
+                ));
+            }
+            Ok(vec![pair.right.clone()])
+        })
+        .collect()
 }
 
 impl UaiSubmissionJudgePlan {
@@ -329,10 +408,10 @@ impl UaiSubmissionPlan {
             || (task_types.len() != 1 && task_types.len() != draft.items.len())
             || task_types
                 .iter()
-                .any(|value| question_kind(value).is_none())
+                .any(|value| audited_question_kind(value).is_none())
         {
             return Err(unsupported(
-                "UAI submission execution requires one shared or one-per-Question simple type",
+                "UAI submission execution requires one shared or one-per-Question audited type",
             ));
         }
         let questions = draft
@@ -344,12 +423,7 @@ impl UaiSubmissionPlan {
                 let expected_position = u32::try_from(index + 1).map_err(|_| {
                     invalid_input("UAI submission execution Question position exceeds the limit")
                 })?;
-                UaiSubmissionQuestionPlan::from_draft_item(
-                    item,
-                    task_type,
-                    expected_position,
-                    draft.items.len() > 1,
-                )
+                UaiSubmissionQuestionPlan::from_draft_item(item, task_type, expected_position)
             })
             .collect::<ProviderResult<Vec<_>>>()?;
         Ok(Self { questions })
@@ -408,27 +482,15 @@ impl UaiSubmissionPlan {
 
 fn submission_judges(
     item: &asterism_domain::SubmissionDraftItem,
-    task_type: &str,
     expected_children: usize,
-    require_current_judges: bool,
 ) -> ProviderResult<Vec<UaiSubmissionJudgePlan>> {
-    if !require_current_judges {
-        return Ok((0..expected_children)
-            .map(|_| UaiSubmissionJudgePlan {
-                question_type: task_type.replace('_', "-"),
-                reply_type: "objective".to_owned(),
-            })
-            .collect());
-    }
     let judges = item
         .question
         .metadata_sanitized
         .get("judge_types")
         .and_then(serde_json::Value::as_array)
         .filter(|values| values.len() == expected_children)
-        .ok_or_else(|| {
-            unsupported("UAI multi-Question submission requires exact current child judge metadata")
-        })?;
+        .ok_or_else(|| unsupported("UAI submission requires exact current child judge metadata"))?;
     judges
         .iter()
         .map(|value| {
@@ -508,7 +570,7 @@ impl UaiSubmissionExecute {
     ) -> ProviderResult<Self> {
         Ok(Self {
             metadata: development_metadata()?,
-            runtime_settings: ProviderRuntimeSettingsSchema::default(),
+            runtime_settings: runtime_settings_schema(),
             details,
             preview: UaiSubmissionBuild::try_new()?,
             transport,
@@ -661,7 +723,7 @@ fn validate_fresh_detail(
         .map(|value| {
             value
                 .as_str()
-                .filter(|value| question_kind(value).is_some())
+                .filter(|value| audited_question_kind(value).is_some())
                 .map(str::to_owned)
                 .ok_or_else(|| unsupported("UAI fresh Group task type is not executable"))
         })
@@ -675,15 +737,6 @@ fn selections_exist(question: &asterism_domain::Question, values: &[String]) -> 
         .map(|option| option.id.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     !values.is_empty() && values.iter().all(|value| options.contains(value.as_str()))
-}
-
-const fn question_kind(task_type: &str) -> Option<QuestionKind> {
-    match task_type.as_bytes() {
-        b"single-choice" => Some(QuestionKind::SingleChoice),
-        b"multichoice" => Some(QuestionKind::MultipleChoice),
-        b"short_answer" => Some(QuestionKind::ShortAnswer),
-        _ => None,
-    }
 }
 
 struct GroupIdentity {
@@ -795,11 +848,12 @@ fn internal(message: &'static str) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Mutex};
+    use std::sync::Mutex;
 
     use asterism_domain::{
-        AnswerCandidateId, AnswerSource, ProviderAccountId, ProviderId, QuestionSnapshotId,
-        SecretId, SelectedAnswer, SubmissionDraftId, SubmissionDraftItem, TaskId,
+        AnswerCandidateId, AnswerPair, AnswerSource, ProviderAccountId, ProviderId,
+        QuestionSnapshotId, SecretId, SelectedAnswer, SubmissionDraftId, SubmissionDraftItem,
+        TaskId,
     };
     use asterism_provider_api::{ProviderExecutionLog, ProviderProgress, RemoteTaskDetail};
 
@@ -1148,6 +1202,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_question_missing_current_judge_metadata_fails_before_mutation() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
+        let mut draft = draft().await;
+        draft.items[0].question.metadata_sanitized["judge_types"] = serde_json::Value::Null;
+        let questions = [draft.items[0].question.clone()];
+        let selected = [draft.items[0].selected.clone()];
+        draft.payload_preview = UaiSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &questions,
+                &selected,
+            )
+            .await
+            .unwrap();
+        let error = capability
+            .execute_submission(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &draft,
+                &runtime_settings(),
+                &NoopEvents,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn stale_preview_fails_before_mutation() {
         let transport = Arc::new(FixtureTransport::default());
         let capability =
@@ -1234,7 +1322,7 @@ mod tests {
 
     async fn draft() -> SubmissionDraft {
         let task_id = TaskId::new();
-        let question = parse_question_content(
+        let mut question = parse_question_content(
             CONTENT,
             "group:2001:unit-1:group-1",
             &["multichoice".to_owned()],
@@ -1244,6 +1332,9 @@ mod tests {
         .remove(0)
         .to_question(task_id)
         .unwrap();
+        question.metadata_sanitized["judge_types"] = serde_json::json!([
+            {"question_type": "multichoice", "reply_type": "multichoice"}
+        ]);
         let selected = SelectedAnswer {
             candidate_id: AnswerCandidateId::new(),
             question_id: question.id,
@@ -1333,11 +1424,250 @@ mod tests {
         }
     }
 
-    fn runtime_settings() -> ResolvedProviderRuntimeSettings {
-        ResolvedProviderRuntimeSettings {
-            schema_version: 1,
-            values: BTreeMap::new(),
+    #[tokio::test]
+    async fn fillblank_plan_preserves_each_child_and_current_judge_type() {
+        let task_id = TaskId::new();
+        let question = asterism_domain::Question {
+            id: asterism_domain::QuestionId::new(),
+            task_id,
+            remote_question_id: Some("2001".to_owned()),
+            kind: QuestionKind::FillBlank,
+            stem: "Fill every blank".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({
+                "schema": "uai.encrypted-question.v1",
+                "task_type": "material-banked-cloze",
+                "remote_task_id": "group:2001:unit-1:group-fillblank",
+                "judge_types": [
+                    {"question_type": "material-banked-cloze", "reply_type": "bankedcloze"},
+                    {"question_type": "material-banked-cloze", "reply_type": "bankedcloze"},
+                ],
+            }),
+            position: 1,
+        };
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer: NormalizedAnswer::Texts(vec!["first".to_owned(), "second".to_owned()]),
+            source: AnswerSource::ProviderNative,
+            confidence: None,
+        };
+        let preview = UaiSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context(),
+                "group:2001:unit-1:group-fillblank",
+                std::slice::from_ref(&question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("uai").unwrap(),
+            provider_version: development_metadata().unwrap().implementation_version,
+            items: vec![SubmissionDraftItem { question, selected }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        };
+        let plan =
+            UaiSubmissionPlan::from_draft(&draft, &["material-banked-cloze".to_owned()]).unwrap();
+
+        assert_eq!(
+            plan.questions()[0].answer_children(),
+            &[vec!["first".to_owned()], vec!["second".to_owned()]]
+        );
+        assert!(
+            plan.questions()[0]
+                .judges()
+                .iter()
+                .all(|judge| judge.question_type() == "material-banked-cloze"
+                    && judge.reply_type() == "bankedcloze")
+        );
+    }
+
+    #[tokio::test]
+    async fn sequence_plan_preserves_order_and_child_cardinality() {
+        let task_id = TaskId::new();
+        let question = asterism_domain::Question {
+            id: asterism_domain::QuestionId::new(),
+            task_id,
+            remote_question_id: Some("4001".to_owned()),
+            kind: QuestionKind::Ordering,
+            stem: "Put the clauses in order".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({
+                "schema": "uai.encrypted-question.v1",
+                "task_type": "sequence",
+                "remote_task_id": "group:2001:unit-1:group-sequence",
+                "judge_types": [
+                    {"question_type": "sequence", "reply_type": "sequence"},
+                    {"question_type": "sequence", "reply_type": "sequence"},
+                ],
+            }),
+            position: 1,
+        };
+        let draft = typed_draft(
+            question,
+            NormalizedAnswer::Ordering(vec!["second".to_owned(), "first".to_owned()]),
+            "group:2001:unit-1:group-sequence",
+        )
+        .await;
+        let plan = UaiSubmissionPlan::from_draft(&draft, &["sequence".to_owned()]).unwrap();
+
+        assert_eq!(
+            plan.questions()[0].answer_children(),
+            &[vec!["second".to_owned()], vec!["first".to_owned()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_plan_rebinds_pairs_to_question_left_order() {
+        let task_id = TaskId::new();
+        let question = asterism_domain::Question {
+            id: asterism_domain::QuestionId::new(),
+            task_id,
+            remote_question_id: Some("5001".to_owned()),
+            kind: QuestionKind::Matching,
+            stem: "Match each expression".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({
+                "schema": "uai.encrypted-question.v1",
+                "task_type": "basic-scoop-content",
+                "remote_task_id": "group:2001:unit-1:group-matching",
+                "matching_lefts": ["first left", "second left"],
+                "judge_types": [
+                    {"question_type": "basic", "reply_type": "scoop"},
+                    {"question_type": "basic", "reply_type": "scoop"},
+                ],
+            }),
+            position: 1,
+        };
+        let draft = typed_draft(
+            question,
+            NormalizedAnswer::Pairs(vec![
+                AnswerPair {
+                    left: "second left".to_owned(),
+                    right: "second right".to_owned(),
+                },
+                AnswerPair {
+                    left: "first left".to_owned(),
+                    right: "first right".to_owned(),
+                },
+            ]),
+            "group:2001:unit-1:group-matching",
+        )
+        .await;
+        let plan =
+            UaiSubmissionPlan::from_draft(&draft, &["basic-scoop-content".to_owned()]).unwrap();
+
+        assert_eq!(
+            plan.questions()[0].answer_children(),
+            &[
+                vec!["first right".to_owned()],
+                vec!["second right".to_owned()]
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_choice_plan_preserves_each_child_selection() {
+        let task_id = TaskId::new();
+        let question = asterism_domain::Question {
+            id: asterism_domain::QuestionId::new(),
+            task_id,
+            remote_question_id: Some("8001".to_owned()),
+            kind: QuestionKind::Composite,
+            stem: "Answer both parts".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({
+                "schema": "uai.encrypted-question.v1",
+                "task_type": "multichoice",
+                "remote_task_id": "group:2001:unit-1:group-composite-choice",
+                "judge_types": [
+                    {"question_type": "basic", "reply_type": "singlechoice"},
+                    {"question_type": "basic", "reply_type": "multichoice"},
+                ],
+                "composite_children": [
+                    {
+                        "kind": "single_choice",
+                        "options": [
+                            {"id":"A","content":"First A","attachments":[],"metadata_sanitized":{}},
+                            {"id":"B","content":"First B","attachments":[],"metadata_sanitized":{}},
+                        ],
+                    },
+                    {
+                        "kind": "multiple_choice",
+                        "options": [
+                            {"id":"A","content":"Second A","attachments":[],"metadata_sanitized":{}},
+                            {"id":"B","content":"Second B","attachments":[],"metadata_sanitized":{}},
+                        ],
+                    },
+                ],
+            }),
+            position: 1,
+        };
+        let draft = typed_draft(
+            question,
+            NormalizedAnswer::Composite(vec![
+                NormalizedAnswer::Selections(vec!["B".to_owned()]),
+                NormalizedAnswer::Selections(vec!["A".to_owned(), "B".to_owned()]),
+            ]),
+            "group:2001:unit-1:group-composite-choice",
+        )
+        .await;
+        let plan = UaiSubmissionPlan::from_draft(&draft, &["multichoice".to_owned()]).unwrap();
+
+        assert_eq!(
+            plan.questions()[0].answer_children(),
+            &[vec!["B".to_owned()], vec!["A".to_owned(), "B".to_owned()]]
+        );
+        assert_eq!(plan.questions()[0].judges().len(), 2);
+    }
+
+    async fn typed_draft(
+        question: asterism_domain::Question,
+        answer: NormalizedAnswer,
+        remote_task_id: &str,
+    ) -> SubmissionDraft {
+        let task_id = question.task_id;
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer,
+            source: AnswerSource::ProviderNative,
+            confidence: None,
+        };
+        let preview = UaiSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context(),
+                remote_task_id,
+                std::slice::from_ref(&question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("uai").unwrap(),
+            provider_version: development_metadata().unwrap().implementation_version,
+            items: vec![SubmissionDraftItem { question, selected }],
+            payload_preview: preview,
+            created_at: Utc::now(),
         }
+    }
+
+    fn runtime_settings() -> ResolvedProviderRuntimeSettings {
+        runtime_settings_schema().resolve(None, None, None).unwrap()
     }
 
     fn context() -> ProviderContext {

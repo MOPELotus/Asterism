@@ -9,7 +9,9 @@ use crate::course_inventory::{
     UaiCourseContext, course_resource_id_from_remote, invalid_response, protocol_drift,
     required_remote_component, required_text,
 };
-use crate::{question::supports_question_read, resource_execution::supports_preset_execution};
+use crate::{
+    question::supports_question_read, resource_execution::supports_empty_completion_execution,
+};
 
 const MAX_TREE_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_NESTED_COURSE_BYTES: usize = 4 * 1_024 * 1_024;
@@ -196,8 +198,12 @@ fn build_task(
         .ok_or_else(|| protocol_drift("UAI Group Task is not nested under a Unit"))?;
     let task_types = task_types(object.get("base"))?;
     let question_count = question_count(object.get("question_num"))?;
-    let mut capabilities = vec![TaskCapability::ProgressRead, TaskCapability::DurationRead];
-    if supports_preset_execution(&task_types) {
+    let mut capabilities = vec![
+        TaskCapability::ProgressRead,
+        TaskCapability::DurationRead,
+        TaskCapability::BrowserBridge,
+    ];
+    if supports_empty_completion_execution(&task_types, question_count) {
         capabilities.extend([
             TaskCapability::ResourceExecution,
             TaskCapability::ExecutionVerify,
@@ -337,6 +343,7 @@ mod tests {
             vec![
                 TaskCapability::ProgressRead,
                 TaskCapability::DurationRead,
+                TaskCapability::BrowserBridge,
                 TaskCapability::ResourceExecution,
                 TaskCapability::ExecutionVerify,
             ]
@@ -400,66 +407,21 @@ mod tests {
         let context = parse_course_context(&course, DETAIL).unwrap();
         let tree = TREE.replace("rich-text-read", "single-choice");
         let tasks = parse_task_inventory(&course, &context, &tree).unwrap();
-        assert!(
-            tasks[0]
-                .capabilities
-                .contains(&TaskCapability::QuestionInventory)
-        );
-        assert!(
-            tasks[0]
-                .capabilities
-                .contains(&TaskCapability::QuestionParse)
-        );
-        assert!(
-            tasks[0]
-                .capabilities
-                .contains(&TaskCapability::AnswerResolve)
-        );
-        assert!(
-            tasks[0]
-                .capabilities
-                .contains(&TaskCapability::SubmissionBuild)
-        );
-        assert!(
-            tasks[0]
-                .capabilities
-                .contains(&TaskCapability::SubmissionExecute)
-        );
-        assert!(
-            tasks[0]
-                .capabilities
-                .contains(&TaskCapability::SubmissionVerify)
-        );
-        assert!(
-            !tasks[1]
-                .capabilities
-                .contains(&TaskCapability::QuestionInventory)
-        );
-        assert!(
-            !tasks[1]
-                .capabilities
-                .contains(&TaskCapability::QuestionParse)
-        );
-        assert!(
-            !tasks[1]
-                .capabilities
-                .contains(&TaskCapability::AnswerResolve)
-        );
-        assert!(
-            !tasks[1]
-                .capabilities
-                .contains(&TaskCapability::SubmissionBuild)
-        );
-        assert!(
-            !tasks[1]
-                .capabilities
-                .contains(&TaskCapability::SubmissionExecute)
-        );
-        assert!(
-            !tasks[1]
-                .capabilities
-                .contains(&TaskCapability::SubmissionVerify)
-        );
+        assert_question_capabilities(&tasks[0], true);
+
+        let fillblank = TREE.replace("rich-text-read", "material-banked-cloze");
+        let fillblank_tasks = parse_task_inventory(&course, &context, &fillblank).unwrap();
+        for capability in [
+            TaskCapability::QuestionInventory,
+            TaskCapability::QuestionParse,
+            TaskCapability::AnswerResolve,
+            TaskCapability::SubmissionBuild,
+            TaskCapability::SubmissionExecute,
+            TaskCapability::SubmissionVerify,
+        ] {
+            assert!(fillblank_tasks[0].capabilities.contains(&capability));
+        }
+        assert_question_capabilities(&tasks[1], false);
 
         let multiple = TREE.replace(
             r#"\"base\":\"rich-text-read\",\"question_num\":1"#,
@@ -501,8 +463,21 @@ mod tests {
         );
     }
 
+    fn assert_question_capabilities(task: &RemoteTask, expected: bool) {
+        for capability in [
+            TaskCapability::QuestionInventory,
+            TaskCapability::QuestionParse,
+            TaskCapability::AnswerResolve,
+            TaskCapability::SubmissionBuild,
+            TaskCapability::SubmissionExecute,
+            TaskCapability::SubmissionVerify,
+        ] {
+            assert_eq!(task.capabilities.contains(&capability), expected);
+        }
+    }
+
     #[test]
-    fn only_audited_preset_groups_advertise_verified_resource_execution() {
+    fn only_audited_empty_completion_groups_advertise_verified_resource_execution() {
         let course = parse_course_inventory(COURSES).unwrap().remove(0);
         let context = parse_course_context(&course, DETAIL).unwrap();
         let tasks = parse_task_inventory(&course, &context, TREE).unwrap();
@@ -540,6 +515,36 @@ mod tests {
             !tasks[1]
                 .capabilities
                 .contains(&TaskCapability::ResourceExecution)
+        );
+
+        let exit_ticket = TREE
+            .replace("rich-text-read", "exit-ticket")
+            .replace("vocabulary,input", "single-choice");
+        let tasks = parse_task_inventory(&course, &context, &exit_ticket).unwrap();
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ResourceExecution)
+        );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ExecutionVerify)
+        );
+
+        let oral = TREE
+            .replace("rich-text-read", "oral-sentence")
+            .replace("vocabulary,input", "single-choice");
+        let tasks = parse_task_inventory(&course, &context, &oral).unwrap();
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ResourceExecution)
+        );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ExecutionVerify)
         );
     }
 }

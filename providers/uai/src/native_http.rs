@@ -6,6 +6,7 @@ use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteCourse,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 use reqwest::{
     Client, Response, StatusCode, Url,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER},
@@ -14,19 +15,24 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     UaiAnswerDocument, UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport,
+    UaiDiscussionBinding, UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport,
     UaiDurationDocument, UaiDurationTransport, UaiInventoryDocument, UaiJwtSession,
     UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiProgressDocument,
     UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport, UaiSessionResolver,
     UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
-    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiVerificationDocument,
-    UaiVerificationTransport,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
+    UaiUploadTransport, UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
+    build_discussion_reply_page_request, build_discussion_reply_request,
+    build_discussion_topic_request, build_upload_multipart,
     course_inventory::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
         required_remote_component,
     },
     encrypted::ZeroizingJsonValue,
-    parse_course_context, parse_group_progress, parse_submission_receipt,
+    parse_course_context, parse_discussion_binding, parse_discussion_reply_page,
+    parse_discussion_reply_receipt, parse_discussion_topic, parse_group_progress,
+    parse_submission_receipt, parse_upload_grant, parse_upload_result,
     submission_verify::validate_verification_course_binding,
     user_identity::parse_user_identity,
 };
@@ -35,6 +41,9 @@ const COURSE_LIST_URL: &str = "https://uai.unipus.cn/api/cmgt/course/getCourseLi
 const USER_INFO_URL: &str = "https://uai.unipus.cn/api/account/user/info";
 const UAI_ORIGIN: &str = "https://uai.unipus.cn";
 const UCONTENT_ORIGIN: &str = "https://ucontent.unipus.cn";
+const UCLOUD_ORIGIN: &str = "https://ucloud.unipus.cn";
+const UCONTENT_REFERER: &str = "https://ucontent.unipus.cn/";
+const QINIU_UPLOAD_URL: &str = "https://upload-z1.qiniup.com/";
 const MAX_INVENTORY_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_PROGRESS_RESPONSE_BYTES: usize = 1_024 * 1_024;
 const MAX_USER_INFO_RESPONSE_BYTES: usize = 64 * 1_024;
@@ -44,6 +53,15 @@ const MAX_ANSWER_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_SUBMISSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
 const MAX_SUBMISSION_REQUEST_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_VERIFICATION_RESPONSE_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_DISCUSSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
+const MAX_UPLOAD_RESPONSE_BYTES: usize = 64 * 1_024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EmptyCompletionPreflight {
+    Preset,
+    ExitTicket,
+    Oral,
+}
 
 /// Native, non-redirecting UAI read and submission transport.
 pub struct NativeUaiInventoryTransport {
@@ -394,6 +412,64 @@ impl NativeUaiInventoryTransport {
         unit_id: &str,
         group_id: &str,
     ) -> ProviderResult<UaiPresetCompletionResult> {
+        self.complete_empty_with_session(
+            session,
+            course_resource_id,
+            unit_id,
+            group_id,
+            EmptyCompletionPreflight::Preset,
+            None,
+        )
+        .await
+    }
+
+    async fn complete_exit_ticket_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        self.complete_empty_with_session(
+            session,
+            course_resource_id,
+            unit_id,
+            group_id,
+            EmptyCompletionPreflight::ExitTicket,
+            None,
+        )
+        .await
+    }
+
+    async fn complete_oral_empty_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        task_type: &str,
+        question_count: u32,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        self.complete_empty_with_session(
+            session,
+            course_resource_id,
+            unit_id,
+            group_id,
+            EmptyCompletionPreflight::Oral,
+            Some((task_type, question_count)),
+        )
+        .await
+    }
+
+    async fn complete_empty_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        preflight: EmptyCompletionPreflight,
+        oral: Option<(&str, u32)>,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
         let course_resource_id = required_remote_component(
             Some(&serde_json::Value::String(course_resource_id.to_owned())),
             "preset completion Course-resource ID",
@@ -440,15 +516,29 @@ impl NativeUaiInventoryTransport {
         let progress = UaiProgressDocument::try_new(
             read_json_response(progress_response, ResponseRoute::Progress).await?,
         )?;
-        if validate_preset_progress_target(progress.as_str(), &unit_id, &group_id)? {
+        if validate_empty_completion_progress_target(
+            progress.as_str(),
+            &unit_id,
+            &group_id,
+            preflight,
+        )? {
             return Ok(UaiPresetCompletionResult::AlreadyCompleted);
         }
 
-        let body = Zeroizing::new(build_preset_submission_body(
-            route.course_instance_id(),
-            session.expose_open_id(),
-            &group_id,
-        )?);
+        let body = Zeroizing::new(match oral {
+            Some((task_type, question_count)) => build_oral_empty_submission_body(
+                route.course_instance_id(),
+                session.expose_open_id(),
+                &group_id,
+                task_type,
+                question_count,
+            )?,
+            None => build_preset_submission_body(
+                route.course_instance_id(),
+                session.expose_open_id(),
+                &group_id,
+            )?,
+        });
         let response = self
             .client
             .post(submission_url()?)
@@ -466,6 +556,222 @@ impl NativeUaiInventoryTransport {
         )?;
         parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
             .map(UaiPresetCompletionResult::Submitted)
+    }
+
+    async fn resolve_discussion_binding_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiDiscussionBinding> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "discussion Course-resource ID",
+        )?;
+        let group_id = required_remote_component(
+            Some(&serde_json::Value::String(group_id.to_owned())),
+            "discussion Group ID",
+        )?;
+        let courses = self.fetch_courses_with_session(session).await?;
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let mut user_info = self
+            .send_get_with_session(session, static_url(USER_INFO_URL)?, ResponseRoute::UserInfo)
+            .await?;
+        let binding = parse_discussion_binding(
+            courses.as_str(),
+            detail.as_str(),
+            user_info.as_bytes(),
+            &course_resource_id,
+            &group_id,
+        );
+        user_info.zeroize();
+        binding
+    }
+
+    async fn send_discussion_post_with_session(
+        &self,
+        session: &UaiJwtSession,
+        url: Url,
+        body: &str,
+        route: ResponseRoute,
+        include_referer: bool,
+    ) -> ProviderResult<String> {
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let mut request = self
+            .client
+            .post(url)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .header("u-app-id", "1501")
+            .header("u-platform", "2");
+        if include_referer {
+            request = request.header("Referer", UCONTENT_REFERER);
+        }
+        let response = request
+            .body(body.as_bytes().to_vec())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        read_json_response(response, route).await
+    }
+
+    async fn find_discussion_topic_with_session(
+        &self,
+        session: &UaiJwtSession,
+        binding: &UaiDiscussionBinding,
+    ) -> ProviderResult<Option<u64>> {
+        let body = build_discussion_topic_request(binding)?;
+        let mut document = self
+            .send_discussion_post_with_session(
+                session,
+                discussion_topic_url()?,
+                body.as_str(),
+                ResponseRoute::DiscussionTopic,
+                false,
+            )
+            .await?;
+        let topic = parse_discussion_topic(&document);
+        document.zeroize();
+        topic
+    }
+
+    async fn read_discussion_replies_with_session(
+        &self,
+        session: &UaiJwtSession,
+        topic_id: u64,
+        page_number: u32,
+        page_size: u32,
+    ) -> ProviderResult<UaiDiscussionReplyPage> {
+        let body = build_discussion_reply_page_request(topic_id, page_number, page_size)?;
+        let mut document = self
+            .send_discussion_post_with_session(
+                session,
+                discussion_replies_url()?,
+                body.as_str(),
+                ResponseRoute::DiscussionReplies,
+                false,
+            )
+            .await?;
+        let page = parse_discussion_reply_page(&document, page_size);
+        document.zeroize();
+        page
+    }
+
+    async fn submit_discussion_reply_with_session(
+        &self,
+        session: &UaiJwtSession,
+        draft: &UaiDiscussionReplyDraft,
+    ) -> ProviderResult<SubmissionReceipt> {
+        let body = build_discussion_reply_request(draft)?;
+        let mut document = self
+            .send_discussion_post_with_session(
+                session,
+                discussion_reply_mutation_url()?,
+                body.as_str(),
+                ResponseRoute::DiscussionReplyMutation,
+                true,
+            )
+            .await?;
+        let receipt = parse_discussion_reply_receipt(&document);
+        document.zeroize();
+        receipt
+    }
+
+    async fn request_upload_grant_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        group_id: &str,
+        artifact: &UaiUploadArtifact,
+    ) -> ProviderResult<UaiUploadGrant> {
+        let course_resource_id = required_remote_component(
+            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            "upload Course-resource ID",
+        )?;
+        let _group_id = required_remote_component(
+            Some(&serde_json::Value::String(group_id.to_owned())),
+            "upload Group ID",
+        )?;
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let mut user_info = self
+            .send_get_with_session(session, static_url(USER_INFO_URL)?, ResponseRoute::UserInfo)
+            .await?;
+        let identity = parse_user_identity(user_info.as_bytes());
+        user_info.zeroize();
+        let identity = identity?;
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let response = self
+            .client
+            .get(upload_grant_url(
+                route.course_instance_id(),
+                identity.app_user_id(),
+                artifact,
+            )?)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .header("Referer", UCONTENT_REFERER)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let mut document = read_json_response(response, ResponseRoute::UploadGrant).await?;
+        let grant = parse_upload_grant(&document);
+        document.zeroize();
+        grant
+    }
+
+    async fn upload_artifact_with_session(
+        &self,
+        grant: &UaiUploadGrant,
+        artifact: &UaiUploadArtifact,
+    ) -> ProviderResult<String> {
+        let multipart = build_upload_multipart(grant, artifact)?;
+        let response = self
+            .client
+            .post(static_url(QINIU_UPLOAD_URL)?)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, multipart.content_type())
+            .body(multipart.expose_body().to_vec())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let mut document = read_json_response(response, ResponseRoute::ObjectUpload).await?;
+        let key = parse_upload_result(&document, grant.file_key());
+        document.zeroize();
+        key
     }
 
     async fn fetch_verification_with_session(
@@ -707,6 +1013,195 @@ impl UaiPresetCompletionTransport for NativeUaiInventoryTransport {
             result => result,
         }
     }
+
+    async fn complete_exit_ticket(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .complete_exit_ticket_with_session(&session, course_resource_id, unit_id, group_id)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.complete_exit_ticket_with_session(
+                    &session,
+                    course_resource_id,
+                    unit_id,
+                    group_id,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+
+    async fn complete_oral_empty(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        task_type: &str,
+        question_count: u32,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .complete_oral_empty_with_session(
+                &session,
+                course_resource_id,
+                unit_id,
+                group_id,
+                task_type,
+                question_count,
+            )
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.complete_oral_empty_with_session(
+                    &session,
+                    course_resource_id,
+                    unit_id,
+                    group_id,
+                    task_type,
+                    question_count,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
+impl UaiDiscussionTransport for NativeUaiInventoryTransport {
+    async fn resolve_discussion_binding(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiDiscussionBinding> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .resolve_discussion_binding_with_session(&session, course_resource_id, group_id)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.resolve_discussion_binding_with_session(&session, course_resource_id, group_id)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn find_discussion_topic(
+        &self,
+        context: &ProviderContext,
+        binding: &UaiDiscussionBinding,
+    ) -> ProviderResult<Option<u64>> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .find_discussion_topic_with_session(&session, binding)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.find_discussion_topic_with_session(&session, binding)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn read_discussion_replies(
+        &self,
+        context: &ProviderContext,
+        topic_id: u64,
+        page_number: u32,
+        page_size: u32,
+    ) -> ProviderResult<UaiDiscussionReplyPage> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .read_discussion_replies_with_session(&session, topic_id, page_number, page_size)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.read_discussion_replies_with_session(
+                    &session,
+                    topic_id,
+                    page_number,
+                    page_size,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+
+    async fn submit_discussion_reply(
+        &self,
+        context: &ProviderContext,
+        draft: &UaiDiscussionReplyDraft,
+    ) -> ProviderResult<SubmissionReceipt> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .submit_discussion_reply_with_session(&session, draft)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.submit_discussion_reply_with_session(&session, draft)
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
+impl UaiUploadTransport for NativeUaiInventoryTransport {
+    async fn request_upload_grant(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        group_id: &str,
+        artifact: &UaiUploadArtifact,
+    ) -> ProviderResult<UaiUploadGrant> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .request_upload_grant_with_session(&session, course_resource_id, group_id, artifact)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.request_upload_grant_with_session(
+                    &session,
+                    course_resource_id,
+                    group_id,
+                    artifact,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+
+    async fn upload_artifact(
+        &self,
+        context: &ProviderContext,
+        grant: &UaiUploadGrant,
+        artifact: &UaiUploadArtifact,
+    ) -> ProviderResult<String> {
+        let (_session, _renewed) = self.session_for_operation(context).await?;
+        self.upload_artifact_with_session(grant, artifact).await
+    }
 }
 
 #[async_trait]
@@ -766,6 +1261,11 @@ enum ResponseRoute {
     StandardAnswer,
     Submission,
     SubmissionVerification,
+    DiscussionTopic,
+    DiscussionReplies,
+    DiscussionReplyMutation,
+    UploadGrant,
+    ObjectUpload,
 }
 
 impl ResponseRoute {
@@ -781,6 +1281,11 @@ impl ResponseRoute {
             Self::StandardAnswer => "standard answer",
             Self::Submission => "submission",
             Self::SubmissionVerification => "submission verification",
+            Self::DiscussionTopic => "discussion topic",
+            Self::DiscussionReplies => "discussion replies",
+            Self::DiscussionReplyMutation => "discussion reply mutation",
+            Self::UploadGrant => "upload grant",
+            Self::ObjectUpload => "object upload",
         }
     }
 
@@ -793,6 +1298,10 @@ impl ResponseRoute {
             Self::StandardAnswer => MAX_ANSWER_RESPONSE_BYTES,
             Self::Submission => MAX_SUBMISSION_RESPONSE_BYTES,
             Self::SubmissionVerification => MAX_VERIFICATION_RESPONSE_BYTES,
+            Self::DiscussionTopic | Self::DiscussionReplies | Self::DiscussionReplyMutation => {
+                MAX_DISCUSSION_RESPONSE_BYTES
+            }
+            Self::UploadGrant | Self::ObjectUpload => MAX_UPLOAD_RESPONSE_BYTES,
             Self::CourseList | Self::CourseDetail | Self::TaskTree => MAX_INVENTORY_RESPONSE_BYTES,
         }
     }
@@ -1014,6 +1523,33 @@ fn submission_url() -> ProviderResult<Url> {
     )
 }
 
+fn discussion_topic_url() -> ProviderResult<Url> {
+    route_url(UCLOUD_ORIGIN, &["api", "bbs", "utopic", "page"])
+}
+
+fn discussion_replies_url() -> ProviderResult<Url> {
+    route_url(UCLOUD_ORIGIN, &["api", "bbs", "ureply", "top", "page"])
+}
+
+fn discussion_reply_mutation_url() -> ProviderResult<Url> {
+    route_url(UCLOUD_ORIGIN, &["api", "bbs", "ureply", "add"])
+}
+
+fn upload_grant_url(
+    course_instance_id: &str,
+    user_id: &str,
+    artifact: &UaiUploadArtifact,
+) -> ProviderResult<Url> {
+    let mut url = route_url(UCONTENT_ORIGIN, &["media", "user_resource", "cms", "token"])?;
+    url.query_pairs_mut()
+        .append_pair("name", artifact.filename())
+        .append_pair("filetype", "audio")
+        .append_pair("isconvert", "0")
+        .append_pair("courseid", course_instance_id)
+        .append_pair("userid", user_id);
+    Ok(url)
+}
+
 fn verification_url(
     course_instance_id: &str,
     group_id: &str,
@@ -1144,16 +1680,128 @@ fn build_preset_submission_body(
     .map_err(|_| static_submission_error())
 }
 
-fn validate_preset_progress_target(
+fn build_oral_empty_submission_body(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+    task_type: &str,
+    question_count: u32,
+) -> ProviderResult<String> {
+    if !matches!(
+        task_type,
+        "oral-sentence" | "video-dub" | "oral-personal-state"
+    ) || !(1..=128).contains(&question_count)
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI oral empty submission received an unsupported bounded shape",
+        ));
+    }
+    let question = build_oral_placeholder_question(group_id, question_count)?;
+    let questions = vec![question; question_count as usize];
+    let completed = vec![true; question_count as usize];
+    let judge = serde_json::json!({
+        "value": "",
+        "question_type": task_type.replace('_', "-"),
+        "reply_type": task_type.replace('_', "-"),
+        "versions": {"course": 123_290, "group": 1, "template": 1, "answer": 3, "content": 0},
+        "payloads": [],
+    });
+    let judges = serde_json::to_string(&vec![judge; question_count as usize])
+        .map_err(|_| static_submission_error())?;
+    let mut encoded = serde_json::to_string(&serde_json::json!({
+        "quesDatas": questions,
+        "groupId": group_id,
+        "isCompleted": completed,
+        "thirdPartyJudges": judges,
+        "submitType": 1,
+        "hideLoading": false,
+        "associationGroupId": "",
+        "courseId": course_instance_id,
+        "openId": open_id,
+        "version": "default",
+    }))
+    .map_err(|_| static_submission_error())?;
+    if encoded.is_empty() || encoded.len() > MAX_SUBMISSION_REQUEST_BYTES {
+        encoded.zeroize();
+        return Err(static_submission_error());
+    }
+    Ok(encoded)
+}
+
+fn build_oral_placeholder_question(
+    group_id: &str,
+    question_count: u32,
+) -> ProviderResult<serde_json::Value> {
+    let now = Utc::now();
+    let now_seconds = now.timestamp();
+    let completion_deadline = now_seconds
+        .checked_add(30 * 24 * 60 * 60)
+        .ok_or_else(static_submission_error)?;
+    let submit_info = serde_json::json!({
+        "group_id": group_id,
+        "strategyId": 0,
+        "record_grade": {"scorePct": 1.0, "ts": now.timestamp_millis()},
+        "state": {
+            "expired": false, "lastSubmit": now_seconds, "not_start": false,
+            "real_score_pct": "1.0", "score": vec![1; question_count as usize],
+            "score_avg": "100", "score_pct": "1.0", "state": 0,
+        },
+        "strategy": {
+            "endTime": completion_deadline, "record_every_submit": false,
+            "record_max_submit": false, "required": true, "startTime": now_seconds,
+            "task_mini_score_pct": 0,
+        },
+        "version": now_seconds.to_string(), "pass": true,
+    });
+    let course_answer = serde_json::json!({
+        "isStudy": false, "groupId": group_id, "quesId": "0", "isRight": [true],
+        "isDone": [true], "subPct": [1], "counted": [true], "isObjective": [true],
+        "firstSubmit": false, "submitInfo": submit_info,
+    });
+    let course_answer_map = serde_json::json!({"0": course_answer});
+    let answer = serde_json::to_string(&serde_json::json!({
+        "value": [],
+        "children": [{"value": [""], "isDone": true, "isRight": true, "replyCategory": "objective"}],
+        "progress": {}, "record": {"url": ""},
+    }))
+    .map_err(|_| static_submission_error())?;
+    let context = serde_json::to_string(&serde_json::json!({"state": "submitted"}))
+        .map_err(|_| static_submission_error())?;
+    Ok(serde_json::json!({
+        "courseAnswer": course_answer_map["0"], "courseAnswerMap": course_answer_map,
+        "instanceId": "0", "answer": answer, "context": context,
+        "contextVersion": 1, "answerVersion": 0,
+    }))
+}
+
+fn validate_empty_completion_progress_target(
     document: &str,
     expected_unit_id: &str,
     expected_group_id: &str,
+    preflight: EmptyCompletionPreflight,
 ) -> ProviderResult<bool> {
     let snapshot = parse_group_progress(document, expected_unit_id, expected_group_id)?;
-    if !matches!(snapshot.tab_type(), Some("text" | "video")) {
+    let tab_type_matches = match preflight {
+        EmptyCompletionPreflight::Preset => matches!(snapshot.tab_type(), Some("text" | "video")),
+        EmptyCompletionPreflight::ExitTicket | EmptyCompletionPreflight::Oral => {
+            snapshot.tab_type() == Some("task")
+        }
+    };
+    if !tab_type_matches {
         return Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
-            "UAI preset completion requires a fresh text or video progress leaf",
+            match preflight {
+                EmptyCompletionPreflight::Preset => {
+                    "UAI preset completion requires a fresh text or video progress leaf"
+                }
+                EmptyCompletionPreflight::ExitTicket => {
+                    "UAI exit-ticket completion requires a fresh task progress leaf"
+                }
+                EmptyCompletionPreflight::Oral => {
+                    "UAI oral empty submission requires a fresh task progress leaf"
+                }
+            },
         ));
     }
     Ok(snapshot.is_completed())
@@ -1506,13 +2154,103 @@ mod tests {
     }
 
     #[test]
+    fn oral_empty_body_preserves_the_donor_placeholder_answer_shape() {
+        let body = build_oral_empty_submission_body(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-1",
+            "oral-sentence",
+            2,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["submitType"], 1);
+        assert_eq!(body["hideLoading"], false);
+        assert_eq!(body["quesDatas"].as_array().unwrap().len(), 2);
+        assert_eq!(body["isCompleted"], serde_json::json!([true, true]));
+        for question in body["quesDatas"].as_array().unwrap() {
+            assert_eq!(question["instanceId"], "0");
+            let answer: serde_json::Value =
+                serde_json::from_str(question["answer"].as_str().unwrap()).unwrap();
+            assert_eq!(answer["children"][0]["value"], serde_json::json!([""]));
+        }
+        let judges: serde_json::Value =
+            serde_json::from_str(body["thirdPartyJudges"].as_str().unwrap()).unwrap();
+        assert_eq!(judges.as_array().unwrap().len(), 2);
+        assert_eq!(judges[0]["question_type"], "oral-sentence");
+        assert_eq!(judges[0]["reply_type"], "oral-sentence");
+        assert!(
+            build_oral_empty_submission_body("course", "openid", "group", "discussion", 1,)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn preset_preflight_requires_fresh_text_or_video_leaf() {
-        assert!(validate_preset_progress_target(PROGRESS, "unit-1", "group-1").unwrap());
-        assert!(!validate_preset_progress_target(PROGRESS, "unit-1", "group-2").unwrap());
-        assert!(validate_preset_progress_target(PROGRESS, "other-unit", "group-1").is_err());
-        assert!(validate_preset_progress_target(PROGRESS, "unit-1", "missing").is_err());
+        assert!(
+            validate_empty_completion_progress_target(
+                PROGRESS,
+                "unit-1",
+                "group-1",
+                EmptyCompletionPreflight::Preset,
+            )
+            .unwrap()
+        );
+        assert!(
+            !validate_empty_completion_progress_target(
+                PROGRESS,
+                "unit-1",
+                "group-2",
+                EmptyCompletionPreflight::Preset,
+            )
+            .unwrap()
+        );
+        assert!(
+            validate_empty_completion_progress_target(
+                PROGRESS,
+                "other-unit",
+                "group-1",
+                EmptyCompletionPreflight::Preset,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_empty_completion_progress_target(
+                PROGRESS,
+                "unit-1",
+                "missing",
+                EmptyCompletionPreflight::Preset,
+            )
+            .is_err()
+        );
         let task = PROGRESS.replacen("\"tab_type\": \"text\"", "\"tab_type\": \"task\"", 1);
-        assert!(validate_preset_progress_target(&task, "unit-1", "group-1").is_err());
+        assert!(
+            validate_empty_completion_progress_target(
+                &task,
+                "unit-1",
+                "group-1",
+                EmptyCompletionPreflight::Preset,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_empty_completion_progress_target(
+                &task,
+                "unit-1",
+                "group-1",
+                EmptyCompletionPreflight::ExitTicket,
+            )
+            .unwrap()
+        );
+        assert!(
+            validate_empty_completion_progress_target(
+                &task,
+                "unit-1",
+                "group-1",
+                EmptyCompletionPreflight::Oral,
+            )
+            .unwrap()
+        );
     }
 
     fn provider_context() -> ProviderContext {

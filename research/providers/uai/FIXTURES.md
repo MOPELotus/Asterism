@@ -79,7 +79,8 @@ field names, placeholder identities and response/result codes.
 
 - Numeric and string CourseResource IDs normalize identically.
 - A decodable standard JWT `exp` bounds persisted/session-cache lifetime but never replaces native user-info validation.
-- Provider metadata accepts the transient `ProviderSpecific` Password candidate and the resulting persisted `Composite` replacement, while manual import remains `Jwt`.
+- Provider metadata and Authentication expose the same validated Capture recipe v1: `AssistedSession` reads same-snapshot `u-openid` and raw `Authorization` headers into one required `ProviderCompositeSession` JSON output, while ManualImport, CaptureTool and BrowserExtension remain validated non-renewable `Jwt` imports.
+- Runtime schema validates conservative Provider/account concurrency and account scan defaults plus bounded Provider/account/Task overrides for residence seconds and video playback; mutation paths reject incomplete or stale-schema snapshots.
 - Expired native Composite metadata may enter only the exact atomic Password renewal path; expired imported JWT cannot renew.
 - Duplicate resources or Groups fail the complete scan.
 - `courseInstanceId` remains operation-only and absent from serialized Tasks.
@@ -92,16 +93,23 @@ field names, placeholder identities and response/result codes.
 - Progress duration remains untyped and independent from completion.
 - Study-record duration seconds require one exact unique CourseResource/Unit/Group binding.
 - Content and standard answers remain independent fresh documents; neither may be reused as submission evidence.
+- Nested content encoded as JSON text or supplied as an inline object normalizes identically under one size/zeroization boundary; rich `text`/`pcText` and per-component stems are preserved without HTML markup.
+- Short-answer standard-answer fallback accepts bounded plain analysis text, a top-level JSON analysis string and ordered child analysis rows, but never arbitrary JSON shapes.
 - Decrypted byte owners zeroize on parse success and failure; raw parsed JSON owners redact Debug output and recursively zeroize nested string values after normalization.
 - Executable answer-bearing and preset request JSON uses a zeroizing owner on every local success, error and cancellation path.
 - Question snapshots remain bound to the exact stable CourseResource/Unit/Group Task and cannot build a draft for another route.
 - Submission previews contain no selected answer values or executable provider payload.
-- Only bounded positive `single-choice`, `multichoice` and `short_answer` Groups with one shared type or exact one-type-per-Question cardinality advertise execute/verify.
+- Bounded positive choice, multi-child composite choice, short-answer, translation/revise, fillblank/banked-cloze, ordering and matching Groups with one shared type or exact one-type-per-Question cardinality advertise execute/verify; composite option sets, matching-left and ordering child facts remain explicit.
 - Multi-Question execution preserves draft positions, native module identities, per-module children and flattened judge/completion order; fresh count/type drift fails before mutation.
-- Multi-Question execution requires one bounded content-derived current-donor judge descriptor per answer child and never substitutes the Group `base` when that exact metadata is absent.
+- Every Question execution requires one bounded content-derived current-donor judge descriptor per answer child and never substitutes the Group `base` when that exact metadata is absent.
 - Submission execution requires a positive numeric native instance ID and rejects arbitrary read-only Question identities before transport.
 - Codes `600001` and `600002` never produce a receipt and never trigger an implicit mutation retry.
 - Ambiguous mutation transport failures return after exactly one Provider attempt.
-- Preset no-Question completion uses the five base labels only as candidates, requires a fresh exact Unit/Group `tab_type=text|video` leaf, skips already-completed leaves, emits the exact empty `submitType=2` body at most once, and requires Core progress-only verification/recovery; its receipt and synthetic body are never completion evidence.
+- Completion execution uses the five preset labels, exact `exit-ticket`, or one exact single oral family only as candidates. It requires a fresh exact Unit/Group `tab_type=text|video` leaf for presets or `tab_type=task` for exit-ticket/oral, skips already-completed leaves, emits either the exact empty `submitType=2` body or oral's bounded `instanceId=0` placeholder body at most once, and exposes a goal-bound fresh-detail plus exact-progress verify-only path for Core recovery; its receipt and synthetic body are never completion evidence.
 - Verification requires the receipt version and an exact fresh Course/Group/complete ordered Question set/submitted-answer readback.
 - Missing receipts are Inconclusive; receipts alone never confirm success, score, progress or completion.
+- Every Group advertises BrowserBridge, but a session spec is issued only after fresh exact Task rediscovery; the isolation key hashes account plus Task and the origin set is exactly `ucontent`/`ipub`.
+- Rendered BrowserBridge fixtures must cover legacy `pc-slider`, Ant Tree/Menu and `u3menu` leaf discovery, Micro→Tab→Task ordering, known popup closure, pause/restart budget accounting, video playback ceilings and origin/frame/session-bound iframe SCAN/CLICK/result messages; wildcard messages and arbitrary selectors are rejected.
+- Browser residence and final upload-answer fixture families remain required as their shared execution contracts land; their absence is a tracked implementation gap, not a first-batch deferral. Exit-ticket and exact single-oral-family execution boundaries are covered offline, pending live validation; mixed oral/upload compound shapes remain active work.
+- Upload boundary coverage requires code-200 grant parsing, redacted/zeroizing token ownership, exact file-key retention, the donor's 4 KiB minimal MP3, bounded audio/mpeg artifacts, deterministic multipart framing and exact key equality in object-store readback. The grant and object upload are not treated as final answer or completion receipts.
+- Discussion synthetic coverage now binds fresh Course/class/curricula/current-user facts, a unique first-page topic, bounded 20-row reply pages, a redacted/zeroizing immutable reply intent, accepted-but-unverified mutation receipts and exact current-user/content readback. Durable Draft/attempt registration and final Group completion remain shared integration work.

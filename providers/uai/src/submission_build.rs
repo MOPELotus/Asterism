@@ -10,13 +10,16 @@ use asterism_provider_api::{
 };
 use async_trait::async_trait;
 
-use crate::metadata::development_metadata;
+use crate::{
+    metadata::development_metadata,
+    task_type::{audited_question_kind, question_kind_matches_task_type},
+};
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 const MAX_QUESTIONS_PER_SUBMISSION: usize = 5_000;
 
-/// Credential-free preview for the audited UAI simple `newExploration` JSON
+/// Credential-free preview for the audited UAI typed `newExploration` JSON
 /// shape. It neither reconstructs executable values nor performs remote I/O.
 #[derive(Clone, Debug)]
 pub struct UaiSubmissionBuild {
@@ -162,18 +165,13 @@ fn validate_answer_shape(
     task_type: &str,
     answer: &NormalizedAnswer,
 ) -> ProviderResult<()> {
-    let expected_kind = match task_type {
-        "single-choice" => QuestionKind::SingleChoice,
-        "multichoice" => QuestionKind::MultipleChoice,
-        "short_answer" => QuestionKind::ShortAnswer,
-        _ => {
-            return Err(ProviderError::new(
-                ProviderErrorKind::UnsupportedTask,
-                "UAI submission preview does not support this Question type",
-            ));
-        }
-    };
-    if question.kind != expected_kind {
+    if audited_question_kind(task_type).is_none() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI submission preview does not support this Question type",
+        ));
+    }
+    if !question_kind_matches_task_type(question.kind, task_type) {
         return Err(invalid_input(
             "UAI submission preview Question kind differs from its task type",
         ));
@@ -189,11 +187,63 @@ fn validate_answer_shape(
         {
             Ok(())
         }
-        (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(_)) => Ok(()),
+        (QuestionKind::ShortAnswer | QuestionKind::FillBlank, NormalizedAnswer::Texts(_))
+        | (QuestionKind::Ordering, NormalizedAnswer::Ordering(_)) => Ok(()),
+        (QuestionKind::Matching, NormalizedAnswer::Pairs(values))
+            if matching_pairs_bound(question, values) =>
+        {
+            Ok(())
+        }
+        (QuestionKind::Composite, NormalizedAnswer::Composite(values))
+            if composite_selections_bound(question, values) =>
+        {
+            Ok(())
+        }
         _ => Err(invalid_input(
             "UAI submission preview answer type does not match its Question kind",
         )),
     }
+}
+
+pub(crate) fn composite_selections_bound(question: &Question, values: &[NormalizedAnswer]) -> bool {
+    let Some(components) = question
+        .metadata_sanitized
+        .get("composite_children")
+        .and_then(serde_json::Value::as_array)
+        .filter(|components| components.len() == values.len() && !components.is_empty())
+    else {
+        return false;
+    };
+    components.iter().zip(values).all(|(component, answer)| {
+        let Some(kind) = component.get("kind").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(options) = component
+            .get("options")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        let option_ids = options
+            .iter()
+            .filter_map(|option| {
+                option
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| valid_question_identity(value))
+            })
+            .collect::<BTreeSet<_>>();
+        let NormalizedAnswer::Selections(selections) = answer else {
+            return false;
+        };
+        !selections.is_empty()
+            && (kind == "multiple_choice" || kind == "single_choice" && selections.len() == 1)
+            && options.len() >= 2
+            && option_ids.len() == options.len()
+            && selections
+                .iter()
+                .all(|selection| option_ids.contains(selection.as_str()))
+    })
 }
 
 fn selections_exist(question: &Question, values: &[String]) -> bool {
@@ -203,6 +253,21 @@ fn selections_exist(question: &Question, values: &[String]) -> bool {
         .map(|option| option.id.as_str())
         .collect::<BTreeSet<_>>();
     !values.is_empty() && values.iter().all(|value| options.contains(value.as_str()))
+}
+
+fn matching_pairs_bound(question: &Question, values: &[asterism_domain::AnswerPair]) -> bool {
+    let Some(lefts) = question
+        .metadata_sanitized
+        .get("matching_lefts")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    lefts.len() == values.len()
+        && lefts.iter().all(|left| {
+            left.as_str()
+                .is_some_and(|left| values.iter().filter(|pair| pair.left == left).count() == 1)
+        })
 }
 
 struct GroupIdentity;

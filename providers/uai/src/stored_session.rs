@@ -19,7 +19,10 @@ use tokio::sync::Mutex;
 
 use crate::{
     UaiAuthenticationTransport, UaiJwtSession, UaiSessionResolver,
-    authentication::{MAX_PASSWORD_BYTES, MAX_USERNAME_BYTES, validate_login_field},
+    authentication::{
+        MAX_PASSWORD_BYTES, MAX_USERNAME_BYTES, is_imported_session_acquisition,
+        validate_login_field,
+    },
     metadata::PROVIDER_ID,
 };
 
@@ -173,8 +176,9 @@ impl UaiSessionResolver for StoredUaiSessionResolver {
             (
                 SessionKind::Composite,
                 CredentialAcquisition::NativeProviderLogin
-            ) | (SessionKind::Jwt, CredentialAcquisition::ManualImport)
-        );
+            )
+        ) || (metadata.session_kind == SessionKind::Jwt
+            && is_imported_session_acquisition(metadata.acquired_via));
         if metadata.provider_account_id != context.account_id
             || metadata.secret.purpose != SecretPurpose::ProviderCompositeSession
             || !context.credential_refs.contains(&metadata.secret.id)
@@ -383,6 +387,8 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     enum FixtureBehavior {
         Imported,
+        CaptureTool,
+        BrowserExtension,
         Native,
         Duplicate,
         ForeignAccount,
@@ -542,6 +548,16 @@ mod tests {
                     CredentialAcquisition::ManualImport,
                     document,
                 )]),
+                FixtureBehavior::CaptureTool => Ok(vec![valid(
+                    SessionKind::Jwt,
+                    CredentialAcquisition::CaptureTool,
+                    document,
+                )]),
+                FixtureBehavior::BrowserExtension => Ok(vec![valid(
+                    SessionKind::Jwt,
+                    CredentialAcquisition::BrowserExtension,
+                    document,
+                )]),
                 FixtureBehavior::Native => Ok(vec![valid(
                     SessionKind::Composite,
                     CredentialAcquisition::NativeProviderLogin,
@@ -612,7 +628,12 @@ mod tests {
 
     #[tokio::test]
     async fn resolves_only_context_bound_imported_or_native_session() {
-        for behavior in [FixtureBehavior::Imported, FixtureBehavior::Native] {
+        for behavior in [
+            FixtureBehavior::Imported,
+            FixtureBehavior::CaptureTool,
+            FixtureBehavior::BrowserExtension,
+            FixtureBehavior::Native,
+        ] {
             let credentials = Arc::new(FixtureCredentialResolver {
                 behavior,
                 request: Mutex::new(None),

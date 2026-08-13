@@ -19,8 +19,8 @@ A successful response uses string code `0` and returns distinct `openid` and
 `HumanRequired`, not a password retry.
 
 The injected Authentication boundary accepts exact username/password fields in
-a transient `ProviderSpecific` candidate or one manually imported provider
-session document:
+a transient `ProviderSpecific` candidate or one imported provider session
+document from ManualImport, CaptureTool or BrowserExtension:
 
 ```json
 {"openid":"...","jwt":"header.payload.signature"}
@@ -36,9 +36,19 @@ stored session. Debug output redacts both. Injected session validation
 resolves an account-bound composite and validates the JWT through the transport;
 the concrete Core adapter requests only `ProviderCompositeSession`, verifies
 the exact account/reference/purpose/expiry tuple, and accepts only
-NativeProviderLogin+Composite or ManualImport+Jwt metadata. Storage/key failures
-remain sanitized Internal errors while missing or stale credentials are
-Authentication errors. The native transport now uses the shared non-redirecting
+NativeProviderLogin+Composite or one of the three imported authorities paired
+with Jwt metadata. Capture recipe v1 uses `AssistedSession` and reads
+`u-openid` plus the raw `Authorization` value from one
+`ucontent.unipus.cn` request snapshot. Its sole required output is one
+`ProviderCompositeSession` JSON object with `openid` and `jwt` fields, not two
+independently commit-able secrets. The declarative recipe starts at
+`https://ucontent.unipus.cn/`, polls at 500 ms and allowlists only the
+`ucontent` and `ipub` HTTPS origins observed by the browser donor. Browser
+request observation and recipe execution remain a shared Capture-helper
+integration responsibility; metadata and the actual recipe are
+registry-validated together, so either one cannot claim the contract alone.
+Storage/key failures remain sanitized Internal errors while missing or stale
+credentials are Authentication errors. The native transport now uses the shared non-redirecting
 HTTPS client, posts the exact JSON login shape, passes JWT directly as a
 sensitive `Authorization` header and validates it with a bounded user-info
 read. It classifies status before reading, requires JSON media types and valid
@@ -49,8 +59,8 @@ password and ProviderCompositeSession set whose three records all originate
 from NativeProviderLogin. Per-account locking and a bounded short-lived cache
 collapse concurrent refreshes. A fresh Password exchange must pass user-info
 validation before Core compare-and-replaces the complete credential set.
-Authentication and every read operation retry at most once. ManualImport+Jwt
-sessions, incomplete metadata and stale credential versions cannot renew. JWT
+Authentication and every read operation retry at most once. Every imported Jwt
+session, incomplete metadata and stale credential version cannot renew. JWT
 standard `exp` is decoded only as a conservative lifecycle hint after the
 native user-info authority accepts the token. Native Password credentials may
 be resolved after that hint expires solely for an atomic re-login; imported
@@ -60,7 +70,14 @@ expiry even when their short cache TTL has not elapsed.
 The complete Development Provider factory shares one resolved network policy and
 one account-scoped stored-session resolver across Authentication,
 CourseInventory, TaskInventory, TaskDetail, TaskProgressRead, DurationRead and
-the question/answer/submission transports. The daemon does not register this
+the question/answer/submission transports. Its versioned Master-owned runtime
+schema defaults both Provider and account execution to serial admission,
+requests a 30-minute account scan interval, and exposes bounded page-residence
+seconds plus optional video playback at Provider, account and Task scope. Core
+resolves and freezes those values; the current BrowserBridge Core Gap must pass
+that immutable snapshot into the eventual rendered execution rather than read
+mutable settings mid-run. Native mutation paths already reject snapshots that
+do not match the complete Provider schema. The daemon does not register this
 entry by default. Its config, environment and CLI opt-ins are independent from
 the other development Providers, require a configured SecretStore and retain
 Development verification with a startup warning.
@@ -165,8 +182,44 @@ The current userscript distributes a requested residence time across visible
 Unit/Section/Micro pages, tabs and tasks while keeping the real page active. It
 does not expose an explicit portable duration request in the audited source.
 Therefore Asterism must not invent a NativeDurationReporter from the timer.
-BrowserBridge/Capture work remains deferred, and a future native reporter needs
-sanitized network evidence plus fresh duration readback.
+The required implementation is the donor-observed BrowserBridge path. The
+frozen `5.2.14` donor supplies the following concrete action evidence:
+
+- run only on rendered `https://ucontent.unipus.cn/*` and
+  `https://ipub.unipus.cn/*` pages, including the latter as an iframe;
+- discover bounded visible leaf paths from the legacy `pc-slider` tree, Ant
+  Tree/Menu ARIA hierarchy, nested `role=menu` hierarchy or current `u3menu`
+  courseware list, while retaining Unit/Section/Micro labels;
+- click the selected Micro leaf, then visible `.pc-header-tabs-container`
+  tabs (or `#header .TabsBox a.topTab`) and `.pc-header-tasks-row .pc-task`
+  children in DOM order;
+- dispatch mouseover/mousedown/mouseup/click only to the selected allowlisted
+  element, scroll it into view, and dismiss the known confirmation modal
+  families before and during residence;
+- divide the requested total budget over remaining Micros, then Tabs and Tasks;
+  pause stops countdown, resume continues it, and a changed total/start index
+  restarts from a freshly selected bounded Micro without counting paused time;
+- optionally locate the current rendered `video`/`video.vjs-tech`, attempt
+  muted playback, restore sound after success, use Video.js controls only as
+  fallback, and check once per second until end/removal or the 30-minute donor
+  ceiling; active video time suspends the ordinary page countdown;
+- for the `ipub` iframe, scan after DOM readiness and mutation, serialize only
+  bounded labels plus an element handle, and exchange SCAN/CLICK/result events
+  with the owning top-level page.
+
+The donor uses wildcard `postMessage` targets and does not validate sender
+origin. That is behavior evidence, not an acceptable Asterism security
+contract: Core must bind every message to the current browser session nonce,
+expected frame/window and the two exact allowed origins; arbitrary selectors,
+wildcard receivers and donor-generated script are not portable inputs. DOM
+polls, menu rows, action counts, residence budgets, video ceilings and popup
+retries must all be bounded and cancellation-aware.
+
+The Provider already issues a freshly Task-bound BrowserSessionSpec restricted
+to `ucontent.unipus.cn` and `ipub.unipus.cn`; target navigation, declarative
+DOM/iframe plans, pause/recovery, browser session injection and fresh
+DurationRead acceptance are an active shared Core integration item. Capture
+evidence may replace or refine this plan at any time; neither path is deferred.
 
 DurationRead never creates an Execution, reports time or mutates remote state.
 The independently implemented submission route does not report duration. HTTP
@@ -210,22 +263,42 @@ contains question structure and answer shape but no selected answer values and
 no executable provider payload. Each sanitized Question also carries the exact
 stable `group:{courseResourceId}:{unitId}:{groupId}` Task identity; answer
 resolution and draft construction reject a snapshot from any other route.
+The current Rust donor accepts each decrypted module's nested `content` as
+either encoded JSON text or an inline object. Both forms enter the same
+bounded, recursively zeroizing parser. `direction.text`/`direction.pcText`,
+module material and child text are normalized from rich text, while a
+multi-child choice keeps each component's own normalized stem and option set.
 
 Execution is advertised only when a fresh Group has a bounded positive
 `question_num` and either one homogeneous type or exactly one positional type
-per Question, with every type limited to `single-choice`, `multichoice` or
-`short_answer`. Immutable draft items must remain in exact positions `1..n`.
+per Question. The currently lossless mappings cover `single-choice`,
+`multichoice`, `short_answer`, `translation`, `revise-mistake`,
+`material-banked-cloze`, `basic-scoop-content-dropdown`,
+`fillblank-scoop-dropdown`, `sequence` and `basic-scoop-content`. They preserve
+Text, FillBlank, Ordering and Matching semantics instead of flattening every
+shape into a generic choice/text answer. A choice module with multiple native
+children becomes one Composite Question whose per-child choice kind and option
+set remain in sanitized metadata; its Provider-native Composite answer and
+execution plan preserve every child instead of flattening duplicate A/B option
+labels across parts. Immutable draft items remain in exact positions `1..n`.
+The donor's short-answer fallback accepts a bounded plain
+`analysis` string, a top-level JSON `analysis` string or ordered child analysis
+rows when the standard `answer` document is absent; all three normalize to
+Text answers before leaving the zeroizing decrypted owner. Across choice,
+text, ordering and matching rows, donor `answers` takes precedence only when
+non-empty; an empty `answers` array falls back to the sibling `value` array as
+the audited Python implementation does.
 The execution boundary additionally requires the explicit unique positive
 numeric answer-entry instance ID used by the donors for every module; arbitrary
 strings remain read-only and cannot reach the POST. The native body is
 constructed only inside the execution boundary and preserves module order,
-per-module answer children and globally flattened completion/judge order. For
-multi-module bodies it additionally requires the bounded child/module `type`
-and child `replyType` facts retained by the answer-free parser, using the
-current donor's exact per-child judge labels instead of guessing them from the
-Group `base`. The single-module compatibility body retains the MIT minimal
-`0/0` version and base/objective judge mapping; multi-module bodies use the
-current Rust donor's coherent minimal `1/1` plus content-derived judge shape
+per-module answer children and globally flattened completion/judge order. Every
+body requires the bounded child/module `type` and child `replyType` facts
+retained by the answer-free parser, using the current donor's exact per-child
+judge labels instead of guessing them from the Group `base`. The single-module
+compatibility body retains the MIT minimal `0/0` version with those current
+labels; multi-module bodies use the current Rust donor's coherent minimal `1/1`
+plus content-derived judge shape
 rather than fabricating the MIT donor's client-authored score maps. A code-`0`,
 version-bearing response becomes an accepted receipt; `600001` and `600002`
 become typed retry state without a receipt, and the mutation is not implicitly
@@ -233,14 +306,14 @@ repeated. A Network failure from the mutation boundary is likewise returned
 after one attempt so Core can retain verify-only recovery authority without
 replaying the POST.
 
-The native mutation client intentionally does not inherit an SSO browser cookie.
-It sends the account-bound JWT and annotator token, but the frozen donors run
-their POST through cookie-bearing sessions. The current Rust donor additionally
-imports `u-openid`, `x-csrftoken`, app/platform and school headers from a browser
-session. These sources therefore do not yet prove that the clean-client
-JWT-plus-annotator combination is live-compatible. The Provider remains
-Development; no browser cookie or extra browser header will be persisted or
-added without a separately authorized sanitized mutation audit.
+The native mutation client currently sends the account-bound JWT and annotator
+token. The frozen donors also prove cookie-bearing sessions, and the current
+Rust donor imports `u-openid`, `x-csrftoken`, app/platform and school headers
+from a browser session. Therefore BrowserBridge/Capture session material is an
+active compatibility fallback when clean-client JWT-plus-annotator is
+insufficient. Any captured fields remain ephemeral, purpose-bound, allowlisted
+and zeroized; the Provider stays Development until both native and fallback
+paths receive live validation.
 
 Verification requires that accepted receipt and reads only the exact
 `{groupId}-{submitVersion}` user-module route after refreshing the Course
@@ -253,9 +326,11 @@ Questions Confirmed; a missing, extra, duplicate, reordered or changed row
 fails the whole verification. No score, progress or Task-completion state is
 inferred. With no receipt the result is
 Inconclusive and no version route is guessed or read.
-Unsupported or unsafe types still fail closed; empty answers, synthetic uploads
-and discussion side effects are not portable defaults. This remains synthetic
-offline coverage and is not a live compatibility claim.
+Unknown or structurally ambiguous types still fail closed, but this is a drift
+guard rather than a policy exclusion. Discussion, exit-ticket, oral-empty and
+artifact-upload mutations each retain their donor-specific execution and
+verification semantics and continue through shared contract work. This remains
+synthetic offline coverage and is not a live compatibility claim.
 
 The MIT and current Rust donors complete pure-study Groups with
 `quesDatas=[]`, `isCompleted=[]`, `thirdPartyJudges="[]"` and `submitType=2`,
@@ -266,18 +341,65 @@ donors agree that `rich-text-read`, `text-learn`, `vocabulary`, `input` and
 donor's active generic preset path inserts `instanceId=0` placeholder question
 rows, so it is not treated as evidence for the empty body. The operation has no
 Question/SelectedAnswer pair and remains separate from the submission-draft
-protocol.
+protocol. Its execution acknowledgement remains unverified. The independent
+goal-bound verification method re-runs fresh Task detail binding and the exact
+per-Unit Group progress read; only `pass=pass2=perm=1` returns a verified
+Completed outcome. Unknown progress remains unverified so Core can retry the
+read-only verifier without replaying the mutation.
 
-Asterism registers ResourceExecution only for a non-empty set containing those
-five audited labels and marks every such Task with ExecutionVerify plus
-ProgressRead. Before mutation the native transport refreshes Course detail and
-the exact Unit progress document, requires the exact Group leaf and
-`tab_type=text|video`, and skips the POST if all three completion flags are
-already `1`. Otherwise it sends the empty body once, validates an accepted
+Asterism registers ResourceExecution for a non-empty set containing those five
+audited labels and, independently, for exact `exit-ticket`, `oral-sentence`,
+`video-dub` and `oral-personal-state`; every such Task is marked with
+ExecutionVerify plus ProgressRead. Before mutation the native transport
+refreshes Course detail and the exact Unit progress document, requires the
+exact Group leaf and `tab_type=text|video` for a preset or `tab_type=task` for
+exit-ticket/oral, and skips the POST if all three completion flags are already
+`1`. Preset and exit-ticket send the donor-observed no-Question empty body;
+oral sends the donor's distinct bounded placeholder-answer body with
+`instanceId=0`, one empty child per declared Question, `submitType=1` and the
+audited score/judge structure. Each body is sent once, validates an accepted
 version acknowledgement, and returns an explicitly unverified outcome. Core
 persists the mutation attempt before the call, accepts success only from the
 existing exact Group progress reader, and uses that reader alone after
 ambiguous transport failure, worker interruption or pending readback. The POST
 is never replayed and neither its receipt nor a duration observation is
-completion evidence. Discussion, exit-ticket, oral, upload, `tab_type=task`
-and mixed unknown modes do not inherit this path.
+completion evidence. Discussion, upload and mixed/compound unknown modes do not
+inherit this path; exit-ticket and each oral family are separately classified,
+and the other audited known families remain required dedicated capabilities
+rather than exclusions.
+
+## Additional donor capability families
+
+The Apache donor provides reliable behavior evidence beyond ordinary question
+submission:
+
+- discussion uses `ucloud.unipus.cn/api/bbs/utopic/page`, paginated
+  `ureply/top/page`, `ureply/add`, then the normal Group completion mutation;
+- exit-ticket and configured oral flows use their own empty-submission shapes;
+- `multiFileUpload` first requests a CMS upload token/file key, uploads the
+  bounded artifact to the returned object-store route, then submits that key in
+  the immutable answer flow;
+- subjective/discussion answers may come from an external OpenAI-compatible
+  model, while the current Rust donor can transcribe referenced audio/video
+  before resolving an answer.
+
+All are active implementation scope. The Provider-private discussion protocol
+now derives Course instance, class, curricula and current-user facts from fresh
+Course/detail/user-info reads; builds the exact topic/reply-page/reply-add
+bodies; bounds every page and response; zeroizes reply content; treats the add
+response as a receipt only; and can verify exact current-user plus exact content
+through paginated readback. Cross-Provider registration still requires a
+shared immutable discussion Draft/attempt contract so reply mutation, final
+Group completion and their two independent readbacks remain durably recoverable
+without ambiguous replay. Artifact handles and external
+AnswerResolve/media-source orchestration likewise require shared Core contracts
+for account/Task ownership and secret isolation. The Provider-private upload
+boundary already fresh-binds Course resource/detail and current app user before
+requesting the exact CMS token route, retains token and artifact bytes only in
+zeroizing owners, bounds audio/mpeg artifacts to 64 MiB, builds a fixed-field
+multipart request for the audited Qiniu origin and accepts only an object-store
+response that repeats the granted file key. It also preserves the donor's
+4 KiB minimal-MP3 artifact as an explicit option. Durable artifact handles and
+the final immutable `multiFileUpload` answer submission remain shared
+integration work; a grant or object-store response alone is never Group
+completion evidence.

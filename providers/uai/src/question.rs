@@ -12,12 +12,14 @@ use asterism_provider_api::{
     RemoteQuestionRef, RemoteTaskDetail, TaskDetailCapability,
 };
 use async_trait::async_trait;
+use scraper::Html;
 use serde_json::{Map, Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     encrypted::{ZeroizingJsonValue, decrypt_unipus_payload},
     metadata::development_metadata,
+    task_type::{audited_question_kind, supports_audited_question_type},
 };
 
 const MAX_QUESTION_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -30,6 +32,7 @@ const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 const MAX_JUDGE_TYPE_BYTES: usize = 128;
 const MAX_QUESTION_CHILDREN: usize = 256;
+const MAX_OPTIONS_PER_CHILD: usize = 256;
 
 /// Redacted ownership wrapper for one encrypted UAI content response.
 pub struct UaiQuestionDocument(String);
@@ -387,19 +390,35 @@ fn parse_question_entry(
     let entry = entry
         .as_object()
         .ok_or_else(|| protocol_drift("UAI decrypted Question entry is not an object"))?;
-    let content = entry
+    let nested = entry
         .get("content")
-        .and_then(Value::as_str)
         .ok_or_else(|| protocol_drift("UAI decrypted Question entry has no nested content"))?;
-    if content.is_empty() || content.len() > MAX_INNER_CONTENT_BYTES {
-        return Err(invalid_response(
-            "UAI nested Question content is empty or exceeds the size limit",
-        ));
-    }
-    let content = ZeroizingJsonValue::new(
-        serde_json::from_str(content)
-            .map_err(|_| invalid_response("UAI nested Question content is not valid JSON"))?,
-    );
+    let content = ZeroizingJsonValue::new(match nested {
+        Value::String(content) => {
+            if content.is_empty() || content.len() > MAX_INNER_CONTENT_BYTES {
+                return Err(invalid_response(
+                    "UAI nested Question content is empty or exceeds the size limit",
+                ));
+            }
+            serde_json::from_str(content)
+                .map_err(|_| invalid_response("UAI nested Question content is not valid JSON"))?
+        }
+        Value::Object(_) => {
+            if serde_json::to_vec(nested)
+                .map_or(true, |encoded| encoded.len() > MAX_INNER_CONTENT_BYTES)
+            {
+                return Err(invalid_response(
+                    "UAI nested Question content is empty or exceeds the size limit",
+                ));
+            }
+            nested.clone()
+        }
+        _ => {
+            return Err(protocol_drift(
+                "UAI decrypted Question entry has invalid nested content",
+            ));
+        }
+    });
     let content = content
         .as_value()
         .as_object()
@@ -411,9 +430,27 @@ fn parse_question_entry(
         .ok_or_else(|| protocol_drift("UAI Question has no explicit remote identity"))?;
     valid_question_identity(&remote_id)?;
     let stem = question_stem(content)?;
-    let options = question_options(content)?;
+    let base_kind = audited_question_kind(task_type).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI Question read does not support this audited task type",
+        )
+    })?;
+    let composite_children = choice_composite_children(content, base_kind)?;
+    let kind = if composite_children.is_some() {
+        QuestionKind::Composite
+    } else {
+        base_kind
+    };
+    let options = if kind == QuestionKind::Composite {
+        Vec::new()
+    } else {
+        question_options(
+            content,
+            matches!(kind, QuestionKind::FillBlank | QuestionKind::Matching),
+        )?
+    };
     let judge_types = current_judge_types(content)?;
-    let kind = question_kind(task_type);
     if matches!(
         kind,
         QuestionKind::SingleChoice | QuestionKind::MultipleChoice
@@ -434,10 +471,82 @@ fn parse_question_entry(
             "task_type": task_type,
             "remote_task_id": remote_task_id,
             "judge_types": judge_types,
+            "composite_children": composite_children,
+            "matching_lefts": if kind == QuestionKind::Matching {
+                Some(matching_lefts(content)?)
+            } else {
+                None
+            },
         }),
     };
     question.to_question(TaskId::new())?;
     Ok(question)
+}
+
+fn choice_composite_children(
+    content: &Map<String, Value>,
+    base_kind: QuestionKind,
+) -> ProviderResult<Option<Vec<Value>>> {
+    if !matches!(
+        base_kind,
+        QuestionKind::SingleChoice | QuestionKind::MultipleChoice
+    ) {
+        return Ok(None);
+    }
+    let Some(children) = content.get("children").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    if children.len() <= 1 {
+        return Ok(None);
+    }
+    if children.len() > MAX_QUESTION_CHILDREN {
+        return Err(invalid_response(
+            "UAI composite choice children exceed the item limit",
+        ));
+    }
+    children
+        .iter()
+        .map(|child| {
+            let child = child
+                .as_object()
+                .ok_or_else(|| protocol_drift("UAI composite choice child is not an object"))?;
+            let kind = child_choice_kind(child, base_kind)?;
+            let options = child_options(child)?;
+            if options.len() < 2 {
+                return Err(protocol_drift(
+                    "UAI composite choice child has no bounded option set",
+                ));
+            }
+            Ok(json!({
+                "kind": match kind {
+                    QuestionKind::SingleChoice => "single_choice",
+                    QuestionKind::MultipleChoice => "multiple_choice",
+                    _ => unreachable!("child_choice_kind returns only choice kinds"),
+                },
+                "stem": (["quesText", "text"]
+                    .into_iter()
+                    .find_map(|key| child.get(key).and_then(Value::as_str))
+                    .map(normalize_rich_text)
+                    .filter(|value| !value.is_empty())),
+                "options": options,
+            }))
+        })
+        .collect::<ProviderResult<Vec<_>>>()
+        .map(Some)
+}
+
+fn child_choice_kind(
+    child: &Map<String, Value>,
+    fallback: QuestionKind,
+) -> ProviderResult<QuestionKind> {
+    match child.get("replyType").and_then(Value::as_str) {
+        Some("singlechoice" | "single-choice") => Ok(QuestionKind::SingleChoice),
+        Some("multichoice") => Ok(QuestionKind::MultipleChoice),
+        None => Ok(fallback),
+        _ => Err(protocol_drift(
+            "UAI composite choice child has an unsupported reply type",
+        )),
+    }
 }
 
 fn question_stem(content: &Map<String, Value>) -> ProviderResult<String> {
@@ -445,14 +554,17 @@ fn question_stem(content: &Map<String, Value>) -> ProviderResult<String> {
     if let Some(text) = content
         .get("direction")
         .and_then(Value::as_object)
-        .and_then(|direction| direction.get("text"))
-        .and_then(Value::as_str)
+        .and_then(|direction| {
+            ["text", "pcText"]
+                .into_iter()
+                .find_map(|key| direction.get(key).and_then(Value::as_str))
+        })
     {
-        fragments.push(text);
+        fragments.push(normalize_rich_text(text));
     }
     for key in ["stem", "question", "title", "text"] {
         if let Some(text) = content.get(key).and_then(Value::as_str) {
-            fragments.push(text);
+            fragments.push(normalize_rich_text(text));
         }
     }
     if let Some(contents) = content.get("contents") {
@@ -469,18 +581,70 @@ fn question_stem(content: &Map<String, Value>) -> ProviderResult<String> {
                 .as_object()
                 .ok_or_else(|| protocol_drift("UAI Question contents contains a non-object"))?;
             if let Some(text) = item.get("text").and_then(Value::as_str) {
-                fragments.push(text);
+                fragments.push(normalize_rich_text(text));
             }
         }
     }
-    let stem = normalize_text(fragments);
+    if let Some(children) = content.get("children") {
+        let children = children
+            .as_array()
+            .ok_or_else(|| protocol_drift("UAI Question children field is not an array"))?;
+        if children.len() > MAX_QUESTION_CHILDREN {
+            return Err(invalid_response(
+                "UAI Question children field exceeds the item limit",
+            ));
+        }
+        for child in children {
+            let child = child
+                .as_object()
+                .ok_or_else(|| protocol_drift("UAI Question children contains a non-object"))?;
+            if let Some(text) = ["quesText", "text"]
+                .into_iter()
+                .find_map(|key| child.get(key).and_then(Value::as_str))
+            {
+                fragments.push(normalize_rich_text(text));
+            }
+        }
+    }
+    let stem = normalize_text(fragments.iter().map(String::as_str));
     if stem.is_empty() {
         return Err(protocol_drift("UAI Question has no bounded textual stem"));
     }
     Ok(stem)
 }
 
-fn question_options(content: &Map<String, Value>) -> ProviderResult<Vec<QuestionOption>> {
+fn matching_lefts(content: &Map<String, Value>) -> ProviderResult<Vec<String>> {
+    let children = content
+        .get("children")
+        .and_then(Value::as_array)
+        .filter(|children| !children.is_empty() && children.len() <= MAX_QUESTION_CHILDREN)
+        .ok_or_else(|| protocol_drift("UAI matching Question has no bounded children"))?;
+    let mut seen = BTreeSet::new();
+    let mut lefts = Vec::with_capacity(children.len());
+    for child in children {
+        let child = child
+            .as_object()
+            .ok_or_else(|| protocol_drift("UAI matching Question child is not an object"))?;
+        let left = ["quesText", "text"]
+            .into_iter()
+            .find_map(|key| child.get(key).and_then(Value::as_str))
+            .map(normalize_rich_text)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| protocol_drift("UAI matching Question child has no left text"))?;
+        if !seen.insert(left.clone()) {
+            return Err(protocol_drift(
+                "UAI matching Question contains duplicate left text",
+            ));
+        }
+        lefts.push(left);
+    }
+    Ok(lefts)
+}
+
+fn question_options(
+    content: &Map<String, Value>,
+    allow_identical_repeats: bool,
+) -> ProviderResult<Vec<QuestionOption>> {
     let Some(children) = content.get("children") else {
         return Ok(Vec::new());
     };
@@ -498,13 +662,41 @@ fn question_options(content: &Map<String, Value>) -> ProviderResult<Vec<Question
         let child = child
             .as_object()
             .ok_or_else(|| protocol_drift("UAI Question children contains a non-object"))?;
-        let Some(values) = child.get("options") else {
-            continue;
-        };
-        let values = values
-            .as_array()
-            .ok_or_else(|| protocol_drift("UAI Question options field is not an array"))?;
-        for value in values {
+        for option in child_options(child)? {
+            if !identifiers.insert(option.id.clone()) {
+                if allow_identical_repeats
+                    && options.iter().any(|existing: &QuestionOption| {
+                        existing.id == option.id && existing.content == option.content
+                    })
+                {
+                    continue;
+                }
+                return Err(protocol_drift(
+                    "UAI Question contains duplicate option identity",
+                ));
+            }
+            options.push(option);
+        }
+    }
+    Ok(options)
+}
+
+fn child_options(child: &Map<String, Value>) -> ProviderResult<Vec<QuestionOption>> {
+    let Some(values) = child.get("options") else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_array()
+        .ok_or_else(|| protocol_drift("UAI Question options field is not an array"))?;
+    if values.len() > MAX_OPTIONS_PER_CHILD {
+        return Err(invalid_response(
+            "UAI Question options field exceeds the item limit",
+        ));
+    }
+    let mut identifiers = BTreeSet::new();
+    values
+        .iter()
+        .map(|value| {
             let value = value
                 .as_object()
                 .ok_or_else(|| protocol_drift("UAI Question options contains a non-object"))?;
@@ -515,24 +707,23 @@ fn question_options(content: &Map<String, Value>) -> ProviderResult<Vec<Question
             valid_question_identity(&id)?;
             if !identifiers.insert(id.clone()) {
                 return Err(protocol_drift(
-                    "UAI Question contains duplicate option identity",
+                    "UAI Question child contains duplicate option identity",
                 ));
             }
             let display = ["text", "content", "label", "name"]
                 .into_iter()
                 .find_map(|key| value.get(key).and_then(Value::as_str))
-                .map(|value| normalize_text([value]))
+                .map(normalize_rich_text)
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| id.clone());
-            options.push(QuestionOption {
+            Ok(QuestionOption {
                 id,
                 content: Some(display),
                 attachments: Vec::new(),
                 metadata_sanitized: json!({}),
-            });
-        }
-    }
-    Ok(options)
+            })
+        })
+        .collect()
 }
 
 fn current_judge_types(content: &Map<String, Value>) -> ProviderResult<Option<Vec<Value>>> {
@@ -605,13 +796,9 @@ fn normalize_text<'a>(fragments: impl IntoIterator<Item = &'a str>) -> String {
         .join(" ")
 }
 
-const fn question_kind(task_type: &str) -> QuestionKind {
-    match task_type.as_bytes() {
-        b"single-choice" => QuestionKind::SingleChoice,
-        b"multichoice" => QuestionKind::MultipleChoice,
-        b"short_answer" => QuestionKind::ShortAnswer,
-        _ => QuestionKind::Unknown,
-    }
+fn normalize_rich_text(value: &str) -> String {
+    let fragment = Html::parse_fragment(value);
+    normalize_text(fragment.root_element().text())
 }
 
 pub(crate) fn supports_question_read(task_types: &[String], question_count: Option<u32>) -> bool {
@@ -627,7 +814,7 @@ pub(crate) fn supports_question_read(task_types: &[String], question_count: Opti
 }
 
 fn supported_question_type(value: &str) -> bool {
-    matches!(value, "single-choice" | "multichoice" | "short_answer")
+    supports_audited_question_type(value)
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -967,6 +1154,185 @@ mod tests {
                 {"question_type": "basic", "reply_type": "text-area"},
             ])
         );
+    }
+
+    #[test]
+    fn donor_fillblank_labels_map_to_typed_questions() {
+        for task_type in [
+            "material-banked-cloze",
+            "basic-scoop-content-dropdown",
+            "fillblank-scoop-dropdown",
+        ] {
+            let parsed = parse_question_entry(
+                &json!({
+                    "id": "2001",
+                    "content": serde_json::to_string(&json!({
+                        "type": task_type,
+                        "direction": {"text": "Fill every blank"},
+                        "children": [
+                            {
+                                "type": task_type,
+                                "replyType": "bankedcloze",
+                                "options": [
+                                    {"name": "first", "text": "first"},
+                                    {"name": "second", "text": "second"},
+                                ],
+                            },
+                            {
+                                "type": task_type,
+                                "replyType": "bankedcloze",
+                                "options": [
+                                    {"name": "first", "text": "first"},
+                                    {"name": "second", "text": "second"},
+                                ],
+                            },
+                        ],
+                    }))
+                    .unwrap(),
+                }),
+                1,
+                task_type,
+                "group:2001:unit-1:group-fillblank",
+            )
+            .unwrap();
+            assert_eq!(parsed.kind, QuestionKind::FillBlank);
+            assert_eq!(parsed.options.len(), 2);
+            assert_eq!(parsed.metadata_sanitized["task_type"], task_type);
+            assert_eq!(
+                parsed.metadata_sanitized["judge_types"][0]["reply_type"],
+                "bankedcloze"
+            );
+        }
+    }
+
+    #[test]
+    fn donor_scoop_content_preserves_matching_left_order() {
+        let parsed = parse_question_entry(
+            &json!({
+                "id": "3001",
+                "content": serde_json::to_string(&json!({
+                    "type": "basic-scoop-content",
+                    "direction": {"text": "Match each expression"},
+                    "children": [
+                        {"quesText": "first left", "type": "basic", "replyType": "scoop"},
+                        {"quesText": "second left", "type": "basic", "replyType": "scoop"},
+                    ],
+                }))
+                .unwrap(),
+            }),
+            1,
+            "basic-scoop-content",
+            "group:2001:unit-1:group-matching",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind, QuestionKind::Matching);
+        assert_eq!(
+            parsed.metadata_sanitized["matching_lefts"],
+            json!(["first left", "second left"])
+        );
+        assert!(parsed.stem.contains("first left"));
+        assert!(parsed.stem.contains("second left"));
+    }
+
+    #[test]
+    fn donor_multi_child_choice_preserves_component_option_sets() {
+        let parsed = parse_question_entry(
+            &json!({
+                "id": "8001",
+                "content": serde_json::to_string(&json!({
+                    "type": "multichoice",
+                    "direction": {"text": "Answer both parts"},
+                    "children": [
+                        {
+                            "quesText": "Choose one",
+                            "type": "basic",
+                            "replyType": "singlechoice",
+                            "options": [
+                                {"name": "A", "text": "First A"},
+                                {"name": "B", "text": "First B"},
+                            ],
+                        },
+                        {
+                            "quesText": "Choose many",
+                            "type": "basic",
+                            "replyType": "multichoice",
+                            "options": [
+                                {"name": "A", "text": "Second A"},
+                                {"name": "B", "text": "Second B"},
+                            ],
+                        },
+                    ],
+                }))
+                .unwrap(),
+            }),
+            1,
+            "multichoice",
+            "group:2001:unit-1:group-composite-choice",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind, QuestionKind::Composite);
+        assert!(parsed.options.is_empty());
+        assert_eq!(
+            parsed.metadata_sanitized["composite_children"][0]["kind"],
+            "single_choice"
+        );
+        assert_eq!(
+            parsed.metadata_sanitized["composite_children"][1]["kind"],
+            "multiple_choice"
+        );
+        assert_eq!(
+            parsed.metadata_sanitized["composite_children"][0]["stem"],
+            "Choose one"
+        );
+        assert_eq!(
+            parsed.metadata_sanitized["composite_children"][0]["options"][0]["id"],
+            "A"
+        );
+        assert_eq!(
+            parsed.metadata_sanitized["composite_children"][1]["options"][0]["content"],
+            "Second A"
+        );
+    }
+
+    #[test]
+    fn current_donor_inline_object_content_is_supported() {
+        let nested = json!({
+            "type": "basic",
+            "direction": {"pcText": "<p>Choose <strong>one</strong> answer</p>"},
+            "children": [{
+                "type": "basic",
+                "replyType": "singlechoice",
+                "quesText": "<span>Object-shaped content</span>",
+                "options": [
+                    {"name": "A", "text": "Alpha"},
+                    {"name": "B", "text": "Beta"},
+                ],
+            }],
+        });
+        let inline = parse_question_entry(
+            &json!({"id": "9001", "content": nested.clone()}),
+            1,
+            "single-choice",
+            "group:2001:unit-1:group-object-content",
+        )
+        .unwrap();
+        let encoded = parse_question_entry(
+            &json!({
+                "id": "9001",
+                "content": serde_json::to_string(&nested).unwrap(),
+            }),
+            1,
+            "single-choice",
+            "group:2001:unit-1:group-object-content",
+        )
+        .unwrap();
+
+        assert_eq!(inline, encoded);
+        assert_eq!(inline.kind, QuestionKind::SingleChoice);
+        assert_eq!(inline.stem, "Choose one answer Object-shaped content");
+        assert_eq!(inline.options.len(), 2);
     }
 
     #[test]

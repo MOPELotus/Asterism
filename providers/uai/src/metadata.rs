@@ -25,7 +25,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
-        capture_recipe_version: None,
+        capture_recipe_version: Some(1),
         capabilities: BTreeSet::from([
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
@@ -41,8 +41,13 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
             ProviderCapability::SubmissionVerify,
+            ProviderCapability::BrowserBridge,
         ]),
-        auth_methods: BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken]),
+        auth_methods: BTreeSet::from([
+            AuthMethod::Password,
+            AuthMethod::ImportedToken,
+            AuthMethod::AssistedSession,
+        ]),
         session_kinds: BTreeSet::from([
             SessionKind::Jwt,
             SessionKind::Composite,
@@ -60,6 +65,7 @@ mod tests {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
+        assert_eq!(metadata.capture_recipe_version, Some(1));
         assert_eq!(
             metadata.capabilities,
             BTreeSet::from([
@@ -77,11 +83,16 @@ mod tests {
                 ProviderCapability::SubmissionBuild,
                 ProviderCapability::SubmissionExecute,
                 ProviderCapability::SubmissionVerify,
+                ProviderCapability::BrowserBridge,
             ])
         );
         assert_eq!(
             metadata.auth_methods,
-            BTreeSet::from([AuthMethod::Password, AuthMethod::ImportedToken])
+            BTreeSet::from([
+                AuthMethod::Password,
+                AuthMethod::ImportedToken,
+                AuthMethod::AssistedSession,
+            ])
         );
         assert_eq!(
             metadata.session_kinds,

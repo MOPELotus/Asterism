@@ -1,18 +1,18 @@
 use std::{fmt, sync::Arc};
 
 use asterism_networking::ResolvedNetworkProfile;
-use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
+use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
     NativeUaiAuthenticationTransport, NativeUaiInventoryTransport, StoredUaiSessionResolver,
     UaiAnswerResolve, UaiAnswerTransport, UaiAuthentication, UaiAuthenticationTransport,
-    UaiCourseInventory, UaiCourseInventoryTransport, UaiDurationTransport,
+    UaiBrowserBridge, UaiCourseInventory, UaiCourseInventoryTransport, UaiDurationTransport,
     UaiPresetCompletionTransport, UaiProgressTransport, UaiQuestionRead, UaiQuestionTransport,
     UaiResourceExecution, UaiSessionResolver, UaiSubmissionBuild, UaiSubmissionExecute,
     UaiSubmissionTransport, UaiSubmissionVerify, UaiTaskDetail, UaiTaskDuration, UaiTaskInventory,
     UaiTaskInventoryTransport, UaiTaskProgress, UaiVerificationTransport,
-    metadata::development_metadata,
+    metadata::development_metadata, runtime_settings::runtime_settings_schema,
 };
 
 /// Injected read and mutation boundaries used by the UAI Development entry.
@@ -110,6 +110,7 @@ pub fn build_development_provider(
         course_inventory.clone(),
         task_inventory.clone(),
     )?);
+    let browser_bridge = Arc::new(UaiBrowserBridge::try_new(task_detail.clone())?);
     let task_progress = Arc::new(UaiTaskProgress::try_new(transports.progress)?);
     let task_duration = Arc::new(UaiTaskDuration::try_new(transports.duration)?);
     let question_read = Arc::new(UaiQuestionRead::try_new(
@@ -131,11 +132,12 @@ pub fn build_development_provider(
     )?);
     let resource_execution = Arc::new(UaiResourceExecution::try_new(
         task_detail.clone(),
+        task_progress.clone(),
         transports.submission.preset,
     )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
-        runtime_settings: ProviderRuntimeSettingsSchema::default(),
+        runtime_settings: runtime_settings_schema(),
         authentication: Some(authentication),
         course_inventory: Some(course_inventory),
         task_inventory: Some(task_inventory),
@@ -149,7 +151,7 @@ pub fn build_development_provider(
         submission_execute: Some(submission_execute),
         submission_verify: Some(submission_verify),
         task_execution: Some(resource_execution),
-        browser_bridge: None,
+        browser_bridge: Some(browser_bridge),
     })
 }
 
@@ -340,8 +342,8 @@ mod tests {
         assert!(entry.submission_execute.is_some());
         assert!(entry.submission_verify.is_some());
         assert!(entry.task_execution.is_some());
-        assert!(entry.browser_bridge.is_none());
-        assert!(entry.runtime_settings.definitions.is_empty());
+        assert!(entry.browser_bridge.is_some());
+        assert_eq!(entry.runtime_settings.definitions.len(), 5);
         for capability in [
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
@@ -357,6 +359,7 @@ mod tests {
             ProviderCapability::SubmissionBuild,
             ProviderCapability::SubmissionExecute,
             ProviderCapability::SubmissionVerify,
+            ProviderCapability::BrowserBridge,
         ] {
             assert!(entry.metadata.capabilities.contains(&capability));
         }

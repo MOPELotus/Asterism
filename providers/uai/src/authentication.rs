@@ -2,9 +2,10 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::{AuthMethod, HumanRequiredReason, SessionKind, Timestamp, WaitingUserState};
 use asterism_provider_api::{
-    AuthChallenge, AuthenticationCapability, CredentialReplacement, CredentialValidation,
-    ProviderAuthContext, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, SessionStatus,
+    AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureJsonField,
+    CaptureRecipe, CaptureScalarSource, CaptureValueSource, CredentialReplacement,
+    CredentialValidation, ProviderAuthContext, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderIdentity, ProviderMetadata, ProviderResult, SessionStatus,
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, CredentialField, SecretPurpose, SecretString,
@@ -23,6 +24,51 @@ pub(crate) const MAX_PASSWORD_BYTES: usize = 4 * 1_024;
 const MAX_JWT_BYTES: usize = 64 * 1_024;
 const MAX_OPEN_ID_BYTES: usize = 512;
 const MAX_SESSION_DOCUMENT_BYTES: usize = 96 * 1_024;
+const CAPTURE_START_URL: &str = "https://ucontent.unipus.cn/";
+const UCONTENT_ORIGIN: &str = "https://ucontent.unipus.cn";
+const IPUB_ORIGIN: &str = "https://ipub.unipus.cn";
+
+fn capture_recipe_v1() -> CaptureRecipe {
+    CaptureRecipe {
+        version: 1,
+        start_url: CAPTURE_START_URL.to_owned(),
+        allowed_origins: vec![UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()],
+        poll_interval_millis: 500,
+        auth_method: AuthMethod::AssistedSession,
+        session_kind: SessionKind::Jwt,
+        outputs: vec![CaptureCredentialOutput {
+            purpose: SecretPurpose::ProviderCompositeSession,
+            required: true,
+            sources: vec![CaptureValueSource::JsonObject {
+                fields: vec![
+                    CaptureJsonField {
+                        name: "openid".to_owned(),
+                        sources: vec![CaptureScalarSource::RequestHeader {
+                            origin: UCONTENT_ORIGIN.to_owned(),
+                            name: "u-openid".to_owned(),
+                        }],
+                    },
+                    CaptureJsonField {
+                        name: "jwt".to_owned(),
+                        sources: vec![CaptureScalarSource::RequestHeader {
+                            origin: UCONTENT_ORIGIN.to_owned(),
+                            name: "Authorization".to_owned(),
+                        }],
+                    },
+                ],
+            }],
+        }],
+    }
+}
+
+pub(crate) const fn is_imported_session_acquisition(acquisition: CredentialAcquisition) -> bool {
+    matches!(
+        acquisition,
+        CredentialAcquisition::ManualImport
+            | CredentialAcquisition::CaptureTool
+            | CredentialAcquisition::BrowserExtension
+    )
+}
 
 /// A bounded atomic `openid`/JWT session. Both values are redacted and
 /// zeroized through their `SecretString` owners.
@@ -240,7 +286,7 @@ impl UaiAuthentication {
         credential: &CredentialBundle,
     ) -> ProviderResult<CredentialValidation> {
         if credential.session_kind != SessionKind::Jwt
-            || credential.acquired_via != CredentialAcquisition::ManualImport
+            || !is_imported_session_acquisition(credential.acquired_via)
             || credential.fields.len() != 1
         {
             return Err(invalid_credential_shape());
@@ -274,6 +320,10 @@ impl ProviderIdentity for UaiAuthentication {
 
 #[async_trait]
 impl AuthenticationCapability for UaiAuthentication {
+    fn capture_recipe(&self) -> Option<CaptureRecipe> {
+        Some(capture_recipe_v1())
+    }
+
     async fn begin_authentication(
         &self,
         context: &ProviderAuthContext,
@@ -288,14 +338,19 @@ impl AuthenticationCapability for UaiAuthentication {
         })?;
         let waiting_for = match method {
             AuthMethod::Password => WaitingUserState::CredentialInput,
-            AuthMethod::ImportedToken => WaitingUserState::SessionImport,
+            AuthMethod::ImportedToken | AuthMethod::AssistedSession => {
+                WaitingUserState::SessionImport
+            }
             _ => return Err(unsupported_auth_method()),
         };
         Ok(AuthChallenge {
             session_id,
             method,
             waiting_for,
-            user_action: None,
+            user_action: (method == AuthMethod::AssistedSession).then(|| {
+                "在打开的 UAI 页面中完成登录并进入任意课程，Capture 将从同一个 ucontent 请求快照读取会话"
+                    .to_owned()
+            }),
             expires_at: None,
         })
     }
@@ -314,7 +369,9 @@ impl AuthenticationCapability for UaiAuthentication {
         }
         match credential.auth_method {
             AuthMethod::Password => self.validate_password(credential).await,
-            AuthMethod::ImportedToken => self.validate_imported_token(credential).await,
+            AuthMethod::ImportedToken | AuthMethod::AssistedSession => {
+                self.validate_imported_token(credential).await
+            }
             _ => Err(unsupported_auth_method()),
         }
     }
@@ -636,6 +693,46 @@ mod tests {
         assert_eq!(opaque.expires_at(), None);
     }
 
+    #[test]
+    fn capture_recipe_builds_one_atomic_openid_jwt_document() {
+        let recipe = capture_recipe_v1();
+        recipe.validate().unwrap();
+        assert_eq!(recipe.start_url, CAPTURE_START_URL);
+        assert_eq!(recipe.auth_method, AuthMethod::AssistedSession);
+        assert_eq!(recipe.session_kind, SessionKind::Jwt);
+        assert_eq!(
+            recipe.allowed_origins,
+            [UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()]
+        );
+        assert_eq!(recipe.outputs.len(), 1);
+        assert_eq!(
+            recipe.outputs[0].purpose,
+            SecretPurpose::ProviderCompositeSession
+        );
+        assert!(recipe.outputs[0].required);
+        assert_eq!(
+            recipe.outputs[0].sources,
+            [CaptureValueSource::JsonObject {
+                fields: vec![
+                    CaptureJsonField {
+                        name: "openid".to_owned(),
+                        sources: vec![CaptureScalarSource::RequestHeader {
+                            origin: UCONTENT_ORIGIN.to_owned(),
+                            name: "u-openid".to_owned(),
+                        }],
+                    },
+                    CaptureJsonField {
+                        name: "jwt".to_owned(),
+                        sources: vec![CaptureScalarSource::RequestHeader {
+                            origin: UCONTENT_ORIGIN.to_owned(),
+                            name: "Authorization".to_owned(),
+                        }],
+                    },
+                ],
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn capability_validates_password_import_and_stored_session() {
         let boundaries = Arc::new(FixtureBoundaries::default());
@@ -657,12 +754,25 @@ mod tests {
             UaiJwtSession::try_from_composite(replacement.fields[2].value.expose_secret()).unwrap();
         assert_eq!(replaced.expose_open_id(), "synthetic-open-id");
 
-        let imported = authentication
-            .validate_credential(&auth_context(), &imported_bundle())
+        for acquisition in [
+            CredentialAcquisition::ManualImport,
+            CredentialAcquisition::CaptureTool,
+            CredentialAcquisition::BrowserExtension,
+        ] {
+            let imported = authentication
+                .validate_credential(&auth_context(), &imported_bundle(acquisition))
+                .await
+                .unwrap();
+            assert_eq!(imported.status.kind, SessionKind::Jwt);
+            assert!(imported.replacement.is_none());
+        }
+
+        let captured = authentication
+            .validate_credential(&auth_context(), &captured_bundle())
             .await
             .unwrap();
-        assert_eq!(imported.status.kind, SessionKind::Jwt);
-        assert!(imported.replacement.is_none());
+        assert_eq!(captured.status.kind, SessionKind::Jwt);
+        assert!(captured.replacement.is_none());
 
         let stored = authentication
             .validate_session(&provider_context())
@@ -670,7 +780,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored.kind, SessionKind::Jwt);
         assert_eq!(boundaries.exchanges.load(Ordering::SeqCst), 1);
-        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 3);
+        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 6);
     }
 
     #[tokio::test]
@@ -724,6 +834,22 @@ mod tests {
                 .unwrap()
                 .waiting_for,
             WaitingUserState::SessionImport
+        );
+        assert_eq!(
+            authentication
+                .begin_authentication(&auth_context(), AuthMethod::AssistedSession)
+                .await
+                .unwrap()
+                .waiting_for,
+            WaitingUserState::SessionImport
+        );
+        assert!(
+            authentication
+                .begin_authentication(&auth_context(), AuthMethod::AssistedSession)
+                .await
+                .unwrap()
+                .user_action
+                .is_some()
         );
         assert!(
             authentication
@@ -782,12 +908,12 @@ mod tests {
         }
     }
 
-    fn imported_bundle() -> CredentialBundle {
+    fn imported_bundle(acquired_via: CredentialAcquisition) -> CredentialBundle {
         CredentialBundle {
             provider_id: ProviderId::new("uai").unwrap(),
             tenant: None,
             auth_method: AuthMethod::ImportedToken,
-            acquired_via: CredentialAcquisition::ManualImport,
+            acquired_via,
             captured_at: Utc::now(),
             expires_at: None,
             session_kind: SessionKind::Jwt,
@@ -800,5 +926,11 @@ mod tests {
             }],
             user_id_hint: None,
         }
+    }
+
+    fn captured_bundle() -> CredentialBundle {
+        let mut bundle = imported_bundle(CredentialAcquisition::CaptureTool);
+        bundle.auth_method = AuthMethod::AssistedSession;
+        bundle
     }
 }
