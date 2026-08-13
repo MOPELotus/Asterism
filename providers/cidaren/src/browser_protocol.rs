@@ -145,7 +145,7 @@ impl Drop for CidarenBrowserCommandEnvelope {
     }
 }
 
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CidarenBrowserEvent {
     CaptureSnapshot {
@@ -163,7 +163,7 @@ impl fmt::Debug for CidarenBrowserEvent {
     }
 }
 
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CidarenBrowserEventEnvelope {
     pub version: u32,
@@ -373,6 +373,11 @@ fn validate_capture_values(
     }
     match mode {
         CidarenCaptureMode::TokenOnly => {
+            if user_token_source != Some(CidarenCaptureTokenSource::RequestHeader) {
+                return Err(protocol_drift(
+                    "Cidaren token-only Capture must use the request-header UserToken",
+                ));
+            }
             if login_info.is_some() || login_info_source.is_some() || user_session.is_some() {
                 return Err(protocol_drift(
                     "Cidaren token-only Capture must not combine Composite storage",
@@ -532,6 +537,17 @@ mod tests {
         let mixed = document.replace("\"login_info\":null", "\"login_info\":\"{}\"");
         assert_eq!(
             parse_browser_event(&mixed, &command, CIDAREN_ORIGIN)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        let wrong_source = document.replace(
+            "\"user_token_source\":\"request_header\"",
+            "\"user_token_source\":\"local_storage\"",
+        );
+        assert_eq!(
+            parse_browser_event(&wrong_source, &command, CIDAREN_ORIGIN)
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::ProtocolDrift

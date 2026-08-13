@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn donor_unfinished_marker_keeps_any未_completion_branch_pending() {
+    fn donor_unfinished_marker_keeps_any_unfinished_branch_pending() {
         let course = &parse_course_inventory(COURSES).unwrap()[0];
         let document = WellearnScoLeavesDocument::try_new(
             0,
