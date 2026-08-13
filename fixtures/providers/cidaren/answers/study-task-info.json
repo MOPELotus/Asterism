@@ -1,0 +1,13 @@
+{
+  "code": 1,
+  "msg": "success",
+  "data": {
+    "exist_little_task": 2,
+    "word_list": [
+      {"word": "alpha", "list_id": "course-a_02", "audio": "must-be-dropped"},
+      {"word": "beta", "list_id": "course-a_02"}
+    ],
+    "unknown": "must-be-dropped"
+  },
+  "jv": "0"
+}

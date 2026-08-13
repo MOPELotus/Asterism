@@ -2,9 +2,9 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::{AuthMethod, SessionKind, WaitingUserState};
 use asterism_provider_api::{
-    AuthChallenge, AuthenticationCapability, CredentialValidation, ProviderAuthContext,
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
-    ProviderResult, SessionStatus,
+    AuthChallenge, AuthenticationCapability, CaptureRecipe, CredentialValidation,
+    ProviderAuthContext, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
+    ProviderMetadata, ProviderResult, SessionStatus,
 };
 use asterism_secrets::{CredentialAcquisition, CredentialBundle, SecretPurpose, SecretString};
 use async_trait::async_trait;
@@ -12,14 +12,17 @@ use http::HeaderValue;
 use serde_json::Value;
 use zeroize::Zeroize;
 
-use crate::metadata::development_metadata;
+use crate::{CidarenCryptoContext, cidaren_capture_recipe_v1, metadata::development_metadata};
 
 const MAX_TOKEN_BYTES: usize = 64 * 1_024;
 const MAX_VALIDATION_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_SELECTED_COURSE_ID_BYTES: usize = 256;
 
 /// One bounded opaque `UserToken`. Plaintext is redacted and zeroized.
-pub struct CidarenTokenSession(SecretString);
+pub struct CidarenTokenSession {
+    token: SecretString,
+    crypto: Option<CidarenCryptoContext>,
+}
 
 impl CidarenTokenSession {
     /// Validates an imported token without assuming a historical hex format.
@@ -39,12 +42,42 @@ impl CidarenTokenSession {
             token.zeroize();
             return Err(invalid_credential_shape());
         }
-        Ok(Self(SecretString::new(token)))
+        Ok(Self {
+            token: SecretString::new(token),
+            crypto: None,
+        })
+    }
+
+    /// Builds one captured composite session after parsing its bounded crypto
+    /// context. The token and context remain one inseparable account binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns Authentication when either credential component is malformed.
+    pub fn try_new_captured(
+        token: impl Into<String>,
+        crypto_document: &[u8],
+    ) -> ProviderResult<Self> {
+        let mut session = Self::try_new(token)?;
+        session.crypto = Some(CidarenCryptoContext::parse(crypto_document)?);
+        Ok(session)
     }
 
     /// Exposes the token only to a bounded authenticated transport.
     pub fn expose_token(&self) -> &str {
-        self.0.expose_secret()
+        self.token.expose_secret()
+    }
+
+    pub fn crypto_context(&self) -> Option<&CidarenCryptoContext> {
+        self.crypto.as_ref()
+    }
+
+    pub const fn session_kind(&self) -> SessionKind {
+        if self.crypto.is_some() {
+            SessionKind::Composite
+        } else {
+            SessionKind::ProviderSpecific
+        }
     }
 }
 
@@ -69,7 +102,7 @@ pub trait CidarenSessionResolver: Send + Sync {
     ) -> ProviderResult<CidarenTokenSession>;
 }
 
-/// Manual `ImportedToken` authentication orchestration.
+/// Manual token and captured WeChat/browser authentication orchestration.
 pub struct CidarenAuthentication {
     metadata: ProviderMetadata,
     transport: Arc<dyn CidarenAuthenticationTransport>,
@@ -131,7 +164,32 @@ impl CidarenAuthentication {
         let token = std::str::from_utf8(bytes).map_err(|_| invalid_credential_shape())?;
         let session = CidarenTokenSession::try_new(token.to_owned())?;
         self.transport.validate_token(&session).await?;
-        Ok(CredentialValidation::accepted(valid_session()))
+        Ok(CredentialValidation::accepted(valid_session(
+            SessionKind::ProviderSpecific,
+        )))
+    }
+
+    async fn validate_captured_session(
+        &self,
+        credential: &CredentialBundle,
+    ) -> ProviderResult<CredentialValidation> {
+        if credential.session_kind != SessionKind::Composite
+            || !matches!(
+                credential.acquired_via,
+                CredentialAcquisition::CaptureTool | CredentialAcquisition::BrowserExtension
+            )
+            || credential.fields.len() != 2
+        {
+            return Err(invalid_credential_shape());
+        }
+        let token = exact_field(credential, SecretPurpose::ProviderAccessToken)?;
+        let crypto = exact_field(credential, SecretPurpose::ProviderCompositeSession)?;
+        let token = std::str::from_utf8(token).map_err(|_| invalid_credential_shape())?;
+        let session = CidarenTokenSession::try_new_captured(token.to_owned(), crypto)?;
+        self.transport.validate_token(&session).await?;
+        Ok(CredentialValidation::accepted(valid_session(
+            SessionKind::Composite,
+        )))
     }
 }
 
@@ -154,13 +212,22 @@ impl ProviderIdentity for CidarenAuthentication {
 
 #[async_trait]
 impl AuthenticationCapability for CidarenAuthentication {
+    fn capture_recipe(&self) -> Option<CaptureRecipe> {
+        Some(cidaren_capture_recipe_v1())
+    }
+
     async fn begin_authentication(
         &self,
         context: &ProviderAuthContext,
         method: AuthMethod,
     ) -> ProviderResult<AuthChallenge> {
         self.validate_provider(&context.provider_id)?;
-        if method != AuthMethod::ImportedToken {
+        if !matches!(
+            method,
+            AuthMethod::ImportedToken
+                | AuthMethod::AssistedSession
+                | AuthMethod::ExternalBrowserOauth
+        ) {
             return Err(unsupported_auth_method());
         }
         let session_id = context.auth_session_id.ok_or_else(|| {
@@ -172,8 +239,15 @@ impl AuthenticationCapability for CidarenAuthentication {
         Ok(AuthChallenge {
             session_id,
             method,
-            waiting_for: WaitingUserState::SessionImport,
-            user_action: None,
+            waiting_for: if method == AuthMethod::ImportedToken {
+                WaitingUserState::SessionImport
+            } else {
+                WaitingUserState::BrowserCallback
+            },
+            user_action: (method != AuthMethod::ImportedToken).then(|| {
+                "Open https://app.vocabgo.com/student/ inside authenticated WeChat and complete the Capture bootstrap"
+                    .to_owned()
+            }),
             expires_at: None,
         })
     }
@@ -190,10 +264,13 @@ impl AuthenticationCapability for CidarenAuthentication {
                 "Cidaren credential belongs to another Provider",
             ));
         }
-        if credential.auth_method != AuthMethod::ImportedToken {
-            return Err(unsupported_auth_method());
+        match credential.auth_method {
+            AuthMethod::ImportedToken => self.validate_imported_token(credential).await,
+            AuthMethod::AssistedSession | AuthMethod::ExternalBrowserOauth => {
+                self.validate_captured_session(credential).await
+            }
+            _ => Err(unsupported_auth_method()),
         }
-        self.validate_imported_token(credential).await
     }
 
     async fn validate_session(&self, context: &ProviderContext) -> ProviderResult<SessionStatus> {
@@ -206,7 +283,7 @@ impl AuthenticationCapability for CidarenAuthentication {
         }
         let session = self.sessions.resolve_session(context).await?;
         self.transport.validate_token(&session).await?;
-        Ok(valid_session())
+        Ok(valid_session(session.session_kind()))
     }
 }
 
@@ -272,10 +349,10 @@ pub(crate) fn selected_course_id(document: &[u8]) -> ProviderResult<String> {
     Ok(course_id.to_owned())
 }
 
-const fn valid_session() -> SessionStatus {
+const fn valid_session(kind: SessionKind) -> SessionStatus {
     SessionStatus {
         valid: true,
-        kind: SessionKind::ProviderSpecific,
+        kind,
         expires_at: None,
         account_hint: None,
     }
@@ -291,8 +368,23 @@ fn unsupported_auth_method() -> ProviderError {
 fn invalid_credential_shape() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Authentication,
-        "Cidaren credential fields do not match ImportedToken",
+        "Cidaren credential fields do not match an advertised session shape",
     )
+}
+
+fn exact_field(credential: &CredentialBundle, purpose: SecretPurpose) -> ProviderResult<&[u8]> {
+    let mut fields = credential
+        .fields
+        .iter()
+        .filter(|field| field.purpose == purpose);
+    let value = fields
+        .next()
+        .map(|field| field.value.expose_secret())
+        .ok_or_else(invalid_credential_shape)?;
+    if fields.next().is_some() {
+        return Err(invalid_credential_shape());
+    }
+    Ok(value)
 }
 
 fn invalid_validation_response() -> ProviderError {
@@ -368,7 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_accepts_only_exact_manual_import_and_stored_token() {
+    async fn capability_accepts_exact_manual_and_captured_sessions() {
         let boundaries = Arc::new(FixtureBoundaries::default());
         let capability =
             CidarenAuthentication::try_new(boundaries.clone(), boundaries.clone()).unwrap();
@@ -379,12 +471,19 @@ mod tests {
         assert_eq!(validated.status.kind, SessionKind::ProviderSpecific);
         assert!(validated.replacement.is_none());
 
+        let captured = capability
+            .validate_credential(&auth_context(), &captured_bundle())
+            .await
+            .unwrap();
+        assert_eq!(captured.status.kind, SessionKind::Composite);
+        assert!(captured.replacement.is_none());
+
         let stored = capability
             .validate_session(&provider_context())
             .await
             .unwrap();
         assert_eq!(stored.kind, SessionKind::ProviderSpecific);
-        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 2);
+        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 3);
 
         assert_eq!(
             capability
@@ -394,6 +493,17 @@ mod tests {
                 .waiting_for,
             WaitingUserState::SessionImport
         );
+        for method in [
+            AuthMethod::AssistedSession,
+            AuthMethod::ExternalBrowserOauth,
+        ] {
+            let challenge = capability
+                .begin_authentication(&auth_context(), method)
+                .await
+                .unwrap();
+            assert_eq!(challenge.waiting_for, WaitingUserState::BrowserCallback);
+            assert!(challenge.user_action.is_some());
+        }
         assert!(
             capability
                 .begin_authentication(&auth_context(), AuthMethod::Password)
@@ -442,6 +552,37 @@ mod tests {
                 purpose: SecretPurpose::ProviderAccessToken,
                 value: SecretValue::new(b"synthetic-user-token".to_vec()),
             }],
+            user_id_hint: None,
+        }
+    }
+
+    fn captured_bundle() -> CredentialBundle {
+        CredentialBundle {
+            provider_id: ProviderId::new("cidaren").unwrap(),
+            tenant: None,
+            auth_method: AuthMethod::AssistedSession,
+            acquired_via: CredentialAcquisition::CaptureTool,
+            captured_at: Utc::now(),
+            expires_at: None,
+            session_kind: SessionKind::Composite,
+            fields: vec![
+                CredentialField {
+                    purpose: SecretPurpose::ProviderAccessToken,
+                    value: SecretValue::new(b"synthetic-user-token".to_vec()),
+                },
+                CredentialField {
+                    purpose: SecretPurpose::ProviderCompositeSession,
+                    value: SecretValue::new(
+                        serde_json::to_vec(&serde_json::json!({
+                            "login_info": {
+                                "a": "hc3ludGhldGljLXNoYXJlZC1zZWNyZXQ=",
+                                "b": "ac3ludGhldGljLXNhbHQ="
+                            }
+                        }))
+                        .unwrap(),
+                    ),
+                },
+            ],
             user_id_hint: None,
         }
     }

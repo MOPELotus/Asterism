@@ -344,7 +344,11 @@ fn normalize_task(row: ClassTaskRow) -> ProviderResult<RemoteTask> {
         opens_at,
         due_at: None,
         closes_at: None,
-        capabilities: vec![TaskCapability::ProgressRead],
+        capabilities: vec![
+            TaskCapability::ProgressRead,
+            TaskCapability::SubmissionBuild,
+            TaskCapability::BrowserBridge,
+        ],
         fingerprint: fingerprint(&normalized)?,
         normalized,
         raw_sanitized: serde_json::json!({
@@ -565,7 +569,14 @@ mod tests {
         assert_eq!(learning.source_type, SourceType::Practice);
         assert_eq!(learning.assessment_class, AssessmentClass::Routine);
         assert_eq!(learning.remote_state, RemoteState::Pending);
-        assert_eq!(learning.capabilities, [TaskCapability::ProgressRead]);
+        assert_eq!(
+            learning.capabilities,
+            [
+                TaskCapability::ProgressRead,
+                TaskCapability::SubmissionBuild,
+                TaskCapability::BrowserBridge,
+            ]
+        );
         assert!(learning.fingerprint.starts_with("v1:"));
 
         let test = tasks

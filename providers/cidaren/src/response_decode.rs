@@ -3,6 +3,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
 use zeroize::Zeroize;
 
+use crate::CidarenCryptoContext;
+
 const MAX_ENCODED_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_DECODED_BYTES: usize = 2 * 1_024 * 1_024;
 
@@ -12,21 +14,36 @@ const JV_2_10232: &[usize] = &[0, 1, 2, 5, 6, 7, 8, 46, 65, 66, 199, 270, 328, 3
 const JV_2_10234: &[usize] = &[0, 1, 2, 4, 5, 6, 7, 46, 65, 66, 198, 270, 328, 329];
 const JV_3_1021: &[usize] = &[0, 1, 2, 4, 5, 6, 7, 48, 49, 66, 150, 151, 284, 374, 375];
 
-/// Strictly decodes non-Capture Cidaren response data.
+/// Strictly decodes Cidaren response data without captured crypto context.
 ///
 /// Plain JSON and base64 `jv=0` are accepted. The exact legacy confusion-byte
-/// variants frozen from donor evidence are also supported. Current `jv=99`
-/// deliberately fails because its authenticated AES-GCM key material belongs
-/// to the deferred Capture boundary.
-///
-/// This helper does not advertise a Question capability and never extracts or
-/// retains answer data by itself.
+/// variants frozen from donor evidence are also supported. `jv=99` fails
+/// closed here because it must be decoded through [`decode_response_data`]
+/// with the fresh account-bound capture context.
 ///
 /// # Errors
 ///
-/// Returns `UnsupportedTask` for `jv=99`, `ProtocolDrift` for unknown versions
+/// Returns `Authentication` for `jv=99`, `ProtocolDrift` for unknown versions
 /// and `InvalidResponse` for malformed, primitive or oversized payloads.
 pub fn decode_legacy_response_data(data: &Value, jv: &str) -> ProviderResult<Value> {
+    decode_response_data(data, jv, None)
+}
+
+/// Strictly decodes one Cidaren response using the exact donor-observed
+/// encoding version and optional captured account crypto context.
+///
+/// The current `jv=99` route is authenticated with HKDF-SHA256/AES-256-GCM and
+/// never falls back to legacy heuristics. Unknown versions also fail closed.
+///
+/// # Errors
+///
+/// Returns a typed Provider error for a missing crypto context, unknown
+/// version, malformed framing, authentication failure or oversized content.
+pub fn decode_response_data(
+    data: &Value,
+    jv: &str,
+    crypto: Option<&CidarenCryptoContext>,
+) -> ProviderResult<Value> {
     let indices = match jv {
         "0" => None,
         "2_1254" => Some(JV_2_1254),
@@ -35,10 +52,9 @@ pub fn decode_legacy_response_data(data: &Value, jv: &str) -> ProviderResult<Val
         "2_10234" => Some(JV_2_10234),
         "3_1021" => Some(JV_3_1021),
         "99" => {
-            return Err(ProviderError::new(
-                ProviderErrorKind::UnsupportedTask,
-                "Cidaren jv=99 response requires the deferred Capture crypto context",
-            ));
+            return crypto
+                .ok_or_else(missing_crypto_context)?
+                .decrypt_payload(data);
         }
         _ => {
             return Err(ProviderError::new(
@@ -68,6 +84,13 @@ pub fn decode_legacy_response_data(data: &Value, jv: &str) -> ProviderResult<Val
     let decoded = decode_json(&normalized).ok_or_else(invalid_encoded_response);
     normalized.zeroize();
     decoded
+}
+
+fn missing_crypto_context() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Authentication,
+        "Cidaren jv=99 response requires a fresh captured crypto context",
+    )
 }
 
 fn bounded_json_clone(data: &Value) -> ProviderResult<Value> {
@@ -173,13 +196,13 @@ mod tests {
     }
 
     #[test]
-    fn current_capture_and_unknown_versions_fail_closed() {
+    fn missing_capture_context_and_unknown_versions_fail_closed() {
         let payload = serde_json::json!({"payload": {"iv": "synthetic"}});
         assert_eq!(
             decode_legacy_response_data(&payload, "99")
                 .unwrap_err()
                 .kind,
-            ProviderErrorKind::UnsupportedTask
+            ProviderErrorKind::Authentication
         );
         assert_eq!(
             decode_legacy_response_data(&payload, "future")

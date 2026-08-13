@@ -1,6 +1,6 @@
 # Cidaren protocol notes
 
-Audit date: 2026-08-11. These notes describe frozen donor behavior and
+Audit date: 2026-08-13. These notes describe frozen donor behavior and
 synthetic parser targets, not live compatibility.
 
 ## Imported token and account validation
@@ -18,9 +18,13 @@ Donor success is outer `code == 1` and contains `data.user_info`; another code
 is treated as an expired/rejected token. Account fields such as student name,
 student code, school and class are display data in the donor, but Asterism does
 not persist them in authentication fixtures or logs. The token has no audited
-expiry or refresh endpoint. Consequently the first batch supports only
-`ImportedToken` plus validation. WeChat OAuth, browser storage takeover,
-mitmproxy and system-proxy changes remain deferred Capture work.
+expiry or refresh endpoint. Asterism therefore keeps `ImportedToken` as one
+independent path and also accepts the current donor's Capture-assisted
+Composite session: one account-bound `UserToken` plus bounded
+`CDR_LOGIN_INFO` crypto context acquired from the authenticated WeChat H5
+origin. `AssistedSession` and `ExternalBrowserOauth` use a visible
+BrowserBridge/Capture challenge rather than pretending a native password flow
+exists.
 
 The native transport now uses the shared non-redirecting HTTPS client. It sends
 the token as a sensitive `UserToken` header, preserves the audited mobile
@@ -30,15 +34,21 @@ to Authentication, 429 retains a bounded Retry-After, redirects/404 map to
 ProtocolDrift and server failures remain ProviderUnavailable. Response bodies
 are zeroized after validation.
 
-The Core adapter requests only `ProviderAccessToken` and requires exactly one
-unexpired record whose account, reference, purpose, ManualImport acquisition
-and ProviderSpecific session kind all match the operation. Missing/stale token
-metadata maps to Authentication; storage/key failures remain sanitized
-Internal errors. No automatic renewal path exists.
+The Core adapter resolves either one exact manual `ProviderAccessToken`, or an
+exact two-record Composite binding containing `ProviderAccessToken` plus
+`ProviderCompositeSession`. Every record must match the account, reference,
+session kind, acquisition method and expiry. Missing/stale metadata maps to
+Authentication; storage/key failures remain sanitized Internal errors. No
+unsupported automatic refresh claim is made, but a fresh Capture session can
+replace an expired binding.
 
-The original historical donor contains a `LoginByWechatCode` exchange. It does
-not establish a current clean native bootstrap and must not override the
-explicit first-batch authentication decision.
+The original historical donor contains a `LoginByWechatCode` exchange, but its
+signing string hard-codes an old one-time WeChat code while the request body
+uses the runtime code. This mismatch persists in the frozen historical source,
+so it is protocol lineage rather than a reproducible native login recipe. The
+current donor's WeChat H5 Capture flow is implemented. A native code exchange
+is added if live evidence supplies a coherent current signature; it is not
+invented from the broken historical sample.
 
 ## Course, class-task and ordinary study inventory
 
@@ -160,12 +170,14 @@ POST Student/{ClassTask|StudyTask}/SubmitChoseWord
 ```
 
 Responses may be plain data, base64 with version-specific inserted confusion
-bytes, or current `jv=99` AES-GCM data. The private donor captures browser
-crypto context and derives a per-session key with HKDF before AES-GCM
-authentication. That material is Capture-dependent and is not implemented in
-the first non-Capture read-only milestone.
+bytes, or current `jv=99` AES-GCM data. The current donor captures browser
+`CDR_LOGIN_INFO`, removes the audited `h`/`a` field prefixes, derives a
+per-response 32-byte key with HKDF-SHA256 using
+`info = "vcg-exam-aes:{aad_last_component}"`, and authenticates AES-256-GCM
+with the response AAD. Asterism now implements this path with bounded framing,
+account-bound Composite sessions and zeroized context/key/plaintext.
 
-The Provider now isolates a non-Capture decoder for exact audited variants:
+The Provider isolates exact audited legacy variants alongside `jv=99`:
 
 ```text
 jv=0
@@ -174,16 +186,75 @@ jv=2_9214
 jv=2_10232
 jv=2_10234
 jv=3_1021
+jv=99 (fresh captured HKDF/AES-GCM context required)
 ```
 
 It bounds encoded and decoded data to 2 MiB, accepts only JSON objects/arrays,
 removes only the fixed inserted-byte positions for the declared variant,
 zeroizes temporary decoded bytes and rejects unknown versions instead of
 guessing indices. Public issue 43 establishes the `2_1254` family, but its
-textbook word payload is not retained as a fixture. `jv=99` returns
-UnsupportedTask at this boundary; the decoder does not justify advertising
-QuestionInventory/QuestionParse or starting a remote attempt.
+textbook word payload is not retained as a fixture. Missing `jv=99` context is
+Authentication; malformed framing/tag/plaintext is InvalidResponse.
+
+The current clean-room protocol layer additionally freezes:
+
+- fresh class/study identity rebinding before using mutable `task_id`;
+- exact `StartAnswer` query family and class `release_id` / study `course_id`;
+- `VerifyAnswer` answer/topic/timestamp/version signing;
+- `SubmitAnswerAndSave` and `SkipAnswer` duration/topic signing;
+- compact `SubmitChoseWord` word-map signing;
+- donor-observed topic modes for single-choice, matching and text Questions;
+- nested answer-tag flattening without persisting executable topic codes.
+
+`SubmitChoseWord` is acknowledgement-only in the donor: it validates the
+success envelope but does not decode a next Question. Asterism therefore uses
+a separate bounded word-selection receipt parser. The ordinary assessment
+parser continues to require decoded `data`, preventing a generic success
+message from being mistaken for a valid Start/Verify/advance result.
+
+Before `StartAnswer`, eligible learning Tasks build the donor's exact flat or
+self-built grouped word map from a fresh Task-bound inventory. After start,
+the Provider-private state machine emits only one remote operation at a time:
+
+```text
+SubmitChoseWord receipt (when required)
+-> StartAnswer payload
+-> current Question or reading card
+-> VerifyAnswer payload with rotated topic_code
+-> next VerifyAnswer (one matching relation at a time)
+-> SubmitAnswerAndSave / SkipAnswer
+-> next step or terminal receipt
+```
+
+Every command is account/task/correlation-bound and consumed on execution. A
+transport error leaves the flow `Issued`; the caller must mark it ambiguous,
+after which no replay is possible. Unexpected response semantics enter a
+separate fail-closed terminal state. This Provider-private machine is not yet a
+public Capability because Core still needs durable storage/recovery for each
+issued edge.
+
+Native answer evidence is also implemented. Inventory routes remain bound to
+the fresh class/study Task; `Course/StudyWordInfo` retains only meanings,
+phrases and examples; `Course/SearchWord` accepts the donor's additional
+bounded literal Unicode-escape layer before extracting a prototype. Phrase
+and example evidence remain separate because topic mode 32 consumes phrases,
+while modes 41-44 and the 51-54 fallback consume examples. Meaning matching
+uses donor direction `meaning in option`, and completion preserves prefix,
+length, `+s`, then example fallback order.
+
+Donor timing configuration is represented by immutable runtime settings. The
+default reported answer range is 2500-7500 ms, skip reports 20000 ms, and the
+default inter-step delay is zero. Range choices are stable for one bound step
+so crash recovery cannot silently choose a different mutation payload; Core
+will schedule real delays instead of sleeping inside Provider mutation code.
+
+`StartAnswer` is a non-idempotent remote attempt mutation, not a harmless
+Question read. The Provider request and parser layers are implemented, while
+registry integration waits on Core's durable AttemptStart/QuestionSession
+contract so ambiguous starts are recovered/verified rather than replayed.
 
 Question discovery, answer resolution, submission construction, mutation and
-fresh verification must remain separate capabilities. The donor's strings
-such as “task complete” do not replace an identity-bound post-mutation read.
+fresh verification remain separate capabilities. `topic_code` is ephemeral,
+redacted and zeroized; it never enters a persisted Question or immutable Draft.
+The donor's strings such as “task complete” are bounded receipt facts and do
+not replace an identity-bound post-mutation read.

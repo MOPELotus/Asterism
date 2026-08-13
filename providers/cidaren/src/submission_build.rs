@@ -1,0 +1,398 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use asterism_domain::{
+    NormalizedAnswer, Question, QuestionKind, SelectedAnswer, SubmissionPayloadEncoding,
+    SubmissionPayloadFieldPreview, SubmissionPayloadPreview,
+};
+use asterism_provider_api::{
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
+    ProviderResult, SubmissionBuildCapability,
+};
+use async_trait::async_trait;
+use serde_json::Value;
+
+use crate::metadata::development_metadata;
+
+const MAX_REMOTE_TASK_ID_BYTES: usize = 768;
+
+/// Credential-free Cidaren preview for one current attempt Question.
+///
+/// Cidaren reveals Questions sequentially and rotates `topic_code` after
+/// Verify. A Draft therefore describes exactly one current Question; executable
+/// topic codes, signatures, endpoints and headers are rebuilt only inside the
+/// durable execution attempt.
+#[derive(Clone, Debug)]
+pub struct CidarenSubmissionBuild {
+    metadata: ProviderMetadata,
+}
+
+impl CidarenSubmissionBuild {
+    /// Builds the Development submission-preview capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if compile-time Provider metadata is invalid.
+    pub fn try_new() -> ProviderResult<Self> {
+        Ok(Self {
+            metadata: development_metadata()?,
+        })
+    }
+}
+
+impl ProviderIdentity for CidarenSubmissionBuild {
+    fn metadata(&self) -> &ProviderMetadata {
+        &self.metadata
+    }
+}
+
+#[async_trait]
+impl SubmissionBuildCapability for CidarenSubmissionBuild {
+    async fn build_submission_preview(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        questions: &[Question],
+        selected_answers: &[SelectedAnswer],
+    ) -> ProviderResult<SubmissionPayloadPreview> {
+        validate_context(context, &self.metadata)?;
+        validate_remote_task_id(remote_task_id)?;
+        let [question] = questions else {
+            return Err(invalid_input(
+                "Cidaren Draft requires exactly one current attempt Question",
+            ));
+        };
+        let [selected] = selected_answers else {
+            return Err(invalid_input(
+                "Cidaren Draft requires exactly one selected answer",
+            ));
+        };
+        validate_binding(question, selected, remote_task_id)?;
+
+        let mut fields = match (&question.kind, &selected.answer) {
+            (QuestionKind::SingleChoice, NormalizedAnswer::Selections(values))
+                if values.len() == 1 && option_ids(question).contains(values[0].as_str()) =>
+            {
+                verify_fields(question, None)
+            }
+            (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) if values.len() == 1 => {
+                verify_fields(question, None)
+            }
+            (QuestionKind::Matching, NormalizedAnswer::Pairs(pairs)) => {
+                validate_matching(question, pairs)?;
+                pairs
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, _)| verify_fields(question, Some(index)))
+                    .collect()
+            }
+            _ => {
+                return Err(invalid_input(
+                    "Cidaren selected answer does not match the Question mode",
+                ));
+            }
+        };
+        fields.extend([
+            preview_field(question, "advance.topic_code"),
+            preview_field(question, "advance.time_spent"),
+        ]);
+        Ok(SubmissionPayloadPreview {
+            encoding: SubmissionPayloadEncoding::Json,
+            format: "cidaren.answer-lifecycle.json.v1".to_owned(),
+            fields,
+        })
+    }
+}
+
+fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
+    if context.provider_id != metadata.id {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Cidaren submission preview received a mismatched Provider context",
+        ));
+    }
+    if context.credential_refs.is_empty() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Cidaren submission preview requires an authenticated session",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_binding(
+    question: &Question,
+    selected: &SelectedAnswer,
+    remote_task_id: &str,
+) -> ProviderResult<()> {
+    if question.validate().is_err()
+        || selected.answer.validate().is_err()
+        || matches!(selected.answer, NormalizedAnswer::Unknown)
+        || selected.question_id != question.id
+        || question.position == 0
+        || question
+            .metadata_sanitized
+            .get("schema")
+            .and_then(Value::as_str)
+            != Some("cidaren.attempt-question.v1")
+        || question
+            .metadata_sanitized
+            .get("remote_task_id")
+            .and_then(Value::as_str)
+            != Some(remote_task_id)
+    {
+        return Err(invalid_input(
+            "Cidaren Draft contains inconsistent Question bindings",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_matching(
+    question: &Question,
+    pairs: &[asterism_domain::AnswerPair],
+) -> ProviderResult<()> {
+    let relations = question
+        .metadata_sanitized
+        .get("relations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_input("Cidaren matching Question has no relations"))?;
+    if pairs.len() != relations.len() || pairs.is_empty() {
+        return Err(invalid_input(
+            "Cidaren matching answer count differs from the Question",
+        ));
+    }
+    let options = option_ids(question);
+    let mut pair_map = BTreeMap::new();
+    for pair in pairs {
+        if !options.contains(pair.right.as_str())
+            || pair_map
+                .insert(pair.left.as_str(), pair.right.as_str())
+                .is_some()
+        {
+            return Err(invalid_input(
+                "Cidaren matching answer contains an invalid pair",
+            ));
+        }
+    }
+    let expected = relations
+        .iter()
+        .map(|relation| {
+            relation
+                .as_str()
+                .ok_or_else(|| invalid_input("Cidaren matching relation is invalid"))
+        })
+        .collect::<ProviderResult<BTreeSet<_>>>()?;
+    if pair_map.keys().copied().collect::<BTreeSet<_>>() != expected {
+        return Err(invalid_input(
+            "Cidaren matching answer is not bound to every relation",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_fields(question: &Question, index: Option<usize>) -> Vec<SubmissionPayloadFieldPreview> {
+    let prefix = index.map_or_else(
+        || "verify_answer".to_owned(),
+        |index| format!("verify_answer[{index}]"),
+    );
+    vec![
+        preview_field(question, &format!("{prefix}.answer")),
+        preview_field(question, &format!("{prefix}.topic_code")),
+    ]
+}
+
+fn preview_field(question: &Question, name: &str) -> SubmissionPayloadFieldPreview {
+    SubmissionPayloadFieldPreview {
+        question_id: question.id,
+        field_name: name.to_owned(),
+    }
+}
+
+fn option_ids(question: &Question) -> BTreeSet<&str> {
+    question
+        .options
+        .iter()
+        .map(|option| option.id.as_str())
+        .collect()
+}
+
+fn validate_remote_task_id(value: &str) -> ProviderResult<()> {
+    if !value.is_empty()
+        && value.len() <= MAX_REMOTE_TASK_ID_BYTES
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+        && (value.starts_with("class-task:") || value.starts_with("study-task:"))
+    {
+        Ok(())
+    } else {
+        Err(invalid_input("Cidaren Draft Task identity is invalid"))
+    }
+}
+
+fn invalid_input(message: &'static str) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::InvalidResponse, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use asterism_domain::{
+        AnswerCandidateId, AnswerPair, AnswerSource, ProviderAccountId, ProviderId, QuestionId,
+        QuestionOption, SecretId, TaskId,
+    };
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn single_and_text_previews_contain_no_executable_values() {
+        let capability = CidarenSubmissionBuild::try_new().unwrap();
+        for (question, answer) in [
+            (
+                question(
+                    QuestionKind::SingleChoice,
+                    vec![("n:0", "first"), ("n:1", "second")],
+                    &json!({}),
+                ),
+                NormalizedAnswer::Selections(vec!["n:1".to_owned()]),
+            ),
+            (
+                question(QuestionKind::ShortAnswer, Vec::new(), &json!({})),
+                NormalizedAnswer::Texts(vec!["synthetic answer".to_owned()]),
+            ),
+        ] {
+            let selected = selected_answer(&question, answer);
+            let preview = capability
+                .build_submission_preview(
+                    &context(),
+                    "class-task:2002",
+                    std::slice::from_ref(&question),
+                    std::slice::from_ref(&selected),
+                )
+                .await
+                .unwrap();
+            assert_eq!(preview.format, "cidaren.answer-lifecycle.json.v1");
+            let serialized = serde_json::to_string(&preview).unwrap();
+            assert!(!serialized.contains("synthetic answer"));
+            assert!(!serialized.contains("topic-code-value"));
+            assert_eq!(preview.fields.len(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn matching_preview_preserves_ordered_verify_steps() {
+        let capability = CidarenSubmissionBuild::try_new().unwrap();
+        let question = question(
+            QuestionKind::Matching,
+            vec![("n:0", "alpha"), ("n:1", "beta")],
+            &json!({"relations": ["alpha", "beta"]}),
+        );
+        let selected = selected_answer(
+            &question,
+            NormalizedAnswer::Pairs(vec![
+                AnswerPair {
+                    left: "alpha".to_owned(),
+                    right: "n:0".to_owned(),
+                },
+                AnswerPair {
+                    left: "beta".to_owned(),
+                    right: "n:1".to_owned(),
+                },
+            ]),
+        );
+        let preview = capability
+            .build_submission_preview(&context(), "class-task:2002", &[question], &[selected])
+            .await
+            .unwrap();
+        assert_eq!(preview.fields.len(), 6);
+        assert_eq!(preview.fields[0].field_name, "verify_answer[0].answer");
+        assert_eq!(preview.fields[3].field_name, "verify_answer[1].topic_code");
+    }
+
+    #[tokio::test]
+    async fn foreign_multiple_or_mismatched_inputs_fail_closed() {
+        let capability = CidarenSubmissionBuild::try_new().unwrap();
+        let question = question(
+            QuestionKind::SingleChoice,
+            vec![("n:0", "first")],
+            &json!({}),
+        );
+        let mut selected = selected_answer(
+            &question,
+            NormalizedAnswer::Selections(vec!["n:0".to_owned()]),
+        );
+        selected.question_id = QuestionId::new();
+        assert!(
+            capability
+                .build_submission_preview(
+                    &context(),
+                    "class-task:2002",
+                    std::slice::from_ref(&question),
+                    &[selected],
+                )
+                .await
+                .is_err()
+        );
+        let selected = selected_answer(
+            &question,
+            NormalizedAnswer::Selections(vec!["n:0".to_owned()]),
+        );
+        assert!(
+            capability
+                .build_submission_preview(
+                    &context(),
+                    "class-task:2002",
+                    &[question.clone(), question],
+                    &[selected.clone(), selected],
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    fn question(kind: QuestionKind, options: Vec<(&str, &str)>, extra: &Value) -> Question {
+        let mut metadata = serde_json::Map::from_iter([
+            ("schema".to_owned(), json!("cidaren.attempt-question.v1")),
+            ("remote_task_id".to_owned(), json!("class-task:2002")),
+            ("topic_mode".to_owned(), json!(17)),
+        ]);
+        metadata.extend(extra.as_object().unwrap().clone());
+        Question {
+            id: QuestionId::new(),
+            task_id: TaskId::new(),
+            remote_question_id: Some("question:synthetic".to_owned()),
+            kind,
+            stem: "Synthetic Question".to_owned(),
+            options: options
+                .into_iter()
+                .map(|(id, content)| QuestionOption {
+                    id: id.to_owned(),
+                    content: Some(content.to_owned()),
+                    attachments: Vec::new(),
+                    metadata_sanitized: json!({}),
+                })
+                .collect(),
+            attachments: Vec::new(),
+            metadata_sanitized: Value::Object(metadata),
+            position: 1,
+        }
+    }
+
+    fn selected_answer(question: &Question, answer: NormalizedAnswer) -> SelectedAnswer {
+        SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer,
+            source: AnswerSource::ProviderNative,
+            confidence: None,
+        }
+    }
+
+    fn context() -> ProviderContext {
+        ProviderContext {
+            provider_id: ProviderId::new("cidaren").unwrap(),
+            account_id: ProviderAccountId::new(),
+            credential_refs: vec![SecretId::new()],
+            correlation_id: "cidaren-submission-build-test".to_owned(),
+        }
+    }
+}

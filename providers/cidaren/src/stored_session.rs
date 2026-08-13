@@ -41,33 +41,98 @@ impl CidarenSessionResolver for StoredCidarenSessionResolver {
         if context.provider_id.as_str() != PROVIDER_ID || context.credential_refs.is_empty() {
             return Err(invalid_stored_session());
         }
-        let mut credentials = self
+        let credentials = self
             .credentials
             .resolve_provider_credentials(ProviderCredentialResolution {
                 provider_account_id: context.account_id,
                 credential_refs: context.credential_refs.clone(),
-                purposes: vec![SecretPurpose::ProviderAccessToken],
+                purposes: vec![
+                    SecretPurpose::ProviderAccessToken,
+                    SecretPurpose::ProviderCompositeSession,
+                ],
                 correlation_id: context.correlation_id.clone(),
             })
             .await
             .map_err(|error| map_resolution_error(&error))?;
-        if credentials.len() != 1 {
+        if credentials.is_empty() || credentials.len() > 2 {
             return Err(invalid_stored_session());
         }
-        let resolved = credentials.pop().expect("one credential was required");
-        let metadata = &resolved.credential;
-        if metadata.provider_account_id != context.account_id
-            || metadata.secret.purpose != SecretPurpose::ProviderAccessToken
-            || !context.credential_refs.contains(&metadata.secret.id)
-            || metadata.session_kind != SessionKind::ProviderSpecific
-            || metadata.acquired_via != CredentialAcquisition::ManualImport
-            || metadata.is_expired_at(Utc::now())
+        let now = Utc::now();
+        for resolved in &credentials {
+            let metadata = &resolved.credential;
+            if metadata.provider_account_id != context.account_id
+                || !context.credential_refs.contains(&metadata.secret.id)
+                || metadata.is_expired_at(now)
+            {
+                return Err(invalid_stored_session());
+            }
+        }
+
+        let access_index = credentials
+            .iter()
+            .position(|resolved| {
+                resolved.credential.secret.purpose == SecretPurpose::ProviderAccessToken
+            })
+            .ok_or_else(invalid_stored_session)?;
+        if credentials
+            .iter()
+            .filter(|resolved| {
+                resolved.credential.secret.purpose == SecretPurpose::ProviderAccessToken
+            })
+            .count()
+            != 1
         {
             return Err(invalid_stored_session());
         }
-        let token = std::str::from_utf8(resolved.value.expose_secret())
+        let token = std::str::from_utf8(credentials[access_index].value.expose_secret())
             .map_err(|_| invalid_stored_session())?;
-        CidarenTokenSession::try_new(token.to_owned()).map_err(|_| invalid_stored_session())
+
+        if credentials.len() == 1 {
+            let metadata = &credentials[access_index].credential;
+            if metadata.session_kind != SessionKind::ProviderSpecific
+                || metadata.acquired_via != CredentialAcquisition::ManualImport
+            {
+                return Err(invalid_stored_session());
+            }
+            return CidarenTokenSession::try_new(token.to_owned())
+                .map_err(|_| invalid_stored_session());
+        }
+
+        let crypto_index = credentials
+            .iter()
+            .position(|resolved| {
+                resolved.credential.secret.purpose == SecretPurpose::ProviderCompositeSession
+            })
+            .ok_or_else(invalid_stored_session)?;
+        let captured_acquisition = credentials[0].credential.acquired_via;
+        let captured_at = credentials[0].credential.captured_at;
+        let captured_expiry = credentials[0].credential.expires_at;
+        if credentials
+            .iter()
+            .filter(|resolved| {
+                resolved.credential.secret.purpose == SecretPurpose::ProviderCompositeSession
+            })
+            .count()
+            != 1
+            || credentials.iter().any(|resolved| {
+                resolved.credential.session_kind != SessionKind::Composite
+                    || resolved.credential.acquired_via != captured_acquisition
+                    || resolved.credential.captured_at != captured_at
+                    || resolved.credential.expires_at != captured_expiry
+                    || !matches!(
+                        resolved.credential.acquired_via,
+                        CredentialAcquisition::CaptureTool
+                            | CredentialAcquisition::BrowserExtension
+                    )
+            })
+        {
+            return Err(invalid_stored_session());
+        }
+        CidarenTokenSession::try_new_captured(
+            token.to_owned(),
+            credentials[crypto_index].value.expose_secret(),
+        )
+        .map_err(|_| invalid_stored_session())
     }
 }
 
@@ -89,7 +154,7 @@ fn map_resolution_error(error: &SecretStoreError) -> ProviderError {
 fn invalid_stored_session() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Authentication,
-        "Cidaren account has no usable stored imported token",
+        "Cidaren account has no usable bound manual or captured session",
     )
 }
 
@@ -104,6 +169,7 @@ mod tests {
     use asterism_secrets::{
         ProviderCredential, ResolvedProviderCredential, SecretRef, SecretValue,
     };
+    use base64::Engine as _;
 
     use super::*;
 
@@ -118,6 +184,9 @@ mod tests {
         WrongOrigin,
         Expired,
         InvalidUtf8,
+        Composite,
+        CompositeWrongOrigin,
+        CompositeMalformedCrypto,
         StorageFailure,
     }
 
@@ -130,6 +199,10 @@ mod tests {
 
     #[async_trait]
     impl ProviderCredentialResolver for FixtureResolver {
+        #[allow(
+            clippy::too_many_lines,
+            reason = "the fixture keeps every credential-shape adversarial case in one auditable resolver"
+        )]
         async fn resolve_provider_credentials(
             &self,
             request: ProviderCredentialResolution,
@@ -214,6 +287,26 @@ mod tests {
                     None,
                     &[0xff],
                 )]),
+                FixtureBehavior::Composite => Ok(composite_credentials(
+                    &request,
+                    CredentialAcquisition::CaptureTool,
+                    valid_crypto_document().as_bytes(),
+                )),
+                FixtureBehavior::CompositeWrongOrigin => {
+                    let mut credentials = composite_credentials(
+                        &request,
+                        CredentialAcquisition::CaptureTool,
+                        valid_crypto_document().as_bytes(),
+                    );
+                    credentials[1].credential.acquired_via =
+                        CredentialAcquisition::BrowserExtension;
+                    Ok(credentials)
+                }
+                FixtureBehavior::CompositeMalformedCrypto => Ok(composite_credentials(
+                    &request,
+                    CredentialAcquisition::CaptureTool,
+                    br#"{"login_info":{"a":"","b":""}}"#,
+                )),
                 FixtureBehavior::StorageFailure => Err(SecretStoreError::Storage),
             }
         }
@@ -235,8 +328,40 @@ mod tests {
         let request = credentials.request.lock().unwrap().clone().unwrap();
         assert_eq!(request.provider_account_id, context.account_id);
         assert_eq!(request.credential_refs, context.credential_refs);
-        assert_eq!(request.purposes, [SecretPurpose::ProviderAccessToken]);
+        assert_eq!(
+            request.purposes,
+            [
+                SecretPurpose::ProviderAccessToken,
+                SecretPurpose::ProviderCompositeSession,
+            ]
+        );
         assert_eq!(request.correlation_id, context.correlation_id);
+    }
+
+    #[tokio::test]
+    async fn resolves_one_exact_account_bound_composite_session() {
+        let resolver = fixture_resolver(FixtureBehavior::Composite);
+        let session = resolver
+            .resolve_session(&composite_context())
+            .await
+            .unwrap();
+        assert_eq!(session.expose_token(), "synthetic-captured-token");
+        assert_eq!(session.session_kind(), SessionKind::Composite);
+        assert!(session.crypto_context().is_some());
+
+        for behavior in [
+            FixtureBehavior::CompositeWrongOrigin,
+            FixtureBehavior::CompositeMalformedCrypto,
+        ] {
+            assert_eq!(
+                fixture_resolver(behavior)
+                    .resolve_session(&composite_context())
+                    .await
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::Authentication
+            );
+        }
     }
 
     #[tokio::test]
@@ -329,12 +454,58 @@ mod tests {
         }
     }
 
+    fn composite_credentials(
+        request: &ProviderCredentialResolution,
+        acquired_via: CredentialAcquisition,
+        crypto: &[u8],
+    ) -> Vec<ResolvedProviderCredential> {
+        vec![
+            resolved_credential(
+                request.provider_account_id,
+                request.credential_refs[0],
+                SecretPurpose::ProviderAccessToken,
+                SessionKind::Composite,
+                acquired_via,
+                None,
+                b"synthetic-captured-token",
+            ),
+            resolved_credential(
+                request.provider_account_id,
+                request.credential_refs[1],
+                SecretPurpose::ProviderCompositeSession,
+                SessionKind::Composite,
+                acquired_via,
+                None,
+                crypto,
+            ),
+        ]
+    }
+
+    fn valid_crypto_document() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "login_info": {
+                "a": format!("h{}", base64::engine::general_purpose::STANDARD.encode(b"synthetic-shared-secret")),
+                "b": format!("a{}", base64::engine::general_purpose::STANDARD.encode(b"synthetic-salt")),
+            }
+        }))
+        .unwrap()
+    }
+
     fn provider_context() -> ProviderContext {
         ProviderContext {
             provider_id: ProviderId::new(PROVIDER_ID).unwrap(),
             account_id: ProviderAccountId::new(),
             credential_refs: vec![SecretId::new()],
             correlation_id: "cidaren-stored-session-test".to_owned(),
+        }
+    }
+
+    fn composite_context() -> ProviderContext {
+        ProviderContext {
+            provider_id: ProviderId::new(PROVIDER_ID).unwrap(),
+            account_id: ProviderAccountId::new(),
+            credential_refs: vec![SecretId::new(), SecretId::new()],
+            correlation_id: "cidaren-composite-session-test".to_owned(),
         }
     }
 }

@@ -1,0 +1,5 @@
+[
+  {"word": "alpha", "list_id": "course-a_01", "unknown": "must-be-dropped"},
+  {"word": "beta", "list_id": "course-a_02"},
+  {"word": "alpha", "list_id": "course-a_03"}
+]

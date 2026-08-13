@@ -1,0 +1,27 @@
+{
+  "code": 1,
+  "msg": "success",
+  "data": {
+    "course_id": "course-a",
+    "list_id": "course-a_02",
+    "word": "alpha",
+    "means": [
+      {
+        "mean": ["noun", "合成释义"],
+        "usages": [
+          {
+            "phrases_infos": [],
+            "examples": [
+              {
+                "sen_content": "This is an {alpha} example.",
+                "sen_mean_cn": "这是合成例句。",
+                "audio_file": "must-be-dropped"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "jv": "0"
+}

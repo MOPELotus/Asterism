@@ -1,6 +1,6 @@
 # Cidaren research sources
 
-Audit date: 2026-08-11. Revisions are frozen before implementation; moving
+Audit date: 2026-08-13. Revisions are frozen before implementation; moving
 default branches and release binaries are not evidence for this checkpoint.
 
 | Source | Revision | Capability evidence | Use | License |
@@ -11,7 +11,10 @@ default branches and release binaries are not evidence for this checkpoint.
 
 The private donor is the primary current behavior source supplied by the
 repository owner. It is one protocol/crypto update ahead of the public branch
-and is audited directly rather than inferred from the GUI. The public issue
+and is audited directly rather than inferred from the GUI. The historical
+original was rechecked at its frozen revision: its native WeChat-code request
+contains a stale hard-coded signing input and is not reliable current protocol
+evidence. The public issue
 tracker supplies independently recorded class-task fields and lifecycle facts,
 not credentials or executable request material:
 
@@ -31,5 +34,6 @@ not credentials or executable request material:
 - [issue 107](https://github.com/ularch/Easy_Cidaren/issues/107) records the
   2026 encrypted-response drift that the private donor addresses.
 
-No live account was contacted during this audit. Capture-dependent bootstrap is
-explicitly deferred by the first-batch decision.
+No live account was contacted during this audit. Capture bootstrap, browser
+storage acquisition and `jv=99` crypto are first-batch implementation scope;
+live validation remains pending only because no real account has been supplied.

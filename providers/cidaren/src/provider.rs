@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use asterism_networking::ResolvedNetworkProfile;
-use asterism_provider_api::{ProviderEntry, ProviderResult, ProviderRuntimeSettingsSchema};
+use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::ProviderCredentialResolver;
 
 use crate::{
-    CidarenAuthentication, CidarenAuthenticationTransport, CidarenClassTaskTransport,
-    CidarenCourseInventory, CidarenSessionResolver, CidarenStudyTaskTransport, CidarenTaskDetail,
-    CidarenTaskInventory, CidarenTaskProgress, metadata::development_metadata,
-    native_http::NativeCidarenTransport, stored_session::StoredCidarenSessionResolver,
+    CidarenAuthentication, CidarenAuthenticationTransport, CidarenBrowserBridge,
+    CidarenClassTaskTransport, CidarenCourseInventory, CidarenSessionResolver,
+    CidarenStudyTaskTransport, CidarenSubmissionBuild, CidarenTaskDetail, CidarenTaskInventory,
+    CidarenTaskProgress, metadata::development_metadata, native_http::NativeCidarenTransport,
+    runtime_settings::runtime_settings_schema, stored_session::StoredCidarenSessionResolver,
 };
 
 /// Composes the Development entry around injected token/session and complete
@@ -34,7 +35,7 @@ pub fn build_development_provider(
     )?);
     Ok(ProviderEntry {
         metadata: development_metadata()?,
-        runtime_settings: ProviderRuntimeSettingsSchema::default(),
+        runtime_settings: runtime_settings_schema(),
         authentication: Some(Arc::new(CidarenAuthentication::try_new(
             authentication_transport,
             sessions,
@@ -47,17 +48,17 @@ pub fn build_development_provider(
             class_tasks,
             study_tasks,
         )?)),
-        task_detail: Some(task_detail),
+        task_detail: Some(task_detail.clone()),
         task_progress: Some(task_progress),
         duration_read: None,
         question_inventory: None,
         question_parse: None,
         answer_resolve: None,
-        submission_build: None,
+        submission_build: Some(Arc::new(CidarenSubmissionBuild::try_new()?)),
         submission_execute: None,
         submission_verify: None,
         task_execution: None,
-        browser_bridge: None,
+        browser_bridge: Some(Arc::new(CidarenBrowserBridge::try_new(task_detail)?)),
     })
 }
 
@@ -175,9 +176,11 @@ mod tests {
         assert!(entry.task_progress.is_some());
         assert!(entry.duration_read.is_none());
         assert!(entry.question_inventory.is_none());
+        assert!(entry.submission_build.is_some());
         assert!(entry.submission_execute.is_none());
-        assert!(entry.browser_bridge.is_none());
-        assert!(entry.runtime_settings.definitions.is_empty());
+        assert!(entry.browser_bridge.is_some());
+        assert_eq!(entry.runtime_settings.version, 1);
+        assert_eq!(entry.runtime_settings.definitions.len(), 8);
 
         let mut registry = ProviderRegistry::default();
         registry.register(entry).unwrap();

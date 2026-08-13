@@ -25,16 +25,22 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
-        capture_recipe_version: None,
+        capture_recipe_version: Some(1),
         capabilities: BTreeSet::from([
             ProviderCapability::Authentication,
+            ProviderCapability::BrowserBridge,
             ProviderCapability::CourseInventory,
             ProviderCapability::TaskInventory,
             ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
+            ProviderCapability::SubmissionBuild,
         ]),
-        auth_methods: BTreeSet::from([AuthMethod::ImportedToken]),
-        session_kinds: BTreeSet::from([SessionKind::ProviderSpecific]),
+        auth_methods: BTreeSet::from([
+            AuthMethod::ImportedToken,
+            AuthMethod::AssistedSession,
+            AuthMethod::ExternalBrowserOauth,
+        ]),
+        session_kinds: BTreeSet::from([SessionKind::ProviderSpecific, SessionKind::Composite]),
     })
 }
 
@@ -43,7 +49,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn development_metadata_advertises_only_non_capture_boundaries() {
+    fn development_metadata_advertises_captured_and_manual_authentication() {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
@@ -51,20 +57,26 @@ mod tests {
             metadata.capabilities,
             BTreeSet::from([
                 ProviderCapability::Authentication,
+                ProviderCapability::BrowserBridge,
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
                 ProviderCapability::TaskDetail,
                 ProviderCapability::TaskProgressRead,
+                ProviderCapability::SubmissionBuild,
             ])
         );
         assert_eq!(
             metadata.auth_methods,
-            BTreeSet::from([AuthMethod::ImportedToken])
+            BTreeSet::from([
+                AuthMethod::ImportedToken,
+                AuthMethod::AssistedSession,
+                AuthMethod::ExternalBrowserOauth,
+            ])
         );
         assert_eq!(
             metadata.session_kinds,
-            BTreeSet::from([SessionKind::ProviderSpecific])
+            BTreeSet::from([SessionKind::ProviderSpecific, SessionKind::Composite,])
         );
-        assert!(metadata.capture_recipe_version.is_none());
+        assert_eq!(metadata.capture_recipe_version, Some(1));
     }
 }
