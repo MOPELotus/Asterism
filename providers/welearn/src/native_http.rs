@@ -613,11 +613,12 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                 "WELearn duration transport received out-of-range runtime settings",
             ));
         }
-        if (protocol_mode == crate::WellearnDurationProtocolMode::ClientCounter
-            && heartbeat_interval_seconds != 1)
-            || (protocol_mode == crate::WellearnDurationProtocolMode::ImplicitServer
-                && heartbeat_interval_seconds != 60)
-        {
+        let evidenced_heartbeat_interval = match protocol_mode {
+            crate::WellearnDurationProtocolMode::ClientCounter => 1,
+            crate::WellearnDurationProtocolMode::PreserveFresh
+            | crate::WellearnDurationProtocolMode::ImplicitServer => 60,
+        };
+        if heartbeat_interval_seconds != evidenced_heartbeat_interval {
             return Err(ProviderError::new(
                 ProviderErrorKind::Internal,
                 "WELearn duration transport received a protocol/interval mismatch",

@@ -151,7 +151,8 @@ only structural field names, response codes and bounded placeholder shapes.
   baseline/start/set/save/verification, and never combines profile halves into
   an unevidenced request.
 - Runtime settings retain the current donor's one-second heartbeat and short
-  session behavior inside explicit bounded ranges.
+  session behavior, expose only the audited 1/60-second heartbeat values, and
+  bind each cadence to its exact donor wire mode.
 - The preservation-mode schedule sends an initial keep and one keep per full
   interval, while a trailing partial interval adds elapsed time but no
   unevidenced final keep.

@@ -73,10 +73,11 @@ renew once; no mutation is replayed after an authentication failure.
 DurationRead remains independent from this write lifecycle and never starts a
 missing CMI session.
 
-The runtime schema accepts bounded one-second granularity for both the report
-length and heartbeat interval. This keeps the current donor's evidenced
-one-second heartbeat and short 10–30 second sessions expressible without
-dropping the upper bound or changing the conservative defaults. Provider and
+The runtime schema accepts bounded one-second granularity for report length,
+while heartbeat cadence exposes only the audited values: 1 second for current
+client-counter and 60 seconds for preserve-fresh/implicit-server. This keeps
+the current donor's short 10–30 second sessions expressible without inventing
+unsupported keep schedules. Provider and
 account execution concurrency are both expressible through 100, matching the
 Auto_WeLearn UI and worker boundary; defaults remain 1 and Core retains its
 global admission and lease controls.

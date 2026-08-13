@@ -268,13 +268,16 @@ owns this normalization.
 
 Master-owned runtime settings expose platform defaults and account/task
 overrides for fixed or donor-observed bounded-random report seconds, heartbeat
-interval and wire mode. One-second granularity is accepted within a bounded
-1–7,200 second report and 1–90 second heartbeat range: the current donor emits
-one heartbeat per second and documents 10–30 second sessions, while the older
-duration donor emits a 60-second cadence. Conservative defaults remain 600 and
-60 seconds. Random duration selection is derived from Core's immutable
-Execution identity plus the bound Task and remote identity: retry/recovery
-reproduce the same value, while a later Execution can sample another value.
+interval and wire mode. One-second granularity is accepted within the bounded
+1–7,200 second report range, while heartbeat cadence is restricted to the two
+audited values: current Fanyuchang's `client_counter` requires 1 second and
+YZBRH `preserve_fresh` plus Auto `implicit_server` require 60 seconds. The
+schema exposes only `{1,60}` and the runtime binds each value to its exact wire
+mode instead of advertising unevidenced 2–59 or 61–90 second variants.
+Conservative defaults remain 600 and 60 seconds. Random duration selection is
+derived from Core's immutable Execution identity plus the bound Task and remote
+identity: retry/recovery reproduce the same value, while a later Execution can
+sample another value.
 Provider and account
 execution concurrency plus periodic Course/Task scan interval are independently
 bounded. Auto_WeLearn exposes 1–100 concurrent workers; both WELearn

@@ -559,7 +559,7 @@ mod tests {
         assert_eq!(outcome.result_sanitized["completion_preserved"], true);
         assert_eq!(
             *transport.settings.lock().unwrap(),
-            Some((120, 30, WellearnDurationProtocolMode::PreserveFresh))
+            Some((120, 60, WellearnDurationProtocolMode::PreserveFresh))
         );
         assert_eq!(
             outcome.result_sanitized["duration_protocol_mode"],
@@ -734,7 +734,7 @@ mod tests {
                 ),
                 (
                     DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),
-                    ProviderSettingValue::DurationSeconds(30),
+                    ProviderSettingValue::DurationSeconds(60),
                 ),
             ]),
         };
@@ -769,7 +769,7 @@ mod tests {
                 ),
                 (
                     DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),
-                    ProviderSettingValue::DurationSeconds(30),
+                    ProviderSettingValue::DurationSeconds(60),
                 ),
             ]),
         };

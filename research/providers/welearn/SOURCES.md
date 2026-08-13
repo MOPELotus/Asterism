@@ -31,7 +31,7 @@ newer capability surface than the audited default head, and is the repository's
 only GitHub release. YZBRH and Auto_WeLearn expose neither fetched tags nor
 GitHub releases. A second `ls-remote`/release check after the endpoint port
 returned the same heads; the subsequent duration-wire, browser-auth, exact
-batch-semantics and current heartbeat-receipt checks did as well. These
+batch-semantics, heartbeat-receipt and heartbeat-cadence checks did as well. These
 revisions remain reproducible snapshots; future
 checkpoints must fetch again rather than treating them as permanent bounds.
 

@@ -45,7 +45,7 @@ const RESOURCE_MUTATION_LEGACY_MINIMAL_TASK: &str = "legacy_minimal_task_referer
 pub(crate) const MIN_DURATION_REPORT_SECONDS: u64 = 1;
 pub(crate) const MAX_DURATION_REPORT_SECONDS: u64 = 7_200;
 pub(crate) const MIN_DURATION_HEARTBEAT_SECONDS: u64 = 1;
-pub(crate) const MAX_DURATION_HEARTBEAT_SECONDS: u64 = 90;
+pub(crate) const MAX_DURATION_HEARTBEAT_SECONDS: u64 = 60;
 pub(crate) const LEGACY_DURATION_REQUEST_INTERVAL_SECONDS: u64 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -265,11 +265,12 @@ impl WellearnRuntimeSettings {
                 ));
             }
         };
-        if (duration_protocol_mode == WellearnDurationProtocolMode::ClientCounter
-            && duration_heartbeat_interval_seconds != 1)
-            || (duration_protocol_mode == WellearnDurationProtocolMode::ImplicitServer
-                && duration_heartbeat_interval_seconds != 60)
-        {
+        let evidenced_heartbeat_interval = match duration_protocol_mode {
+            WellearnDurationProtocolMode::ClientCounter => 1,
+            WellearnDurationProtocolMode::PreserveFresh
+            | WellearnDurationProtocolMode::ImplicitServer => 60,
+        };
+        if duration_heartbeat_interval_seconds != evidenced_heartbeat_interval {
             return Err(ProviderError::new(
                 ProviderErrorKind::Internal,
                 "WELearn donor duration protocol requires its evidenced heartbeat interval",
@@ -434,7 +435,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 13,
+        version: 14,
         definitions: vec![
             ProviderSettingDefinition {
                 key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
@@ -544,7 +545,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 kind: ProviderSettingKind::DurationSeconds {
                     minimum: MIN_DURATION_HEARTBEAT_SECONDS,
                     maximum: MAX_DURATION_HEARTBEAT_SECONDS,
-                    step: 1,
+                    step: 59,
                 },
                 default: ProviderSettingValue::DurationSeconds(60),
                 scopes: provider_account_task_scopes.clone(),
@@ -729,10 +730,6 @@ mod tests {
                     ProviderSettingValue::DurationSeconds(1_200),
                 ),
                 (
-                    DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),
-                    ProviderSettingValue::DurationSeconds(45),
-                ),
-                (
                     ACCOUNT_EXECUTION_CONCURRENCY_KEY.to_owned(),
                     ProviderSettingValue::Integer(2),
                 ),
@@ -747,7 +744,7 @@ mod tests {
             WellearnRuntimeSettings::resolve(&resolved).unwrap(),
             WellearnRuntimeSettings {
                 duration_report: WellearnDurationTarget::Fixed(1_200),
-                duration_heartbeat_interval_seconds: 45,
+                duration_heartbeat_interval_seconds: 60,
                 duration_protocol_mode: WellearnDurationProtocolMode::PreserveFresh,
                 resource_score: WellearnResourceScore::Fixed(82),
                 resource_completion_sequence: WellearnResourceCompletionSequence::SelectedScore,
@@ -780,6 +777,18 @@ mod tests {
         assert!(
             schema
                 .validate_patch(ProviderSettingScope::Task, &invalid)
+                .is_err()
+        );
+        let unevidenced = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: BTreeMap::from([(
+                DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),
+                ProviderSettingValue::DurationSeconds(30),
+            )]),
+        };
+        assert!(
+            schema
+                .validate_patch(ProviderSettingScope::Task, &unevidenced)
                 .is_err()
         );
 
@@ -840,6 +849,10 @@ mod tests {
                     DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),
                     ProviderSettingValue::DurationSeconds(1),
                 ),
+                (
+                    DURATION_PROTOCOL_MODE_KEY.to_owned(),
+                    ProviderSettingValue::Choice(DURATION_PROTOCOL_CLIENT_COUNTER.to_owned()),
+                ),
             ]),
         };
         let resolved = schema.resolve(None, None, Some(&task)).unwrap();
@@ -848,7 +861,7 @@ mod tests {
             WellearnRuntimeSettings {
                 duration_report: WellearnDurationTarget::Fixed(10),
                 duration_heartbeat_interval_seconds: 1,
-                duration_protocol_mode: WellearnDurationProtocolMode::PreserveFresh,
+                duration_protocol_mode: WellearnDurationProtocolMode::ClientCounter,
                 resource_score: WellearnResourceScore::Fixed(100),
                 resource_completion_sequence: WellearnResourceCompletionSequence::SelectedScore,
                 resource_completion_time_mode: WellearnResourceCompletionTimeMode::Auto,
@@ -895,7 +908,7 @@ mod tests {
         for (mode, interval, expected) in [
             (
                 DURATION_PROTOCOL_PRESERVE_FRESH,
-                30,
+                60,
                 WellearnDurationProtocolMode::PreserveFresh,
             ),
             (
@@ -932,6 +945,7 @@ mod tests {
         }
 
         for (mode, wrong_interval) in [
+            (DURATION_PROTOCOL_PRESERVE_FRESH, 1),
             (DURATION_PROTOCOL_CLIENT_COUNTER, 60),
             (DURATION_PROTOCOL_IMPLICIT_SERVER, 1),
         ] {
