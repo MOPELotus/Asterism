@@ -37,6 +37,22 @@
         }
       }
     },
+    "micros": {
+      "section-1/micro-1": {
+        "state": {
+          "pass": 0,
+          "pass2": 1,
+          "perm": 1
+        },
+        "strategies": {
+          "required": true,
+          "min_score_pct": 60,
+          "start_time": 1785542400,
+          "end_time": 1790812800,
+          "statistic_mode_out": false
+        }
+      }
+    },
     "open_id": "synthetic-open-id",
     "publish_version": "123290",
     "tutorialId": "course-v2:synthetic+rw+20260809",

@@ -10,7 +10,8 @@ use crate::course_inventory::{
     required_remote_component, required_text,
 };
 use crate::{
-    UaiCourseProgressDocument, UaiProgressDocument, parse_course_progress, parse_group_progress,
+    UaiCourseProgressDocument, UaiMicroProgressSnapshot, UaiProgressDocument,
+    parse_course_progress, parse_group_progress, parse_micro_progress,
     question::supports_question_read, resource_execution::supports_empty_completion_execution,
 };
 
@@ -120,6 +121,12 @@ pub(crate) fn enrich_task_inventory(
             "UAI Course progress Units do not match the Task-tree Units",
         ));
     }
+    let micro_progress_by_unit = progress_by_unit
+        .iter()
+        .map(|(unit_id, document)| {
+            parse_micro_progress(document.as_str()).map(|progress| (unit_id.clone(), progress))
+        })
+        .collect::<ProviderResult<BTreeMap<_, _>>>()?;
     for task in &mut tasks {
         let unit_id = task_unit_id(task)?;
         if let Some(course_snapshot) = &course_progress {
@@ -168,10 +175,54 @@ pub(crate) fn enrich_task_inventory(
             });
             task.normalized["strategy"] = strategy.clone();
             task.raw_sanitized["strategy"] = strategy;
+            if let Some(micros) = micro_progress_by_unit.get(&unit_id) {
+                attach_micro_progress(task, micros)?;
+            }
         }
         task.fingerprint = fingerprint(&task.normalized)?;
     }
     Ok(tasks)
+}
+
+fn attach_micro_progress(
+    task: &mut RemoteTask,
+    micros: &BTreeMap<String, UaiMicroProgressSnapshot>,
+) -> ProviderResult<()> {
+    let Some(micro_id) = task
+        .normalized
+        .get("micro")
+        .and_then(Value::as_object)
+        .and_then(|micro| micro.get("id"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let mut matches = micros
+        .iter()
+        .filter(|(path, _)| path.rsplit('/').next() == Some(micro_id));
+    let Some((path, snapshot)) = matches.next() else {
+        return Ok(());
+    };
+    if matches.next().is_some() {
+        return Err(protocol_drift(
+            "UAI progress contains ambiguous Micro paths for one Task hierarchy",
+        ));
+    }
+    let progress = serde_json::json!({
+        "path": path,
+        "pass": snapshot.pass(),
+        "pass2": snapshot.pass2(),
+        "perm": snapshot.perm(),
+        "completed": snapshot.is_completed(),
+        "required": snapshot.required(),
+        "min_score_percent": snapshot.min_score_percent(),
+        "statistic_mode_out": snapshot.statistic_mode_out(),
+        "opens_at": snapshot.opens_at(),
+        "closes_at": snapshot.closes_at(),
+    });
+    task.normalized["micro_progress"] = progress.clone();
+    task.raw_sanitized["micro_progress"] = progress;
+    Ok(())
 }
 
 fn bind_task_publish_version(
@@ -581,6 +632,8 @@ mod tests {
             tasks[0].normalized["course_unit_strategy"]["opens_at"],
             "2026-08-01T00:00:00Z"
         );
+        assert_eq!(tasks[0].normalized["micro_progress"]["path"], "section-1/micro-1");
+        assert_eq!(tasks[0].normalized["micro_progress"]["completed"], false);
     }
 
     #[test]

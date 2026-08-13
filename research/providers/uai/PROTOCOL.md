@@ -443,9 +443,12 @@ separate from `thirdPartyJudges[].versions`: the current donor reads the fresh
 Course `publish_version` and emits it as `course` with `answer=3`; the MIT
 compatibility builder independently evidences `course=0`/`answer=0`. Asterism
 normalizes a bounded positive numeric or numeric-string publish version into
-every fresh Group Task and uses the current pair when that fact is present. If
-the tree omits the field it uses only the legacy pair; it never fabricates a
-Course version or the MIT donor's client-authored score maps. A code-`0`,
+every fresh Group Task and uses the current pair when that fact is present.
+Native inventory takes the required current value from Course progress,
+cross-checks tree and per-Unit copies, and fills a missing tree field. Only an
+explicitly injected legacy transport that omits Course progress and every
+per-Unit version can select the compatibility pair; Asterism never fabricates
+a Course version or the MIT donor's client-authored score maps. A code-`0`,
 version-bearing response becomes an accepted receipt; `600001` and `600002`
 become typed retry state without a receipt, and the mutation is not implicitly
 repeated. A Network failure from the mutation boundary is likewise returned

@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use asterism_domain::RemoteState;
 use asterism_provider_api::{
@@ -18,6 +18,8 @@ use crate::{
 const MAX_PROGRESS_DOCUMENT_BYTES: usize = 1_024 * 1_024;
 const MAX_PROGRESS_ROUTE_IDENTITY_BYTES: usize = 512;
 const MAX_SIGNED_64_BIT_VALUE: u64 = 9_223_372_036_854_775_807;
+const MAX_PROGRESS_MICROS: usize = 4_096;
+const MAX_MICRO_PATH_COMPONENTS: usize = 8;
 
 /// One bounded per-Unit progress response, redacted and zeroized on drop.
 pub struct UaiProgressDocument(String);
@@ -140,6 +142,57 @@ impl UaiGroupProgressSnapshot {
             duration_seconds: None,
             updated_at: Utc::now(),
         }
+    }
+}
+
+/// Sanitized Micro-level progress and strategy facts from one per-Unit read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UaiMicroProgressSnapshot {
+    pass: u8,
+    pass2: u8,
+    perm: u8,
+    required: bool,
+    min_score_percent: u8,
+    opens_at: Option<asterism_domain::Timestamp>,
+    closes_at: Option<asterism_domain::Timestamp>,
+    statistic_mode_out: bool,
+}
+
+impl UaiMicroProgressSnapshot {
+    pub const fn pass(&self) -> u8 {
+        self.pass
+    }
+
+    pub const fn pass2(&self) -> u8 {
+        self.pass2
+    }
+
+    pub const fn perm(&self) -> u8 {
+        self.perm
+    }
+
+    pub const fn required(&self) -> bool {
+        self.required
+    }
+
+    pub const fn min_score_percent(&self) -> u8 {
+        self.min_score_percent
+    }
+
+    pub const fn opens_at(&self) -> Option<asterism_domain::Timestamp> {
+        self.opens_at
+    }
+
+    pub const fn closes_at(&self) -> Option<asterism_domain::Timestamp> {
+        self.closes_at
+    }
+
+    pub const fn statistic_mode_out(&self) -> bool {
+        self.statistic_mode_out
+    }
+
+    pub const fn is_completed(&self) -> bool {
+        self.pass == 1 && self.pass2 == 1 && self.perm == 1
     }
 }
 
@@ -285,6 +338,59 @@ pub fn parse_group_progress(
     })
 }
 
+/// Parses all bounded Micro-level state entries from one per-Unit response.
+/// Composite Micro keys are retained as sanitized identity paths rather than
+/// flattened into a guessed single ID.
+///
+/// # Errors
+///
+/// Returns protocol drift for malformed paths, flags, strategies or windows,
+/// and an invalid-response error when the map exceeds its bound.
+pub fn parse_micro_progress(
+    document: &str,
+) -> ProviderResult<BTreeMap<String, UaiMicroProgressSnapshot>> {
+    let result = progress_result(document)?;
+    let Some(micros) = result.get("micros") else {
+        return Ok(BTreeMap::new());
+    };
+    let micros = micros
+        .as_object()
+        .ok_or_else(|| protocol_drift("UAI progress micros is not an object"))?;
+    if micros.len() > MAX_PROGRESS_MICROS {
+        return Err(invalid_progress_response(
+            "UAI progress Micro count exceeds the limit",
+        ));
+    }
+    let mut snapshots = BTreeMap::new();
+    for (path, value) in micros {
+        let path = micro_progress_path(path)?;
+        let micro = value
+            .as_object()
+            .ok_or_else(|| protocol_drift("UAI Micro progress entry is not an object"))?;
+        let state = micro
+            .get("state")
+            .and_then(Value::as_object)
+            .ok_or_else(|| protocol_drift("UAI Micro progress has no state object"))?;
+        let strategy = progress_strategy(micro.get("strategies"))?;
+        let snapshot = UaiMicroProgressSnapshot {
+            pass: state_flag(state.get("pass"), "Micro pass")?,
+            pass2: state_flag(state.get("pass2"), "Micro pass2")?,
+            perm: state_flag(state.get("perm"), "Micro perm")?,
+            required: strategy.required,
+            min_score_percent: strategy.min_score_percent,
+            opens_at: strategy.opens_at,
+            closes_at: strategy.closes_at,
+            statistic_mode_out: strategy.statistic_mode_out,
+        };
+        if snapshots.insert(path, snapshot).is_some() {
+            return Err(protocol_drift(
+                "UAI progress contains a duplicate Micro identity path",
+            ));
+        }
+    }
+    Ok(snapshots)
+}
+
 /// Validates the account/Course/Unit echo on one native per-Unit progress read.
 ///
 /// # Errors
@@ -359,6 +465,32 @@ fn required_progress_route_identity(
         })
         .map(str::to_owned)
         .ok_or_else(|| protocol_drift(format!("UAI progress has no valid {label} identity")))
+}
+
+fn micro_progress_path(value: &str) -> ProviderResult<String> {
+    if value.is_empty() || value.len() > MAX_PROGRESS_ROUTE_IDENTITY_BYTES {
+        return Err(protocol_drift("UAI progress Micro path is invalid"));
+    }
+    let components = value.split('/').collect::<Vec<_>>();
+    if components.is_empty() || components.len() > MAX_MICRO_PATH_COMPONENTS {
+        return Err(protocol_drift("UAI progress Micro path is invalid"));
+    }
+    if components
+        .iter()
+        .any(|component| component.is_empty() || matches!(*component, "." | ".."))
+    {
+        return Err(protocol_drift("UAI progress Micro path is invalid"));
+    }
+    components
+        .iter()
+        .map(|component| {
+            required_remote_component(
+                Some(&Value::String((*component).to_owned())),
+                "progress Micro path component",
+            )
+        })
+        .collect::<ProviderResult<Vec<_>>>()
+        .map(|components| components.join("/"))
 }
 
 struct ProgressStrategy {
@@ -661,6 +793,34 @@ mod tests {
                 "foreign-open-id",
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn micro_progress_preserves_composite_identity_state_and_strategy() {
+        let micros = parse_micro_progress(PROGRESS).unwrap();
+        assert_eq!(micros.len(), 1);
+        let micro = &micros["section-1/micro-1"];
+        assert_eq!(micro.pass(), 0);
+        assert_eq!(micro.pass2(), 1);
+        assert_eq!(micro.perm(), 1);
+        assert!(!micro.is_completed());
+        assert!(micro.required());
+        assert_eq!(micro.min_score_percent(), 60);
+        assert!(!micro.statistic_mode_out());
+        assert_eq!(micro.opens_at().unwrap().timestamp(), 1_785_542_400);
+        assert_eq!(micro.closes_at().unwrap().timestamp(), 1_790_812_800);
+
+        assert!(
+            parse_micro_progress(&PROGRESS.replace(
+                "section-1/micro-1",
+                "section-1/../micro-1"
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_micro_progress(&PROGRESS.replace(r#""pass2": 1"#, r#""pass2": 2"#))
+                .is_err()
         );
     }
 

@@ -83,8 +83,8 @@ pub use metadata::development_metadata;
 pub use native_authentication::NativeUaiAuthenticationTransport;
 pub use native_http::NativeUaiInventoryTransport;
 pub use progress::{
-    UaiGroupProgressSnapshot, UaiProgressDocument, UaiProgressTransport, UaiTaskProgress,
-    parse_group_progress,
+    UaiGroupProgressSnapshot, UaiMicroProgressSnapshot, UaiProgressDocument, UaiProgressTransport,
+    UaiTaskProgress, parse_group_progress, parse_micro_progress,
 };
 pub use provider::{
     UaiDevelopmentTransports, UaiSubmissionTransports, build_development_provider,
