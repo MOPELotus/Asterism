@@ -810,6 +810,17 @@ mod tests {
         assert_eq!(progress.completed(), 1);
         assert_eq!(progress.total(), 127);
         let reference = parsed.question_ref().unwrap();
+        let mut progress_only_payload = payload.clone();
+        progress_only_payload["topic_done_num"] = json!(99);
+        let progress_only = parse_attempt_question(&progress_only_payload, "class-task:2002", 1)
+            .unwrap()
+            .question_ref()
+            .unwrap();
+        assert_eq!(progress_only.remote_id, reference.remote_id);
+        assert_eq!(
+            progress_only.metadata_sanitized,
+            reference.metadata_sanitized
+        );
         assert_eq!(reference.kind_hint, QuestionKind::SingleChoice);
         assert_eq!(
             reference.route_context.get("cidaren.topic_code"),

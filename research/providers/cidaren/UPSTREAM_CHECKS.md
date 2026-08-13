@@ -140,6 +140,14 @@ Post-implementation ref checks retained both revisions and the same ularch
 release. The 107-test Provider suite, all-target clippy and scoped diff checks
 passed without an intervening upstream delta.
 
+The full `ularch/Easy_Cidaren` source tree was also re-read at this checkpoint.
+Its executable platform surface remains the already mapped inventory,
+word-evidence, five assessment mutations, task-score read, token-only proxy
+Capture and UI-only helper paths; no new platform route or crypto transform
+was found. `MOPELotus/Easy_Cidaren` was re-read in parallel and still only adds
+the known `crypto.json` capture writer and `jv=99` context around that same
+surface. No additional Provider capability delta entered this checkpoint.
+
 ## Check procedure
 
 For the next checkpoint:
