@@ -119,6 +119,11 @@ non-headless session. It then delegates bounded nonce/frame/Task/sequence
 validation to the typed command constructor. This keeps fresh rediscovery and
 identity rebinding in the Provider while leaving browser startup, access-token
 authentication, durable sequence consumption and credential commit to Core.
+The matching `parse_capture_snapshot_result` method repeats that fresh Task
+check before accepting the result, then delegates exact nonce/frame/Task/
+sequence and recipe validation to the typed parser. A stale Task cannot cause
+a previously issued Capture observation to be committed under a new remote
+identity.
 
 The Core adapter resolves either one exact manual or token-only Capture
 `ProviderAccessToken`, or an exact two-record Composite binding containing

@@ -8,7 +8,10 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-use crate::{CidarenBrowserCommandEnvelope, CidarenCaptureMode, metadata::development_metadata};
+use crate::{
+    CidarenBrowserCommandEnvelope, CidarenCaptureMode, CidarenCaptureSnapshot,
+    metadata::development_metadata, parse_browser_event,
+};
 
 const CIDAREN_ORIGIN: &str = "https://app.vocabgo.com";
 const MAX_REMOTE_COMPONENT_BYTES: usize = 256;
@@ -70,6 +73,39 @@ impl CidarenBrowserBridge {
             sequence,
             mode,
         )
+    }
+
+    /// Freshly rebinds a Task and parses one typed Capture result.
+    ///
+    /// Core still owns durable command issuance, sequence consumption and
+    /// credential commit. This method only applies the Provider's origin,
+    /// Task and Capture value validation to the returned transport document.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the fresh Task no longer authorizes the
+    /// session, the command binding differs from that Task, or the result is
+    /// malformed/foreign.
+    pub async fn parse_capture_snapshot_result(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        command: &CidarenBrowserCommandEnvelope,
+        document: &str,
+        observed_origin: &str,
+    ) -> ProviderResult<CidarenCaptureSnapshot> {
+        let spec = self.browser_session_spec(context, remote_task_id).await?;
+        if spec.allowed_origins != [CIDAREN_ORIGIN]
+            || spec.headless
+            || command.remote_task_id != remote_task_id
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Cidaren Capture result Task binding is stale",
+            ));
+        }
+        let event = parse_browser_event(document, command, observed_origin)?;
+        event.into_capture_snapshot(command, observed_origin)
     }
 }
 
@@ -340,6 +376,52 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::InvalidResponse
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_result_rebinds_fresh_task_before_parse() {
+        let capability = bridge(true);
+        let command = capability
+            .capture_snapshot_command(
+                &context(),
+                "class-task:2002",
+                "synthetic-session-nonce".to_owned(),
+                "frame-1".to_owned(),
+                1,
+                CidarenCaptureMode::TokenOnly,
+            )
+            .await
+            .unwrap();
+        let snapshot = capability
+            .parse_capture_snapshot_result(
+                &context(),
+                "class-task:2002",
+                &command,
+                include_str!(
+                    "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
+                ),
+                CIDAREN_ORIGIN,
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.user_token(), Some("synthetic-user-token"));
+
+        assert_eq!(
+            capability
+                .parse_capture_snapshot_result(
+                    &context(),
+                    "class-task:2003",
+                    &command,
+                    include_str!(
+                        "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
+                    ),
+                    CIDAREN_ORIGIN,
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
         );
     }
 
