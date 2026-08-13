@@ -118,7 +118,7 @@ platform-facing surface maps as follows:
 | `main_api.submit_result` | `VerifyAnswer` | single-answer and sequential rotated-token matching mutations |
 | `main_api.next_exam` | `SubmitAnswerAndSave` | signed answer/reading-card advance with stable reported duration |
 | `main_api.skip_exam` | `SkipAnswer` | explicit signed skip with stable reported duration |
-| `main_api.get_task_score` | post-run `ClassTask/Info` score read | fresh complete class-task rediscovery already yields the same release-bound score fact; SubmissionVerify now retains it independently from completion/progress as Core thousandth-points |
+| `main_api.get_task_score` | post-run `ClassTask/Info` or `StudyTask/Info` score read | exact authenticated Native HTTP route after fresh Task rebinding; `score/task_score/grade` are one conflict-checked fact mapped to Core thousandth-points independently from completion/progress |
 | response decoder | fixed-index `jv=2_*`/owner `3_1021`, public span/chunk `3_1021/3_2265/3_2277`, owner `jv=99` | all exact transforms implemented with bounded unique-result semantics and authenticated crypto context for `jv=99` |
 | capture helpers | public proxy-observed token-only `UserToken`; owner `UserToken` plus `CDR_LOGIN_INFO` | Both exact recipes, validation and stored-session paths are ordered and registered; actual system-proxy/XWeb acquisition remains a shared helper-execution gap, while OAuth uses the implemented random-marker callback path |
 

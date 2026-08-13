@@ -49,7 +49,7 @@ either Python donor.
 | No-MITM assisted WeChat OAuth | No | No | Yes; Windows desktop WeChat and Android callback behavior evidenced | Provider and durable Core flow implemented; live product-path validation pending |
 | Course and task inventory | Class pages plus selected-Course study units | Same | No | Implemented with bounded complete scans |
 | Task detail/progress/duration | Task rows and Info reads | Same | No | Implemented through fresh identity rebinding |
-| Post-run task score | Calls `ClassTask/Info` or `StudyTask/Info`, trying `score/task_score/grade` | No dedicated caller; inventory retains score | No | Fresh task score retained; SubmissionVerify maps bounded decimal 0-100 to Core thousandth-points independently of progress/completion |
+| Post-run task score | Calls `ClassTask/Info` or `StudyTask/Info`, trying `score/task_score/grade`; its dedicated requests session accidentally omits `UserToken` | No dedicated caller; inventory retains score | No | Exact authenticated Native HTTP route implemented after fresh rebinding; aliases are conflict-checked and mapped to Core thousandth-points, with fresh-list fallback for absent score or ambiguous study `task_id=-1` |
 | Word inventory/evidence | `StudyTask/Info`, Course page, `StudyWordInfo`, `SearchWord` | Same, with encrypted lookup fix | Supplies crypto needed by current responses | Implemented |
 | Question and answer strategy | Single, matching, reading and text families; donor fallback behavior | Same plus current encrypted response support | Supplies crypto/login context only | Implemented privately with immutable Draft-safe answer evidence |
 | `SubmitChoseWord` | Yes | Yes | No | Implemented one-shot transport/state edge |

@@ -39,6 +39,30 @@ Post-implementation ref check: `ularch/master` remained `bce9559`,
 and MOPELotus still exposed no GitHub release. No additional diff entered this
 checkpoint between the initial audit and the 99-test Provider verification.
 
+### 2026-08-13 exact task-score checkpoint
+
+Pre-implementation ref check again resolved `ularch/master` to full revision
+`bce9559f536ebbdad791f41ed4e111b30accb05d` and `MOPELotus/master` to
+`a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`. The latest ularch release/tag
+remained `1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`, and MOPELotus still
+published no GitHub release. There was therefore no upstream diff to port
+before this checkpoint.
+
+The reopened public donor's new `main_api.get_task_score` was then audited as
+its own protocol route rather than approximated from PageTask alone. Asterism
+now implements exact `ClassTask/Info` and `StudyTask/Info` query shapes,
+account-bound read headers, bounded plain/legacy/current decoding,
+conflict-checked `score/task_score/grade`, precise thousandth-point conversion
+and SubmissionVerify integration. The public donor's dedicated requests
+session does not copy `UserToken`; that is treated as a donor implementation
+defect, not a platform requirement. Its study query also omits stable
+`list_id`, so a fresh `task_id=-1` unit retains its identity-bound
+`StudyTask/List` score rather than issuing an ambiguous request.
+
+Post-implementation fetch resolved the same two full revisions and the same
+`1.5.4` tag target; no new donor diff entered while the 105-test Provider,
+all-target clippy and scoped diff checks completed.
+
 ## Check procedure
 
 For the next checkpoint:

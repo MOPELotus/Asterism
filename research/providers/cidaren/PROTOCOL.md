@@ -388,9 +388,20 @@ not replace an identity-bound post-mutation read. The Provider-private
 SubmissionVerify implementation recomputes the immutable preview, freshly
 rebinds the exact release/list identity and confirms only 100%/Completed. The
 current public donor additionally reads the post-run task score from
-`ClassTask/Info`; Asterism's complete fresh class-task scan already exposes the
-same release-bound score fact, which verification maps from bounded 0-100
-decimal points into Core thousandth-points without inferring completion from
-it. The platform exposes no audited answer-history readback, so the Task goal may be
-confirmed while each Question remains explicitly Unverified; incomplete
+`ClassTask/Info` or `StudyTask/Info` using version `2.6.1.240122`. Asterism now
+issues that exact authenticated GET only after fresh Task rediscovery and binds
+class requests to `task_id + release_id`, or ordinary-study requests to
+`task_id + course_id`. The donor creates this session without copying its
+`UserToken`; Asterism corrects that implementation defect by using the same
+account-bound native session as the fresh read. The response aliases
+`score/task_score/grade` are parsed as one bounded decimal 0-100 fact,
+conflicting aliases fail closed, and the result maps to Core thousandth-points
+without inferring completion from it. A study row with `task_id=-1` cannot be
+uniquely identified by the donor request because it omits `list_id`; Asterism
+retains the already fresh `StudyTask/List` score instead of making an ambiguous
+cross-unit request. A missing Info score similarly preserves that fresh list
+observation.
+
+The platform exposes no audited answer-history readback, so the Task goal may
+be confirmed while each Question remains explicitly Unverified; incomplete
 readback stays Pending even after a terminal acknowledgement.

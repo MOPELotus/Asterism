@@ -28,17 +28,23 @@ use crate::{
     CidarenAssessmentResponse, CidarenAssessmentTransport, CidarenAuthenticationTransport,
     CidarenClassTaskPageDocument, CidarenClassTaskTransport, CidarenMutationRequest,
     CidarenSessionResolver, CidarenStartAnswerRequest, CidarenStudyTaskDocument,
-    CidarenStudyTaskTransport, CidarenTokenSession, CidarenWireAnswer, CidarenWordEvidence,
-    CidarenWordInfoRequest, CidarenWordInventory, CidarenWordInventoryRequest, CidarenWordLookup,
-    CidarenWordPrototypeRequest, CidarenWordSelectionPlan,
-    answer_evidence_protocol::fresh_course_id, assessment_protocol::CidarenMutationAuthorization,
-    authentication::selected_course_id, build_skip_answer_request, build_start_answer_request,
-    build_submit_answer_and_save_request, build_submit_chose_word_request,
-    build_verify_answer_request, build_word_info_request, build_word_inventory_request,
-    build_word_prototype_request, class_tasks::class_task_total,
+    CidarenStudyTaskTransport, CidarenTaskScoreTransport, CidarenTokenSession, CidarenWireAnswer,
+    CidarenWordEvidence, CidarenWordInfoRequest, CidarenWordInventory, CidarenWordInventoryRequest,
+    CidarenWordLookup, CidarenWordPrototypeRequest, CidarenWordSelectionPlan,
+    answer_evidence_protocol::fresh_course_id,
+    assessment_protocol::CidarenMutationAuthorization,
+    authentication::selected_course_id,
+    build_skip_answer_request, build_start_answer_request, build_submit_answer_and_save_request,
+    build_submit_chose_word_request, build_verify_answer_request, build_word_info_request,
+    build_word_inventory_request, build_word_prototype_request,
+    class_tasks::class_task_total,
     classify_token_validation_response, parse_assessment_response, parse_course_page_response,
     parse_study_task_info_response, parse_word_info_response, parse_word_prototype_response,
     parse_word_selection_response,
+    score_read::{
+        CidarenTaskScoreRequest, build_task_score_request, normalized_task_score,
+        parse_task_score_response,
+    },
 };
 
 const STUDENT_MAIN_URL: &str = "https://app.vocabgo.com/student/api/Student/Main";
@@ -65,6 +71,7 @@ const MAX_PAGE_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_STUDY_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_ASSESSMENT_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_ANSWER_EVIDENCE_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_TASK_SCORE_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 
 const USER_TOKEN: HeaderName = HeaderName::from_static("usertoken");
 const ABC: HeaderName = HeaderName::from_static("abc");
@@ -563,6 +570,37 @@ impl CidarenAnswerEvidenceTransport for NativeCidarenTransport {
     }
 }
 
+#[async_trait]
+impl CidarenTaskScoreTransport for NativeCidarenTransport {
+    async fn fetch_task_score(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        detail: &asterism_provider_api::RemoteTaskDetail,
+    ) -> ProviderResult<Option<asterism_domain::SubmissionScore>> {
+        let normalized = normalized_task_score(detail)?;
+        let Some(request) =
+            build_task_score_request(remote_task_id, detail, current_timestamp_millis()?)?
+        else {
+            return Ok(normalized);
+        };
+        let session = self.sessions.resolve_session(context).await?;
+        let response = native_task_score_request(&self.client, &session, &request)?
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error, ResponseRoute::TaskScore))?;
+        let mut document = read_json_response(
+            response,
+            ResponseRoute::TaskScore,
+            MAX_TASK_SCORE_RESPONSE_BYTES,
+        )
+        .await?;
+        let parsed = parse_task_score_response(document.as_bytes(), session.crypto_context());
+        document.zeroize();
+        parsed.map(|score| score.or(normalized))
+    }
+}
+
 impl NativeCidarenTransport {
     async fn send_assessment_request(
         &self,
@@ -806,6 +844,25 @@ fn native_word_prototype_request(
     )
 }
 
+fn native_task_score_request(
+    client: &Client,
+    session: &CidarenTokenSession,
+    request: &CidarenTaskScoreRequest,
+) -> ProviderResult<RequestBuilder> {
+    if !matches!(request.path, "ClassTask/Info" | "StudyTask/Info") {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Cidaren task-score request route is not audited",
+        ));
+    }
+    authenticated_request(
+        client
+            .get(format!("{ASSESSMENT_BASE_URL}/{}", request.path))
+            .query(&request.query),
+        session,
+    )
+}
+
 fn assessment_url(path: &str) -> ProviderResult<String> {
     let allowed = ["ClassTask", "StudyTask"].into_iter().any(|family| {
         [
@@ -991,6 +1048,7 @@ enum ResponseRoute {
     CoursePage,
     WordInformation,
     WordPrototype,
+    TaskScore,
 }
 
 impl ResponseRoute {
@@ -1005,6 +1063,7 @@ impl ResponseRoute {
             Self::CoursePage => "course-page",
             Self::WordInformation => "word-information",
             Self::WordPrototype => "word-prototype",
+            Self::TaskScore => "task-score",
         }
     }
 }
@@ -1417,6 +1476,41 @@ mod tests {
             request.headers().get(X_REQUESTED_WITH).unwrap(),
             "com.tencent.mm"
         );
+    }
+
+    #[test]
+    fn task_score_read_is_authenticated_and_route_allowlisted() {
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .expect("built-in network profile");
+        let client = build_http_client(&network).unwrap();
+        let session = CidarenTokenSession::try_new("synthetic-user-token").unwrap();
+        let request = CidarenTaskScoreRequest {
+            path: "ClassTask/Info",
+            query: vec![
+                ("task_id", "812".to_owned()),
+                ("release_id", "2002".to_owned()),
+                ("timestamp", "1730000000000".to_owned()),
+                ("version", "2.6.1.240122".to_owned()),
+                ("app_type", "1".to_owned()),
+            ],
+        };
+        let request = native_task_score_request(&client, &session, &request)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().path(), "/student/api/Student/ClassTask/Info");
+        assert!(request.headers().contains_key(USER_TOKEN));
+        assert_eq!(
+            request.headers().get(AUTHORIZATION_V).unwrap(),
+            AUTHORIZATION_V_READ
+        );
+        assert_eq!(request.url().query_pairs().count(), 5);
+
+        let rejected = CidarenTaskScoreRequest {
+            path: "ClassTask/SubmitAnswerAndSave",
+            query: Vec::new(),
+        };
+        assert!(native_task_score_request(&client, &session, &rejected).is_err());
     }
 
     #[test]

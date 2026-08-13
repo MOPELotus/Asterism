@@ -18,6 +18,7 @@
 | New `task_type` appears | Current evidence recognizes class 1/2 and ordinary study 3 | Fail closed within the matching response family and add a sanitized fixture before normalization |
 | Status vocabulary changes | Donor documents `over_status` 1/2/3 | Preserve unknown only after explicit mapping decision; never silently mark executable |
 | Completion is inferred from expiry | Donor filters expiry and progress independently | Keep remote state, progress and close status separate |
+| Post-run score is stale, unauthenticated or cross-unit | Reopened donor reads `score/task_score/grade` from class/study Info but its dedicated session omits `UserToken`, and the study query omits stable `list_id` | Rebind the Task first, authenticate with its account session, reject conflicting/out-of-range aliases, and retain the fresh list score instead of issuing an ambiguous study `task_id=-1` request; score never proves completion |
 | `time_spent` is misread as seconds or unbounded | Public issue 6 has non-zero values, sibling time fields are milliseconds and mutation routes write the same field | Preserve raw milliseconds, bound to 100 years, fresh-rebind, then truncate to Domain seconds; retain live comparison as validation rather than an implementation blocker |
 | Response `jv` obfuscation changes | Owner donor has fixed-index legacy variants and 2026 `jv=99`; current public donor additionally has sequential-span/five-chunk `3_1021`, `3_2265` and `3_2277` | Decode only exact frozen transforms; for conflicting `3_1021` donor evidence accept only a unique/equal JSON result; require fresh account-bound crypto from Capture or native V2 exchange for authenticated HKDF/AES-GCM `jv=99`; fail closed on unknown or ambiguous `jv` |
 | Browser crypto material leaks | Current donor captures login/session crypto context | Store only through SecretStore as a Composite session; zeroize parsed JSON/key/plaintext and never persist it in Task, Question, Draft or logs |
@@ -40,12 +41,14 @@ After the product UI/plugin stage and account delivery:
    stable release/list identities;
 4. compare the implemented millisecond `time_spent` conversion with visible H5
    duration and retain a sanitized non-zero study-row sample;
-5. record only sanitized response fixtures and retain Development until all
+5. compare authenticated post-run class/study Info scores with the freshly
+   rebound list row, including alias shape and any `task_id=-1` unit;
+6. record only sanitized response fixtures and retain Development until all
    applicable live gates pass.
-6. exercise Capture/BrowserBridge and `jv=99` with ephemeral crypto material;
-7. validate mutation families only under explicit live-test authorization,
+7. exercise Capture/BrowserBridge and `jv=99` with ephemeral crypto material;
+8. validate mutation families only under explicit live-test authorization,
    preserving attempt/receipt/verification separation.
-8. validate the assisted random-marker OAuth URL and manually returned callback
+9. validate the assisted random-marker OAuth URL and manually returned callback
    through the native V2 exchange on the applicable Windows/Android paths,
    including cancellation, expiry, duplicate delivery and ambiguous-failure
    recovery, without retaining raw state, marker or code in a fixture or log.

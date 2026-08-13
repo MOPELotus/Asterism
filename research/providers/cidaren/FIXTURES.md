@@ -15,6 +15,7 @@ fixtures/providers/cidaren/
   tasks/class-task-page-1.json
   tasks/class-task-page-2.json
   tasks/study-task-list.json
+  tasks/task-score-success.json
   answers/course-page.json
   answers/study-task-info.json
   answers/study-word-info-envelope.json
@@ -126,8 +127,12 @@ placeholder identities, result codes, status values and pagination shape.
 - Learning and test tasks remain distinct source types but both are Routine.
 - Expiry, completion, progress, score and raw time remain independent facts.
 - Submission verification converts a present fresh 0-100 task score to Core
-  thousandth-points, retains `null` as absent, and rejects out-of-range values
-  without using score as completion proof.
+  thousandth-points, accepts the donor's numeric or decimal-string aliases,
+  retains `null` as absent, and rejects conflicting/out-of-range values without
+  using score as completion proof. Native request tests freeze both score-route
+  query families and require the account-bound `UserToken`; an ordinary-study
+  `task_id=-1` falls back to its freshly rebound list fact because the donor
+  score route cannot carry the stable `list_id`.
 - Non-zero `time_spent` is treated as bounded milliseconds and converted to
   whole Domain seconds only after fresh Task rebinding; absent or >100-year
   observations fail the standalone DurationRead contract.

@@ -34,6 +34,7 @@ mod provider;
 mod question_parser;
 mod response_decode;
 mod runtime_settings;
+mod score_read;
 mod stored_session;
 mod study_tasks;
 mod submission_build;
@@ -87,6 +88,7 @@ pub use question_parser::{
 };
 pub use response_decode::{decode_legacy_response_data, decode_response_data};
 pub use runtime_settings::CidarenRuntimeSettings;
+pub use score_read::CidarenTaskScoreTransport;
 pub use stored_session::StoredCidarenSessionResolver;
 pub use study_tasks::{parse_study_course, parse_study_task_inventory};
 pub use submission_build::CidarenSubmissionBuild;
