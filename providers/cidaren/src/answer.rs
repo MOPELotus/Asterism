@@ -74,6 +74,7 @@ impl AnswerResolveCapability for CidarenAnswerResolve {
             ));
         }
         let detail = self.details.task_detail(context, remote_task_id).await?;
+        validate_question_task_bindings(questions, remote_task_id)?;
         let binding = self
             .transport
             .bind_answer_evidence(context, remote_task_id, &detail)
@@ -86,6 +87,30 @@ impl AnswerResolveCapability for CidarenAnswerResolve {
         }
         Ok(candidates)
     }
+}
+
+fn validate_question_task_bindings(
+    questions: &[Question],
+    remote_task_id: &str,
+) -> ProviderResult<()> {
+    let Some(first_task_id) = questions.first().map(|question| question.task_id) else {
+        return Ok(());
+    };
+    for question in questions {
+        if question.task_id != first_task_id
+            || question
+                .metadata_sanitized
+                .get("remote_task_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(remote_task_id)
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Cidaren answer resolution received a Question from another Task",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
@@ -102,4 +127,57 @@ fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> P
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use asterism_domain::{QuestionId, QuestionKind, QuestionOption, TaskId};
+    use serde_json::json;
+
+    use super::*;
+
+    fn question(task_id: TaskId, remote_task_id: &str) -> Question {
+        Question {
+            id: QuestionId::new(),
+            task_id,
+            remote_question_id: Some("question:synthetic".to_owned()),
+            kind: QuestionKind::SingleChoice,
+            stem: "Synthetic prompt".to_owned(),
+            options: vec![QuestionOption {
+                id: "option:0".to_owned(),
+                content: Some("Synthetic option".to_owned()),
+                attachments: Vec::new(),
+                metadata_sanitized: json!({}),
+            }],
+            attachments: Vec::new(),
+            metadata_sanitized: json!({
+                "schema": "cidaren.attempt-question.v1",
+                "remote_task_id": remote_task_id,
+            }),
+            position: 1,
+        }
+    }
+
+    #[test]
+    fn answer_resolution_rejects_mixed_task_questions() {
+        let first_task = TaskId::new();
+        let second_task = TaskId::new();
+        let questions = vec![
+            question(first_task, "class-task:2002"),
+            question(second_task, "class-task:2002"),
+        ];
+        assert_eq!(
+            validate_question_task_bindings(&questions, "class-task:2002")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        let foreign = vec![question(first_task, "class-task:2003")];
+        assert_eq!(
+            validate_question_task_bindings(&foreign, "class-task:2002")
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
 }
