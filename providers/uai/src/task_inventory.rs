@@ -632,7 +632,10 @@ mod tests {
             tasks[0].normalized["course_unit_strategy"]["opens_at"],
             "2026-08-01T00:00:00Z"
         );
-        assert_eq!(tasks[0].normalized["micro_progress"]["path"], "section-1/micro-1");
+        assert_eq!(
+            tasks[0].normalized["micro_progress"]["path"],
+            "section-1/micro-1"
+        );
         assert_eq!(tasks[0].normalized["micro_progress"]["completed"], false);
     }
 

@@ -293,9 +293,10 @@ impl UaiBrowserResidenceResult {
             || self.planned_residence_seconds != *seconds
             || self.processed_micros > 1
             || self.processed_tabs > plan.max_tabs_per_micro
-            || self.processed_tabs.checked_mul(plan.max_tasks_per_tab).is_none_or(
-                |max_tasks| self.processed_tasks > max_tasks,
-            )
+            || self
+                .processed_tabs
+                .checked_mul(plan.max_tasks_per_tab)
+                .is_none_or(|max_tasks| self.processed_tasks > max_tasks)
             || self.video_seconds > plan.max_video_seconds
             || (!play_video && self.video_seconds != 0)
             || self.last_label.as_ref().is_some_and(|label| {
@@ -2058,20 +2059,12 @@ mod tests {
             UaiBrowserResidenceControl::Pause,
             UaiBrowserResidenceControl::Resume,
         ] {
-            let control_command = UaiBrowserCommandEnvelope::residence_control(
-                &plan,
-                &binding,
-                7,
-                &target,
-                control,
-            )
-            .unwrap();
+            let control_command =
+                UaiBrowserCommandEnvelope::residence_control(&plan, &binding, 7, &target, control)
+                    .unwrap();
             assert!(matches!(
                 control_command.command,
-                UaiBrowserCommand::ResidenceControl {
-                    seconds: 1_200,
-                    ..
-                }
+                UaiBrowserCommand::ResidenceControl { seconds: 1_200, .. }
             ));
         }
         let document =

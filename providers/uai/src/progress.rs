@@ -812,16 +812,10 @@ mod tests {
         assert_eq!(micro.closes_at().unwrap().timestamp(), 1_790_812_800);
 
         assert!(
-            parse_micro_progress(&PROGRESS.replace(
-                "section-1/micro-1",
-                "section-1/../micro-1"
-            ))
-            .is_err()
-        );
-        assert!(
-            parse_micro_progress(&PROGRESS.replace(r#""pass2": 1"#, r#""pass2": 2"#))
+            parse_micro_progress(&PROGRESS.replace("section-1/micro-1", "section-1/../micro-1"))
                 .is_err()
         );
+        assert!(parse_micro_progress(&PROGRESS.replace(r#""pass2": 1"#, r#""pass2": 2"#)).is_err());
     }
 
     #[tokio::test]
