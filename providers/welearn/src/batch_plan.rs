@@ -406,6 +406,34 @@ mod tests {
     }
 
     #[test]
+    fn every_donor_flow_exposes_a_stable_dispatch_contract() {
+        assert_eq!(
+            WellearnBatchFlow::FanyuchangCompletion.dispatch(),
+            WellearnBatchDispatch::PerChildConcurrent
+        );
+        assert_eq!(
+            WellearnBatchFlow::FanyuchangDuration.dispatch(),
+            WellearnBatchDispatch::PerChildConcurrent
+        );
+        assert_eq!(
+            WellearnBatchFlow::YzbrhCompletion.dispatch(),
+            WellearnBatchDispatch::Sequential
+        );
+        assert_eq!(
+            WellearnBatchFlow::YzbrhDuration.dispatch(),
+            WellearnBatchDispatch::SharedHeartbeat
+        );
+        assert_eq!(
+            WellearnBatchFlow::AutoCompletion.dispatch(),
+            WellearnBatchDispatch::Sequential
+        );
+        assert_eq!(
+            WellearnBatchFlow::AutoDuration.dispatch(),
+            WellearnBatchDispatch::BoundedThreadPool
+        );
+    }
+
+    #[test]
     fn incomplete_normalized_task_fails_closed() {
         let mut task = tasks().remove(0);
         task.normalized["sco_index"] = serde_json::Value::Null;
