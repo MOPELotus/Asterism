@@ -1,7 +1,9 @@
 # UAI protocol notes
 
-Audit date: 2026-08-09. These are static donor observations and synthetic
-parser coverage, not live compatibility claims.
+Audit date: 2026-08-13. These are static donor observations and synthetic
+parser coverage, not live compatibility claims. The recorded donor default
+branches, tags and releases were refreshed on this date; unchanged revisions
+remain reproducible audit snapshots rather than permanent update ceilings.
 
 ## Authentication
 

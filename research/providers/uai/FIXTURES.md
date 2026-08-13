@@ -1,6 +1,6 @@
 # UAI fixture plan
 
-No real account was contacted during the 2026-08-09 audit. Current fixtures are
+No real account was contacted during the 2026-08-13 audit refresh. Current fixtures are
 explicitly synthetic and prove parser invariants only.
 
 ## Initial synthetic fixtures
