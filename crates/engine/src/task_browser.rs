@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use asterism_domain::{AuthState, ProviderId, TaskCapability, TaskId, UserId};
+use asterism_domain::{AuthState, ProviderAccountId, ProviderId, TaskCapability, TaskId, UserId};
 use asterism_provider_api::{BrowserSessionSpec, ProviderContext, ProviderError, ProviderRegistry};
 use asterism_storage::{ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository};
 
@@ -16,6 +16,7 @@ pub struct ReadTaskBrowserSessionCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderTaskBrowserSessionResult {
     pub task_id: TaskId,
+    pub provider_account_id: ProviderAccountId,
     pub provider_id: ProviderId,
     pub provider_version: String,
     pub spec: BrowserSessionSpec,
@@ -97,6 +98,7 @@ where
             .map_err(|_| ProviderTaskBrowserSessionError::ProviderResponseInvalid)?;
         Ok(ProviderTaskBrowserSessionResult {
             task_id: task.id,
+            provider_account_id: account.id,
             provider_id: account.provider_id,
             provider_version: entry.metadata.implementation_version.clone(),
             spec,
@@ -247,6 +249,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.task_id, fixture.task_id);
+        assert_eq!(result.provider_account_id, calls_account_id(&fixture));
         assert_eq!(result.spec.version, 1);
         assert_eq!(result.spec.allowed_origins, ["https://provider.example"]);
         let calls = fixture.capability.calls.lock().unwrap();
@@ -254,6 +257,10 @@ mod tests {
         assert_eq!(calls[0].0.correlation_id, "browser-spec-1");
         assert_eq!(calls[0].0.credential_refs.len(), 1);
         assert_eq!(calls[0].1, "work:remote");
+    }
+
+    fn calls_account_id(fixture: &Fixture) -> ProviderAccountId {
+        fixture.capability.calls.lock().unwrap()[0].0.account_id
     }
 
     #[tokio::test]

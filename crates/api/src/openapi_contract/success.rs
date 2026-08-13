@@ -16,6 +16,14 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ),
     ("recordAuthBootstrapEvent", "AuthBootstrapEventResponse"),
     ("pollAuthBootstrapStream", "AuthBootstrapSession"),
+    ("createBrowserBridgeSession", "BrowserBridgeCreateResponse"),
+    ("getBrowserBridgeSession", "BrowserBridgeSnapshotResponse"),
+    (
+        "cancelBrowserBridgeSession",
+        "BrowserBridgeSnapshotResponse",
+    ),
+    ("claimBrowserBridgeSession", "BrowserBridgeClaimResponse"),
+    ("pollBrowserBridgeSnapshot", "BrowserBridgeSnapshotResponse"),
     ("listProviders", "ProviderMetadataListResponse"),
     ("listProviderCaptureRecipes", "CaptureRecipeListResponse"),
     ("listProviderAccounts", "ProviderAccountListResponse"),
@@ -813,6 +821,25 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             "TaskBrowserSessionSpecResponse",
             provider_task_read_response("spec", "BrowserSessionSpec"),
         ),
+        ("BrowserBridgeSession", browser_bridge_session_schema()),
+        (
+            "BrowserBridgeSnapshotResponse",
+            object(
+                &["session", "spec"],
+                json!({
+                    "session": schema_ref("BrowserBridgeSession"),
+                    "spec": schema_ref("BrowserSessionSpec")
+                }),
+            ),
+        ),
+        (
+            "BrowserBridgeCreateResponse",
+            browser_bridge_token_response("pairing_token"),
+        ),
+        (
+            "BrowserBridgeClaimResponse",
+            browser_bridge_token_response("access_token"),
+        ),
         (
             "TaskProgressResponse",
             provider_task_read_response("progress", "RemoteProgress"),
@@ -1515,6 +1542,49 @@ fn provider_task_read_response(field: &str, value_schema: &str) -> Value {
         &["task_id", "provider_id", "provider_version", field],
         Value::Object(properties),
     )
+}
+
+fn browser_bridge_session_schema() -> Value {
+    object(
+        &[
+            "id",
+            "task_id",
+            "provider_id",
+            "provider_version",
+            "spec_version",
+            "state",
+            "created_at",
+            "updated_at",
+            "expires_at",
+            "claimed_at",
+            "revision",
+        ],
+        json!({
+            "id": uuid(),
+            "task_id": uuid(),
+            "provider_id": provider_id(),
+            "provider_version": {"type": "string", "minLength": 1, "maxLength": 64},
+            "spec_version": {"type": "integer", "minimum": 1, "maximum": u32::MAX},
+            "state": string_enum(&["awaiting_claim", "claimed", "completed", "failed", "expired", "cancelled"]),
+            "created_at": timestamp(),
+            "updated_at": timestamp(),
+            "expires_at": timestamp(),
+            "claimed_at": nullable_timestamp(),
+            "revision": {"type": "integer", "minimum": 1, "maximum": u32::MAX}
+        }),
+    )
+}
+
+fn browser_bridge_token_response(token_field: &str) -> Value {
+    let properties = Map::from_iter([
+        ("session".to_owned(), schema_ref("BrowserBridgeSession")),
+        ("spec".to_owned(), schema_ref("BrowserSessionSpec")),
+        (
+            token_field.to_owned(),
+            json!({"type": "string", "format": "password", "minLength": 1, "maxLength": 128, "x-sensitive": true}),
+        ),
+    ]);
+    object(&["session", "spec", token_field], Value::Object(properties))
 }
 
 fn task_schema() -> Value {

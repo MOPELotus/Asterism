@@ -6,6 +6,7 @@ mod account;
 mod admin;
 mod auth;
 mod auth_bootstrap;
+mod browser_bridge;
 mod credit;
 mod execution;
 mod openapi_contract;
@@ -50,6 +51,7 @@ pub struct ApiState {
     login_rate_limiter: rate_limit::LoginRateLimiter,
     bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter,
     bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter,
+    browser_bridge_claim_rate_limiter: rate_limit::LoginRateLimiter,
 }
 
 impl ApiState {
@@ -70,6 +72,7 @@ impl ApiState {
             login_rate_limiter: rate_limit::LoginRateLimiter::default(),
             bootstrap_claim_rate_limiter: rate_limit::LoginRateLimiter::default(),
             bootstrap_credential_rate_limiter: rate_limit::LoginRateLimiter::default(),
+            browser_bridge_claim_rate_limiter: rate_limit::LoginRateLimiter::default(),
         }
     }
 
@@ -113,6 +116,11 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/auth-bootstrap/sessions/{session_id}",
             get(auth_bootstrap::get_auth_bootstrap_session)
                 .delete(auth_bootstrap::cancel_auth_bootstrap_session),
+        )
+        .route(
+            "/api/v1/browser-bridge/sessions/{session_id}",
+            get(browser_bridge::get_browser_bridge_session)
+                .delete(browser_bridge::cancel_browser_bridge_session),
         )
         .route(
             "/api/v1/provider-accounts",
@@ -211,6 +219,14 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/auth-bootstrap/sessions/{session_id}/credential",
             post(auth_bootstrap::submit_auth_bootstrap_credential),
         )
+        .route(
+            "/api/v1/browser-bridge/sessions/{session_id}/claim",
+            post(browser_bridge::claim_browser_bridge_session),
+        )
+        .route(
+            "/api/v1/browser-bridge/sessions/{session_id}/snapshot",
+            get(browser_bridge::get_browser_bridge_snapshot),
+        )
         .merge(protected)
         .with_state(state)
         .fallback(not_found)
@@ -281,6 +297,10 @@ fn task_routes() -> Router<ApiState> {
         .route(
             "/api/v1/tasks/{task_id}/browser-session-spec",
             get(task::get_task_browser_session_spec),
+        )
+        .route(
+            "/api/v1/tasks/{task_id}/browser-bridge/sessions",
+            post(browser_bridge::create_browser_bridge_session),
         )
         .route(
             "/api/v1/tasks/{task_id}/progress",
@@ -718,7 +738,8 @@ pub fn openapi_document() -> Value {
             "securitySchemes": {
                 "cookieAuth": {"type": "apiKey", "in": "cookie", "name": "asterism_session"},
                 "bearerAuth": {"type": "http", "scheme": "bearer"},
-                "bootstrapAuth": {"type": "apiKey", "in": "header", "name": "Authorization", "description": "Bootstrap followed by a pairing or session-scoped access token, as required by the route"}
+                "bootstrapAuth": {"type": "apiKey", "in": "header", "name": "Authorization", "description": "Bootstrap followed by a pairing or session-scoped access token, as required by the route"},
+                "browserBridgeAuth": {"type": "apiKey", "in": "header", "name": "Authorization", "description": "BrowserBridge followed by a one-time pairing or session-scoped helper access token, as required by the route"}
             },
             "schemas": {
                 "Credentials": {
@@ -952,6 +973,34 @@ pub fn openapi_document() -> Value {
         .insert(
             "/api/v1/tasks/{task_id}/browser-session-spec".to_owned(),
             task_browser_session_spec_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/tasks/{task_id}/browser-bridge/sessions".to_owned(),
+            create_browser_bridge_session_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/browser-bridge/sessions/{session_id}".to_owned(),
+            browser_bridge_session_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/browser-bridge/sessions/{session_id}/claim".to_owned(),
+            claim_browser_bridge_session_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/browser-bridge/sessions/{session_id}/snapshot".to_owned(),
+            browser_bridge_snapshot_path(),
         );
     document["paths"]
         .as_object_mut()
@@ -1509,6 +1558,90 @@ fn task_browser_session_spec_path() -> Value {
     }})
 }
 
+fn create_browser_bridge_session_path() -> Value {
+    json!({"post": {
+        "operationId": "createBrowserBridgeSession",
+        "description": "Freshly rebinds the owner/account/Task/Provider capability, freezes the validated BrowserBridge policy, and returns one short-lived pairing token exactly once.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "201": {"description": "Durable BrowserBridge helper session created; pairing token returned once"},
+            "400": {"description": "Invalid Task or request ID"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "TaskExecute permission required"},
+            "404": {"description": "Task not found"},
+            "409": {"description": "Task/Provider capability, account, or remote binding conflict"},
+            "429": {"description": "Provider rate limited"},
+            "502": {"description": "Provider returned an unsafe browser policy"},
+            "503": {"description": "Provider temporarily unavailable"}
+        }
+    }})
+}
+
+fn browser_bridge_session_path() -> Value {
+    let parameter = json!({"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}});
+    json!({
+        "get": {
+            "operationId": "getBrowserBridgeSession",
+            "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+            "parameters": [parameter.clone()],
+            "responses": {
+                "200": {"description": "Owner-scoped BrowserBridge session and frozen policy"},
+                "400": {"description": "Invalid session ID"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "TaskRead permission required"},
+                "404": {"description": "Session not found"}
+            }
+        },
+        "delete": {
+            "operationId": "cancelBrowserBridgeSession",
+            "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+            "parameters": [parameter],
+            "responses": {
+                "200": {"description": "Live BrowserBridge session cancelled or durably expired and all tokens invalidated"},
+                "400": {"description": "Invalid session ID"},
+                "401": {"description": "Authentication required"},
+                "403": {"description": "TaskExecute permission required"},
+                "404": {"description": "Session not found"},
+                "409": {"description": "Session is terminal or changed concurrently"}
+            }
+        }
+    })
+}
+
+fn claim_browser_bridge_session_path() -> Value {
+    json!({"post": {
+        "operationId": "claimBrowserBridgeSession",
+        "security": [{"browserBridgeAuth": []}],
+        "parameters": [
+            {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Pairing consumed; session-bound helper access token returned once with the frozen policy"},
+            "400": {"description": "Invalid session ID"},
+            "401": {"description": "Pairing token is invalid, expired, cancelled, or already used"},
+            "429": {"description": "Pairing claim rate limit reached"}
+        }
+    }})
+}
+
+fn browser_bridge_snapshot_path() -> Value {
+    json!({"get": {
+        "operationId": "pollBrowserBridgeSnapshot",
+        "security": [{"browserBridgeAuth": []}],
+        "parameters": [
+            {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Exact claimed session and frozen credential-free policy"},
+            "400": {"description": "Invalid session ID"},
+            "401": {"description": "Session-scoped BrowserBridge access token is invalid or expired"}
+        }
+    }})
+}
+
 fn task_progress_path() -> Value {
     json!({"get": {
         "operationId": "getTaskProgress",
@@ -1922,6 +2055,15 @@ impl ApiError {
         }
     }
 
+    fn invalid_browser_bridge_token() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_browser_bridge_token",
+            message: "the BrowserBridge token is invalid or expired".to_owned(),
+            retry_after_seconds: None,
+        }
+    }
+
     fn forbidden() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
@@ -2023,10 +2165,14 @@ impl IntoResponse for ApiError {
         if self.status == StatusCode::UNAUTHORIZED {
             response.headers_mut().insert(
                 header::WWW_AUTHENTICATE,
-                if self.code == "invalid_bootstrap_token" {
-                    HeaderValue::from_static("Bootstrap realm=\"asterism\"")
-                } else {
-                    HeaderValue::from_static("Bearer realm=\"asterism\"")
+                match self.code {
+                    "invalid_bootstrap_token" => {
+                        HeaderValue::from_static("Bootstrap realm=\"asterism\"")
+                    }
+                    "invalid_browser_bridge_token" => {
+                        HeaderValue::from_static("BrowserBridge realm=\"asterism\"")
+                    }
+                    _ => HeaderValue::from_static("Bearer realm=\"asterism\""),
                 },
             );
         }
@@ -2069,14 +2215,14 @@ mod tests {
         SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId,
     };
     use asterism_provider_api::{
-        AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureRecipe,
-        CaptureValueSource, CourseInventoryCapability, CredentialValidation, ExecutionEventSink,
-        ExecutionOutcome, ExecutionRequest as ProviderExecutionRequest, ProviderAuthContext,
-        ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata,
-        ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior,
-        ProviderSettingDefinition, ProviderSettingKind, ProviderSettingScope, ProviderSettingValue,
-        RemoteCourse, RemoteTask, SessionStatus, TaskExecutionCapability, TaskInventoryCapability,
-        VerificationLevel,
+        AuthChallenge, AuthenticationCapability, BrowserBridgeCapability, BrowserSessionSpec,
+        CaptureCredentialOutput, CaptureRecipe, CaptureValueSource, CourseInventoryCapability,
+        CredentialValidation, ExecutionEventSink, ExecutionOutcome,
+        ExecutionRequest as ProviderExecutionRequest, ProviderAuthContext, ProviderCapability,
+        ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
+        ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior, ProviderSettingDefinition,
+        ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask,
+        SessionStatus, TaskExecutionCapability, TaskInventoryCapability, VerificationLevel,
     };
     use asterism_secrets::{CredentialBundle, SecretKey};
     use asterism_storage::{
@@ -2168,11 +2314,28 @@ mod tests {
                 opens_at: None,
                 due_at: None,
                 closes_at: None,
-                capabilities: Vec::new(),
+                capabilities: vec![asterism_domain::TaskCapability::BrowserBridge],
                 fingerprint: "v1:fingerprint-a".to_owned(),
                 normalized: json!({"revision": 1}),
                 raw_sanitized: json!({"task": "safe"}),
             }])
+        }
+    }
+
+    #[async_trait]
+    impl BrowserBridgeCapability for ApiScanInventory {
+        async fn browser_session_spec(
+            &self,
+            _context: &ProviderContext,
+            remote_task_id: &str,
+        ) -> ProviderResult<BrowserSessionSpec> {
+            assert_eq!(remote_task_id, "task-a");
+            Ok(BrowserSessionSpec {
+                version: 1,
+                isolation_key: "provider-alpha-task-a".to_owned(),
+                allowed_origins: vec!["https://provider-alpha.example".to_owned()],
+                headless: false,
+            })
         }
     }
 
@@ -2187,6 +2350,7 @@ mod tests {
             capabilities: BTreeSet::from([
                 ProviderCapability::CourseInventory,
                 ProviderCapability::TaskInventory,
+                ProviderCapability::BrowserBridge,
             ]),
             auth_methods: BTreeSet::new(),
             session_kinds: BTreeSet::new(),
@@ -2219,7 +2383,7 @@ mod tests {
                 },
                 authentication: None,
                 course_inventory: Some(inventory.clone()),
-                task_inventory: Some(inventory),
+                task_inventory: Some(inventory.clone()),
                 task_detail: None,
                 task_progress: None,
                 duration_read: None,
@@ -2230,7 +2394,7 @@ mod tests {
                 submission_execute: None,
                 submission_verify: None,
                 task_execution: None,
-                browser_bridge: None,
+                browser_bridge: Some(inventory),
             })
             .unwrap();
         registry
@@ -4011,6 +4175,165 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audit_count, 1);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one helper session must prove token rotation, replay rejection and revocation together"
+    )]
+    async fn browser_bridge_pairing_rotates_once_and_cancellation_revokes_access() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let app = build_router(ApiState::new(
+            database.clone(),
+            Arc::new(scan_registry()),
+            3600,
+            false,
+        ));
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        sqlx::query("UPDATE provider_accounts SET auth_state_json = ? WHERE id = ?")
+            .bind(serde_json::to_string(&AuthState::Authenticated).unwrap())
+            .bind(&account_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let scanned = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/provider-accounts/{account_id}/scan"))
+                    .header(header::COOKIE, &cookie)
+                    .header("x-request-id", "browser-bridge-scan")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scanned.status(), StatusCode::OK);
+        let task_id: String = sqlx::query_scalar("SELECT id FROM tasks WHERE remote_id = 'task-a'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{task_id}/browser-bridge/sessions"))
+                    .header(header::COOKIE, &cookie)
+                    .header("x-request-id", "browser-bridge-create")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
+        let created = response_json(created).await;
+        let session_id = created["session"]["id"].as_str().unwrap().to_owned();
+        let pairing_token = created["pairing_token"].as_str().unwrap().to_owned();
+        assert!(pairing_token.starts_with("ast_bridge_pair_"));
+        assert_eq!(created["session"]["task_id"], task_id);
+        assert_eq!(created["session"]["state"], "awaiting_claim");
+        assert_eq!(
+            created["spec"]["allowed_origins"][0],
+            "https://provider-alpha.example"
+        );
+
+        let claim_path = format!("/api/v1/browser-bridge/sessions/{session_id}/claim");
+        let claimed = app
+            .clone()
+            .oneshot(
+                Request::post(&claim_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {pairing_token}"),
+                    )
+                    .header("x-request-id", "browser-bridge-claim")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_001))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::OK);
+        assert_eq!(claimed.headers()[header::CACHE_CONTROL], "no-store");
+        let claimed = response_json(claimed).await;
+        let access_token = claimed["access_token"].as_str().unwrap().to_owned();
+        assert!(access_token.starts_with("ast_bridge_"));
+        assert_eq!(claimed["session"]["state"], "claimed");
+
+        let replayed = app
+            .clone()
+            .oneshot(
+                Request::post(&claim_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {pairing_token}"),
+                    )
+                    .header("x-request-id", "browser-bridge-replay")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_002))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replayed.status(), StatusCode::UNAUTHORIZED);
+
+        let snapshot_path = format!("/api/v1/browser-bridge/sessions/{session_id}/snapshot");
+        let snapshot = app
+            .clone()
+            .oneshot(
+                Request::get(&snapshot_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status(), StatusCode::OK);
+        assert_eq!(response_json(snapshot).await["session"]["id"], session_id);
+
+        let cancelled = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/browser-bridge/sessions/{session_id}"))
+                    .header(header::COOKIE, cookie)
+                    .header("x-request-id", "browser-bridge-cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(cancelled).await["session"]["state"],
+            "cancelled"
+        );
+
+        let revoked = app
+            .oneshot(
+                Request::get(snapshot_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -5798,6 +6121,9 @@ mod tests {
             "/api/v1/auth-bootstrap/sessions/{session_id}/credential",
             "/api/v1/auth-bootstrap/sessions/{session_id}/events",
             "/api/v1/auth-bootstrap/sessions/{session_id}/stream",
+            "/api/v1/browser-bridge/sessions/{session_id}",
+            "/api/v1/browser-bridge/sessions/{session_id}/claim",
+            "/api/v1/browser-bridge/sessions/{session_id}/snapshot",
             "/api/v1/service-tokens",
             "/api/v1/service-tokens/{token_id}",
             "/api/v1/provider-accounts",
@@ -5817,6 +6143,7 @@ mod tests {
             "/api/v1/tasks/{task_id}",
             "/api/v1/tasks/{task_id}/detail",
             "/api/v1/tasks/{task_id}/browser-session-spec",
+            "/api/v1/tasks/{task_id}/browser-bridge/sessions",
             "/api/v1/tasks/{task_id}/progress",
             "/api/v1/tasks/{task_id}/duration",
             "/api/v1/tasks/{task_id}/questions",
@@ -5850,6 +6177,19 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/browser-session-spec"]["get"]["operationId"],
             "getTaskBrowserSessionSpec"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/tasks/{task_id}/browser-bridge/sessions"]["post"]["operationId"],
+            "createBrowserBridgeSession"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/browser-bridge/sessions/{session_id}/claim"]["post"]["security"]
+                [0]["browserBridgeAuth"],
+            json!([])
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/browser-bridge/sessions/{session_id}/snapshot"]["get"]["operationId"],
+            "pollBrowserBridgeSnapshot"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/progress"]["get"]["operationId"],

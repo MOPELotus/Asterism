@@ -7,6 +7,7 @@ pub mod auth;
 pub mod auth_bootstrap;
 pub mod auth_bootstrap_event;
 pub mod automation;
+pub mod browser_bridge;
 pub mod credits;
 pub mod execution;
 pub mod external_oauth;
@@ -36,6 +37,10 @@ pub use auth_bootstrap_event::{
 pub use automation::{
     AutomationPlan, AutomationPlanStatus, BillingPolicy, CoverageSpec, ExecutionPolicy,
     InheritanceMode, PlanScope, SchedulePolicy,
+};
+pub use browser_bridge::{
+    BrowserBridgeSession, BrowserBridgeSessionCreate, BrowserBridgeSessionError,
+    BrowserBridgeSessionState, MAX_BROWSER_BRIDGE_SESSION_TTL_SECONDS,
 };
 pub use credits::{
     CreditAccount, CreditAmount, CreditError, CreditReservation, CreditReservationState,

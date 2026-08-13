@@ -3134,3 +3134,30 @@ and validates the submitted credential bundle against the same version before
 any Provider validation or Secret write. Omitting the selection preserves the
 Provider's audited default recipe. This permits Cidaren's token-only and
 Composite Capture routes to coexist without weakening recipe/session binding.
+
+## One-hundred-and-eighty-second Phase 0 slice
+
+`BrowserBridge` now has a durable helper-session and pairing boundary instead
+of ending at the credential-free Provider policy read. Session creation first
+re-runs the owner-scoped Task/Provider lookup, then atomically freezes the
+owner, Provider account, Task, Provider implementation version and validated
+policy digest. The bounded policy is stored beside that digest; any corrupted
+or drifted record fails closed on decode.
+
+Core returns the random pairing token exactly once and persists only its
+SHA-256 digest. A helper claim consumes that digest through one compare-and-set
+transition, rotates it to an independent access-token digest and cannot be
+replayed. Access is path-bound to the same claimed session. Expiry or owner
+cancellation invalidates both token families, while every transition preserves
+revision and sanitized Audit attribution. Public helper responses omit owner
+and Provider-account identifiers and expose neither credential references nor
+browser storage, DOM or response payloads.
+
+The protected API can create a helper session from an executable Task, read an
+owner-scoped snapshot and cancel it. The helper API can claim once and poll the
+exact frozen policy under the `BrowserBridge` authorization scheme. OpenAPI
+describes all four operations and one-time sensitive response fields. This
+slice establishes identity, policy and token transport; typed Provider
+commands/results, credential injection, durable Artifact/Attempt binding and
+verification-only recovery remain explicit following slices rather than an
+arbitrary-script surface.

@@ -3,6 +3,7 @@
 mod admin;
 mod auth_bootstrap;
 mod auth_session;
+mod browser_bridge;
 mod credit;
 mod database;
 mod execution;
@@ -25,6 +26,7 @@ mod user;
 pub use admin::SqliteAdminRepository;
 pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
+pub use browser_bridge::SqliteBrowserBridgeSessionRepository;
 pub use credit::{CreditGrant, CreditGrantOutcome, CreditGrantResult, SqliteCreditRepository};
 pub use database::{Database, StorageError};
 pub use execution::SqliteExecutionRepository;
@@ -39,8 +41,8 @@ pub use repository::{
     AuditPage, AuditQueryRepository, AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
-    AuthenticatedCredentialRepository, CreditQueryRepository, CreditRepository,
-    CreditReservationDetail, CreditReservationPage, CreditTransactionPage,
+    AuthenticatedCredentialRepository, BrowserBridgeSessionRepository, CreditQueryRepository,
+    CreditRepository, CreditReservationDetail, CreditReservationPage, CreditTransactionPage,
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionBillingReservation,
     ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
     ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionDetail,

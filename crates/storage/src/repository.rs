@@ -4,19 +4,19 @@ use asterism_auth::TokenDigest;
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor, AuditRecord,
     AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId, AuthSession,
-    AuthSessionId, CreditAccount, CreditReservation, CreditReservationId, CreditTransaction,
-    CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId, ExecutionId,
-    ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState,
-    ExternalOauthPending, LogLevel, OrchestrationState, PriceQuote, ProviderAccount,
-    ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
-    QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId,
-    SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
+    AuthSessionId, BrowserBridgeSession, BrowserBridgeSessionId, CreditAccount, CreditReservation,
+    CreditReservationId, CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt,
+    ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
+    ExecutionStage, ExecutionState, ExternalOauthPending, LogLevel, OrchestrationState, PriceQuote,
+    ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
+    Question, QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken,
+    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
     SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
     Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
-    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
-    ProviderSettingScope, ResolvedProviderRuntimeSettings,
+    BrowserSessionSpec, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
+    ProviderRuntimeSettingsSchema, ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
 use async_trait::async_trait;
@@ -548,6 +548,49 @@ pub enum AuthBootstrapClientEventRecord {
     Duplicate(AuthBootstrapClientEvent),
     AccessRejected,
     SequenceConflict,
+}
+
+/// Short-lived `BrowserBridge` helper sessions with one-time token rotation.
+#[async_trait]
+pub trait BrowserBridgeSessionRepository: Send + Sync {
+    async fn create_browser_bridge_session(
+        &self,
+        session: &BrowserBridgeSession,
+        spec: &BrowserSessionSpec,
+        pairing_token_digest: &TokenDigest,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<(), StorageError>;
+
+    async fn find_browser_bridge_session(
+        &self,
+        owner_user_id: UserId,
+        session_id: BrowserBridgeSessionId,
+    ) -> Result<Option<(BrowserBridgeSession, BrowserSessionSpec)>, StorageError>;
+
+    async fn claim_browser_bridge_session(
+        &self,
+        session_id: BrowserBridgeSessionId,
+        pairing_token_digest: &TokenDigest,
+        access_token_digest: &TokenDigest,
+        claimed_at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<Option<(BrowserBridgeSession, BrowserSessionSpec)>, StorageError>;
+
+    async fn authenticate_browser_bridge_access(
+        &self,
+        session_id: BrowserBridgeSessionId,
+        access_token_digest: &TokenDigest,
+        authenticated_at: Timestamp,
+    ) -> Result<Option<(BrowserBridgeSession, BrowserSessionSpec)>, StorageError>;
+
+    async fn update_browser_bridge_session_for_owner(
+        &self,
+        session: &BrowserBridgeSession,
+        expected_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<bool, StorageError>;
 }
 
 #[derive(Debug)]

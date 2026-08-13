@@ -954,7 +954,7 @@ fn map_task_detail_error(error: ProviderTaskDetailError) -> ApiError {
     }
 }
 
-fn map_task_browser_session_error(error: ProviderTaskBrowserSessionError) -> ApiError {
+pub(super) fn map_task_browser_session_error(error: ProviderTaskBrowserSessionError) -> ApiError {
     match error {
         ProviderTaskBrowserSessionError::TaskNotFound => ApiError::not_found("task_not_found"),
         ProviderTaskBrowserSessionError::TaskCapabilityUnavailable

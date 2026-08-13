@@ -10,6 +10,7 @@ use asterism_secrets::{CredentialBundle, CredentialField, SecretPurpose, SecretS
 use async_trait::async_trait;
 use http::Uri;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::ResolvedProviderRuntimeSettings;
@@ -1528,6 +1529,18 @@ impl BrowserSessionSpec {
             Ok(())
         }
     }
+
+    /// Computes the stable digest Core freezes onto a durable helper session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowserSessionSpecError::Invalid`] when the specification is
+    /// invalid or cannot be serialized after validation.
+    pub fn digest(&self) -> Result<[u8; 32], BrowserSessionSpecError> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(self).map_err(|_| BrowserSessionSpecError::Invalid)?;
+        Ok(Sha256::digest(encoded).into())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -1552,6 +1565,7 @@ mod browser_session_spec_tests {
     #[test]
     fn exact_https_origins_and_bounded_isolation_are_required() {
         assert_eq!(spec().validate(), Ok(()));
+        assert_eq!(spec().digest(), spec().digest());
 
         let mut duplicate = spec();
         duplicate
