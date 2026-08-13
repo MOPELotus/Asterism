@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -14,11 +14,17 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 
 use crate::{
+    ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingChapterWorkTarget,
     ChaoxingCourseRoute, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
     ChaoxingWorkDetailRequest,
     inventory::parse_work_inventory_entries,
     metadata::development_metadata,
-    question_parser::{ParsedChaoxingQuestion, parse_work_preview_question_page},
+    parse_chapter_inventory,
+    question_parser::{
+        ParsedChaoxingQuestion, parse_chapter_work_question_page, parse_work_preview_question_page,
+    },
+    resource_inventory::locate_chapter_work_target,
+    task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
 };
 
 const MAX_ACTIVE_QUESTION_ATTEMPTS: usize = 128;
@@ -34,6 +40,16 @@ pub trait ChaoxingQuestionTransport: Send + Sync {
         &self,
         context: &ProviderContext,
         request: ChaoxingWorkDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingInventoryDocument>;
+
+    /// Fetches the question page for one freshly rebound Chapter Work target.
+    /// The request can create an attempt and must not be ambiguously replayed.
+    async fn fetch_chapter_work_question_document(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        request: &ChaoxingChapterResourceRequest,
+        target: &ChaoxingChapterWorkTarget,
     ) -> ProviderResult<ChaoxingInventoryDocument>;
 }
 
@@ -69,14 +85,32 @@ impl ChaoxingQuestionRead {
         })
     }
 
-    async fn discover_work_questions(
+    async fn discover_questions(
         &self,
         context: &ProviderContext,
-        identity: &WorkTaskIdentity<'_>,
+        identity: &QuestionTaskIdentity<'_>,
     ) -> ProviderResult<Vec<ParsedChaoxingQuestion>> {
         let courses = self.courses.list_courses(context).await?;
         let course = matching_course(&courses, identity)?;
         let route = ChaoxingCourseRoute::from_remote_course(course)?;
+        match identity {
+            QuestionTaskIdentity::IndependentWork(identity) => {
+                self.discover_independent_work_questions(context, route, identity)
+                    .await
+            }
+            QuestionTaskIdentity::ChapterWork(identity) => {
+                self.discover_chapter_work_questions(context, route, identity)
+                    .await
+            }
+        }
+    }
+
+    async fn discover_independent_work_questions(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        identity: &ScopedQuestionIdentity<'_>,
+    ) -> ProviderResult<Vec<ParsedChaoxingQuestion>> {
         let document = self.inventory.fetch_work_inventory(context, route).await?;
         let entries = parse_work_inventory_entries(document.as_str(), &route.parser_scope()?)?;
         let mut matching = entries
@@ -100,6 +134,51 @@ impl ChaoxingQuestionRead {
             .fetch_work_question_document(context, request)
             .await?;
         parse_work_preview_question_page(document.as_str())
+    }
+
+    async fn discover_chapter_work_questions(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        identity: &ChapterWorkIdentity<'_>,
+    ) -> ProviderResult<Vec<ParsedChaoxingQuestion>> {
+        let document = self
+            .inventory
+            .fetch_chapter_inventory(context, route)
+            .await?;
+        let scope = route.parser_scope()?;
+        let chapters = parse_chapter_inventory(document.as_str(), &scope)?;
+        let mut matching = chapters.iter().filter(|chapter| {
+            chapter
+                .normalized
+                .get("knowledge_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(identity.knowledge)
+        });
+        let chapter = matching.next().ok_or_else(chapter_work_changed)?;
+        if matching.next().is_some() {
+            return Err(protocol_drift(
+                "Chaoxing chapter inventory contains duplicate Question scope",
+            ));
+        }
+        let request = ChaoxingChapterResourceRequest::try_from_available_chapter(chapter)?
+            .ok_or_else(chapter_work_changed)?;
+        if !request.belongs_to(route) || request.knowledge_id() != identity.knowledge {
+            return Err(protocol_drift(
+                "Chaoxing Chapter Work Question request lost its route binding",
+            ));
+        }
+        let documents = self
+            .inventory
+            .fetch_chapter_resource_inventories(context, route, std::slice::from_ref(&request))
+            .await?;
+        let target =
+            locate_chapter_work_in_documents(documents, route, &request, identity.remote_task)?;
+        let document = self
+            .transport
+            .fetch_chapter_work_question_document(context, route, &request, &target)
+            .await?;
+        parse_chapter_work_question_page(document.as_str())
     }
 
     fn store_attempt(
@@ -162,8 +241,8 @@ impl QuestionInventoryCapability for ChaoxingQuestionRead {
         remote_task_id: &str,
     ) -> ProviderResult<Vec<RemoteQuestionRef>> {
         validate_context(context, &self.metadata)?;
-        let identity = WorkTaskIdentity::parse(remote_task_id)?;
-        let questions = self.discover_work_questions(context, &identity).await?;
+        let identity = QuestionTaskIdentity::parse(remote_task_id)?;
+        let questions = self.discover_questions(context, &identity).await?;
         self.store_attempt(QuestionAttemptKey::new(context, remote_task_id), questions)
     }
 }
@@ -178,11 +257,11 @@ impl QuestionParseCapability for ChaoxingQuestionRead {
         question: &RemoteQuestionRef,
     ) -> ProviderResult<Question> {
         validate_context(context, &self.metadata)?;
-        WorkTaskIdentity::parse(remote_task_id)?;
+        let identity = QuestionTaskIdentity::parse(remote_task_id)?;
         question
             .validate()
             .map_err(|_| invalid_response("Chaoxing Question reference is invalid"))?;
-        if question.route_context.get("page_kind") != Some("work_preview") {
+        if question.route_context.get("page_kind") != Some(identity.page_kind()) {
             return Err(invalid_response(
                 "Chaoxing Question reference has a mismatched page kind",
             ));
@@ -237,13 +316,27 @@ struct CachedQuestionAttempt {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct WorkTaskIdentity<'a> {
+struct ScopedQuestionIdentity<'a> {
     remote_task: &'a str,
     course: &'a str,
     class: &'a str,
 }
 
-impl<'a> WorkTaskIdentity<'a> {
+#[derive(Clone, Copy, Debug)]
+struct ChapterWorkIdentity<'a> {
+    remote_task: &'a str,
+    course: &'a str,
+    class: &'a str,
+    knowledge: &'a str,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum QuestionTaskIdentity<'a> {
+    IndependentWork(ScopedQuestionIdentity<'a>),
+    ChapterWork(ChapterWorkIdentity<'a>),
+}
+
+impl<'a> QuestionTaskIdentity<'a> {
     fn parse(remote_task_id: &'a str) -> ProviderResult<Self> {
         if remote_task_id.is_empty()
             || remote_task_id.len() > MAX_REMOTE_TASK_ID_BYTES
@@ -251,36 +344,67 @@ impl<'a> WorkTaskIdentity<'a> {
         {
             return Err(protocol_drift("Chaoxing remote Work identity is invalid"));
         }
-        let mut parts = remote_task_id.splitn(4, ':');
-        let module = parts.next().unwrap_or_default();
-        let course_id = parts.next().unwrap_or_default();
-        let class_id = parts.next().unwrap_or_default();
-        let work_id = parts.next().unwrap_or_default();
-        if module != "work"
-            || !valid_component(course_id)
-            || !valid_component(class_id)
-            || !valid_component(work_id)
-        {
-            return Err(ProviderError::new(
+        let parts = remote_task_id.split(':').collect::<Vec<_>>();
+        match parts.as_slice() {
+            ["work", course, class, work]
+                if [course, class, work]
+                    .into_iter()
+                    .all(|component| valid_component(component)) =>
+            {
+                Ok(Self::IndependentWork(ScopedQuestionIdentity {
+                    remote_task: remote_task_id,
+                    course,
+                    class,
+                }))
+            }
+            ["resource", course, class, knowledge, job]
+                if [course, class, knowledge, job]
+                    .into_iter()
+                    .all(|component| valid_component(component)) =>
+            {
+                Ok(Self::ChapterWork(ChapterWorkIdentity {
+                    remote_task: remote_task_id,
+                    course,
+                    class,
+                    knowledge,
+                }))
+            }
+            _ => Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
-                "Chaoxing Question read currently supports independent Work tasks only",
-            ));
+                "Chaoxing Question read supports Work and Chapter Work tasks",
+            )),
         }
-        Ok(Self {
-            remote_task: remote_task_id,
-            course: course_id,
-            class: class_id,
-        })
+    }
+
+    const fn course(self) -> &'a str {
+        match self {
+            Self::IndependentWork(identity) => identity.course,
+            Self::ChapterWork(identity) => identity.course,
+        }
+    }
+
+    const fn class(self) -> &'a str {
+        match self {
+            Self::IndependentWork(identity) => identity.class,
+            Self::ChapterWork(identity) => identity.class,
+        }
+    }
+
+    const fn page_kind(self) -> &'static str {
+        match self {
+            Self::IndependentWork(_) => "work_preview",
+            Self::ChapterWork(_) => "chapter_work_mobile",
+        }
     }
 }
 
 fn matching_course<'a>(
     courses: &'a [RemoteCourse],
-    identity: &WorkTaskIdentity<'_>,
+    identity: &QuestionTaskIdentity<'_>,
 ) -> ProviderResult<&'a RemoteCourse> {
     let mut matching = courses.iter().filter(|course| {
         ChaoxingCourseRoute::from_remote_course(course).is_ok_and(|route| {
-            route.course_id() == identity.course && route.class_id() == identity.class
+            route.course_id() == identity.course() && route.class_id() == identity.class()
         })
     });
     let course = matching.next().ok_or_else(|| {
@@ -295,6 +419,52 @@ fn matching_course<'a>(
         ));
     }
     Ok(course)
+}
+
+fn locate_chapter_work_in_documents(
+    documents: Vec<ChaoxingChapterResourceDocument>,
+    route: ChaoxingCourseRoute<'_>,
+    request: &ChaoxingChapterResourceRequest,
+    remote_task_id: &str,
+) -> ProviderResult<ChaoxingChapterWorkTarget> {
+    if documents.len() != usize::from(CHAPTER_RESOURCE_CARD_COUNT) {
+        return Err(protocol_drift(
+            "Chaoxing Chapter Work Question lookup received an incomplete card set",
+        ));
+    }
+    let mut indexed = BTreeMap::new();
+    for document in documents {
+        if document.knowledge_id() != request.knowledge_id()
+            || indexed.insert(document.card_index(), document).is_some()
+        {
+            return Err(protocol_drift(
+                "Chaoxing Chapter Work Question lookup received a foreign or duplicate card",
+            ));
+        }
+    }
+    let scope = route.parser_scope()?;
+    let mut found = None;
+    for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+        let document = indexed.remove(&card_index).ok_or_else(|| {
+            protocol_drift("Chaoxing Chapter Work Question lookup omitted a card")
+        })?;
+        let Some(target) = locate_chapter_work_target(
+            document.as_str(),
+            &scope,
+            request.knowledge_id(),
+            card_index,
+            remote_task_id,
+        )?
+        else {
+            continue;
+        };
+        if found.replace(target).is_some() {
+            return Err(protocol_drift(
+                "Chaoxing Chapter Work Question target appears on multiple cards",
+            ));
+        }
+    }
+    found.ok_or_else(chapter_work_changed)
 }
 
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
@@ -327,6 +497,13 @@ fn question_attempt_changed() -> ProviderError {
     )
 }
 
+fn chapter_work_changed() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::RemoteChanged,
+        "Chaoxing Chapter Work is missing or no longer exposes a fresh Question attempt",
+    )
+}
+
 fn protocol_drift(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
 }
@@ -352,6 +529,12 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/work/list-mixed.html");
     const WORK_QUESTIONS: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/work-preview-mixed.html");
+    const CHAPTER_LIST: &str =
+        include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
+    const CHAPTER_CARDS: &str =
+        include_str!("../../../fixtures/providers/chaoxing/resources/cards-mixed.html");
+    const CHAPTER_QUESTIONS: &str =
+        include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
 
     #[derive(Debug)]
     struct FixtureCourses {
@@ -384,8 +567,21 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct FixtureTransport {
-        inventory_calls: AtomicUsize,
-        question_calls: AtomicUsize,
+        work: WorkCounters,
+        chapter: ChapterCounters,
+    }
+
+    #[derive(Debug, Default)]
+    struct WorkCounters {
+        inventory: AtomicUsize,
+        question: AtomicUsize,
+    }
+
+    #[derive(Debug, Default)]
+    struct ChapterCounters {
+        inventory: AtomicUsize,
+        resources: AtomicUsize,
+        question: AtomicUsize,
     }
 
     #[async_trait]
@@ -395,7 +591,8 @@ mod tests {
             _context: &ProviderContext,
             _route: ChaoxingCourseRoute<'_>,
         ) -> ProviderResult<ChaoxingInventoryDocument> {
-            Err(unsupported_fixture_call())
+            self.chapter.inventory.fetch_add(1, Ordering::Relaxed);
+            ChaoxingInventoryDocument::try_new(CHAPTER_LIST)
         }
 
         async fn fetch_work_inventory(
@@ -403,7 +600,7 @@ mod tests {
             _context: &ProviderContext,
             _route: ChaoxingCourseRoute<'_>,
         ) -> ProviderResult<ChaoxingInventoryDocument> {
-            self.inventory_calls.fetch_add(1, Ordering::Relaxed);
+            self.work.inventory.fetch_add(1, Ordering::Relaxed);
             ChaoxingInventoryDocument::try_new(WORK_LIST)
         }
 
@@ -411,9 +608,26 @@ mod tests {
             &self,
             _context: &ProviderContext,
             _route: ChaoxingCourseRoute<'_>,
-            _requests: &[crate::ChaoxingChapterResourceRequest],
+            requests: &[crate::ChaoxingChapterResourceRequest],
         ) -> ProviderResult<Vec<crate::ChaoxingChapterResourceDocument>> {
-            Err(unsupported_fixture_call())
+            self.chapter.resources.fetch_add(1, Ordering::Relaxed);
+            let request = requests.first().ok_or_else(unsupported_fixture_call)?;
+            if requests.len() != 1 {
+                return Err(unsupported_fixture_call());
+            }
+            (0..CHAPTER_RESOURCE_CARD_COUNT)
+                .map(|card_index| {
+                    ChaoxingChapterResourceDocument::for_request(
+                        request,
+                        card_index,
+                        if card_index == 0 {
+                            CHAPTER_CARDS
+                        } else {
+                            "<script>mArg={\"defaults\":{},\"attachments\":[]};</script>"
+                        },
+                    )
+                })
+                .collect()
         }
 
         async fn fetch_exam_inventory(
@@ -441,8 +655,19 @@ mod tests {
             _context: &ProviderContext,
             _request: ChaoxingWorkDetailRequest<'_>,
         ) -> ProviderResult<ChaoxingInventoryDocument> {
-            self.question_calls.fetch_add(1, Ordering::Relaxed);
+            self.work.question.fetch_add(1, Ordering::Relaxed);
             ChaoxingInventoryDocument::try_new(WORK_QUESTIONS)
+        }
+
+        async fn fetch_chapter_work_question_document(
+            &self,
+            _context: &ProviderContext,
+            _route: ChaoxingCourseRoute<'_>,
+            _request: &ChaoxingChapterResourceRequest,
+            _target: &ChaoxingChapterWorkTarget,
+        ) -> ProviderResult<ChaoxingInventoryDocument> {
+            self.chapter.question.fetch_add(1, Ordering::Relaxed);
+            ChaoxingInventoryDocument::try_new(CHAPTER_QUESTIONS)
         }
     }
 
@@ -474,8 +699,8 @@ mod tests {
                 Some(reference.remote_id.as_str())
             );
         }
-        assert_eq!(transport.inventory_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(transport.question_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.work.inventory.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.work.question.load(Ordering::Relaxed), 1);
         let expired = capability
             .parse_question(&context, task_id, remote_task_id, &references[0])
             .await
@@ -509,7 +734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exam_and_chapter_work_are_not_routed_through_independent_work() {
+    async fn chapter_work_is_freshly_rebound_and_exam_remains_a_separate_family() {
         let transport = Arc::new(FixtureTransport::default());
         let capability = ChaoxingQuestionRead::try_new(
             Arc::new(FixtureCourses::new()),
@@ -517,15 +742,34 @@ mod tests {
             transport.clone(),
         )
         .unwrap();
-        for remote_task_id in ["exam:100:200:exam-1", "resource:100:200:300:chapter-work-1"] {
-            let error = capability
-                .list_question_refs(&context("unsupported"), remote_task_id)
+        let remote_task_id = "resource:100:200:4001:job-work";
+        let chapter_context = context("chapter-work-question");
+        let references = capability
+            .list_question_refs(&chapter_context, remote_task_id)
+            .await
+            .unwrap();
+        assert_eq!(references.len(), 4);
+        for reference in &references {
+            assert_eq!(
+                reference.route_context.get("page_kind"),
+                Some("chapter_work_mobile")
+            );
+            capability
+                .parse_question(&chapter_context, TaskId::new(), remote_task_id, reference)
                 .await
-                .unwrap_err();
-            assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+                .unwrap();
         }
-        assert_eq!(transport.inventory_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(transport.question_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.chapter.inventory.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.chapter.resources.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.chapter.question.load(Ordering::Relaxed), 1);
+
+        let error = capability
+            .list_question_refs(&context("unsupported"), "exam:100:200:exam-1")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+        assert_eq!(transport.work.inventory.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.work.question.load(Ordering::Relaxed), 0);
     }
 
     fn course() -> RemoteCourse {

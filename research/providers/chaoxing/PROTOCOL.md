@@ -223,11 +223,30 @@ attempt and `QuestionParse` must consume matching references in the same Core
 read. The cache has a hard capacity, is removed after the final Question, and
 never persists HTML, entry URLs, `enc`, form tokens or attempt-local QIDs.
 
-This checkpoint does not yet construct an Exam preview URL or start an
-assessment. Exam and Chapter Work remain offline parse modes only as the current
-implementation status; their donor-observed start/mutation flow and bounded
-Capture/BrowserBridge gates are active next work. They must not be represented
-as read-only when the platform requires an attempt-start mutation.
+## Native Chapter Work question read
+
+Chapter Work remains a `resource:course:class:knowledge:job` task. A read first
+rediscovers the exact Course and Chapter, fetches the complete card indexes
+`0..=6`, rejects foreign, missing or duplicate cards, and locates exactly one
+pending `workid` attachment. `jobid`, `enc` and the card-root `ktoken` are held
+only in a redacted, zeroizing operation target.
+
+The primary donor then performs one GET to
+`https://mooc1.chaoxing.com/mooc-ans/api/work` with the exact
+course/class/knowledge/cpi, `workId`, `jobid`, `originJobId`, `enc` and `ktoken`
+binding. This GET can create an attempt. Asterism may renew authentication only
+before sending it and never replays an ambiguous response. Redirects are
+manually bounded to the same host and the audited `doHomeWorkNew` route;
+`clazzId` on the initial request and `classId` on the redirect are treated as
+exclusive aliases with the same required value. The server-generated final
+`workId` is accepted only alongside the exact `oldWorkId`, job and route scope.
+
+The bounded mobile page is parsed through the existing Chapter Work grammar and
+stored only as normalized Questions in the same account/correlation/task-bound
+short-lived cache. Page-kind binding prevents an independent Work reference
+from being consumed as Chapter Work. Chapter Work answer resolution,
+SubmissionBuild/Execute/Verify and live validation remain active work. Exam
+still requires its separate attempt-start, gate and verification lifecycle.
 
 ## Native independent Work submission
 

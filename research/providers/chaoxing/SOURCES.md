@@ -1,6 +1,6 @@
 # chaoxing upstream sources
 
-Audit date: 2026-08-09
+Audit date: 2026-08-13
 
 This is a static source audit. No donor or Asterism implementation was live-tested
 against a real account during this audit, so every live-validation claim remains
@@ -28,3 +28,13 @@ pending.
 - Use `cxmooc-tools` only to diagnose historical route variants.
 
 No donor source is vendored into Asterism by this audit.
+
+## Refresh log
+
+- 2026-08-13: refreshed every recorded donor through the GitHub API. All six
+  recorded default-branch revisions remained unchanged. Tags and releases were
+  also enumerated: `Samueli924/chaoxing` latest tag/release remains `v3.1.4`,
+  OCS latest release is `4.15.3`, and the historical `cxmooc-tools` release is
+  `v2.5.0`; the other three donors currently expose no tags or releases. These
+  revisions are reproducible audit snapshots, not a freeze; refresh again at
+  the next capability-family checkpoint.

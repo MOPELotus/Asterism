@@ -67,8 +67,11 @@ inputs and every submission field are deliberately excluded from normalized
 output. The legacy `work-mobile-mixed.html` filename refers specifically to
 Chapter Work and is not an independent Work transport fixture. The independent
 Work preview fixture also exercises the registered native Question reader after
-strict route acquisition; it remains synthetic parser/transport-boundary
-evidence rather than a live response.
+strict route acquisition. The Chapter list, seven-slot Resource matrix and
+legacy `work-mobile-mixed.html` fixture now exercise the Chapter Work reader's
+fresh job/token rebinding, single attempt acquisition and page-kind-bound cache.
+They remain synthetic parser/transport-boundary evidence rather than live
+responses.
 
 The three submission fixtures are donor-compatible synthetic shapes rather
 than captured responses. They cover strict editor identity/type matching,

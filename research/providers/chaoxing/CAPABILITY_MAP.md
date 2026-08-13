@@ -1,8 +1,7 @@
 # chaoxing capability map
 
-The first implementation target remains independent `WorkModule` and
-`ExamModule` inventory. `ChapterModule` is a separate source module even when a
-Chapter card contains a Work-shaped assessment.
+`ChapterModule`, independent `WorkModule` and `ExamModule` remain separate
+source modules even when their assessments share field names or HTML shapes.
 
 | Asterism capability | Primary source | Secondary source | Planned use | Current evidence |
 |---|---|---|---|---|
@@ -16,7 +15,7 @@ Chapter card contains a Work-shaped assessment.
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
-| QuestionInventory / QuestionParse | OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work now has an offline-covered native fresh-page read and account/correlation/task-bound attempt cache; Chapter Work and Exam remain parse-only, and all live behavior is pending |
+| QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; Exam remains parse-only and all live behavior is pending |
 | SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work rebuilds choice/true-false values from an immutable Draft, reopens one fresh editor, forwards only audited form fields and POSTs `addStudentWorkNew` once; the JSON success flag is only a Receipt, never completion |
 | SubmissionVerify | agent skill | `chaoxing-exam`, OCS | PortSource | Independent read-only slot re-discovers the same Work without requiring a Receipt; editor/prompt remain Pending and only a result view whose server-visible per-Question answers exactly match the Draft becomes Confirmed |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
@@ -113,10 +112,16 @@ policy and remains independently guarded.
   rediscovers the course and Work entry, accepts only the final `/work/dowork`
   route, parses one bounded page and shares it through a five-minute
   account/correlation/task-bound process-local cache. HTML, route credentials
-  and attempt-local QIDs are never persisted. Exam and Chapter Work currently
-  remain parser-only; their donor-observed attempt-start/mutation and
-  Capture/BrowserBridge lifecycles are required next capabilities rather than a
-  read-only-policy exclusion.
+  and attempt-local QIDs are never persisted.
+- Pending Chapter Work now advertises the same two read capabilities without
+  being collapsed into independent Work. It rediscovers the exact Chapter,
+  requires a complete unique seven-card set, extracts one matching fresh
+  `jobid`/`enc`/`ktoken`, and sends the donor `api/work` GET once. Because that
+  GET can create the attempt, authentication is resolved before the request and
+  no ambiguous failure is renewed or replayed. Only the audited same-host
+  `doHomeWorkNew` redirect and exact course/class/knowledge/job binding are
+  accepted. Submission and result verification remain active work; Exam still
+  requires its distinct attempt-start family and browser gates.
 - The same fresh pending independent Work state now advertises
   `SubmissionBuild`, `SubmissionExecute` and `SubmissionVerify` together for
   the native subset. Build remains value-free. Execute currently accepts only

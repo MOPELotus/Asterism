@@ -47,7 +47,7 @@ pub use question_parser::{
 };
 pub use question_read::{ChaoxingQuestionRead, ChaoxingQuestionTransport};
 pub use resource_execution::ChaoxingResourceExecution;
-pub use resource_inventory::parse_chapter_resource_inventory;
+pub use resource_inventory::{ChaoxingChapterWorkTarget, parse_chapter_resource_inventory};
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use submission_build::ChaoxingSubmissionBuild;
 pub use submission_execute::{ChaoxingSubmissionExecute, ChaoxingSubmissionTransport};

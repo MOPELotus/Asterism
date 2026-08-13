@@ -25,7 +25,7 @@ use crate::{
         ChaoxingImmediateResourceTransport, ChaoxingVideoStatus, ChaoxingVideoTransport,
     },
     resource_inventory::{
-        ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
+        ChaoxingChapterWorkTarget, ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
         ChaoxingVideoResourceTarget, ChaoxingVideoRt,
     },
     submission_support::ChaoxingSubmissionForm,
@@ -40,6 +40,7 @@ const COURSE_LIST_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/c
 const COURSE_INTERACTION_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction";
 const CHAPTER_LIST_BASE: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse";
 const CHAPTER_RESOURCE_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/knowledge/cards";
+const CHAPTER_WORK_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/api/work";
 const CHAPTER_RESOURCE_VERSION: &str = "2025-0424-1038-3";
 const DOCUMENT_COMPLETE_BASE: &str = "https://mooc1.chaoxing.com/ananas/job/document";
 const READ_COMPLETE_BASE: &str = "https://mooc1.chaoxing.com/ananas/job/readv2";
@@ -386,6 +387,64 @@ impl NativeChaoxingInventoryTransport {
         document.into_inventory_document()
     }
 
+    async fn fetch_chapter_work_question_document_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+        request: &ChaoxingChapterResourceRequest,
+        target: &ChaoxingChapterWorkTarget,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        let mut url = chapter_work_url(route, request, target)?;
+        for redirect_count in 0..=MAX_WORK_DETAIL_REDIRECTS {
+            let response = self
+                .client
+                .get(url.clone())
+                .header(COOKIE, session.header_value()?)
+                .header(ACCEPT, "text/html,application/xhtml+xml")
+                .send()
+                .await
+                .map_err(|error| classify_reqwest_error(&error))?;
+            if response.status().is_redirection() {
+                if redirect_count == MAX_WORK_DETAIL_REDIRECTS {
+                    return Err(protocol_drift(
+                        "Chaoxing Chapter Work exceeded the redirect limit",
+                    ));
+                }
+                let location = response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| {
+                        protocol_drift("Chaoxing Chapter Work redirect has no valid location")
+                    })?;
+                if looks_like_login_location(location) {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Authentication,
+                        "Chaoxing Chapter Work redirected to login",
+                    ));
+                }
+                let next = url
+                    .join(location)
+                    .map_err(|_| protocol_drift("Chaoxing Chapter Work redirect is invalid"))?;
+                if looks_like_login_location(next.as_str()) {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Authentication,
+                        "Chaoxing Chapter Work redirected to login",
+                    ));
+                }
+                if !valid_chapter_work_url(&next, route, request, target) {
+                    return Err(protocol_drift(
+                        "Chaoxing Chapter Work redirected outside its route boundary",
+                    ));
+                }
+                url = next;
+                continue;
+            }
+            return classify_response(response).await?.into_inventory_document();
+        }
+        unreachable!("bounded Chapter Work redirect loop always returns")
+    }
+
     async fn prepare_work_submission_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -699,6 +758,20 @@ impl ChaoxingQuestionTransport for NativeChaoxingInventoryTransport {
             result => result,
         }
     }
+
+    async fn fetch_chapter_work_question_document(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        request: &ChaoxingChapterResourceRequest,
+        target: &ChaoxingChapterWorkTarget,
+    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        // The donor-observed GET can create the attempt. Session renewal may
+        // happen before sending, but an ambiguous response must never replay it.
+        let (session, _) = self.session_for_operation(context).await?;
+        self.fetch_chapter_work_question_document_once(&session, route, request, target)
+            .await
+    }
 }
 
 #[async_trait]
@@ -941,6 +1014,97 @@ fn chapter_resource_url(
             ("num", &card_index),
         ],
     )
+}
+
+fn chapter_work_url(
+    route: ChaoxingCourseRoute<'_>,
+    request: &ChaoxingChapterResourceRequest,
+    target: &ChaoxingChapterWorkTarget,
+) -> ProviderResult<Url> {
+    if !request.belongs_to(route) {
+        return Err(protocol_drift(
+            "Chaoxing Chapter Work request is outside the current course route",
+        ));
+    }
+    build_url(
+        CHAPTER_WORK_BASE,
+        &[
+            ("api", "1"),
+            ("workId", target.work_id()),
+            ("jobid", target.job_id()),
+            ("originJobId", target.job_id()),
+            ("needRedirect", "true"),
+            ("skipHeader", "true"),
+            ("knowledgeid", request.knowledge_id()),
+            ("ktoken", target.knowledge_token().expose_secret()),
+            ("cpi", route.cpi()),
+            ("ut", "s"),
+            ("clazzId", route.class_id()),
+            ("type", ""),
+            ("enc", target.enc().expose_secret()),
+            ("mooc2", "1"),
+            ("courseid", route.course_id()),
+        ],
+    )
+}
+
+fn valid_chapter_work_url(
+    url: &Url,
+    route: ChaoxingCourseRoute<'_>,
+    request: &ChaoxingChapterResourceRequest,
+    target: &ChaoxingChapterWorkTarget,
+) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    if url.as_str().len() > 16 * 1_024
+        || url.query_pairs().count() > 64
+        || url.scheme() != "https"
+        || url.host_str() != Some("mooc1.chaoxing.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+        || !request.belongs_to(route)
+        || unique_query(url, "courseid").as_deref() != Some(route.course_id())
+        || unique_query_aliases(url, &["clazzId", "classId"]).as_deref() != Some(route.class_id())
+        || unique_query(url, "knowledgeid").as_deref() != Some(request.knowledge_id())
+        || unique_query(url, "cpi").as_deref() != Some(route.cpi())
+        || unique_query(url, "enc").as_deref() != Some(target.enc().expose_secret())
+    {
+        return false;
+    }
+    match path.as_str() {
+        "/mooc-ans/api/work" => {
+            unique_query(url, "workId").as_deref() == Some(target.work_id())
+                && unique_query(url, "jobid").as_deref() == Some(target.job_id())
+                && unique_query(url, "originJobId").as_deref() == Some(target.job_id())
+                && unique_query(url, "ktoken").as_deref()
+                    == Some(target.knowledge_token().expose_secret())
+        }
+        "/mooc-ans/work/dohomeworknew" => {
+            unique_query(url, "oldWorkId").as_deref() == Some(target.work_id())
+                && unique_query(url, "jobid").as_deref() == Some(target.job_id())
+                && unique_query(url, "originJobId").as_deref() == Some(target.job_id())
+                && unique_query(url, "workId").is_some_and(|value| valid_route_component(&value))
+        }
+        _ => false,
+    }
+}
+
+fn valid_route_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn unique_query_aliases<'a>(url: &'a Url, keys: &[&str]) -> Option<Cow<'a, str>> {
+    let mut values = url
+        .query_pairs()
+        .filter(|(candidate, _)| keys.iter().any(|key| candidate.eq_ignore_ascii_case(key)))
+        .map(|(_, value)| value);
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
 }
 
 fn immediate_resource_url(
@@ -1554,6 +1718,50 @@ mod tests {
         let work_url = discover_work_list_url(COURSE_PAGE, route).unwrap();
         assert_eq!(work_url.host_str(), Some("mooc1.chaoxing.com"));
         assert_eq!(query(&work_url, "enc").as_deref(), Some("SAFE_ENC"));
+    }
+
+    #[test]
+    fn chapter_work_routes_bind_fresh_attempt_and_redirect_aliases() {
+        let course = course();
+        let route = ChaoxingCourseRoute::from_remote_course(&course).unwrap();
+        let scope = route.parser_scope().unwrap();
+        let chapter = crate::parse_chapter_inventory(CHAPTER_MIXED, &scope)
+            .unwrap()
+            .remove(0);
+        let request = ChaoxingChapterResourceRequest::try_from_chapter(&chapter)
+            .unwrap()
+            .unwrap();
+        let target = crate::resource_inventory::locate_chapter_work_target(
+            RESOURCE_MIXED,
+            &scope,
+            "4001",
+            0,
+            "resource:100:200:4001:job-work",
+        )
+        .unwrap()
+        .unwrap();
+        let url = chapter_work_url(route, &request, &target).unwrap();
+        assert_eq!(url.path(), "/mooc-ans/api/work");
+        for (key, expected) in [
+            ("workId", "job-work"),
+            ("jobid", "job-work"),
+            ("ktoken", "PRIVATE_TOKEN"),
+            ("enc", "PRIVATE_ENC"),
+        ] {
+            assert_eq!(query(&url, key).as_deref(), Some(expected), "{key}");
+        }
+        assert!(valid_chapter_work_url(&url, route, &request, &target));
+
+        let redirect = Url::parse(
+            "https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew?courseId=100&classId=200&knowledgeid=4001&cpi=300&enc=PRIVATE_ENC&oldWorkId=job-work&jobid=job-work&originJobId=job-work&workId=server-123",
+        )
+        .unwrap();
+        assert!(valid_chapter_work_url(&redirect, route, &request, &target));
+        let foreign = Url::parse(
+            "https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew?courseId=100&classId=201&knowledgeid=4001&cpi=300&enc=PRIVATE_ENC&oldWorkId=job-work&jobid=job-work&originJobId=job-work&workId=server-123",
+        )
+        .unwrap();
+        assert!(!valid_chapter_work_url(&foreign, route, &request, &target));
     }
 
     #[test]

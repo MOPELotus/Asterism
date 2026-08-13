@@ -57,6 +57,57 @@ pub(crate) struct ChaoxingVideoResourceTarget {
     attendance_duration_enc: Option<SecretString>,
 }
 
+/// One fresh Chapter Work attempt target. Route credentials remain in memory,
+/// are redacted from diagnostics and are zeroized when the operation ends.
+#[must_use]
+pub struct ChaoxingChapterWorkTarget {
+    job_id: String,
+    work_id: String,
+    enc: SecretString,
+    knowledge_token: SecretString,
+}
+
+impl ChaoxingChapterWorkTarget {
+    /// Returns the fresh card job identity.
+    pub fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
+    /// Returns the server Work route identity.
+    pub fn work_id(&self) -> &str {
+        &self.work_id
+    }
+
+    /// Exposes the short-lived Work route token only to an authorized transport.
+    pub fn enc(&self) -> &SecretString {
+        &self.enc
+    }
+
+    /// Exposes the short-lived chapter token only to an authorized transport.
+    pub fn knowledge_token(&self) -> &SecretString {
+        &self.knowledge_token
+    }
+}
+
+impl std::fmt::Debug for ChaoxingChapterWorkTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChaoxingChapterWorkTarget")
+            .field("job_id", &"[REDACTED]")
+            .field("work_id", &"[REDACTED]")
+            .field("enc", &"[REDACTED]")
+            .field("knowledge_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for ChaoxingChapterWorkTarget {
+    fn drop(&mut self) {
+        self.job_id.zeroize();
+        self.work_id.zeroize();
+    }
+}
+
 impl ChaoxingVideoResourceTarget {
     pub(crate) const fn remote_state(&self) -> RemoteState {
         self.remote_state
@@ -414,6 +465,105 @@ pub(crate) fn locate_video_resource_target(
     Ok(found)
 }
 
+/// Locates one fresh Chapter Work route without persisting its attempt
+/// credentials. Callers must scan the complete bounded card set and reject a
+/// duplicate target across cards.
+///
+/// # Errors
+///
+/// Returns a typed error for foreign identities, malformed card material,
+/// duplicate matches, or a target which is not a pending Chapter Work.
+pub(crate) fn locate_chapter_work_target(
+    html: &str,
+    scope: &ChaoxingCourseScope,
+    knowledge_id: &str,
+    card_index: u8,
+    remote_task_id: &str,
+) -> ProviderResult<Option<ChaoxingChapterWorkTarget>> {
+    if html.is_empty() || html.len() > MAX_CARD_DOCUMENT_BYTES {
+        return Err(invalid_response(
+            "Chaoxing chapter card document is empty or exceeds the size limit",
+        ));
+    }
+    validate_component(knowledge_id, "knowledge identity")?;
+    if card_index > MAX_CARD_INDEX {
+        return Err(protocol_drift(
+            "Chaoxing chapter card index exceeds the donor range",
+        ));
+    }
+    let prefix = format!(
+        "resource:{}:{}:{knowledge_id}:",
+        scope.course_id(),
+        scope.class_id()
+    );
+    let expected_job_id = remote_task_id
+        .strip_prefix(&prefix)
+        .ok_or_else(|| protocol_drift("Chaoxing Chapter Work is outside the current scope"))?;
+    validate_component(expected_job_id, "Chapter Work identity")?;
+    if html.contains("章节未开放") {
+        return Ok(None);
+    }
+    let Some(root) = parse_card_root(html)? else {
+        return Ok(None);
+    };
+    let defaults = optional_object(root.as_map(), "defaults")?;
+    let mut found = None;
+    for attachment in card_attachments(root.as_map())? {
+        let Some(task) = parse_resource_attachment(attachment, scope, knowledge_id, card_index)?
+        else {
+            continue;
+        };
+        if task.remote_id != remote_task_id {
+            continue;
+        }
+        if found.is_some() {
+            return Err(protocol_drift(
+                "Chaoxing chapter card contains a duplicate Chapter Work target",
+            ));
+        }
+        if task.remote_state != RemoteState::Pending
+            || task.normalized.get("resource_kind").and_then(Value::as_str) != Some("chapter_work")
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing Chapter Work is not pending",
+            ));
+        }
+        let card = attachment
+            .as_object()
+            .ok_or_else(|| protocol_drift("Chaoxing chapter attachment is not an object"))?;
+        let job_id = optional_string(card, "jobid")?
+            .filter(|value| *value == expected_job_id)
+            .ok_or_else(|| protocol_drift("Chaoxing Chapter Work job identity changed"))?;
+        let work_id = job_id.strip_prefix("work-").unwrap_or(job_id);
+        validate_component(work_id, "Chapter Work route identity")?;
+        let enc = bounded_secret(card, "enc", "Chapter Work route token")?;
+        let knowledge_token = bounded_secret(defaults, "ktoken", "Chapter Work knowledge token")?;
+        found = Some(ChaoxingChapterWorkTarget {
+            job_id: job_id.to_owned(),
+            work_id: work_id.to_owned(),
+            enc,
+            knowledge_token,
+        });
+    }
+    Ok(found)
+}
+
+fn bounded_secret(
+    object: &Map<String, Value>,
+    key: &str,
+    label: &'static str,
+) -> ProviderResult<SecretString> {
+    optional_string(object, key)?
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_EPHEMERAL_TOKEN_BYTES
+                && !value.chars().any(char::is_control)
+        })
+        .map(SecretString::new)
+        .ok_or_else(|| protocol_drift(label))
+}
+
 fn required_ephemeral_string<'a>(
     object: &'a Map<String, Value>,
     key: &str,
@@ -582,6 +732,10 @@ fn parse_resource_attachment(
         due_at: None,
         closes_at: None,
         capabilities: match (kind, remote_state) {
+            ("chapter_work", RemoteState::Pending) => vec![
+                TaskCapability::QuestionInventory,
+                TaskCapability::QuestionParse,
+            ],
             ("document" | "read" | "video", RemoteState::Pending) => vec![
                 TaskCapability::ProgressRead,
                 TaskCapability::ResourceExecution,
@@ -889,6 +1043,18 @@ mod tests {
                 .find(|task| task.remote_id.ends_with(":job-document"))
                 .is_some_and(|task| task.capabilities == [TaskCapability::ProgressRead])
         );
+        assert!(
+            tasks
+                .iter()
+                .find(|task| task.remote_id.ends_with(":job-work"))
+                .is_some_and(|task| {
+                    task.capabilities
+                        == [
+                            TaskCapability::QuestionInventory,
+                            TaskCapability::QuestionParse,
+                        ]
+                })
+        );
         let serialized = serde_json::to_string(&tasks).unwrap();
         for private in [
             "PRIVATE_ENC",
@@ -1094,6 +1260,74 @@ mod tests {
                 "resource:100:200:4001:job-read",
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn chapter_work_locator_binds_fresh_attempt_material_and_redacts_it() {
+        let target = locate_chapter_work_target(
+            CARDS_MIXED,
+            &scope(),
+            "4001",
+            0,
+            "resource:100:200:4001:job-work",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(target.job_id(), "job-work");
+        assert_eq!(target.work_id(), "job-work");
+        assert_eq!(target.enc().expose_secret(), "PRIVATE_ENC");
+        assert_eq!(target.knowledge_token().expose_secret(), "PRIVATE_TOKEN");
+        let debug = format!("{target:?}");
+        for private in ["job-work", "PRIVATE_ENC", "PRIVATE_TOKEN"] {
+            assert!(!debug.contains(private));
+        }
+    }
+
+    #[test]
+    fn chapter_work_locator_fails_closed_on_foreign_duplicate_or_missing_material() {
+        assert!(
+            locate_chapter_work_target(
+                CARDS_MIXED,
+                &scope(),
+                "4001",
+                0,
+                "resource:999:200:4001:job-work",
+            )
+            .is_err()
+        );
+        let work = r#"{"type":"workid","job":true,"jobid":"job-work","isPassed":false,"enc":"PRIVATE_ENC","property":{"title":"章节练习"}}"#;
+        let duplicate = CARDS_MIXED.replace(work, &format!("{work},{work}"));
+        assert!(
+            locate_chapter_work_target(
+                &duplicate,
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:job-work",
+            )
+            .is_err()
+        );
+        assert!(
+            locate_chapter_work_target(
+                &CARDS_MIXED.replace("\"enc\":\"PRIVATE_ENC\"", "\"enc\":null"),
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:job-work",
+            )
+            .is_err()
+        );
+        assert!(
+            locate_chapter_work_target(
+                CARDS_MIXED,
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:missing",
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
