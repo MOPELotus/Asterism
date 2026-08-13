@@ -37,13 +37,14 @@ resolves an account-bound composite and validates the JWT through the transport;
 the concrete Core adapter requests only `ProviderCompositeSession`, verifies
 the exact account/reference/purpose/expiry tuple, and accepts only
 NativeProviderLogin+Composite or one of the three imported authorities paired
-with Jwt metadata. Capture recipe v1 uses `AssistedSession` and reads
-`u-openid` plus the raw `Authorization` value from one
-`ucontent.unipus.cn` request snapshot. Its sole required output is one
+with Jwt metadata. Capture recipe v3 uses `AssistedSession` and reads
+`u-openid`, the raw `Authorization` value and the Cookie header from one
+`ucontent.unipus.cn` request snapshot. Its required outputs are one
 `ProviderCompositeSession` JSON object with `openid` and `jwt` fields, not two
-independently commit-able secrets. The declarative recipe starts at
-`https://ucontent.unipus.cn/`, polls at 500 ms and allowlists only the
-`ucontent` and `ipub` HTTPS origins observed by the browser donor. Browser
+independently commit-able secrets, plus one purpose-bound `ProviderCookie`.
+The declarative recipe starts at `https://ucontent.unipus.cn/`, polls at 500 ms,
+navigates only the `ucontent`/`ipub` HTTPS origins observed by the browser donor
+and reads request material only from `ucontent`. Browser
 request observation and recipe execution remain a shared Capture-helper
 integration responsibility; metadata and the actual recipe are
 registry-validated together, so either one cannot claim the contract alone.
@@ -215,10 +216,36 @@ wildcard receivers and donor-generated script are not portable inputs. DOM
 polls, menu rows, action counts, residence budgets, video ceilings and popup
 retries must all be bounded and cancellation-aware.
 
-The Provider already issues a freshly Task-bound BrowserSessionSpec restricted
-to `ucontent.unipus.cn` and `ipub.unipus.cn`; target navigation, declarative
-DOM/iframe plans, pause/recovery, browser session injection and fresh
-DurationRead acceptance are an active shared Core integration item. Capture
+The Provider issues a freshly Task-bound BrowserSessionSpec restricted to
+`ucontent.unipus.cn` and `ipub.unipus.cn` and independently re-reads the exact
+Group detail before creating a versioned private residence plan. The plan binds
+the normalized Unit/Section/Micro/Task labels and freezes the four audited discovery families, exact current
+Tab/Task/popup/video selector sets, a 2048-Micro/64-Tab/128-Task ceiling,
+bounded popup retries, 3-second DOM polls, the 30-minute donor video ceiling,
+the master-resolved residence/video settings snapshot, and mandatory
+session-nonce/frame/exact-origin message binding. The Provider result parser
+then requires the same plan version, session nonce, frame, allowed origin and
+Task; bounds observed residence/video time and Micro/Tab/Task counts; rejects
+video activity when disabled; and marks every valid observation as still
+requiring fresh DurationRead. The donor's wildcard `UAI_CMD` channel is
+represented as a typed, sequence-correlated `SCAN`/`CLICK`/`PING` command and
+menu/click/`PONG` event protocol. The transport-observed origin must equal both
+the exact allowlisted plan origin and envelope origin, nonce/frame/Task must
+match, menu labels and cardinality are bounded, menu ordinals must be complete
+and ordered. Exactly one menu entry must match the plan's fresh hierarchy;
+missing or duplicate matches fail closed, and `CLICK` carries only that
+authorized opaque session-derived handle, never a browser-supplied CSS
+selector or DOM path. Top-page Tab/Task enumeration uses a separate typed scope
+over the exact frozen selector families; its entries are ordered, bounded and
+carry binding-derived opaque handles. Tab traversal accepts only those snapshot
+handles, and a Task click requires exactly one title equal to the freshly
+normalized Group target within the current Tab. Only that authorized Task
+wrapper can construct the final residence action; the action copies the frozen
+residence/video settings exactly, and the final result must repeat both its
+sequence and target handle. The final observation permits at most that one Micro and
+one target Task per processed Tab. Target navigation, action dispatch,
+pause/recovery, browser session injection and fresh DurationRead acceptance are
+an active shared Core integration item. Capture
 evidence may replace or refine this plan at any time; neither path is deferred.
 
 DurationRead never creates an Execution, reports time or mutates remote state.
@@ -268,6 +295,16 @@ either encoded JSON text or an inline object. Both forms enter the same
 bounded, recursively zeroizing parser. `direction.text`/`direction.pcText`,
 module material and child text are normalized from rich text, while a
 multi-child choice keeps each component's own normalized stem and option set.
+The same donor reads `contents[].path`, subtitle-track paths and embedded
+WEBVTT before external transcription. Asterism now classifies bounded audio,
+video and subtitle routes, accepts only HTTPS names rather than literal-IP
+hosts, strips fragments, deduplicates in order and retains exact URLs only in a
+zeroizing Provider-private media owner. The persisted Question receives a
+stable hash-derived attachment ID, kind, bounded label and subtitle flag but no
+fetch URL. Embedded WEBVTT becomes bounded normalized transcript metadata and
+is excluded from the display stem. A shared downloader must still enforce DNS
+resolution/redirect policy and bind the resulting bytes plus model credential
+to the exact Task and AnswerResolve attempt.
 
 Execution is advertised only when a fresh Group has a bounded positive
 `question_num` and either one homogeneous type or exactly one positional type
@@ -306,14 +343,15 @@ repeated. A Network failure from the mutation boundary is likewise returned
 after one attempt so Core can retain verify-only recovery authority without
 replaying the POST.
 
-The native mutation client currently sends the account-bound JWT and annotator
-token. The frozen donors also prove cookie-bearing sessions, and the current
-Rust donor imports `u-openid`, `x-csrftoken`, app/platform and school headers
-from a browser session. Therefore BrowserBridge/Capture session material is an
-active compatibility fallback when clean-client JWT-plus-annotator is
-insufficient. Any captured fields remain ephemeral, purpose-bound, allowlisted
-and zeroized; the Provider stays Development until both native and fallback
-paths receive live validation.
+The native mutation client sends the account-bound JWT and annotator token.
+Capture recipe v3 additionally preserves the donor-proven browser Cookie. The
+native transport injects that optional Cookie only into `ucontent` requests,
+along with the exact account-bound `u-openid`/`x-csrftoken`, app/platform and
+Origin/Referer headers; it never forwards browser Cookie material to `uai` or
+`ucloud`. The donor's optional school header still needs a typed structured
+browser-session contract rather than being misclassified as an access token.
+Captured fields remain purpose-bound, allowlisted and zeroized; the Provider
+stays Development until both native and fallback paths receive live validation.
 
 Verification requires that accepted receipt and reads only the exact
 `{groupId}-{submitVersion}` user-module route after refreshing the Course
@@ -394,11 +432,19 @@ Group completion and their two independent readbacks remain durably recoverable
 without ambiguous replay. Artifact handles and external
 AnswerResolve/media-source orchestration likewise require shared Core contracts
 for account/Task ownership and secret isolation. The Provider-private upload
-boundary already fresh-binds Course resource/detail and current app user before
-requesting the exact CMS token route, retains token and artifact bytes only in
-zeroizing owners, bounds audio/mpeg artifacts to 64 MiB, builds a fixed-field
-multipart request for the audited Qiniu origin and accepts only an object-store
-response that repeats the granted file key. It also preserves the donor's
+boundary now first re-reads exact TaskDetail and freezes the stable hierarchy,
+Task fingerprint, unique positional `multiFileUpload` module and selected
+artifact digest into an upload intent. CMS grant acquisition accepts that
+intent rather than raw Course/Group strings, then fresh-binds Course
+resource/detail and current app user before requesting the exact token route.
+The grant remains tied to the same intent/artifact and a swapped artifact fails
+before multipart emission. Token and artifact bytes stay in zeroizing owners,
+audio/mpeg artifacts are bounded to 64 MiB, the multipart request has fixed
+fields for the audited Qiniu origin, and the object-store response must repeat
+the granted file key. A successful response becomes a strong uploaded-artifact
+owner retaining remote Task, Course/Group, positional upload module, exact key,
+artifact digest and intent fingerprint; its route data is redacted in debug and
+zeroized on drop. It also preserves the donor's
 4 KiB minimal-MP3 artifact as an explicit option. Durable artifact handles and
 the final immutable `multiFileUpload` answer submission remain shared
 integration work; a grant or object-store response alone is never Group

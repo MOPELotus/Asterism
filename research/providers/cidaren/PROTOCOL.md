@@ -23,8 +23,15 @@ independent path and also accepts the current donor's Capture-assisted
 Composite session: one account-bound `UserToken` plus bounded
 `CDR_LOGIN_INFO` crypto context acquired from the authenticated WeChat H5
 origin. `AssistedSession` and `ExternalBrowserOauth` use a visible
-BrowserBridge/Capture challenge rather than pretending a native password flow
+callback/helper challenge rather than pretending a native password flow
 exists.
+
+The donor capture helper also records `CDR_USER_SESSION` when present, but its
+own completion gate requires only the token plus `CDR_LOGIN_INFO`, and the
+`jv=99` decoder consumes only the latter. The declarative recipe therefore
+does not turn that optional, unused observation into a required JSON field;
+this avoids stalling a valid capture and avoids persisting excess browser
+state.
 
 The native transport now uses the shared non-redirecting HTTPS client. It sends
 the token as a sensitive `UserToken` header, preserves the audited mobile
@@ -42,13 +49,42 @@ Authentication; storage/key failures remain sanitized Internal errors. No
 unsupported automatic refresh claim is made, but a fresh Capture session can
 replace an expired binding.
 
-The original historical donor contains a `LoginByWechatCode` exchange, but its
-signing string hard-codes an old one-time WeChat code while the request body
-uses the runtime code. This mismatch persists in the frozen historical source,
-so it is protocol lineage rather than a reproducible native login recipe. The
-current donor's WeChat H5 Capture flow is implemented. A native code exchange
-is added if live evidence supplies a coherent current signature; it is not
-invented from the broken historical sample.
+The original historical donor's `LoginByWechatCode` hard-codes an obsolete
+code into its signature and remains lineage only. A frozen first-party
+`2.7.0.260715_01` H5 asset snapshot plus a redacted live-safe exchange now
+provide coherent current evidence:
+
+```text
+POST /student/api/Auth/Wechat/V2/LoginByWechatCode
+
+code={single-use OAuth callback code}
+cpub_k={fresh P-256 public key, SPKI DER then Base64}
+cpub_v=v1
+timestamp={milliseconds}
+version=2.7.0.260715_01
+sign=md5(sorted non-empty fields + donor suffix)
+app_type=1                 # interceptor-added, not signed
+```
+
+The callback helper must also preserve the current `Authorization-v` device
+code and exact browser User-Agent; Asterism derives `Abc=md5(User-Agent)` and
+does not mix a callback from one browser identity with donor's unrelated fixed
+mobile headers. The response supplies `spub_k` and `salt`; the client performs P-256 ECDH,
+HKDF-SHA256 with `info="vcg-auth-aes"`, then AES-256-GCM with exact AAD
+`vcg-auth:POST:/Wechat/V2/LoginByWechatCode`. The decrypted object supplies the
+new `token`. Asterism implements this entire code-to-Composite path in Rust,
+zeroizes owned code/key/plaintext material, sends the exchange once, and
+requires a fresh `Student/Main` read before persistence. The redacted live-safe
+test removed the old `vcg_refresh_token`; V2 still succeeded, issued a new
+refresh cookie and passed the account readback.
+
+What remains is earlier in the flow: securely obtaining the callback code from
+the authenticated PC WeChat XWeb page. The generic `asterism-capture` helper
+launches an isolated Edge/Chrome profile and therefore cannot honestly claim
+that it observes the WeChat XWeb session. Core still needs a bounded,
+owner/account/AuthSession-bound, single-use authorization-artifact handoff
+(`code` plus bounded device code and exact User-Agent) and
+a callback-only XWeb/Capture helper. An ambiguous POST is never replayed.
 
 ## Course, class-task and ordinary study inventory
 
@@ -98,10 +134,14 @@ observed through `progress == 100`; an active row with lower progress remains
 pending or in progress.
 
 `start_time` is an epoch-millisecond opening observation. Donor samples pair
-`over_time` with a duration-like millisecond value, but Asterism does not infer
-a close timestamp until bounded addition is validated against current
-fixtures. `release_time`, `start_time`, `over_time` and `time_spent` stay
-separate; `time_spent` is not converted to learning seconds before live proof.
+`over_time` with a duration-like millisecond value. Public issue 6 also records
+non-zero `time_spent` values such as `2181226` in the same rows, while donor
+answer mutations submit values such as `20000` on the same field. This
+cross-route evidence establishes millisecond wire semantics. Asterism keeps
+`release_time`, `start_time`, `over_time` and `time_spent` separate, bounds
+accumulated `time_spent` to 100 years and converts it to whole Domain seconds
+only after a fresh stable-identity read. It still does not infer a close
+timestamp from `over_time`.
 
 Course inventory can be derived from the complete class-task pages because
 each row carries stable `course_id` plus `course_name`. Multiple rows for one
@@ -151,11 +191,11 @@ re-list the matching complete class pagination or selected study list and
 select exactly one row by stable identity. A malformed identity is protocol
 drift; an identity absent from the fresh inventory is RemoteChanged. The fresh
 detail preserves the current `task_id`, Course/list binding and normalized
-status, while progress publishes only the bounded percentage and remote state.
-`time_spent` remains a raw detail observation and is never converted into
-duration seconds. Future question or submission operations must perform the
-same fresh release-identity binding before using `task_id`, `course_id` or task
-type.
+status, while progress publishes the bounded percentage/state and optional
+duration. `time_spent` remains preserved as a normalized raw millisecond
+observation; DurationRead converts it to seconds after the same fresh identity
+binding. Future question or submission operations must perform that binding
+before using `task_id`, `course_id` or task type.
 
 ## Question and mutation chain
 
@@ -186,7 +226,7 @@ jv=2_9214
 jv=2_10232
 jv=2_10234
 jv=3_1021
-jv=99 (fresh captured HKDF/AES-GCM context required)
+jv=99 (fresh captured or native-login HKDF/AES-GCM context required)
 ```
 
 It bounds encoded and decoded data to 2 MiB, accepts only JSON objects/arrays,
@@ -204,7 +244,9 @@ The current clean-room protocol layer additionally freezes:
 - `SubmitAnswerAndSave` and `SkipAnswer` duration/topic signing;
 - compact `SubmitChoseWord` word-map signing;
 - donor-observed topic modes for single-choice, matching and text Questions;
-- nested answer-tag flattening without persisting executable topic codes.
+- nested answer-tag flattening without persisting executable topic codes,
+  while retaining sanitized top-level order, parent tag and child wire content
+  needed to reproduce the donor's sentence-selection semantics exactly.
 
 `SubmitChoseWord` is acknowledgement-only in the donor: it validates the
 success envelope but does not decode a next Question. Asterism therefore uses
@@ -231,7 +273,10 @@ transport error leaves the flow `Issued`; the caller must mark it ambiguous,
 after which no replay is possible. Unexpected response semantics enter a
 separate fail-closed terminal state. This Provider-private machine is not yet a
 public Capability because Core still needs durable storage/recovery for each
-issued edge.
+issued edge. Only the donor's terminal Completed acknowledgement can be
+projected into a bounded `SubmissionReceipt`; intermediate success and
+word-selection acknowledgements cannot, and even the terminal receipt remains
+verification context rather than proof of success.
 
 Native answer evidence is also implemented. Inventory routes remain bound to
 the fresh class/study Task; `Course/StudyWordInfo` retains only meanings,
@@ -241,6 +286,20 @@ and example evidence remain separate because topic mode 32 consumes phrases,
 while modes 41-44 and the 51-54 fallback consume examples. Meaning matching
 uses donor direction `meaning in option`, and completion preserves prefix,
 length, `+s`, then example fallback order.
+
+The donor also performs explicit low-quality fallbacks when evidence is
+present but no semantic match is found: random option for word-to-meaning,
+third option for meaning-to-word and sentence choice, and the last inventory
+word for completion. Asterism retains those capabilities and labels them with
+low confidence/provenance. The random branch hashes the immutable Question ID
+instead of drawing again on every call, so one reviewed Draft cannot silently
+change before execution. For nested sentence options, "third option" means the
+third top-level parent exactly as in the donor, not the third entry after
+flattening; successful matches similarly resolve the example word back to the
+exact child tag before building the one-Question Draft. A well-formed empty
+`means` array is not reclassified as protocol drift: the parser falls through
+to a non-empty `options` family when present, otherwise it retains empty
+evidence so the donor's explicit failure strategy can run.
 
 Donor timing configuration is represented by immutable runtime settings. The
 default reported answer range is 2500-7500 ms, skip reports 20000 ms, and the
@@ -257,4 +316,9 @@ Question discovery, answer resolution, submission construction, mutation and
 fresh verification remain separate capabilities. `topic_code` is ephemeral,
 redacted and zeroized; it never enters a persisted Question or immutable Draft.
 The donor's strings such as “task complete” are bounded receipt facts and do
-not replace an identity-bound post-mutation read.
+not replace an identity-bound post-mutation read. The Provider-private
+SubmissionVerify implementation recomputes the immutable preview, freshly
+rebinds the exact release/list identity and confirms only 100%/Completed. The
+platform exposes no audited answer-history readback, so the Task goal may be
+confirmed while each Question remains explicitly Unverified; incomplete
+readback stays Pending even after a terminal acknowledgement.

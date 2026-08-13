@@ -441,6 +441,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         ),
         ("AuthBootstrapSession", auth_bootstrap_session_schema()),
         ("CaptureValueSource", capture_value_source_schema()),
+        ("CaptureReadiness", capture_readiness_schema()),
         (
             "CaptureCredentialOutput",
             object(
@@ -463,16 +464,25 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 &[
                     "version",
                     "start_url",
-                    "allowed_origins",
+                    "navigation_origins",
+                    "read_origins",
                     "poll_interval_millis",
                     "auth_method",
                     "session_kind",
+                    "readiness",
                     "outputs",
                 ],
                 json!({
                     "version": {"type": "integer", "format": "int64", "minimum": 1},
                     "start_url": {"type": "string", "format": "uri", "pattern": "^https://"},
-                    "allowed_origins": {
+                    "navigation_origins": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "uniqueItems": true,
+                        "items": {"type": "string", "format": "uri", "pattern": "^https://[^/]+$"}
+                    },
+                    "read_origins": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 8,
@@ -482,6 +492,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                     "poll_interval_millis": {"type": "integer", "format": "int64", "minimum": 100, "maximum": 5000},
                     "auth_method": schema_ref("AuthMethod"),
                     "session_kind": schema_ref("SessionKind"),
+                    "readiness": schema_ref("CaptureReadiness"),
                     "outputs": {
                         "type": "array",
                         "minItems": 1,
@@ -1699,6 +1710,34 @@ fn capture_value_source_schema() -> Value {
                     }))
                 }
             }))
+        ]
+    })
+}
+
+fn capture_readiness_schema() -> Value {
+    json!({
+        "oneOf": [
+            object(&["type"], json!({"type": {"const": "outputs_complete"}})),
+            object(
+                &["type", "origin", "method", "path_and_query"],
+                json!({
+                    "type": {"const": "request_observed"},
+                    "origin": {"type": "string", "format": "uri", "pattern": "^https://[^/]+$"},
+                    "method": string_enum(&["GET", "POST"]),
+                    "path_and_query": {"type": "string", "pattern": "^/", "maxLength": 2048}
+                }),
+            ),
+            object(
+                &["type", "origin", "method", "path_and_query", "status", "mime_type"],
+                json!({
+                    "type": {"const": "response_observed"},
+                    "origin": {"type": "string", "format": "uri", "pattern": "^https://[^/]+$"},
+                    "method": string_enum(&["GET", "POST"]),
+                    "path_and_query": {"type": "string", "pattern": "^/", "maxLength": 2048},
+                    "status": {"type": "integer", "minimum": 200, "maximum": 299},
+                    "mime_type": {"type": "string", "minLength": 3, "maxLength": 128}
+                }),
+            )
         ]
     })
 }

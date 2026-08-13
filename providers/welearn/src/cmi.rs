@@ -221,10 +221,7 @@ pub fn parse_cmi_snapshot(document: &str) -> ProviderResult<WellearnCmiSnapshot>
     let outer = outer
         .as_object()
         .ok_or_else(|| protocol_drift("WELearn CMI response is not an object"))?;
-    if outer
-        .get("ret")
-        .is_some_and(|value| value.as_i64() != Some(0))
-    {
+    if outer.get("ret").and_then(Value::as_i64) != Some(0) {
         return Err(protocol_drift("WELearn CMI read did not succeed"));
     }
     let comment = outer
@@ -456,6 +453,8 @@ mod tests {
         for document in [
             r"{}",
             r#"{"comment":{}}"#,
+            r#"{"comment":"{}"}"#,
+            r#"{"ret":"0","comment":"{}"}"#,
             r#"{"comment":"not-json"}"#,
             r#"{"ret":1,"comment":"{}"}"#,
             r#"{"comment":"{\"cmi\":{\"progress_measure\":\"1.1\"}}"}"#,

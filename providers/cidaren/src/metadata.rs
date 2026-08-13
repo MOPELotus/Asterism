@@ -25,7 +25,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
-        capture_recipe_version: Some(1),
+        capture_recipe_version: Some(2),
         capabilities: BTreeSet::from([
             ProviderCapability::Authentication,
             ProviderCapability::BrowserBridge,
@@ -33,6 +33,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::TaskInventory,
             ProviderCapability::TaskDetail,
             ProviderCapability::TaskProgressRead,
+            ProviderCapability::DurationRead,
             ProviderCapability::SubmissionBuild,
         ]),
         auth_methods: BTreeSet::from([
@@ -62,6 +63,7 @@ mod tests {
                 ProviderCapability::TaskInventory,
                 ProviderCapability::TaskDetail,
                 ProviderCapability::TaskProgressRead,
+                ProviderCapability::DurationRead,
                 ProviderCapability::SubmissionBuild,
             ])
         );
@@ -77,6 +79,6 @@ mod tests {
             metadata.session_kinds,
             BTreeSet::from([SessionKind::ProviderSpecific, SessionKind::Composite,])
         );
-        assert_eq!(metadata.capture_recipe_version, Some(1));
+        assert_eq!(metadata.capture_recipe_version, Some(2));
     }
 }

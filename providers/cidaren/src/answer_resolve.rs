@@ -9,6 +9,7 @@ use asterism_domain::{
 };
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 const MAX_WORDS: usize = 100_000;
@@ -145,6 +146,10 @@ impl CidarenAnswerEvidence {
                 .and_then(|target| self.by_word.get(target))
         })
     }
+
+    fn contains_task_word(&self, word: &str) -> bool {
+        self.word_list.iter().any(|candidate| candidate == word)
+    }
 }
 
 impl fmt::Debug for CidarenAnswerEvidence {
@@ -187,7 +192,9 @@ pub fn parse_word_evidence(payload: &Value) -> ProviderResult<CidarenWordEvidenc
     let word = required_text(object.get("word"), MAX_WORD_BYTES, "word")?;
     let mut meanings = Vec::new();
     let mut examples = Vec::new();
-    if let Some(entries) = object.get("means").and_then(Value::as_array) {
+    let means_entries = optional_evidence_array(object.get("means"), "mean")?;
+    let option_entries = optional_evidence_array(object.get("options"), "option")?;
+    if let Some(entries) = means_entries.filter(|entries| !entries.is_empty()) {
         if entries.len() > MAX_MEANINGS {
             return Err(invalid_response(
                 "Cidaren word-info meanings exceed the limit",
@@ -196,7 +203,7 @@ pub fn parse_word_evidence(payload: &Value) -> ProviderResult<CidarenWordEvidenc
         for entry in entries {
             parse_means_entry(entry, &mut meanings, &mut examples)?;
         }
-    } else if let Some(entries) = object.get("options").and_then(Value::as_array) {
+    } else if let Some(entries) = option_entries {
         if entries.len() > MAX_MEANINGS {
             return Err(invalid_response(
                 "Cidaren word-info options exceed the limit",
@@ -205,14 +212,14 @@ pub fn parse_word_evidence(payload: &Value) -> ProviderResult<CidarenWordEvidenc
         for entry in entries {
             parse_options_entry(entry, &mut meanings, &mut examples)?;
         }
-    } else {
+    } else if means_entries.is_none() {
         return Err(protocol_drift(
             "Cidaren word-info payload has no audited meaning family",
         ));
     }
-    if meanings.is_empty() || meanings.len() > MAX_MEANINGS || examples.len() > MAX_EXAMPLES {
-        return Err(protocol_drift(
-            "Cidaren word-info payload contains no bounded meaning evidence",
+    if meanings.len() > MAX_MEANINGS || examples.len() > MAX_EXAMPLES {
+        return Err(invalid_response(
+            "Cidaren word-info payload exceeds the evidence limit",
         ));
     }
     Ok(CidarenWordEvidence {
@@ -220,6 +227,19 @@ pub fn parse_word_evidence(payload: &Value) -> ProviderResult<CidarenWordEvidenc
         meanings,
         examples,
     })
+}
+
+fn optional_evidence_array<'a>(
+    value: Option<&'a Value>,
+    family: &'static str,
+) -> ProviderResult<Option<&'a [Value]>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(entries)) => Ok(Some(entries)),
+        Some(_) => Err(protocol_drift(format!(
+            "Cidaren word-info {family} family is not an array"
+        ))),
+    }
 }
 
 /// Resolves one parsed Cidaren Question from a fresh bounded word-evidence
@@ -256,37 +276,30 @@ pub fn resolve_answer_candidate(
         .and_then(Value::as_i64)
         .ok_or_else(|| protocol_drift("Cidaren Question has no topic mode"))?;
     let (answer, confidence, strategy) = match mode {
-        11 | 15 | 16 | 21 | 22 => (
-            resolve_word_to_meaning(question, evidence)?,
-            10_000,
-            "word-to-meaning",
-        ),
+        11 | 15 | 16 | 21 | 22 => match resolve_word_to_meaning(question, evidence)? {
+            Some(answer) => (answer, 10_000, "word-to-meaning"),
+            None => donor_stable_random_choice(question)?,
+        },
         13 => (
             donor_fixed_fourth_choice(question)?,
             2_500,
             "donor-fixed-fourth-choice",
         ),
-        17 | 18 => (
-            resolve_meaning_to_word(question, evidence)?,
-            10_000,
-            "meaning-to-word",
-        ),
+        17 | 18 => match resolve_meaning_to_word(question, evidence)? {
+            Some(answer) => (answer, 10_000, "meaning-to-word"),
+            None => donor_third_choice(question, "donor-third-choice-fallback")?,
+        },
         31 => (resolve_matching(question)?, 10_000, "relation-matching"),
         32 => (
             resolve_translation_text(question, evidence)?,
             9_000,
             "phrase-translation",
         ),
-        41..=44 => (
-            resolve_sentence_choice(question, evidence)?,
-            9_000,
-            "example-sentence",
-        ),
-        51..=54 => (
-            resolve_word_completion(question, evidence)?,
-            9_000,
-            "word-prefix-length",
-        ),
+        41..=44 => match resolve_sentence_choice(question, evidence)? {
+            Some(answer) => (answer, 9_000, "example-sentence"),
+            None => donor_third_choice(question, "donor-third-choice-fallback")?,
+        },
+        51..=54 => resolve_word_completion(question, evidence)?,
         _ => {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
@@ -318,7 +331,7 @@ pub fn resolve_answer_candidate(
 fn resolve_word_to_meaning(
     question: &Question,
     evidence: &CidarenAnswerEvidence,
-) -> ProviderResult<NormalizedAnswer> {
+) -> ProviderResult<Option<NormalizedAnswer>> {
     require_kind(question, QuestionKind::SingleChoice)?;
     let prompt = metadata_text(question, "prompt_content")?;
     let word = braced_word(prompt).unwrap_or(prompt);
@@ -336,14 +349,14 @@ fn resolve_word_to_meaning(
                     .any(|meaning| semantic_equal(content, meaning) || content.contains(meaning))
             })
         })
-        .ok_or_else(|| remote_changed("Cidaren meanings do not match the current options"))?;
-    Ok(NormalizedAnswer::Selections(vec![option.id.clone()]))
+        .map(|option| NormalizedAnswer::Selections(vec![option.id.clone()]));
+    Ok(option)
 }
 
 fn resolve_meaning_to_word(
     question: &Question,
     evidence: &CidarenAnswerEvidence,
-) -> ProviderResult<NormalizedAnswer> {
+) -> ProviderResult<Option<NormalizedAnswer>> {
     require_kind(question, QuestionKind::SingleChoice)?;
     let target = metadata_text(question, "prompt_content")?;
     let option = question
@@ -360,8 +373,8 @@ fn resolve_meaning_to_word(
                         .any(|meaning| semantic_equal(target, meaning))
                 })
         })
-        .ok_or_else(|| remote_changed("Cidaren word meanings do not match the current prompt"))?;
-    Ok(NormalizedAnswer::Selections(vec![option.id.clone()]))
+        .map(|option| NormalizedAnswer::Selections(vec![option.id.clone()]));
+    Ok(option)
 }
 
 fn donor_fixed_fourth_choice(question: &Question) -> ProviderResult<NormalizedAnswer> {
@@ -428,33 +441,82 @@ fn resolve_translation_text(
 fn resolve_sentence_choice(
     question: &Question,
     evidence: &CidarenAnswerEvidence,
-) -> ProviderResult<NormalizedAnswer> {
+) -> ProviderResult<Option<NormalizedAnswer>> {
     require_kind(question, QuestionKind::SingleChoice)?;
     let target = metadata_text(question, "prompt_remark")?;
-    for option in &question.options {
-        let Some(content) = option.content.as_deref() else {
-            continue;
-        };
-        let candidate = content.rsplit(" — ").next().unwrap_or(content);
+    let mut top_level = BTreeMap::new();
+    for (fallback_index, option) in question.options.iter().enumerate() {
+        let index = option
+            .metadata_sanitized
+            .get("top_level_index")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(fallback_index);
+        let content = option
+            .metadata_sanitized
+            .get("top_level_content")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                option
+                    .content
+                    .as_deref()
+                    .and_then(|value| value.rsplit(" — ").next())
+            })
+            .ok_or_else(|| protocol_drift("Cidaren sentence option has no content"))?;
+        match top_level.get(&index) {
+            Some(existing) if existing != &content => {
+                return Err(protocol_drift(
+                    "Cidaren nested options disagree on their parent content",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                top_level.insert(index, content);
+            }
+        }
+    }
+    let mut donor_order = Vec::with_capacity(top_level.len());
+    for content in top_level.into_values() {
+        if evidence.contains_task_word(content) {
+            donor_order.insert(0, content);
+        } else {
+            donor_order.push(content);
+        }
+    }
+    for candidate in donor_order {
         let Some(info) = evidence.info(candidate) else {
             continue;
         };
-        if matching_evidence(info, target, CidarenEvidenceUse::Example)
+        let Some(answer) = matching_evidence(info, target, CidarenEvidenceUse::Example)
             .and_then(|example| braced_word(&example.english))
-            .is_some()
-        {
-            return Ok(NormalizedAnswer::Selections(vec![option.id.clone()]));
-        }
+        else {
+            continue;
+        };
+        return Ok(question
+            .options
+            .iter()
+            .find(|option| {
+                option
+                    .metadata_sanitized
+                    .get("wire_content")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        option
+                            .content
+                            .as_deref()
+                            .map(|value| value.rsplit(" — ").next().unwrap_or(value))
+                    })
+                    == Some(answer)
+            })
+            .map(|option| NormalizedAnswer::Selections(vec![option.id.clone()])));
     }
-    Err(remote_changed(
-        "Cidaren example evidence does not match the current sentence",
-    ))
+    Ok(None)
 }
 
 fn resolve_word_completion(
     question: &Question,
     evidence: &CidarenAnswerEvidence,
-) -> ProviderResult<NormalizedAnswer> {
+) -> ProviderResult<(NormalizedAnswer, u16, &'static str)> {
     require_kind(question, QuestionKind::ShortAnswer)?;
     let tip = metadata_text(question, "word_tip")?.to_lowercase();
     let length = question
@@ -470,10 +532,18 @@ fn resolve_word_completion(
             continue;
         }
         if word.chars().count() == length {
-            return Ok(NormalizedAnswer::Texts(vec![word.clone()]));
+            return Ok((
+                NormalizedAnswer::Texts(vec![word.clone()]),
+                9_000,
+                "word-prefix-length",
+            ));
         }
         if word.chars().count().saturating_add(1) == length {
-            return Ok(NormalizedAnswer::Texts(vec![format!("{word}s")]));
+            return Ok((
+                NormalizedAnswer::Texts(vec![format!("{word}s")]),
+                9_000,
+                "word-prefix-length-plus-s",
+            ));
         }
         let target = metadata_text(question, "prompt_remark")?;
         if let Some(answer) = evidence
@@ -481,11 +551,81 @@ fn resolve_word_completion(
             .and_then(|info| matching_evidence(info, target, CidarenEvidenceUse::Example))
             .and_then(|example| braced_word(&example.english))
         {
-            return Ok(NormalizedAnswer::Texts(vec![answer.to_owned()]));
+            return Ok((
+                NormalizedAnswer::Texts(vec![answer.to_owned()]),
+                9_000,
+                "word-completion-example",
+            ));
         }
     }
-    Err(remote_changed(
-        "Cidaren word list does not satisfy the current prefix and length",
+    evidence
+        .word_list
+        .last()
+        .cloned()
+        .map(|word| {
+            (
+                NormalizedAnswer::Texts(vec![word]),
+                500,
+                "donor-last-word-fallback",
+            )
+        })
+        .ok_or_else(|| remote_changed("Cidaren current Task word list is empty"))
+}
+
+fn donor_stable_random_choice(
+    question: &Question,
+) -> ProviderResult<(NormalizedAnswer, u16, &'static str)> {
+    require_kind(question, QuestionKind::SingleChoice)?;
+    if question.options.is_empty() {
+        return Err(protocol_drift(
+            "Cidaren donor random fallback has no options",
+        ));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:cidaren:donor-random-choice:v1\0");
+    digest.update(question.id.to_string().as_bytes());
+    digest.update(b"\0");
+    if let Some(remote_id) = &question.remote_question_id {
+        digest.update(remote_id.as_bytes());
+    }
+    let digest = digest.finalize();
+    let index = usize::from(u16::from_be_bytes([digest[0], digest[1]])) % question.options.len();
+    let confidence = u16::try_from(10_000 / question.options.len()).unwrap_or(1);
+    Ok((
+        NormalizedAnswer::Selections(vec![question.options[index].id.clone()]),
+        confidence,
+        "donor-random-choice-stable",
+    ))
+}
+
+fn donor_third_choice(
+    question: &Question,
+    strategy: &'static str,
+) -> ProviderResult<(NormalizedAnswer, u16, &'static str)> {
+    require_kind(question, QuestionKind::SingleChoice)?;
+    let answer_id = question
+        .options
+        .iter()
+        .find(|option| {
+            option
+                .metadata_sanitized
+                .get("top_level_index")
+                .and_then(Value::as_u64)
+                == Some(2)
+        })
+        .and_then(|option| {
+            option
+                .metadata_sanitized
+                .get("parent_answer_id")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
+        .or_else(|| question.options.get(2).map(|option| option.id.clone()))
+        .ok_or_else(|| protocol_drift("Cidaren donor third-choice fallback is absent"))?;
+    Ok((
+        NormalizedAnswer::Selections(vec![answer_id]),
+        2_500,
+        strategy,
     ))
 }
 
@@ -724,6 +864,40 @@ mod tests {
     }
 
     #[test]
+    fn empty_means_uses_options_or_reaches_the_donor_fallback() {
+        let options = json!({
+            "word": "alpha",
+            "means": [],
+            "options": [{
+                "content": {
+                    "mean": "noun option meaning",
+                    "usage_infos": [],
+                    "example": []
+                }
+            }]
+        });
+        let parsed = parse_word_evidence(&options).unwrap();
+        assert_eq!(parsed.meanings, ["noun option meaning"]);
+
+        let empty = parse_word_evidence(&json!({"word": "alpha", "means": []})).unwrap();
+        let evidence =
+            CidarenAnswerEvidence::try_new(vec!["alpha".to_owned()], vec![empty]).unwrap();
+        let question = question(
+            15,
+            QuestionKind::SingleChoice,
+            "{alpha}",
+            None,
+            vec![("n:0", "first"), ("n:1", "second")],
+            &json!({}),
+        );
+        let candidate = resolve_answer_candidate(&question, &evidence).unwrap();
+        assert_eq!(
+            candidate.provenance_sanitized["strategy"],
+            "donor-random-choice-stable"
+        );
+    }
+
+    #[test]
     fn resolves_meaning_direction_matching_and_completion_modes() {
         let evidence = evidence();
         let word_to_meaning = question(
@@ -861,6 +1035,108 @@ mod tests {
     }
 
     #[test]
+    fn donor_failure_fallbacks_are_explicit_bounded_and_stable() {
+        let evidence = evidence();
+        let word_to_meaning = question(
+            15,
+            QuestionKind::SingleChoice,
+            "{alpha}",
+            None,
+            vec![
+                ("n:0", "other-a"),
+                ("n:1", "other-b"),
+                ("n:2", "other-c"),
+                ("n:3", "other-d"),
+            ],
+            &json!({}),
+        );
+        let first = resolve_answer_candidate(&word_to_meaning, &evidence).unwrap();
+        let second = resolve_answer_candidate(&word_to_meaning, &evidence).unwrap();
+        assert_eq!(first.answer, second.answer);
+        assert_eq!(first.confidence.unwrap().basis_points(), 2_500);
+        assert_eq!(
+            first.provenance_sanitized["strategy"],
+            "donor-random-choice-stable"
+        );
+
+        for mode in [17, 41] {
+            let question = question(
+                mode,
+                QuestionKind::SingleChoice,
+                "unmatched",
+                Some("unmatched"),
+                vec![("n:0", "a"), ("n:1", "b"), ("n:2", "c")],
+                &json!({}),
+            );
+            let candidate = resolve_answer_candidate(&question, &evidence).unwrap();
+            assert_eq!(
+                candidate.answer,
+                NormalizedAnswer::Selections(vec!["n:2".to_owned()])
+            );
+            assert_eq!(
+                candidate.provenance_sanitized["strategy"],
+                "donor-third-choice-fallback"
+            );
+        }
+
+        let completion = question(
+            51,
+            QuestionKind::ShortAnswer,
+            "Complete",
+            Some("unmatched"),
+            Vec::new(),
+            &json!({"word_tip": "zzz", "word_lengths": [99]}),
+        );
+        let candidate = resolve_answer_candidate(&completion, &evidence).unwrap();
+        assert_eq!(
+            candidate.answer,
+            NormalizedAnswer::Texts(vec!["beta".to_owned()])
+        );
+        assert_eq!(
+            candidate.provenance_sanitized["strategy"],
+            "donor-last-word-fallback"
+        );
+        assert_eq!(candidate.confidence.unwrap().basis_points(), 500);
+    }
+
+    #[test]
+    fn sentence_modes_preserve_nested_wire_selection_and_parent_fallback() {
+        let evidence = evidence();
+        let options = vec![
+            semantic_option("n:0", "other-a", 0, "other-a", "other-a", "n:0"),
+            semantic_option("n:1", "other-b", 1, "other-b", "other-b", "n:1"),
+            semantic_option("s:2#0", "alpha — alpha", 2, "alpha", "alpha", "s:2#"),
+            semantic_option("s:2#1", "alpha — beta", 2, "alpha", "beta", "s:2#"),
+        ];
+        let mut matched = question(
+            41,
+            QuestionKind::SingleChoice,
+            "Complete sentence",
+            Some("这是合成例句。"),
+            Vec::new(),
+            &json!({}),
+        );
+        matched.options = options.clone();
+        assert_eq!(
+            resolve_answer_candidate(&matched, &evidence)
+                .unwrap()
+                .answer,
+            NormalizedAnswer::Selections(vec!["s:2#0".to_owned()])
+        );
+
+        matched.metadata_sanitized["prompt_remark"] = json!("unmatched");
+        let fallback = resolve_answer_candidate(&matched, &evidence).unwrap();
+        assert_eq!(
+            fallback.answer,
+            NormalizedAnswer::Selections(vec!["s:2#".to_owned()])
+        );
+        assert_eq!(
+            fallback.provenance_sanitized["strategy"],
+            "donor-third-choice-fallback"
+        );
+    }
+
+    #[test]
     fn missing_or_malformed_evidence_fails_closed() {
         let payload = json!({"word": "alpha", "unknown": []});
         assert_eq!(
@@ -880,7 +1156,7 @@ mod tests {
             resolve_answer_candidate(&question, &evidence)
                 .unwrap_err()
                 .kind,
-            ProviderErrorKind::RemoteChanged
+            ProviderErrorKind::ProtocolDrift
         );
     }
 
@@ -926,6 +1202,28 @@ mod tests {
             attachments: Vec::new(),
             metadata_sanitized: Value::Object(metadata),
             position: 1,
+        }
+    }
+
+    fn semantic_option(
+        id: &str,
+        content: &str,
+        top_level_index: usize,
+        top_level_content: &str,
+        wire_content: &str,
+        parent_answer_id: &str,
+    ) -> QuestionOption {
+        QuestionOption {
+            id: id.to_owned(),
+            content: Some(content.to_owned()),
+            attachments: Vec::new(),
+            metadata_sanitized: json!({
+                "nested": id != parent_answer_id,
+                "top_level_index": top_level_index,
+                "top_level_content": top_level_content,
+                "wire_content": wire_content,
+                "parent_answer_id": parent_answer_id,
+            }),
         }
     }
 }

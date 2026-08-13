@@ -25,7 +25,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
-        capture_recipe_version: Some(1),
+        capture_recipe_version: Some(3),
         capabilities: BTreeSet::from([
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
@@ -65,7 +65,7 @@ mod tests {
         let metadata = development_metadata().unwrap();
         assert_eq!(metadata.id.as_str(), PROVIDER_ID);
         assert_eq!(metadata.verification, VerificationLevel::Development);
-        assert_eq!(metadata.capture_recipe_version, Some(1));
+        assert_eq!(metadata.capture_recipe_version, Some(3));
         assert_eq!(
             metadata.capabilities,
             BTreeSet::from([

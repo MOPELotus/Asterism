@@ -7,7 +7,9 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use asterism_provider_api::{CaptureRecipe, CaptureScalarSource, CaptureValueSource};
+use asterism_provider_api::{
+    CaptureReadiness, CaptureRecipe, CaptureScalarSource, CaptureValueSource,
+};
 use asterism_secrets::SecretString;
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use serde::Deserialize;
@@ -109,9 +111,10 @@ impl ChromiumCapture {
             if chrono::Utc::now() >= deadline {
                 bail!("Capture pairing session expired before the browser recipe completed");
             }
-            match self.capture_snapshot().await?.resolve()? {
-                CaptureResolution::Ready(fields) => return Ok(fields),
-                CaptureResolution::Incomplete { .. } => {}
+            let (snapshot, ready) = self.capture_snapshot().await?;
+            match snapshot.resolve()? {
+                CaptureResolution::Ready(fields) if ready => return Ok(fields),
+                CaptureResolution::Ready(_) | CaptureResolution::Incomplete { .. } => {}
             }
             tokio::time::sleep(Duration::from_millis(self.recipe.poll_interval_millis)).await;
         }
@@ -134,7 +137,7 @@ impl ChromiumCapture {
         self.process.shutdown().await
     }
 
-    async fn capture_snapshot(&mut self) -> anyhow::Result<CaptureSnapshot> {
+    async fn capture_snapshot(&mut self) -> anyhow::Result<(CaptureSnapshot, bool)> {
         let document = self.current_document().await?;
         let mut snapshot = CaptureSnapshot::new(
             self.recipe.clone(),
@@ -149,7 +152,10 @@ impl ChromiumCapture {
         if confirmation != document {
             bail!("browser document changed during one Capture snapshot");
         }
-        Ok(snapshot)
+        let ready = self
+            .cdp
+            .readiness_satisfied(&self.recipe.readiness, &document.loader_id);
+        Ok((snapshot, ready))
     }
 
     async fn wait_for_initial_document(&mut self) -> anyhow::Result<()> {
@@ -204,7 +210,7 @@ impl ChromiumCapture {
         let origin = canonical_origin(&url).context("browser page URL has no safe HTTPS origin")?;
         if !self
             .recipe
-            .allowed_origins
+            .navigation_origins
             .iter()
             .any(|allowed| allowed == &origin)
         {
@@ -379,6 +385,8 @@ struct CdpSession {
     requests: BTreeMap<String, RequestBinding>,
     pending_headers: BTreeMap<String, BTreeMap<String, SecretString>>,
     observed_headers: BTreeMap<(String, String, String), SecretString>,
+    observed_requests: BTreeSet<(String, String, String, String)>,
+    observed_responses: BTreeSet<(String, String, String, String, u16, String)>,
 }
 
 impl CdpSession {
@@ -390,6 +398,8 @@ impl CdpSession {
             requests: BTreeMap::new(),
             pending_headers: BTreeMap::new(),
             observed_headers: BTreeMap::new(),
+            observed_requests: BTreeSet::new(),
+            observed_responses: BTreeSet::new(),
         }
     }
 
@@ -420,68 +430,136 @@ impl CdpSession {
 
     fn observe_event(&mut self, event: &Value) -> anyhow::Result<()> {
         match event.get("method").and_then(Value::as_str) {
-            Some("Network.requestWillBeSent") => {
-                let Some(request_id) = bounded_text(event.pointer("/params/requestId"), 256) else {
-                    return Ok(());
-                };
-                let Some(loader_id) = bounded_text(event.pointer("/params/loaderId"), 256) else {
-                    return Ok(());
-                };
-                let Some(url) = event.pointer("/params/request/url").and_then(Value::as_str) else {
-                    return Ok(());
-                };
-                let Some(origin) = canonical_origin(url) else {
-                    return Ok(());
-                };
-                if self.requests.len() >= MAX_TRACKED_REQUESTS {
-                    self.requests.clear();
-                    self.pending_headers.clear();
-                }
-                let pending_headers = self.pending_headers.remove(&request_id);
-                self.requests.insert(
-                    request_id,
-                    RequestBinding {
-                        loader_id: loader_id.clone(),
-                        origin: origin.clone(),
-                    },
-                );
-                self.observe_headers(
-                    &loader_id,
-                    &origin,
-                    event.pointer("/params/request/headers"),
-                )?;
-                if let Some(headers) = pending_headers {
-                    self.observe_header_values(&loader_id, &origin, headers);
-                }
-            }
-            Some("Network.requestWillBeSentExtraInfo") => {
-                let Some(request_id) = event.pointer("/params/requestId").and_then(Value::as_str)
-                else {
-                    return Ok(());
-                };
-                let Some(binding) = self.requests.get(request_id).cloned() else {
-                    self.remember_pending_headers(request_id, event.pointer("/params/headers"))?;
-                    return Ok(());
-                };
-                self.observe_headers(
-                    &binding.loader_id,
-                    &binding.origin,
-                    event.pointer("/params/headers"),
-                )?;
-            }
-            Some("Page.frameNavigated") => {
-                let Some(loader_id) = top_level_loader_id(event) else {
-                    return Ok(());
-                };
-                self.requests
-                    .retain(|_, binding| binding.loader_id == loader_id);
-                self.pending_headers.clear();
-                self.observed_headers
-                    .retain(|(observed_loader, _, _), _| observed_loader == loader_id);
-            }
+            Some("Network.requestWillBeSent") => self.observe_request(event)?,
+            Some("Network.requestWillBeSentExtraInfo") => self.observe_request_headers(event)?,
+            Some("Network.responseReceived") => self.observe_response(event)?,
+            Some("Page.frameNavigated") => self.observe_navigation(event),
             _ => {}
         }
         Ok(())
+    }
+
+    fn observe_request(&mut self, event: &Value) -> anyhow::Result<()> {
+        let Some(request_id) = bounded_text(event.pointer("/params/requestId"), 256) else {
+            return Ok(());
+        };
+        let Some(loader_id) = bounded_text(event.pointer("/params/loaderId"), 256) else {
+            return Ok(());
+        };
+        let Some(url) = event.pointer("/params/request/url").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        let Some(origin) = canonical_origin(url) else {
+            return Ok(());
+        };
+        let request_route = if let (Some(method), Some(path_and_query)) = (
+            event
+                .pointer("/params/request/method")
+                .and_then(Value::as_str),
+            canonical_path_and_query(url),
+        ) && matches!(method, "GET" | "POST")
+        {
+            if self.observed_requests.len() >= MAX_TRACKED_REQUESTS {
+                bail!("DevTools request readiness observations exceed their safety limit");
+            }
+            self.observed_requests.insert((
+                loader_id.clone(),
+                origin.clone(),
+                method.to_owned(),
+                path_and_query.clone(),
+            ));
+            Some((method.to_owned(), path_and_query))
+        } else {
+            None
+        };
+        if self.requests.len() >= MAX_TRACKED_REQUESTS {
+            self.requests.clear();
+            self.pending_headers.clear();
+        }
+        let pending_headers = self.pending_headers.remove(&request_id);
+        self.requests.insert(
+            request_id,
+            RequestBinding {
+                loader_id: loader_id.clone(),
+                origin: origin.clone(),
+                method: request_route.as_ref().map(|(method, _)| method.clone()),
+                path_and_query: request_route.map(|(_, path)| path),
+            },
+        );
+        self.observe_headers(
+            &loader_id,
+            &origin,
+            event.pointer("/params/request/headers"),
+        )?;
+        if let Some(headers) = pending_headers {
+            self.observe_header_values(&loader_id, &origin, headers);
+        }
+        Ok(())
+    }
+
+    fn observe_request_headers(&mut self, event: &Value) -> anyhow::Result<()> {
+        let Some(request_id) = event.pointer("/params/requestId").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        let Some(binding) = self.requests.get(request_id).cloned() else {
+            self.remember_pending_headers(request_id, event.pointer("/params/headers"))?;
+            return Ok(());
+        };
+        self.observe_headers(
+            &binding.loader_id,
+            &binding.origin,
+            event.pointer("/params/headers"),
+        )
+    }
+
+    fn observe_response(&mut self, event: &Value) -> anyhow::Result<()> {
+        let Some(request_id) = event.pointer("/params/requestId").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        let Some(binding) = self.requests.get(request_id) else {
+            return Ok(());
+        };
+        let (Some(method), Some(path_and_query)) = (&binding.method, &binding.path_and_query)
+        else {
+            return Ok(());
+        };
+        let Some(status) = event
+            .pointer("/params/response/status")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+        else {
+            return Ok(());
+        };
+        let Some(mime_type) = bounded_text(event.pointer("/params/response/mimeType"), 128) else {
+            return Ok(());
+        };
+        if self.observed_responses.len() >= MAX_TRACKED_REQUESTS {
+            bail!("DevTools response readiness observations exceed their safety limit");
+        }
+        self.observed_responses.insert((
+            binding.loader_id.clone(),
+            binding.origin.clone(),
+            method.clone(),
+            path_and_query.clone(),
+            status,
+            mime_type.to_ascii_lowercase(),
+        ));
+        Ok(())
+    }
+
+    fn observe_navigation(&mut self, event: &Value) {
+        let Some(loader_id) = top_level_loader_id(event) else {
+            return;
+        };
+        self.requests
+            .retain(|_, binding| binding.loader_id == loader_id);
+        self.pending_headers.clear();
+        self.observed_headers
+            .retain(|(observed_loader, _, _), _| observed_loader == loader_id);
+        self.observed_requests
+            .retain(|(observed_loader, _, _, _)| observed_loader == loader_id);
+        self.observed_responses
+            .retain(|(observed_loader, _, _, _, _, _)| observed_loader == loader_id);
     }
 
     fn observe_headers(
@@ -583,12 +661,58 @@ impl CdpSession {
         }
         Ok(())
     }
+
+    fn readiness_satisfied(&self, readiness: &CaptureReadiness, loader_id: &str) -> bool {
+        readiness_satisfied(
+            readiness,
+            loader_id,
+            &self.observed_requests,
+            &self.observed_responses,
+        )
+    }
+}
+
+fn readiness_satisfied(
+    readiness: &CaptureReadiness,
+    loader_id: &str,
+    observed_requests: &BTreeSet<(String, String, String, String)>,
+    observed_responses: &BTreeSet<(String, String, String, String, u16, String)>,
+) -> bool {
+    match readiness {
+        CaptureReadiness::OutputsComplete => true,
+        CaptureReadiness::RequestObserved {
+            origin,
+            method,
+            path_and_query,
+        } => observed_requests.contains(&(
+            loader_id.to_owned(),
+            origin.clone(),
+            method.clone(),
+            path_and_query.clone(),
+        )),
+        CaptureReadiness::ResponseObserved {
+            origin,
+            method,
+            path_and_query,
+            status,
+            mime_type,
+        } => observed_responses.contains(&(
+            loader_id.to_owned(),
+            origin.clone(),
+            method.clone(),
+            path_and_query.clone(),
+            *status,
+            mime_type.clone(),
+        )),
+    }
 }
 
 #[derive(Clone, Debug)]
 struct RequestBinding {
     loader_id: String,
     origin: String,
+    method: Option<String>,
+    path_and_query: Option<String>,
 }
 
 fn top_level_loader_id(event: &Value) -> Option<&str> {
@@ -598,6 +722,19 @@ fn top_level_loader_id(event: &Value) -> Option<&str> {
     event
         .pointer("/params/frame/loaderId")
         .and_then(Value::as_str)
+}
+
+fn canonical_path_and_query(raw_url: &str) -> Option<String> {
+    let url = Url::parse(raw_url).ok()?;
+    if url.scheme() != "https" || url.fragment().is_some() {
+        return None;
+    }
+    let mut value = url.path().to_owned();
+    if let Some(query) = url.query() {
+        value.push('?');
+        value.push_str(query);
+    }
+    (value.len() <= 2_048).then_some(value)
 }
 
 #[derive(Deserialize)]
@@ -755,7 +892,7 @@ async fn wait_for_recipe_target(
                 target.target_type == "page"
                     && canonical_origin(&target.url).is_some_and(|origin| {
                         recipe
-                            .allowed_origins
+                            .navigation_origins
                             .iter()
                             .any(|allowed| allowed == &origin)
                     })
@@ -924,10 +1061,12 @@ mod tests {
         let recipe = CaptureRecipe {
             version: 1,
             start_url: "https://provider.example/login".to_owned(),
-            allowed_origins: vec!["https://provider.example".to_owned()],
+            navigation_origins: vec!["https://provider.example".to_owned()],
+            read_origins: vec!["https://provider.example".to_owned()],
             poll_interval_millis: 500,
             auth_method: AuthMethod::AssistedSession,
             session_kind: SessionKind::Composite,
+            readiness: asterism_provider_api::CaptureReadiness::OutputsComplete,
             outputs: vec![CaptureCredentialOutput {
                 purpose: SecretPurpose::ProviderCompositeSession,
                 required: true,
@@ -975,16 +1114,96 @@ mod tests {
         assert_eq!(top_level_loader_id(&child), None);
     }
 
+    #[test]
+    fn request_readiness_is_exact_and_bound_to_the_current_document_loader() {
+        let readiness = CaptureReadiness::RequestObserved {
+            origin: "https://provider.example".to_owned(),
+            method: "GET".to_owned(),
+            path_and_query: "/api/account?action=current".to_owned(),
+        };
+        let observations = BTreeSet::from([(
+            "authenticated-loader".to_owned(),
+            "https://provider.example".to_owned(),
+            "GET".to_owned(),
+            "/api/account?action=current".to_owned(),
+        )]);
+        let responses = BTreeSet::new();
+        assert!(readiness_satisfied(
+            &readiness,
+            "authenticated-loader",
+            &observations,
+            &responses,
+        ));
+        assert!(!readiness_satisfied(
+            &readiness,
+            "anonymous-loader",
+            &observations,
+            &responses,
+        ));
+        assert_eq!(
+            canonical_path_and_query("https://provider.example/api/account?action=current"),
+            Some("/api/account?action=current".to_owned())
+        );
+        assert!(canonical_path_and_query("http://provider.example/api/account").is_none());
+    }
+
+    #[test]
+    fn response_readiness_rejects_login_html_with_the_same_successful_route() {
+        let readiness = CaptureReadiness::ResponseObserved {
+            origin: "https://provider.example".to_owned(),
+            method: "GET".to_owned(),
+            path_and_query: "/api/account".to_owned(),
+            status: 200,
+            mime_type: "application/json".to_owned(),
+        };
+        let requests = BTreeSet::from([(
+            "loader".to_owned(),
+            "https://provider.example".to_owned(),
+            "GET".to_owned(),
+            "/api/account".to_owned(),
+        )]);
+        let login_html = BTreeSet::from([(
+            "loader".to_owned(),
+            "https://provider.example".to_owned(),
+            "GET".to_owned(),
+            "/api/account".to_owned(),
+            200,
+            "text/html".to_owned(),
+        )]);
+        assert!(!readiness_satisfied(
+            &readiness,
+            "loader",
+            &requests,
+            &login_html,
+        ));
+        let authenticated_json = BTreeSet::from([(
+            "loader".to_owned(),
+            "https://provider.example".to_owned(),
+            "GET".to_owned(),
+            "/api/account".to_owned(),
+            200,
+            "application/json".to_owned(),
+        )]);
+        assert!(readiness_satisfied(
+            &readiness,
+            "loader",
+            &requests,
+            &authenticated_json,
+        ));
+    }
+
     #[tokio::test]
     #[ignore = "requires a locally installed Chromium browser and network access"]
     async fn isolated_browser_attaches_only_to_the_allowlisted_page() {
         let recipe = CaptureRecipe {
             version: 1,
             start_url: "https://example.com/".to_owned(),
-            allowed_origins: vec!["https://example.com".to_owned()],
+            navigation_origins: vec!["https://example.com".to_owned()],
+            read_origins: vec!["https://example.com".to_owned()],
             poll_interval_millis: 500,
             auth_method: AuthMethod::AssistedSession,
             session_kind: SessionKind::Cookie,
+            readiness: asterism_provider_api::CaptureReadiness::OutputsComplete,
             outputs: vec![CaptureCredentialOutput {
                 purpose: SecretPurpose::ProviderCookie,
                 required: true,

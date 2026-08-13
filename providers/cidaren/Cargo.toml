@@ -19,6 +19,8 @@ chrono.workspace = true
 http.workspace = true
 hkdf = "0.12.4"
 md5.workspace = true
+p256 = { version = "0.13.2", features = ["ecdh", "pkcs8"] }
+rand_core.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

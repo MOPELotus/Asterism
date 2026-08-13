@@ -1959,11 +1959,13 @@ mod tests {
     };
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureRecipe,
-        CaptureValueSource, CourseInventoryCapability, CredentialValidation, ProviderAuthContext,
+        CaptureValueSource, CourseInventoryCapability, CredentialValidation, ExecutionEventSink,
+        ExecutionOutcome, ExecutionRequest as ProviderExecutionRequest, ProviderAuthContext,
         ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata,
         ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior,
         ProviderSettingDefinition, ProviderSettingKind, ProviderSettingScope, ProviderSettingValue,
-        RemoteCourse, RemoteTask, SessionStatus, TaskInventoryCapability, VerificationLevel,
+        RemoteCourse, RemoteTask, SessionStatus, TaskExecutionCapability, TaskInventoryCapability,
+        VerificationLevel,
     };
     use asterism_secrets::{CredentialBundle, SecretKey};
     use asterism_storage::{
@@ -1990,6 +1992,33 @@ mod tests {
     impl ProviderIdentity for ApiScanInventory {
         fn metadata(&self) -> &ProviderMetadata {
             &self.metadata
+        }
+    }
+
+    #[derive(Debug)]
+    struct ApiTaskExecution {
+        metadata: ProviderMetadata,
+    }
+
+    impl ProviderIdentity for ApiTaskExecution {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl TaskExecutionCapability for ApiTaskExecution {
+        async fn execute(
+            &self,
+            _context: &ProviderContext,
+            _request: &ProviderExecutionRequest,
+            _events: &(dyn ExecutionEventSink + Send + Sync),
+        ) -> ProviderResult<ExecutionOutcome> {
+            Ok(ExecutionOutcome {
+                remote_state: RemoteState::Completed,
+                verified: false,
+                result_sanitized: json!({"fixture": "api-scheduling-only"}),
+            })
         }
     }
 
@@ -2104,11 +2133,14 @@ mod tests {
             verification: VerificationLevel::Development,
             scan_min_interval_seconds: None,
             capture_recipe_version: None,
-            capabilities: BTreeSet::new(),
+            capabilities: BTreeSet::from([ProviderCapability::ResourceExecution]),
             auth_methods: BTreeSet::new(),
             session_kinds: BTreeSet::new(),
         };
         let mut entry = ProviderEntry::metadata_only(metadata);
+        entry.task_execution = Some(Arc::new(ApiTaskExecution {
+            metadata: entry.metadata.clone(),
+        }));
         entry.runtime_settings = ProviderRuntimeSettingsSchema {
             version: 2,
             definitions: vec![ProviderSettingDefinition {
@@ -2238,10 +2270,12 @@ mod tests {
         CaptureRecipe {
             version,
             start_url: "https://provider-alpha.example/login".to_owned(),
-            allowed_origins: vec!["https://provider-alpha.example".to_owned()],
+            navigation_origins: vec!["https://provider-alpha.example".to_owned()],
+            read_origins: vec!["https://provider-alpha.example".to_owned()],
             poll_interval_millis: 500,
             auth_method: AuthMethod::AssistedSession,
             session_kind: SessionKind::Cookie,
+            readiness: asterism_provider_api::CaptureReadiness::OutputsComplete,
             outputs: vec![CaptureCredentialOutput {
                 purpose: asterism_secrets::SecretPurpose::ProviderCookie,
                 required: true,

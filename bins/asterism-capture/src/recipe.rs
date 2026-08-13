@@ -392,10 +392,12 @@ mod tests {
         CaptureRecipe {
             version: 1,
             start_url: format!("{ORIGIN}/login"),
-            allowed_origins: vec![ORIGIN.to_owned()],
+            navigation_origins: vec![ORIGIN.to_owned()],
+            read_origins: vec![ORIGIN.to_owned()],
             poll_interval_millis: 500,
             auth_method: AuthMethod::AssistedSession,
             session_kind: SessionKind::Composite,
+            readiness: asterism_provider_api::CaptureReadiness::OutputsComplete,
             outputs: vec![CaptureCredentialOutput {
                 purpose: SecretPurpose::ProviderCompositeSession,
                 required: true,

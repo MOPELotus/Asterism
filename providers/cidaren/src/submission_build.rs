@@ -70,7 +70,7 @@ impl SubmissionBuildCapability for CidarenSubmissionBuild {
 
         let mut fields = match (&question.kind, &selected.answer) {
             (QuestionKind::SingleChoice, NormalizedAnswer::Selections(values))
-                if values.len() == 1 && option_ids(question).contains(values[0].as_str()) =>
+                if values.len() == 1 && valid_single_choice_id(question, &values[0]) =>
             {
                 verify_fields(question, None)
             }
@@ -216,6 +216,28 @@ fn option_ids(question: &Question) -> BTreeSet<&str> {
         .collect()
 }
 
+fn valid_single_choice_id(question: &Question, answer_id: &str) -> bool {
+    option_ids(question).contains(answer_id)
+        || (matches!(
+            question
+                .metadata_sanitized
+                .get("topic_mode")
+                .and_then(Value::as_i64),
+            Some(41..=44)
+        ) && question.options.iter().any(|option| {
+            option
+                .metadata_sanitized
+                .get("top_level_index")
+                .and_then(Value::as_u64)
+                == Some(2)
+                && option
+                    .metadata_sanitized
+                    .get("parent_answer_id")
+                    .and_then(Value::as_str)
+                    == Some(answer_id)
+        }))
+}
+
 fn validate_remote_task_id(value: &str) -> ProviderResult<()> {
     if !value.is_empty()
         && value.len() <= MAX_REMOTE_TASK_ID_BYTES
@@ -306,6 +328,49 @@ mod tests {
         assert_eq!(preview.fields.len(), 6);
         assert_eq!(preview.fields[0].field_name, "verify_answer[0].answer");
         assert_eq!(preview.fields[3].field_name, "verify_answer[1].topic_code");
+    }
+
+    #[tokio::test]
+    async fn nested_third_parent_fallback_remains_an_executable_donor_answer() {
+        let capability = CidarenSubmissionBuild::try_new().unwrap();
+        let mut question = question(
+            QuestionKind::SingleChoice,
+            vec![
+                ("n:0", "first"),
+                ("n:1", "second"),
+                ("s:2#0", "third child"),
+            ],
+            &json!({"topic_mode": 41}),
+        );
+        question.options[2].metadata_sanitized = json!({
+            "nested": true,
+            "top_level_index": 2,
+            "top_level_content": "third",
+            "wire_content": "third child",
+            "parent_answer_id": "s:2#",
+        });
+        let selected = selected_answer(
+            &question,
+            NormalizedAnswer::Selections(vec!["s:2#".to_owned()]),
+        );
+        assert!(
+            capability
+                .build_submission_preview(
+                    &context(),
+                    "class-task:2002",
+                    std::slice::from_ref(&question),
+                    std::slice::from_ref(&selected),
+                )
+                .await
+                .is_ok()
+        );
+        question.metadata_sanitized["topic_mode"] = json!(17);
+        assert!(
+            capability
+                .build_submission_preview(&context(), "class-task:2002", &[question], &[selected],)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

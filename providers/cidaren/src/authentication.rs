@@ -12,7 +12,7 @@ use http::HeaderValue;
 use serde_json::Value;
 use zeroize::Zeroize;
 
-use crate::{CidarenCryptoContext, cidaren_capture_recipe_v1, metadata::development_metadata};
+use crate::{CidarenCryptoContext, cidaren_capture_recipe_v2, metadata::development_metadata};
 
 const MAX_TOKEN_BYTES: usize = 64 * 1_024;
 const MAX_VALIDATION_RESPONSE_BYTES: usize = 64 * 1_024;
@@ -213,7 +213,7 @@ impl ProviderIdentity for CidarenAuthentication {
 #[async_trait]
 impl AuthenticationCapability for CidarenAuthentication {
     fn capture_recipe(&self) -> Option<CaptureRecipe> {
-        Some(cidaren_capture_recipe_v1())
+        Some(cidaren_capture_recipe_v2())
     }
 
     async fn begin_authentication(

@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use crate::{
     CidarenClassTaskTransport, CidarenStudyTaskTransport, class_tasks::parse_task_inventory,
-    metadata::development_metadata, study_tasks::parse_study_task_inventory,
+    duration_read::duration_seconds_from_task, metadata::development_metadata,
+    study_tasks::parse_study_task_inventory,
 };
 
 const MAX_RELEASE_ID_BYTES: usize = 32;
@@ -170,7 +171,7 @@ impl TaskProgressCapability for CidarenTaskProgress {
         Ok(RemoteProgress {
             remote_state: task.remote_state,
             percent: Some(percent),
-            duration_seconds: None,
+            duration_seconds: duration_seconds_from_task(&task)?,
             updated_at: Utc::now(),
         })
     }
@@ -343,7 +344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progress_is_fresh_and_never_converts_raw_time() {
+    async fn progress_is_fresh_and_converts_millisecond_duration() {
         let transport = Arc::new(FixtureTransport);
         let capability = CidarenTaskProgress::try_new(transport.clone(), transport).unwrap();
         let progress = capability
@@ -352,7 +353,7 @@ mod tests {
             .unwrap();
         assert_eq!(progress.remote_state, RemoteState::InProgress);
         assert_eq!(progress.percent, Some(35));
-        assert!(progress.duration_seconds.is_none());
+        assert_eq!(progress.duration_seconds, Some(125));
 
         let completed = capability
             .read_progress(&provider_context(), "class-task:2003")
@@ -369,7 +370,7 @@ mod tests {
             .unwrap();
         assert_eq!(study.remote_state, RemoteState::InProgress);
         assert_eq!(study.percent, Some(35));
-        assert!(study.duration_seconds.is_none());
+        assert_eq!(study.duration_seconds, Some(125));
     }
 
     #[tokio::test]

@@ -42,7 +42,14 @@ pub use authentication::{
     UaiAuthentication, UaiAuthenticationTransport, UaiJwtSession, UaiSessionResolver,
     classify_password_login_response,
 };
-pub use browser_bridge::UaiBrowserBridge;
+pub use browser_bridge::{
+    UaiBrowserBridge, UaiBrowserCommand, UaiBrowserCommandEnvelope, UaiBrowserEvent,
+    UaiBrowserEventEnvelope, UaiBrowserMenuEntry, UaiBrowserMessageSecurity, UaiBrowserPageEntry,
+    UaiBrowserPageScope, UaiBrowserResidencePlan, UaiBrowserResidenceResult,
+    UaiBrowserSessionBinding, UaiBrowserTarget, UaiBrowserTargetMenuEntry,
+    UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy, parse_browser_event,
+    parse_browser_residence_result,
+};
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
 pub use discussion::{
     UaiDiscussionBinding, UaiDiscussionReply, UaiDiscussionReplyDraft, UaiDiscussionReplyPage,
@@ -70,8 +77,8 @@ pub use provider::{
     build_development_provider_with_renewal, build_development_provider_with_stored_session,
 };
 pub use question::{
-    ParsedUaiQuestion, UaiQuestionDocument, UaiQuestionRead, UaiQuestionTransport,
-    parse_question_content,
+    ParsedUaiQuestion, UaiQuestionDocument, UaiQuestionMediaSource, UaiQuestionRead,
+    UaiQuestionTransport, parse_question_content,
 };
 pub use resource_execution::{
     UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiResourceExecution,
@@ -89,6 +96,7 @@ pub use submission_verify::{
 pub use task_detail::UaiTaskDetail;
 pub use task_inventory::parse_task_inventory;
 pub use upload::{
-    UaiMultipartUpload, UaiUploadArtifact, UaiUploadGrant, UaiUploadTransport,
-    build_upload_multipart, parse_upload_grant, parse_upload_result,
+    UaiMultipartUpload, UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadPreparation,
+    UaiUploadTransport, UaiUploadedArtifact, build_upload_multipart, parse_upload_grant,
+    parse_upload_result,
 };

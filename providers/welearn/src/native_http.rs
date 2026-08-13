@@ -22,6 +22,10 @@ use crate::{
     cmi::{WellearnCmiSnapshot, parse_cmi_snapshot},
     course_context::{parse_course_context, parse_course_context_for_id},
     course_inventory::course_id_from_remote,
+    runtime_settings::{
+        MAX_DURATION_HEARTBEAT_SECONDS, MAX_DURATION_REPORT_SECONDS,
+        MIN_DURATION_HEARTBEAT_SECONDS, MIN_DURATION_REPORT_SECONDS,
+    },
     task_inventory::unit_count,
 };
 
@@ -108,7 +112,7 @@ impl NativeWellearnInventoryTransport {
             )
             .await?;
         let route = parse_course_context(course, course_page.as_str())?;
-        let unit_response = self
+        let mut unit_response = self
             .client
             .post(static_url(STUDY_STAT_URL)?)
             .header(COOKIE, session.expose_secret())
@@ -121,6 +125,19 @@ impl NativeWellearnInventoryTransport {
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
+        if matches!(
+            unit_response.status(),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            unit_response = self
+                .client
+                .get(course_units_url(&route)?)
+                .header(COOKIE, session.expose_secret())
+                .header(REFERER, course_url.as_str())
+                .send()
+                .await
+                .map_err(|error| classify_reqwest_error(&error))?;
+        }
         let units = read_inventory_response(unit_response, ResponseContent::Json).await?;
         let count = unit_count(units.as_str())?;
         let mut leaves = Vec::with_capacity(count);
@@ -485,8 +502,9 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         heartbeat_interval_seconds: u64,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnDurationReportDocuments> {
-        if !(60..=7_200).contains(&duration_seconds)
-            || !(30..=90).contains(&heartbeat_interval_seconds)
+        if !(MIN_DURATION_REPORT_SECONDS..=MAX_DURATION_REPORT_SECONDS).contains(&duration_seconds)
+            || !(MIN_DURATION_HEARTBEAT_SECONDS..=MAX_DURATION_HEARTBEAT_SECONDS)
+                .contains(&heartbeat_interval_seconds)
         {
             return Err(ProviderError::new(
                 ProviderErrorKind::Internal,
@@ -561,10 +579,11 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         self.keep_duration(&session, &route, sco_id, &state).await?;
         heartbeat_count = heartbeat_count.saturating_add(1);
         let mut elapsed = 0_u64;
-        while elapsed < duration_seconds {
-            let wait = heartbeat_interval_seconds.min(duration_seconds - elapsed);
-            tokio::time::sleep(Duration::from_secs(wait)).await;
-            elapsed = elapsed.saturating_add(wait);
+        let (complete_intervals, trailing_seconds) =
+            duration_heartbeat_plan(duration_seconds, heartbeat_interval_seconds);
+        for _ in 0..complete_intervals {
+            tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
+            elapsed = elapsed.saturating_add(heartbeat_interval_seconds);
             self.keep_duration(&session, &route, sco_id, &state).await?;
             heartbeat_count = heartbeat_count.saturating_add(1);
             let percent = u8::try_from(elapsed.saturating_mul(90) / duration_seconds)
@@ -575,6 +594,22 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                     percent: Some(percent),
                     stage: "duration_execute".to_owned(),
                     status_text: Some("学习时长心跳已上报".to_owned()),
+                    completed_items: Some(0),
+                    total_items: Some(1),
+                })
+                .await?;
+        }
+        if trailing_seconds != 0 {
+            tokio::time::sleep(Duration::from_secs(trailing_seconds)).await;
+            elapsed = elapsed.saturating_add(trailing_seconds);
+            let percent = u8::try_from(elapsed.saturating_mul(90) / duration_seconds)
+                .unwrap_or(90)
+                .min(90);
+            events
+                .report(ProviderProgress {
+                    percent: Some(percent),
+                    stage: "duration_execute".to_owned(),
+                    status_text: Some("学习时长尾段已完成".to_owned()),
                     completed_items: Some(0),
                     total_items: Some(1),
                 })
@@ -608,6 +643,16 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             heartbeat_count,
         ))
     }
+}
+
+const fn duration_heartbeat_plan(
+    duration_seconds: u64,
+    heartbeat_interval_seconds: u64,
+) -> (u64, u64) {
+    (
+        duration_seconds / heartbeat_interval_seconds,
+        duration_seconds % heartbeat_interval_seconds,
+    )
 }
 
 impl NativeWellearnInventoryTransport {
@@ -995,6 +1040,15 @@ fn sco_leaves_url(route: &crate::WellearnCourseContext, unit_index: u32) -> Prov
     Ok(url)
 }
 
+fn course_units_url(route: &crate::WellearnCourseContext) -> ProviderResult<Url> {
+    let mut url = static_url(STUDY_STAT_URL)?;
+    url.query_pairs_mut()
+        .append_pair("action", "courseunits")
+        .append_pair("cid", route.course_id())
+        .append_pair("uid", route.user_id());
+    Ok(url)
+}
+
 fn sco_url(user_id: &str) -> ProviderResult<Url> {
     let mut url = static_url(SCO_URL)?;
     url.query_pairs_mut().append_pair("uid", user_id);
@@ -1024,10 +1078,15 @@ fn looks_like_login_location(value: &str) -> bool {
 
 fn looks_like_login_document(document: &str) -> bool {
     let lowercase = document.to_ascii_lowercase();
-    lowercase.contains("<form")
+    let login_form = lowercase.contains("<form")
         && lowercase.contains("login")
         && lowercase.contains("account")
-        && lowercase.contains("pwd")
+        && lowercase.contains("pwd");
+    let prelogin_script = lowercase.contains("<script")
+        && lowercase.contains("/user/prelogin.aspx")
+        && lowercase.contains("loginret=")
+        && lowercase.contains("top.loginsso()");
+    login_form || prelogin_script
 }
 
 pub(crate) fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
@@ -1157,6 +1216,10 @@ mod tests {
             Some("action=scoLeaves&cid=1001&uid=7001&unitidx=3&classid=class-8001")
         );
         assert_eq!(
+            course_units_url(&context).unwrap().query(),
+            Some("action=courseunits&cid=1001&uid=7001")
+        );
+        assert_eq!(
             sco_url("user value").unwrap().as_str(),
             "https://welearn.sflep.com/Ajax/SCO.aspx?uid=user+value"
         );
@@ -1179,6 +1242,14 @@ mod tests {
             );
         }
         assert!(parse_mutation_response(r#"{"ret":2}"#, MutationResponseKind::Heartbeat).is_err());
+    }
+
+    #[test]
+    fn duration_heartbeat_plan_does_not_invent_a_trailing_keep() {
+        assert_eq!(duration_heartbeat_plan(10, 60), (0, 10));
+        assert_eq!(duration_heartbeat_plan(60, 60), (1, 0));
+        assert_eq!(duration_heartbeat_plan(61, 60), (1, 1));
+        assert_eq!(duration_heartbeat_plan(120, 30), (4, 0));
     }
 
     #[test]
@@ -1281,8 +1352,14 @@ mod tests {
         assert!(looks_like_login_document(
             "<form action='/login'><input name='account'><input name='pwd'></form>"
         ));
+        assert!(looks_like_login_document(include_str!(
+            "../../../fixtures/providers/welearn/auth/anonymous-course-list-login.html"
+        )));
         assert!(!looks_like_login_document(
             "<script>const message='login account pwd';</script>"
+        ));
+        assert!(!looks_like_login_document(
+            "<script>top.loginSSO();</script>"
         ));
     }
 
@@ -1290,7 +1367,9 @@ mod tests {
     async fn json_reader_distinguishes_a_login_page_from_unexpected_html() {
         let login = fixture_response(
             "text/html",
-            "<form action='/login'><input name='account'><input name='pwd'></form>",
+            include_str!(
+                "../../../fixtures/providers/welearn/auth/anonymous-course-list-login.html"
+            ),
         )
         .await;
         let error = read_inventory_response(login, ResponseContent::Json)

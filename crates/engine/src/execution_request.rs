@@ -126,16 +126,18 @@ where
         let (runtime_settings, runtime_settings_schema) = self
             .resolve_runtime_settings(command.owner_id, &task, command.requested_at)
             .await?;
-        let verification_required = validate_execution_verification_contract(
-            &task,
-            &command.requested_capabilities,
-            &self.providers,
-            &runtime_settings.provider_id,
-        )?;
+        let (verification_required, capability_plan, provider_state_exception) =
+            resolve_execution_contract(
+                &task,
+                &command.requested_capabilities,
+                &self.providers,
+                &runtime_settings.provider_id,
+            )?;
         if !remote_state_is_executable(
             &task,
             &command.requested_capabilities,
             verification_required,
+            provider_state_exception,
         ) {
             return Err(ExecutionRequestError::RemoteStateNotExecutable);
         }
@@ -172,6 +174,7 @@ where
             .executions
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
+                capability_plan: &capability_plan,
                 billing: None,
                 runtime_settings: Some(ExecutionRuntimeSettingsResolution {
                     snapshot: &runtime_settings,
@@ -353,6 +356,7 @@ fn remote_state_is_executable(
     task: &Task,
     requested_capabilities: &[TaskCapability],
     verification_required: bool,
+    provider_state_exception: bool,
 ) -> bool {
     matches!(
         task.remote_state,
@@ -366,6 +370,11 @@ fn remote_state_is_executable(
             && matches!(
                 task.remote_state,
                 RemoteState::Unknown | RemoteState::Completed
+            ))
+        || (provider_state_exception
+            && !matches!(
+                task.remote_state,
+                RemoteState::Expired | RemoteState::Removed
             ))
 }
 
@@ -392,35 +401,44 @@ fn safe_verification_action(
         || verification_required
 }
 
-fn validate_execution_verification_contract(
+fn resolve_execution_contract(
     task: &Task,
     requested_capabilities: &[TaskCapability],
     providers: &ProviderRegistry,
     provider_id: &asterism_domain::ProviderId,
-) -> Result<bool, ExecutionRequestError> {
-    if !task.capabilities.contains(&TaskCapability::ExecutionVerify)
-        || requested_capabilities == [TaskCapability::SubmissionExecute]
-    {
-        return Ok(false);
-    }
-    if requested_capabilities.len() != 1 {
-        return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
+) -> Result<(bool, Vec<TaskCapability>, bool), ExecutionRequestError> {
+    if requested_capabilities == [TaskCapability::SubmissionExecute] {
+        return Ok((false, requested_capabilities.to_vec(), false));
     }
     let provider = providers
         .get(provider_id)
         .ok_or(ExecutionRequestError::ProviderRuntimeUnavailable)?;
-    if !provider
-        .metadata
-        .advertises(ProviderCapability::ExecutionVerify)
-        || provider.task_execution.is_none()
+    let Some(capability) = provider.task_execution.as_ref() else {
+        return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
+    };
+    let plan = capability
+        .execution_plan(requested_capabilities)
+        .map_err(|_| ExecutionRequestError::ExecutionVerificationUnavailable)?;
+    if plan.len() != requested_capabilities.len()
+        || plan
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            != requested_capabilities
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
     {
         return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
     }
-    Ok(provider
-        .task_execution
-        .as_ref()
-        .expect("validated TaskExecution capability")
-        .requires_execution_verification(requested_capabilities))
+    let verification = task.capabilities.contains(&TaskCapability::ExecutionVerify)
+        && provider
+            .metadata
+            .advertises(ProviderCapability::ExecutionVerify)
+        && capability.requires_execution_verification(requested_capabilities);
+    let state_exception =
+        capability.allows_execution_from_remote_state(requested_capabilities, task.remote_state);
+    Ok((verification, plan, state_exception))
 }
 
 fn normalize_requested_capabilities(
@@ -522,6 +540,7 @@ mod tests {
             &duration,
             &[TaskCapability::DurationReport],
             false,
+            false,
         ));
         let resource = task(
             RemoteState::Completed,
@@ -531,11 +550,13 @@ mod tests {
             &resource,
             &[TaskCapability::ResourceExecution],
             false,
+            false,
         ));
         assert!(remote_state_is_executable(
             &resource,
             &[TaskCapability::ResourceExecution],
             true,
+            false,
         ));
         let submission = task(
             RemoteState::Unknown,
@@ -548,7 +569,38 @@ mod tests {
             &submission,
             &[TaskCapability::SubmissionExecute],
             false,
+            false,
         ));
+    }
+
+    #[test]
+    fn provider_state_exception_never_reopens_terminally_unavailable_tasks() {
+        let not_open = task(
+            RemoteState::NotOpen,
+            vec![TaskCapability::ResourceExecution],
+        );
+        assert!(!remote_state_is_executable(
+            &not_open,
+            &[TaskCapability::ResourceExecution],
+            true,
+            false,
+        ));
+        assert!(remote_state_is_executable(
+            &not_open,
+            &[TaskCapability::ResourceExecution],
+            true,
+            true,
+        ));
+
+        for remote_state in [RemoteState::Expired, RemoteState::Removed] {
+            let unavailable = task(remote_state, vec![TaskCapability::ResourceExecution]);
+            assert!(!remote_state_is_executable(
+                &unavailable,
+                &[TaskCapability::ResourceExecution],
+                true,
+                true,
+            ));
+        }
     }
 
     #[test]

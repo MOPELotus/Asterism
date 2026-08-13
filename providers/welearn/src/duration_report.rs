@@ -4,16 +4,17 @@ use asterism_domain::{LogLevel, TaskCapability};
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionOutcome, ExecutionRequest, ProviderContext, ProviderError,
     ProviderErrorKind, ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
-    ProviderResult, TaskExecutionCapability,
+    ProviderResult, TaskDetailCapability, TaskExecutionCapability,
 };
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 
 use crate::{
     WellearnCmiDocument, WellearnCmiSnapshot,
     cmi::{parse_cmi_snapshot, parse_sco_identity},
+    execution_selection::uniform_u64,
     metadata::development_metadata,
     runtime_settings::{WellearnDurationTarget, WellearnRuntimeSettings},
+    task_detail::validate_fresh_execution_detail,
 };
 
 /// Complete before/after evidence returned by one bounded `WELearn` duration
@@ -62,6 +63,7 @@ pub trait WellearnDurationReportTransport: Send + Sync {
 /// `WELearn` duration reporting kept separate from completion/progress writes.
 pub struct WellearnDurationReport {
     metadata: ProviderMetadata,
+    details: Arc<dyn TaskDetailCapability>,
     transport: Arc<dyn WellearnDurationReportTransport>,
 }
 
@@ -71,9 +73,13 @@ impl WellearnDurationReport {
     /// # Errors
     ///
     /// Returns an internal error if compile-time metadata is invalid.
-    pub fn try_new(transport: Arc<dyn WellearnDurationReportTransport>) -> ProviderResult<Self> {
+    pub fn try_new(
+        details: Arc<dyn TaskDetailCapability>,
+        transport: Arc<dyn WellearnDurationReportTransport>,
+    ) -> ProviderResult<Self> {
         Ok(Self {
             metadata: development_metadata()?,
+            details,
             transport,
         })
     }
@@ -84,6 +90,7 @@ impl fmt::Debug for WellearnDurationReport {
         formatter
             .debug_struct("WellearnDurationReport")
             .field("metadata", &self.metadata)
+            .field("details", &"configured")
             .field("transport", &"configured")
             .finish()
     }
@@ -113,6 +120,21 @@ impl TaskExecutionCapability for WellearnDurationReport {
         let (course_id, sco_id) = parse_sco_identity(&request.remote_task_id)?;
         let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
         let duration_seconds = select_duration(settings.duration_report, request);
+        let detail = self
+            .details
+            .task_detail(context, &request.remote_task_id)
+            .await?;
+        validate_fresh_execution_detail(
+            &detail,
+            &request.remote_task_id,
+            &course_id,
+            &sco_id,
+            &[
+                TaskCapability::ProgressRead,
+                TaskCapability::DurationRead,
+                TaskCapability::DurationReport,
+            ],
+        )?;
         let documents = self
             .transport
             .report_duration(
@@ -180,17 +202,12 @@ impl TaskExecutionCapability for WellearnDurationReport {
 fn select_duration(configured: WellearnDurationTarget, request: &ExecutionRequest) -> u64 {
     match configured {
         WellearnDurationTarget::Fixed(seconds) => seconds,
-        WellearnDurationTarget::RandomRange { minimum, maximum } => {
-            let width = maximum - minimum + 1;
-            let mut hash = Sha256::new();
-            hash.update(b"asterism.welearn.duration-target.v1\0");
-            hash.update(request.task_id.to_string().as_bytes());
-            hash.update(b"\0");
-            hash.update(request.remote_task_id.as_bytes());
-            let digest = hash.finalize();
-            let sample = u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 prefix"));
-            minimum + sample % width
-        }
+        WellearnDurationTarget::RandomRange { minimum, maximum } => uniform_u64(
+            b"asterism.welearn.duration-target.uniform.v2",
+            request,
+            minimum,
+            maximum,
+        ),
     }
 }
 
@@ -266,8 +283,12 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use asterism_domain::{ProviderAccountId, ProviderId, SecretId, TaskId};
-    use asterism_provider_api::{ProviderRuntimeSettingsPatch, ProviderSettingValue};
+    use asterism_domain::{
+        AssessmentClass, ProviderAccountId, ProviderId, RemoteState, SecretId, SourceType, TaskId,
+    };
+    use asterism_provider_api::{
+        ProviderRuntimeSettingsPatch, ProviderSettingValue, RemoteTask, RemoteTaskDetail,
+    };
 
     use super::*;
     use crate::runtime_settings::{
@@ -279,6 +300,84 @@ mod tests {
     const BEFORE: &str =
         include_str!("../../../fixtures/providers/welearn/cmi/duration-before.json");
     const AFTER: &str = include_str!("../../../fixtures/providers/welearn/cmi/duration-after.json");
+
+    #[derive(Debug)]
+    struct FixtureDetail {
+        metadata: ProviderMetadata,
+        calls: AtomicUsize,
+        disappeared: bool,
+    }
+
+    impl FixtureDetail {
+        fn present() -> Self {
+            Self {
+                metadata: development_metadata().unwrap(),
+                calls: AtomicUsize::new(0),
+                disappeared: false,
+            }
+        }
+    }
+
+    impl ProviderIdentity for FixtureDetail {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl TaskDetailCapability for FixtureDetail {
+        async fn task_detail(
+            &self,
+            _context: &ProviderContext,
+            remote_task_id: &str,
+        ) -> ProviderResult<RemoteTaskDetail> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.disappeared {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::RemoteChanged,
+                    "fixture SCO disappeared",
+                ));
+            }
+            let normalized = serde_json::json!({
+                "schema": "welearn.sco.v1",
+                "course_id": "1001",
+                "unit_index": 0,
+                "unit_title": "Unit",
+                "unit_code": null,
+                "sco_id": "301",
+                "visible": true,
+                "completion": "in_progress",
+                "duration_raw": "45",
+            });
+            Ok(RemoteTaskDetail {
+                task: RemoteTask {
+                    remote_id: remote_task_id.to_owned(),
+                    course_remote_id: Some("course:1001".to_owned()),
+                    title: "Practice".to_owned(),
+                    source_type: SourceType::Resource,
+                    assessment_class: AssessmentClass::Unknown,
+                    remote_state: RemoteState::InProgress,
+                    opens_at: None,
+                    due_at: None,
+                    closes_at: None,
+                    capabilities: vec![
+                        TaskCapability::ProgressRead,
+                        TaskCapability::ResourceExecution,
+                        TaskCapability::ExecutionVerify,
+                        TaskCapability::DurationRead,
+                        TaskCapability::DurationReport,
+                    ],
+                    fingerprint: "v1:fixture".to_owned(),
+                    normalized: normalized.clone(),
+                    raw_sanitized: serde_json::json!({"schema": "welearn.sco.raw.v1"}),
+                },
+                normalized_detail: serde_json::json!({
+                    "schema": "welearn.sco-task-detail.v1",
+                    "task": normalized,
+                }),
+            })
+        }
+    }
 
     #[derive(Debug, Default)]
     struct FixtureTransport {
@@ -344,7 +443,9 @@ mod tests {
     #[tokio::test]
     async fn duration_report_uses_frozen_settings_and_verifies_fresh_cmi() {
         let transport = Arc::new(FixtureTransport::default());
-        let capability = WellearnDurationReport::try_new(transport.clone()).unwrap();
+        let details = Arc::new(FixtureDetail::present());
+        let capability =
+            WellearnDurationReport::try_new(details.clone(), transport.clone()).unwrap();
         let events = FixtureEvents::default();
         let outcome = capability
             .execute(&context(), &request(), &events)
@@ -360,6 +461,7 @@ mod tests {
         assert_eq!(*transport.settings.lock().unwrap(), Some((120, 30)));
         assert_eq!(events.progress.load(Ordering::Relaxed), 1);
         assert_eq!(events.logs.load(Ordering::Relaxed), 1);
+        assert_eq!(details.calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -374,7 +476,11 @@ mod tests {
                 ..FixtureTransport::default()
             },
         ] {
-            let capability = WellearnDurationReport::try_new(Arc::new(transport)).unwrap();
+            let capability = WellearnDurationReport::try_new(
+                Arc::new(FixtureDetail::present()),
+                Arc::new(transport),
+            )
+            .unwrap();
             let error = capability
                 .execute(&context(), &request(), &FixtureEvents::default())
                 .await
@@ -385,10 +491,13 @@ mod tests {
 
     #[tokio::test]
     async fn duration_report_rejects_missing_verification_cmi() {
-        let capability = WellearnDurationReport::try_new(Arc::new(FixtureTransport {
-            incomplete_verification: true,
-            ..FixtureTransport::default()
-        }))
+        let capability = WellearnDurationReport::try_new(
+            Arc::new(FixtureDetail::present()),
+            Arc::new(FixtureTransport {
+                incomplete_verification: true,
+                ..FixtureTransport::default()
+            }),
+        )
         .unwrap();
         let error = capability
             .execute(&context(), &request(), &FixtureEvents::default())
@@ -399,9 +508,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn random_duration_is_bounded_and_stable_for_the_frozen_task() {
+    async fn random_duration_is_bounded_and_stable_for_the_frozen_execution() {
         let transport = Arc::new(FixtureTransport::default());
-        let capability = WellearnDurationReport::try_new(transport.clone()).unwrap();
+        let capability =
+            WellearnDurationReport::try_new(Arc::new(FixtureDetail::present()), transport.clone())
+                .unwrap();
         let request = random_request();
 
         let first = capability
@@ -425,6 +536,51 @@ mod tests {
             first.result_sanitized["duration_report_mode"],
             "random_range"
         );
+    }
+
+    #[test]
+    fn later_executions_can_resample_the_bounded_duration() {
+        let mut request = random_request();
+        let configured = WellearnRuntimeSettings::resolve(&request.runtime_settings)
+            .unwrap()
+            .duration_report;
+        let mut selected = std::collections::BTreeSet::new();
+        for index in 1_u64..=128 {
+            request.execution_id = format!("00000000-0000-0000-0000-{index:012x}")
+                .parse()
+                .unwrap();
+            let first = select_duration(configured, &request);
+            let recovered = select_duration(configured, &request);
+            assert_eq!(first, recovered);
+            assert!((180..=240).contains(&first));
+            selected.insert(first);
+        }
+        assert!(
+            selected.len() > 1,
+            "new Executions must be able to resample"
+        );
+    }
+
+    #[tokio::test]
+    async fn duration_report_requires_fresh_sco_rediscovery_before_transport() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability = WellearnDurationReport::try_new(
+            Arc::new(FixtureDetail {
+                metadata: development_metadata().unwrap(),
+                calls: AtomicUsize::new(0),
+                disappeared: true,
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        let error = capability
+            .execute(&context(), &request(), &FixtureEvents::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 0);
     }
 
     fn context() -> ProviderContext {
@@ -452,6 +608,7 @@ mod tests {
             ]),
         };
         ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,
@@ -484,6 +641,7 @@ mod tests {
             ]),
         };
         ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,

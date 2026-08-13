@@ -28,7 +28,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
         implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
         verification: VerificationLevel::Development,
         scan_min_interval_seconds: None,
-        capture_recipe_version: Some(1),
+        capture_recipe_version: Some(4),
         capabilities: BTreeSet::from([
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,
@@ -84,6 +84,6 @@ mod tests {
                 AuthMethod::AssistedSession,
             ])
         );
-        assert_eq!(metadata.capture_recipe_version, Some(1));
+        assert_eq!(metadata.capture_recipe_version, Some(4));
     }
 }

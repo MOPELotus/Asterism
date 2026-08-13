@@ -1,8 +1,10 @@
 # Cidaren fixture plan
 
-No real account was contacted during the 2026-08-13 audit. Initial fixtures are
-synthetic reconstructions of fields read by frozen donor code and corroborated
-by the public issue tracker.
+Repository tests contact no real account. Initial fixtures are synthetic
+reconstructions of fields read by frozen donor code and corroborated by the
+public issue tracker. A separately supplied redacted live-safe capture proves
+the current V2 login envelope/cookieless exchange but is not committed as a
+credential fixture.
 
 ## Initial synthetic fixtures
 
@@ -33,6 +35,17 @@ all-or-nothing pagination, selected-Course query binding, fresh TaskDetail and
 TaskProgressRead tests. They remain synthetic and do not establish live
 compatibility; native HTTP request and response boundaries are covered
 separately with deterministic transports.
+
+Capture tests require the same-snapshot token and `CDR_LOGIN_INFO` only.
+Missing optional donor-observed `CDR_USER_SESSION` must not stall the helper or
+expand stored secret material.
+
+Native OAuth tests generate both P-256 peers in memory, DER/SPKI round-trip the
+client public key, reproduce the server ECDH/HKDF/AES-GCM response and tamper
+the ciphertext/version to prove fail-closed behavior. OAuth code, private key,
+shared secret, salt, login plaintext and request/response bodies remain
+bounded, redacted where printable and zeroized where owned. No real callback
+code or first-party ciphertext is copied into a fixture.
 
 Inline negative tests must cover empty/oversized/non-JSON responses, non-object
 records, unsupported task types/status values, duplicate release identities,
@@ -74,6 +87,9 @@ placeholder identities, result codes, status values and pagination shape.
 ## Regression requirements
 
 - Imported tokens never appear in Debug, fixture, normalized metadata or logs.
+- Native V2 login codes are bounded single-use secrets; request signing omits
+  interceptor-added `app_type`, response handshake/version/AAD are exact, and
+  fresh `Student/Main` must succeed before Core may persist the replacement.
 - Class-task pagination is complete and total-consistent before normalization.
 - Course identity is `course:{course_id}` and duplicate rows must agree.
 - Task identity is `class-task:{release_id}` even when `task_id == -1`.
@@ -83,7 +99,9 @@ placeholder identities, result codes, status values and pagination shape.
 - TaskDetail and TaskProgressRead re-scan and reject missing fresh identities.
 - Learning and test tasks remain distinct source types but both are Routine.
 - Expiry, completion, progress, score and raw time remain independent facts.
-- Raw `time_spent` never becomes `duration_seconds` without live unit proof.
+- Non-zero `time_spent` is treated as bounded milliseconds and converted to
+  whole Domain seconds only after fresh Task rebinding; absent or >100-year
+  observations fail the standalone DurationRead contract.
 - Legacy response decoding is bounded and exact-version only; `jv=99` requires
   a fresh account-bound Capture context and zeroizes crypto JSON, key and
   plaintext buffers.
@@ -97,9 +115,18 @@ placeholder identities, result codes, status values and pagination shape.
   Unicode-escape layer before extracting a prototype.
 - Phrase and example evidence are not merged; completion evidence fetches only
   prefix-matching words which need the example fallback.
+- Donor random/fixed-third/last-word fallbacks are stable, low-confidence and
+  explicitly identified in answer provenance. Nested sentence fixtures also
+  distinguish top-level evidence loading/order from flattened children:
+  semantic matches select the exact child wire tag, while a failed match
+  retains the donor's third-parent tag.
 - Attempt tests freeze one-operation-at-a-time start/verify/advance/skip,
   sequential rotated tokens for matching, reading-card execution, word
   selection acknowledgement, ambiguity no-replay and semantic fail-closed.
+- Submission verification replays no mutation: fresh 100%/Completed confirms
+  the Task goal while per-Question answer history stays explicitly Unverified;
+  a terminal receipt with incomplete readback remains Pending, and stale
+  Draft/preview/state combinations fail closed.
 - Unknown response fields are dropped.
 - Capability advertisement follows implemented registry slots; an unfinished
   shared integration is recorded as a concrete Core Gap, never as a policy

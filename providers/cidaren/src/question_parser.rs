@@ -387,7 +387,7 @@ fn parse_options(value: Option<&Value>, kind: QuestionKind) -> ProviderResult<Ve
     }
     let mut options = Vec::new();
     let mut ids = BTreeSet::new();
-    for entry in entries {
+    for (top_level_index, entry) in entries.iter().enumerate() {
         let entry = entry
             .as_object()
             .ok_or_else(|| protocol_drift("Cidaren Question contains a non-object option"))?;
@@ -424,11 +424,30 @@ fn parse_options(value: Option<&Value>, kind: QuestionKind) -> ProviderResult<Ve
                     &mut ids,
                     combined,
                     format!("{parent_content} — {content}"),
-                    true,
+                    OptionSemantics {
+                        nested: true,
+                        top_level_index,
+                        top_level_content: &parent_content,
+                        wire_content: &content,
+                        parent_answer_id: &parent_tag,
+                    },
                 )?;
             }
         } else {
-            push_option(&mut options, &mut ids, parent_tag, parent_content, false)?;
+            let answer_id = parent_tag.clone();
+            push_option(
+                &mut options,
+                &mut ids,
+                answer_id,
+                parent_content.clone(),
+                OptionSemantics {
+                    nested: false,
+                    top_level_index,
+                    top_level_content: &parent_content,
+                    wire_content: &parent_content,
+                    parent_answer_id: &parent_tag,
+                },
+            )?;
         }
     }
     if options.len() > MAX_OPTIONS || (options.is_empty() && kind != QuestionKind::ShortAnswer) {
@@ -444,9 +463,9 @@ fn push_option(
     ids: &mut BTreeSet<String>,
     id: String,
     content: String,
-    nested: bool,
+    semantics: OptionSemantics<'_>,
 ) -> ProviderResult<()> {
-    if id.len() > MAX_ANSWER_TAG_BYTES || !ids.insert(id.clone()) {
+    if options.len() >= MAX_OPTIONS || id.len() > MAX_ANSWER_TAG_BYTES || !ids.insert(id.clone()) {
         return Err(protocol_drift(
             "Cidaren Question contains a duplicate or oversized answer tag",
         ));
@@ -455,9 +474,24 @@ fn push_option(
         id,
         content: Some(content),
         attachments: Vec::new(),
-        metadata_sanitized: json!({"nested": nested}),
+        metadata_sanitized: json!({
+            "nested": semantics.nested,
+            "top_level_index": semantics.top_level_index,
+            "top_level_content": semantics.top_level_content,
+            "wire_content": semantics.wire_content,
+            "parent_answer_id": semantics.parent_answer_id,
+        }),
     });
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct OptionSemantics<'a> {
+    nested: bool,
+    top_level_index: usize,
+    top_level_content: &'a str,
+    wire_content: &'a str,
+    parent_answer_id: &'a str,
 }
 
 fn answer_tag(value: Option<&Value>) -> ProviderResult<String> {
@@ -739,6 +773,16 @@ mod tests {
             .unwrap();
         assert_eq!(question.options[0].id, "s:1#0");
         assert_eq!(question.options[1].id, "s:1#1");
+        assert_eq!(
+            question.options[0].metadata_sanitized,
+            json!({
+                "nested": true,
+                "top_level_index": 0,
+                "top_level_content": "parent",
+                "wire_content": "first",
+                "parent_answer_id": "s:1#",
+            })
+        );
 
         let text = json!({
             "topic_code": "synthetic-text-topic",

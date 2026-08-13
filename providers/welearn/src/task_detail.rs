@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use asterism_domain::{RemoteState, SourceType, TaskCapability};
 use asterism_provider_api::{
     CourseInventoryCapability, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
     ProviderMetadata, ProviderResult, RemoteCourse, RemoteTaskDetail, TaskDetailCapability,
@@ -19,6 +20,72 @@ pub struct WellearnTaskDetail {
     metadata: ProviderMetadata,
     courses: Arc<dyn CourseInventoryCapability>,
     tasks: Arc<dyn TaskInventoryCapability>,
+}
+
+pub(crate) fn validate_fresh_execution_detail(
+    detail: &RemoteTaskDetail,
+    remote_task_id: &str,
+    course_id: &str,
+    sco_id: &str,
+    required_capabilities: &[TaskCapability],
+) -> ProviderResult<()> {
+    if detail.task.remote_id != remote_task_id
+        || detail.task.course_remote_id.as_deref() != Some(format!("course:{course_id}").as_str())
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "WELearn SCO identity changed before execution",
+        ));
+    }
+    if detail.task.source_type != SourceType::Resource
+        || required_capabilities
+            .iter()
+            .any(|capability| !detail.task.capabilities.contains(capability))
+        || detail
+            .task
+            .capabilities
+            .contains(&TaskCapability::SubmissionExecute)
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "WELearn fresh SCO does not advertise the requested execution contract",
+        ));
+    }
+    if matches!(
+        detail.task.remote_state,
+        RemoteState::Expired | RemoteState::Removed
+    ) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "WELearn fresh SCO is no longer executable",
+        ));
+    }
+    if detail
+        .normalized_detail
+        .get("schema")
+        .and_then(Value::as_str)
+        != Some("welearn.sco-task-detail.v1")
+    {
+        return Err(protocol_drift(
+            "WELearn fresh SCO detail has an unknown schema",
+        ));
+    }
+    let normalized = detail
+        .normalized_detail
+        .get("task")
+        .and_then(Value::as_object)
+        .ok_or_else(|| protocol_drift("WELearn fresh SCO detail has no normalized Task"))?;
+    if normalized.get("schema").and_then(Value::as_str) != Some("welearn.sco.v1")
+        || normalized.get("course_id").and_then(Value::as_str) != Some(course_id)
+        || normalized.get("sco_id").and_then(Value::as_str) != Some(sco_id)
+        || normalized.get("visible").and_then(Value::as_bool).is_none()
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "WELearn fresh SCO route or visibility observation changed before execution",
+        ));
+    }
+    Ok(())
 }
 
 impl WellearnTaskDetail {

@@ -19,7 +19,7 @@ const JV_3_1021: &[usize] = &[0, 1, 2, 4, 5, 6, 7, 48, 49, 66, 150, 151, 284, 37
 /// Plain JSON and base64 `jv=0` are accepted. The exact legacy confusion-byte
 /// variants frozen from donor evidence are also supported. `jv=99` fails
 /// closed here because it must be decoded through [`decode_response_data`]
-/// with the fresh account-bound capture context.
+/// with fresh account-bound Capture or native-login context.
 ///
 /// # Errors
 ///
@@ -30,7 +30,7 @@ pub fn decode_legacy_response_data(data: &Value, jv: &str) -> ProviderResult<Val
 }
 
 /// Strictly decodes one Cidaren response using the exact donor-observed
-/// encoding version and optional captured account crypto context.
+/// encoding version and optional account-bound crypto context.
 ///
 /// The current `jv=99` route is authenticated with HKDF-SHA256/AES-256-GCM and
 /// never falls back to legacy heuristics. Unknown versions also fail closed.
@@ -89,7 +89,7 @@ pub fn decode_response_data(
 fn missing_crypto_context() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Authentication,
-        "Cidaren jv=99 response requires a fresh captured crypto context",
+        "Cidaren jv=99 response requires fresh account-bound crypto context",
     )
 }
 

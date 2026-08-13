@@ -14,13 +14,15 @@ use reqwest::{
 use serde::Serialize;
 use zeroize::Zeroize;
 
+use crate::oauth_exchange::{CidarenOauthBootstrap, CidarenOauthLoginRequest};
 use crate::{
     CidarenAnswerEvidenceBinding, CidarenAnswerEvidenceTransport, CidarenAssessmentBinding,
     CidarenAssessmentResponse, CidarenAssessmentTransport, CidarenAuthenticationTransport,
     CidarenClassTaskPageDocument, CidarenClassTaskTransport, CidarenMutationRequest,
-    CidarenSessionResolver, CidarenStartAnswerRequest, CidarenStudyTaskDocument,
-    CidarenStudyTaskTransport, CidarenTokenSession, CidarenWireAnswer, CidarenWordEvidence,
-    CidarenWordInfoRequest, CidarenWordInventory, CidarenWordInventoryRequest, CidarenWordLookup,
+    CidarenOauthClientContext, CidarenOauthCode, CidarenOauthLoginMaterial, CidarenSessionResolver,
+    CidarenStartAnswerRequest, CidarenStudyTaskDocument, CidarenStudyTaskTransport,
+    CidarenTokenSession, CidarenWireAnswer, CidarenWordEvidence, CidarenWordInfoRequest,
+    CidarenWordInventory, CidarenWordInventoryRequest, CidarenWordLookup,
     CidarenWordPrototypeRequest, CidarenWordSelectionPlan,
     answer_evidence_protocol::fresh_course_id, assessment_protocol::CidarenMutationAuthorization,
     authentication::selected_course_id, build_skip_answer_request, build_start_answer_request,
@@ -33,6 +35,8 @@ use crate::{
 };
 
 const STUDENT_MAIN_URL: &str = "https://app.vocabgo.com/student/api/Student/Main";
+const WECHAT_V2_LOGIN_URL: &str =
+    "https://app.vocabgo.com/student/api/Auth/Wechat/V2/LoginByWechatCode";
 const CLASS_TASK_PAGE_URL: &str = "https://app.vocabgo.com/student/api/Student/ClassTask/PageTask";
 const STUDY_TASK_LIST_URL: &str = "https://app.vocabgo.com/student/api/Student/StudyTask/List";
 const ASSESSMENT_BASE_URL: &str = "https://app.vocabgo.com/student/api/Student";
@@ -48,6 +52,7 @@ const SIGNING_SUFFIX: &str = "ajfajfamsnfaflfasakljdlalkflak";
 const PAGE_SIZE: u32 = 10;
 const MAX_TASKS: usize = 10_000;
 const MAX_AUTH_RESPONSE_BYTES: usize = 64 * 1_024;
+const MAX_OAUTH_RESPONSE_BYTES: usize = 256 * 1_024;
 const MAX_PAGE_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_STUDY_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_ASSESSMENT_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
@@ -83,6 +88,47 @@ impl NativeCidarenTransport {
             )
         })?;
         Ok(Self { client, sessions })
+    }
+
+    /// Executes the current native V2 exchange exactly once, authenticates
+    /// its P-256/HKDF/AES-GCM response and performs a fresh `Student/Main`
+    /// readback before returning persistable Composite material.
+    ///
+    /// Core must claim the OAuth code before this call and must not replay the
+    /// call after an ambiguous network failure. `client_context` is the
+    /// callback/helper-bound current Cidaren device code plus exact User-Agent,
+    /// not a stored account credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns typed Authentication, Network, `InvalidResponse` or
+    /// `ProtocolDrift` errors. It never retries the single-use mutation.
+    pub async fn exchange_wechat_oauth_code(
+        &self,
+        code: CidarenOauthCode,
+        client_context: &CidarenOauthClientContext,
+    ) -> ProviderResult<CidarenOauthLoginMaterial> {
+        let bootstrap = CidarenOauthBootstrap::generate()?;
+        let request = bootstrap.build_request(code, current_timestamp_millis()?)?;
+        let response = native_oauth_request(&self.client, &request, client_context)?
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error, ResponseRoute::OauthLogin))?;
+        let mut document = read_json_response(
+            response,
+            ResponseRoute::OauthLogin,
+            MAX_OAUTH_RESPONSE_BYTES,
+        )
+        .await?;
+        let material = bootstrap.complete(document.as_bytes().to_vec());
+        document.zeroize();
+        let material = material?;
+        let session = material.token_session()?;
+        let mut account = self.fetch_account_document(&session).await?;
+        let validation = classify_token_validation_response(account.as_bytes());
+        account.zeroize();
+        validation?;
+        Ok(material)
     }
 
     async fn fetch_account_document(
@@ -157,6 +203,26 @@ impl NativeCidarenTransport {
         .await?;
         CidarenStudyTaskDocument::try_new(course_id, document)
     }
+}
+
+fn native_oauth_request(
+    client: &Client,
+    request: &CidarenOauthLoginRequest,
+    client_context: &CidarenOauthClientContext,
+) -> ProviderResult<RequestBuilder> {
+    let body = request.body_bytes()?;
+    Ok(client
+        .post(WECHAT_V2_LOGIN_URL)
+        .header(ACCEPT, "application/json, text/plain, */*")
+        .header(ABC, client_context.abc_header()?)
+        .header(AUTHORIZATION_V, client_context.authorization_header()?)
+        .header(X_REQUESTED_WITH, "XMLHttpRequest")
+        .header(USER_AGENT, client_context.user_agent_header()?)
+        .header(ACCEPT_LANGUAGE, "*")
+        .header(REFERER, STUDENT_REFERER)
+        .header("origin", STUDENT_ORIGIN)
+        .header(CONTENT_TYPE, "application/json;charset=UTF-8")
+        .body(body.as_slice().to_vec()))
 }
 
 impl fmt::Debug for NativeCidarenTransport {
@@ -811,6 +877,7 @@ fn oversized_response(route: ResponseRoute) -> ProviderError {
 
 #[derive(Clone, Copy, Debug)]
 enum ResponseRoute {
+    OauthLogin,
     AccountValidation,
     ClassTaskPage,
     StudyTaskList,
@@ -824,6 +891,7 @@ enum ResponseRoute {
 impl ResponseRoute {
     const fn label(self) -> &'static str {
         match self {
+            Self::OauthLogin => "oauth-login",
             Self::AccountValidation => "account-validation",
             Self::ClassTaskPage => "class-task",
             Self::StudyTaskList => "study-task",
@@ -893,6 +961,54 @@ mod tests {
             })
         );
         assert!(class_task_request(0, 1).is_err());
+    }
+
+    #[test]
+    fn oauth_request_is_single_route_device_bound_and_has_no_stale_token() {
+        let bootstrap = CidarenOauthBootstrap::generate().unwrap();
+        let request = bootstrap
+            .build_request(
+                CidarenOauthCode::try_new("synthetic-oauth-code").unwrap(),
+                1_786_444_968_188,
+            )
+            .unwrap();
+        let client_context = CidarenOauthClientContext::try_new(
+            "synthetic-device-code",
+            "Mozilla/5.0 synthetic-cidaren-client",
+        )
+        .unwrap();
+        let request = native_oauth_request(&Client::new(), &request, &client_context)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            "https://app.vocabgo.com/student/api/Auth/Wechat/V2/LoginByWechatCode"
+        );
+        assert!(request.headers().get(USER_TOKEN).is_none());
+        assert!(
+            request
+                .headers()
+                .get(AUTHORIZATION_V)
+                .unwrap()
+                .is_sensitive()
+        );
+        assert_eq!(
+            request.headers().get(ABC).unwrap().to_str().unwrap(),
+            format!(
+                "{:x}",
+                md5::compute(b"Mozilla/5.0 synthetic-cidaren-client")
+            )
+        );
+        assert_eq!(
+            request.headers().get(USER_AGENT).unwrap(),
+            "Mozilla/5.0 synthetic-cidaren-client"
+        );
+        let body: Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body["code"], "synthetic-oauth-code");
+        assert_eq!(body["version"], "2.7.0.260715_01");
+        assert_eq!(body["app_type"], 1);
     }
 
     #[test]

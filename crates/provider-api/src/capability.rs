@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use asterism_domain::{
-    AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, CourseId, LogLevel,
+    AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, CourseId, ExecutionId, LogLevel,
     ProviderAccountId, ProviderId, Question, QuestionKind, RemoteState, SecretId, SelectedAnswer,
     SessionKind, SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
     SubmissionVerificationSnapshot, TaskCapability, TaskId, Timestamp, WaitingUserState,
@@ -51,11 +51,45 @@ pub struct ProviderAuthContext {
 pub struct CaptureRecipe {
     pub version: u32,
     pub start_url: String,
-    pub allowed_origins: Vec<String>,
+    /// Top-level origins the isolated helper may visit during this auth flow.
+    /// This may include exact third-party OAuth origins, but grants no access
+    /// to their storage, headers or Cookies.
+    pub navigation_origins: Vec<String>,
+    /// Origins from which declared credential sources may be read. This is a
+    /// strict subset of `navigation_origins`.
+    pub read_origins: Vec<String>,
     pub poll_interval_millis: u64,
     pub auth_method: AuthMethod,
     pub session_kind: SessionKind,
+    pub readiness: CaptureReadiness,
     pub outputs: Vec<CaptureCredentialOutput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CaptureReadiness {
+    /// Legacy-safe only for Providers whose required outputs cannot exist in
+    /// an anonymous/pre-login session.
+    OutputsComplete,
+    /// Requires an exact request bound to the current top-level document
+    /// loader before any resolved credential is accepted. This prevents
+    /// anonymous Cookies created by a login page from prematurely completing
+    /// Capture.
+    RequestObserved {
+        origin: String,
+        method: String,
+        path_and_query: String,
+    },
+    /// Requires the exact request to receive an exact successful response
+    /// media type under the same current document loader. This distinguishes
+    /// authenticated API data from login HTML returned with status 200.
+    ResponseObserved {
+        origin: String,
+        method: String,
+        path_and_query: String,
+        status: u16,
+        mime_type: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -121,8 +155,10 @@ impl CaptureRecipe {
     pub fn validate(&self) -> Result<(), CaptureRecipeError> {
         let start_origin = https_origin(&self.start_url, false)?;
         if self.version == 0
-            || self.allowed_origins.is_empty()
-            || self.allowed_origins.len() > MAX_CAPTURE_ORIGINS
+            || self.navigation_origins.is_empty()
+            || self.navigation_origins.len() > MAX_CAPTURE_ORIGINS
+            || self.read_origins.is_empty()
+            || self.read_origins.len() > MAX_CAPTURE_ORIGINS
             || !(100..=5_000).contains(&self.poll_interval_millis)
             || !matches!(
                 self.auth_method,
@@ -133,18 +169,33 @@ impl CaptureRecipe {
         {
             return Err(CaptureRecipeError::Invalid);
         }
-        let mut origins = self.allowed_origins.clone();
-        for origin in &origins {
+        let mut navigation_origins = self.navigation_origins.clone();
+        for origin in &navigation_origins {
             if https_origin(origin, true)? != *origin {
                 return Err(CaptureRecipeError::Invalid);
             }
         }
-        origins.sort_unstable();
-        if origins.windows(2).any(|pair| pair[0] == pair[1])
-            || !origins.iter().any(|origin| origin == &start_origin)
+        navigation_origins.sort_unstable();
+        if navigation_origins.windows(2).any(|pair| pair[0] == pair[1])
+            || !navigation_origins
+                .iter()
+                .any(|origin| origin == &start_origin)
         {
             return Err(CaptureRecipeError::Invalid);
         }
+        let mut read_origins = self.read_origins.clone();
+        for origin in &read_origins {
+            if https_origin(origin, true)? != *origin
+                || !navigation_origins.iter().any(|allowed| allowed == origin)
+            {
+                return Err(CaptureRecipeError::Invalid);
+            }
+        }
+        read_origins.sort_unstable();
+        if read_origins.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(CaptureRecipeError::Invalid);
+        }
+        validate_capture_readiness(&self.readiness, &navigation_origins)?;
 
         let mut purposes = Vec::with_capacity(self.outputs.len());
         for output in &self.outputs {
@@ -156,7 +207,7 @@ impl CaptureRecipe {
             }
             purposes.push(output.purpose);
             for source in &output.sources {
-                validate_capture_source(source, &origins)?;
+                validate_capture_source(source, &read_origins)?;
             }
         }
         if !self.outputs.iter().any(|output| output.required) {
@@ -171,6 +222,64 @@ impl CaptureRecipe {
         }
         Ok(())
     }
+}
+
+fn validate_capture_readiness(
+    readiness: &CaptureReadiness,
+    navigation_origins: &[String],
+) -> Result<(), CaptureRecipeError> {
+    let (origin, method, path_and_query) = match readiness {
+        CaptureReadiness::OutputsComplete => return Ok(()),
+        CaptureReadiness::RequestObserved {
+            origin,
+            method,
+            path_and_query,
+        }
+        | CaptureReadiness::ResponseObserved {
+            origin,
+            method,
+            path_and_query,
+            ..
+        } => (origin, method, path_and_query),
+    };
+    validate_source_origin(origin, navigation_origins)?;
+    if !matches!(method.as_str(), "GET" | "POST")
+        || path_and_query.is_empty()
+        || path_and_query.len() > 2_048
+        || !path_and_query.starts_with('/')
+        || path_and_query.contains('#')
+        || path_and_query
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
+    {
+        return Err(CaptureRecipeError::Invalid);
+    }
+    let uri = format!("{origin}{path_and_query}")
+        .parse::<Uri>()
+        .map_err(|_| CaptureRecipeError::Invalid)?;
+    if uri.scheme_str() != Some("https") || uri.authority().is_none() {
+        return Err(CaptureRecipeError::Invalid);
+    }
+    if let CaptureReadiness::ResponseObserved {
+        status, mime_type, ..
+    } = readiness
+        && (!(200..=299).contains(status) || !valid_capture_mime_type(mime_type))
+    {
+        return Err(CaptureRecipeError::Invalid);
+    }
+    Ok(())
+}
+
+fn valid_capture_mime_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.trim() == value
+        && value.contains('/')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'/' | b'+' | b'.' | b'-')
+        })
 }
 
 const fn capture_purpose_rank(purpose: SecretPurpose) -> u8 {
@@ -331,10 +440,12 @@ mod capture_recipe_tests {
         CaptureRecipe {
             version: 1,
             start_url: "https://provider.example/login".to_owned(),
-            allowed_origins: vec!["https://provider.example".to_owned()],
+            navigation_origins: vec!["https://provider.example".to_owned()],
+            read_origins: vec!["https://provider.example".to_owned()],
             poll_interval_millis: 500,
             auth_method: AuthMethod::AssistedSession,
             session_kind: SessionKind::Composite,
+            readiness: CaptureReadiness::OutputsComplete,
             outputs: vec![CaptureCredentialOutput {
                 purpose: SecretPurpose::ProviderCompositeSession,
                 required: true,
@@ -367,7 +478,7 @@ mod capture_recipe_tests {
         assert_eq!(foreign_header.validate(), Err(CaptureRecipeError::Invalid));
 
         let mut non_canonical_origin = recipe();
-        non_canonical_origin.allowed_origins[0].push('/');
+        non_canonical_origin.navigation_origins[0].push('/');
         assert_eq!(
             non_canonical_origin.validate(),
             Err(CaptureRecipeError::Invalid)
@@ -402,6 +513,62 @@ mod capture_recipe_tests {
             non_provider_secret.validate(),
             Err(CaptureRecipeError::Invalid)
         );
+    }
+
+    #[test]
+    fn navigation_does_not_grant_secret_reads_and_readiness_is_exact() {
+        let mut oauth = recipe();
+        oauth
+            .navigation_origins
+            .push("https://oauth.example".to_owned());
+        oauth.readiness = CaptureReadiness::RequestObserved {
+            origin: "https://provider.example".to_owned(),
+            method: "GET".to_owned(),
+            path_and_query: "/api/account?action=current".to_owned(),
+        };
+        assert_eq!(oauth.validate(), Ok(()));
+
+        oauth
+            .read_origins
+            .push("https://unlisted.example".to_owned());
+        assert_eq!(oauth.validate(), Err(CaptureRecipeError::Invalid));
+        oauth.read_origins.pop();
+        oauth.readiness = CaptureReadiness::RequestObserved {
+            origin: "https://oauth.example".to_owned(),
+            method: "PATCH".to_owned(),
+            path_and_query: "/callback".to_owned(),
+        };
+        assert_eq!(oauth.validate(), Err(CaptureRecipeError::Invalid));
+        oauth.readiness = CaptureReadiness::RequestObserved {
+            origin: "https://provider.example".to_owned(),
+            method: "POST".to_owned(),
+            path_and_query: "missing-leading-slash".to_owned(),
+        };
+        assert_eq!(oauth.validate(), Err(CaptureRecipeError::Invalid));
+
+        oauth.readiness = CaptureReadiness::ResponseObserved {
+            origin: "https://provider.example".to_owned(),
+            method: "GET".to_owned(),
+            path_and_query: "/api/account?action=current".to_owned(),
+            status: 200,
+            mime_type: "application/json".to_owned(),
+        };
+        assert_eq!(oauth.validate(), Ok(()));
+        let CaptureReadiness::ResponseObserved { status, .. } = &mut oauth.readiness else {
+            unreachable!();
+        };
+        *status = 302;
+        assert_eq!(oauth.validate(), Err(CaptureRecipeError::Invalid));
+
+        let CaptureReadiness::ResponseObserved {
+            status, mime_type, ..
+        } = &mut oauth.readiness
+        else {
+            unreachable!();
+        };
+        *status = 200;
+        *mime_type = "Application/JSON".to_owned();
+        assert_eq!(oauth.validate(), Err(CaptureRecipeError::Invalid));
     }
 }
 
@@ -554,6 +721,43 @@ pub trait SubmissionVerifyCapability: ProviderIdentity {
 
 #[async_trait]
 pub trait TaskExecutionCapability: ProviderIdentity {
+    /// Declares an evidenced Provider-specific exception to Core's ordinary
+    /// executable remote states. The default grants no exception. Providers
+    /// may opt into a state such as `NotOpen` only for an exact action set
+    /// whose audited protocol still accepts that mutation; Core continues to
+    /// reject terminally unavailable `Expired` and `Removed` tasks.
+    fn allows_execution_from_remote_state(
+        &self,
+        _requested_capabilities: &[TaskCapability],
+        _remote_state: RemoteState,
+    ) -> bool {
+        false
+    }
+
+    /// Returns the exact durable order for a requested executable capability
+    /// set. Core validates that the plan is a permutation of the request and
+    /// persists every phase before scheduling. Providers must explicitly opt
+    /// into multi-capability semantics rather than inheriting an arbitrary
+    /// enum or caller order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed unsupported-task error unless the Provider explicitly
+    /// defines this exact multi-capability combination.
+    fn execution_plan(
+        &self,
+        requested_capabilities: &[TaskCapability],
+    ) -> ProviderResult<Vec<TaskCapability>> {
+        if requested_capabilities.len() == 1 {
+            Ok(requested_capabilities.to_vec())
+        } else {
+            Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::UnsupportedTask,
+                "Provider does not define a multi-capability execution plan",
+            ))
+        }
+    }
+
     /// Declares whether this exact selected action set requires the Provider's
     /// goal-bound, read-only verification path. Task-level `ExecutionVerify`
     /// metadata only advertises that at least one action supports this path;
@@ -869,6 +1073,11 @@ pub struct RemoteDuration {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionRequest {
+    /// Stable Core-owned identity for this immutable execution intent. A
+    /// Provider may derive deterministic per-execution choices from it; retry
+    /// and recovery retain the same value while a later execution gets a new
+    /// identity.
+    pub execution_id: ExecutionId,
     pub task_id: TaskId,
     pub remote_task_id: String,
     pub course_id: Option<CourseId>,

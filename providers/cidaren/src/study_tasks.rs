@@ -204,11 +204,14 @@ fn normalize_task(row: StudyTaskRow) -> ProviderResult<RemoteTask> {
         opens_at: None,
         due_at: None,
         closes_at: None,
-        capabilities: vec![
+        capabilities: [
             TaskCapability::ProgressRead,
             TaskCapability::SubmissionBuild,
             TaskCapability::BrowserBridge,
-        ],
+        ]
+        .into_iter()
+        .chain(row.time_spent_raw.map(|_| TaskCapability::DurationRead))
+        .collect(),
         fingerprint: fingerprint(&normalized)?,
         normalized,
         raw_sanitized: serde_json::json!({
@@ -404,6 +407,7 @@ mod tests {
                 TaskCapability::ProgressRead,
                 TaskCapability::SubmissionBuild,
                 TaskCapability::BrowserBridge,
+                TaskCapability::DurationRead,
             ]
         );
         assert!(tasks[0].fingerprint.starts_with("v1:"));

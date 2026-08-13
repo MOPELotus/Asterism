@@ -1,19 +1,20 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{RemoteState, SourceType, TaskCapability};
+use asterism_domain::{RemoteState, TaskCapability};
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionOutcome, ExecutionRequest, ProviderContext, ProviderError,
     ProviderErrorKind, ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
     ProviderResult, TaskDetailCapability, TaskExecutionCapability,
 };
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 
 use crate::{
     WellearnCmiDocument,
     cmi::{parse_cmi_snapshot, parse_sco_identity},
+    execution_selection::{clamped_gaussian_u8, uniform_u8},
     metadata::development_metadata,
     runtime_settings::{WellearnResourceScore, WellearnRuntimeSettings},
+    task_detail::validate_fresh_execution_detail,
 };
 
 /// Bounded documents returned by one SCO preset-completion attempt.
@@ -142,7 +143,17 @@ impl TaskExecutionCapability for WellearnResourceExecution {
             .details
             .task_detail(context, &request.remote_task_id)
             .await?;
-        validate_fresh_detail(&detail, &request.remote_task_id, &course_id, &sco_id)?;
+        validate_fresh_execution_detail(
+            &detail,
+            &request.remote_task_id,
+            &course_id,
+            &sco_id,
+            &[
+                TaskCapability::ProgressRead,
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ],
+        )?;
 
         events
             .log(ProviderExecutionLog {
@@ -233,7 +244,17 @@ impl TaskExecutionCapability for WellearnResourceExecution {
             .details
             .task_detail(context, &request.remote_task_id)
             .await?;
-        validate_fresh_detail(&detail, &request.remote_task_id, &course_id, &sco_id)?;
+        validate_fresh_execution_detail(
+            &detail,
+            &request.remote_task_id,
+            &course_id,
+            &sco_id,
+            &[
+                TaskCapability::ProgressRead,
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ],
+        )?;
         let document = self
             .transport
             .verify_resource(context, &course_id, &sco_id)
@@ -255,90 +276,29 @@ impl TaskExecutionCapability for WellearnResourceExecution {
     }
 }
 
-fn validate_fresh_detail(
-    detail: &asterism_provider_api::RemoteTaskDetail,
-    remote_task_id: &str,
-    course_id: &str,
-    sco_id: &str,
-) -> ProviderResult<()> {
-    if detail.task.remote_id != remote_task_id {
-        return Err(remote_changed(
-            "WELearn SCO identity changed before resource execution",
-        ));
-    }
-    if detail.task.source_type != SourceType::Resource
-        || !detail
-            .task
-            .capabilities
-            .contains(&TaskCapability::ResourceExecution)
-        || !detail
-            .task
-            .capabilities
-            .contains(&TaskCapability::ExecutionVerify)
-        || !detail
-            .task
-            .capabilities
-            .contains(&TaskCapability::ProgressRead)
-        || detail
-            .task
-            .capabilities
-            .contains(&TaskCapability::SubmissionExecute)
-    {
-        return Err(unsupported(
-            "WELearn fresh SCO does not advertise verified resource execution",
-        ));
-    }
-    if matches!(
-        detail.task.remote_state,
-        RemoteState::NotOpen | RemoteState::Expired | RemoteState::Removed
-    ) {
-        return Err(unsupported(
-            "WELearn fresh SCO is not open for resource execution",
-        ));
-    }
-    let normalized = detail
-        .normalized_detail
-        .get("task")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| invalid_response("WELearn fresh SCO detail has no normalized Task"))?;
-    if normalized
-        .get("course_id")
-        .and_then(serde_json::Value::as_str)
-        != Some(course_id)
-        || normalized.get("sco_id").and_then(serde_json::Value::as_str) != Some(sco_id)
-        || normalized
-            .get("visible")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-    {
-        return Err(remote_changed(
-            "WELearn fresh SCO route or visibility changed before execution",
-        ));
-    }
-    Ok(())
-}
-
 fn select_score(configured: WellearnResourceScore, request: &ExecutionRequest) -> u8 {
     match configured {
         WellearnResourceScore::Fixed(score) => score,
-        WellearnResourceScore::RandomRange { minimum, maximum } => {
-            let width = u16::from(maximum) - u16::from(minimum) + 1;
-            let mut hash = Sha256::new();
-            hash.update(b"asterism.welearn.resource-score.v1\0");
-            hash.update(request.task_id.to_string().as_bytes());
-            hash.update(b"\0");
-            hash.update(request.remote_task_id.as_bytes());
-            let digest = hash.finalize();
-            let sample = u16::from_be_bytes([digest[0], digest[1]]);
-            minimum + u8::try_from(sample % width).expect("score range width is at most 101")
-        }
+        WellearnResourceScore::UniformRandomRange { minimum, maximum } => uniform_u8(
+            b"asterism.welearn.resource-score.uniform.v2",
+            request,
+            minimum,
+            maximum,
+        ),
+        WellearnResourceScore::GaussianRandomRange { minimum, maximum } => clamped_gaussian_u8(
+            b"asterism.welearn.resource-score.gaussian.v2",
+            request,
+            minimum,
+            maximum,
+        ),
     }
 }
 
 const fn score_mode(configured: WellearnResourceScore) -> &'static str {
     match configured {
         WellearnResourceScore::Fixed(_) => "fixed",
-        WellearnResourceScore::RandomRange { .. } => "random_range",
+        WellearnResourceScore::UniformRandomRange { .. } => "random_range",
+        WellearnResourceScore::GaussianRandomRange { .. } => "gaussian_random_range",
     }
 }
 
@@ -375,10 +335,6 @@ fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> P
     Ok(())
 }
 
-fn invalid_response(message: &'static str) -> ProviderError {
-    ProviderError::new(ProviderErrorKind::InvalidResponse, message)
-}
-
 fn remote_changed(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::RemoteChanged, message)
 }
@@ -389,14 +345,19 @@ fn unsupported(message: &'static str) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::BTreeSet,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
     use crate::runtime_settings::{
         RESOURCE_SCORE_MAX_PERCENT_KEY, RESOURCE_SCORE_MIN_PERCENT_KEY, RESOURCE_SCORE_MODE_KEY,
         RESOURCE_SCORE_PERCENT_KEY, runtime_settings_schema,
     };
-    use asterism_domain::{AssessmentClass, ProviderAccountId, ProviderId, SecretId, TaskId};
+    use asterism_domain::{
+        AssessmentClass, ProviderAccountId, ProviderId, SecretId, SourceType, TaskId,
+    };
     use asterism_provider_api::{
         ProviderRuntimeSettingsPatch, ProviderSettingValue, RemoteTask, RemoteTaskDetail,
     };
@@ -454,7 +415,7 @@ mod tests {
                     raw_sanitized: serde_json::json!({"schema": "welearn.sco.raw.v1"}),
                 },
                 normalized_detail: serde_json::json!({
-                    "schema": "welearn.sco-detail.v1",
+                    "schema": "welearn.sco-task-detail.v1",
                     "task": normalized,
                 }),
             })
@@ -620,6 +581,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn donor_random_modes_are_execution_bound_and_recovery_stable() {
+        for (mode, expected) in [
+            ("random_range", "random_range"),
+            ("gaussian_random_range", "gaussian_random_range"),
+        ] {
+            let mut request = random_request_with_mode(mode, 60, 90);
+            let configured = WellearnRuntimeSettings::resolve(&request.runtime_settings)
+                .unwrap()
+                .resource_score;
+            let mut selected = BTreeSet::new();
+            for index in 1_u64..=128 {
+                request.execution_id = format!("00000000-0000-0000-0000-{index:012x}")
+                    .parse()
+                    .unwrap();
+                let first = select_score(configured, &request);
+                let recovered = select_score(configured, &request);
+                assert_eq!(first, recovered);
+                assert!((60..=90).contains(&first));
+                selected.insert(first);
+                assert_eq!(score_mode(configured), expected);
+            }
+            assert!(
+                selected.len() > 1,
+                "new Executions must be able to resample"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn goal_bound_verification_fresh_reads_without_replaying_mutation() {
         let transport = Arc::new(FixtureTransport::default());
@@ -645,7 +635,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn score_drift_or_hidden_fresh_task_fails_closed() {
+    async fn score_drift_fails_closed_and_hidden_fresh_task_remains_executable() {
         let drift = WellearnResourceExecution::try_new(
             Arc::new(FixtureDetail { visible: true }),
             Arc::new(FixtureTransport {
@@ -666,12 +656,15 @@ mod tests {
             hidden_transport.clone(),
         )
         .unwrap();
-        let error = hidden
+        let outcome = hidden
             .execute(&context(), &request(), &FixtureEvents)
             .await
-            .unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
-        assert!(hidden_transport.calls.lock().unwrap().is_empty());
+            .unwrap();
+        assert!(outcome.verified);
+        assert_eq!(
+            hidden_transport.calls.lock().unwrap().as_slice(),
+            &[("1001".to_owned(), "301".to_owned(), 82)]
+        );
     }
 
     fn context() -> ProviderContext {
@@ -693,6 +686,7 @@ mod tests {
             )]),
         };
         ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,
@@ -702,25 +696,30 @@ mod tests {
     }
 
     fn random_request() -> ExecutionRequest {
+        random_request_with_mode("random_range", 73, 79)
+    }
+
+    fn random_request_with_mode(mode: &str, minimum: i64, maximum: i64) -> ExecutionRequest {
         let schema = runtime_settings_schema();
         let task = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
             values: std::collections::BTreeMap::from([
                 (
                     RESOURCE_SCORE_MODE_KEY.to_owned(),
-                    ProviderSettingValue::Choice("random_range".to_owned()),
+                    ProviderSettingValue::Choice(mode.to_owned()),
                 ),
                 (
                     RESOURCE_SCORE_MIN_PERCENT_KEY.to_owned(),
-                    ProviderSettingValue::Integer(73),
+                    ProviderSettingValue::Integer(minimum),
                 ),
                 (
                     RESOURCE_SCORE_MAX_PERCENT_KEY.to_owned(),
-                    ProviderSettingValue::Integer(79),
+                    ProviderSettingValue::Integer(maximum),
                 ),
             ]),
         };
         ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,

@@ -5,15 +5,16 @@
 | Authentication | Fanyuchang 2026 | Reference | Native Password/OIDC, ImportedCookie and Capture-assisted Cookie validation are offline/native-boundary covered; scoped redirects/Cookies and typed captcha/SMS outcomes; live pending |
 | Stored session validation | Fanyuchang 2026 | Reference | Core-scoped Cookie resolution, authenticated Course-list validation and atomic Password/Composite renewal are native-boundary covered; live pending |
 | CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Native authenticated `authCourse.aspx?action=gmc` read is implemented behind shared NetworkProfile; live pending |
-| TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Native Course page → `courseunits` → one `scoLeaves` response per Unit is implemented all-or-nothing; live pending |
+| TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Native Course page → POST `courseunits` with GET compatibility only after explicit 404/405 → one `scoLeaves` response per Unit is implemented all-or-nothing; live pending |
 | TaskDetail | Fresh Course/Unit/SCO inventory | FromScratch | Re-lists Courses and re-runs one complete Course scan, then requires exactly one matching stable SCO identity; live pending |
 | TaskProgressRead | YZBRH | Reference | Implemented through a fresh non-mutating `getscoinfo_v7` CMI request; completion, progress, score and time observations are parsed independently; live pending |
 | DurationRead | YZBRH + Fanyuchang 2026 | Reference | Independent fresh CMI reader maps donor-observed canonical integer `total_time` to bounded seconds, returns zero for explicit no-CMI/not-started state and fails closed on unknown grammar; live pending |
-| ResourceExecution | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Native fresh rebind → optional completed preflight → `startsco160928` → `setscoinfo` → `savescoinfo160928` → exact fresh CMI verification is implemented with fixed or bounded random score settings; live pending |
+| ResourceExecution | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Native fresh rebind → optional completed preflight → `startsco160928` → `setscoinfo` → `savescoinfo160928` → exact fresh CMI verification is implemented with fixed or bounded random score settings. Current Fanyuchang deliberately includes hidden/NotOpen SCOs, so Provider advertises and fresh-rebinds that route while preserving the honest remote state; shared exact-action admission is integrated and live behavior remains pending |
 | DurationReport | YZBRH + Fanyuchang 2026 + Auto_WeLearn | Reference | Native fresh-read → optional start → complete preservation baseline → bounded real-time heartbeat → preserve-and-finalize → strict fresh-read lifecycle is offline/native-boundary covered, with fixed or bounded-random duration settings; live pending |
 | Assessment/exercise behavior | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Audited donors do not expose Question/Answer endpoints; their exercise behavior is the direct SCO completion/progress/score preset mapped to `ResourceExecution`, now implemented offline/native-boundary; audit remains open to new evidence |
 | Result verification | Fresh Course/SCO/CMI reads | FromScratch | DurationReport verifies preservation plus changed time; ResourceExecution implements goal-bound `verify_execution` over the frozen settings and exact completion/progress/score tuple, so Core recovery fresh-reads without replay |
-| BrowserBridge / Capture | Fanyuchang 2026 Cookie mode + authentication outcomes | Reference | Capture recipe v1 and AssistedSession Cookie submission/validation are implemented for browser-obtained sessions. Current donors contain no reliable automated captcha/SMS solver or task BrowserBridge protocol; typed HumanRequired remains for those challenges pending sanitized evidence, not policy deferral |
+| BrowserBridge / Capture | Fanyuchang 2026 Cookie mode + SSO browser implementation + 2026-08-13 public login audit | Reference | Capture recipe v4 separates five exact navigation origins from the sole WELearn credential-read origin, and requires the current loader's exact `GET /ajax/authCourse.aspx?action=gmc` to receive `200 application/json` before resolving the Cookie. The helper enforces that response gate, so the audited anonymous `200 text/html` login script cannot complete Capture; native Course parsing remains the final authority. Manual captcha/SMS navigation is evidenced; OAuth callback/live validation and accurate per-flow acquisition-method reporting remain pending |
+| Unit/all-task bulk orchestration | Fanyuchang 2026 + Auto_WeLearn | Reference | Provider primitives and Unit observations exist, but shared Core/API still need first-class Unit/selection scopes and a durable batch plan. Auto_WeLearn additionally allocates a selected-range duration budget across visible SCOs; this remains an explicit shared orchestration gap, not a reason to stop the Provider |
 
 ## Implementation checkpoint
 
@@ -59,7 +60,9 @@ fixed/bounded-random report length and heartbeat interval, while Core-owned
 concurrency and scan-interval behaviors stay explicit. The native lifecycle
 keeps one resolved
 Cookie and fresh Course route through baseline read, optional start, bounded
-heartbeats and finalization. It preserves completion, progress, score and
+heartbeats and finalization. It sends one initial keep plus keeps after complete
+configured intervals, waiting any trailing partial interval without adding an
+unevidenced final keep. It preserves completion, progress, score and
 success status, does not call `setscoinfo`, and re-reads CMI before returning a
 verified outcome. Missing baseline/readback preservation fields fail closed
 instead of becoming synthetic defaults. Authentication before mutation may
@@ -67,9 +70,18 @@ renew once; no mutation is replayed after an authentication failure.
 DurationRead remains independent from this write lifecycle and never starts a
 missing CMI session.
 
-`ResourceExecution` is separately advertised for visible SCOs. It freezes a
-fixed score or deterministically selects one value from the configured bounded
-range for the attempt, rebinds the exact Course/SCO through fresh detail, then
+The runtime schema accepts bounded one-second granularity for both the report
+length and heartbeat interval. This keeps the current donor's evidenced
+one-second heartbeat and short 10–30 second sessions expressible without
+dropping the upper bound or changing the conservative defaults. Provider and
+account execution concurrency are both expressible through 100, matching the
+Auto_WeLearn UI and worker boundary; defaults remain 1 and Core retains its
+global admission and lease controls.
+
+`ResourceExecution` is separately advertised for every returned SCO. It freezes a
+fixed score or selects one value from the configured uniform or
+clamped-Gaussian bounded range using immutable Execution identity, rebinds the
+exact Course/SCO through fresh detail, then
 uses the donor-audited start → setscoinfo → save sequence. A strict fresh CMI
 read must show `completed`, progress `1` and the exact selected score. No
 post-mutation failure is automatically replayed. `ExecutionVerify` reuses the
@@ -77,6 +89,16 @@ frozen runtime settings, performs another full TaskDetail identity rebind and
 calls only the non-mutating fresh CMI read. It proves the exact selected tuple,
 not generic Completed state, so ambiguous results and crash recovery never
 repeat start/setscoinfo/save.
+
+Visibility remains an observation rather than a Provider capability ban. The
+current Fanyuchang donor has both visibility and already-completed skip checks
+explicitly disabled before it builds the execution list, so hidden SCOs retain
+`NotOpen` while still advertising ResourceExecution, ExecutionVerify and
+DurationReport. The Provider validates that a fresh boolean visibility fact is
+still present and binds the same Course/SCO identity; it does not relabel the
+SCO as open. Its dispatcher opts into Core's exact-action NotOpen exception
+only for ResourceExecution, DurationReport, or their audited composite; Core
+still rejects Expired and Removed.
 
 The shared Engine now evaluates a DurationReport-only execution against the
 duration goal instead of requiring the remote Task to become Completed. A
@@ -88,3 +110,12 @@ live Provider validation remains pending. Intermediate parser, Native HTTP and
 DurationReport milestones are checkpoints only; they are not stopping
 conditions. Capture/BrowserBridge and further assessment families remain in
 scope whenever donor or sanitized live evidence establishes their protocol.
+
+One donor-level orchestration contract remains a shared Core gap. The donors
+accept selected Units or all Units as a batch; Auto_WeLearn can treat the
+selected range as one duration budget and distribute it over visible SCOs.
+Unit identity, batch selection, budget allocation and crash-safe child
+Execution creation belong in Core/API rather than a Provider-private scheduler.
+Immutable Core Execution identity now makes donor-style per-Execution random
+duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
+persisted capability-step plan covers the duration-then-completion composite.

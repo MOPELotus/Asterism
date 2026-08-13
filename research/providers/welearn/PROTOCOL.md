@@ -22,12 +22,36 @@ POST https://sso.sflep.com/idsvr/account/login
 The returned redirect must be followed to complete Cookie establishment.
 Authentication responses may signal image captcha or SMS verification. Those
 states currently become typed `HumanRequired` and automated password retry must
-stop. Capture recipe v1 exposes a first-batch AssistedSession path: a local
+stop. Capture recipe v4 exposes a first-batch AssistedSession path: a local
 Capture/browser helper may submit the resulting bounded Cookie, which the
 Provider validates against the authenticated Course endpoint before Core stores
-it. The three pinned donors contain no reliable automated challenge-solving
-protocol, so automatic captcha/SMS interaction still requires sanitized live or
-new donor evidence rather than invented behavior.
+it. The current donor's browser implementation posts image-captcha `icode` and
+`sign`, or SMS `vcode` and `vcToken`, from the interactive SSO page. Those
+same-origin manual challenge paths can finish under the current recipe. The
+page also exposes dynamically supplied QQ, WeChat and Apple third-party login
+URLs. A 2026-08-13 read-only audit of the public SSO bundle and unauthenticated
+challenge redirects established the exact first-hop HTTPS origins
+`graph.qq.com`, `open.weixin.qq.com` and `appleid.apple.com`; recipe v4
+allowlists them for top-level navigation while restricting credential reads to
+the WELearn origin. Authenticated callbacks have not been live
+validated, and the current shared recipe reports the generic AssistedSession
+method rather than which browser choice the user made. The donors contain no
+reliable headless solver protocol, so native Password stops as typed
+HumanRequired when challenged instead of guessing requests.
+
+The public prelogin response itself sets anonymous `acw_tc` and
+`ASP.NET_SessionId` Cookies for WELearn. Therefore a non-empty origin-wide
+Cookie header is not an authentication readiness signal: automatic Capture can
+otherwise submit before the user completes SSO. A 2026-08-13 public no-account
+check proved an anonymous prelogin session can issue the Course-list request
+and receive `200 text/html` login script. Recipe v4 therefore requires the
+current loader's exact `GET /ajax/authCourse.aspx?action=gmc` response to be
+`200 application/json` while collecting the whole WELearn Cookie header. The
+Capture helper enforces this response gate, and native Course parsing remains
+the final acceptance authority.
+The SMS token takes precedence over the numeric login code: the audited browser
+implementation treats `code=0` with a non-empty `extraCheck.vcToken` as a
+continuation challenge, not as a redirect-ready success.
 
 The native transport covers deterministic password form encoding, bounded
 login-envelope classification and a strict `https://sso.sflep.com/idsvr/`
@@ -79,6 +103,14 @@ Task identity. Unit facts include `unitname` and `visible`. SCO leaf facts inclu
 Stable normalized hierarchy is Course → Unit index → SCO ID. Mutable labels,
 visibility, completion and duration must not be used as identity.
 
+The current Fanyuchang donor intentionally leaves both the hidden-SCO and
+already-completed skip conditions disabled while building its work list. Thus
+`isvisible=false` remains an honest `NotOpen` observation, but it does not erase
+the donor-evidenced ResourceExecution, ExecutionVerify or DurationReport
+capabilities. Asterism retains the visibility boolean through fresh discovery
+and verification; the dispatcher grants Core's NotOpen exception only to the
+exact evidenced WELearn action sets and never to Expired or Removed tasks.
+
 The audited `scoLeaves` shape does not expose a trustworthy assessment-nature
 field. Every SCO therefore keeps `assessment_class=Unknown`; a Resource module
 label or ordinary-looking title is not evidence that an item is Routine, and
@@ -107,6 +139,11 @@ login redirects/pages, response content type, UTF-8 and body limits are typed
 before parser entry. This is native-boundary coverage only; it has not been run
 against a live account.
 
+The current donor's POST form is primary. The YZBRH and Auto_WeLearn donors
+use an equivalent GET query for `courseunits`; native inventory retries that
+read-only alternate only when POST receives an explicit 404 or 405. It does not
+switch method after authentication, rate-limit, network, body or parser errors.
+
 ## CMI lifecycle
 
 Observed mutation/read actions on `POST https://welearn.sflep.com/Ajax/SCO.aspx`
@@ -131,8 +168,9 @@ POST /Ajax/SCO.aspx?uid={uid}
 The audited response is an outer JSON object whose `comment` string contains a
 second JSON document. The nested optional `cmi` object is parsed field by field;
 completion, progress and both time strings remain independent. Missing `cmi`
-means the donor-observed not-attempted zero-progress state. A non-zero `ret`, a
-non-string `comment`, malformed nested JSON or an unsafe scalar fails closed.
+means the donor-observed not-attempted zero-progress state. The outer `ret`
+must be the integer `0`; a missing, non-integer or non-zero result, a non-string
+`comment`, malformed nested JSON or an unsafe scalar fails closed.
 The native adapter uses the same bounded authenticated session and one
 Authentication-only renewal retry as inventory. It does not call `startsco160928`
 when CMI is absent or malformed, because a read capability must never mutate
@@ -155,10 +193,12 @@ before any heartbeat or finalization rather than synthesizing defaults. The
 baseline preserves bounded `completion_status`, `progress_measure`,
 `score.scaled`, `success_status`, `session_time` and `total_time` values.
 
-The lifecycle sends an initial and then periodic
-`keepsco_with_getticket_with_updatecmitime` heartbeat, with real elapsed waits
-and the preserved session/total observations, before `savescoinfo160928`
-finalizes the session. The final form carries the preserved completion,
+The lifecycle sends an initial and then one
+`keepsco_with_getticket_with_updatecmitime` heartbeat after each complete
+configured interval, with real elapsed waits and the preserved session/total
+observations, before `savescoinfo160928` finalizes the session. A trailing
+partial interval is still waited but does not invent an extra keep; this
+matches the preservation-mode YZBRH donor. The final form carries the preserved completion,
 progress, score and success values and does not call `setscoinfo`; this is the
 independent preservation-mode DurationReport capability, not a boundary on
 other mutations. Start/finalize require
@@ -191,10 +231,18 @@ owns this normalization.
 
 Master-owned runtime settings expose platform defaults and account/task
 overrides for fixed or donor-observed bounded-random report seconds and the
-heartbeat interval. The selected duration is derived from the frozen Task and
-remote identities so one execution uses one stable target. Provider and account
+heartbeat interval. One-second granularity is accepted within a bounded
+1–7,200 second report and 1–90 second heartbeat range: the current donor emits
+one heartbeat per second and documents 10–30 second sessions, while the older
+duration donor emits a 60-second cadence. Conservative defaults remain 600 and
+60 seconds. Random duration selection is derived from Core's immutable
+Execution identity plus the bound Task and remote identity: retry/recovery
+reproduce the same value, while a later Execution can sample another value.
+Provider and account
 execution concurrency plus periodic Course/Task scan interval are independently
-bounded.
+bounded. Auto_WeLearn exposes 1–100 concurrent workers; both WELearn
+concurrency settings therefore accept 1–100 with a default of 1, while Core's
+global admission and durable leases remain the final scheduling bounds.
 
 ## Completion, progress and score execution
 
@@ -212,10 +260,13 @@ fresh Course/SCO rebind
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or
 submit individual answers. Their user-facing “exercise accuracy” choice is a
-CMI score preset. Asterism implements both a fixed integer score and the
-donor-observed bounded random interval. Random selection is derived
-deterministically from the frozen Task identity and remote identity so the
-selected goal remains stable across normal verification and crash recovery.
+CMI score preset. Asterism implements both a fixed integer score and a bounded
+random interval. Auto_WeLearn samples that interval uniformly, while current
+Fanyuchang samples a normal distribution centered in the interval with
+standard deviation `(maximum - minimum) / 6`, rounds, then clamps. The current
+Asterism selector exposes both modes and derives them from Core's immutable
+Execution identity plus Task/remote binding. It therefore resamples across new
+Executions while reproducing the exact frozen goal during retry and recovery.
 
 The Provider performs a complete fresh TaskDetail rebind before mutation. If
 the baseline CMI is already Completed, it skips all mutation and verifies that
@@ -231,6 +282,23 @@ fresh `getscoinfo_v7`. It recomputes the selected score from the frozen goal and
 requires the exact completion/progress/score tuple. Transient verification
 reads may be retried by Core, but the mutation path is never entered.
 
+## Batch selection and duration allocation
+
+The current donor selects one, several or every Unit and concurrently applies
+the per-SCO duration or completion operation. Auto_WeLearn also exposes a
+selected-range total-minute target with a bounded random perturbation, divides
+the resulting seconds across all visible SCOs, and executes those SCOs with a
+bounded worker count. These are orchestration semantics over the native SCO
+operations, not new WELearn endpoints.
+
+Asterism currently retains Unit index/title/code in each fresh Task observation
+and exposes per-Task runtime settings, but Unit is not yet a shared first-class
+selection scope and execution creation is single-Task. The complete donor
+behavior therefore requires Core/API to freeze the selected Unit/all-task set,
+derive and persist each child target, apply provider/account concurrency, and
+recover children independently. The Provider must not create its own task
+scheduler or silently recompute the distribution after a crash.
+
 ## Sanitization and routing
 
 - `uid`, `classid`, redirect state, PKCE material and Cookies are route/session
@@ -239,6 +307,13 @@ reads may be retried by Core, but the mutation path is never entered.
   and explicitly zeroized when their operation-local containers are dropped.
 - Only the audited HTTPS hosts may be contacted; unexpected OIDC redirects fail
   closed as protocol drift.
+- QQ/WeChat/Apple are allowlisted only at the three exact origins established
+  by the public SSO redirects. No credential source reads their headers,
+  storage or Cookies; only the final WELearn Cookie is emitted.
+- Anonymous prelogin Cookies never satisfy Capture readiness: their exact
+  Course-list request returns `200 text/html`, while recipe v4 requires `200
+  application/json` under the current loader. Native Course parsing validates
+  the resulting Cookie again before storage.
 - Course percentage and SCO duration are remote observations, not proof of a
   successful Asterism execution.
 - A selected score and completion preset are non-secret attempt facts, but the

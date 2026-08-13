@@ -83,7 +83,10 @@
     "closes_at": null,
     "capabilities": [
       "progress_read",
-      "duration_read"
+      "resource_execution",
+      "execution_verify",
+      "duration_read",
+      "duration_report"
     ],
     "fingerprint": "v1:845536d30d715cbdde80a6142b7bc7d0f6f42847a1966cb735a2208178c37459",
     "normalized": {

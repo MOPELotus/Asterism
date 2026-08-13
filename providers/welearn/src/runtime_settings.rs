@@ -21,6 +21,11 @@ pub(crate) const RESOURCE_SCORE_MAX_PERCENT_KEY: &str = "execution.completion_sc
 
 const RESOURCE_SCORE_FIXED: &str = "fixed";
 const RESOURCE_SCORE_RANDOM_RANGE: &str = "random_range";
+const RESOURCE_SCORE_GAUSSIAN_RANDOM_RANGE: &str = "gaussian_random_range";
+pub(crate) const MIN_DURATION_REPORT_SECONDS: u64 = 1;
+pub(crate) const MAX_DURATION_REPORT_SECONDS: u64 = 7_200;
+pub(crate) const MIN_DURATION_HEARTBEAT_SECONDS: u64 = 1;
+pub(crate) const MAX_DURATION_HEARTBEAT_SECONDS: u64 = 90;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WellearnDurationTarget {
@@ -31,7 +36,8 @@ pub(crate) enum WellearnDurationTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WellearnResourceScore {
     Fixed(u8),
-    RandomRange { minimum: u8, maximum: u8 },
+    UniformRandomRange { minimum: u8, maximum: u8 },
+    GaussianRandomRange { minimum: u8, maximum: u8 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,10 +114,16 @@ impl WellearnRuntimeSettings {
         }
         let resource_score = match settings.choice(RESOURCE_SCORE_MODE_KEY) {
             Some(RESOURCE_SCORE_FIXED) => WellearnResourceScore::Fixed(fixed_score),
-            Some(RESOURCE_SCORE_RANDOM_RANGE) => WellearnResourceScore::RandomRange {
+            Some(RESOURCE_SCORE_RANDOM_RANGE) => WellearnResourceScore::UniformRandomRange {
                 minimum: minimum_score,
                 maximum: maximum_score,
             },
+            Some(RESOURCE_SCORE_GAUSSIAN_RANDOM_RANGE) => {
+                WellearnResourceScore::GaussianRandomRange {
+                    minimum: minimum_score,
+                    maximum: maximum_score,
+                }
+            }
             _ => {
                 return Err(ProviderError::new(
                     ProviderErrorKind::Internal,
@@ -166,16 +178,16 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 4,
+        version: 7,
         definitions: vec![
             ProviderSettingDefinition {
                 key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
                 display_name: "平台执行并发".to_owned(),
-                description: "Core 同时向 WELearn 发起的执行数量上限；真实并发验证前默认 1。"
+                description: "Core 同时向 WELearn 发起的执行数量上限；donor 可配置到 100，默认仍为 1。"
                     .to_owned(),
                 kind: ProviderSettingKind::Integer {
                     minimum: 1,
-                    maximum: 16,
+                    maximum: 100,
                     step: 1,
                 },
                 default: ProviderSettingValue::Integer(1),
@@ -185,11 +197,11 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
             ProviderSettingDefinition {
                 key: ACCOUNT_EXECUTION_CONCURRENCY_KEY.to_owned(),
                 display_name: "账号执行并发".to_owned(),
-                description: "同一 WELearn 账号的并行执行上限，可按账号或具体任务覆盖；默认串行。"
+                description: "同一 WELearn 账号的并行执行上限，可按账号或具体任务覆盖；donor 可配置到 100，默认串行。"
                     .to_owned(),
                 kind: ProviderSettingKind::Integer {
                     minimum: 1,
-                    maximum: 4,
+                    maximum: 100,
                     step: 1,
                 },
                 default: ProviderSettingValue::Integer(1),
@@ -234,9 +246,9 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 description: "一次 WELearn 学习会话实际等待并上报的秒数，可按账号或具体任务覆盖。"
                     .to_owned(),
                 kind: ProviderSettingKind::DurationSeconds {
-                    minimum: 60,
-                    maximum: 7_200,
-                    step: 60,
+                    minimum: MIN_DURATION_REPORT_SECONDS,
+                    maximum: MAX_DURATION_REPORT_SECONDS,
+                    step: 1,
                 },
                 default: ProviderSettingValue::DurationSeconds(600),
                 scopes: provider_account_task_scopes.clone(),
@@ -247,9 +259,9 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 display_name: "随机时长下限".to_owned(),
                 description: "随机区间模式下本次实际学习并上报的最短秒数（含边界）。".to_owned(),
                 kind: ProviderSettingKind::DurationSeconds {
-                    minimum: 60,
-                    maximum: 7_200,
-                    step: 60,
+                    minimum: MIN_DURATION_REPORT_SECONDS,
+                    maximum: MAX_DURATION_REPORT_SECONDS,
+                    step: 1,
                 },
                 default: ProviderSettingValue::DurationSeconds(300),
                 scopes: provider_account_task_scopes.clone(),
@@ -260,9 +272,9 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 display_name: "随机时长上限".to_owned(),
                 description: "随机区间模式下本次实际学习并上报的最长秒数（含边界）。".to_owned(),
                 kind: ProviderSettingKind::DurationSeconds {
-                    minimum: 60,
-                    maximum: 7_200,
-                    step: 60,
+                    minimum: MIN_DURATION_REPORT_SECONDS,
+                    maximum: MAX_DURATION_REPORT_SECONDS,
+                    step: 1,
                 },
                 default: ProviderSettingValue::DurationSeconds(900),
                 scopes: provider_account_task_scopes.clone(),
@@ -274,9 +286,9 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 description: "WELearn 学习会话两次时长心跳之间的真实等待秒数，受安全范围限制。"
                     .to_owned(),
                 kind: ProviderSettingKind::DurationSeconds {
-                    minimum: 30,
-                    maximum: 90,
-                    step: 5,
+                    minimum: MIN_DURATION_HEARTBEAT_SECONDS,
+                    maximum: MAX_DURATION_HEARTBEAT_SECONDS,
+                    step: 1,
                 },
                 default: ProviderSettingValue::DurationSeconds(60),
                 scopes: provider_account_task_scopes.clone(),
@@ -285,13 +297,13 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
             ProviderSettingDefinition {
                 key: RESOURCE_SCORE_MODE_KEY.to_owned(),
                 display_name: "完成预设分数模式".to_owned(),
-                description:
-                    "固定使用一个分数，或按 donor 行为在每次任务执行时从有界区间确定一个分数。"
-                        .to_owned(),
+                description: "固定使用一个分数、按 Auto_WeLearn 均匀随机，或按当前 donor 的截断高斯分布确定每次执行的分数。"
+                    .to_owned(),
                 kind: ProviderSettingKind::Choice {
                     options: BTreeSet::from([
                         RESOURCE_SCORE_FIXED.to_owned(),
                         RESOURCE_SCORE_RANDOM_RANGE.to_owned(),
+                        RESOURCE_SCORE_GAUSSIAN_RANDOM_RANGE.to_owned(),
                     ]),
                 },
                 default: ProviderSettingValue::Choice(RESOURCE_SCORE_FIXED.to_owned()),
@@ -399,7 +411,7 @@ mod tests {
             schema_version: schema.version,
             values: BTreeMap::from([(
                 DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),
-                ProviderSettingValue::DurationSeconds(25),
+                ProviderSettingValue::DurationSeconds(0),
             )]),
         };
         assert!(
@@ -449,5 +461,107 @@ mod tests {
             .resolve(None, None, Some(&inverted_duration))
             .unwrap();
         assert!(WellearnRuntimeSettings::resolve(&resolved).is_err());
+    }
+
+    #[test]
+    fn current_donor_short_session_and_one_second_heartbeat_are_expressible() {
+        let schema = runtime_settings_schema();
+        let task = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: BTreeMap::from([
+                (
+                    DURATION_REPORT_SECONDS_KEY.to_owned(),
+                    ProviderSettingValue::DurationSeconds(10),
+                ),
+                (
+                    DURATION_HEARTBEAT_INTERVAL_KEY.to_owned(),
+                    ProviderSettingValue::DurationSeconds(1),
+                ),
+            ]),
+        };
+        let resolved = schema.resolve(None, None, Some(&task)).unwrap();
+        assert_eq!(
+            WellearnRuntimeSettings::resolve(&resolved).unwrap(),
+            WellearnRuntimeSettings {
+                duration_report: WellearnDurationTarget::Fixed(10),
+                duration_heartbeat_interval_seconds: 1,
+                resource_score: WellearnResourceScore::Fixed(100),
+            }
+        );
+    }
+
+    #[test]
+    fn current_donor_hundred_way_concurrency_is_expressible() {
+        let schema = runtime_settings_schema();
+        let provider = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: BTreeMap::from([(
+                PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
+                ProviderSettingValue::Integer(100),
+            )]),
+        };
+        let account = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: BTreeMap::from([(
+                ACCOUNT_EXECUTION_CONCURRENCY_KEY.to_owned(),
+                ProviderSettingValue::Integer(100),
+            )]),
+        };
+        let resolved = schema
+            .resolve(Some(&provider), Some(&account), None)
+            .unwrap();
+        assert_eq!(
+            schema.execution_concurrency(&resolved).unwrap(),
+            asterism_provider_api::ProviderExecutionConcurrency {
+                provider: 100,
+                account: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn current_and_historical_donor_score_distributions_are_explicit() {
+        let schema = runtime_settings_schema();
+        for (mode, expected) in [
+            (
+                RESOURCE_SCORE_RANDOM_RANGE,
+                WellearnResourceScore::UniformRandomRange {
+                    minimum: 70,
+                    maximum: 90,
+                },
+            ),
+            (
+                RESOURCE_SCORE_GAUSSIAN_RANDOM_RANGE,
+                WellearnResourceScore::GaussianRandomRange {
+                    minimum: 70,
+                    maximum: 90,
+                },
+            ),
+        ] {
+            let task = ProviderRuntimeSettingsPatch {
+                schema_version: schema.version,
+                values: BTreeMap::from([
+                    (
+                        RESOURCE_SCORE_MODE_KEY.to_owned(),
+                        ProviderSettingValue::Choice(mode.to_owned()),
+                    ),
+                    (
+                        RESOURCE_SCORE_MIN_PERCENT_KEY.to_owned(),
+                        ProviderSettingValue::Integer(70),
+                    ),
+                    (
+                        RESOURCE_SCORE_MAX_PERCENT_KEY.to_owned(),
+                        ProviderSettingValue::Integer(90),
+                    ),
+                ]),
+            };
+            let resolved = schema.resolve(None, None, Some(&task)).unwrap();
+            assert_eq!(
+                WellearnRuntimeSettings::resolve(&resolved)
+                    .unwrap()
+                    .resource_score,
+                expected
+            );
+        }
     }
 }

@@ -13,6 +13,7 @@ mod course_inventory;
 mod duration_read;
 mod duration_report;
 mod execution;
+mod execution_selection;
 mod inventory_capabilities;
 mod metadata;
 mod native_authentication;

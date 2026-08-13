@@ -21,7 +21,7 @@ use crate::{
     UaiAuthenticationTransport, UaiJwtSession, UaiSessionResolver,
     authentication::{
         MAX_PASSWORD_BYTES, MAX_USERNAME_BYTES, is_imported_session_acquisition,
-        validate_login_field,
+        valid_browser_cookie, validate_login_field,
     },
     metadata::PROVIDER_ID,
 };
@@ -135,6 +135,44 @@ impl StoredUaiSessionResolver {
         );
         Ok(())
     }
+
+    async fn resolve_optional_browser_cookie(
+        &self,
+        context: &ProviderContext,
+    ) -> ProviderResult<Option<SecretString>> {
+        let resolved = self
+            .credentials
+            .resolve_provider_credentials(ProviderCredentialResolution {
+                provider_account_id: context.account_id,
+                credential_refs: context.credential_refs.clone(),
+                purposes: vec![SecretPurpose::ProviderCookie],
+                correlation_id: context.correlation_id.clone(),
+            })
+            .await;
+        let mut resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(SecretStoreError::AccountMismatch) => return Ok(None),
+            Err(error) => return Err(map_resolution_error(&error)),
+        };
+        if resolved.len() != 1 {
+            return Err(invalid_stored_session());
+        }
+        let resolved = resolved.pop().expect("one browser Cookie was required");
+        let metadata = &resolved.credential;
+        let cookie = std::str::from_utf8(resolved.value.expose_secret())
+            .map_err(|_| invalid_stored_session())?;
+        if metadata.provider_account_id != context.account_id
+            || metadata.secret.purpose != SecretPurpose::ProviderCookie
+            || !context.credential_refs.contains(&metadata.secret.id)
+            || metadata.session_kind != SessionKind::Jwt
+            || !is_imported_session_acquisition(metadata.acquired_via)
+            || metadata.is_expired_at(Utc::now())
+            || !valid_browser_cookie(cookie)
+        {
+            return Err(invalid_stored_session());
+        }
+        Ok(Some(SecretString::new(cookie.to_owned())))
+    }
 }
 
 impl fmt::Debug for StoredUaiSessionResolver {
@@ -187,8 +225,9 @@ impl UaiSessionResolver for StoredUaiSessionResolver {
         {
             return Err(invalid_stored_session());
         }
-        UaiJwtSession::try_from_composite(resolved.value.expose_secret())
-            .map_err(|_| invalid_stored_session())
+        let session = UaiJwtSession::try_from_composite(resolved.value.expose_secret())
+            .map_err(|_| invalid_stored_session())?;
+        session.attach_browser_cookie(self.resolve_optional_browser_cookie(context).await?)
     }
 
     async fn renew_session(&self, context: &ProviderContext) -> ProviderResult<UaiJwtSession> {
@@ -259,6 +298,13 @@ fn clone_session(session: &UaiJwtSession) -> ProviderResult<UaiJwtSession> {
         session.expose_open_id().to_owned(),
         session.expose_authorization().to_owned(),
     )
+    .and_then(|cloned| {
+        cloned.attach_browser_cookie(
+            session
+                .expose_browser_cookie()
+                .map(|cookie| SecretString::new(cookie.to_owned())),
+        )
+    })
 }
 
 fn validate_renewal_credentials(
@@ -388,6 +434,7 @@ mod tests {
     enum FixtureBehavior {
         Imported,
         CaptureTool,
+        CaptureCookie,
         BrowserExtension,
         Native,
         Duplicate,
@@ -405,6 +452,26 @@ mod tests {
         behavior: FixtureBehavior,
         request: Mutex<Option<ProviderCredentialResolution>>,
         resolutions: AtomicUsize,
+    }
+
+    impl FixtureCredentialResolver {
+        fn resolve_cookie(
+            &self,
+            request: &ProviderCredentialResolution,
+        ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError> {
+            if !matches!(self.behavior, FixtureBehavior::CaptureCookie) {
+                return Err(SecretStoreError::AccountMismatch);
+            }
+            Ok(vec![resolved_credential(
+                request.provider_account_id,
+                request.credential_refs[1],
+                SecretPurpose::ProviderCookie,
+                SessionKind::Jwt,
+                CredentialAcquisition::CaptureTool,
+                None,
+                b"session=synthetic; csrf=synthetic",
+            )])
+        }
     }
 
     #[derive(Debug)]
@@ -528,6 +595,9 @@ mod tests {
             request: ProviderCredentialResolution,
         ) -> Result<Vec<ResolvedProviderCredential>, SecretStoreError> {
             self.resolutions.fetch_add(1, Ordering::SeqCst);
+            if request.purposes == [SecretPurpose::ProviderCookie] {
+                return self.resolve_cookie(&request);
+            }
             *self.request.lock().unwrap() = Some(request.clone());
             let secret_id = request.credential_refs[0];
             let valid = |session_kind, acquired_via, value: &[u8]| {
@@ -548,7 +618,7 @@ mod tests {
                     CredentialAcquisition::ManualImport,
                     document,
                 )]),
-                FixtureBehavior::CaptureTool => Ok(vec![valid(
+                FixtureBehavior::CaptureTool | FixtureBehavior::CaptureCookie => Ok(vec![valid(
                     SessionKind::Jwt,
                     CredentialAcquisition::CaptureTool,
                     document,
@@ -650,6 +720,24 @@ mod tests {
             assert_eq!(request.purposes, [SecretPurpose::ProviderCompositeSession]);
             assert_eq!(request.correlation_id, context.correlation_id);
         }
+    }
+
+    #[tokio::test]
+    async fn captured_cookie_is_optional_account_bound_and_zeroizing() {
+        let credentials = Arc::new(FixtureCredentialResolver {
+            behavior: FixtureBehavior::CaptureCookie,
+            request: Mutex::new(None),
+            resolutions: AtomicUsize::new(0),
+        });
+        let resolver = StoredUaiSessionResolver::new(credentials);
+        let mut context = provider_context();
+        context.credential_refs.push(SecretId::new());
+        let session = resolver.resolve_session(&context).await.unwrap();
+        assert_eq!(
+            session.expose_browser_cookie(),
+            Some("session=synthetic; csrf=synthetic")
+        );
+        assert!(!format!("{session:?}").contains("session=synthetic"));
     }
 
     #[tokio::test]

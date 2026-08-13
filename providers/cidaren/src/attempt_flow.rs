@@ -4,10 +4,13 @@ use std::{
     sync::Arc,
 };
 
-use asterism_domain::{NormalizedAnswer, Question, QuestionKind, SelectedAnswer, TaskId};
+use asterism_domain::{
+    NormalizedAnswer, Question, QuestionKind, SelectedAnswer, SubmissionReceipt, TaskId,
+};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteTaskDetail,
 };
+use chrono::Utc;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -83,7 +86,11 @@ enum CidarenAttemptPhase {
         operation: CidarenAttemptOperation,
         continuation: CidarenAttemptContinuation,
     },
-    Receipt(CidarenAssessmentReceiptKind),
+    Receipt {
+        kind: CidarenAssessmentReceiptKind,
+        message_sanitized: Option<String>,
+        received_at: asterism_domain::Timestamp,
+    },
     Ambiguous(CidarenAttemptOperation),
     FailedClosed(CidarenAttemptOperation),
 }
@@ -195,7 +202,7 @@ impl CidarenAttemptFlow {
             CidarenAttemptPhase::Issued { operation, .. } => {
                 CidarenAttemptFlowStatus::Issued(*operation)
             }
-            CidarenAttemptPhase::Receipt(kind) => CidarenAttemptFlowStatus::Receipt(*kind),
+            CidarenAttemptPhase::Receipt { kind, .. } => CidarenAttemptFlowStatus::Receipt(*kind),
             CidarenAttemptPhase::Ambiguous(operation) => {
                 CidarenAttemptFlowStatus::Ambiguous(*operation)
             }
@@ -415,6 +422,36 @@ impl CidarenAttemptFlow {
         settings.answer_delay_seconds(&entropy)
     }
 
+    /// Produces a bounded Core receipt only after the donor returned its
+    /// terminal completion acknowledgement. This remains acknowledgement
+    /// context for fresh verification and never marks the Task successful.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error unless the flow is terminally completed.
+    pub fn completion_receipt(&self) -> ProviderResult<SubmissionReceipt> {
+        let CidarenAttemptPhase::Receipt {
+            kind: CidarenAssessmentReceiptKind::Completed,
+            message_sanitized,
+            received_at,
+        } = self.phase()
+        else {
+            return Err(invalid_state(
+                "Cidaren attempt has no terminal completion receipt",
+            ));
+        };
+        let receipt = SubmissionReceipt {
+            remote_status: "completed".to_owned(),
+            message_sanitized: message_sanitized.clone(),
+            provider_trace_id: None,
+            received_at: *received_at,
+        };
+        receipt
+            .validate()
+            .map_err(|_| invalid_response("Cidaren completion receipt is invalid"))?;
+        Ok(receipt)
+    }
+
     /// Accepts only a response produced by the exact issued command. Each
     /// successful response advances one state-machine edge.
     ///
@@ -581,9 +618,13 @@ impl CidarenAttemptFlow {
                 kind:
                     kind @ (CidarenAssessmentReceiptKind::Completed
                     | CidarenAssessmentReceiptKind::WordSelectionRequired),
-                ..
+                message_sanitized,
             } => {
-                self.phase = Some(CidarenAttemptPhase::Receipt(kind));
+                self.phase = Some(CidarenAttemptPhase::Receipt {
+                    kind,
+                    message_sanitized,
+                    received_at: Utc::now(),
+                });
                 Ok(())
             }
             CidarenAssessmentResponse::Receipt {
@@ -733,7 +774,9 @@ fn wire_answers(
         .collect::<BTreeSet<_>>();
     match (&question.kind, &selected.answer) {
         (QuestionKind::SingleChoice, NormalizedAnswer::Selections(values))
-            if values.len() == 1 && option_ids.contains(values[0].as_str()) =>
+            if values.len() == 1
+                && (option_ids.contains(values[0].as_str())
+                    || valid_donor_third_parent_fallback(question, &values[0])) =>
         {
             Ok(VecDeque::from([CidarenWireAnswer::from_option_id(
                 &values[0],
@@ -782,6 +825,27 @@ fn wire_answers(
             "Cidaren selected answer does not match the current Question",
         )),
     }
+}
+
+fn valid_donor_third_parent_fallback(question: &Question, answer_id: &str) -> bool {
+    matches!(
+        question
+            .metadata_sanitized
+            .get("topic_mode")
+            .and_then(serde_json::Value::as_i64),
+        Some(41..=44)
+    ) && question.options.iter().any(|option| {
+        option
+            .metadata_sanitized
+            .get("top_level_index")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2)
+            && option
+                .metadata_sanitized
+                .get("parent_answer_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(answer_id)
+    })
 }
 
 fn rotated_topic_code(value: &serde_json::Value) -> ProviderResult<Zeroizing<String>> {
@@ -898,7 +962,7 @@ mod tests {
     use super::*;
     use crate::{
         CidarenAnswerEvidenceBinding, CidarenStudyTaskDocument, build_word_selection_plan,
-        parse_assessment_response, parse_study_task_info_response,
+        parse_assessment_response, parse_attempt_question, parse_study_task_info_response,
     };
 
     struct FixtureTransport {
@@ -1017,6 +1081,9 @@ mod tests {
             flow.status(),
             CidarenAttemptFlowStatus::Receipt(CidarenAssessmentReceiptKind::Completed)
         );
+        let receipt = flow.completion_receipt().unwrap();
+        assert_eq!(receipt.remote_status, "completed");
+        assert!(receipt.validate().is_ok());
         assert_eq!(
             *transport.operations.lock().unwrap(),
             [
@@ -1198,6 +1265,7 @@ mod tests {
             flow.status(),
             CidarenAttemptFlowStatus::Receipt(CidarenAssessmentReceiptKind::Completed)
         );
+        assert!(flow.completion_receipt().is_ok());
         assert_eq!(
             *transport.operations.lock().unwrap(),
             [
@@ -1237,6 +1305,47 @@ mod tests {
             CidarenAttemptFlowStatus::FailedClosed(CidarenAttemptOperation::StartAnswer)
         );
         assert!(flow.issue_start().is_err());
+    }
+
+    #[test]
+    fn nested_third_parent_fallback_is_encoded_as_the_exact_donor_wire_answer() {
+        let mut parsed = parse_attempt_question(
+            &json!({
+                "topic_code": "nested-topic",
+                "topic_mode": 41,
+                "stem": {"content": "Complete {}", "remark": "unmatched"},
+                "options": [
+                    {"answer_tag": 0, "content": "first", "sub_options": []},
+                    {"answer_tag": 1, "content": "second", "sub_options": []},
+                    {
+                        "answer_tag": "2#",
+                        "content": "third",
+                        "sub_options": [{"answer_tag": 0, "content": "child"}]
+                    }
+                ]
+            }),
+            "class-task:2002",
+            1,
+        )
+        .unwrap()
+        .to_question(TaskId::new())
+        .unwrap();
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: parsed.id,
+            answer: NormalizedAnswer::Selections(vec!["s:2#".to_owned()]),
+            source: AnswerSource::ProviderNative,
+            confidence: None,
+        };
+        let mut answers = wire_answers(&parsed, &selected).unwrap();
+        let CidarenWireAnswer::Text(answer) = answers.pop_front().unwrap() else {
+            panic!("expected text wire answer");
+        };
+        assert_eq!(answer.as_str(), "2#");
+        assert!(answers.is_empty());
+
+        parsed.metadata_sanitized["topic_mode"] = json!(17);
+        assert!(wire_answers(&parsed, &selected).is_err());
     }
 
     fn response(data: &Value) -> CidarenAssessmentResponse {

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::{
     Client, Response, StatusCode, Url,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, RETRY_AFTER},
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -21,7 +21,8 @@ use crate::{
     UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport, UaiSessionResolver,
     UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
     UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
-    UaiUploadTransport, UaiVerificationDocument, UaiVerificationTransport,
+    UaiUploadIntent, UaiUploadTransport, UaiUploadedArtifact, UaiVerificationDocument,
+    UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_discussion_reply_page_request, build_discussion_reply_request,
     build_discussion_topic_request, build_upload_multipart,
@@ -122,12 +123,16 @@ impl NativeUaiInventoryTransport {
         url: Url,
         route: ResponseRoute,
     ) -> ProviderResult<String> {
-        let authorization = sensitive_authorization(session)?;
+        let headers = if url.host_str() == Some("ucontent.unipus.cn") {
+            ucontent_session_headers(session)?
+        } else {
+            authorization_headers(session)?
+        };
         let response = self
             .client
             .get(url)
             .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, authorization)
+            .headers(headers)
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
@@ -200,7 +205,7 @@ impl NativeUaiInventoryTransport {
                 session.expose_open_id(),
             )?)
             .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
             .send()
             .await
@@ -279,7 +284,7 @@ impl NativeUaiInventoryTransport {
             .client
             .get(question_content_url(route.course_instance_id(), &group_id)?)
             .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
             .send()
             .await
@@ -325,7 +330,7 @@ impl NativeUaiInventoryTransport {
             .client
             .get(question_content_url(route.course_instance_id(), &group_id)?)
             .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header.clone())
             .send()
             .await
@@ -337,7 +342,7 @@ impl NativeUaiInventoryTransport {
             .client
             .get(standard_answer_url(route.course_instance_id(), &group_id)?)
             .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
             .send()
             .await
@@ -392,7 +397,7 @@ impl NativeUaiInventoryTransport {
             .post(submission_url()?)
             .header(ACCEPT, "application/json")
             .header(CONTENT_TYPE, "application/json; charset=utf-8")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
             .body(body.as_bytes().to_vec())
             .send()
@@ -508,7 +513,7 @@ impl NativeUaiInventoryTransport {
                 session.expose_open_id(),
             )?)
             .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header.clone())
             .send()
             .await
@@ -544,7 +549,7 @@ impl NativeUaiInventoryTransport {
             .post(submission_url()?)
             .header(ACCEPT, "application/json")
             .header(CONTENT_TYPE, "application/json; charset=utf-8")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
             .body(body.as_bytes().to_vec())
             .send()
@@ -617,7 +622,7 @@ impl NativeUaiInventoryTransport {
             .post(url)
             .header(ACCEPT, "application/json")
             .header(CONTENT_TYPE, "application/json; charset=utf-8")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(authorization_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
             .header("u-app-id", "1501")
             .header("u-platform", "2");
@@ -697,16 +702,23 @@ impl NativeUaiInventoryTransport {
     async fn request_upload_grant_with_session(
         &self,
         session: &UaiJwtSession,
-        course_resource_id: &str,
-        group_id: &str,
+        intent: &UaiUploadIntent,
         artifact: &UaiUploadArtifact,
     ) -> ProviderResult<UaiUploadGrant> {
+        if !intent.matches_artifact(artifact) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI upload intent is foreign to the selected artifact",
+            ));
+        }
         let course_resource_id = required_remote_component(
-            Some(&serde_json::Value::String(course_resource_id.to_owned())),
+            Some(&serde_json::Value::String(
+                intent.course_resource_id().to_owned(),
+            )),
             "upload Course-resource ID",
         )?;
         let _group_id = required_remote_component(
-            Some(&serde_json::Value::String(group_id.to_owned())),
+            Some(&serde_json::Value::String(intent.group_id().to_owned())),
             "upload Group ID",
         )?;
         let detail = UaiInventoryDocument::try_new(
@@ -741,14 +753,14 @@ impl NativeUaiInventoryTransport {
                 artifact,
             )?)
             .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
             .header("Referer", UCONTENT_REFERER)
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
         let mut document = read_json_response(response, ResponseRoute::UploadGrant).await?;
-        let grant = parse_upload_grant(&document);
+        let grant = parse_upload_grant(&document, intent);
         document.zeroize();
         grant
     }
@@ -757,7 +769,7 @@ impl NativeUaiInventoryTransport {
         &self,
         grant: &UaiUploadGrant,
         artifact: &UaiUploadArtifact,
-    ) -> ProviderResult<String> {
+    ) -> ProviderResult<UaiUploadedArtifact> {
         let multipart = build_upload_multipart(grant, artifact)?;
         let response = self
             .client
@@ -769,7 +781,8 @@ impl NativeUaiInventoryTransport {
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
         let mut document = read_json_response(response, ResponseRoute::ObjectUpload).await?;
-        let key = parse_upload_result(&document, grant.file_key());
+        let key = parse_upload_result(&document, grant.file_key())
+            .and_then(|key| UaiUploadedArtifact::from_grant(grant, key));
         document.zeroize();
         key
     }
@@ -819,7 +832,7 @@ impl NativeUaiInventoryTransport {
                 &submission_version,
             )?)
             .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, sensitive_authorization(session)?)
+            .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
             .send()
             .await
@@ -1170,24 +1183,18 @@ impl UaiUploadTransport for NativeUaiInventoryTransport {
     async fn request_upload_grant(
         &self,
         context: &ProviderContext,
-        course_resource_id: &str,
-        group_id: &str,
+        intent: &UaiUploadIntent,
         artifact: &UaiUploadArtifact,
     ) -> ProviderResult<UaiUploadGrant> {
         let (session, renewed) = self.session_for_operation(context).await?;
         match self
-            .request_upload_grant_with_session(&session, course_resource_id, group_id, artifact)
+            .request_upload_grant_with_session(&session, intent, artifact)
             .await
         {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 let session = self.sessions.renew_session(context).await?;
-                self.request_upload_grant_with_session(
-                    &session,
-                    course_resource_id,
-                    group_id,
-                    artifact,
-                )
-                .await
+                self.request_upload_grant_with_session(&session, intent, artifact)
+                    .await
             }
             result => result,
         }
@@ -1198,7 +1205,7 @@ impl UaiUploadTransport for NativeUaiInventoryTransport {
         context: &ProviderContext,
         grant: &UaiUploadGrant,
         artifact: &UaiUploadArtifact,
-    ) -> ProviderResult<String> {
+    ) -> ProviderResult<UaiUploadedArtifact> {
         let (_session, _renewed) = self.session_for_operation(context).await?;
         self.upload_artifact_with_session(grant, artifact).await
     }
@@ -1247,6 +1254,47 @@ fn sensitive_authorization(session: &UaiJwtSession) -> ProviderResult<HeaderValu
     })?;
     value.set_sensitive(true);
     Ok(value)
+}
+
+fn authorization_headers(session: &UaiJwtSession) -> ProviderResult<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, sensitive_authorization(session)?);
+    Ok(headers)
+}
+
+fn ucontent_session_headers(session: &UaiJwtSession) -> ProviderResult<HeaderMap> {
+    let mut headers = authorization_headers(session)?;
+    let mut open_id = HeaderValue::from_str(session.expose_open_id()).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "UAI session contains an invalid open ID header value",
+        )
+    })?;
+    open_id.set_sensitive(true);
+    headers.insert("u-openid", open_id.clone());
+    headers.insert("x-csrftoken", open_id);
+    headers.insert("u-app-id", HeaderValue::from_static("39"));
+    headers.insert("u-platform", HeaderValue::from_static("2"));
+    headers.insert("appid", HeaderValue::from_static("undefined"));
+    headers.insert(
+        "origin",
+        HeaderValue::from_static("https://ucontent.unipus.cn"),
+    );
+    headers.insert(
+        "referer",
+        HeaderValue::from_static("https://ucontent.unipus.cn/_explorationpc_default/pc.html"),
+    );
+    if let Some(cookie) = session.expose_browser_cookie() {
+        let mut cookie = HeaderValue::from_str(cookie).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "UAI browser compatibility Cookie is invalid",
+            )
+        })?;
+        cookie.set_sensitive(true);
+        headers.insert(COOKIE, cookie);
+    }
+    Ok(headers)
 }
 
 #[derive(Clone, Copy)]
@@ -1987,6 +2035,28 @@ mod tests {
         let header = sensitive_authorization(&session).unwrap();
         assert!(header.is_sensitive());
         assert_eq!(header.to_str().unwrap(), "HEADER.PAYLOAD.SIGNATURE");
+    }
+
+    #[test]
+    fn captured_browser_cookie_and_donor_client_headers_are_ucontent_only() {
+        let session = UaiJwtSession::try_new("open-id", "HEADER.PAYLOAD.SIGNATURE")
+            .unwrap()
+            .attach_browser_cookie(Some(asterism_secrets::SecretString::new(
+                "session=synthetic; csrf=synthetic".to_owned(),
+            )))
+            .unwrap();
+        let ucontent = ucontent_session_headers(&session).unwrap();
+        assert!(ucontent[COOKIE].is_sensitive());
+        assert_eq!(ucontent["u-openid"].to_str().unwrap(), "open-id");
+        assert_eq!(ucontent["x-csrftoken"].to_str().unwrap(), "open-id");
+        assert_eq!(ucontent["u-app-id"], "39");
+        assert_eq!(ucontent["u-platform"], "2");
+        assert_eq!(ucontent["appid"], "undefined");
+
+        let management = authorization_headers(&session).unwrap();
+        assert!(management.contains_key(AUTHORIZATION));
+        assert!(!management.contains_key(COOKIE));
+        assert!(!management.contains_key("u-openid"));
     }
 
     #[test]

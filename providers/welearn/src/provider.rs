@@ -48,7 +48,10 @@ pub fn build_development_provider(
         task_detail.clone(),
         resource_transport,
     )?);
-    let duration_report = Arc::new(WellearnDurationReport::try_new(duration_transport)?);
+    let duration_report = Arc::new(WellearnDurationReport::try_new(
+        task_detail.clone(),
+        duration_transport,
+    )?);
     let task_execution = Arc::new(WellearnTaskExecution::try_new(
         resource_execution,
         duration_report,
@@ -317,7 +320,7 @@ mod tests {
         assert!(entry.duration_read.is_some());
         assert!(entry.task_execution.is_some());
         assert!(entry.browser_bridge.is_none());
-        assert_eq!(entry.runtime_settings.version, 4);
+        assert_eq!(entry.runtime_settings.version, 7);
         assert_eq!(entry.runtime_settings.definitions.len(), 12);
 
         let mut registry = ProviderRegistry::default();

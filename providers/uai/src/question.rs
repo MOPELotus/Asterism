@@ -1,11 +1,15 @@
 use std::{
     collections::{BTreeSet, HashMap},
     fmt,
+    net::IpAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use asterism_domain::{Question, QuestionId, QuestionKind, QuestionOption, TaskCapability, TaskId};
+use asterism_domain::{
+    Question, QuestionAttachment, QuestionAttachmentKind, QuestionId, QuestionKind, QuestionOption,
+    TaskCapability, TaskId,
+};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
     ProviderResult, ProviderRouteContext, QuestionInventoryCapability, QuestionParseCapability,
@@ -14,6 +18,7 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 use scraper::Html;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
@@ -33,6 +38,10 @@ const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 const MAX_JUDGE_TYPE_BYTES: usize = 128;
 const MAX_QUESTION_CHILDREN: usize = 256;
 const MAX_OPTIONS_PER_CHILD: usize = 256;
+const MAX_MEDIA_SOURCES: usize = 64;
+const MAX_MEDIA_URL_BYTES: usize = 8 * 1_024;
+const MAX_MEDIA_LABEL_BYTES: usize = 512;
+const MAX_EMBEDDED_TRANSCRIPT_BYTES: usize = 256 * 1_024;
 
 /// Redacted ownership wrapper for one encrypted UAI content response.
 pub struct UaiQuestionDocument(String);
@@ -248,10 +257,56 @@ pub struct ParsedUaiQuestion {
     kind: QuestionKind,
     stem: String,
     options: Vec<QuestionOption>,
+    attachments: Vec<QuestionAttachment>,
+    media_sources: Vec<UaiQuestionMediaSource>,
     metadata_sanitized: Value,
 }
 
+/// Ephemeral Provider-private media route retained only long enough for a
+/// future Task-bound external transcription resolver to fetch it.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiQuestionMediaSource {
+    attachment_id: String,
+    kind: QuestionAttachmentKind,
+    url: Zeroizing<String>,
+    subtitle: bool,
+}
+
+impl UaiQuestionMediaSource {
+    pub fn attachment_id(&self) -> &str {
+        &self.attachment_id
+    }
+
+    pub const fn kind(&self) -> QuestionAttachmentKind {
+        self.kind
+    }
+
+    pub fn expose_url(&self) -> &str {
+        self.url.as_str()
+    }
+
+    pub const fn is_subtitle(&self) -> bool {
+        self.subtitle
+    }
+}
+
+impl fmt::Debug for UaiQuestionMediaSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiQuestionMediaSource")
+            .field("attachment_id", &self.attachment_id)
+            .field("kind", &self.kind)
+            .field("url", &"[REDACTED]")
+            .field("subtitle", &self.subtitle)
+            .finish()
+    }
+}
+
 impl ParsedUaiQuestion {
+    pub fn media_sources(&self) -> &[UaiQuestionMediaSource] {
+        &self.media_sources
+    }
+
     fn matches_reference(&self, reference: &RemoteQuestionRef) -> bool {
         self.remote_id == reference.remote_id
             && self.position == reference.position
@@ -284,7 +339,7 @@ impl ParsedUaiQuestion {
             kind: self.kind,
             stem: self.stem.clone(),
             options: self.options.clone(),
-            attachments: Vec::new(),
+            attachments: self.attachments.clone(),
             metadata_sanitized: self.metadata_sanitized.clone(),
             position: self.position,
         };
@@ -450,6 +505,7 @@ fn parse_question_entry(
             matches!(kind, QuestionKind::FillBlank | QuestionKind::Matching),
         )?
     };
+    let media = question_media(content)?;
     let judge_types = current_judge_types(content)?;
     if matches!(
         kind,
@@ -466,12 +522,16 @@ fn parse_question_entry(
         kind,
         stem,
         options,
+        attachments: media.attachments,
+        media_sources: media.sources,
         metadata_sanitized: json!({
             "schema": "uai.encrypted-question.v1",
             "task_type": task_type,
             "remote_task_id": remote_task_id,
             "judge_types": judge_types,
             "composite_children": composite_children,
+            "media_attachment_ids": media.attachment_ids,
+            "embedded_transcript": media.embedded_transcript,
             "matching_lefts": if kind == QuestionKind::Matching {
                 Some(matching_lefts(content)?)
             } else {
@@ -549,6 +609,204 @@ fn child_choice_kind(
     }
 }
 
+struct ParsedQuestionMedia {
+    attachments: Vec<QuestionAttachment>,
+    sources: Vec<UaiQuestionMediaSource>,
+    attachment_ids: Vec<String>,
+    embedded_transcript: Option<String>,
+}
+
+fn question_media(content: &Map<String, Value>) -> ProviderResult<ParsedQuestionMedia> {
+    let Some(contents) = content.get("contents") else {
+        return Ok(ParsedQuestionMedia {
+            attachments: Vec::new(),
+            sources: Vec::new(),
+            attachment_ids: Vec::new(),
+            embedded_transcript: None,
+        });
+    };
+    let contents = contents
+        .as_array()
+        .ok_or_else(|| protocol_drift("UAI Question contents field is not an array"))?;
+    if contents.len() > 5_000 {
+        return Err(invalid_response(
+            "UAI Question contents field exceeds the item limit",
+        ));
+    }
+    let mut sources = Vec::new();
+    let mut attachments = Vec::new();
+    let mut seen_urls = BTreeSet::new();
+    let mut transcript_fragments = Vec::new();
+    for item in contents {
+        let item = item
+            .as_object()
+            .ok_or_else(|| protocol_drift("UAI Question contents contains a non-object"))?;
+        if let Some(text) = item.get("text").and_then(Value::as_str)
+            && text.trim_start().starts_with("WEBVTT")
+        {
+            let transcript = normalize_text([text]);
+            if transcript.len() > MAX_EMBEDDED_TRANSCRIPT_BYTES {
+                return Err(invalid_response(
+                    "UAI embedded transcript exceeds the size limit",
+                ));
+            }
+            if !transcript.is_empty() {
+                transcript_fragments.push(transcript);
+            }
+        }
+        if let Some(path) = item.get("path").and_then(Value::as_str)
+            && media_kind(path).is_some()
+        {
+            push_media_source(
+                &mut sources,
+                &mut attachments,
+                &mut seen_urls,
+                path,
+                item.get("name").and_then(Value::as_str),
+                false,
+            )?;
+        }
+        if let Some(subtitles) = item.get("subtitles") {
+            let subtitles = subtitles
+                .as_array()
+                .ok_or_else(|| protocol_drift("UAI Question subtitles field is not an array"))?;
+            if subtitles.len() > MAX_MEDIA_SOURCES {
+                return Err(invalid_response(
+                    "UAI Question subtitle sources exceed the item limit",
+                ));
+            }
+            for subtitle in subtitles {
+                let subtitle = subtitle.as_object().ok_or_else(|| {
+                    protocol_drift("UAI Question subtitle source is not an object")
+                })?;
+                if let Some(path) = subtitle.get("path").and_then(Value::as_str) {
+                    push_media_source(
+                        &mut sources,
+                        &mut attachments,
+                        &mut seen_urls,
+                        path,
+                        subtitle.get("name").and_then(Value::as_str),
+                        true,
+                    )?;
+                }
+            }
+        }
+    }
+    let embedded_transcript = if transcript_fragments.is_empty() {
+        None
+    } else {
+        let transcript = transcript_fragments.join(" ");
+        if transcript.len() > MAX_EMBEDDED_TRANSCRIPT_BYTES {
+            return Err(invalid_response(
+                "UAI combined embedded transcript exceeds the size limit",
+            ));
+        }
+        Some(transcript)
+    };
+    let attachment_ids = attachments
+        .iter()
+        .filter_map(|attachment| attachment.remote_id.clone())
+        .collect();
+    Ok(ParsedQuestionMedia {
+        attachments,
+        sources,
+        attachment_ids,
+        embedded_transcript,
+    })
+}
+
+fn push_media_source(
+    sources: &mut Vec<UaiQuestionMediaSource>,
+    attachments: &mut Vec<QuestionAttachment>,
+    seen_urls: &mut BTreeSet<String>,
+    raw_url: &str,
+    raw_label: Option<&str>,
+    subtitle: bool,
+) -> ProviderResult<()> {
+    let (canonical_url, kind) = canonical_media_url(raw_url, subtitle)?;
+    if !seen_urls.insert(canonical_url.clone()) {
+        return Ok(());
+    }
+    if sources.len() >= MAX_MEDIA_SOURCES {
+        return Err(invalid_response(
+            "UAI Question media sources exceed the item limit",
+        ));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:question-media:v1\0");
+    digest.update(canonical_url.as_bytes());
+    let attachment_id = format!("uai-media-v1:{:x}", digest.finalize());
+    let label = raw_label
+        .map(normalize_rich_text)
+        .filter(|label| !label.is_empty() && label.len() <= MAX_MEDIA_LABEL_BYTES);
+    attachments.push(QuestionAttachment {
+        kind,
+        remote_id: Some(attachment_id.clone()),
+        label,
+        metadata_sanitized: json!({
+            "schema": "uai.question-media.v1",
+            "subtitle": subtitle,
+        }),
+    });
+    sources.push(UaiQuestionMediaSource {
+        attachment_id,
+        kind,
+        url: Zeroizing::new(canonical_url),
+        subtitle,
+    });
+    Ok(())
+}
+
+fn canonical_media_url(
+    raw_url: &str,
+    subtitle: bool,
+) -> ProviderResult<(String, QuestionAttachmentKind)> {
+    if raw_url.is_empty() || raw_url.len() > MAX_MEDIA_URL_BYTES {
+        return Err(protocol_drift(
+            "UAI Question media URL is invalid or unbounded",
+        ));
+    }
+    let mut url = reqwest::Url::parse(raw_url)
+        .map_err(|_| protocol_drift("UAI Question media URL is malformed"))?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+        || url
+            .host_str()
+            .is_some_and(|host| host.parse::<IpAddr>().is_ok())
+    {
+        return Err(protocol_drift(
+            "UAI Question media URL is not a safe HTTPS route",
+        ));
+    }
+    url.set_fragment(None);
+    let kind = if subtitle {
+        QuestionAttachmentKind::File
+    } else {
+        media_kind(url.path())
+            .ok_or_else(|| protocol_drift("UAI Question media URL has an unknown media kind"))?
+    };
+    Ok((url.to_string(), kind))
+}
+
+fn media_kind(value: &str) -> Option<QuestionAttachmentKind> {
+    let lower = value.to_ascii_lowercase();
+    if [".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac", "audio/"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        Some(QuestionAttachmentKind::Audio)
+    } else if [".mp4", "video/"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        Some(QuestionAttachmentKind::Video)
+    } else {
+        None
+    }
+}
+
 fn question_stem(content: &Map<String, Value>) -> ProviderResult<String> {
     let mut fragments = Vec::new();
     if let Some(text) = content
@@ -580,7 +838,11 @@ fn question_stem(content: &Map<String, Value>) -> ProviderResult<String> {
             let item = item
                 .as_object()
                 .ok_or_else(|| protocol_drift("UAI Question contents contains a non-object"))?;
-            if let Some(text) = item.get("text").and_then(Value::as_str) {
+            if let Some(text) = item
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim_start().starts_with("WEBVTT"))
+            {
                 fragments.push(normalize_rich_text(text));
             }
         }
@@ -1294,6 +1556,68 @@ mod tests {
             parsed.metadata_sanitized["composite_children"][1]["options"][0]["content"],
             "Second A"
         );
+    }
+
+    #[test]
+    fn donor_media_sources_and_embedded_transcript_are_bounded_without_persisting_urls() {
+        let parsed = parse_question_entry(
+            &json!({
+                "id": "9001",
+                "content": {
+                    "type": "short_answer",
+                    "direction": {"text": "Summarize the recording"},
+                    "contents": [
+                        {
+                            "name": "Listening.mp3",
+                            "path": "https://media.example.edu/listening.mp3#duration=10",
+                            "text": "WEBVTT\n00:00.000 --> 00:01.000\nSynthetic transcript",
+                            "subtitles": [
+                                {"name":"English", "path":"https://media.example.edu/listening.vtt#track=en"}
+                            ]
+                        }
+                    ],
+                    "children": [
+                        {"type":"basic", "replyType":"text-area", "quesText":"What happened?"}
+                    ]
+                }
+            }),
+            1,
+            "short_answer",
+            "group:2001:unit-1:group-media",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.attachments.len(), 2);
+        assert_eq!(parsed.attachments[0].kind, QuestionAttachmentKind::Audio);
+        assert_eq!(parsed.attachments[1].kind, QuestionAttachmentKind::File);
+        assert_eq!(parsed.media_sources().len(), 2);
+        assert_eq!(
+            parsed.media_sources()[0].expose_url(),
+            "https://media.example.edu/listening.mp3"
+        );
+        assert!(parsed.media_sources()[1].is_subtitle());
+        assert!(!format!("{:?}", parsed.media_sources()[0]).contains("media.example.edu"));
+        assert_eq!(
+            parsed.metadata_sanitized["embedded_transcript"],
+            "WEBVTT 00:00.000 --> 00:01.000 Synthetic transcript"
+        );
+        assert!(!parsed.stem.contains("WEBVTT"));
+        let question = parsed.to_question(TaskId::new()).unwrap();
+        let encoded = serde_json::to_string(&question).unwrap();
+        assert!(!encoded.contains("media.example.edu"));
+        assert!(encoded.contains("uai-media-v1:"));
+    }
+
+    #[test]
+    fn media_routes_fail_closed_on_non_https_or_literal_ip_hosts() {
+        for path in [
+            "http://media.example.edu/listening.mp3",
+            "https://127.0.0.1/listening.mp3",
+        ] {
+            assert!(
+                question_media(json!({"contents":[{"path":path}]}).as_object().unwrap()).is_err()
+            );
+        }
     }
 
     #[test]

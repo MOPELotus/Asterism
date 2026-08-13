@@ -21,7 +21,9 @@ use crate::credit::settle_execution_reservation;
 use crate::outbox::enqueue_in_transaction;
 use crate::{
     Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
-    ExecutionBillingReservation, ExecutionLogAppendRequest, ExecutionProgressUpdate,
+    ExecutionBillingReservation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
+    ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
+    ExecutionCapabilityStepState, ExecutionLogAppendRequest, ExecutionProgressUpdate,
     ExecutionQueryRepository, ExecutionRecoveryFinishRequest, ExecutionRepository,
     ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome,
     ExecutionScheduleRequest, ExecutionSubmissionRepository,
@@ -52,6 +54,10 @@ impl SqliteExecutionRepository {
 }
 
 #[async_trait]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the scheduling transaction keeps execution, phase plan, settings, billing, job, audit and outbox writes visibly atomic"
+)]
 impl ExecutionRepository for SqliteExecutionRepository {
     async fn find_idempotent_execution(
         &self,
@@ -144,6 +150,18 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .bind(request.idempotency_key)
         .execute(&mut *transaction)
         .await?;
+
+        for (index, capability) in request.capability_plan.iter().copied().enumerate() {
+            sqlx::query(
+                "INSERT INTO execution_capability_steps \
+                 (execution_id, position, capability, state) VALUES (?, ?, ?, 'pending')",
+            )
+            .bind(execution.id.to_string())
+            .bind(i64::try_from(index + 1).expect("capability plan is bounded"))
+            .bind(enum_name(capability)?)
+            .execute(&mut *transaction)
+            .await?;
+        }
 
         if let Some(resolution) = request.runtime_settings {
             insert_runtime_settings_snapshot(&mut transaction, execution.id, resolution.snapshot)
@@ -437,6 +455,125 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .await?;
         transaction.commit().await?;
         Ok(execution)
+    }
+}
+
+#[async_trait]
+impl ExecutionCapabilityStepRepository for SqliteExecutionRepository {
+    async fn find_execution_capability_steps(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Vec<ExecutionCapabilityStep>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT execution_id, position, capability, state, issued_attempt_id, \
+                    issued_at, succeeded_at FROM execution_capability_steps \
+             WHERE execution_id = ? ORDER BY position",
+        )
+        .bind(execution_id.to_string())
+        .fetch_all(self.database.pool())
+        .await?;
+        rows.iter().map(decode_capability_step).collect()
+    }
+
+    async fn issue_execution_capability_step(
+        &self,
+        request: ExecutionCapabilityStepMutation<'_>,
+    ) -> Result<ExecutionCapabilityStepIssueOutcome, StorageError> {
+        validate_worker_token(request.worker_id, request.correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let active = find_active_attempt(&mut transaction, request.execution_id).await?;
+        if active.id != request.attempt_id {
+            return Err(StorageError::ExecutionAttemptNotActive);
+        }
+        let step: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT state, issued_attempt_id FROM execution_capability_steps \
+             WHERE execution_id = ? AND capability = ?",
+        )
+        .bind(request.execution_id.to_string())
+        .bind(enum_name(request.capability)?)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        match step
+            .as_ref()
+            .map(|(state, attempt_id)| (state.as_str(), attempt_id.as_deref()))
+        {
+            Some(("issued", Some(issued_attempt_id)))
+                if issued_attempt_id == request.attempt_id.to_string() =>
+            {
+                transaction.rollback().await?;
+                Ok(ExecutionCapabilityStepIssueOutcome::AlreadyIssued)
+            }
+            Some(("pending", None)) => {
+                let changed = sqlx::query(
+                    "UPDATE execution_capability_steps SET state = 'issued', \
+                            issued_attempt_id = ?, issued_at = ? \
+                     WHERE execution_id = ? AND capability = ? AND state = 'pending' \
+                       AND NOT EXISTS ( \
+                         SELECT 1 FROM execution_capability_steps AS earlier \
+                         WHERE earlier.execution_id = execution_capability_steps.execution_id \
+                           AND earlier.position < execution_capability_steps.position \
+                           AND earlier.state != 'succeeded')",
+                )
+                .bind(request.attempt_id.to_string())
+                .bind(encode_timestamp(request.at))
+                .bind(request.execution_id.to_string())
+                .bind(enum_name(request.capability)?)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+                if changed != 1 {
+                    return Err(StorageError::ExecutionStateConflict);
+                }
+                transaction.commit().await?;
+                Ok(ExecutionCapabilityStepIssueOutcome::Issued)
+            }
+            Some(("issued" | "succeeded" | "ambiguous", _) | _) | None => {
+                Err(StorageError::ExecutionStateConflict)
+            }
+        }
+    }
+
+    async fn succeed_execution_capability_step(
+        &self,
+        request: ExecutionCapabilityStepMutation<'_>,
+    ) -> Result<(), StorageError> {
+        validate_worker_token(request.worker_id, request.correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let changed = sqlx::query(
+            "UPDATE execution_capability_steps SET state = 'succeeded', succeeded_at = ? \
+             WHERE execution_id = ? AND capability = ? AND state = 'issued' \
+               AND issued_attempt_id = ?",
+        )
+        .bind(encode_timestamp(request.at))
+        .bind(request.execution_id.to_string())
+        .bind(enum_name(request.capability)?)
+        .bind(request.attempt_id.to_string())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 }
 
@@ -1793,8 +1930,21 @@ fn validate_schedule_request(request: &ExecutionScheduleRequest<'_>) -> Result<(
             && valid_runtime_settings_snapshot(resolution.snapshot, execution.created_at)
             && resolution.snapshot.resolved.schema_version == resolution.schema.version
     });
+    let capability_plan_valid = request.capability_plan.len()
+        == execution.requested_capabilities.len()
+        && request
+            .capability_plan
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            == execution
+                .requested_capabilities
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
     if execution.state != ExecutionState::Scheduled
         || !valid_requested_capabilities(&execution.requested_capabilities)
+        || !capability_plan_valid
         || execution
             .requested_capabilities
             .contains(&TaskCapability::SubmissionExecute)
@@ -2326,6 +2476,38 @@ fn decode_execution(row: &sqlx::sqlite::SqliteRow) -> Result<Execution, StorageE
     })
 }
 
+fn decode_capability_step(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ExecutionCapabilityStep, StorageError> {
+    let state = match row.try_get::<&str, _>("state")? {
+        "pending" => ExecutionCapabilityStepState::Pending,
+        "issued" => ExecutionCapabilityStepState::Issued,
+        "succeeded" => ExecutionCapabilityStepState::Succeeded,
+        "ambiguous" => ExecutionCapabilityStepState::Ambiguous,
+        _ => {
+            return Err(StorageError::InvalidData(
+                "persisted execution capability step has an invalid state".to_owned(),
+            ));
+        }
+    };
+    Ok(ExecutionCapabilityStep {
+        execution_id: ExecutionId::from_str(row.try_get("execution_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        position: u8::try_from(row.try_get::<i64, _>("position")?).map_err(|_| {
+            StorageError::InvalidData("execution capability step position is invalid".to_owned())
+        })?,
+        capability: decode_enum(row.try_get("capability")?)?,
+        state,
+        issued_attempt_id: row
+            .try_get::<Option<&str>, _>("issued_attempt_id")?
+            .map(ExecutionAttemptId::from_str)
+            .transpose()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        issued_at: decode_optional_timestamp(row.try_get("issued_at")?)?,
+        succeeded_at: decode_optional_timestamp(row.try_get("succeeded_at")?)?,
+    })
+}
+
 fn valid_requested_capabilities(capabilities: &[TaskCapability]) -> bool {
     !capabilities.is_empty()
         && capabilities.len() <= 5
@@ -2515,6 +2697,7 @@ mod tests {
         let execution = scheduled_execution(owner, task_id, now);
         let request = || ExecutionScheduleRequest {
             execution: &execution,
+            capability_plan: &execution.requested_capabilities,
             billing: None,
             runtime_settings: None,
             expected_task_state: OrchestrationState::Ready,
@@ -2557,6 +2740,98 @@ mod tests {
                 .get("count");
             assert_eq!(count, 1, "unexpected row count in {table}");
         }
+    }
+
+    #[tokio::test]
+    async fn composite_capability_steps_are_ordered_and_attempt_bound() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let mut execution = scheduled_execution(owner, task_id, now);
+        execution.requested_capabilities = vec![
+            TaskCapability::ResourceExecution,
+            TaskCapability::DurationReport,
+        ];
+        let plan = [
+            TaskCapability::DurationReport,
+            TaskCapability::ResourceExecution,
+        ];
+        let mut request = test_request(&execution, owner, "composite-capabilities");
+        request.capability_plan = &plan;
+        assert!(matches!(
+            repository.schedule_execution(request).await.unwrap(),
+            ExecutionScheduleOutcome::Created(_)
+        ));
+        let steps = repository
+            .find_execution_capability_steps(execution.id)
+            .await
+            .unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].position, 1);
+        assert_eq!(steps[0].capability, TaskCapability::DurationReport);
+        assert_eq!(steps[1].position, 2);
+        assert_eq!(steps[1].capability, TaskCapability::ResourceExecution);
+
+        let job_id = claim_execution(&database, &execution, "phase-worker", now).await;
+        let attempt = repository
+            .start_attempt(ExecutionAttemptStartRequest {
+                execution_id: execution.id,
+                scheduler_job_id: job_id,
+                worker_id: "phase-worker",
+                at: now + chrono::Duration::seconds(1),
+                correlation_id: "phase-attempt",
+            })
+            .await
+            .unwrap();
+        let mutation = |capability, seconds| ExecutionCapabilityStepMutation {
+            execution_id: execution.id,
+            attempt_id: attempt.id,
+            capability,
+            scheduler_job_id: job_id,
+            worker_id: "phase-worker",
+            correlation_id: "phase-attempt",
+            at: now + chrono::Duration::seconds(seconds),
+        };
+        assert!(
+            repository
+                .issue_execution_capability_step(mutation(TaskCapability::ResourceExecution, 2,))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            repository
+                .issue_execution_capability_step(mutation(TaskCapability::DurationReport, 2))
+                .await
+                .unwrap(),
+            ExecutionCapabilityStepIssueOutcome::Issued
+        );
+        assert_eq!(
+            repository
+                .issue_execution_capability_step(mutation(TaskCapability::DurationReport, 2))
+                .await
+                .unwrap(),
+            ExecutionCapabilityStepIssueOutcome::AlreadyIssued
+        );
+        repository
+            .succeed_execution_capability_step(mutation(TaskCapability::DurationReport, 3))
+            .await
+            .unwrap();
+        repository
+            .issue_execution_capability_step(mutation(TaskCapability::ResourceExecution, 4))
+            .await
+            .unwrap();
+        repository
+            .succeed_execution_capability_step(mutation(TaskCapability::ResourceExecution, 5))
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .find_execution_capability_steps(execution.id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|step| step.state == ExecutionCapabilityStepState::Succeeded)
+        );
     }
 
     #[tokio::test]
@@ -3605,6 +3880,7 @@ mod tests {
     ) -> ExecutionScheduleRequest<'a> {
         ExecutionScheduleRequest {
             execution,
+            capability_plan: &execution.requested_capabilities,
             billing: None,
             runtime_settings: None,
             expected_task_state: OrchestrationState::Ready,
@@ -3624,6 +3900,7 @@ mod tests {
     ) -> ExecutionScheduleRequest<'a> {
         ExecutionScheduleRequest {
             execution,
+            capability_plan: &execution.requested_capabilities,
             billing: Some(ExecutionBillingReservation { quote, reservation }),
             runtime_settings: None,
             expected_task_state: OrchestrationState::Ready,

@@ -546,10 +546,12 @@ mod tests {
             Some(CaptureRecipe {
                 version: 3,
                 start_url: "https://provider-alpha.example/login".to_owned(),
-                allowed_origins: vec!["https://provider-alpha.example".to_owned()],
+                navigation_origins: vec!["https://provider-alpha.example".to_owned()],
+                read_origins: vec!["https://provider-alpha.example".to_owned()],
                 poll_interval_millis: 500,
                 auth_method: AuthMethod::AssistedSession,
                 session_kind: SessionKind::Cookie,
+                readiness: asterism_provider_api::CaptureReadiness::OutputsComplete,
                 outputs: vec![CaptureCredentialOutput {
                     purpose: SecretPurpose::ProviderCookie,
                     required: true,

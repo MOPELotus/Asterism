@@ -11,8 +11,8 @@ use asterism_domain::{
     ProviderId, ProviderRuntimeSettingsId, Question, QuestionContentFingerprint,
     QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
     SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
-    TaskActionReceiptId, TaskId, TaskLifecycleAction, Timestamp, User, UserId, UserProfile,
-    UserStatus, WebSession, WebSessionId,
+    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
+    UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
@@ -680,6 +680,9 @@ pub struct ExecutionRuntimeSettingsResolution<'a> {
 #[derive(Clone, Debug)]
 pub struct ExecutionScheduleRequest<'a> {
     pub execution: &'a Execution,
+    /// Exact Provider-approved phase order. This is persisted atomically with
+    /// the Execution and must be a permutation of `requested_capabilities`.
+    pub capability_plan: &'a [TaskCapability],
     pub billing: Option<ExecutionBillingReservation<'a>>,
     pub runtime_settings: Option<ExecutionRuntimeSettingsResolution<'a>>,
     pub expected_task_state: OrchestrationState,
@@ -687,6 +690,63 @@ pub struct ExecutionScheduleRequest<'a> {
     pub idempotency_key: &'a str,
     pub actor: AuditActor,
     pub correlation_id: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionCapabilityStepState {
+    Pending,
+    Issued,
+    Succeeded,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionCapabilityStep {
+    pub execution_id: ExecutionId,
+    pub position: u8,
+    pub capability: TaskCapability,
+    pub state: ExecutionCapabilityStepState,
+    pub issued_attempt_id: Option<ExecutionAttemptId>,
+    pub issued_at: Option<Timestamp>,
+    pub succeeded_at: Option<Timestamp>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionCapabilityStepMutation<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub capability: TaskCapability,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionCapabilityStepIssueOutcome {
+    Issued,
+    AlreadyIssued,
+}
+
+/// Durable phase boundary for a composite Provider execution. A phase is
+/// marked issued before the remote mutation, preventing crash recovery from
+/// replaying a possibly accepted non-idempotent request.
+#[async_trait]
+pub trait ExecutionCapabilityStepRepository: Send + Sync {
+    async fn find_execution_capability_steps(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Vec<ExecutionCapabilityStep>, StorageError>;
+
+    async fn issue_execution_capability_step(
+        &self,
+        request: ExecutionCapabilityStepMutation<'_>,
+    ) -> Result<ExecutionCapabilityStepIssueOutcome, StorageError>;
+
+    async fn succeed_execution_capability_step(
+        &self,
+        request: ExecutionCapabilityStepMutation<'_>,
+    ) -> Result<(), StorageError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

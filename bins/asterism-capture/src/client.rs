@@ -1135,10 +1135,12 @@ mod tests {
         json!({
             "version": 1,
             "start_url": "https://app.vocabgo.com/student/",
-            "allowed_origins": ["https://app.vocabgo.com"],
+            "navigation_origins": ["https://app.vocabgo.com"],
+            "read_origins": ["https://app.vocabgo.com"],
             "poll_interval_millis": 800,
             "auth_method": "assisted_session",
             "session_kind": "cookie",
+            "readiness": {"type": "outputs_complete"},
             "outputs": [{
                 "purpose": "provider_cookie",
                 "required": true,

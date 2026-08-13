@@ -2,10 +2,10 @@ use std::{collections::BTreeSet, fmt, fmt::Write as _, sync::Arc};
 
 use asterism_domain::{AuthMethod, HumanRequiredReason, SessionKind, WaitingUserState};
 use asterism_provider_api::{
-    AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureRecipe,
-    CaptureValueSource, CredentialReplacement, CredentialValidation, ProviderAuthContext,
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
-    ProviderResult, SessionStatus,
+    AuthChallenge, AuthenticationCapability, CaptureCredentialOutput, CaptureReadiness,
+    CaptureRecipe, CaptureValueSource, CredentialReplacement, CredentialValidation,
+    ProviderAuthContext, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
+    ProviderMetadata, ProviderResult, SessionStatus,
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, CredentialField, SecretPurpose, SecretString,
@@ -27,6 +27,9 @@ const MAX_COOKIE_BYTES: usize = 64 * 1_024;
 const MAX_COOKIE_FIELDS: usize = 128;
 const MAX_COOKIE_NAME_BYTES: usize = 256;
 const SSO_ORIGIN: &str = "https://sso.sflep.com";
+const QQ_OAUTH_ORIGIN: &str = "https://graph.qq.com";
+const WECHAT_OAUTH_ORIGIN: &str = "https://open.weixin.qq.com";
+const APPLE_OAUTH_ORIGIN: &str = "https://appleid.apple.com";
 const SSO_CALLBACK_PREFIX: &str = "/idsvr/";
 const WELEARN_ORIGIN: &str = "https://welearn.sflep.com";
 const WELEARN_CAPTURE_START_URL: &str = "https://welearn.sflep.com/user/prelogin.aspx?loginret=http%3a%2f%2fwelearn.sflep.com%2fuser%2floginredirect.aspx";
@@ -172,12 +175,26 @@ impl ProviderIdentity for WellearnAuthentication {
 impl AuthenticationCapability for WellearnAuthentication {
     fn capture_recipe(&self) -> Option<CaptureRecipe> {
         Some(CaptureRecipe {
-            version: 1,
+            version: 4,
             start_url: WELEARN_CAPTURE_START_URL.to_owned(),
-            allowed_origins: vec![WELEARN_ORIGIN.to_owned(), SSO_ORIGIN.to_owned()],
+            navigation_origins: vec![
+                WELEARN_ORIGIN.to_owned(),
+                SSO_ORIGIN.to_owned(),
+                QQ_OAUTH_ORIGIN.to_owned(),
+                WECHAT_OAUTH_ORIGIN.to_owned(),
+                APPLE_OAUTH_ORIGIN.to_owned(),
+            ],
+            read_origins: vec![WELEARN_ORIGIN.to_owned()],
             poll_interval_millis: 500,
             auth_method: AuthMethod::AssistedSession,
             session_kind: SessionKind::Cookie,
+            readiness: CaptureReadiness::ResponseObserved {
+                origin: WELEARN_ORIGIN.to_owned(),
+                method: "GET".to_owned(),
+                path_and_query: "/ajax/authCourse.aspx?action=gmc".to_owned(),
+                status: 200,
+                mime_type: "application/json".to_owned(),
+            },
             outputs: vec![CaptureCredentialOutput {
                 purpose: SecretPurpose::ProviderCookie,
                 required: true,
@@ -516,6 +533,9 @@ pub fn classify_password_login_response(document: &[u8]) -> ProviderResult<Welle
     }
     let mut envelope: LoginEnvelope =
         serde_json::from_slice(document).map_err(|_| invalid_login_response())?;
+    if !envelope.extra_check.verification_token.is_empty() {
+        return Err(classify_login_rejection(&envelope));
+    }
     match envelope.code {
         Some(0) => {
             let redirect = std::mem::take(&mut envelope.data);
@@ -757,6 +777,16 @@ mod tests {
     }
 
     #[test]
+    fn password_encoding_uses_utf8_bytes_like_the_browser_text_encoder() {
+        let cipher = encode_password_at("密码🙂", 1_760_000_000_123).unwrap();
+        assert_eq!(
+            cipher.encoded(),
+            "MTc2MDAwMDAwMDE4MiplNWFmODZlN2EwODFmMDlmOTk4Mg=="
+        );
+        assert_eq!(cipher.timestamp_milliseconds(), 1_760_000_000_182);
+    }
+
+    #[test]
     fn login_outcomes_are_typed_without_leaking_response_details() {
         let success = classify_password_login_response(LOGIN_SUCCESS).unwrap();
         assert!(
@@ -784,6 +814,17 @@ mod tests {
             Some(HumanRequiredReason::SmsVerification)
         );
         assert!(!format!("{sms:?}").contains("SAFE_VC_TOKEN"));
+
+        let sms_with_success_code = classify_password_login_response(
+            br#"{"code":0,"data":"","extraCheck":{"vcToken":"SAFE_SUCCESS_TOKEN"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(sms_with_success_code.kind, ProviderErrorKind::HumanRequired);
+        assert_eq!(
+            sms_with_success_code.human_required_reason,
+            Some(HumanRequiredReason::SmsVerification)
+        );
+        assert!(!format!("{sms_with_success_code:?}").contains("SAFE_SUCCESS_TOKEN"));
     }
 
     #[test]
@@ -804,6 +845,51 @@ mod tests {
         assert!(encode_password_at("", 1).is_err());
         assert!(encode_password_at("bad\npassword", 1).is_err());
         assert!(encode_password_at(&"x".repeat(MAX_PASSWORD_BYTES + 1), 1).is_err());
+    }
+
+    #[test]
+    fn capture_recipe_covers_the_interactive_sso_page_and_final_cookie_origin() {
+        let authentication = WellearnAuthentication::try_new(
+            Arc::new(FixtureTransport {
+                exchanges: AtomicUsize::new(0),
+                validations: AtomicUsize::new(0),
+            }),
+            Arc::new(FixtureSessions),
+        )
+        .unwrap();
+        let recipe = authentication.capture_recipe().unwrap();
+        recipe.validate().unwrap();
+        assert_eq!(recipe.version, 4);
+        assert_eq!(recipe.start_url, WELEARN_CAPTURE_START_URL);
+        assert_eq!(
+            recipe.navigation_origins,
+            [
+                WELEARN_ORIGIN,
+                SSO_ORIGIN,
+                QQ_OAUTH_ORIGIN,
+                WECHAT_OAUTH_ORIGIN,
+                APPLE_OAUTH_ORIGIN,
+            ]
+        );
+        assert_eq!(recipe.read_origins, [WELEARN_ORIGIN]);
+        assert_eq!(recipe.auth_method, AuthMethod::AssistedSession);
+        assert_eq!(recipe.session_kind, SessionKind::Cookie);
+        assert_eq!(
+            recipe.readiness,
+            CaptureReadiness::ResponseObserved {
+                origin: WELEARN_ORIGIN.to_owned(),
+                method: "GET".to_owned(),
+                path_and_query: "/ajax/authCourse.aspx?action=gmc".to_owned(),
+                status: 200,
+                mime_type: "application/json".to_owned(),
+            }
+        );
+        assert_eq!(
+            recipe.outputs[0].sources,
+            [CaptureValueSource::CookieHeader {
+                origin: WELEARN_ORIGIN.to_owned(),
+            }]
+        );
     }
 
     #[test]

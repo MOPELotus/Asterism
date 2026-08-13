@@ -8,8 +8,11 @@ const MAX_SETTING_LABEL_BYTES: usize = 120;
 const MAX_SETTING_DESCRIPTION_BYTES: usize = 400;
 const MAX_CHOICE_OPTIONS: usize = 64;
 const MAX_CHOICE_BYTES: usize = 120;
-const MAX_PROVIDER_EXECUTION_CONCURRENCY: i64 = 64;
-const MAX_ACCOUNT_EXECUTION_CONCURRENCY: i64 = 16;
+// The audited WELearn donors expose a bounded 1..=100 per-account worker
+// range. Core keeps the value finite and admission-controlled, but must not
+// make an evidenced Provider contract unrepresentable.
+const MAX_PROVIDER_EXECUTION_CONCURRENCY: i64 = 100;
+const MAX_ACCOUNT_EXECUTION_CONCURRENCY: i64 = 100;
 const MIN_ACCOUNT_SCAN_INTERVAL_SECONDS: u64 = 60;
 const MAX_ACCOUNT_SCAN_INTERVAL_SECONDS: u64 = 7 * 24 * 60 * 60;
 
@@ -866,7 +869,7 @@ mod tests {
         let mut unsafe_cap = schema();
         unsafe_cap.definitions[0].kind = ProviderSettingKind::Integer {
             minimum: 1,
-            maximum: 17,
+            maximum: 101,
             step: 1,
         };
         unsafe_cap.definitions[0].core_behavior =

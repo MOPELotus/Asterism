@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::Question;
 use asterism_provider_api::{ProviderContext, ProviderError, ProviderErrorKind, ProviderResult};
@@ -117,17 +117,47 @@ fn candidate_words(question: &Question, mode: i64) -> ProviderResult<(Vec<String
 }
 
 fn option_words(question: &Question, sentence_mode: bool) -> ProviderResult<Vec<String>> {
+    if sentence_mode {
+        let mut top_level = BTreeMap::new();
+        for (fallback_index, option) in question.options.iter().enumerate() {
+            let index = option
+                .metadata_sanitized
+                .get("top_level_index")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(fallback_index);
+            let content = option
+                .metadata_sanitized
+                .get("top_level_content")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    option
+                        .content
+                        .as_deref()
+                        .and_then(|value| value.rsplit(" — ").next())
+                })
+                .filter(|value| valid_candidate(value))
+                .ok_or_else(|| {
+                    protocol_drift("Cidaren sentence option contains an invalid parent candidate")
+                })?;
+            match top_level.get(&index) {
+                Some(existing) if existing != content => {
+                    return Err(protocol_drift(
+                        "Cidaren sentence options disagree on their parent candidate",
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    top_level.insert(index, content.to_owned());
+                }
+            }
+        }
+        return Ok(top_level.into_values().collect());
+    }
     question
         .options
         .iter()
         .filter_map(|option| option.content.as_deref())
-        .map(|value| {
-            if sentence_mode {
-                value.rsplit(" — ").next().unwrap_or(value)
-            } else {
-                value
-            }
-        })
         .map(|value| {
             valid_candidate(value)
                 .then(|| value.to_owned())
@@ -235,8 +265,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        CidarenStudyTaskDocument, CidarenWordEvidence, parse_study_task_info_response,
-        parse_word_info_response, resolve_answer_candidate,
+        CidarenStudyTaskDocument, CidarenWordEvidence, parse_attempt_question,
+        parse_study_task_info_response, parse_word_info_response, resolve_answer_candidate,
     };
 
     #[derive(Debug)]
@@ -356,6 +386,49 @@ mod tests {
                 .unwrap()
                 .answer,
             NormalizedAnswer::Texts(vec!["alpha".to_owned()])
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_sentence_loads_top_level_parent_evidence_once() {
+        let transport = Arc::new(FixtureTransport {
+            prototype_calls: AtomicUsize::new(0),
+            evidence_calls: AtomicUsize::new(0),
+        });
+        let parsed = parse_attempt_question(
+            &json!({
+                "topic_code": "nested-topic",
+                "topic_mode": 41,
+                "stem": {"content": "Complete {}", "remark": "这是合成例句。"},
+                "options": [{
+                    "answer_tag": "1#",
+                    "content": "alpha",
+                    "sub_options": [
+                        {"answer_tag": 0, "content": "alpha"},
+                        {"answer_tag": 1, "content": "beta"}
+                    ]
+                }]
+            }),
+            "class-task:2002",
+            1,
+        )
+        .unwrap();
+        let question = parsed.to_question(TaskId::new()).unwrap();
+        let evidence = load_answer_evidence(
+            transport.as_ref(),
+            &provider_context(),
+            &answer_binding(),
+            &question,
+        )
+        .await
+        .unwrap();
+        assert_eq!(transport.prototype_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.evidence_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            resolve_answer_candidate(&question, &evidence)
+                .unwrap()
+                .answer,
+            NormalizedAnswer::Selections(vec!["s:1#0".to_owned()])
         );
     }
 

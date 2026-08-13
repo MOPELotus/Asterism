@@ -4,8 +4,9 @@
 |---|---|---|
 | Imported token format changes | Current donor treats `UserToken` as opaque | Validate only bounded header safety; do not require historical hex length |
 | Token expires after another login | Donor warns another device login can refresh token | Classify authenticated-read rejection as Authentication, then acquire a fresh manual or Capture-assisted composite session |
-| WeChat OAuth/bootstrap changes | Current workflow depends on WeChat H5 and browser storage | Keep a visible origin-bounded BrowserBridge/Capture path; fail closed when the browser recipe or captured credential shape drifts |
-| Historical native WeChat exchange is copied as current | Original `LoginByWechatCode` signs a stale hard-coded code while sending the runtime code | Treat it as non-reproducible lineage; require coherent live signature evidence before adding native OAuth, while retaining the implemented Capture route |
+| WeChat OAuth callback acquisition changes | Current authorization callback is delivered inside PC WeChat XWeb; the generic helper only launches isolated desktop Chromium | Keep callback/helper acquisition explicit and fail closed. Do not claim that a declarative Edge/Chrome recipe observes the WeChat session, and do not persist or replay the single-use code |
+| Historical native WeChat exchange is copied as current | Original donor `LoginByWechatCode` signs a stale hard-coded code; the frozen first-party `2.7.0.260715_01` H5 and redacted live-safe V2 exchange establish the replacement | Use only the current P-256/SPKI, sorted MD5, ECDH, HKDF `vcg-auth-aes` and AES-GCM/AAD flow; fail closed on handshake/version/AAD drift and fresh-read the resulting account before persistence |
+| OAuth exchange is retried after an ambiguous failure | WeChat callback code is single-use and the V2 POST mutates authentication state | Core must durably claim and consume an owner/account/AuthSession-bound artifact; Provider sends once and never retries a Network-ambiguous result |
 | Account validation returns HTML/redirect | Donor assumes JSON | Shared native client disables redirects, bounds the body and requires JSON before parsing |
 | Class-task pagination is partial | Donor loops pages from `total` | Native transport fetches page one first; parser requires a complete, ordered, total-consistent page set before returning any Courses/Tasks |
 | Body and signing versions are accidentally unified | Current donor sends `231204` but signs `240122` | Freeze the split in an exact-time request vector and treat any future change as protocol research |
@@ -17,8 +18,8 @@
 | New `task_type` appears | Current evidence recognizes class 1/2 and ordinary study 3 | Fail closed within the matching response family and add a sanitized fixture before normalization |
 | Status vocabulary changes | Donor documents `over_status` 1/2/3 | Preserve unknown only after explicit mapping decision; never silently mark executable |
 | Completion is inferred from expiry | Donor filters expiry and progress independently | Keep remote state, progress and close status separate |
-| `time_spent` is assumed to be seconds | Samples are millisecond-like but no live unit proof exists | Preserve raw value; do not expose DurationRead until measured |
-| Response `jv` obfuscation changes | Multiple inserted-byte variants and 2026 `jv=99` exist | Decode only exact frozen legacy variants; require the fresh account-bound Capture context for authenticated HKDF/AES-GCM `jv=99`; fail closed on unknown `jv` |
+| `time_spent` is misread as seconds or unbounded | Public issue 6 has non-zero values, sibling time fields are milliseconds and mutation routes write the same field | Preserve raw milliseconds, bound to 100 years, fresh-rebind, then truncate to Domain seconds; retain live comparison as validation rather than an implementation blocker |
+| Response `jv` obfuscation changes | Multiple inserted-byte variants and 2026 `jv=99` exist | Decode only exact frozen legacy variants; require fresh account-bound crypto from Capture or native V2 exchange for authenticated HKDF/AES-GCM `jv=99`; fail closed on unknown `jv` |
 | Browser crypto material leaks | Current donor captures login/session crypto context | Store only through SecretStore as a Composite session; zeroize parsed JSON/key/plaintext and never persist it in Task, Question, Draft or logs |
 | `StartAnswer` is treated as a read | Donor creates/advances a remote answer attempt before yielding the current topic | Use Core's durable AttemptStart boundary; never hide this non-idempotent mutation inside QuestionInventory or replay an ambiguous start |
 | A stale `topic_code` crosses Questions | Verify/advance responses rotate the current topic code | Keep the code in redacted zeroizing attempt route state and bind every Verify/Submit/Skip to the same durable attempt and fresh Question |
@@ -37,10 +38,13 @@ After the product UI/plugin stage and account delivery:
    merged Course grouping with visible H5;
 3. confirm task type/status/access vocabulary, `task_id=-1` behavior and both
    stable release/list identities;
-4. measure `start_time`, `over_time` and `time_spent` semantics without remote
-   mutation;
+4. compare the implemented millisecond `time_spent` conversion with visible H5
+   duration and retain a sanitized non-zero study-row sample;
 5. record only sanitized response fixtures and retain Development until all
    applicable live gates pass.
 6. exercise Capture/BrowserBridge and `jv=99` with ephemeral crypto material;
 7. validate mutation families only under explicit live-test authorization,
    preserving attempt/receipt/verification separation.
+8. validate one PC WeChat callback-only acquisition into the native V2
+   exchange, including cancellation, expiry and ambiguous-failure recovery,
+   without retaining the OAuth code in a fixture or log.

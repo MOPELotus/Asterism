@@ -951,6 +951,7 @@ mod tests {
 
     fn request() -> ExecutionRequest {
         ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: "group:2001:unit-1:group-1".to_owned(),
             course_id: Some(CourseId::new()),

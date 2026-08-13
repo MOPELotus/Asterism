@@ -6,7 +6,7 @@ use asterism_secrets::ProviderCredentialResolver;
 
 use crate::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenBrowserBridge,
-    CidarenClassTaskTransport, CidarenCourseInventory, CidarenSessionResolver,
+    CidarenClassTaskTransport, CidarenCourseInventory, CidarenDurationRead, CidarenSessionResolver,
     CidarenStudyTaskTransport, CidarenSubmissionBuild, CidarenTaskDetail, CidarenTaskInventory,
     CidarenTaskProgress, metadata::development_metadata, native_http::NativeCidarenTransport,
     runtime_settings::runtime_settings_schema, stored_session::StoredCidarenSessionResolver,
@@ -50,7 +50,7 @@ pub fn build_development_provider(
         )?)),
         task_detail: Some(task_detail.clone()),
         task_progress: Some(task_progress),
-        duration_read: None,
+        duration_read: Some(Arc::new(CidarenDurationRead::try_new(task_detail.clone())?)),
         question_inventory: None,
         question_parse: None,
         answer_resolve: None,
@@ -174,7 +174,7 @@ mod tests {
         assert!(entry.task_inventory.is_some());
         assert!(entry.task_detail.is_some());
         assert!(entry.task_progress.is_some());
-        assert!(entry.duration_read.is_none());
+        assert!(entry.duration_read.is_some());
         assert!(entry.question_inventory.is_none());
         assert!(entry.submission_build.is_some());
         assert!(entry.submission_execute.is_none());

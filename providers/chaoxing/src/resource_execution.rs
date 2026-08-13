@@ -1218,6 +1218,7 @@ mod tests {
 
     fn execution_request(remote_task_id: &str) -> ExecutionRequest {
         ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: remote_task_id.to_owned(),
             course_id: None,
@@ -1238,6 +1239,7 @@ mod tests {
             )]),
         };
         ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: remote_task_id.to_owned(),
             course_id: None,

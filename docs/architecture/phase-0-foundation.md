@@ -3022,3 +3022,56 @@ completion and CDP close all enter one process-tree/profile reclamation path.
 Unit/contract suites and an ignored real-browser smoke test cover both successful
 allowlisted attachment and zero leftover helper processes/profiles; Provider
 account validation against real platform sessions remains the later live gate.
+
+## One-hundred-and-seventy-seventh Phase 0 slice
+
+Multi-capability Task execution is now an explicit Provider-planned durable
+workflow. `TaskExecutionCapability::execution_plan` rejects combinations by
+default; a Provider must return the exact phase order for an evidenced action
+set. Core validates that order as a permutation of the caller's canonical
+selection and persists every phase in the same transaction as the Execution
+and scheduler Job.
+
+The worker marks one phase `issued` with the current Attempt binding before its
+remote call, runs only that singleton Capability, applies its own verification
+contract, and marks it `succeeded` before advancing. A crash or network error
+after issue enters verification-only recovery rather than replaying the
+possibly accepted mutation. Recovery verifies the exact issued phase; after a
+confirmed phase it schedules a new Attempt for the next still-pending phase,
+while phases without a readback path become HumanRequired instead of being
+guessed or repeated. This closes the WELearn donor order of DurationReport
+before completion/progress/score ResourceExecution without collapsing their
+different success meanings.
+
+Provider-specific remote-state exceptions are also explicit rather than
+global. A TaskExecution implementation may opt an exact action set into an
+audited state such as WELearn `NotOpen`; the default grants nothing and Core
+still refuses `Expired` and `Removed`. Shared Provider/account concurrency
+schema bounds now reach the donor-evidenced finite maximum of 100 while the
+worker continues to enforce global, Provider and account admission leases.
+Unit/all-course batch planning and Cidaren's question-internal continuation
+steps remain separate shared orchestration contracts; neither is hidden inside
+Provider-private scheduling or misrepresented as a TaskCapability phase.
+
+## One-hundred-and-seventy-eighth Phase 0 slice
+
+Capture navigation authority and credential-read authority are now distinct.
+An exact third-party OAuth origin may be listed for top-level navigation
+without granting access to its request headers, storage or Cookies; every
+declared Secret source must belong to the narrower `read_origins` set. Recipe
+versions changed with this wire contract, so an older helper cannot silently
+interpret the widened navigation set as read authority.
+
+Credential completeness alone is no longer the only readiness contract.
+Recipes may require an exact request, or an exact 2xx response media type, on
+the current top-level document loader. The Chromium helper correlates bounded
+request IDs to method, canonical origin/path, loader, status and MIME type and
+accepts credentials only when both the frozen gate and all required outputs
+hold in one stable snapshot. WELearn uses the authenticated Course-list route
+with `application/json`; an anonymous session's pre-login Cookies and 200 login
+HTML therefore cannot close the browser or be submitted as a false session.
+
+Provider execution requests also carry the immutable Core `ExecutionId`.
+Providers can derive bounded random-duration or score choices per Execution
+while keeping retries and verification stable; unlike Task-only hashing, a
+future authorized Execution of the same Task receives a distinct identity.

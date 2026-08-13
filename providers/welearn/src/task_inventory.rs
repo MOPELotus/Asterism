@@ -220,17 +220,13 @@ fn parse_leaves(
             "completion": remote_state,
             "duration_raw": duration_raw,
         });
-        let mut capabilities = vec![TaskCapability::ProgressRead];
-        if visible {
-            capabilities.extend([
-                TaskCapability::ResourceExecution,
-                TaskCapability::ExecutionVerify,
-            ]);
-        }
-        capabilities.push(TaskCapability::DurationRead);
-        if visible {
-            capabilities.push(TaskCapability::DurationReport);
-        }
+        let capabilities = vec![
+            TaskCapability::ProgressRead,
+            TaskCapability::ResourceExecution,
+            TaskCapability::ExecutionVerify,
+            TaskCapability::DurationRead,
+            TaskCapability::DurationReport,
+        ];
         tasks.push(RemoteTask {
             remote_id,
             course_remote_id: Some(course.remote_id.clone()),
@@ -380,10 +376,7 @@ mod tests {
                 TaskCapability::DurationReport,
             ]
         );
-        assert_eq!(
-            tasks[2].capabilities,
-            [TaskCapability::ProgressRead, TaskCapability::DurationRead]
-        );
+        assert_eq!(tasks[2].capabilities, tasks[0].capabilities);
         assert!(tasks.iter().all(|task| task.fingerprint.starts_with("v1:")));
     }
 

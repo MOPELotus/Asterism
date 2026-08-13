@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::TaskCapability;
+use asterism_domain::{RemoteState, TaskCapability};
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionOutcome, ExecutionRequest, ProviderContext, ProviderError,
     ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult, TaskExecutionCapability,
@@ -65,6 +65,54 @@ impl ProviderIdentity for WellearnTaskExecution {
 
 #[async_trait]
 impl TaskExecutionCapability for WellearnTaskExecution {
+    fn allows_execution_from_remote_state(
+        &self,
+        requested_capabilities: &[TaskCapability],
+        remote_state: RemoteState,
+    ) -> bool {
+        if remote_state != RemoteState::NotOpen {
+            return false;
+        }
+        matches!(
+            requested_capabilities,
+            [TaskCapability::ResourceExecution | TaskCapability::DurationReport]
+                | [
+                    TaskCapability::ResourceExecution,
+                    TaskCapability::DurationReport
+                ]
+                | [
+                    TaskCapability::DurationReport,
+                    TaskCapability::ResourceExecution
+                ]
+        )
+    }
+
+    fn execution_plan(
+        &self,
+        requested_capabilities: &[TaskCapability],
+    ) -> ProviderResult<Vec<TaskCapability>> {
+        match requested_capabilities {
+            [capability @ (TaskCapability::ResourceExecution | TaskCapability::DurationReport)] => {
+                Ok(vec![*capability])
+            }
+            [
+                TaskCapability::ResourceExecution,
+                TaskCapability::DurationReport,
+            ]
+            | [
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ] => Ok(vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ]),
+            _ => Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "WELearn execution received an unsupported capability combination",
+            )),
+        }
+    }
+
     fn requires_execution_verification(&self, requested_capabilities: &[TaskCapability]) -> bool {
         requested_capabilities == [TaskCapability::ResourceExecution]
     }
@@ -256,6 +304,42 @@ mod tests {
         assert_eq!(outcome.result_sanitized["order"][0], "duration_report");
     }
 
+    #[test]
+    fn current_donor_allows_only_exact_not_open_welearn_action_sets() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let metadata = development_metadata().unwrap();
+        let execution = WellearnTaskExecution::try_new(
+            Arc::new(FixtureCapability {
+                metadata: metadata.clone(),
+                expected: TaskCapability::ResourceExecution,
+                calls: calls.clone(),
+            }),
+            Arc::new(FixtureCapability {
+                metadata,
+                expected: TaskCapability::DurationReport,
+                calls,
+            }),
+        )
+        .unwrap();
+        for requested in [
+            vec![TaskCapability::ResourceExecution],
+            vec![TaskCapability::DurationReport],
+            vec![
+                TaskCapability::ResourceExecution,
+                TaskCapability::DurationReport,
+            ],
+        ] {
+            assert!(execution.allows_execution_from_remote_state(&requested, RemoteState::NotOpen));
+            assert!(
+                !execution.allows_execution_from_remote_state(&requested, RemoteState::Expired)
+            );
+        }
+        assert!(!execution.allows_execution_from_remote_state(
+            &[TaskCapability::SubmissionExecute],
+            RemoteState::NotOpen
+        ));
+    }
+
     fn context() -> ProviderContext {
         ProviderContext {
             provider_id: ProviderId::new("welearn").unwrap(),
@@ -267,6 +351,7 @@ mod tests {
 
     fn request() -> ExecutionRequest {
         ExecutionRequest {
+            execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
             remote_task_id: "sco:1001:301".to_owned(),
             course_id: None,

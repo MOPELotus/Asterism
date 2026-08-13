@@ -25,7 +25,9 @@ use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
 };
 use asterism_storage::{
-    ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionLeaseRepository,
+    ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionCapabilityStep,
+    ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
+    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
     ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionRecoveryFinishRequest,
     ExecutionRepository, ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository,
     LeaseAcquireOutcome, ProviderAccountRuntimeRepository, SchedulerRepository, StorageError,
@@ -212,6 +214,7 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
 impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T>
 where
     E: ExecutionRepository
+        + ExecutionCapabilityStepRepository
         + ExecutionSubmissionRepository
         + ExecutionVerificationRecoveryRepository,
     L: ExecutionLeaseRepository,
@@ -343,6 +346,11 @@ where
                 .recover_submission(job, execution, task, now, correlation_id)
                 .await;
         }
+        if execution.requested_capabilities.len() > 1 {
+            return self
+                .recover_composite_execution(job, execution, task, now, correlation_id)
+                .await;
+        }
         let prepared = match self
             .prepare_provider_call(
                 execution.id,
@@ -419,6 +427,190 @@ where
                     .await
             }
         }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "recovery keeps the exact issued phase, attempt binding and verify-only decision visible"
+    )]
+    async fn recover_composite_execution(
+        &self,
+        job: &ScheduledJob,
+        execution: &Execution,
+        task: &Task,
+        now: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let steps = self
+            .executions
+            .find_execution_capability_steps(execution.id)
+            .await?;
+        if !capability_steps_match_execution(execution, &steps) {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::Internal),
+                    None,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        }
+        let Some(step) = steps
+            .iter()
+            .find(|step| step.state != ExecutionCapabilityStepState::Succeeded)
+        else {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::Succeeded,
+                    None,
+                    None,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        };
+        if step.state == ExecutionCapabilityStepState::Pending {
+            return self
+                .continue_composite_after_recovery(job, now, correlation_id)
+                .await;
+        }
+        let Some(attempt_id) = step.issued_attempt_id else {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::Internal),
+                    None,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        };
+        let prepared = match self
+            .prepare_provider_call(execution.id, task, &[step.capability], correlation_id)
+            .await?
+        {
+            Ok(prepared) if prepared.verification => prepared,
+            Ok(_) => {
+                return self
+                    .finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(ProviderErrorClass::InvalidRemoteState),
+                        None,
+                        now,
+                        correlation_id,
+                    )
+                    .await;
+            }
+            Err(failure) => {
+                return self
+                    .finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(failure.error_class),
+                        None,
+                        now,
+                        correlation_id,
+                    )
+                    .await;
+            }
+        };
+        let execution_id = claimed_execution_id(job)?;
+        let _admission = self
+            .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
+            .await?;
+        let provider = prepared
+            .capability
+            .verify_execution(&prepared.context, &prepared.request);
+        tokio::pin!(provider);
+        let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        let result = loop {
+            tokio::select! {
+                result = &mut provider => break result,
+                _ = heartbeat.tick() => self.renew_claims(job, execution_id).await?,
+            }
+        };
+        let finished_at = Utc::now().max(now);
+        match result {
+            Ok(verification)
+                if execution_goal_verified(
+                    &prepared.request.requested_capabilities,
+                    &verification,
+                ) =>
+            {
+                self.executions
+                    .succeed_execution_capability_step(ExecutionCapabilityStepMutation {
+                        execution_id,
+                        attempt_id,
+                        capability: step.capability,
+                        scheduler_job_id: job.id,
+                        worker_id: claimed_worker(job)?,
+                        correlation_id,
+                        at: finished_at,
+                    })
+                    .await?;
+                if steps
+                    .iter()
+                    .all(|candidate| candidate.position <= step.position)
+                {
+                    self.finish_recovery(
+                        job,
+                        ExecutionState::Succeeded,
+                        None,
+                        None,
+                        finished_at,
+                        correlation_id,
+                    )
+                    .await
+                } else {
+                    self.continue_composite_after_recovery(job, finished_at, correlation_id)
+                        .await
+                }
+            }
+            Ok(_) => {
+                if let Some(retry_at) = self.recovery_retry_at(job, finished_at)? {
+                    self.defer_recovery(job, retry_at, finished_at).await
+                } else {
+                    self.finish_recovery(
+                        job,
+                        ExecutionState::HumanRequired,
+                        Some(ProviderErrorClass::InvalidRemoteState),
+                        None,
+                        finished_at,
+                        correlation_id,
+                    )
+                    .await
+                }
+            }
+            Err(error) => {
+                self.finish_from_recovery_error(job, &error, finished_at, correlation_id)
+                    .await
+            }
+        }
+    }
+
+    async fn continue_composite_after_recovery(
+        &self,
+        job: &ScheduledJob,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let retry_at = self.recovery_retry_at(job, at)?.unwrap_or(at);
+        self.finish_recovery(
+            job,
+            ExecutionState::RetryWaiting,
+            Some(ProviderErrorClass::InvalidRemoteState),
+            Some(retry_at),
+            at,
+            correlation_id,
+        )
+        .await
     }
 
     #[allow(
@@ -1080,38 +1272,12 @@ where
                 .execute_submission_attempt(job, execution, task, attempt, now, correlation_id)
                 .await;
         }
-        let verification_candidate = task.capabilities.contains(&TaskCapability::ExecutionVerify)
-            && execution.requested_capabilities.len() == 1;
-        let duration_only = duration_report_only(&execution.requested_capabilities);
-        if task.remote_state == RemoteState::Completed && !verification_candidate && !duration_only
-        {
-            return self.finish_success(job, attempt, now, correlation_id).await;
-        }
-        if !(matches!(
-            task.remote_state,
-            RemoteState::Pending | RemoteState::InProgress
-        ) || duration_only
-            && matches!(
-                task.remote_state,
-                RemoteState::Unknown | RemoteState::Completed
-            )
-            || verification_candidate
-                && matches!(
-                    task.remote_state,
-                    RemoteState::Unknown | RemoteState::Completed
-                ))
-        {
+        if execution.requested_capabilities.len() > 1 {
             return self
-                .finish_failure(
-                    job,
-                    attempt,
-                    ProviderErrorClass::InvalidRemoteState,
-                    FailureDisposition::Failed,
-                    now,
-                    correlation_id,
-                )
+                .execute_composite_attempt(job, execution, task, attempt, now, correlation_id)
                 .await;
         }
+        let duration_only = duration_report_only(&execution.requested_capabilities);
         let prepared = match self
             .prepare_provider_call(
                 attempt.execution_id,
@@ -1135,6 +1301,43 @@ where
                     .await;
             }
         };
+        if task.remote_state == RemoteState::Completed && !prepared.verification && !duration_only {
+            return self.finish_success(job, attempt, now, correlation_id).await;
+        }
+        let provider_state_exception = prepared.capability.allows_execution_from_remote_state(
+            &execution.requested_capabilities,
+            task.remote_state,
+        );
+        if !(matches!(
+            task.remote_state,
+            RemoteState::Pending | RemoteState::InProgress
+        ) || duration_only
+            && matches!(
+                task.remote_state,
+                RemoteState::Unknown | RemoteState::Completed
+            )
+            || prepared.verification
+                && matches!(
+                    task.remote_state,
+                    RemoteState::Unknown | RemoteState::Completed
+                )
+            || provider_state_exception
+                && !matches!(
+                    task.remote_state,
+                    RemoteState::Expired | RemoteState::Removed
+                ))
+        {
+            return self
+                .finish_failure(
+                    job,
+                    attempt,
+                    ProviderErrorClass::InvalidRemoteState,
+                    FailureDisposition::Failed,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        }
         if task.remote_state == RemoteState::Completed && prepared.verification {
             return self
                 .verify_task_execution_without_mutation(job, attempt, &prepared, correlation_id)
@@ -1154,6 +1357,241 @@ where
         }
         self.call_provider(job, attempt, &prepared, correlation_id)
             .await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "composite execution keeps each durable issue, remote call, verification and success boundary explicit"
+    )]
+    async fn execute_composite_attempt(
+        &self,
+        job: &ScheduledJob,
+        execution: &Execution,
+        task: &Task,
+        attempt: &ExecutionAttempt,
+        now: Timestamp,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let steps = self
+            .executions
+            .find_execution_capability_steps(execution.id)
+            .await?;
+        if !capability_steps_match_execution(execution, &steps) {
+            return self
+                .finish_failure(
+                    job,
+                    attempt,
+                    ProviderErrorClass::Internal,
+                    FailureDisposition::HumanRequired,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        }
+        for step in steps {
+            if step.state == ExecutionCapabilityStepState::Succeeded {
+                continue;
+            }
+            if step.state != ExecutionCapabilityStepState::Pending {
+                return self
+                    .begin_verification_recovery(
+                        job,
+                        attempt,
+                        ProviderErrorClass::InvalidRemoteState,
+                        correlation_id,
+                    )
+                    .await;
+            }
+            let prepared = match self
+                .prepare_provider_call(execution.id, task, &[step.capability], correlation_id)
+                .await?
+            {
+                Ok(prepared) => prepared,
+                Err(failure) => {
+                    return self
+                        .finish_failure(
+                            job,
+                            attempt,
+                            failure.error_class,
+                            failure.disposition,
+                            Utc::now().max(now),
+                            correlation_id,
+                        )
+                        .await;
+                }
+            };
+            let ordinary_state = matches!(
+                task.remote_state,
+                RemoteState::Pending | RemoteState::InProgress
+            ) || duration_report_only(
+                &prepared.request.requested_capabilities,
+            ) && matches!(
+                task.remote_state,
+                RemoteState::Unknown | RemoteState::Completed
+            ) || prepared.verification
+                && matches!(
+                    task.remote_state,
+                    RemoteState::Unknown | RemoteState::Completed
+                );
+            let provider_state_exception = prepared.capability.allows_execution_from_remote_state(
+                &prepared.request.requested_capabilities,
+                task.remote_state,
+            );
+            if !(ordinary_state
+                || provider_state_exception
+                    && !matches!(
+                        task.remote_state,
+                        RemoteState::Expired | RemoteState::Removed
+                    ))
+            {
+                return self
+                    .finish_failure(
+                        job,
+                        attempt,
+                        ProviderErrorClass::InvalidRemoteState,
+                        FailureDisposition::Failed,
+                        Utc::now().max(now),
+                        correlation_id,
+                    )
+                    .await;
+            }
+            let issued_at = Utc::now().max(now);
+            let issue = self
+                .executions
+                .issue_execution_capability_step(ExecutionCapabilityStepMutation {
+                    execution_id: execution.id,
+                    attempt_id: attempt.id,
+                    capability: step.capability,
+                    scheduler_job_id: job.id,
+                    worker_id: claimed_worker(job)?,
+                    correlation_id,
+                    at: issued_at,
+                })
+                .await?;
+            if issue != ExecutionCapabilityStepIssueOutcome::Issued {
+                return self
+                    .begin_verification_recovery(
+                        job,
+                        attempt,
+                        ProviderErrorClass::InvalidRemoteState,
+                        correlation_id,
+                    )
+                    .await;
+            }
+            let _admission = self
+                .acquire_admission(
+                    job,
+                    attempt.execution_id,
+                    &prepared.context,
+                    prepared.concurrency,
+                )
+                .await?;
+            let claim_lost = Arc::new(AtomicBool::new(false));
+            let sink = PersistedExecutionEventSink {
+                executions: &self.executions,
+                execution_id: attempt.execution_id,
+                attempt_id: attempt.id,
+                worker_id: claimed_worker(job)?,
+                correlation_id,
+                claim_lost: Arc::clone(&claim_lost),
+            };
+            let mutation = prepared
+                .capability
+                .execute(&prepared.context, &prepared.request, &sink);
+            tokio::pin!(mutation);
+            let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            heartbeat.tick().await;
+            let mutation = loop {
+                tokio::select! {
+                    result = &mut mutation => break result,
+                    _ = heartbeat.tick() => self.renew_claims(job, attempt.execution_id).await?,
+                }
+            };
+            if claim_lost.load(Ordering::Acquire) {
+                return Err(ScheduledExecutionRunError::ClaimLost);
+            }
+            let mutation = match mutation {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return self
+                        .begin_verification_recovery(
+                            job,
+                            attempt,
+                            provider_error_class(&error),
+                            correlation_id,
+                        )
+                        .await;
+                }
+            };
+            if prepared.verification {
+                let verification = prepared
+                    .capability
+                    .verify_execution(&prepared.context, &prepared.request);
+                tokio::pin!(verification);
+                let verification = loop {
+                    tokio::select! {
+                        result = &mut verification => break result,
+                        _ = heartbeat.tick() => self.renew_claims(job, attempt.execution_id).await?,
+                    }
+                };
+                match verification {
+                    Ok(outcome)
+                        if execution_goal_verified(
+                            &prepared.request.requested_capabilities,
+                            &outcome,
+                        ) => {}
+                    Ok(_) => {
+                        return self
+                            .begin_verification_recovery(
+                                job,
+                                attempt,
+                                ProviderErrorClass::InvalidRemoteState,
+                                correlation_id,
+                            )
+                            .await;
+                    }
+                    Err(error) => {
+                        return self
+                            .begin_verification_recovery(
+                                job,
+                                attempt,
+                                provider_error_class(&error),
+                                correlation_id,
+                            )
+                            .await;
+                    }
+                }
+            } else if !execution_goal_verified(&prepared.request.requested_capabilities, &mutation)
+            {
+                return self
+                    .begin_verification_recovery(
+                        job,
+                        attempt,
+                        ProviderErrorClass::InvalidRemoteState,
+                        correlation_id,
+                    )
+                    .await;
+            }
+            self.executions
+                .succeed_execution_capability_step(ExecutionCapabilityStepMutation {
+                    execution_id: execution.id,
+                    attempt_id: attempt.id,
+                    capability: step.capability,
+                    scheduler_job_id: job.id,
+                    worker_id: claimed_worker(job)?,
+                    correlation_id,
+                    at: Utc::now().max(issued_at),
+                })
+                .await?;
+        }
+        self.finish_success(
+            job,
+            attempt,
+            Utc::now().max(attempt.started_at),
+            correlation_id,
+        )
+        .await
     }
 
     async fn execute_submission_attempt(
@@ -1429,6 +1867,7 @@ where
                 correlation_id: correlation_id.to_owned(),
             },
             request: ProviderExecutionRequest {
+                execution_id,
                 task_id: task.id,
                 remote_task_id: task.remote_id.clone(),
                 course_id: task.course_id,
@@ -2232,6 +2671,25 @@ fn duration_report_only(capabilities: &[TaskCapability]) -> bool {
     capabilities == [TaskCapability::DurationReport]
 }
 
+fn capability_steps_match_execution(
+    execution: &Execution,
+    steps: &[ExecutionCapabilityStep],
+) -> bool {
+    steps.len() == execution.requested_capabilities.len()
+        && steps.iter().enumerate().all(|(index, step)| {
+            step.execution_id == execution.id && usize::from(step.position) == index + 1
+        })
+        && steps
+            .iter()
+            .map(|step| step.capability)
+            .collect::<std::collections::BTreeSet<_>>()
+            == execution
+                .requested_capabilities
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+}
+
 fn execution_goal_verified(
     capabilities: &[TaskCapability],
     outcome: &asterism_provider_api::ExecutionOutcome,
@@ -2528,6 +2986,7 @@ mod tests {
         RecoveryPending,
         DurationSuccess,
         DurationNetworkFailure,
+        CompositeSuccess,
         SubmissionConfirmed,
         SubmissionPending,
         SubmissionExecuteNetwork,
@@ -2609,6 +3068,13 @@ mod tests {
 
     #[async_trait]
     impl TaskExecutionCapability for FakeExecution {
+        fn requires_execution_verification(
+            &self,
+            requested_capabilities: &[TaskCapability],
+        ) -> bool {
+            requested_capabilities == [TaskCapability::ResourceExecution]
+        }
+
         async fn execute(
             &self,
             _context: &ProviderContext,
@@ -2618,14 +3084,15 @@ mod tests {
             *self.calls.lock().unwrap() += 1;
             let expected_capabilities = match self.behavior {
                 ProviderBehavior::DurationSuccess | ProviderBehavior::DurationNetworkFailure => {
-                    [TaskCapability::DurationReport]
+                    vec![TaskCapability::DurationReport]
                 }
+                ProviderBehavior::CompositeSuccess => request.requested_capabilities.clone(),
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork => {
                     panic!("submission behaviors use the independent mutation slot")
                 }
-                _ => [TaskCapability::ResourceExecution],
+                _ => vec![TaskCapability::ResourceExecution],
             };
             assert_eq!(request.requested_capabilities, expected_capabilities);
             assert_eq!(
@@ -2678,6 +3145,20 @@ mod tests {
                     ProviderErrorKind::Network,
                     "duration mutation outcome is uncertain",
                 )),
+                ProviderBehavior::CompositeSuccess
+                    if request.requested_capabilities == [TaskCapability::DurationReport] =>
+                {
+                    Ok(ExecutionOutcome {
+                        remote_state: RemoteState::InProgress,
+                        verified: true,
+                        result_sanitized: serde_json::json!({"duration_changed": true}),
+                    })
+                }
+                ProviderBehavior::CompositeSuccess => Ok(ExecutionOutcome {
+                    remote_state: RemoteState::Completed,
+                    verified: true,
+                    result_sanitized: serde_json::json!({"completion_changed": true}),
+                }),
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork => {
@@ -2729,6 +3210,11 @@ mod tests {
                     ProviderErrorKind::Network,
                     "duration goal verification is uncertain",
                 )),
+                ProviderBehavior::CompositeSuccess => Ok(ExecutionOutcome {
+                    remote_state: RemoteState::Completed,
+                    verified: true,
+                    result_sanitized: serde_json::json!({"goal_matched": true}),
+                }),
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork => {
@@ -2773,6 +3259,9 @@ mod tests {
                 )),
                 ProviderBehavior::DurationSuccess | ProviderBehavior::DurationNetworkFailure => {
                     panic!("DurationReport recovery must not use TaskProgress")
+                }
+                ProviderBehavior::CompositeSuccess => {
+                    panic!("composite recovery must use phase-bound execution verification")
                 }
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionPending
@@ -3058,6 +3547,34 @@ mod tests {
         assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
         assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
         assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn composite_execution_persists_and_verifies_each_provider_ordered_phase() {
+        let fixture = Fixture::composite().await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 2);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+        let steps: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT position, capability, state FROM execution_capability_steps \
+             WHERE execution_id = ? ORDER BY position",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_all(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                (1, "duration_report".to_owned(), "succeeded".to_owned()),
+                (2, "resource_execution".to_owned(), "succeeded".to_owned()),
+            ]
+        );
     }
 
     #[test]
@@ -3552,6 +4069,46 @@ mod tests {
             Self::duration(behavior).await.enter_recovery().await
         }
 
+        async fn composite() -> Self {
+            let fixture =
+                Self::new(AssessmentClass::Routine, ProviderBehavior::CompositeSuccess).await;
+            sqlx::query(
+                "UPDATE tasks SET capabilities_json = \
+                 '[\"resource_execution\",\"execution_verify\",\"duration_report\"]'",
+            )
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE executions SET requested_capabilities_json = \
+                 '[\"resource_execution\",\"duration_report\"]' WHERE id = ?",
+            )
+            .bind(fixture.execution_id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+            sqlx::query("DELETE FROM execution_capability_steps WHERE execution_id = ?")
+                .bind(fixture.execution_id.to_string())
+                .execute(fixture.database.pool())
+                .await
+                .unwrap();
+            for (position, capability) in
+                [(1_i64, "duration_report"), (2_i64, "resource_execution")]
+            {
+                sqlx::query(
+                    "INSERT INTO execution_capability_steps \
+                     (execution_id, position, capability, state) VALUES (?, ?, ?, 'pending')",
+                )
+                .bind(fixture.execution_id.to_string())
+                .bind(position)
+                .bind(capability)
+                .execute(fixture.database.pool())
+                .await
+                .unwrap();
+            }
+            fixture
+        }
+
         async fn submission(behavior: ProviderBehavior) -> Self {
             let fixture = Self::new(AssessmentClass::Routine, behavior).await;
             let task_id = execution_id_to_task(
@@ -3840,6 +4397,7 @@ mod tests {
         SqliteExecutionRepository::new(database.clone())
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
+                capability_plan: &execution.requested_capabilities,
                 billing: None,
                 runtime_settings: Some(ExecutionRuntimeSettingsResolution {
                     snapshot: &runtime_settings,

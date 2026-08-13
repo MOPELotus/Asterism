@@ -20,9 +20,11 @@ mod browser_bridge;
 mod capture_recipe;
 mod class_tasks;
 mod crypto;
+mod duration_read;
 mod inventory;
 mod metadata;
 mod native_http;
+mod oauth_exchange;
 mod provider;
 mod question_parser;
 mod response_decode;
@@ -30,6 +32,7 @@ mod runtime_settings;
 mod stored_session;
 mod study_tasks;
 mod submission_build;
+mod submission_verify;
 mod task_read;
 
 pub use answer_evidence_loader::load_answer_evidence;
@@ -63,15 +66,17 @@ pub use authentication::{
     CidarenTokenSession, classify_token_validation_response,
 };
 pub use browser_bridge::CidarenBrowserBridge;
-pub use capture_recipe::cidaren_capture_recipe_v1;
+pub use capture_recipe::cidaren_capture_recipe_v2;
 pub use class_tasks::{parse_course_inventory, parse_task_inventory};
 pub use crypto::CidarenCryptoContext;
+pub use duration_read::CidarenDurationRead;
 pub use inventory::{
     CidarenClassTaskPageDocument, CidarenClassTaskTransport, CidarenCourseInventory,
     CidarenStudyTaskDocument, CidarenStudyTaskTransport, CidarenTaskInventory,
 };
 pub use metadata::development_metadata;
 pub use native_http::NativeCidarenTransport;
+pub use oauth_exchange::{CidarenOauthClientContext, CidarenOauthCode, CidarenOauthLoginMaterial};
 pub use provider::{
     build_development_provider, build_development_provider_native,
     build_development_provider_with_stored_session,
@@ -85,4 +90,5 @@ pub use runtime_settings::CidarenRuntimeSettings;
 pub use stored_session::StoredCidarenSessionResolver;
 pub use study_tasks::{parse_study_course, parse_study_task_inventory};
 pub use submission_build::CidarenSubmissionBuild;
+pub use submission_verify::CidarenSubmissionVerify;
 pub use task_read::{CidarenTaskDetail, CidarenTaskProgress};
