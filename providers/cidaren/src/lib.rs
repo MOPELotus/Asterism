@@ -67,7 +67,7 @@ pub use authentication::{
     CidarenTokenSession, classify_token_validation_response,
 };
 pub use browser_bridge::CidarenBrowserBridge;
-pub use capture_recipe::cidaren_capture_recipe_v2;
+pub use capture_recipe::{cidaren_capture_recipe_v2, cidaren_token_capture_recipe_v1};
 pub use class_tasks::{parse_course_inventory, parse_task_inventory};
 pub use crypto::CidarenCryptoContext;
 pub use duration_read::CidarenDurationRead;

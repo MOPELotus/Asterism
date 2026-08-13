@@ -155,15 +155,29 @@ fn decode_unique_candidates<const N: usize>(
 ) -> ProviderResult<Value> {
     let mut accepted: Option<Value> = None;
     for candidate in candidates.into_iter().flatten() {
-        let decoded = decode_transformed(candidate).ok();
-        match (&accepted, decoded) {
-            (_, None) => {}
-            (None, Some(value)) => accepted = Some(value),
-            (Some(existing), Some(value)) if *existing == value => {}
-            (Some(_), Some(_)) => return Err(invalid_encoded_response()),
+        let Some(mut decoded) = decode_transformed(candidate).ok() else {
+            continue;
+        };
+        match accepted.as_mut() {
+            None => accepted = Some(decoded),
+            Some(existing) if existing == &decoded => zeroize_json_strings(&mut decoded),
+            Some(existing) => {
+                zeroize_json_strings(existing);
+                zeroize_json_strings(&mut decoded);
+                return Err(invalid_encoded_response());
+            }
         }
     }
     accepted.ok_or_else(invalid_encoded_response)
+}
+
+fn zeroize_json_strings(value: &mut Value) {
+    match value {
+        Value::String(value) => value.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_json_strings),
+        Value::Object(values) => values.values_mut().for_each(zeroize_json_strings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn remove_confusion_bytes(encoded: &[u8], indices: &[usize]) -> ProviderResult<Vec<u8>> {
@@ -305,6 +319,22 @@ mod tests {
                 "variant {jv}",
             );
         }
+    }
+
+    #[test]
+    fn conflicting_transform_candidates_fail_closed() {
+        let first = STANDARD.encode(br#"{"schema":"synthetic.one"}"#);
+        let second = STANDARD.encode(br#"{"schema":"synthetic.two"}"#);
+        assert!(
+            decode_unique_candidates([Ok(first.into_bytes()), Ok(second.into_bytes())]).is_err()
+        );
+
+        let same = STANDARD.encode(br#"{"schema":"synthetic.same"}"#);
+        assert_eq!(
+            decode_unique_candidates([Ok(same.clone().into_bytes()), Ok(same.into_bytes())])
+                .unwrap(),
+            serde_json::json!({"schema": "synthetic.same"})
+        );
     }
 
     #[test]

@@ -113,6 +113,9 @@ placeholder identities, result codes, status values and pagination shape.
   the same atomic two-field acquisition without mixing origins or timestamps.
   Core's post-exchange validation repeats fresh `Student/Main` with the same
   OAuth context, while Capture-origin validation keeps its donor header family.
+- Public-donor token-only Capture validates and resolves only as one
+  ProviderSpecific `ProviderAccessToken` from CaptureTool/BrowserExtension;
+  unrelated helper origins and token/Composite relabelling fail closed.
 - Class-task pagination is complete and total-consistent before normalization.
 - Course identity is `course:{course_id}` and duplicate rows must agree.
 - Task identity is `class-task:{release_id}` even when `task_id == -1`.
@@ -122,6 +125,9 @@ placeholder identities, result codes, status values and pagination shape.
 - TaskDetail and TaskProgressRead re-scan and reject missing fresh identities.
 - Learning and test tasks remain distinct source types but both are Routine.
 - Expiry, completion, progress, score and raw time remain independent facts.
+- Submission verification converts a present fresh 0-100 task score to Core
+  thousandth-points, retains `null` as absent, and rejects out-of-range values
+  without using score as completion proof.
 - Non-zero `time_spent` is treated as bounded milliseconds and converted to
   whole Domain seconds only after fresh Task rebinding; absent or >100-year
   observations fail the standalone DurationRead contract.

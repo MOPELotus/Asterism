@@ -2,8 +2,8 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::{
     RemoteState, SubmissionDraft, SubmissionQuestionVerification,
-    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionVerificationSnapshot,
-    SubmissionVerificationStatus, TaskCapability,
+    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionScore,
+    SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskCapability,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
@@ -124,10 +124,11 @@ impl SubmissionVerifyCapability for CidarenSubmissionVerify {
                 ));
             }
         };
+        let score = normalized_submission_score(&detail.task.normalized)?;
         let snapshot = SubmissionVerificationSnapshot {
             status,
             remote_state: Some(detail.task.remote_state),
-            score: None,
+            score,
             progress_percent: Some(progress),
             questions: draft
                 .items
@@ -144,6 +145,62 @@ impl SubmissionVerifyCapability for CidarenSubmissionVerify {
             .map_err(|_| invalid_response("Cidaren verification snapshot is invalid"))?;
         Ok(snapshot)
     }
+}
+
+fn normalized_submission_score(normalized: &Value) -> ProviderResult<Option<SubmissionScore>> {
+    let Some(value) = normalized.get("score") else {
+        return Err(protocol_drift(
+            "Cidaren verification Task omitted its normalized score fact",
+        ));
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let earned_milli_points = score_milli_points(value)?;
+    let score = SubmissionScore {
+        earned_milli_points,
+        possible_milli_points: 100_000,
+    };
+    score
+        .validate()
+        .map_err(|_| protocol_drift("Cidaren verification score is out of range"))?;
+    Ok(Some(score))
+}
+
+fn score_milli_points(value: &Value) -> ProviderResult<u64> {
+    let encoded = value
+        .as_number()
+        .map(ToString::to_string)
+        .filter(|value| !value.is_empty() && value.len() <= 32)
+        .ok_or_else(|| protocol_drift("Cidaren verification score is invalid"))?;
+    let (whole, fractional) = encoded
+        .split_once('.')
+        .map_or((encoded.as_str(), ""), |parts| parts);
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(protocol_drift("Cidaren verification score is invalid"));
+    }
+    let whole = whole
+        .parse::<u64>()
+        .ok()
+        .filter(|whole| *whole <= 100)
+        .ok_or_else(|| protocol_drift("Cidaren verification score is out of range"))?;
+    if whole == 100 && fractional.bytes().any(|byte| byte != b'0') {
+        return Err(protocol_drift("Cidaren verification score is out of range"));
+    }
+    let mut digits = fractional.bytes();
+    let hundreds = digits.next().map_or(0, |byte| u64::from(byte - b'0'));
+    let tens = digits.next().map_or(0, |byte| u64::from(byte - b'0'));
+    let units = digits.next().map_or(0, |byte| u64::from(byte - b'0'));
+    let rounds_up = digits.next().is_some_and(|byte| byte >= b'5');
+    let fractional_milli_points = hundreds * 100 + tens * 10 + units + u64::from(rounds_up);
+    whole
+        .checked_mul(1_000)
+        .and_then(|whole| whole.checked_add(fractional_milli_points))
+        .filter(|score| *score <= 100_000)
+        .ok_or_else(|| protocol_drift("Cidaren verification score is out of range"))
 }
 
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
@@ -243,6 +300,7 @@ mod tests {
     struct FixtureDetail {
         state: RemoteState,
         progress: u8,
+        score: Option<f64>,
     }
 
     #[async_trait]
@@ -269,6 +327,7 @@ mod tests {
                         "schema": "cidaren.class-task.v1",
                         "release_id": "2002",
                         "progress": self.progress,
+                        "score": self.score,
                     }),
                     raw_sanitized: json!({}),
                 },
@@ -292,6 +351,7 @@ mod tests {
         let verifier = CidarenSubmissionVerify::try_new(Arc::new(FixtureDetail {
             state: RemoteState::Completed,
             progress: 100,
+            score: Some(96.5),
         }))
         .unwrap();
         let snapshot = verifier
@@ -301,11 +361,28 @@ mod tests {
         assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
         assert_eq!(snapshot.remote_state, Some(RemoteState::Completed));
         assert_eq!(snapshot.progress_percent, Some(100));
+        assert_eq!(
+            snapshot.score,
+            Some(SubmissionScore {
+                earned_milli_points: 96_500,
+                possible_milli_points: 100_000,
+            })
+        );
         assert_eq!(snapshot.questions.len(), 1);
         assert_eq!(
             snapshot.questions[0].status,
             SubmissionQuestionVerificationStatus::Unverified
         );
+    }
+
+    #[test]
+    fn score_conversion_is_decimal_bounded_and_rounds_to_thousandths() {
+        assert_eq!(score_milli_points(&json!(96.5004)).unwrap(), 96_500);
+        assert_eq!(score_milli_points(&json!(96.5005)).unwrap(), 96_501);
+        assert_eq!(score_milli_points(&json!(99.9999)).unwrap(), 100_000);
+        assert!(score_milli_points(&json!(100.0001)).is_err());
+        assert!(score_milli_points(&json!(-0.001)).is_err());
+        assert!(score_milli_points(&json!("96.5")).is_err());
     }
 
     #[tokio::test]
@@ -314,6 +391,7 @@ mod tests {
         let verifier = CidarenSubmissionVerify::try_new(Arc::new(FixtureDetail {
             state: RemoteState::InProgress,
             progress: 35,
+            score: None,
         }))
         .unwrap();
         let receipt = SubmissionReceipt {
@@ -337,6 +415,7 @@ mod tests {
         let verifier = CidarenSubmissionVerify::try_new(Arc::new(FixtureDetail {
             state: RemoteState::InProgress,
             progress: 35,
+            score: None,
         }))
         .unwrap();
         assert_eq!(
@@ -367,10 +446,26 @@ mod tests {
         let drifted = CidarenSubmissionVerify::try_new(Arc::new(FixtureDetail {
             state: RemoteState::Completed,
             progress: 99,
+            score: None,
         }))
         .unwrap();
         assert_eq!(
             drifted
+                .verify_submission(&context(), "class-task:2002", &draft, None)
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        let invalid_score = CidarenSubmissionVerify::try_new(Arc::new(FixtureDetail {
+            state: RemoteState::Completed,
+            progress: 100,
+            score: Some(100.001),
+        }))
+        .unwrap();
+        assert_eq!(
+            invalid_score
                 .verify_submission(&context(), "class-task:2002", &draft, None)
                 .await
                 .unwrap_err()

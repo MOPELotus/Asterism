@@ -1,12 +1,16 @@
 # Cidaren research sources
 
-Audit date: 2026-08-13. Revisions are frozen before implementation; moving
-default branches and release binaries are not evidence for this checkpoint.
+Audit date: 2026-08-13. Revisions below are reproducible snapshots for this
+checkpoint, not permanent pins. Default branches, tags/releases and key
+commits are rechecked before and after each meaningful Provider checkpoint;
+changes are recorded in [`UPSTREAM_CHECKS.md`](UPSTREAM_CHECKS.md) before an
+incremental audit/port/test cycle.
 
 | Source | Revision | Capability evidence | Use | License |
 |---|---|---|---|---|
 | [`MOPELotus/Easy_Cidaren`](https://github.com/MOPELotus/Easy_Cidaren) | `a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` | Current imported `UserToken`, account validation, class Course/task inventory, learning/test execution, response obfuscation and 2026 `jv=99` crypto/capture changes | PortSource | GPL-3.0 |
 | [`ularch/Easy_Cidaren`](https://github.com/ularch/Easy_Cidaren) | `bce9559f536ebbdad791f41ed4e111b30accb05d` | Current public lineage, class task lifecycle, execution flow, token-only local Capture helper and exact `jv=3_1021/3_2265/3_2277` transforms | Reference | GPL-3.0 |
+| [`ularch/Easy_Cidaren` release 1.5.4](https://github.com/ularch/Easy_Cidaren/releases/tag/1.5.4) | tag commit `7e29ee43692f4c0807fae8cf7f74a5a674793097`; asset SHA-256 `526011a4ccd14cc38887a663d54a5c78c33d8ea3d48e6c424a32128b6d0d8aca` | Latest published packaged release (2025-12-09), retained as a provenance checkpoint because it predates the 2026-08-12 reopened default-branch source | Historical release | GPL-3.0 project release; binary not redistributed |
 | [`github123666/cidaren`](https://github.com/github123666/cidaren) | `1409858800f3c4bd27577a08049bf1f8d17a069c` | Original protocol lineage, historical WeChat-code exchange, `UserToken` validation, task routes and signing | Historical | MIT |
 | User-supplied Cidaren H5 asset snapshot | SHA-256 `65b9c80f2dbc0775fb61813f89f254128c03d7dca928b4af8694bff4fe61fefe` | First-party `2.7.0.260715_01` OAuth callback, P-256 bootstrap, V2 exchange, HKDF/AES-GCM and browser session behavior | Reference | Protocol observation only; not redistributed |
 | User-supplied redacted WeChat flow capture | SHA-256 `0d937e9c621429bac6cc6e1892e43a9e5758dff8e79c4f5d56d35f052c199ec7` | Live-safe callback, exact V2 request/response envelope, new refresh-cookie issuance and fresh `Student/Main` success with the old refresh cookie removed | Reference | Sanitized protocol evidence only; not redistributed |
@@ -58,3 +62,9 @@ hash-only binding, strict callback parsing and the native exchange are now
 implemented. The shared hash-only owner/account/AuthSession-bound pending
 record, atomic claim/consume, Provider callback exchange and credential commit
 are also implemented; end-to-end live validation remains pending.
+
+The complete side-by-side audit is frozen in
+[`DONOR_DIFFERENCES.md`](DONOR_DIFFERENCES.md). In particular, the reopened
+public source augments rather than supersedes the owner-supplied `jv=99` and
+Composite Capture work, and neither Python branch supersedes the first-party
+no-MITM OAuth V2 handoff.

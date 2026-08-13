@@ -7,6 +7,33 @@ use asterism_secrets::SecretPurpose;
 
 const ORIGIN: &str = "https://app.vocabgo.com";
 
+/// Returns the reopened public donor's token-only local Capture recipe.
+///
+/// This is a distinct `ProviderSpecific` bundle from [`cidaren_capture_recipe_v2`]:
+/// it must never be relabelled as carrying the `CDR_LOGIN_INFO` material needed
+/// for `jv=99`. Provider registration advertises it after the richer Composite
+/// recipe so Core freezes one exact alternative per bootstrap session.
+pub fn cidaren_token_capture_recipe_v1() -> CaptureRecipe {
+    CaptureRecipe {
+        version: 1,
+        start_url: "https://app.vocabgo.com/student/".to_owned(),
+        navigation_origins: vec![ORIGIN.to_owned()],
+        read_origins: vec![ORIGIN.to_owned()],
+        poll_interval_millis: 500,
+        auth_method: AuthMethod::AssistedSession,
+        session_kind: SessionKind::ProviderSpecific,
+        readiness: CaptureReadiness::OutputsComplete,
+        outputs: vec![CaptureCredentialOutput {
+            purpose: SecretPurpose::ProviderAccessToken,
+            required: true,
+            sources: vec![CaptureValueSource::RequestHeader {
+                origin: ORIGIN.to_owned(),
+                name: "UserToken".to_owned(),
+            }],
+        }],
+    }
+}
+
 /// Returns the exact current donor-observed Cidaren Capture recipe.
 ///
 /// Both required outputs are taken from one logical browser snapshot. The
@@ -103,5 +130,27 @@ mod tests {
         let encoded = serde_json::to_string(&recipe).unwrap();
         assert!(!encoded.to_ascii_lowercase().contains("script"));
         assert!(!encoded.to_ascii_lowercase().contains("proxy"));
+    }
+
+    #[test]
+    fn token_only_recipe_is_valid_and_distinct_from_composite_capture() {
+        let recipe = cidaren_token_capture_recipe_v1();
+        recipe.validate().unwrap();
+        assert_eq!(recipe.version, 1);
+        assert_eq!(recipe.auth_method, AuthMethod::AssistedSession);
+        assert_eq!(recipe.session_kind, SessionKind::ProviderSpecific);
+        assert_eq!(recipe.outputs.len(), 1);
+        assert_eq!(
+            recipe.outputs[0].purpose,
+            SecretPurpose::ProviderAccessToken
+        );
+        assert_eq!(
+            recipe.outputs[0].sources,
+            [CaptureValueSource::RequestHeader {
+                origin: ORIGIN.to_owned(),
+                name: "UserToken".to_owned(),
+            }]
+        );
+        assert_ne!(recipe, cidaren_capture_recipe_v2());
     }
 }

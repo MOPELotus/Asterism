@@ -1,9 +1,13 @@
 # Cidaren capability map
 
+This map combines the reopened `ularch@bce9559`, owner-supplied
+`MOPELotus@a74b4a2` and OAuth V2 assisted-bootstrap handoff. Their additive
+differences are frozen in [`DONOR_DIFFERENCES.md`](DONOR_DIFFERENCES.md).
+
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
-| Authentication | Current donor + first-party H5/live-safe capture + assisted-bootstrap handoff | PortSource + Reference | Manual opaque `UserToken`, captured Composite sessions and the assisted native V2 path are implemented. `AuthenticationCapability` returns the structured External OAuth challenge for both assisted/browser-OAuth begins and consumes Core-claimed callbacks into a Composite replacement; imported-token begins carry no OAuth artifact. Provider generates independent CSPRNG `state`/random `authorize != "2"`, maps only their hashes into the shared binding, strictly parses query or SPA-fragment callbacks, sends verified `Authorization-v: 00` with exact User-Agent/derived `Abc`, performs fresh P-256/SPKI + signed ECDH/HKDF/AES-GCM once, validates through same-context fresh `Student/Main`, and yields atomic Composite material. Core now durably binds owner/account/AuthSession/TTL, atomically claims/consumes the two digests, records terminal or ambiguous outcome and commits the NativeProviderLogin replacement; Password is not invented without evidence |
-| Stored session validation | Current donor + Asterism secrets boundary | FromScratch | Resolver accepts either one exact manual access token or an exact atomic Composite token + crypto pair from NativeProviderLogin/CaptureTool/BrowserExtension, all account/reference/purpose/session/acquisition/timestamp bound |
+| Authentication | Current donors + first-party H5/live-safe capture + assisted-bootstrap handoff | PortSource + Reference | Manual opaque `UserToken`, public-donor token-only Capture, captured Composite sessions and the assisted native V2 path are implemented at the Provider validation boundary. `AuthenticationCapability` returns the structured External OAuth challenge for both assisted/browser-OAuth begins and consumes Core-claimed callbacks into a Composite replacement; imported-token begins carry no OAuth artifact. Provider generates independent CSPRNG `state`/random `authorize != "2"`, maps only their hashes into the shared binding, strictly parses query or SPA-fragment callbacks, sends verified `Authorization-v: 00` with exact User-Agent/derived `Abc`, performs fresh P-256/SPKI + signed ECDH/HKDF/AES-GCM once, validates through same-context fresh `Student/Main`, and yields atomic Composite material. Core now durably binds owner/account/AuthSession/TTL, atomically claims/consumes the two digests, records terminal or ambiguous outcome and commits the NativeProviderLogin replacement; Password is not invented without evidence |
+| Stored session validation | Current donors + Asterism secrets boundary | FromScratch | Resolver accepts one exact manual or CaptureTool/BrowserExtension token-only ProviderSpecific session, or an exact atomic Composite token + crypto pair from NativeProviderLogin/CaptureTool/BrowserExtension, all account/reference/purpose/session/acquisition/timestamp bound |
 | Session recovery / refresh | Current donor | Reference | No audited refresh endpoint exists; expired sessions require fresh manual import, random-marker OAuth bootstrap or Capture-assisted reacquisition rather than silent refresh claims |
 | CourseInventory | Current/private task routes + public issue fixtures | PortSource | Native signed class pagination and selected-Course `StudyTask/List` are merged by stable `course_id`; conflicting titles fail the complete inventory |
 | TaskInventory | Current/private donor + public issue 83 | PortSource | Native `ClassTask/PageTask` pagination is all-or-nothing; class learning/test identities bind to `release_id`, while ordinary study units bind to `course_id + list_id` because `task_id` may remain `-1` |
@@ -14,8 +18,8 @@
 | AnswerResolve | Current donor | PortSource | Native task-bound inventory, `StudyWordInfo` and bounded `Course/SearchWord` prototype lookup are implemented. Donor strategies resolve bidirectional meaning, ordered matching, separately-scoped phrase/example evidence and completion/example behavior; audited random/fixed-third/last-word failure fallbacks are retained with stable Draft-safe selection and explicit low confidence, including well-formed empty evidence families. Sentence modes load evidence once per top-level parent, preserve donor ordering, resolve exact nested child wire tags and retain the donor's third-parent fallback |
 | SubmissionBuild | Current donor | Reference | Registry-advertised one-current-Question immutable Draft preview is implemented for selection/text/matching; it exposes field names only and never persists topic codes, signatures or endpoints |
 | SubmissionExecute | Current donor | PortSource | Native transports plus a one-shot Provider-private state machine cover `SubmitChoseWord`, `StartAnswer`, sequential `VerifyAnswer`, `SubmitAnswerAndSave` and `SkipAnswer`. Issued/ambiguous/failed-closed states prevent replay, matching consumes each rotated token serially, and only a terminal Completed state can emit a bounded receipt for later fresh verification. Durable public execution awaits the shared AttemptStart/QuestionSession slot |
-| SubmissionVerify | Fresh class task/detail read | FromScratch | The read-only verifier is implemented and Draft/preview/task bound: a receipt or localized completion message is insufficient, fresh exact release/list completion is required, and per-Question status remains honestly `Unverified` because no answer-history endpoint is evidenced. Registry integration remains paired with durable SubmissionExecute |
-| Capture bootstrap | Current donors + PC WeChat XWeb audit | PortSource + Reference | Composite ingestion and the bounded browser-storage recipe are implemented. The current public donor also has a token-only system-proxy helper; Core's single fixed-session-kind Capture recipe cannot yet advertise that as an alternative beside the Composite recipe. The generic helper's isolated Edge/Chrome profile still cannot observe an authenticated PC WeChat XWeb storage context, so those alternate donor Capture paths need shared helper/multi-recipe execution rather than a false end-to-end claim. OAuth bootstrap no longer depends on XWeb/MITM: users can return the preserved random-marker callback URL from an audited WeChat device flow |
+| SubmissionVerify | Fresh class task/detail read + current public donor score read | FromScratch | The read-only verifier is implemented and Draft/preview/task bound: a receipt or localized completion message is insufficient, fresh exact release/list completion is required, and the independently observed bounded 0-100 score is converted to Core thousandth-points when present. Per-Question status remains honestly `Unverified` because no answer-history endpoint is evidenced. Registry integration remains paired with durable SubmissionExecute |
+| Capture bootstrap | Current donors + PC WeChat XWeb audit | PortSource + Reference | Token-only and Composite ingestion plus separate bounded token-only request-header and Composite browser-storage recipes are implemented and advertised as ordered alternatives. Core freezes one exact version per bootstrap and never mixes their outputs. The generic helper's isolated Edge/Chrome profile still cannot observe an authenticated PC WeChat XWeb storage context, so actual PC WeChat/system-proxy helper execution remains shared work rather than a false end-to-end claim. OAuth bootstrap no longer depends on XWeb/MITM: users can return the preserved random-marker callback URL from an audited WeChat device flow |
 | BrowserBridge | Current donor | PortSource | Provider policy is implemented and advertised for freshly rebound class/study Tasks: visible, account/task hash-isolated and restricted to `https://app.vocabgo.com`. The shared `BrowserSessionSpec` currently carries only isolation/origin/headless policy and no executable start route/action/result contract, so Engine/API execution is a recorded Main-owned gap rather than a completed fallback |
 
 ## Current implementation checkpoint
@@ -24,8 +28,8 @@ The current checkpoint (not a completion boundary):
 
 1. establish a Development-only Provider crate with exact canonical ID
    `cidaren`;
-2. validate bounded, redacted and zeroized manual-token and captured Composite
-   sessions;
+2. validate bounded, redacted and zeroized manual/token-only Capture and
+   captured Composite sessions;
 3. classify `Student/Main` success, ordinary token expiry and malformed
    responses without retaining account PII;
 4. parse all-or-nothing class-task pages into unique Courses and stable Tasks;
@@ -83,8 +87,8 @@ The current checkpoint (not a completion boundary):
     mandatory fresh account readback, with no ambiguous retry.
 
 The remaining work is durable shared attempt/submission registration, shared
-execution for the alternate Capture/BrowserBridge paths (including a second
-token-only Capture recipe) and live validation.
+execution for the alternate Capture/BrowserBridge helper paths and live
+validation.
 Fresh post-mutation verification and the durable one-shot External OAuth path
 are already implemented. A checkpoint or Core Gap is not a Provider stopping
 condition.
@@ -114,8 +118,9 @@ platform-facing surface maps as follows:
 | `main_api.submit_result` | `VerifyAnswer` | single-answer and sequential rotated-token matching mutations |
 | `main_api.next_exam` | `SubmitAnswerAndSave` | signed answer/reading-card advance with stable reported duration |
 | `main_api.skip_exam` | `SkipAnswer` | explicit signed skip with stable reported duration |
+| `main_api.get_task_score` | post-run `ClassTask/Info` score read | fresh complete class-task rediscovery already yields the same release-bound score fact; SubmissionVerify now retains it independently from completion/progress as Core thousandth-points |
 | response decoder | fixed-index `jv=2_*`/owner `3_1021`, public span/chunk `3_1021/3_2265/3_2277`, owner `jv=99` | all exact transforms implemented with bounded unique-result semantics and authenticated crypto context for `jv=99` |
-| capture helpers | public proxy-observed token-only `UserToken`; owner `UserToken` plus `CDR_LOGIN_INFO` | Composite ingestion and bounded storage recipe implemented; token-only alternative and XWeb acquisition remain shared multi-recipe/helper-execution gaps, while OAuth uses the implemented random-marker callback path |
+| capture helpers | public proxy-observed token-only `UserToken`; owner `UserToken` plus `CDR_LOGIN_INFO` | Both exact recipes, validation and stored-session paths are ordered and registered; actual system-proxy/XWeb acquisition remains a shared helper-execution gap, while OAuth uses the implemented random-marker callback path |
 
 Donor update checks, GUI controls, logging/export, completion sound and the
 unrelated Gitee access-log probe do not express Cidaren platform protocol

@@ -3,6 +3,11 @@
 Audit date: 2026-08-13. These notes describe frozen donor behavior and
 synthetic parser targets, not live compatibility.
 
+The reopened `ularch@bce9559`, owner-supplied `MOPELotus@a74b4a2` and
+assisted OAuth V2 handoff remain independent, additive evidence lines. See
+[`DONOR_DIFFERENCES.md`](DONOR_DIFFERENCES.md) for the exact revision,
+release, protocol and capability matrix; no line is used to roll back another.
+
 ## Imported token and account validation
 
 The current H5 client sends an opaque token in the `UserToken` header. The
@@ -22,7 +27,14 @@ expiry or refresh endpoint. Asterism therefore keeps `ImportedToken` as one
 independent path and also accepts the current donor's Capture-assisted
 Composite session: one account-bound `UserToken` plus bounded
 `CDR_LOGIN_INFO` crypto context acquired from the authenticated WeChat H5
-origin. `AssistedSession` and `ExternalBrowserOauth` use a visible
+origin. The current public donor's local system-proxy helper captures only the
+same opaque `UserToken`; Asterism accepts that exact token-only
+`AssistedSession` shape from CaptureTool/BrowserExtension as a
+ProviderSpecific session without pretending it contains `jv=99` material.
+The Provider exposes this as a separate version-1 declarative request-header
+recipe after the richer version-2 Composite recipe. Core freezes one exact
+recipe version into each bootstrap session and never combines their outputs.
+`AssistedSession` and `ExternalBrowserOauth` use a visible
 callback/helper challenge rather than pretending a native password flow
 exists.
 
@@ -41,13 +53,15 @@ to Authentication, 429 retains a bounded Retry-After, redirects/404 map to
 ProtocolDrift and server failures remain ProviderUnavailable. Response bodies
 are zeroized after validation.
 
-The Core adapter resolves either one exact manual `ProviderAccessToken`, or an
-exact two-record Composite binding containing `ProviderAccessToken` plus
-`ProviderCompositeSession`. Every record must match the account, reference,
-session kind, acquisition method and expiry. Missing/stale metadata maps to
-Authentication; storage/key failures remain sanitized Internal errors. No
-unsupported automatic refresh claim is made, but a fresh Capture session can
-replace an expired binding.
+The Core adapter resolves either one exact manual or token-only Capture
+`ProviderAccessToken`, or an exact two-record Composite binding containing
+`ProviderAccessToken` plus `ProviderCompositeSession`. Every record must match
+the account, reference, session kind, acquisition method and expiry. A
+token-only Capture must be ProviderSpecific and originate from CaptureTool or
+BrowserExtension; AndroidHelper/NativeProviderLogin cannot be relabelled into
+that shape. Missing/stale metadata maps to Authentication; storage/key failures
+remain sanitized Internal errors. No unsupported automatic refresh claim is
+made, but a fresh Capture session can replace an expired binding.
 
 The original historical donor's `LoginByWechatCode` hard-codes an obsolete
 code into its signature and remains lineage only. A frozen first-party
@@ -373,6 +387,10 @@ The donor's strings such as “task complete” are bounded receipt facts and do
 not replace an identity-bound post-mutation read. The Provider-private
 SubmissionVerify implementation recomputes the immutable preview, freshly
 rebinds the exact release/list identity and confirms only 100%/Completed. The
-platform exposes no audited answer-history readback, so the Task goal may be
+current public donor additionally reads the post-run task score from
+`ClassTask/Info`; Asterism's complete fresh class-task scan already exposes the
+same release-bound score fact, which verification maps from bounded 0-100
+decimal points into Core thousandth-points without inferring completion from
+it. The platform exposes no audited answer-history readback, so the Task goal may be
 confirmed while each Question remains explicitly Unverified; incomplete
 readback stays Pending even after a terminal acknowledgement.

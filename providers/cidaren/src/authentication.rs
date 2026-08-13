@@ -14,8 +14,8 @@ use serde_json::Value;
 use zeroize::Zeroize;
 
 use crate::{
-    CidarenCryptoContext, cidaren_capture_recipe_v2, metadata::development_metadata,
-    oauth_authorization::CidarenOauthAuthorization,
+    CidarenCryptoContext, cidaren_capture_recipe_v2, cidaren_token_capture_recipe_v1,
+    metadata::development_metadata, oauth_authorization::CidarenOauthAuthorization,
 };
 
 const MAX_TOKEN_BYTES: usize = 64 * 1_024;
@@ -198,6 +198,22 @@ impl CidarenAuthentication {
         &self,
         credential: &CredentialBundle,
     ) -> ProviderResult<CredentialValidation> {
+        if credential.auth_method == AuthMethod::AssistedSession
+            && credential.session_kind == SessionKind::ProviderSpecific
+            && matches!(
+                credential.acquired_via,
+                CredentialAcquisition::CaptureTool | CredentialAcquisition::BrowserExtension
+            )
+            && credential.fields.len() == 1
+        {
+            let token = exact_field(credential, SecretPurpose::ProviderAccessToken)?;
+            let token = std::str::from_utf8(token).map_err(|_| invalid_credential_shape())?;
+            let session = CidarenTokenSession::try_new(token.to_owned())?;
+            self.transport.validate_token(&session).await?;
+            return Ok(CredentialValidation::accepted(valid_session(
+                SessionKind::ProviderSpecific,
+            )));
+        }
         let valid_acquisition = match credential.auth_method {
             AuthMethod::AssistedSession => matches!(
                 credential.acquired_via,
@@ -248,6 +264,13 @@ impl ProviderIdentity for CidarenAuthentication {
 impl AuthenticationCapability for CidarenAuthentication {
     fn capture_recipe(&self) -> Option<CaptureRecipe> {
         Some(cidaren_capture_recipe_v2())
+    }
+
+    fn capture_recipes(&self) -> Vec<CaptureRecipe> {
+        vec![
+            cidaren_capture_recipe_v2(),
+            cidaren_token_capture_recipe_v1(),
+        ]
     }
 
     async fn begin_authentication(
@@ -570,6 +593,30 @@ mod tests {
         assert_eq!(captured.status.kind, SessionKind::Composite);
         assert!(captured.replacement.is_none());
 
+        let captured_token = capability
+            .validate_credential(&auth_context(), &captured_token_bundle())
+            .await
+            .unwrap();
+        assert_eq!(captured_token.status.kind, SessionKind::ProviderSpecific);
+        assert!(captured_token.replacement.is_none());
+        for mutate in [
+            |bundle: &mut CredentialBundle| {
+                bundle.acquired_via = CredentialAcquisition::AndroidHelper;
+            },
+            |bundle: &mut CredentialBundle| {
+                bundle.auth_method = AuthMethod::ExternalBrowserOauth;
+            },
+        ] {
+            let mut invalid = captured_token_bundle();
+            mutate(&mut invalid);
+            assert!(
+                capability
+                    .validate_credential(&auth_context(), &invalid)
+                    .await
+                    .is_err()
+            );
+        }
+
         for method in [
             AuthMethod::AssistedSession,
             AuthMethod::ExternalBrowserOauth,
@@ -601,7 +648,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.kind, SessionKind::ProviderSpecific);
-        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 5);
+        assert_eq!(boundaries.validations.load(Ordering::SeqCst), 6);
 
         let mut malformed = imported_bundle();
         malformed.session_kind = SessionKind::BearerToken;
@@ -688,6 +735,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn capture_recipes_prefer_composite_and_expose_token_only_fallback() {
+        let boundaries = Arc::new(FixtureBoundaries::default());
+        let capability = CidarenAuthentication::try_new(boundaries.clone(), boundaries).unwrap();
+        let recipes = capability.capture_recipes();
+        assert_eq!(recipes.len(), 2);
+        assert_eq!(recipes[0], cidaren_capture_recipe_v2());
+        assert_eq!(recipes[1], cidaren_token_capture_recipe_v1());
+        assert_eq!(recipes[0].session_kind, SessionKind::Composite);
+        assert_eq!(recipes[1].session_kind, SessionKind::ProviderSpecific);
+        assert!(recipes.iter().all(|recipe| recipe.validate().is_ok()));
+    }
+
     fn auth_context() -> ProviderAuthContext {
         ProviderAuthContext {
             provider_id: ProviderId::new("cidaren").unwrap(),
@@ -750,6 +810,23 @@ mod tests {
                     ),
                 },
             ],
+            user_id_hint: None,
+        }
+    }
+
+    fn captured_token_bundle() -> CredentialBundle {
+        CredentialBundle {
+            provider_id: ProviderId::new("cidaren").unwrap(),
+            tenant: None,
+            auth_method: AuthMethod::AssistedSession,
+            acquired_via: CredentialAcquisition::CaptureTool,
+            captured_at: Utc::now(),
+            expires_at: None,
+            session_kind: SessionKind::ProviderSpecific,
+            fields: vec![CredentialField {
+                purpose: SecretPurpose::ProviderAccessToken,
+                value: SecretValue::new(b"synthetic-user-token".to_vec()),
+            }],
             user_id_hint: None,
         }
     }

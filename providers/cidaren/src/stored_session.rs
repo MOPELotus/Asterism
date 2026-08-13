@@ -90,7 +90,12 @@ impl CidarenSessionResolver for StoredCidarenSessionResolver {
         if credentials.len() == 1 {
             let metadata = &credentials[access_index].credential;
             if metadata.session_kind != SessionKind::ProviderSpecific
-                || metadata.acquired_via != CredentialAcquisition::ManualImport
+                || !matches!(
+                    metadata.acquired_via,
+                    CredentialAcquisition::ManualImport
+                        | CredentialAcquisition::CaptureTool
+                        | CredentialAcquisition::BrowserExtension
+                )
             {
                 return Err(invalid_stored_session());
             }
@@ -182,9 +187,10 @@ mod tests {
         UnrequestedSecret,
         WrongPurpose,
         WrongKind,
-        WrongOrigin,
+        UnsupportedSingleOrigin,
         Expired,
         InvalidUtf8,
+        CapturedToken,
         Composite,
         CompositeNative,
         CompositeWrongOrigin,
@@ -262,12 +268,12 @@ mod tests {
                     None,
                     b"bearer-token",
                 )]),
-                FixtureBehavior::WrongOrigin => Ok(vec![resolved_credential(
+                FixtureBehavior::UnsupportedSingleOrigin => Ok(vec![resolved_credential(
                     request.provider_account_id,
                     secret_id,
                     SecretPurpose::ProviderAccessToken,
                     SessionKind::ProviderSpecific,
-                    CredentialAcquisition::CaptureTool,
+                    CredentialAcquisition::AndroidHelper,
                     None,
                     b"captured-token",
                 )]),
@@ -288,6 +294,15 @@ mod tests {
                     CredentialAcquisition::ManualImport,
                     None,
                     &[0xff],
+                )]),
+                FixtureBehavior::CapturedToken => Ok(vec![resolved_credential(
+                    request.provider_account_id,
+                    secret_id,
+                    SecretPurpose::ProviderAccessToken,
+                    SessionKind::ProviderSpecific,
+                    CredentialAcquisition::CaptureTool,
+                    None,
+                    b"synthetic-captured-token",
                 )]),
                 FixtureBehavior::Composite => Ok(composite_credentials(
                     &request,
@@ -346,6 +361,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolves_one_exact_token_only_capture() {
+        let session = fixture_resolver(FixtureBehavior::CapturedToken)
+            .resolve_session(&provider_context())
+            .await
+            .unwrap();
+        assert_eq!(session.expose_token(), "synthetic-captured-token");
+        assert_eq!(session.session_kind(), SessionKind::ProviderSpecific);
+        assert!(session.crypto_context().is_none());
+    }
+
+    #[tokio::test]
     async fn resolves_one_exact_account_bound_composite_session() {
         let resolver = fixture_resolver(FixtureBehavior::Composite);
         let session = resolver
@@ -386,7 +412,7 @@ mod tests {
             FixtureBehavior::UnrequestedSecret,
             FixtureBehavior::WrongPurpose,
             FixtureBehavior::WrongKind,
-            FixtureBehavior::WrongOrigin,
+            FixtureBehavior::UnsupportedSingleOrigin,
             FixtureBehavior::Expired,
             FixtureBehavior::InvalidUtf8,
         ] {
