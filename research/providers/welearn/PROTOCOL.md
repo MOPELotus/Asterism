@@ -230,9 +230,15 @@ reported, while only the final fresh CMI preservation/readback proves success.
 
 The client-counter and implicit modes require their evidenced 1-second and
 60-second intervals respectively. Current Fanyuchang requires accepted
-integer `ret=0` at start and accepts heartbeat `ret=0/1`; the historical modes
-record every well-formed integer receipt and continue their donor sequence.
-Missing/string/malformed receipts remain ambiguous and stop with no replay.
+integer `ret=0` at start and accepts heartbeat `ret=0/1`. A different integer
+heartbeat result is an explicit rejection: its donor stops later keeps, then
+continues to the separately mapped completion phase. Asterism records that
+rejection, stops the keep loop and performs the fresh duration read; a verified
+change can therefore let the durable composite proceed to its independently
+authorized ResourceExecution step. The historical modes record every
+well-formed integer receipt and continue their donor sequence. Missing,
+string, malformed, authentication or network outcomes remain ambiguous and
+stop with no replay or later-mutation authority.
 None of these duration modes calls `setscoinfo`; completion remains a separate
 capability.
 

@@ -778,6 +778,9 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
                         &mut heartbeat_rejected,
                     );
                     heartbeat_count = heartbeat_count.saturating_add(1);
+                    if !accepted {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     report_duration_heartbeat(events, elapsed.saturating_add(1), duration_seconds)
                         .await?;
@@ -1016,8 +1019,7 @@ impl NativeWellearnInventoryTransport {
                 ],
             )
             .await?;
-        parse_mutation_response(response.as_str(), MutationResponseKind::Heartbeat)?;
-        Ok(true)
+        mutation_accepted(response.as_str(), MutationResponseKind::Heartbeat)
     }
 
     async fn keep_duration_implicit(
@@ -1147,17 +1149,6 @@ impl Drop for PreservedCmiState {
 enum MutationResponseKind {
     StrictSuccess,
     Heartbeat,
-}
-
-fn parse_mutation_response(document: &str, kind: MutationResponseKind) -> ProviderResult<()> {
-    if mutation_accepted(document, kind)? {
-        Ok(())
-    } else {
-        Err(ProviderError::new(
-            ProviderErrorKind::RemoteChanged,
-            "WELearn SCO mutation was not accepted",
-        ))
-    }
 }
 
 fn mutation_accepted(document: &str, kind: MutationResponseKind) -> ProviderResult<bool> {
@@ -1776,21 +1767,13 @@ mod tests {
 
     #[test]
     fn duration_mutation_results_are_strictly_classified() {
-        assert!(
-            parse_mutation_response(r#"{"ret":0}"#, MutationResponseKind::StrictSuccess).is_ok()
-        );
-        assert!(parse_mutation_response(r#"{"ret":1}"#, MutationResponseKind::Heartbeat).is_ok());
-        for document in [
-            r#"{"ret":1}"#,
-            r#"{"ret":"0"}"#,
-            r#"{"ok":true}"#,
-            "not-json",
-        ] {
-            assert!(
-                parse_mutation_response(document, MutationResponseKind::StrictSuccess).is_err()
-            );
+        assert!(mutation_accepted(r#"{"ret":0}"#, MutationResponseKind::StrictSuccess).unwrap());
+        assert!(mutation_accepted(r#"{"ret":1}"#, MutationResponseKind::Heartbeat).unwrap());
+        assert!(!mutation_accepted(r#"{"ret":1}"#, MutationResponseKind::StrictSuccess).unwrap());
+        assert!(!mutation_accepted(r#"{"ret":2}"#, MutationResponseKind::Heartbeat).unwrap());
+        for document in [r#"{"ret":"0"}"#, r#"{"ok":true}"#, "not-json"] {
+            assert!(mutation_accepted(document, MutationResponseKind::StrictSuccess).is_err());
         }
-        assert!(parse_mutation_response(r#"{"ret":2}"#, MutationResponseKind::Heartbeat).is_err());
         assert!(!mutation_accepted(r#"{"ret":7}"#, MutationResponseKind::StrictSuccess).unwrap());
 
         let (mut accepted, mut rejected) = (0, 0);
