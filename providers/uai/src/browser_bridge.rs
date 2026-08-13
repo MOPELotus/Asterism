@@ -575,6 +575,14 @@ impl UaiBrowserTargetTaskEntry {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UaiBrowserResidenceControl {
+    Pause,
+    Resume,
+    Restart { start_micro_ordinal: u32 },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UaiBrowserCommand {
     ScanMenu,
     ClickMenu {
@@ -593,6 +601,11 @@ pub enum UaiBrowserCommand {
         task_handle: String,
         seconds: u64,
         play_video: bool,
+    },
+    ResidenceControl {
+        task_handle: String,
+        seconds: u64,
+        control: UaiBrowserResidenceControl,
     },
     Ping,
 }
@@ -777,6 +790,51 @@ impl UaiBrowserCommandEnvelope {
         )
     }
 
+    /// Builds a bounded pause/resume/restart control for an active residence
+    /// action. A restart keeps the immutable budget and only changes the
+    /// freshly discovered Micro start ordinal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a foreign target, invalid handle or an
+    /// out-of-range restart ordinal.
+    pub fn residence_control(
+        plan: &UaiBrowserResidencePlan,
+        binding: &UaiBrowserSessionBinding,
+        sequence: u32,
+        target: &UaiBrowserTargetTaskEntry,
+        control: UaiBrowserResidenceControl,
+    ) -> ProviderResult<Self> {
+        let entry = target.entry();
+        entry.validate_for_binding(plan, binding)?;
+        if entry.scope != UaiBrowserPageScope::Task || entry.label != plan.target.task {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI BrowserBridge residence control is outside the exact fresh Task target",
+            ));
+        }
+        if matches!(
+            &control,
+            UaiBrowserResidenceControl::Restart { start_micro_ordinal }
+                if *start_micro_ordinal >= plan.max_discovered_micros
+        ) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge restart Micro ordinal exceeds the frozen bound",
+            ));
+        }
+        Self::new(
+            plan,
+            binding,
+            sequence,
+            UaiBrowserCommand::ResidenceControl {
+                task_handle: entry.handle.clone(),
+                seconds: plan.residence_seconds,
+                control,
+            },
+        )
+    }
+
     fn new(
         plan: &UaiBrowserResidencePlan,
         binding: &UaiBrowserSessionBinding,
@@ -830,6 +888,13 @@ impl UaiBrowserCommandEnvelope {
                         || *seconds != plan.residence_seconds
                         || *play_video != plan.play_video
             )
+            || matches!(
+                &self.command,
+                UaiBrowserCommand::ResidenceControl { task_handle, seconds, control }
+                    if !is_browser_page_handle(task_handle)
+                        || *seconds != plan.residence_seconds
+                        || matches!(control, UaiBrowserResidenceControl::Restart { start_micro_ordinal } if *start_micro_ordinal >= plan.max_discovered_micros)
+            )
         {
             return Err(ProviderError::new(
                 ProviderErrorKind::InvalidResponse,
@@ -874,6 +939,12 @@ pub enum UaiBrowserEvent {
     ClickResult {
         handle: String,
         clicked: bool,
+    },
+    ResidenceControlResult {
+        task_handle: String,
+        control: UaiBrowserResidenceControl,
+        accepted: bool,
+        observed_active_seconds: u64,
     },
     Pong,
 }
@@ -933,21 +1004,7 @@ impl UaiBrowserEventEnvelope {
 
         match (&command.command, &self.event) {
             (UaiBrowserCommand::ScanMenu, UaiBrowserEvent::MenuList { entries }) => {
-                if entries.len() > plan.max_discovered_micros as usize {
-                    return Err(ProviderError::new(
-                        ProviderErrorKind::InvalidResponse,
-                        "UAI BrowserBridge menu result exceeds the frozen bound",
-                    ));
-                }
-                for (expected_ordinal, entry) in entries.iter().enumerate() {
-                    if entry.ordinal as usize != expected_ordinal {
-                        return Err(ProviderError::new(
-                            ProviderErrorKind::ProtocolDrift,
-                            "UAI BrowserBridge menu ordinals are missing or reordered",
-                        ));
-                    }
-                    entry.validate_for_binding(plan, &binding)?;
-                }
+                validate_menu_event(plan, &binding, entries)?;
             }
             (
                 UaiBrowserCommand::ClickMenu { handle: expected },
@@ -957,31 +1014,33 @@ impl UaiBrowserEventEnvelope {
                 UaiBrowserCommand::ScanPage { scope: expected },
                 UaiBrowserEvent::PageList { scope, entries },
             ) if scope == expected => {
-                let limit = match scope {
-                    UaiBrowserPageScope::Tab => plan.max_tabs_per_micro,
-                    UaiBrowserPageScope::Task => plan.max_tasks_per_tab,
-                };
-                if entries.len() > limit as usize {
-                    return Err(ProviderError::new(
-                        ProviderErrorKind::InvalidResponse,
-                        "UAI BrowserBridge page result exceeds the frozen bound",
-                    ));
-                }
-                for (expected_ordinal, entry) in entries.iter().enumerate() {
-                    if entry.scope != *scope || entry.ordinal as usize != expected_ordinal {
-                        return Err(ProviderError::new(
-                            ProviderErrorKind::ProtocolDrift,
-                            "UAI BrowserBridge page entries are foreign, missing or reordered",
-                        ));
-                    }
-                    entry.validate_for_binding(plan, &binding)?;
-                }
+                validate_page_event(plan, &binding, *scope, entries)?;
             }
             (
                 UaiBrowserCommand::ClickTab { handle: expected }
                 | UaiBrowserCommand::ClickTask { handle: expected },
                 UaiBrowserEvent::ClickResult { handle, .. },
             ) if handle == expected && is_browser_page_handle(handle) => {}
+            (
+                UaiBrowserCommand::ResidenceControl {
+                    task_handle: expected_task,
+                    seconds,
+                    control: expected_control,
+                },
+                UaiBrowserEvent::ResidenceControlResult {
+                    task_handle,
+                    control,
+                    observed_active_seconds,
+                    ..
+                },
+            ) => validate_residence_control_event(
+                expected_task,
+                *seconds,
+                expected_control,
+                task_handle,
+                control,
+                *observed_active_seconds,
+            )?,
             (UaiBrowserCommand::Ping, UaiBrowserEvent::Pong) => {}
             _ => {
                 return Err(ProviderError::new(
@@ -991,6 +1050,78 @@ impl UaiBrowserEventEnvelope {
             }
         }
         Ok(())
+    }
+}
+
+fn validate_menu_event(
+    plan: &UaiBrowserResidencePlan,
+    binding: &UaiBrowserSessionBinding,
+    entries: &[UaiBrowserMenuEntry],
+) -> ProviderResult<()> {
+    if entries.len() > plan.max_discovered_micros as usize {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "UAI BrowserBridge menu result exceeds the frozen bound",
+        ));
+    }
+    for (expected_ordinal, entry) in entries.iter().enumerate() {
+        if entry.ordinal as usize != expected_ordinal {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI BrowserBridge menu ordinals are missing or reordered",
+            ));
+        }
+        entry.validate_for_binding(plan, binding)?;
+    }
+    Ok(())
+}
+
+fn validate_page_event(
+    plan: &UaiBrowserResidencePlan,
+    binding: &UaiBrowserSessionBinding,
+    scope: UaiBrowserPageScope,
+    entries: &[UaiBrowserPageEntry],
+) -> ProviderResult<()> {
+    let limit = match scope {
+        UaiBrowserPageScope::Tab => plan.max_tabs_per_micro,
+        UaiBrowserPageScope::Task => plan.max_tasks_per_tab,
+    };
+    if entries.len() > limit as usize {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "UAI BrowserBridge page result exceeds the frozen bound",
+        ));
+    }
+    for (expected_ordinal, entry) in entries.iter().enumerate() {
+        if entry.scope != scope || entry.ordinal as usize != expected_ordinal {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI BrowserBridge page entries are foreign, missing or reordered",
+            ));
+        }
+        entry.validate_for_binding(plan, binding)?;
+    }
+    Ok(())
+}
+
+fn validate_residence_control_event(
+    expected_task: &str,
+    expected_seconds: u64,
+    expected_control: &UaiBrowserResidenceControl,
+    task_handle: &str,
+    control: &UaiBrowserResidenceControl,
+    observed_active_seconds: u64,
+) -> ProviderResult<()> {
+    if task_handle == expected_task
+        && control == expected_control
+        && observed_active_seconds <= expected_seconds
+    {
+        Ok(())
+    } else {
+        Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI BrowserBridge residence control result is foreign or over budget",
+        ))
     }
 }
 
@@ -1876,6 +2007,63 @@ mod tests {
                 &plan,
                 &ping,
                 IPUB_ORIGIN,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn residence_controls_preserve_target_budget_and_bound_restart() {
+        let plan = residence_plan(false);
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, "nonce-42", UCONTENT_ORIGIN, "frame-1")
+                .unwrap();
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            "Read the passage".to_owned(),
+            true,
+        )
+        .unwrap();
+        let target = plan.select_target_task_entry(&binding, &[task]).unwrap();
+        let command = UaiBrowserCommandEnvelope::residence_control(
+            &plan,
+            &binding,
+            8,
+            &target,
+            UaiBrowserResidenceControl::Restart {
+                start_micro_ordinal: 3,
+            },
+        )
+        .unwrap();
+        let document = serde_json::json!({
+            "version": 1,
+            "session_nonce": "nonce-42",
+            "origin": UCONTENT_ORIGIN,
+            "frame_id": "frame-1",
+            "remote_task_id": "group:2001:unit-1:group-1",
+            "reply_to_sequence": 8,
+            "event": {
+                "kind": "residence_control_result",
+                "task_handle": target.entry().handle,
+                "control": {"kind": "restart", "start_micro_ordinal": 3},
+                "accepted": true,
+                "observed_active_seconds": 600
+            }
+        })
+        .to_string();
+        assert!(parse_browser_event(&document, &plan, &command, UCONTENT_ORIGIN).is_ok());
+        assert!(
+            UaiBrowserCommandEnvelope::residence_control(
+                &plan,
+                &binding,
+                9,
+                &target,
+                UaiBrowserResidenceControl::Restart {
+                    start_micro_ordinal: plan.max_discovered_micros,
+                },
             )
             .is_err()
         );

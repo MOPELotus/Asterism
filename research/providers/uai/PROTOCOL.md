@@ -306,7 +306,10 @@ Task; bounds observed residence/video time and Micro/Tab/Task counts; rejects
 video activity when disabled; and marks every valid observation as still
 requiring fresh DurationRead. The donor's wildcard `UAI_CMD` channel is
 represented as a typed, sequence-correlated `SCAN`/`CLICK`/`PING` command and
-menu/click/`PONG` event protocol. The transport-observed origin must equal both
+menu/click/`PONG` event protocol. Donor pause/resume and changed-start-index
+restart controls are represented as a separate typed residence-control command;
+they retain the exact Task handle and frozen budget, and restart accepts only a
+bounded Micro ordinal from the fresh scan. The transport-observed origin must equal both
 the exact allowlisted plan origin and envelope origin, nonce/frame/Task must
 match, menu labels and cardinality are bounded, menu ordinals must be complete
 and ordered. Exactly one menu entry must match the plan's fresh hierarchy;

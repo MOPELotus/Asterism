@@ -52,10 +52,10 @@ pub use authentication::{
 pub use browser_bridge::{
     UaiBrowserBridge, UaiBrowserCommand, UaiBrowserCommandEnvelope, UaiBrowserEvent,
     UaiBrowserEventEnvelope, UaiBrowserMenuEntry, UaiBrowserMessageSecurity, UaiBrowserPageEntry,
-    UaiBrowserPageScope, UaiBrowserResidencePlan, UaiBrowserResidenceResult,
-    UaiBrowserSessionBinding, UaiBrowserTarget, UaiBrowserTargetMenuEntry,
-    UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy, browser_start_url_from_detail,
-    parse_browser_event, parse_browser_residence_result,
+    UaiBrowserPageScope, UaiBrowserResidenceControl, UaiBrowserResidencePlan,
+    UaiBrowserResidenceResult, UaiBrowserSessionBinding, UaiBrowserTarget,
+    UaiBrowserTargetMenuEntry, UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy,
+    browser_start_url_from_detail, parse_browser_event, parse_browser_residence_result,
 };
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
 pub use course_policy::{
