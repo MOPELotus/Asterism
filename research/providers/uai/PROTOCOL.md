@@ -121,16 +121,19 @@ label and does not imply an assessment or execution capability.
 Native TaskInventory first reads and parses the selected resource detail,
 requiring its `courseResourceId` to match the stable Course identity. Only then
 is the fresh `courseInstanceId` encoded as one URL path segment for the tree
-read. Both completed bodies are held in one redacted transport result and
-parsed all-or-nothing; the instance route is never serialized into a Course or
-Task. Authentication renewal restarts the detail/tree pair from the fresh
-detail; progress and duration remain independent capabilities over the same
-native transport.
+read. It extracts the exact unique Unit set from that bounded tree and performs
+one signed progress read for every Unit through the same fresh Course instance.
+The complete detail/tree/progress set is held in one redacted transport result
+and parsed all-or-nothing; a missing, extra or mismatched Unit document fails
+closed, and the instance route is never serialized into a Course or Task.
+Authentication renewal restarts the complete inventory from fresh detail;
+DurationRead remains an independent capability over the same native transport.
 
 TaskDetail never trusts the persisted scan payload as current. It parses the
 stable `group:{courseResourceId}:{unitId}:{groupId}` identity, re-reads the
 Course list, selects exactly one CourseResource, then re-runs the complete
-fresh detail/tree Task inventory and requires exactly one matching Group. A
+fresh detail/tree/every-Unit-progress Task inventory and requires exactly one
+matching Group. A
 missing CourseResource or Group becomes RemoteChanged; duplicate or mismatched
 normalized identities are protocol drift. The bounded tree facts now preserve
 `question_num` beside `base`, retain positional `base` tokens including
@@ -162,6 +165,19 @@ per-Unit route never guesses an ancestor or persists `courseInstanceId`. The
 response must repeat the Unit and contain the exact Group leaf. A Group maps to
 Completed/100 only when `pass`, `pass2` and `perm` are all `1`; every other
 valid flag combination remains Unknown with no percentage.
+
+The current Rust donor's progress leaf additionally exposes `strategies` with
+`required`, `min_score_pct`, `start_time`, `end_time` and
+`statistic_mode_out`, while the MIT donor's execution policy independently
+checks the leaf start/end window before running a Task. Asterism bounds minimum
+score to `0..=100`, requires booleans for the two flags and accepts only
+nonnegative epoch seconds. The donor convention treats either zero endpoint as
+an unbounded window; when both are nonzero they must satisfy `start < end`, and
+a mutation is eligible only under the donor's strict `start < now < end` rule.
+TaskInventory retains those facts, `tab_type`, the resulting `opens_at` /
+`closes_at` and completion state in the enriched fingerprint. Missing strategy
+objects preserve the current donor's serde defaults rather than inventing a
+window.
 
 The independent study-record responses contain both `finishProgress` and
 `duration`. The frozen MIT donor explicitly documents Course, Unit and nested
@@ -388,7 +404,13 @@ the plan is `video-popup`. Any mixed ordinary/video plan uses `submitType=1`.
 This answer-bearing type-2 path is distinct from the empty preset completion
 body and remains under ordinary SubmissionExecute/SubmissionVerify recovery.
 
-The native mutation client sends the account-bound JWT and annotator token.
+Immediately before an answer-bearing POST, the native mutation client refreshes
+the Course detail and exact Unit progress through the same account session. It
+requires the exact Group to be an incomplete `tab_type=task` leaf and requires
+the fresh donor availability window to contain the current time. A completed,
+non-task, unavailable, missing or identity-mismatched leaf fails before body
+construction and transport. The mutation client then sends the account-bound
+JWT and annotator token.
 Capture recipe v4 additionally preserves the donor-proven browser Cookie and
 optional `u-school` header. The native transport injects those optional values
 only into `ucontent` requests, along with the exact account-bound
@@ -436,7 +458,8 @@ audited labels and, independently, for exact `exit-ticket`, `oral-sentence`,
 ExecutionVerify plus ProgressRead. Before mutation the native transport
 refreshes Course detail and the exact Unit progress document, requires the
 exact Group leaf and `tab_type=text|video` for a preset or `tab_type=task` for
-exit-ticket/oral, and skips the POST if all three completion flags are already
+exit-ticket/oral, requires the fresh donor availability window to contain the
+current time, and skips the POST if all three completion flags are already
 `1`. Preset and exit-ticket send the donor-observed no-Question empty body;
 oral sends the donor's distinct bounded placeholder-answer body with
 `instanceId=0`, one empty child per declared Question, `submitType=1` and the

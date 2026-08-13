@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
 use asterism_provider_api::{ProviderError, ProviderResult, RemoteCourse, RemoteTask};
@@ -10,7 +10,8 @@ use crate::course_inventory::{
     required_remote_component, required_text,
 };
 use crate::{
-    question::supports_question_read, resource_execution::supports_empty_completion_execution,
+    UaiProgressDocument, parse_group_progress, question::supports_question_read,
+    resource_execution::supports_empty_completion_execution,
 };
 
 const MAX_TREE_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -105,6 +106,65 @@ pub fn parse_task_inventory(
         )?;
     }
     Ok(tasks.into_values().collect())
+}
+
+pub(crate) fn enrich_task_inventory(
+    mut tasks: Vec<RemoteTask>,
+    progress_by_unit: &BTreeMap<String, UaiProgressDocument>,
+) -> ProviderResult<Vec<RemoteTask>> {
+    if progress_by_unit.is_empty() {
+        return Ok(tasks);
+    }
+    let expected_units = tasks
+        .iter()
+        .map(task_unit_id)
+        .collect::<ProviderResult<BTreeSet<_>>>()?;
+    if progress_by_unit.keys().collect::<BTreeSet<_>>()
+        != expected_units.iter().collect::<BTreeSet<_>>()
+    {
+        return Err(protocol_drift(
+            "UAI Task strategy documents do not match the Task-tree Units",
+        ));
+    }
+    for task in &mut tasks {
+        let unit_id = task_unit_id(task)?;
+        let group_id = task
+            .normalized
+            .get("group_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| protocol_drift("UAI normalized Task has no Group identity"))?;
+        let progress = progress_by_unit
+            .get(&unit_id)
+            .ok_or_else(|| protocol_drift("UAI Task strategy has no matching Unit document"))?;
+        let snapshot = parse_group_progress(progress.as_str(), &unit_id, group_id)?;
+        task.remote_state = if snapshot.is_completed() {
+            RemoteState::Completed
+        } else {
+            RemoteState::Unknown
+        };
+        task.opens_at = snapshot.opens_at();
+        task.closes_at = snapshot.closes_at();
+        let strategy = serde_json::json!({
+            "required": snapshot.required(),
+            "min_score_percent": snapshot.min_score_percent(),
+            "statistic_mode_out": snapshot.statistic_mode_out(),
+            "tab_type": snapshot.tab_type(),
+        });
+        task.normalized["strategy"] = strategy.clone();
+        task.raw_sanitized["strategy"] = strategy;
+        task.fingerprint = fingerprint(&task.normalized)?;
+    }
+    Ok(tasks)
+}
+
+fn task_unit_id(task: &RemoteTask) -> ProviderResult<String> {
+    task.normalized
+        .get("unit")
+        .and_then(Value::as_object)
+        .and_then(|unit| unit.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| protocol_drift("UAI normalized Task has no Unit identity"))
 }
 
 #[derive(Clone, Copy)]

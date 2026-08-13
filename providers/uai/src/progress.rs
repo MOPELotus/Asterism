@@ -62,6 +62,11 @@ pub struct UaiGroupProgressSnapshot {
     perm: u8,
     duration_raw: Option<u64>,
     tab_type: Option<String>,
+    required: bool,
+    min_score_percent: u8,
+    opens_at: Option<asterism_domain::Timestamp>,
+    closes_at: Option<asterism_domain::Timestamp>,
+    statistic_mode_out: bool,
 }
 
 impl UaiGroupProgressSnapshot {
@@ -83,6 +88,33 @@ impl UaiGroupProgressSnapshot {
 
     pub fn tab_type(&self) -> Option<&str> {
         self.tab_type.as_deref()
+    }
+
+    pub const fn required(&self) -> bool {
+        self.required
+    }
+
+    pub const fn min_score_percent(&self) -> u8 {
+        self.min_score_percent
+    }
+
+    pub const fn opens_at(&self) -> Option<asterism_domain::Timestamp> {
+        self.opens_at
+    }
+
+    pub const fn closes_at(&self) -> Option<asterism_domain::Timestamp> {
+        self.closes_at
+    }
+
+    pub const fn statistic_mode_out(&self) -> bool {
+        self.statistic_mode_out
+    }
+
+    pub fn mutation_available_at(&self, now: asterism_domain::Timestamp) -> bool {
+        match (self.opens_at, self.closes_at) {
+            (Some(opens_at), Some(closes_at)) => opens_at < now && now < closes_at,
+            _ => true,
+        }
     }
 
     pub const fn is_completed(&self) -> bool {
@@ -223,6 +255,7 @@ pub fn parse_group_progress(
         .get("state")
         .and_then(Value::as_object)
         .ok_or_else(|| protocol_drift("UAI Group progress has no state object"))?;
+    let strategy = progress_strategy(leaf.get("strategies"))?;
     Ok(UaiGroupProgressSnapshot {
         pass: state_flag(state.get("pass"), "pass")?,
         pass2: state_flag(state.get("pass2"), "pass2")?,
@@ -247,7 +280,101 @@ pub fn parse_group_progress(
                 )
             })
             .transpose()?,
+        required: strategy.required,
+        min_score_percent: strategy.min_score_percent,
+        opens_at: strategy.opens_at,
+        closes_at: strategy.closes_at,
+        statistic_mode_out: strategy.statistic_mode_out,
     })
+}
+
+struct ProgressStrategy {
+    required: bool,
+    min_score_percent: u8,
+    opens_at: Option<asterism_domain::Timestamp>,
+    closes_at: Option<asterism_domain::Timestamp>,
+    statistic_mode_out: bool,
+}
+
+fn progress_strategy(value: Option<&Value>) -> ProviderResult<ProgressStrategy> {
+    let Some(strategy) = value else {
+        return Ok(ProgressStrategy {
+            required: false,
+            min_score_percent: 0,
+            opens_at: None,
+            closes_at: None,
+            statistic_mode_out: false,
+        });
+    };
+    let strategy = strategy
+        .as_object()
+        .ok_or_else(|| protocol_drift("UAI Group progress strategies is not an object"))?;
+    let required = optional_boolean(strategy.get("required"), "required")?.unwrap_or(false);
+    let min_score_percent = strategy
+        .get("min_score_pct")
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|value| *value <= 100)
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or_else(|| protocol_drift("UAI Group minimum score percent is invalid"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let start = optional_epoch_seconds(strategy.get("start_time"), "start time")?.unwrap_or(0);
+    let end = optional_epoch_seconds(strategy.get("end_time"), "end time")?.unwrap_or(0);
+    let (opens_at, closes_at) = if start == 0 || end == 0 {
+        (None, None)
+    } else {
+        if start >= end {
+            return Err(protocol_drift(
+                "UAI Group progress has an invalid availability window",
+            ));
+        }
+        (
+            Some(
+                chrono::DateTime::from_timestamp(start, 0)
+                    .ok_or_else(|| protocol_drift("UAI Group start time is out of range"))?,
+            ),
+            Some(
+                chrono::DateTime::from_timestamp(end, 0)
+                    .ok_or_else(|| protocol_drift("UAI Group end time is out of range"))?,
+            ),
+        )
+    };
+    let statistic_mode_out =
+        optional_boolean(strategy.get("statistic_mode_out"), "statistic mode")?.unwrap_or(false);
+    Ok(ProgressStrategy {
+        required,
+        min_score_percent,
+        opens_at,
+        closes_at,
+        statistic_mode_out,
+    })
+}
+
+fn optional_boolean(value: Option<&Value>, label: &'static str) -> ProviderResult<Option<bool>> {
+    value
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| protocol_drift(format!("UAI Group {label} is not boolean")))
+        })
+        .transpose()
+}
+
+fn optional_epoch_seconds(
+    value: Option<&Value>,
+    label: &'static str,
+) -> ProviderResult<Option<i64>> {
+    value
+        .map(|value| {
+            value
+                .as_i64()
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| protocol_drift(format!("UAI Group {label} is invalid")))
+        })
+        .transpose()
 }
 
 struct GroupIdentity {
@@ -353,6 +480,19 @@ mod tests {
         assert!(completed.is_completed());
         assert_eq!(completed.duration_raw(), Some(17));
         assert_eq!(completed.tab_type(), Some("text"));
+        assert!(completed.required());
+        assert_eq!(completed.min_score_percent(), 60);
+        assert!(!completed.statistic_mode_out());
+        assert_eq!(completed.opens_at().unwrap().timestamp(), 1_785_542_400);
+        assert_eq!(completed.closes_at().unwrap().timestamp(), 1_790_812_800);
+        assert!(
+            completed
+                .mutation_available_at(chrono::DateTime::from_timestamp(1_786_752_000, 0).unwrap())
+        );
+        assert!(
+            !completed
+                .mutation_available_at(chrono::DateTime::from_timestamp(1_784_678_400, 0).unwrap())
+        );
 
         let incomplete = parse_group_progress(PROGRESS, "unit-1", "group-2").unwrap();
         assert!(!incomplete.is_completed());
@@ -361,6 +501,10 @@ mod tests {
         assert_eq!(incomplete.perm(), 1);
         assert_eq!(incomplete.duration_raw(), Some(9));
         assert_eq!(incomplete.tab_type(), Some("video"));
+        assert!(!incomplete.required());
+        assert!(incomplete.statistic_mode_out());
+        assert!(incomplete.opens_at().is_none());
+        assert!(incomplete.closes_at().is_none());
     }
 
     #[test]
@@ -368,6 +512,22 @@ mod tests {
         assert!(
             parse_group_progress(
                 &PROGRESS.replacen("\"code\": 0,", "\"message\": \"success\",", 1),
+                "unit-1",
+                "group-1",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_group_progress(
+                &PROGRESS.replacen("\"min_score_pct\": 60", "\"min_score_pct\": 101", 1),
+                "unit-1",
+                "group-1",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_group_progress(
+                &PROGRESS.replacen("\"end_time\": 1790812800", "\"end_time\": 1785542399", 1,),
                 "unit-1",
                 "group-1",
             )

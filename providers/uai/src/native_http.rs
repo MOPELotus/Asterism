@@ -1,4 +1,8 @@
-use std::{fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
 
 use asterism_domain::SubmissionReceipt;
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
@@ -33,7 +37,7 @@ use crate::{
     encrypted::ZeroizingJsonValue,
     parse_course_context, parse_discussion_binding, parse_discussion_reply_page,
     parse_discussion_reply_receipt, parse_discussion_topic, parse_group_progress,
-    parse_submission_receipt, parse_upload_grant, parse_upload_result,
+    parse_submission_receipt, parse_task_inventory, parse_upload_grant, parse_upload_result,
     submission_verify::validate_verification_course_binding,
     user_identity::parse_user_identity,
 };
@@ -162,7 +166,66 @@ impl NativeUaiInventoryTransport {
             )
             .await?,
         )?;
-        Ok(UaiTaskInventoryDocuments::new(detail, tree))
+        let units = parse_task_inventory(course, &route, tree.as_str())?
+            .into_iter()
+            .map(|task| {
+                task.normalized
+                    .get("unit")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|unit| unit.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        ProviderError::new(
+                            ProviderErrorKind::ProtocolDrift,
+                            "UAI native Task inventory found no normalized Unit identity",
+                        )
+                    })
+            })
+            .collect::<ProviderResult<BTreeSet<_>>>()?;
+        let mut progress_by_unit = BTreeMap::new();
+        for unit_id in units {
+            let progress = self
+                .fetch_progress_for_route_with_session(
+                    session,
+                    route.course_instance_id(),
+                    &unit_id,
+                )
+                .await?;
+            progress_by_unit.insert(unit_id, progress);
+        }
+        Ok(UaiTaskInventoryDocuments::new(detail, tree).with_unit_progress(progress_by_unit))
+    }
+
+    async fn fetch_progress_for_route_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_instance_id: &str,
+        unit_id: &str,
+    ) -> ProviderResult<UaiProgressDocument> {
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let response = self
+            .client
+            .get(course_progress_url(
+                course_instance_id,
+                unit_id,
+                session.expose_open_id(),
+            )?)
+            .header(ACCEPT, "application/json")
+            .headers(ucontent_session_headers(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        UaiProgressDocument::try_new(read_json_response(response, ResponseRoute::Progress).await?)
     }
 
     async fn fetch_progress_with_session(
@@ -188,29 +251,8 @@ impl NativeUaiInventoryTransport {
             .await?,
         )?;
         let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
-        let annotator = generate_annotator_token(session.expose_open_id())?;
-        let mut annotator_header =
-            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
-                ProviderError::new(
-                    ProviderErrorKind::Internal,
-                    "UAI annotator token cannot be encoded as a request header",
-                )
-            })?;
-        annotator_header.set_sensitive(true);
-        let response = self
-            .client
-            .get(course_progress_url(
-                route.course_instance_id(),
-                &unit_id,
-                session.expose_open_id(),
-            )?)
-            .header(ACCEPT, "application/json")
-            .headers(ucontent_session_headers(session)?)
-            .header("x-annotator-auth-token", annotator_header)
-            .send()
+        self.fetch_progress_for_route_with_session(session, route.course_instance_id(), &unit_id)
             .await
-            .map_err(|error| classify_reqwest_error(&error))?;
-        UaiProgressDocument::try_new(read_json_response(response, ResponseRoute::Progress).await?)
     }
 
     async fn fetch_duration_with_session(
@@ -357,6 +399,7 @@ impl NativeUaiInventoryTransport {
         &self,
         session: &UaiJwtSession,
         course_resource_id: &str,
+        unit_id: &str,
         group_id: &str,
         plan: &UaiSubmissionPlan,
     ) -> ProviderResult<SubmissionReceipt> {
@@ -368,6 +411,10 @@ impl NativeUaiInventoryTransport {
             Some(&serde_json::Value::String(group_id.to_owned())),
             "submission Group ID",
         )?;
+        let unit_id = required_remote_component(
+            Some(&serde_json::Value::String(unit_id.to_owned())),
+            "submission Unit ID",
+        )?;
         let detail = UaiInventoryDocument::try_new(
             self.send_get_with_session(
                 session,
@@ -377,6 +424,15 @@ impl NativeUaiInventoryTransport {
             .await?,
         )?;
         let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let progress = self
+            .fetch_progress_for_route_with_session(session, route.course_instance_id(), &unit_id)
+            .await?;
+        validate_answer_submission_progress_target(
+            progress.as_str(),
+            &unit_id,
+            &group_id,
+            Utc::now(),
+        )?;
         let body = Zeroizing::new(build_submission_body(
             route.course_instance_id(),
             session.expose_open_id(),
@@ -986,17 +1042,18 @@ impl UaiSubmissionTransport for NativeUaiInventoryTransport {
         &self,
         context: &ProviderContext,
         course_resource_id: &str,
+        unit_id: &str,
         group_id: &str,
         plan: &UaiSubmissionPlan,
     ) -> ProviderResult<SubmissionReceipt> {
         let (session, renewed) = self.session_for_operation(context).await?;
         match self
-            .submit_with_session(&session, course_resource_id, group_id, plan)
+            .submit_with_session(&session, course_resource_id, unit_id, group_id, plan)
             .await
         {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 let session = self.sessions.renew_session(context).await?;
-                self.submit_with_session(&session, course_resource_id, group_id, plan)
+                self.submit_with_session(&session, course_resource_id, unit_id, group_id, plan)
                     .await
             }
             result => result,
@@ -1840,6 +1897,22 @@ fn validate_empty_completion_progress_target(
     expected_group_id: &str,
     preflight: EmptyCompletionPreflight,
 ) -> ProviderResult<bool> {
+    validate_empty_completion_progress_target_at(
+        document,
+        expected_unit_id,
+        expected_group_id,
+        preflight,
+        Utc::now(),
+    )
+}
+
+fn validate_empty_completion_progress_target_at(
+    document: &str,
+    expected_unit_id: &str,
+    expected_group_id: &str,
+    preflight: EmptyCompletionPreflight,
+    now: asterism_domain::Timestamp,
+) -> ProviderResult<bool> {
     let snapshot = parse_group_progress(document, expected_unit_id, expected_group_id)?;
     let tab_type_matches = match preflight {
         EmptyCompletionPreflight::Preset => matches!(snapshot.tab_type(), Some("text" | "video")),
@@ -1863,7 +1936,41 @@ fn validate_empty_completion_progress_target(
             },
         ));
     }
+    if !snapshot.mutation_available_at(now) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI Group is outside its fresh donor availability window",
+        ));
+    }
     Ok(snapshot.is_completed())
+}
+
+fn validate_answer_submission_progress_target(
+    document: &str,
+    expected_unit_id: &str,
+    expected_group_id: &str,
+    now: asterism_domain::Timestamp,
+) -> ProviderResult<()> {
+    let snapshot = parse_group_progress(document, expected_unit_id, expected_group_id)?;
+    if snapshot.tab_type() != Some("task") {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI answer submission requires a fresh task progress leaf",
+        ));
+    }
+    if snapshot.is_completed() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI answer submission refuses to mutate an already-completed Group",
+        ));
+    }
+    if !snapshot.mutation_available_at(now) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI Group is outside its fresh donor availability window",
+        ));
+    }
+    Ok(())
 }
 
 fn static_submission_error() -> ProviderError {
@@ -2317,69 +2424,117 @@ mod tests {
 
     #[test]
     fn preset_preflight_requires_fresh_text_or_video_leaf() {
+        let within_window = chrono::DateTime::from_timestamp(1_786_752_000, 0).unwrap();
         assert!(
-            validate_empty_completion_progress_target(
+            validate_empty_completion_progress_target_at(
                 PROGRESS,
                 "unit-1",
                 "group-1",
                 EmptyCompletionPreflight::Preset,
+                within_window,
             )
             .unwrap()
         );
         assert!(
-            !validate_empty_completion_progress_target(
+            !validate_empty_completion_progress_target_at(
                 PROGRESS,
                 "unit-1",
                 "group-2",
                 EmptyCompletionPreflight::Preset,
+                within_window,
             )
             .unwrap()
         );
         assert!(
-            validate_empty_completion_progress_target(
+            validate_empty_completion_progress_target_at(
                 PROGRESS,
                 "other-unit",
                 "group-1",
                 EmptyCompletionPreflight::Preset,
+                within_window,
             )
             .is_err()
         );
         assert!(
-            validate_empty_completion_progress_target(
+            validate_empty_completion_progress_target_at(
                 PROGRESS,
                 "unit-1",
                 "missing",
                 EmptyCompletionPreflight::Preset,
+                within_window,
             )
             .is_err()
         );
         let task = PROGRESS.replacen("\"tab_type\": \"text\"", "\"tab_type\": \"task\"", 1);
         assert!(
-            validate_empty_completion_progress_target(
+            validate_empty_completion_progress_target_at(
                 &task,
                 "unit-1",
                 "group-1",
                 EmptyCompletionPreflight::Preset,
+                within_window,
             )
             .is_err()
         );
         assert!(
-            validate_empty_completion_progress_target(
+            validate_empty_completion_progress_target_at(
                 &task,
                 "unit-1",
                 "group-1",
                 EmptyCompletionPreflight::ExitTicket,
+                within_window,
             )
             .unwrap()
         );
         assert!(
-            validate_empty_completion_progress_target(
+            validate_empty_completion_progress_target_at(
                 &task,
                 "unit-1",
                 "group-1",
                 EmptyCompletionPreflight::Oral,
+                within_window,
             )
             .unwrap()
+        );
+        let before_window = chrono::DateTime::from_timestamp(1_784_678_400, 0).unwrap();
+        assert!(
+            validate_empty_completion_progress_target_at(
+                &task,
+                "unit-1",
+                "group-1",
+                EmptyCompletionPreflight::ExitTicket,
+                before_window,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn answer_submission_preflight_requires_fresh_available_incomplete_task_leaf() {
+        let within_window = chrono::DateTime::from_timestamp(1_786_752_000, 0).unwrap();
+        let task = PROGRESS.replacen("\"tab_type\": \"video\"", "\"tab_type\": \"task\"", 1);
+        validate_answer_submission_progress_target(&task, "unit-1", "group-2", within_window)
+            .unwrap();
+
+        assert!(
+            validate_answer_submission_progress_target(
+                PROGRESS,
+                "unit-1",
+                "group-2",
+                within_window,
+            )
+            .is_err()
+        );
+        let completed_task =
+            PROGRESS.replacen("\"tab_type\": \"text\"", "\"tab_type\": \"task\"", 1);
+        assert!(
+            validate_answer_submission_progress_target(
+                &completed_task,
+                "unit-1",
+                "group-1",
+                within_window,
+            )
+            .is_err()
         );
     }
 

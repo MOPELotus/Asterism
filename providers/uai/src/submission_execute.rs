@@ -635,6 +635,7 @@ pub trait UaiSubmissionTransport: Send + Sync {
         &self,
         context: &ProviderContext,
         course_resource_id: &str,
+        unit_id: &str,
         group_id: &str,
         plan: &UaiSubmissionPlan,
     ) -> ProviderResult<SubmissionReceipt>;
@@ -742,7 +743,13 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
         )?;
         let receipt = self
             .transport
-            .submit(context, &identity.course_resource, &identity.group, &plan)
+            .submit(
+                context,
+                &identity.course_resource,
+                &identity.unit,
+                &identity.group,
+                &plan,
+            )
             .await?;
         receipt
             .validate()
@@ -1059,6 +1066,7 @@ mod tests {
     #[derive(Debug, Eq, PartialEq)]
     struct RecordedSubmission {
         course_resource_id: String,
+        unit_id: String,
         group_id: String,
         protocol_versions: UaiSubmissionProtocolVersions,
         questions: Vec<RecordedQuestion>,
@@ -1070,11 +1078,13 @@ mod tests {
             &self,
             _context: &ProviderContext,
             course_resource_id: &str,
+            unit_id: &str,
             group_id: &str,
             plan: &UaiSubmissionPlan,
         ) -> ProviderResult<SubmissionReceipt> {
             self.calls.lock().unwrap().push(RecordedSubmission {
                 course_resource_id: course_resource_id.to_owned(),
+                unit_id: unit_id.to_owned(),
                 group_id: group_id.to_owned(),
                 protocol_versions: plan.protocol_versions(),
                 questions: plan
@@ -1111,6 +1121,7 @@ mod tests {
             &self,
             _context: &ProviderContext,
             _course_resource_id: &str,
+            _unit_id: &str,
             _group_id: &str,
             _plan: &UaiSubmissionPlan,
         ) -> ProviderResult<SubmissionReceipt> {
@@ -1131,6 +1142,7 @@ mod tests {
             &self,
             _context: &ProviderContext,
             _course_resource_id: &str,
+            _unit_id: &str,
             _group_id: &str,
             _plan: &UaiSubmissionPlan,
         ) -> ProviderResult<SubmissionReceipt> {
@@ -1217,6 +1229,7 @@ mod tests {
             transport.calls.lock().unwrap().as_slice(),
             &[RecordedSubmission {
                 course_resource_id: "2001".to_owned(),
+                unit_id: "unit-1".to_owned(),
                 group_id: "group-1".to_owned(),
                 protocol_versions: UaiSubmissionProtocolVersions {
                     course: 123_290,
@@ -1252,6 +1265,7 @@ mod tests {
             transport.calls.lock().unwrap().as_slice(),
             &[RecordedSubmission {
                 course_resource_id: "2001".to_owned(),
+                unit_id: "unit-1".to_owned(),
                 group_id: "group-1".to_owned(),
                 protocol_versions: UaiSubmissionProtocolVersions {
                     course: 123_290,

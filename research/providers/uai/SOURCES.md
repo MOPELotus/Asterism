@@ -8,13 +8,15 @@ default branches are not evidence for this checkpoint.
 | [`create-try-now/AutoFinish_UxiaoyuanAI`](https://github.com/create-try-now/AutoFinish_UxiaoyuanAI) | `bef0d29155cef727e05ba6b72336ee212c94fe84` | Current Password/JWT, Course/progress, encrypted content/answer, typed objective/subjective/compound execution, discussion, exit-ticket, oral-empty, upload and external AI behavior | Reference | Apache-2.0 |
 | [`Duster-Cule/UnipusHelperPro`](https://github.com/Duster-Cule/UnipusHelperPro) | `590b4a58fe175240fe9a08fdd69948effcf4f193` | Independent Course/task progress and duration reads; encrypted answer, ordered single/multi-module submit builders and fresh user-module verification routes | Reference | MIT |
 | [`uxudjs/UnipusAIAutoPlayer`](https://github.com/uxudjs/UnipusAIAutoPlayer) | `cc6bdc86a13e7c80a54dff50819607a488ed952e` | Current Unit/Section/Micro DOM and iframe discovery, Tab/Task interaction, popup handling, page-residence distribution and optional video playback/keepalive | Reference | GPL-3.0 |
-| [`Zzj-klwgxdz/UnipusAI`](https://github.com/Zzj-klwgxdz/UnipusAI) | `40ead69c7dabf7a2f3a215ff69f3feba73a736f6` | Current Rust progress-leaf `tab_type`, text/video mark-seen, generic ordered child answer body, content-derived judge types, external LLM and media transcription | Reference | GPL-3.0 |
+| [`Zzj-klwgxdz/UnipusAI`](https://github.com/Zzj-klwgxdz/UnipusAI) | `40ead69c7dabf7a2f3a215ff69f3feba73a736f6` | Current Rust progress-leaf `tab_type`, required/minimum-score/time-window/statistic strategy, text/video mark-seen, generic ordered child answer body, content-derived judge types, external LLM and media transcription | Reference | GPL-3.0 |
 
 The Apache backend donor is the primary current HTTP reference. The MIT donor
 is an independent route/schema cross-check and proves that completion,
 progress and duration are separate observations. Its response contract also
 explicitly identifies the study-record duration values as seconds and the
-route caller binds query `id` to the numeric CourseResource ID. The GPL
+route caller binds query `id` to the numeric CourseResource ID. Its task runner
+also corroborates the strict nonzero start/end availability check used before
+interaction. The GPL
 userscript is used only to understand browser lifecycle behavior; no
 implementation code is copied. Its frozen `5.2.14` source specifically
 evidences the two browser origins, legacy/Ant/u3menu directory discovery,
@@ -55,6 +57,10 @@ on the five preset `base` labels but its active generic builder inserts
 `instanceId=0` placeholder question rows, so that path is recorded as drift and
 is not body evidence. Asterism uses the five labels only to identify scan-time
 candidates and requires a fresh exact text/video progress leaf before mutation.
+The same current progress model exposes per-leaf `required`, `min_score_pct`,
+`start_time`, `end_time` and `statistic_mode_out`; Asterism retains those facts
+for Task selection and applies the donor time-window rule to every native
+mutation rather than relying on stale tree labels.
 
 For answer-bearing Groups, the current Rust and MIT donors both serialize one
 ordered `quesDatas` row per native module and flatten child completion/judge

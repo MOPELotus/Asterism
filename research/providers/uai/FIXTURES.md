@@ -31,8 +31,9 @@ CourseResource flattening, paired point counts, fresh detail binding, redacted
 Course-instance routing, the outer/nested Course-tree envelope,
 Unit/Section/Micro/Group identity separation, bounded task type/question count,
 numeric and numeric-string Course publish versions, versioned Task fingerprints,
-identity-bound per-Unit flags plus raw progress
-duration and bounded text/video tab type, and exact
+identity-bound per-Unit flags, required/minimum-score/statistic-mode strategy,
+strict bounded availability windows, raw progress duration and bounded
+text/video tab type, and exact
 CourseResource/Unit/Group-bound learning seconds. Inline negative tests cover
 malformed/extra composite
 fields, duplicate
@@ -111,10 +112,10 @@ field names, placeholder identities and response/result codes.
 - Bounded positive choice, multi-child composite choice, short-answer/writing, translation/revise, fillblank/banked-cloze, ordering, matching and content-derived `video-popup` Groups with one shared type or exact one-type-per-Question cardinality advertise execute/verify. MIT-donor `writing` analysis is tested through Question→Answer→Draft→Submission as bound text; `video-popup` tests derive choice or ordered text children from fresh `replyType`, reject incompatible mixtures and retain a non-empty answer body with `submitType=2`; composite option sets, matching-left and ordering child facts remain explicit.
 - Multi-Question execution preserves draft positions, native module identities, per-module children and flattened judge/completion order; fresh count/type drift fails before mutation.
 - Every Question execution requires one bounded content-derived current-donor judge descriptor per answer child and never substitutes the Group `base` when that exact metadata is absent.
-- Submission execution requires a positive numeric native instance ID and rejects arbitrary read-only Question identities before transport.
+- Submission execution requires a positive numeric native instance ID and rejects arbitrary read-only Question identities before transport. Its native path refreshes exact Unit progress and rejects a completed, non-task or out-of-window Group before building or sending the POST.
 - Codes `600001` and `600002` never produce a receipt and never trigger an implicit mutation retry.
 - Ambiguous mutation transport failures return after exactly one Provider attempt.
-- Completion execution uses the five preset labels, exact `exit-ticket`, or one exact single oral family only as candidates. It requires a fresh exact Unit/Group `tab_type=text|video` leaf for presets or `tab_type=task` for exit-ticket/oral, skips already-completed leaves, emits either the exact empty `submitType=2` body or oral's bounded `instanceId=0` placeholder body at most once, and exposes a goal-bound fresh-detail plus exact-progress verify-only path for Core recovery; its receipt and synthetic body are never completion evidence.
+- Completion execution uses the five preset labels, exact `exit-ticket`, or one exact single oral family only as candidates. It requires a fresh exact Unit/Group `tab_type=text|video` leaf for presets or `tab_type=task` for exit-ticket/oral, enforces the donor's strict availability window, skips already-completed leaves, emits either the exact empty `submitType=2` body or oral's bounded `instanceId=0` placeholder body at most once, and exposes a goal-bound fresh-detail plus exact-progress verify-only path for Core recovery; its receipt and synthetic body are never completion evidence.
 - Verification requires the receipt version and an exact fresh Course/Group/complete ordered Question set/submitted-answer readback.
 - Missing receipts are Inconclusive; receipts alone never confirm success, score, progress or completion.
 - Every Group advertises BrowserBridge, but a session spec is issued only after fresh exact Task rediscovery; the isolation key hashes account plus Task and the origin set is exactly `ucontent`/`ipub`.

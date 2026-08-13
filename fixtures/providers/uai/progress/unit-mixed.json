@@ -7,6 +7,13 @@
       "group-1": {
         "duration": 17,
         "tab_type": "text",
+        "strategies": {
+          "required": true,
+          "min_score_pct": 60,
+          "start_time": 1785542400,
+          "end_time": 1790812800,
+          "statistic_mode_out": false
+        },
         "state": {
           "pass": 1,
           "pass2": 1,
@@ -16,6 +23,13 @@
       "group-2": {
         "duration": 9,
         "tab_type": "video",
+        "strategies": {
+          "required": false,
+          "min_score_pct": 0,
+          "start_time": 0,
+          "end_time": 32503651200,
+          "statistic_mode_out": true
+        },
         "state": {
           "pass": 0,
           "pass2": 0,

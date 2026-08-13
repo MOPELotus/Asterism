@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use asterism_provider_api::{
     CourseInventoryCapability, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use zeroize::Zeroize;
 
 use crate::{
-    metadata::development_metadata, parse_course_context, parse_course_inventory,
-    parse_task_inventory,
+    UaiProgressDocument, metadata::development_metadata, parse_course_context,
+    parse_course_inventory, parse_task_inventory, task_inventory::enrich_task_inventory,
 };
 
 const MAX_INVENTORY_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -66,13 +66,29 @@ pub trait UaiCourseInventoryTransport: Send + Sync {
 pub struct UaiTaskInventoryDocuments {
     detail: UaiInventoryDocument,
     tree: UaiInventoryDocument,
+    progress_by_unit: BTreeMap<String, UaiProgressDocument>,
 }
 
 impl UaiTaskInventoryDocuments {
     /// Binds the two completed responses into one all-or-nothing transport
     /// result.
     pub const fn new(detail: UaiInventoryDocument, tree: UaiInventoryDocument) -> Self {
-        Self { detail, tree }
+        Self {
+            detail,
+            tree,
+            progress_by_unit: BTreeMap::new(),
+        }
+    }
+
+    /// Adds one complete fresh progress document for every Unit represented by
+    /// the tree. Native inventory uses this to retain donor task strategies.
+    #[must_use]
+    pub fn with_unit_progress(
+        mut self,
+        progress_by_unit: BTreeMap<String, UaiProgressDocument>,
+    ) -> Self {
+        self.progress_by_unit = progress_by_unit;
+        self
     }
 }
 
@@ -184,7 +200,8 @@ impl TaskInventoryCapability for UaiTaskInventory {
         })?;
         let documents = self.transport.fetch_tasks(context, course).await?;
         let route = parse_course_context(course, documents.detail.as_str())?;
-        parse_task_inventory(course, &route, documents.tree.as_str())
+        let tasks = parse_task_inventory(course, &route, documents.tree.as_str())?;
+        enrich_task_inventory(tasks, &documents.progress_by_unit)
     }
 }
 
@@ -239,7 +256,13 @@ mod tests {
                 UaiInventoryDocument::try_new(include_str!(
                     "../../../fixtures/providers/uai/tasks/tree-mixed.json"
                 ))?,
-            ))
+            )
+            .with_unit_progress(BTreeMap::from([(
+                "unit-1".to_owned(),
+                UaiProgressDocument::try_new(include_str!(
+                    "../../../fixtures/providers/uai/progress/unit-mixed.json"
+                ))?,
+            )])))
         }
     }
 
@@ -285,6 +308,13 @@ mod tests {
                 .all(|task| { task.remote_id.starts_with("group:2001:unit-1:group-") })
         );
         assert!(format!("{capability:?}").contains("configured"));
+        assert!(tasks[0].opens_at.is_some());
+        assert!(tasks[0].closes_at.is_some());
+        assert_eq!(tasks[0].normalized["strategy"]["required"], true);
+        assert_eq!(tasks[0].normalized["strategy"]["min_score_percent"], 60);
+        assert_eq!(tasks[1].normalized["strategy"]["required"], false);
+        assert!(tasks[1].opens_at.is_none());
+        assert!(tasks[1].closes_at.is_none());
 
         assert_eq!(
             capability
