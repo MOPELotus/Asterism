@@ -416,6 +416,21 @@ one selected-range budget rather than a per-Unit value despite the current UI
 log text calling it “每单元”; the worker collects every selected Unit before it
 samples and divides the budget.
 
+The same Auto_WeLearn revision also retains the original single-file
+`WeLearn.py` entry point. Its completion and duration routes deliberately keep
+hidden/already-completed SCOs, sample one target per child and launch one
+thread per child; these are the same wire and target semantics as the current
+Fanyuchang-compatible profiles and are represented by
+`FanyuchangCompletion`/`FanyuchangDuration`, rather than silently discarded as
+an obsolete capability. The modular `ui/workers.py` flow remains the source
+for the distinct Auto completion and aggregate-duration filters above.
+
+`WellearnBatchPlan.dispatch` records the donor dispatch contract needed by the
+shared durable parent/child layer: per-child concurrent, sequential,
+shared-heartbeat, or bounded-thread-pool. The Core layer must persist this
+value with the immutable flow, membership and derived targets; it must not let
+a crash recovery silently switch dispatch semantics.
+
 Asterism currently retains Unit index/title/code in each fresh Task observation
 and exposes per-Task runtime settings, but Unit is not yet a shared first-class
 selection scope and execution creation is single-Task. The complete donor

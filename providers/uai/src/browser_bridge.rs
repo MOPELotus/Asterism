@@ -1030,8 +1030,8 @@ impl UaiBrowserEventEnvelope {
                 UaiBrowserEvent::ResidenceControlResult {
                     task_handle,
                     control,
+                    accepted,
                     observed_active_seconds,
-                    ..
                 },
             ) => validate_residence_control_event(
                 expected_task,
@@ -1039,6 +1039,7 @@ impl UaiBrowserEventEnvelope {
                 expected_control,
                 task_handle,
                 control,
+                *accepted,
                 *observed_active_seconds,
             )?,
             (UaiBrowserCommand::Ping, UaiBrowserEvent::Pong) => {}
@@ -1110,9 +1111,11 @@ fn validate_residence_control_event(
     expected_control: &UaiBrowserResidenceControl,
     task_handle: &str,
     control: &UaiBrowserResidenceControl,
+    accepted: bool,
     observed_active_seconds: u64,
 ) -> ProviderResult<()> {
-    if task_handle == expected_task
+    if accepted
+        && task_handle == expected_task
         && control == expected_control
         && observed_active_seconds <= expected_seconds
     {
@@ -2055,6 +2058,15 @@ mod tests {
         })
         .to_string();
         assert!(parse_browser_event(&document, &plan, &command, UCONTENT_ORIGIN).is_ok());
+        assert!(
+            parse_browser_event(
+                &document.replace("\"accepted\":true", "\"accepted\":false"),
+                &plan,
+                &command,
+                UCONTENT_ORIGIN,
+            )
+            .is_err()
+        );
         assert!(
             UaiBrowserCommandEnvelope::residence_control(
                 &plan,

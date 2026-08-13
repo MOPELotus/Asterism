@@ -27,16 +27,19 @@ mod task_detail;
 mod task_inventory;
 
 pub use authentication::{
-    WellearnAuthentication, WellearnAuthenticationTransport, WellearnCookieSession,
-    WellearnLoginRedirect, WellearnPasswordCipher, WellearnSessionResolver,
-    classify_password_login_response, encode_password_at,
+    classify_password_login_response, encode_password_at, WellearnAuthentication,
+    WellearnAuthenticationTransport, WellearnCookieSession, WellearnLoginRedirect,
+    WellearnPasswordCipher, WellearnSessionResolver,
 };
-pub use batch_plan::{WellearnBatchEntry, WellearnBatchFlow, WellearnBatchPlan, build_batch_plan};
+pub use batch_plan::{
+    build_batch_plan, WellearnBatchDispatch, WellearnBatchEntry, WellearnBatchFlow,
+    WellearnBatchPlan,
+};
 pub use cmi::{
-    WellearnCmiDocument, WellearnCmiSnapshot, WellearnCmiTransport, WellearnTaskProgress,
-    parse_cmi_snapshot,
+    parse_cmi_snapshot, WellearnCmiDocument, WellearnCmiSnapshot, WellearnCmiTransport,
+    WellearnTaskProgress,
 };
-pub use course_context::{WellearnCourseContext, parse_course_context};
+pub use course_context::{parse_course_context, WellearnCourseContext};
 pub use course_inventory::parse_course_inventory;
 pub use duration_read::WellearnDurationRead;
 pub use duration_report::{
@@ -67,4 +70,4 @@ pub use runtime_settings::{
 };
 pub use stored_session::StoredWellearnSessionResolver;
 pub use task_detail::WellearnTaskDetail;
-pub use task_inventory::{WellearnScoLeavesDocument, parse_task_inventory};
+pub use task_inventory::{parse_task_inventory, WellearnScoLeavesDocument};

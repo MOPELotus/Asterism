@@ -15,7 +15,29 @@ pub enum WellearnBatchFlow {
     AutoDuration,
 }
 
+/// Donor dispatch behavior that the shared parent/child execution layer must
+/// persist with the selected batch flow. This remains a Provider-private
+/// semantic value; it does not schedule child executions itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WellearnBatchDispatch {
+    PerChildConcurrent,
+    Sequential,
+    SharedHeartbeat,
+    BoundedThreadPool,
+}
+
 impl WellearnBatchFlow {
+    pub const fn dispatch(self) -> WellearnBatchDispatch {
+        match self {
+            Self::FanyuchangCompletion | Self::FanyuchangDuration => {
+                WellearnBatchDispatch::PerChildConcurrent
+            }
+            Self::YzbrhCompletion | Self::AutoCompletion => WellearnBatchDispatch::Sequential,
+            Self::YzbrhDuration => WellearnBatchDispatch::SharedHeartbeat,
+            Self::AutoDuration => WellearnBatchDispatch::BoundedThreadPool,
+        }
+    }
+
     const fn keeps_hidden(self) -> bool {
         matches!(
             self,
@@ -64,6 +86,7 @@ pub struct WellearnBatchEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WellearnBatchPlan {
     pub flow: WellearnBatchFlow,
+    pub dispatch: WellearnBatchDispatch,
     pub entries: Vec<WellearnBatchEntry>,
     pub aggregate_duration_seconds: Option<u64>,
     pub discarded_remainder_seconds: u64,
@@ -221,6 +244,7 @@ pub fn build_batch_plan(
     }
     Ok(WellearnBatchPlan {
         flow,
+        dispatch: flow.dispatch(),
         entries,
         aggregate_duration_seconds,
         discarded_remainder_seconds,
@@ -279,7 +303,7 @@ fn normalized_completion(task: &RemoteTask) -> Option<RemoteState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{WellearnScoLeavesDocument, parse_course_inventory, parse_task_inventory};
+    use crate::{parse_course_inventory, parse_task_inventory, WellearnScoLeavesDocument};
 
     const COURSES: &str =
         include_str!("../../../fixtures/providers/welearn/courses/list-mixed.json");
@@ -320,6 +344,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["sco:1001:301", "sco:1001:302", "sco:1001:401"]
         );
+        assert_eq!(plan.dispatch, WellearnBatchDispatch::PerChildConcurrent);
     }
 
     #[test]
@@ -340,6 +365,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["sco:1001:301", "sco:1001:302", "sco:1001:401"]
         );
+        assert_eq!(plan.dispatch, WellearnBatchDispatch::SharedHeartbeat);
     }
 
     #[test]
@@ -356,11 +382,11 @@ mod tests {
         assert_eq!(plan.entries.len(), 2);
         assert_eq!(plan.aggregate_duration_seconds, Some(60));
         assert_eq!(plan.discarded_remainder_seconds, 0);
-        assert!(
-            plan.entries
-                .iter()
-                .all(|entry| entry.target_seconds == Some(30))
-        );
+        assert_eq!(plan.dispatch, WellearnBatchDispatch::BoundedThreadPool);
+        assert!(plan
+            .entries
+            .iter()
+            .all(|entry| entry.target_seconds == Some(30)));
     }
 
     #[test]
