@@ -202,7 +202,7 @@ explicitly tied to the Main-owned durable Attempt/QuestionSession contract.
 
 Post-registration refs remained `ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`,
 `MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and
-`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`. The 113-test Provider suite,
+`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`. The 114-test Provider suite,
 all-target clippy and scoped diff checks passed.
 
 The BrowserBridge exchange follow-up re-read both default branches and the
@@ -213,7 +213,7 @@ canonical typed envelope JSON; the result digest covers only the bounded raw
 transport document. Core stores type/digest/sequence metadata, while Cidaren
 retains and zeroizes the typed Capture values and performs the final credential
 validation/commit. No donor protocol delta entered this checkpoint. The
-Provider suite remained at 113 passing tests with all-target clippy and scoped
+Provider suite remained at 114 passing tests with all-target clippy and scoped
 diff checks clean.
 
 ## Check procedure
