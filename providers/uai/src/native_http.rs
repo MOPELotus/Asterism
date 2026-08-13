@@ -40,6 +40,7 @@ use crate::{
     parse_discussion_reply_page, parse_discussion_reply_receipt, parse_discussion_topic,
     parse_group_progress, parse_submission_receipt, parse_task_inventory, parse_upload_grant,
     parse_upload_result,
+    progress::validate_progress_route_binding,
     submission_verify::validate_verification_course_binding,
     task_inventory::parse_task_tree_unit_ids,
     user_identity::parse_user_identity,
@@ -258,7 +259,14 @@ impl NativeUaiInventoryTransport {
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
-        UaiProgressDocument::try_new(read_json_response(response, ResponseRoute::Progress).await?)
+        let document = read_json_response(response, ResponseRoute::Progress).await?;
+        validate_progress_route_binding(
+            &document,
+            course_instance_id,
+            unit_id,
+            session.expose_open_id(),
+        )?;
+        UaiProgressDocument::try_new(document)
     }
 
     async fn fetch_progress_with_session(
@@ -671,9 +679,15 @@ impl NativeUaiInventoryTransport {
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
-        let progress = UaiProgressDocument::try_new(
-            read_json_response(progress_response, ResponseRoute::Progress).await?,
+        let progress_document =
+            read_json_response(progress_response, ResponseRoute::Progress).await?;
+        validate_progress_route_binding(
+            &progress_document,
+            route.course_instance_id(),
+            &unit_id,
+            session.expose_open_id(),
         )?;
+        let progress = UaiProgressDocument::try_new(progress_document)?;
         if validate_empty_completion_progress_target(
             progress.as_str(),
             &unit_id,

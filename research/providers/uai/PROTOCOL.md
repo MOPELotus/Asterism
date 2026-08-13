@@ -177,7 +177,12 @@ detail is rebound before each progress URL is built.
 
 Normalized Group identity is `group:{resourceId}:{unitId}:{groupId}` so the
 per-Unit route never guesses an ancestor or persists `courseInstanceId`. The
-response must repeat the Unit and contain the exact Group leaf. A Group maps to
+native response must repeat the session openid as `open_id`, the fresh Course
+instance as `tutorialId` and the Unit route as `unit_id`; these values are
+compared inside the native boundary and are never serialized. Its optional
+positive numeric or numeric-string `publish_version` must agree with the
+Course/tree snapshot and can fill a missing legacy tree copy. The response must
+also contain the exact Group leaf. A Group maps to
 Completed/100 only when `pass`, `pass2` and `perm` are all `1`; every other
 valid flag combination remains Unknown with no percentage.
 

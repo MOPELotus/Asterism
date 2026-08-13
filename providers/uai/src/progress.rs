@@ -16,6 +16,8 @@ use crate::{
 };
 
 const MAX_PROGRESS_DOCUMENT_BYTES: usize = 1_024 * 1_024;
+const MAX_PROGRESS_ROUTE_IDENTITY_BYTES: usize = 512;
+const MAX_SIGNED_64_BIT_VALUE: u64 = 9_223_372_036_854_775_807;
 
 /// One bounded per-Unit progress response, redacted and zeroized on drop.
 pub struct UaiProgressDocument(String);
@@ -67,6 +69,7 @@ pub struct UaiGroupProgressSnapshot {
     opens_at: Option<asterism_domain::Timestamp>,
     closes_at: Option<asterism_domain::Timestamp>,
     statistic_mode_out: bool,
+    publish_version: Option<u64>,
 }
 
 impl UaiGroupProgressSnapshot {
@@ -108,6 +111,10 @@ impl UaiGroupProgressSnapshot {
 
     pub const fn statistic_mode_out(&self) -> bool {
         self.statistic_mode_out
+    }
+
+    pub const fn publish_version(&self) -> Option<u64> {
+        self.publish_version
     }
 
     pub fn mutation_available_at(&self, now: asterism_domain::Timestamp) -> bool {
@@ -225,18 +232,7 @@ pub fn parse_group_progress(
         Some(&Value::String(expected_group_id.to_owned())),
         "expected progress Group ID",
     )?;
-    let root: Value = serde_json::from_str(document)
-        .map_err(|_| invalid_progress_response("UAI progress response is not valid JSON"))?;
-    let root = root
-        .as_object()
-        .ok_or_else(|| protocol_drift("UAI progress response is not an object"))?;
-    if root.get("code").and_then(Value::as_i64) != Some(0) {
-        return Err(protocol_drift("UAI progress read did not succeed"));
-    }
-    let result = root
-        .get("rt")
-        .and_then(Value::as_object)
-        .ok_or_else(|| protocol_drift("UAI progress response has no rt object"))?;
+    let result = progress_result(document)?;
     let actual_unit = required_remote_component(result.get("unit_id"), "progress Unit ID")?;
     if actual_unit != expected_unit_id {
         return Err(protocol_drift(
@@ -285,7 +281,84 @@ pub fn parse_group_progress(
         opens_at: strategy.opens_at,
         closes_at: strategy.closes_at,
         statistic_mode_out: strategy.statistic_mode_out,
+        publish_version: optional_progress_publish_version(result.get("publish_version"))?,
     })
+}
+
+/// Validates the account/Course/Unit echo on one native per-Unit progress read.
+///
+/// # Errors
+///
+/// Returns protocol drift when the bounded response belongs to a different
+/// browser account, Course instance or Unit route.
+pub(crate) fn validate_progress_route_binding(
+    document: &str,
+    expected_course_instance_id: &str,
+    expected_unit_id: &str,
+    expected_open_id: &str,
+) -> ProviderResult<()> {
+    let result = progress_result(document)?;
+    let actual_unit = required_remote_component(result.get("unit_id"), "progress Unit ID")?;
+    let actual_course = required_progress_route_identity(result.get("tutorialId"), "Course")?;
+    let actual_open_id = required_progress_route_identity(result.get("open_id"), "account")?;
+    if actual_unit != expected_unit_id
+        || actual_course != expected_course_instance_id
+        || actual_open_id != expected_open_id
+    {
+        return Err(protocol_drift(
+            "UAI progress response does not match its account/Course/Unit route",
+        ));
+    }
+    Ok(())
+}
+
+fn progress_result(document: &str) -> ProviderResult<serde_json::Map<String, Value>> {
+    if document.is_empty() || document.len() > MAX_PROGRESS_DOCUMENT_BYTES {
+        return Err(invalid_progress_response(
+            "UAI progress response is empty or exceeds the size limit",
+        ));
+    }
+    let root: Value = serde_json::from_str(document)
+        .map_err(|_| invalid_progress_response("UAI progress response is not valid JSON"))?;
+    let root = root
+        .as_object()
+        .ok_or_else(|| protocol_drift("UAI progress response is not an object"))?;
+    if root.get("code").and_then(Value::as_i64) != Some(0) {
+        return Err(protocol_drift("UAI progress read did not succeed"));
+    }
+    root.get("rt")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| protocol_drift("UAI progress response has no rt object"))
+}
+
+fn optional_progress_publish_version(value: Option<&Value>) -> ProviderResult<Option<u64>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let version = match value {
+        Value::Number(value) => value.as_u64(),
+        Value::String(value) => value.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+    .filter(|value| (1..=MAX_SIGNED_64_BIT_VALUE).contains(value))
+    .ok_or_else(|| protocol_drift("UAI Unit progress has an invalid publish version"))?;
+    Ok(Some(version))
+}
+
+fn required_progress_route_identity(
+    value: Option<&Value>,
+    label: &'static str,
+) -> ProviderResult<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_PROGRESS_ROUTE_IDENTITY_BYTES
+                && !value.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| protocol_drift(format!("UAI progress has no valid {label} identity")))
 }
 
 struct ProgressStrategy {
@@ -483,6 +556,7 @@ mod tests {
         assert!(completed.required());
         assert_eq!(completed.min_score_percent(), 60);
         assert!(!completed.statistic_mode_out());
+        assert_eq!(completed.publish_version(), Some(123_290));
         assert_eq!(completed.opens_at().unwrap().timestamp(), 1_785_542_400);
         assert_eq!(completed.closes_at().unwrap().timestamp(), 1_790_812_800);
         assert!(
@@ -545,9 +619,46 @@ mod tests {
         assert!(parse_group_progress(PROGRESS, "unit-1", "missing").is_err());
         assert!(
             parse_group_progress(
+                &PROGRESS.replace(r#""publish_version": "123290""#, r#""publish_version": 0"#),
+                "unit-1",
+                "group-1",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_group_progress(
                 r#"{"code":0,"rt":{"unit_id":"unit-1","leafs":{"group-1":{"state":{"pass":2,"pass2":1,"perm":1}}}}}"#,
                 "unit-1",
                 "group-1",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_route_binding_requires_exact_account_course_and_unit_echoes() {
+        validate_progress_route_binding(
+            PROGRESS,
+            "course-v2:synthetic+rw+20260809",
+            "unit-1",
+            "synthetic-open-id",
+        )
+        .unwrap();
+        assert!(
+            validate_progress_route_binding(
+                PROGRESS,
+                "course-v2:foreign+rw+20260809",
+                "unit-1",
+                "synthetic-open-id",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_progress_route_binding(
+                PROGRESS,
+                "course-v2:synthetic+rw+20260809",
+                "unit-1",
+                "foreign-open-id",
             )
             .is_err()
         );

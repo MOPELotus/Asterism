@@ -37,7 +37,8 @@ numeric and numeric-string Course publish versions, an independent
 Course-progress Unit map and version cross-check, versioned Task fingerprints,
 identity-bound per-Unit flags, required/minimum-score/statistic-mode strategy,
 strict bounded availability windows, raw progress duration and bounded
-text/video tab type, independent Course/Unit aggregate finish-progress,
+text/video tab type, exact per-Unit account/Course/Unit route echoes and a
+publish-version cross-check, independent Course/Unit aggregate finish-progress,
 learning-seconds, score and required facts, Course/Unit unlock, scoring, window
 and ordered required-Task policy facts, and exact
 CourseResource/Unit/Group-bound learning seconds. Inline negative tests cover
@@ -108,6 +109,7 @@ field names, placeholder identities and response/result codes.
 - `base` labels never imply executable or assessment capability.
 - Unknown tree roles fail closed.
 - Progress duration remains untyped and independent from completion.
+- Native per-Unit progress must echo the exact session `open_id`, fresh `tutorialId` Course instance and requested `unit_id`; foreign or malformed values fail before a document reaches inventory/progress/execution consumers. Its optional positive publish version must agree with the Course/tree snapshot, while zero, negative, oversized or conflicting values fail closed.
 - Study-record duration seconds require one exact unique CourseResource/Unit/Group binding.
 - Aggregate progress requires an exact CourseResource and fresh app-user binding, one bounded Course total and unique `role=unit` rows; out-of-range/negative metrics, duplicate Units, foreign users and invalid required/role shapes fail closed while personal and path noise is discarded.
 - Required policy refreshes the positive strategy ID from Course detail, POSTs the exact CourseResource/strategy pair and requires both identities throughout the response. Fixtures preserve donor required-Task order and reject duplicate Unit/task/sort identities, foreign strategy/resource, unsupported node type, non-binary unlock mode and invalid score/time fields.

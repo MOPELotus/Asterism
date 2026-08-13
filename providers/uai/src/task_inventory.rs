@@ -127,19 +127,7 @@ pub(crate) fn enrich_task_inventory(
                 .units()
                 .get(&unit_id)
                 .ok_or_else(|| protocol_drift("UAI Course progress has no matching Task Unit"))?;
-            match task.normalized.get("course_publish_version") {
-                None | Some(Value::Null) => {}
-                Some(value)
-                    if optional_publish_version(Some(value))?
-                        == Some(course_snapshot.publish_version()) => {}
-                Some(_) => {
-                    return Err(protocol_drift(
-                        "UAI Course progress publish version does not match the Task tree",
-                    ));
-                }
-            }
-            task.normalized["course_publish_version"] =
-                serde_json::json!(course_snapshot.publish_version());
+            bind_task_publish_version(task, course_snapshot.publish_version(), "Course progress")?;
             let strategy = serde_json::json!({
                 "required": strategy.required(),
                 "min_score_percent": strategy.minimum_score_percent(),
@@ -160,6 +148,9 @@ pub(crate) fn enrich_task_inventory(
                 .get(&unit_id)
                 .ok_or_else(|| protocol_drift("UAI Task strategy has no matching Unit document"))?;
             let snapshot = parse_group_progress(progress.as_str(), &unit_id, group_id)?;
+            if let Some(publish_version) = snapshot.publish_version() {
+                bind_task_publish_version(task, publish_version, "Unit progress")?;
+            }
             task.remote_state = if snapshot.is_completed() {
                 RemoteState::Completed
             } else {
@@ -181,6 +172,24 @@ pub(crate) fn enrich_task_inventory(
         task.fingerprint = fingerprint(&task.normalized)?;
     }
     Ok(tasks)
+}
+
+fn bind_task_publish_version(
+    task: &mut RemoteTask,
+    publish_version: u64,
+    source: &'static str,
+) -> ProviderResult<()> {
+    match task.normalized.get("course_publish_version") {
+        None | Some(Value::Null) => {}
+        Some(value) if optional_publish_version(Some(value))? == Some(publish_version) => {}
+        Some(_) => {
+            return Err(protocol_drift(format!(
+                "UAI {source} publish version does not match the current Task snapshot"
+            )));
+        }
+    }
+    task.normalized["course_publish_version"] = serde_json::json!(publish_version);
+    Ok(())
 }
 
 struct ParsedTaskTree {
@@ -607,6 +616,25 @@ mod tests {
                 &tree_units,
                 Some(&units),
                 &progress,
+            )
+            .is_err()
+        );
+
+        let unit_version = BTreeMap::from([(
+            "unit-1".to_owned(),
+            UaiProgressDocument::try_new(UNIT_PROGRESS.replace(
+                r#""publish_version": "123290""#,
+                r#""publish_version": "123291""#,
+            ))
+            .unwrap(),
+        )]);
+        let current = UaiCourseProgressDocument::try_new(COURSE_PROGRESS).unwrap();
+        assert!(
+            enrich_task_inventory(
+                parse_task_inventory(&course, &context, TREE).unwrap(),
+                &tree_units,
+                Some(&current),
+                &unit_version,
             )
             .is_err()
         );

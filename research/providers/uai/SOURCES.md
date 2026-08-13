@@ -17,7 +17,10 @@ progress and duration are separate observations. Its response contract also
 explicitly identifies the study-record duration values as seconds and the
 route caller binds query `id` to the numeric CourseResource ID. Its task runner
 also corroborates the strict nonzero start/end availability check used before
-interaction. The GPL
+interaction. Both backend response models expose the per-Unit progress
+`open_id`, `tutorialId`, `unit_id` and `publish_version` route echoes; Asterism
+validates all four at the native boundary and never persists the account or
+Course-instance values. The GPL
 userscript is used only to understand browser lifecycle behavior; no
 implementation code is copied. Its frozen `5.2.14` source specifically
 evidences the two browser origins, legacy/Ant/u3menu directory discovery,
