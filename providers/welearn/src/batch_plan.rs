@@ -23,10 +23,6 @@ impl WellearnBatchFlow {
     const fn skips_completed(self) -> bool {
         matches!(self, Self::YzbrhCompletion | Self::AutoCompletion)
     }
-
-    const fn is_auto(self) -> bool {
-        matches!(self, Self::AutoCompletion | Self::AutoDuration)
-    }
 }
 
 /// One frozen child selection. The Core batch layer owns durable child
@@ -65,7 +61,7 @@ pub fn build_batch_plan(
             "WELearn batch selection contains no SCO tasks",
         ));
     }
-    if !flow.is_auto() && auto_duration_minutes.is_some() {
+    if flow != WellearnBatchFlow::AutoDuration && auto_duration_minutes.is_some() {
         return Err(ProviderError::new(
             ProviderErrorKind::Internal,
             "WELearn aggregate duration is only valid for Auto duration flow",
@@ -78,13 +74,33 @@ pub fn build_batch_plan(
         ));
     }
 
+    for task in tasks {
+        if task
+            .normalized
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            != Some("welearn.sco.v2")
+            || normalized_bool(task, "visible").is_none()
+            || normalized_bool(task, "unit_visible").is_none()
+            || normalized_u32(task, "unit_index").is_none()
+            || normalized_usize(task, "sco_index").is_none()
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn batch selection requires a complete normalized SCO v2 observation",
+            ));
+        }
+    }
+
     let mut ordered = tasks.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| compare_task_order(left, right));
     let mut entries = ordered
         .into_iter()
         .filter_map(|task| {
-            let visible = normalized_bool(task, "visible")?;
-            let unit_visible = normalized_bool(task, "unit_visible").unwrap_or(visible);
+            let visible = normalized_bool(task, "visible")
+                .expect("validated complete normalized observation above");
+            let unit_visible = normalized_bool(task, "unit_visible")
+                .expect("validated complete normalized observation above");
             let completion = task.remote_state;
             let keep = (flow.keeps_hidden() || visible)
                 && (!flow.skips_completed() || completion != RemoteState::Completed);
@@ -95,8 +111,10 @@ pub fn build_batch_plan(
         })
         .map(|(task, visible, completion)| WellearnBatchEntry {
             remote_task_id: task.remote_id.clone(),
-            unit_index: normalized_u32(task, "unit_index").unwrap_or_default(),
-            sco_index: normalized_usize(task, "sco_index").unwrap_or_default(),
+            unit_index: normalized_u32(task, "unit_index")
+                .expect("validated complete normalized observation above"),
+            sco_index: normalized_usize(task, "sco_index")
+                .expect("validated complete normalized observation above"),
             visible,
             completion,
             target_seconds: None,
@@ -106,6 +124,12 @@ pub fn build_batch_plan(
     let (aggregate_duration_seconds, discarded_remainder_seconds) =
         if flow == WellearnBatchFlow::AutoDuration {
             let minutes = auto_duration_minutes.expect("validated above");
+            if minutes == 0 || minutes > 7_200 {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "WELearn Auto duration is outside the bounded aggregate limit",
+                ));
+            }
             let aggregate = minutes.checked_mul(60).ok_or_else(|| {
                 ProviderError::new(
                     ProviderErrorKind::InvalidResponse,
@@ -261,5 +285,17 @@ mod tests {
     #[test]
     fn auto_duration_requires_a_frozen_sample() {
         assert!(build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, None).is_err());
+    }
+
+    #[test]
+    fn non_auto_flow_rejects_aggregate_duration_input() {
+        assert!(build_batch_plan(&tasks(), WellearnBatchFlow::AutoCompletion, Some(1)).is_err());
+    }
+
+    #[test]
+    fn incomplete_normalized_task_fails_closed() {
+        let mut task = tasks().remove(0);
+        task.normalized["sco_index"] = serde_json::Value::Null;
+        assert!(build_batch_plan(&[task], WellearnBatchFlow::AutoCompletion, None).is_err());
     }
 }
