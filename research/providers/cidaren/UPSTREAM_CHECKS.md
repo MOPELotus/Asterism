@@ -205,6 +205,17 @@ Post-registration refs remained `ularch/master@bce9559f536ebbdad791f41ed4e111b30
 `1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`. The 113-test Provider suite,
 all-target clippy and scoped diff checks passed.
 
+The BrowserBridge exchange follow-up re-read both default branches and the
+public tag again; all three revisions remained unchanged. To match the new
+Core durable exchange boundary, Cidaren now exposes stable command/result type
+strings and SHA-256 digest helpers. The command digest covers validated
+canonical typed envelope JSON; the result digest covers only the bounded raw
+transport document. Core stores type/digest/sequence metadata, while Cidaren
+retains and zeroizes the typed Capture values and performs the final credential
+validation/commit. No donor protocol delta entered this checkpoint. The
+Provider suite remained at 113 passing tests with all-target clippy and scoped
+diff checks clean.
+
 ## Check procedure
 
 For the next checkpoint:

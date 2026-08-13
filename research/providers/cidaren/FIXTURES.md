@@ -87,6 +87,12 @@ are never real tokens, cookies, browser storage or answer material, and these
 documents are observations only until Core performs its own session validation
 and credential commit.
 
+Core exchange fixtures should persist only the stable message type and SHA-256
+command/result digests. They must never copy the JSON document, `UserToken`,
+`CDR_LOGIN_INFO`, `CDR_USER_SESSION` or a decoded `CidarenCaptureSnapshot` into
+Domain/storage rows; the Provider typed boundary remains the sole owner of
+those values until the Capture credential commit succeeds.
+
 ## Required live-sanitized fixtures
 
 After WebUI and Asterism-Plugin/Yunzai are complete and the user supplies an
