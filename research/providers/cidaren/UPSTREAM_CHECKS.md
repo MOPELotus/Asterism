@@ -182,6 +182,14 @@ Post-implementation refs retained both full donor revisions and the same
 `1.5.4` release. The 110-test Provider suite, all-target clippy and scoped diff
 checks passed without an upstream delta.
 
+The follow-up fixture-binding checkpoint re-resolved `ularch/HEAD` and
+`ularch/master` to `bce9559f536ebbdad791f41ed4e111b30accb05d`, tag `1.5.4` to
+`7e29ee43692f4c0807fae8cf7f74a5a674793097`, and `MOPELotus/HEAD` plus
+`master` to `a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`. No default-branch or
+tag movement occurred. The two committed synthetic Capture result fixtures
+now run through the same typed command/result parser; the 111-test Provider
+suite, all-target clippy and scoped diff checks passed.
+
 ## Check procedure
 
 For the next checkpoint:
