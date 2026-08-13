@@ -2041,26 +2041,12 @@ mod tests {
             },
         )
         .unwrap();
-        let document = serde_json::json!({
-            "version": 1,
-            "session_nonce": "nonce-42",
-            "origin": UCONTENT_ORIGIN,
-            "frame_id": "frame-1",
-            "remote_task_id": "group:2001:unit-1:group-1",
-            "reply_to_sequence": 8,
-            "event": {
-                "kind": "residence_control_result",
-                "task_handle": target.entry().handle,
-                "control": {"kind": "restart", "start_micro_ordinal": 3},
-                "accepted": true,
-                "observed_active_seconds": 600
-            }
-        })
-        .to_string();
+        let document = include_str!("../../../fixtures/providers/uai/browser/residence-control-restart.json")
+            .replace("{{target_task_handle}}", &target.entry().handle);
         assert!(parse_browser_event(&document, &plan, &command, UCONTENT_ORIGIN).is_ok());
         assert!(
             parse_browser_event(
-                &document.replace("\"accepted\":true", "\"accepted\":false"),
+                &document.replace("\"accepted\": true", "\"accepted\": false"),
                 &plan,
                 &command,
                 UCONTENT_ORIGIN,

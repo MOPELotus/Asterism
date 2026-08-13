@@ -14,6 +14,7 @@ fixtures/providers/uai/
   courses/list-mixed.json
   courses/resource-detail.json
   tasks/tree-mixed.json
+  browser/residence-control-restart.json
   progress/course-mixed.json
   progress/unit-mixed.json
   progress/course-unit-summary.json
