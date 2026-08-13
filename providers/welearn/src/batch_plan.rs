@@ -229,6 +229,17 @@ pub fn build_batch_plan(
             .expect("validated complete normalized observation above");
         let unit_visible = normalized_bool(task, "unit_visible")
             .expect("validated complete normalized observation above");
+        let sco_visible = task
+            .normalized
+            .get("sco_visible")
+            .and_then(serde_json::Value::as_bool);
+        let expected_visible = unit_visible && sco_visible.unwrap_or(unit_visible);
+        if visible != expected_visible {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn batch visibility observations are inconsistent",
+            ));
+        }
         let completion = normalized_completion(task).ok_or_else(|| {
             ProviderError::new(
                 ProviderErrorKind::ProtocolDrift,
@@ -248,10 +259,7 @@ pub fn build_batch_plan(
             sco_index: normalized_usize(task, "sco_index")
                 .expect("validated complete normalized observation above"),
             unit_visible,
-            sco_visible: task
-                .normalized
-                .get("sco_visible")
-                .and_then(serde_json::Value::as_bool),
+            sco_visible,
             visible,
             completion,
             target_seconds: None,
@@ -555,6 +563,13 @@ mod tests {
         let mut task = tasks().remove(0);
         task.normalized["sco_visible"] = serde_json::json!("false");
         assert!(build_batch_plan(&[task], WellearnBatchFlow::AutoCompletion, None).is_err());
+    }
+
+    #[test]
+    fn inconsistent_visibility_observations_fail_closed() {
+        let mut task = tasks().remove(0);
+        task.normalized["visible"] = serde_json::json!(false);
+        assert!(build_batch_plan(&[task], WellearnBatchFlow::FanyuchangCompletion, None).is_err());
     }
 
     #[test]
