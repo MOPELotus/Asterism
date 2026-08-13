@@ -100,6 +100,27 @@ Post-implementation fetch retained both donor revisions and the same ularch
 tag target. The 106-test Provider suite, all-target clippy and scoped diff
 checks passed without an intervening upstream delta.
 
+### 2026-08-13 attempt-residence timing checkpoint
+
+After one transient TLS fetch failure was retried successfully, the
+pre-implementation refs still resolved to `ularch/master@bce9559`,
+`MOPELotus/master@a74b4a2` and ularch tag/release `1.5.4`. Public donor
+`answer_questions.submit` waits 1-2 seconds between the last `VerifyAnswer`
+and `SubmitAnswerAndSave`; `jump_read` waits 1-3 seconds before advancing a
+reading card. These are distinct from configurable `min_time/max_time` after a
+completed step.
+
+The Provider-private issued command now carries a stable bounded delay before
+advance execution: 1-2 seconds for a verified Question and 1-3 seconds for a
+reading card. Start, Verify, Skip and word-selection mutations remain
+immediate. This gives future durable Core integration an explicit scheduling
+fact instead of either sleeping inside Provider code or collapsing all donor
+timing into one setting.
+
+Post-implementation fetch of both remotes retained the same revisions and
+ularch tag target. The 106-test Provider suite, all-target clippy and scoped
+diff checks passed without an intervening donor delta.
+
 ## Check procedure
 
 For the next checkpoint:

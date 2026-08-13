@@ -375,9 +375,13 @@ evidence so the donor's explicit failure strategy can run.
 Donor timing configuration is represented by immutable runtime settings. The
 default reported answer range is 2500-7500 ms, skip reports 20000 ms, and the
 default inter-step delay is exactly 2 seconds, matching both the reopened
-donor config and its UI-enforced lower bound. Range choices are stable for one bound step
-so crash recovery cannot silently choose a different mutation payload; Core
-will schedule real delays instead of sleeping inside Provider mutation code.
+donor config and its UI-enforced lower bound. Separately, the donor waits 1-2
+seconds after the final `VerifyAnswer` before `SubmitAnswerAndSave`, and a
+reading card resides for 1-3 seconds before the same advance mutation. Issued
+commands expose those distinct, stable pre-execution delays so Core can durably
+record the one-shot command before scheduling it. Range choices are stable for
+one bound step so crash recovery cannot silently choose a different mutation
+payload or residence time; Provider mutation code never sleeps internally.
 
 `StartAnswer` is a non-idempotent remote attempt mutation, not a harmless
 Question read. The Provider request and parser layers are implemented, while

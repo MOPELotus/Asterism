@@ -119,6 +119,7 @@ pub struct CidarenIssuedCommand {
     operation: CidarenAttemptOperation,
     binding: CidarenAssessmentBinding,
     action: CidarenIssuedAction,
+    delay_before_execute_seconds: u64,
 }
 
 enum CidarenIssuedAction {
@@ -275,6 +276,7 @@ impl CidarenAttemptFlow {
             CidarenAttemptOperation::SubmitChoseWord,
             CidarenAttemptContinuation::SelectWords,
             CidarenIssuedAction::SubmitChoseWord(plan),
+            0,
         )
     }
 
@@ -295,6 +297,7 @@ impl CidarenAttemptFlow {
             CidarenAttemptOperation::StartAnswer,
             CidarenAttemptContinuation::Start,
             CidarenIssuedAction::StartAnswer,
+            0,
         )
     }
 
@@ -359,11 +362,16 @@ impl CidarenAttemptFlow {
         settings: &CidarenRuntimeSettings,
     ) -> ProviderResult<CidarenIssuedCommand> {
         let phase = self.take_phase();
-        let topic_code = match phase {
-            CidarenAttemptPhase::ReadyToAdvance { topic_code } => topic_code,
-            CidarenAttemptPhase::CurrentReadingCard(card) => {
-                Zeroizing::new(card.topic_code().to_owned())
-            }
+        let delay_entropy = step_entropy(self.flow_binding, self.position, b"advance-delay");
+        let (topic_code, delay_before_execute_seconds) = match phase {
+            CidarenAttemptPhase::ReadyToAdvance { topic_code } => (
+                topic_code,
+                settings.verified_advance_delay_seconds(&delay_entropy),
+            ),
+            CidarenAttemptPhase::CurrentReadingCard(card) => (
+                Zeroizing::new(card.topic_code().to_owned()),
+                settings.reading_advance_delay_seconds(&delay_entropy),
+            ),
             other => {
                 self.phase = Some(other);
                 return Err(invalid_state("Cidaren SubmitAnswerAndSave is not ready"));
@@ -381,6 +389,7 @@ impl CidarenAttemptFlow {
                 topic_code,
                 time_spent_millis,
             },
+            delay_before_execute_seconds,
         )
     }
 
@@ -412,6 +421,7 @@ impl CidarenAttemptFlow {
                 topic_code: Zeroizing::new(current.parsed.topic_code().to_owned()),
                 time_spent_millis: settings.skip_reported_time_millis(),
             },
+            0,
         )
     }
 
@@ -522,6 +532,7 @@ impl CidarenAttemptFlow {
             CidarenAttemptOperation::VerifyAnswer,
             CidarenAttemptContinuation::Verify { remaining: answers },
             CidarenIssuedAction::VerifyAnswer { topic_code, answer },
+            0,
         )
     }
 
@@ -530,6 +541,7 @@ impl CidarenAttemptFlow {
         operation: CidarenAttemptOperation,
         continuation: CidarenAttemptContinuation,
         action: CidarenIssuedAction,
+        delay_before_execute_seconds: u64,
     ) -> ProviderResult<CidarenIssuedCommand> {
         if self.phase.is_some() {
             return Err(invalid_state(
@@ -546,6 +558,7 @@ impl CidarenAttemptFlow {
             operation,
             binding: self.binding.clone(),
             action,
+            delay_before_execute_seconds,
         })
     }
 
@@ -673,6 +686,13 @@ impl CidarenIssuedCommand {
         self.operation
     }
 
+    /// Returns the stable donor-observed residence time which Core must
+    /// schedule after durably recording this issued command and before
+    /// executing its one-shot mutation.
+    pub const fn delay_before_execute_seconds(&self) -> u64 {
+        self.delay_before_execute_seconds
+    }
+
     /// Executes exactly one prepared remote operation. The command is consumed
     /// even when transport fails, so the one-time topic code cannot be reused.
     ///
@@ -736,6 +756,10 @@ impl fmt::Debug for CidarenIssuedCommand {
         formatter
             .debug_struct("CidarenIssuedCommand")
             .field("operation", &self.operation)
+            .field(
+                "delay_before_execute_seconds",
+                &self.delay_before_execute_seconds,
+            )
             .field("payload", &"[REDACTED]")
             .finish_non_exhaustive()
     }
@@ -1055,6 +1079,7 @@ mod tests {
         .unwrap();
 
         let command = flow.issue_start().unwrap();
+        assert_eq!(command.delay_before_execute_seconds(), 0);
         assert_eq!(
             flow.status(),
             CidarenAttemptFlowStatus::Issued(CidarenAttemptOperation::StartAnswer)
@@ -1070,11 +1095,13 @@ mod tests {
             confidence: None,
         };
         let command = flow.issue_selected_answer(&selected).unwrap();
+        assert_eq!(command.delay_before_execute_seconds(), 0);
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToAdvance);
 
         let command = flow.issue_advance(&settings()).unwrap();
+        assert!((1..=2).contains(&command.delay_before_execute_seconds()));
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(
@@ -1246,20 +1273,15 @@ mod tests {
             .unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::CurrentReadingCard);
-        let outcome = flow
-            .issue_advance(&settings())
-            .unwrap()
-            .execute(transport.clone(), &context)
-            .await
-            .unwrap();
+        let command = flow.issue_advance(&settings()).unwrap();
+        assert!((1..=3).contains(&command.delay_before_execute_seconds()));
+        let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.current_question().unwrap().position, 2);
-        let outcome = flow
-            .issue_skip(&settings())
-            .unwrap()
-            .execute(transport.clone(), &context)
-            .await
-            .unwrap();
+        assert_eq!(flow.inter_step_delay_seconds(&settings()), 2);
+        let command = flow.issue_skip(&settings()).unwrap();
+        assert_eq!(command.delay_before_execute_seconds(), 0);
+        let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(
             flow.status(),

@@ -74,6 +74,18 @@ impl CidarenRuntimeSettings {
         )
     }
 
+    /// Selects the donor's fixed one-to-two second pause between the final
+    /// `VerifyAnswer` and `SubmitAnswerAndSave` mutations.
+    pub fn verified_advance_delay_seconds(&self, entropy: &[u8]) -> u64 {
+        select_bounded(1, 2, b"cidaren-verified-advance-delay-v1", entropy)
+    }
+
+    /// Selects the donor's fixed one-to-three second reading-card residence
+    /// before `SubmitAnswerAndSave` advances to the next step.
+    pub fn reading_advance_delay_seconds(&self, entropy: &[u8]) -> u64 {
+        select_bounded(1, 3, b"cidaren-reading-advance-delay-v1", entropy)
+    }
+
     /// Returns the donor-observed fixed reported duration for `SkipAnswer`.
     pub const fn skip_reported_time_millis(&self) -> u64 {
         self.skip_time_millis
@@ -303,6 +315,16 @@ mod tests {
             }
         );
         assert!((2..=4).contains(&task_settings.answer_delay_seconds(b"synthetic-step")));
+        assert!((1..=2).contains(&task_settings.verified_advance_delay_seconds(b"synthetic-step")));
+        assert!((1..=3).contains(&task_settings.reading_advance_delay_seconds(b"synthetic-step")));
+        assert_eq!(
+            task_settings.verified_advance_delay_seconds(b"synthetic-step"),
+            task_settings.verified_advance_delay_seconds(b"synthetic-step")
+        );
+        assert_eq!(
+            task_settings.reading_advance_delay_seconds(b"synthetic-step"),
+            task_settings.reading_advance_delay_seconds(b"synthetic-step")
+        );
         assert_eq!(
             schema.execution_concurrency(&resolved).unwrap(),
             asterism_provider_api::ProviderExecutionConcurrency {
