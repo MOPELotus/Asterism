@@ -10,8 +10,8 @@ use crate::course_inventory::{
     required_remote_component, required_text,
 };
 use crate::{
-    UaiProgressDocument, parse_group_progress, question::supports_question_read,
-    resource_execution::supports_empty_completion_execution,
+    UaiCourseProgressDocument, UaiProgressDocument, parse_course_progress, parse_group_progress,
+    question::supports_question_read, resource_execution::supports_empty_completion_execution,
 };
 
 const MAX_TREE_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -55,6 +55,140 @@ pub fn parse_task_inventory(
             "UAI Task tree context does not match its Course identity",
         ));
     }
+    let tree = parse_task_tree(document)?;
+    task_tree_unit_ids(&tree.units)?;
+
+    let mut tasks = BTreeMap::new();
+    let mut node_count = 0_usize;
+    let binding = CourseTreeBinding {
+        course,
+        resource_id: &resource_id,
+        course_publish_version: tree.course_publish_version,
+    };
+    for unit in &tree.units {
+        visit_node(
+            binding,
+            unit,
+            &Hierarchy::default(),
+            1,
+            &mut node_count,
+            &mut tasks,
+        )?;
+    }
+    Ok(tasks.into_values().collect())
+}
+
+pub(crate) fn parse_task_tree_unit_ids(document: &str) -> ProviderResult<BTreeSet<String>> {
+    let tree = parse_task_tree(document)?;
+    task_tree_unit_ids(&tree.units)
+}
+
+pub(crate) fn enrich_task_inventory(
+    mut tasks: Vec<RemoteTask>,
+    tree_units: &BTreeSet<String>,
+    course_progress: Option<&UaiCourseProgressDocument>,
+    progress_by_unit: &BTreeMap<String, UaiProgressDocument>,
+) -> ProviderResult<Vec<RemoteTask>> {
+    let course_progress = course_progress
+        .map(|document| parse_course_progress(document.as_str()))
+        .transpose()?;
+    if progress_by_unit.is_empty() && course_progress.is_none() {
+        return Ok(tasks);
+    }
+    let task_units = tasks
+        .iter()
+        .map(task_unit_id)
+        .collect::<ProviderResult<BTreeSet<_>>>()?;
+    if !task_units.is_subset(tree_units) {
+        return Err(protocol_drift(
+            "UAI normalized Task Units do not belong to the Task tree",
+        ));
+    }
+    if !progress_by_unit.is_empty()
+        && progress_by_unit.keys().collect::<BTreeSet<_>>()
+            != tree_units.iter().collect::<BTreeSet<_>>()
+    {
+        return Err(protocol_drift(
+            "UAI Task strategy documents do not match the Task-tree Units",
+        ));
+    }
+    if course_progress.as_ref().is_some_and(|snapshot| {
+        snapshot.units().keys().collect::<BTreeSet<_>>()
+            != tree_units.iter().collect::<BTreeSet<_>>()
+    }) {
+        return Err(protocol_drift(
+            "UAI Course progress Units do not match the Task-tree Units",
+        ));
+    }
+    for task in &mut tasks {
+        let unit_id = task_unit_id(task)?;
+        if let Some(course_snapshot) = &course_progress {
+            let strategy = course_snapshot
+                .units()
+                .get(&unit_id)
+                .ok_or_else(|| protocol_drift("UAI Course progress has no matching Task Unit"))?;
+            match task.normalized.get("course_publish_version") {
+                None | Some(Value::Null) => {}
+                Some(value)
+                    if optional_publish_version(Some(value))?
+                        == Some(course_snapshot.publish_version()) => {}
+                Some(_) => {
+                    return Err(protocol_drift(
+                        "UAI Course progress publish version does not match the Task tree",
+                    ));
+                }
+            }
+            task.normalized["course_publish_version"] =
+                serde_json::json!(course_snapshot.publish_version());
+            let strategy = serde_json::json!({
+                "required": strategy.required(),
+                "min_score_percent": strategy.minimum_score_percent(),
+                "statistic_mode_out": strategy.statistic_mode_out(),
+                "opens_at": strategy.opens_at(),
+                "closes_at": strategy.closes_at(),
+            });
+            task.normalized["course_unit_strategy"] = strategy.clone();
+            task.raw_sanitized["course_unit_strategy"] = strategy;
+        }
+        if !progress_by_unit.is_empty() {
+            let group_id = task
+                .normalized
+                .get("group_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| protocol_drift("UAI normalized Task has no Group identity"))?;
+            let progress = progress_by_unit
+                .get(&unit_id)
+                .ok_or_else(|| protocol_drift("UAI Task strategy has no matching Unit document"))?;
+            let snapshot = parse_group_progress(progress.as_str(), &unit_id, group_id)?;
+            task.remote_state = if snapshot.is_completed() {
+                RemoteState::Completed
+            } else {
+                RemoteState::Unknown
+            };
+            task.opens_at = snapshot.opens_at();
+            task.closes_at = snapshot.closes_at();
+            let strategy = serde_json::json!({
+                "required": snapshot.required(),
+                "min_score_percent": snapshot.min_score_percent(),
+                "statistic_mode_out": snapshot.statistic_mode_out(),
+                "tab_type": snapshot.tab_type(),
+                "opens_at": snapshot.opens_at(),
+                "closes_at": snapshot.closes_at(),
+            });
+            task.normalized["strategy"] = strategy.clone();
+            task.raw_sanitized["strategy"] = strategy;
+        }
+        task.fingerprint = fingerprint(&task.normalized)?;
+    }
+    Ok(tasks)
+}
+
+struct ParsedTaskTree {
+    course_publish_version: Option<u64>,
+    units: Vec<Value>,
+}
+
+fn parse_task_tree(document: &str) -> ProviderResult<ParsedTaskTree> {
     if document.is_empty() || document.len() > MAX_TREE_DOCUMENT_BYTES {
         return Err(invalid_response(
             "UAI Task tree is empty or exceeds the size limit",
@@ -86,75 +220,33 @@ pub fn parse_task_inventory(
     let units = root
         .get("units")
         .and_then(Value::as_array)
-        .ok_or_else(|| protocol_drift("UAI nested Course tree has no units array"))?;
-
-    let mut tasks = BTreeMap::new();
-    let mut node_count = 0_usize;
-    let binding = CourseTreeBinding {
-        course,
-        resource_id: &resource_id,
+        .ok_or_else(|| protocol_drift("UAI nested Course tree has no units array"))?
+        .clone();
+    Ok(ParsedTaskTree {
         course_publish_version,
-    };
-    for unit in units {
-        visit_node(
-            binding,
-            unit,
-            &Hierarchy::default(),
-            1,
-            &mut node_count,
-            &mut tasks,
-        )?;
-    }
-    Ok(tasks.into_values().collect())
+        units,
+    })
 }
 
-pub(crate) fn enrich_task_inventory(
-    mut tasks: Vec<RemoteTask>,
-    progress_by_unit: &BTreeMap<String, UaiProgressDocument>,
-) -> ProviderResult<Vec<RemoteTask>> {
-    if progress_by_unit.is_empty() {
-        return Ok(tasks);
+fn task_tree_unit_ids(units: &[Value]) -> ProviderResult<BTreeSet<String>> {
+    let mut identities = BTreeSet::new();
+    for unit in units {
+        let unit = unit
+            .as_object()
+            .ok_or_else(|| protocol_drift("UAI Task tree contains a non-object Unit"))?;
+        if unit.get("role").and_then(Value::as_str) != Some("unit") {
+            return Err(protocol_drift(
+                "UAI Task tree contains a non-Unit top-level node",
+            ));
+        }
+        let identity = required_remote_component(unit.get("id"), "Task-tree Unit ID")?;
+        if !identities.insert(identity) {
+            return Err(protocol_drift(
+                "UAI Task tree contains a duplicate Unit identity",
+            ));
+        }
     }
-    let expected_units = tasks
-        .iter()
-        .map(task_unit_id)
-        .collect::<ProviderResult<BTreeSet<_>>>()?;
-    if progress_by_unit.keys().collect::<BTreeSet<_>>()
-        != expected_units.iter().collect::<BTreeSet<_>>()
-    {
-        return Err(protocol_drift(
-            "UAI Task strategy documents do not match the Task-tree Units",
-        ));
-    }
-    for task in &mut tasks {
-        let unit_id = task_unit_id(task)?;
-        let group_id = task
-            .normalized
-            .get("group_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| protocol_drift("UAI normalized Task has no Group identity"))?;
-        let progress = progress_by_unit
-            .get(&unit_id)
-            .ok_or_else(|| protocol_drift("UAI Task strategy has no matching Unit document"))?;
-        let snapshot = parse_group_progress(progress.as_str(), &unit_id, group_id)?;
-        task.remote_state = if snapshot.is_completed() {
-            RemoteState::Completed
-        } else {
-            RemoteState::Unknown
-        };
-        task.opens_at = snapshot.opens_at();
-        task.closes_at = snapshot.closes_at();
-        let strategy = serde_json::json!({
-            "required": snapshot.required(),
-            "min_score_percent": snapshot.min_score_percent(),
-            "statistic_mode_out": snapshot.statistic_mode_out(),
-            "tab_type": snapshot.tab_type(),
-        });
-        task.normalized["strategy"] = strategy.clone();
-        task.raw_sanitized["strategy"] = strategy;
-        task.fingerprint = fingerprint(&task.normalized)?;
-    }
-    Ok(tasks)
+    Ok(identities)
 }
 
 fn task_unit_id(task: &RemoteTask) -> ProviderResult<String> {
@@ -407,6 +499,10 @@ mod tests {
     const DETAIL: &str =
         include_str!("../../../fixtures/providers/uai/courses/resource-detail.json");
     const TREE: &str = include_str!("../../../fixtures/providers/uai/tasks/tree-mixed.json");
+    const COURSE_PROGRESS: &str =
+        include_str!("../../../fixtures/providers/uai/progress/course-mixed.json");
+    const UNIT_PROGRESS: &str =
+        include_str!("../../../fixtures/providers/uai/progress/unit-mixed.json");
 
     #[test]
     fn parser_keeps_unit_section_micro_and_group_identity_separate() {
@@ -450,6 +546,70 @@ mod tests {
         );
         let tasks = parse_task_inventory(&course, &context, &tree).unwrap();
         assert_eq!(tasks[0].normalized["course_publish_version"], 123_290);
+    }
+
+    #[test]
+    fn course_progress_independently_fills_and_binds_publish_version() {
+        let course = parse_course_inventory(COURSES).unwrap().remove(0);
+        let context = parse_course_context(&course, DETAIL).unwrap();
+        let tree_without_version = TREE.replace("\n  \"publish_version\": 123290,", "");
+        let tasks = parse_task_inventory(&course, &context, &tree_without_version).unwrap();
+        assert!(tasks[0].normalized["course_publish_version"].is_null());
+        let tree_units = parse_task_tree_unit_ids(&tree_without_version).unwrap();
+        let course_progress = UaiCourseProgressDocument::try_new(COURSE_PROGRESS).unwrap();
+        let progress = BTreeMap::from([(
+            "unit-1".to_owned(),
+            UaiProgressDocument::try_new(UNIT_PROGRESS).unwrap(),
+        )]);
+        let tasks =
+            enrich_task_inventory(tasks, &tree_units, Some(&course_progress), &progress).unwrap();
+        assert_eq!(tasks[0].normalized["course_publish_version"], 123_290);
+        assert_eq!(
+            tasks[0].normalized["course_unit_strategy"]["required"],
+            true
+        );
+        assert_eq!(
+            tasks[0].normalized["course_unit_strategy"]["opens_at"],
+            "2026-08-01T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn course_progress_unit_or_version_drift_fails_closed() {
+        let course = parse_course_inventory(COURSES).unwrap().remove(0);
+        let context = parse_course_context(&course, DETAIL).unwrap();
+        let tree_units = parse_task_tree_unit_ids(TREE).unwrap();
+        let progress = BTreeMap::from([(
+            "unit-1".to_owned(),
+            UaiProgressDocument::try_new(UNIT_PROGRESS).unwrap(),
+        )]);
+
+        let version = UaiCourseProgressDocument::try_new(
+            COURSE_PROGRESS.replace(r#""123290""#, r#""123291""#),
+        )
+        .unwrap();
+        assert!(
+            enrich_task_inventory(
+                parse_task_inventory(&course, &context, TREE).unwrap(),
+                &tree_units,
+                Some(&version),
+                &progress,
+            )
+            .is_err()
+        );
+
+        let units =
+            UaiCourseProgressDocument::try_new(COURSE_PROGRESS.replace("unit-1", "unit-other"))
+                .unwrap();
+        assert!(
+            enrich_task_inventory(
+                parse_task_inventory(&course, &context, TREE).unwrap(),
+                &tree_units,
+                Some(&units),
+                &progress,
+            )
+            .is_err()
+        );
     }
 
     #[test]

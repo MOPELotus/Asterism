@@ -52,6 +52,8 @@ against their default remote branches. Apache `bef0d29155ce`, MIT
 `40ead69c7dabf` were each at zero divergence; no new default-branch or tag delta
 required an incremental port at this checkpoint. These revisions remain
 reproducible audit snapshots, not permanent update ceilings.
+The same four default branches and tag tips were fetched and confirmed at zero
+delta again after the independent Course-progress checkpoint.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
@@ -84,6 +86,15 @@ The same current progress model exposes per-leaf `required`, `min_score_pct`,
 `start_time`, `end_time` and `statistic_mode_out`; Asterism retains those facts
 for Task selection and applies the donor time-window rule to every native
 mutation rather than relying on stale tree labels.
+
+The current Rust donor also performs a separate Course-level progress read at
+`course_progress/{courseInstanceId}/{openid}/default` before the per-Unit
+reads. It takes both the complete Unit-key map and `publish_version` from that
+response, then uses the version in later submission judge metadata. Asterism
+now ports this route independently: the bounded snapshot must agree with the
+fresh tree's complete Unit set, fills a missing tree version, rejects a
+conflicting copy and retains the Course-Unit strategy facts separately from
+each Group leaf's strategy.
 
 For answer-bearing Groups, the current Rust and MIT donors both serialize one
 ordered `quesDatas` row per native module and flatten child completion/judge

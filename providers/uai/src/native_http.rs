@@ -20,14 +20,14 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     UaiAggregateProgressDocument, UaiAggregateProgressTransport, UaiAnswerDocument,
     UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport, UaiCoursePolicyDocument,
-    UaiCoursePolicyTransport, UaiDiscussionBinding, UaiDiscussionReplyDraft,
-    UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument, UaiDurationTransport,
-    UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult, UaiPresetCompletionTransport,
-    UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
-    UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
-    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
-    UaiUploadIntent, UaiUploadTransport, UaiUploadedArtifact, UaiVerificationDocument,
-    UaiVerificationTransport,
+    UaiCoursePolicyTransport, UaiCourseProgressDocument, UaiDiscussionBinding,
+    UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument,
+    UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult,
+    UaiPresetCompletionTransport, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
+    UaiQuestionTransport, UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument,
+    UaiSubmissionTransport, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+    UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadTransport, UaiUploadedArtifact,
+    UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_discussion_reply_page_request, build_discussion_reply_request,
     build_discussion_topic_request, build_upload_multipart,
@@ -36,10 +36,12 @@ use crate::{
         required_remote_component,
     },
     encrypted::ZeroizingJsonValue,
-    parse_course_context, parse_discussion_binding, parse_discussion_reply_page,
-    parse_discussion_reply_receipt, parse_discussion_topic, parse_group_progress,
-    parse_submission_receipt, parse_task_inventory, parse_upload_grant, parse_upload_result,
+    parse_course_context, parse_course_progress, parse_discussion_binding,
+    parse_discussion_reply_page, parse_discussion_reply_receipt, parse_discussion_topic,
+    parse_group_progress, parse_submission_receipt, parse_task_inventory, parse_upload_grant,
+    parse_upload_result,
     submission_verify::validate_verification_course_binding,
+    task_inventory::parse_task_tree_unit_ids,
     user_identity::parse_user_identity,
 };
 
@@ -167,25 +169,22 @@ impl NativeUaiInventoryTransport {
             )
             .await?,
         )?;
-        let units = parse_task_inventory(course, &route, tree.as_str())?
-            .into_iter()
-            .map(|task| {
-                task.normalized
-                    .get("unit")
-                    .and_then(serde_json::Value::as_object)
-                    .and_then(|unit| unit.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        ProviderError::new(
-                            ProviderErrorKind::ProtocolDrift,
-                            "UAI native Task inventory found no normalized Unit identity",
-                        )
-                    })
-            })
-            .collect::<ProviderResult<BTreeSet<_>>>()?;
+        parse_task_inventory(course, &route, tree.as_str())?;
+        let tree_units = parse_task_tree_unit_ids(tree.as_str())?;
+        let course_progress = self
+            .fetch_course_progress_with_session(session, route.course_instance_id())
+            .await?;
+        let course_snapshot = parse_course_progress(course_progress.as_str())?;
+        if course_snapshot.units().keys().collect::<BTreeSet<_>>()
+            != tree_units.iter().collect::<BTreeSet<_>>()
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI native Course progress Units do not match the Task tree",
+            ));
+        }
         let mut progress_by_unit = BTreeMap::new();
-        for unit_id in units {
+        for unit_id in tree_units {
             let progress = self
                 .fetch_progress_for_route_with_session(
                     session,
@@ -195,7 +194,40 @@ impl NativeUaiInventoryTransport {
                 .await?;
             progress_by_unit.insert(unit_id, progress);
         }
-        Ok(UaiTaskInventoryDocuments::new(detail, tree).with_unit_progress(progress_by_unit))
+        Ok(UaiTaskInventoryDocuments::new(detail, tree)
+            .with_course_progress(course_progress)
+            .with_unit_progress(progress_by_unit))
+    }
+
+    async fn fetch_course_progress_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_instance_id: &str,
+    ) -> ProviderResult<UaiCourseProgressDocument> {
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let response = self
+            .client
+            .get(course_overview_progress_url(
+                course_instance_id,
+                session.expose_open_id(),
+            )?)
+            .header(ACCEPT, "application/json")
+            .headers(ucontent_session_headers(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        UaiCourseProgressDocument::try_new(
+            read_json_response(response, ResponseRoute::CourseProgress).await?,
+        )
     }
 
     async fn fetch_progress_for_route_with_session(
@@ -1478,6 +1510,7 @@ enum ResponseRoute {
     CourseList,
     CourseDetail,
     TaskTree,
+    CourseProgress,
     Progress,
     UserInfo,
     Duration,
@@ -1500,6 +1533,7 @@ impl ResponseRoute {
             Self::CourseList => "Course inventory",
             Self::CourseDetail => "Course-resource detail",
             Self::TaskTree => "Task tree",
+            Self::CourseProgress => "Course progress",
             Self::Progress => "Task progress",
             Self::UserInfo => "User info",
             Self::Duration => "Task duration",
@@ -1519,7 +1553,7 @@ impl ResponseRoute {
 
     const fn maximum_bytes(self) -> usize {
         match self {
-            Self::Progress => MAX_PROGRESS_RESPONSE_BYTES,
+            Self::CourseProgress | Self::Progress => MAX_PROGRESS_RESPONSE_BYTES,
             Self::UserInfo => MAX_USER_INFO_RESPONSE_BYTES,
             Self::Duration | Self::AggregateProgress | Self::CoursePolicy => {
                 MAX_DURATION_RESPONSE_BYTES
@@ -1710,6 +1744,21 @@ fn course_progress_url(
             "course_progress",
             course_instance_id,
             unit_id,
+            open_id,
+            "default",
+        ],
+    )
+}
+
+fn course_overview_progress_url(course_instance_id: &str, open_id: &str) -> ProviderResult<Url> {
+    route_url(
+        UCONTENT_ORIGIN,
+        &[
+            "course",
+            "api",
+            "v2",
+            "course_progress",
+            course_instance_id,
             open_id,
             "default",
         ],
@@ -2355,6 +2404,12 @@ mod tests {
             "https://ucontent.unipus.cn/course/api/course/course-v2:synthetic+rw%2Fguard/default"
         );
         assert_eq!(
+            course_overview_progress_url("course-v2:synthetic+rw", "open-id")
+                .unwrap()
+                .as_str(),
+            "https://ucontent.unipus.cn/course/api/v2/course_progress/course-v2:synthetic+rw/open-id/default"
+        );
+        assert_eq!(
             course_progress_url("course-v2:synthetic+rw", "unit-1", "open-id")
                 .unwrap()
                 .as_str(),
@@ -2398,6 +2453,7 @@ mod tests {
             "https://ucontent.unipus.cn/api/mobile/user_module/course-v2:synthetic+rw%2Fguard/group%2F1-submit%2Fversion"
         );
         assert_eq!(ResponseRoute::Progress.maximum_bytes(), 1_024 * 1_024);
+        assert_eq!(ResponseRoute::CourseProgress.maximum_bytes(), 1_024 * 1_024);
         assert_eq!(
             ResponseRoute::QuestionContent.maximum_bytes(),
             4 * 1_024 * 1_024

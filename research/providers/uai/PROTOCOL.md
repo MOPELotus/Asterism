@@ -144,6 +144,9 @@ fingerprint prefix for Core detail validation and future schema migration.
 
 ```text
 GET https://ucontent.unipus.cn/course/api/v2/course_progress/
+    {courseInstanceId}/{openid}/default
+
+GET https://ucontent.unipus.cn/course/api/v2/course_progress/
     {courseInstanceId}/{unitId}/{openid}/default
 
 GET https://uai.unipus.cn/api/tla/learningDetail/studyRecord/
@@ -153,6 +156,18 @@ GET https://uai.unipus.cn/api/tla/learningDetail/studyRecord/
     unitTaskSituation?nodeId={unitId}&id={courseResourceId}
     &appUserId={appUserId}&ssoId={ssoId}
 ```
+
+The current Rust donor reads the Course-level route before every Unit route,
+uses its `rt.units` keys as the current Unit inventory and takes
+`rt.publish_version` from the same response for submission judge metadata.
+Asterism ports that read as a separate bounded, redacted and zeroizing document.
+Its Unit set must equal the fresh tree's complete top-level Unit set and its
+positive numeric or numeric-string publish version must equal any copy in the
+tree; a tree that omits the version is filled from this independent current
+snapshot. Every Course-level Unit must contain a typed strategy object, whose
+required/minimum-score/window/statistic facts remain distinct from the Group
+leaf strategy below. Missing/extra Units or conflicting versions are protocol
+drift, so the Provider never silently builds a submission from a stale tree.
 
 Both backend donors generate the same HS256 `x-annotator-auth-token` from the
 account-bound openid and send it beside the raw Authorization JWT. The native

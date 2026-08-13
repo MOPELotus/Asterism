@@ -14,6 +14,7 @@ fixtures/providers/uai/
   courses/list-mixed.json
   courses/resource-detail.json
   tasks/tree-mixed.json
+  progress/course-mixed.json
   progress/unit-mixed.json
   progress/course-unit-summary.json
   progress/course-required-policy.json
@@ -32,7 +33,8 @@ openid/JWT parsing, bounded user-info identity validation, Course →
 CourseResource flattening, paired point counts, fresh detail binding, redacted
 Course-instance routing, the outer/nested Course-tree envelope,
 Unit/Section/Micro/Group identity separation, bounded task type/question count,
-numeric and numeric-string Course publish versions, versioned Task fingerprints,
+numeric and numeric-string Course publish versions, an independent
+Course-progress Unit map and version cross-check, versioned Task fingerprints,
 identity-bound per-Unit flags, required/minimum-score/statistic-mode strategy,
 strict bounded availability windows, raw progress duration and bounded
 text/video tab type, independent Course/Unit aggregate finish-progress,
@@ -98,7 +100,8 @@ field names, placeholder identities and response/result codes.
 - Duplicate resources or Groups fail the complete scan.
 - `courseInstanceId` remains operation-only and absent from serialized Tasks.
 - Stable Group identity contains CourseResource, Unit and Group components.
-- Fresh Task inventory accepts only a bounded positive numeric or numeric-string Course `publish_version`, fingerprints it, carries it into fresh TaskDetail and emits the current donor judge pair `{course: publish_version, answer: 3}`. An absent field alone selects the separately evidenced MIT `{course: 0, answer: 0}` compatibility pair; zero, negative, oversized and structurally different values fail before mutation.
+- Fresh native Task inventory accepts only a bounded positive numeric or numeric-string Course `publish_version` from the independent Course-progress route, requires its complete Unit-key set to equal the fresh tree Unit set, cross-checks any tree version, fingerprints the result, carries it into fresh TaskDetail and emits the current donor judge pair `{course: publish_version, answer: 3}`. A tree without a version is filled from Course progress. Only an explicitly injected legacy fixture transport that omits Course progress can select the separately evidenced MIT `{course: 0, answer: 0}` compatibility pair; zero, negative, oversized, conflicting and structurally different values fail before mutation.
+- Course-progress strategy fixtures require one typed strategy object per Unit, retain required/minimum-score/statistic/window facts separately from per-Group strategy and reject invalid booleans, percentages or epoch windows. Empty Unit maps remain valid for a newly empty Course, while oversized maps fail closed.
 - Fresh TaskDetail must rediscover that exact identity and reject disappearance or drift.
 - Group question counts are optional bounded facts and never authorize a submission by themselves.
 - Course point totals never imply Group completion.

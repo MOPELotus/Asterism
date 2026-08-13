@@ -1,7 +1,7 @@
 //! `uai` Provider implementation.
 //!
 //! The current Development checkpoint provides native Password/JWT
-//! authentication, Course/Task inventory, fresh Group detail and progress,
+//! authentication, Course/Task inventory, independent Course/Group progress,
 //! identity-bound duration, separate encrypted Question/answer reads, and a
 //! preview/execute/verify submission chain for bounded ordered typed Groups plus
 //! verify-only recovery for pure-study preset completion over the shared
@@ -14,6 +14,7 @@ mod authentication;
 mod browser_bridge;
 mod course_inventory;
 mod course_policy;
+mod course_progress;
 mod discussion;
 mod duration;
 mod encrypted;
@@ -60,6 +61,10 @@ pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_
 pub use course_policy::{
     UaiCoursePolicy, UaiCoursePolicyDocument, UaiCoursePolicyTransport, UaiUnitCoursePolicy,
     parse_course_policy,
+};
+pub use course_progress::{
+    UaiCourseProgressDocument, UaiCourseProgressSnapshot, UaiCourseUnitProgressStrategy,
+    parse_course_progress,
 };
 pub use discussion::{
     UaiDiscussionBinding, UaiDiscussionReply, UaiDiscussionReplyDraft, UaiDiscussionReplyPage,

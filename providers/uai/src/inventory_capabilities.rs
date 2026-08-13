@@ -8,8 +8,10 @@ use async_trait::async_trait;
 use zeroize::Zeroize;
 
 use crate::{
-    UaiProgressDocument, metadata::development_metadata, parse_course_context,
-    parse_course_inventory, parse_task_inventory, task_inventory::enrich_task_inventory,
+    UaiCourseProgressDocument, UaiProgressDocument,
+    metadata::development_metadata,
+    parse_course_context, parse_course_inventory, parse_task_inventory,
+    task_inventory::{enrich_task_inventory, parse_task_tree_unit_ids},
 };
 
 const MAX_INVENTORY_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
@@ -66,6 +68,7 @@ pub trait UaiCourseInventoryTransport: Send + Sync {
 pub struct UaiTaskInventoryDocuments {
     detail: UaiInventoryDocument,
     tree: UaiInventoryDocument,
+    course_progress: Option<UaiCourseProgressDocument>,
     progress_by_unit: BTreeMap<String, UaiProgressDocument>,
 }
 
@@ -76,8 +79,17 @@ impl UaiTaskInventoryDocuments {
         Self {
             detail,
             tree,
+            course_progress: None,
             progress_by_unit: BTreeMap::new(),
         }
+    }
+
+    /// Adds the independent current Course progress document used to bind the
+    /// exact Unit set and Course publish version.
+    #[must_use]
+    pub fn with_course_progress(mut self, course_progress: UaiCourseProgressDocument) -> Self {
+        self.course_progress = Some(course_progress);
+        self
     }
 
     /// Adds one complete fresh progress document for every Unit represented by
@@ -200,8 +212,14 @@ impl TaskInventoryCapability for UaiTaskInventory {
         })?;
         let documents = self.transport.fetch_tasks(context, course).await?;
         let route = parse_course_context(course, documents.detail.as_str())?;
+        let tree_units = parse_task_tree_unit_ids(documents.tree.as_str())?;
         let tasks = parse_task_inventory(course, &route, documents.tree.as_str())?;
-        enrich_task_inventory(tasks, &documents.progress_by_unit)
+        enrich_task_inventory(
+            tasks,
+            &tree_units,
+            documents.course_progress.as_ref(),
+            &documents.progress_by_unit,
+        )
     }
 }
 
@@ -257,6 +275,9 @@ mod tests {
                     "../../../fixtures/providers/uai/tasks/tree-mixed.json"
                 ))?,
             )
+            .with_course_progress(UaiCourseProgressDocument::try_new(include_str!(
+                "../../../fixtures/providers/uai/progress/course-mixed.json"
+            ))?)
             .with_unit_progress(BTreeMap::from([(
                 "unit-1".to_owned(),
                 UaiProgressDocument::try_new(include_str!(
@@ -312,6 +333,19 @@ mod tests {
         assert!(tasks[0].closes_at.is_some());
         assert_eq!(tasks[0].normalized["strategy"]["required"], true);
         assert_eq!(tasks[0].normalized["strategy"]["min_score_percent"], 60);
+        assert_eq!(
+            tasks[0].normalized["strategy"]["opens_at"],
+            "2026-08-01T00:00:00Z"
+        );
+        assert_eq!(tasks[0].normalized["course_publish_version"], 123_290);
+        assert_eq!(
+            tasks[0].normalized["course_unit_strategy"]["required"],
+            true
+        );
+        assert_eq!(
+            tasks[0].normalized["course_unit_strategy"]["min_score_percent"],
+            60
+        );
         assert_eq!(tasks[1].normalized["strategy"]["required"], false);
         assert!(tasks[1].opens_at.is_none());
         assert!(tasks[1].closes_at.is_none());
