@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use asterism_domain::RemoteState;
+use asterism_domain::{RemoteState, TaskCapability};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTask};
 
 /// Audited donor batch flow. This is a pure membership/target boundary; it
@@ -26,6 +26,21 @@ impl WellearnBatchFlow {
 
     const fn requires_pending_completion(self) -> bool {
         matches!(self, Self::YzbrhCompletion | Self::AutoCompletion)
+    }
+
+    const fn is_duration(self) -> bool {
+        matches!(
+            self,
+            Self::FanyuchangDuration | Self::YzbrhDuration | Self::AutoDuration
+        )
+    }
+
+    const fn required_capability(self) -> TaskCapability {
+        if self.is_duration() {
+            TaskCapability::DurationReport
+        } else {
+            TaskCapability::ResourceExecution
+        }
     }
 }
 
@@ -78,7 +93,37 @@ pub fn build_batch_plan(
         ));
     }
 
+    let course_remote_id = tasks
+        .first()
+        .and_then(|task| task.course_remote_id.as_deref())
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn batch selection has no Course binding",
+            )
+        })?;
     for task in tasks {
+        if task.course_remote_id.as_deref() != Some(course_remote_id) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "WELearn batch selection spans multiple Courses",
+            ));
+        }
+        if !task.capabilities.contains(&flow.required_capability()) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "WELearn batch task does not advertise the selected donor capability",
+            ));
+        }
+        if matches!(
+            task.remote_state,
+            RemoteState::Expired | RemoteState::Removed
+        ) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "WELearn batch selection contains an unavailable SCO",
+            ));
+        }
         if task
             .normalized
             .get("schema")
