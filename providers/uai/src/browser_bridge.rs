@@ -1008,8 +1008,8 @@ impl UaiBrowserEventEnvelope {
             }
             (
                 UaiBrowserCommand::ClickMenu { handle: expected },
-                UaiBrowserEvent::ClickResult { handle, .. },
-            ) if handle == expected && is_browser_menu_handle(handle) => {}
+                UaiBrowserEvent::ClickResult { handle, clicked },
+            ) if *clicked && handle == expected && is_browser_menu_handle(handle) => {}
             (
                 UaiBrowserCommand::ScanPage { scope: expected },
                 UaiBrowserEvent::PageList { scope, entries },
@@ -1019,8 +1019,8 @@ impl UaiBrowserEventEnvelope {
             (
                 UaiBrowserCommand::ClickTab { handle: expected }
                 | UaiBrowserCommand::ClickTask { handle: expected },
-                UaiBrowserEvent::ClickResult { handle, .. },
-            ) if handle == expected && is_browser_page_handle(handle) => {}
+                UaiBrowserEvent::ClickResult { handle, clicked },
+            ) if *clicked && handle == expected && is_browser_page_handle(handle) => {}
             (
                 UaiBrowserCommand::ResidenceControl {
                     task_handle: expected_task,
@@ -1976,6 +1976,17 @@ mod tests {
         let target = plan.select_target_menu_entry(&binding, entries).unwrap();
         let click = UaiBrowserCommandEnvelope::click_menu(&plan, &binding, 2, &target).unwrap();
         assert!(matches!(click.command, UaiBrowserCommand::ClickMenu { .. }));
+        let rejected_event = serde_json::json!({
+            "version": 1,
+            "session_nonce": "nonce-42",
+            "origin": UCONTENT_ORIGIN,
+            "frame_id": "content-frame",
+            "remote_task_id": "group:2001:unit-1:group-1",
+            "reply_to_sequence": 2,
+            "event": {"kind": "click_result", "handle": target.entry().handle, "clicked": false}
+        })
+        .to_string();
+        assert!(parse_browser_event(&rejected_event, &plan, &click, UCONTENT_ORIGIN).is_err());
 
         let mut forged_entry = entries[0].clone();
         forged_entry.handle = "#arbitrary-selector".to_owned();
