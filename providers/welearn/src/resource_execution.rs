@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use crate::{
     WellearnCmiDocument, WellearnResourceCompletionCmiFormat, WellearnResourceCompletionSequence,
     WellearnResourceCompletionTimeMode,
-    cmi::{parse_cmi_snapshot, parse_sco_identity},
+    cmi::{parse_cmi_snapshot, parse_mutation_cmi_baseline, parse_sco_identity},
     execution_selection::{clamped_gaussian_u8, uniform_u8},
     metadata::development_metadata,
     runtime_settings::{WellearnResourceScore, WellearnRuntimeSettings},
@@ -223,16 +223,22 @@ impl TaskExecutionCapability for WellearnResourceExecution {
                 },
             )
             .await?;
-        let before = parse_cmi_snapshot(documents.before.as_str())?;
+        let before = parse_mutation_cmi_baseline(documents.before.as_str())?;
         let already_completed = !documents.mutation_submitted;
         if already_completed {
-            verify_completed_preset(&before, verified_score_percent)?;
+            let before = before.as_ref().ok_or_else(|| {
+                remote_changed("WELearn completed preflight has no initialized CMI")
+            })?;
+            verify_completed_preset(before, verified_score_percent)?;
         }
         let time_preservation_verified = if let Some(after) = documents.after.as_ref() {
             let after = parse_cmi_snapshot(after.as_str())?;
             verify_completed_preset(&after, verified_score_percent)?;
             if completion_time_mode == WellearnResourceCompletionTimeMode::PreserveFreshTime {
-                verify_preserved_completion_times(&before, &after)?;
+                let before = before.as_ref().ok_or_else(|| {
+                    remote_changed("WELearn completion has no fresh time baseline")
+                })?;
+                verify_preserved_completion_times(before, &after)?;
                 Some(true)
             } else {
                 None
@@ -575,12 +581,20 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
+    enum FixtureBaseline {
+        #[default]
+        Initialized,
+        Uninitialized,
+    }
+
+    #[derive(Debug, Default)]
     struct FixtureTransport {
         calls: Mutex<Vec<CompletionCall>>,
         verifications: Mutex<Vec<(String, String)>>,
         already_completed: bool,
         drift_score: bool,
         explicit_rejections: bool,
+        baseline: FixtureBaseline,
     }
 
     #[async_trait]
@@ -630,8 +644,12 @@ mod tests {
                 WellearnResourceCompletionSequence::SelectedScore => 1,
                 WellearnResourceCompletionSequence::CurrentDonorDualSave100 => 2,
             };
+            let before = match self.baseline {
+                FixtureBaseline::Initialized => BEFORE,
+                FixtureBaseline::Uninitialized => "学习数据不正确，请先开始学习",
+            };
             Ok(WellearnResourceExecutionDocuments::submitted(
-                WellearnCmiDocument::try_new(BEFORE).unwrap(),
+                WellearnCmiDocument::try_new(before).unwrap(),
                 WellearnCmiDocument::try_new(after).unwrap(),
                 true,
                 accepted,
@@ -722,6 +740,29 @@ mod tests {
         assert_eq!(outcome.result_sanitized["already_completed"], true);
         assert_eq!(outcome.result_sanitized["mutation_submitted"], false);
         assert!(outcome.verified);
+    }
+
+    #[tokio::test]
+    async fn zero_time_completion_accepts_an_explicit_uninitialized_baseline() {
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            Arc::new(FixtureTransport {
+                baseline: FixtureBaseline::Uninitialized,
+                ..FixtureTransport::default()
+            }),
+        )
+        .unwrap();
+        let outcome = execution
+            .execute(&context(), &request(), &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert!(outcome.verified);
+        assert_eq!(
+            outcome.result_sanitized["completion_time_mode"],
+            "zero_time"
+        );
+        assert_eq!(outcome.result_sanitized["mutation_submitted"], true);
     }
 
     #[tokio::test]

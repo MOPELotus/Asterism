@@ -58,12 +58,12 @@ start and `0,1,2...` paired client counters, and Auto_WeLearn's delayed
 60-second implicit plan distinct. Native request tests also keep the audited
 plain-endpoint four-field minimal start separate from the query-uid six-field
 full-route start.
-The duration baseline regression recognizes YZBRH's exact
-`学习数据不正确` marker as uninitialized only inside the mutation-capable
-DurationReport path, rejects unrelated non-JSON text, and requires the next
-post-start document to pass the ordinary strict CMI parser. Response-reader
-tests allow only that marker through an unexpected media type while still
-classifying structural login HTML as Authentication.
+The mutation-baseline regression recognizes YZBRH's exact
+`学习数据不正确` marker as uninitialized only inside mutation-capable
+DurationReport/ResourceExecution paths, rejects unrelated non-JSON text, and
+requires the next post-start document to pass the ordinary strict CMI parser.
+Response-reader tests allow only that marker through an unexpected media type
+while still classifying structural login HTML as Authentication.
 
 The ResourceExecution fixtures prove the independently written bounded CMI
 preset and the nested fresh-read goal used by immediate verification and crash
@@ -162,6 +162,9 @@ only structural field names, response codes and bounded placeholder shapes.
 - ResourceExecution exposes ordinary zero-time and donor fresh-time CMI facts
   separately; standalone preservation-mode tests verify both time fields, but
   do not claim the split call reproduces the pending atomic donor lifecycle.
+- ResourceExecution accepts the exact uninitialized marker for zero-time or
+  save-only completion, but fresh-time mode rejects it before start because no
+  real session/total-time fields exist to preserve.
 - ResourceExecution can emit either plain JSON or the exact donor
   `[INTERACTIONINFO]` CMI suffix without changing the underlying document.
 - ResourceExecution distinguishes set-then-save from the modular Auto

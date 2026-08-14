@@ -17,6 +17,7 @@ use crate::{
 
 const MAX_CMI_DOCUMENT_BYTES: usize = 1_024 * 1_024;
 const MAX_CMI_SCALAR_BYTES: usize = 128;
+pub(crate) const UNINITIALIZED_CMI_MARKER: &str = "学习数据不正确";
 
 /// One bounded CMI response whose body is redacted and zeroized on drop.
 pub struct WellearnCmiDocument(String);
@@ -286,6 +287,23 @@ pub fn parse_cmi_snapshot(document: &str) -> ProviderResult<WellearnCmiSnapshot>
         score_scaled_raw,
         success_status_raw: optional_scalar(cmi, "success_status")?,
     })
+}
+
+/// Parses a pre-mutation CMI read while retaining the donor's exact explicit
+/// uninitialized response as an absent baseline. Read-only capabilities must
+/// continue to call [`parse_cmi_snapshot`] directly.
+///
+/// # Errors
+///
+/// Returns the same typed errors as [`parse_cmi_snapshot`] for every response
+/// other than the audited uninitialized marker.
+pub(crate) fn parse_mutation_cmi_baseline(
+    document: &str,
+) -> ProviderResult<Option<WellearnCmiSnapshot>> {
+    if document.contains(UNINITIALIZED_CMI_MARKER) {
+        return Ok(None);
+    }
+    parse_cmi_snapshot(document).map(Some)
 }
 
 fn optional_scalar(cmi: &Map<String, Value>, key: &'static str) -> ProviderResult<Option<String>> {

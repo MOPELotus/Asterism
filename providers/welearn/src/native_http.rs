@@ -19,7 +19,10 @@ use crate::{
     WellearnResourceExecutionDocuments, WellearnResourceExecutionTransport,
     WellearnScoLeavesDocument, WellearnSessionResolver, WellearnTaskInventoryDocuments,
     WellearnTaskInventoryTransport,
-    cmi::{WellearnCmiSnapshot, parse_cmi_snapshot},
+    cmi::{
+        UNINITIALIZED_CMI_MARKER, WellearnCmiSnapshot, parse_cmi_snapshot,
+        parse_mutation_cmi_baseline,
+    },
     course_context::{parse_course_context, parse_course_context_for_id},
     course_inventory::course_id_from_remote,
     runtime_settings::{
@@ -420,12 +423,13 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
             }
             result => result?,
         };
-        let baseline = parse_cmi_snapshot(before.as_str())?;
+        let baseline = parse_mutation_cmi_baseline(before.as_str())?;
         let expected_score = sequence.final_score(score_percent).to_string();
-        if baseline.remote_state() == asterism_domain::RemoteState::Completed
-            && baseline.percent() == Some(100)
-            && baseline.score_scaled_raw() == Some(expected_score.as_str())
-        {
+        if baseline.as_ref().is_some_and(|baseline| {
+            baseline.remote_state() == asterism_domain::RemoteState::Completed
+                && baseline.percent() == Some(100)
+                && baseline.score_scaled_raw() == Some(expected_score.as_str())
+        }) {
             return Ok(WellearnResourceExecutionDocuments::already_completed(
                 before,
             ));
@@ -437,7 +441,7 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
                 score_percent,
                 time_mode,
                 cmi_format,
-                &baseline,
+                baseline.as_ref(),
             )?)
         } else {
             None
@@ -644,7 +648,7 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             }
             result => result?,
         };
-        let mut snapshot = parse_duration_baseline(before.as_str())?;
+        let mut snapshot = parse_mutation_cmi_baseline(before.as_str())?;
         let mut started = false;
         let mut start_accepted = None;
         let must_start = match snapshot.as_ref() {
@@ -892,15 +896,6 @@ const fn duration_requires_start(
         crate::WellearnDurationProtocolMode::ClientCounter
         | crate::WellearnDurationProtocolMode::ImplicitServer => true,
     }
-}
-
-const UNINITIALIZED_DURATION_MARKER: &str = "学习数据不正确";
-
-fn parse_duration_baseline(document: &str) -> ProviderResult<Option<WellearnCmiSnapshot>> {
-    if document.contains(UNINITIALIZED_DURATION_MARKER) {
-        return Ok(None);
-    }
-    parse_cmi_snapshot(document).map(Some)
 }
 
 fn duration_counter_fields(elapsed_seconds: u64) -> (String, String) {
@@ -1195,7 +1190,7 @@ fn resource_completion_cmi(
     score_percent: u8,
     time_mode: crate::WellearnResourceCompletionTimeMode,
     cmi_format: crate::WellearnResourceCompletionCmiFormat,
-    baseline: &WellearnCmiSnapshot,
+    baseline: Option<&WellearnCmiSnapshot>,
 ) -> ProviderResult<Zeroizing<String>> {
     if score_percent > 100 {
         return Err(ProviderError::new(
@@ -1213,6 +1208,12 @@ fn resource_completion_cmi(
         }
         crate::WellearnResourceCompletionTimeMode::ZeroTime => ("0", "0"),
         crate::WellearnResourceCompletionTimeMode::PreserveFreshTime => {
+            let baseline = baseline.ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "WELearn cannot preserve completion time from an uninitialized CMI",
+                )
+            })?;
             if !baseline.cmi_present() {
                 return Err(ProviderError::new(
                     ProviderErrorKind::ProtocolDrift,
@@ -1362,7 +1363,7 @@ async fn read_inventory_response(
     }
     if let Err(error) = content_type_result
         && (expected_content != ResponseContent::Cmi
-            || !document.contains(UNINITIALIZED_DURATION_MARKER))
+            || !document.contains(UNINITIALIZED_CMI_MARKER))
     {
         let mut document = document;
         document.zeroize();
@@ -1837,13 +1838,13 @@ mod tests {
     #[test]
     fn duration_baseline_recognizes_only_the_donor_uninitialized_marker() {
         assert!(
-            parse_duration_baseline("学习数据不正确，请先开始学习")
+            parse_mutation_cmi_baseline("学习数据不正确，请先开始学习")
                 .unwrap()
                 .is_none()
         );
-        assert!(parse_duration_baseline("not-json").is_err());
+        assert!(parse_mutation_cmi_baseline("not-json").is_err());
 
-        let initialized = parse_duration_baseline(
+        let initialized = parse_mutation_cmi_baseline(
             r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0\",\"session_time\":\"0\",\"total_time\":\"0\",\"score\":{\"scaled\":\"0\"},\"success_status\":\"unknown\"}}"}"#,
         )
         .unwrap();
@@ -1860,7 +1861,7 @@ mod tests {
             82,
             crate::WellearnResourceCompletionTimeMode::ZeroTime,
             crate::WellearnResourceCompletionCmiFormat::Json,
-            &baseline,
+            Some(&baseline),
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(document.as_str()).unwrap();
@@ -1877,10 +1878,19 @@ mod tests {
         assert_eq!(value["cmi"]["total_time"], "0");
         assert!(
             resource_completion_cmi(
+                82,
+                crate::WellearnResourceCompletionTimeMode::ZeroTime,
+                crate::WellearnResourceCompletionCmiFormat::Json,
+                None,
+            )
+            .is_ok()
+        );
+        assert!(
+            resource_completion_cmi(
                 101,
                 crate::WellearnResourceCompletionTimeMode::ZeroTime,
                 crate::WellearnResourceCompletionCmiFormat::Json,
-                &baseline,
+                Some(&baseline),
             )
             .is_err()
         );
@@ -1896,7 +1906,7 @@ mod tests {
             100,
             crate::WellearnResourceCompletionTimeMode::PreserveFreshTime,
             crate::WellearnResourceCompletionCmiFormat::Json,
-            &baseline,
+            Some(&baseline),
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(document.as_str()).unwrap();
@@ -1913,7 +1923,15 @@ mod tests {
             100,
             crate::WellearnResourceCompletionTimeMode::PreserveFreshTime,
             crate::WellearnResourceCompletionCmiFormat::Json,
-            &missing,
+            Some(&missing),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let error = resource_completion_cmi(
+            100,
+            crate::WellearnResourceCompletionTimeMode::PreserveFreshTime,
+            crate::WellearnResourceCompletionCmiFormat::Json,
+            None,
         )
         .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
@@ -1929,7 +1947,7 @@ mod tests {
             82,
             crate::WellearnResourceCompletionTimeMode::ZeroTime,
             crate::WellearnResourceCompletionCmiFormat::InteractionInfoSuffix,
-            &baseline,
+            Some(&baseline),
         )
         .unwrap();
         let json = document
@@ -2088,7 +2106,7 @@ mod tests {
         let document = read_inventory_response(uninitialized, ResponseContent::Cmi)
             .await
             .unwrap();
-        assert!(document.as_str().contains(UNINITIALIZED_DURATION_MARKER));
+        assert!(document.as_str().contains(UNINITIALIZED_CMI_MARKER));
 
         let login = fixture_response(
             "text/html",

@@ -212,8 +212,11 @@ baseline and requires the complete audited CMI preservation set; a
 still-uninitialized, absent or partial CMI stops before any heartbeat or
 finalization rather than synthesizing defaults. The baseline binds bounded
 `completion_status`, `progress_measure`, `score.scaled`, `success_status`,
-`session_time` and `total_time` values. The independent read capabilities keep
-their stricter no-mutation rule and never consume the marker as a fallback.
+`session_time` and `total_time` values. ResourceExecution uses the same
+pre-mutation marker only as an absent baseline: zero-time or save-only plans
+may continue to their evidenced start, while fresh-time preservation fails
+before mutation. The independent read capabilities keep their stricter
+no-mutation rule and never consume the marker as a fallback.
 
 Three donor wire modes remain separate:
 
@@ -394,11 +397,14 @@ Execution identity plus Task/remote binding. It therefore resamples across new
 Executions while reproducing the exact frozen goal during retry and recovery.
 
 The Provider performs a complete fresh TaskDetail rebind before mutation. If
-the baseline CMI is already Completed, it skips all mutation and verifies that
-fact. Otherwise it builds the bounded CMI document before the first mutation,
-uses exact fresh `uid`/`classid` routing, accepts only integer `ret=0` from each
-write, emits the configured CMI envelope, performs the configured one- or
-two-save sequence, and finally requires
+the baseline CMI is already Completed with the exact frozen score, it skips all
+mutation and verifies that fact. The exact donor uninitialized marker cannot
+prove that preflight, but zero-time/set-then-save and save-only plans may
+continue; fresh-time mode rejects it before start. Otherwise the Provider
+builds any required bounded CMI document before the first mutation, uses exact
+fresh `uid`/`classid` routing, accepts only integer `ret=0` from each write,
+emits the configured CMI envelope, performs the configured one- or two-save
+sequence, and finally requires
 a fresh CMI showing exactly Completed, progress 100 percent and the configured
 sequence's final score. Fresh-time mode additionally requires the two CMI time
 fields to survive that immediate readback. HTTP acceptance alone is not
