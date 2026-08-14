@@ -158,7 +158,11 @@ process restart, Cidaren must still recover the exact issued recipe mode,
 frame, Task, nonce and sequence without trusting the helper's echoed result.
 The shared action boundary therefore needs an encrypted bounded command
 artifact, or an equivalent independently frozen set of reconstructible fields,
-persisted before dispatch.
+persisted before dispatch. The Provider now supplies that exact input as
+`EncodedCidarenBrowserCommandArtifact`: its zeroizing `SecretValue` contains
+the validated canonical command JSON and its digest is reused by the ordinary
+exchange row. Decode rechecks the digest plus BrowserSession ID, Task,
+sequence and selected Capture recipe before returning the typed command.
 The high-level Provider adapter accepts the raw result only as an owned,
 bounded `CidarenBrowserResultDocument`. Its contents are unavailable through
 Debug or the public API, and the consumed transport buffer is zeroized after

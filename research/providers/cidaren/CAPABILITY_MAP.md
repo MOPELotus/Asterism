@@ -178,6 +178,10 @@ The current checkpoint (not a completion boundary):
     restoring the immutable Draft after each accepted Verify, requiring a new
     topic-code digest before the next relation and advancing only after the
     exact verified relation count reaches the Draft-bound answer length.
+38. encodes each typed Capture command into a zeroizing encrypted-at-rest
+    artifact whose digest is the exchange command digest. Recovery decodes it
+    only after exact digest, BrowserSession, Task, sequence and recipe rebinding;
+    helper-echoed result fields never reconstruct command authority.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

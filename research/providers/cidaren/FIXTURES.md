@@ -153,6 +153,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Public-donor token-only Capture validates and resolves only as one
   ProviderSpecific `ProviderAccessToken` from CaptureTool/BrowserExtension;
   unrelated helper origins and token/Composite relabelling fail closed.
+- Typed Capture command recovery owns serialized command bytes in a zeroizing
+  SecretValue artifact and rejects digest, BrowserSession, Task, sequence or
+  recipe drift before any helper result can be accepted.
 - Class-task pagination is complete and total-consistent before normalization.
 - Course identity is `course:{course_id}` and duplicate rows must agree.
 - Task identity is `class-task:{release_id}` even when `task_id == -1`.

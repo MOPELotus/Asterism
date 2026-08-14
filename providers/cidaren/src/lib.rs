@@ -82,8 +82,8 @@ pub use browser_protocol::{
     CIDAREN_CAPTURE_COMMAND_TYPE, CIDAREN_CAPTURE_RESULT_TYPE, CidarenBrowserCommand,
     CidarenBrowserCommandEnvelope, CidarenBrowserEvent, CidarenBrowserEventEnvelope,
     CidarenBrowserResultDocument, CidarenCaptureMode, CidarenCaptureSnapshot,
-    CidarenCaptureStorageSource, CidarenCaptureTokenSource, browser_event_exchange_digest,
-    parse_browser_event,
+    CidarenCaptureStorageSource, CidarenCaptureTokenSource, EncodedCidarenBrowserCommandArtifact,
+    browser_event_exchange_digest, parse_browser_event,
 };
 pub use capture_recipe::{cidaren_capture_recipe_v2, cidaren_token_capture_recipe_v1};
 pub use class_tasks::{parse_course_inventory, parse_task_inventory};

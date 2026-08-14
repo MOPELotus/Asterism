@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CidarenBrowserCommandEnvelope, CidarenBrowserResultDocument, CidarenCaptureMode,
-    CidarenCaptureSnapshot, metadata::development_metadata, parse_browser_event,
+    CidarenCaptureSnapshot, EncodedCidarenBrowserCommandArtifact, metadata::development_metadata,
+    parse_browser_event,
 };
 
 const CIDAREN_ORIGIN: &str = "https://app.vocabgo.com";
@@ -34,6 +35,7 @@ pub struct CidarenBrowserBridge {
 #[derive(Debug)]
 pub struct CidarenCaptureExchangeIssued {
     command: CidarenBrowserCommandEnvelope,
+    command_artifact: EncodedCidarenBrowserCommandArtifact,
     exchange: BrowserBridgeExchange,
 }
 
@@ -44,6 +46,10 @@ impl CidarenCaptureExchangeIssued {
 
     pub const fn exchange(&self) -> &BrowserBridgeExchange {
         &self.exchange
+    }
+
+    pub const fn command_artifact(&self) -> &EncodedCidarenBrowserCommandArtifact {
+        &self.command_artifact
     }
 }
 
@@ -159,11 +165,12 @@ impl CidarenBrowserBridge {
                 mode,
             )
             .await?;
+        let command_artifact = command.encode_artifact()?;
         let exchange = BrowserBridgeExchange::issue(
             session_id,
             sequence,
             CidarenBrowserCommandEnvelope::exchange_type().to_owned(),
-            command.exchange_digest()?,
+            command_artifact.digest(),
             issued_at,
         )
         .map_err(|_| {
@@ -172,7 +179,11 @@ impl CidarenBrowserBridge {
                 "Cidaren command cannot be represented by the durable BrowserBridge exchange",
             )
         })?;
-        Ok(CidarenCaptureExchangeIssued { command, exchange })
+        Ok(CidarenCaptureExchangeIssued {
+            command,
+            command_artifact,
+            exchange,
+        })
     }
 
     /// Freshly rebinds a Task and parses one typed Capture result.
@@ -627,6 +638,11 @@ mod tests {
             issued.exchange().command_digest,
             issued.command().exchange_digest().unwrap()
         );
+        assert_eq!(
+            issued.command_artifact().digest(),
+            issued.exchange().command_digest
+        );
+        assert!(!format!("{:?}", issued.command_artifact()).contains(&session_id.to_string()));
         assert_eq!(issued.exchange().state, BrowserBridgeExchangeState::Issued);
 
         let document = include_str!(

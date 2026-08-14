@@ -1,6 +1,6 @@
 use std::fmt;
 
-use asterism_domain::SessionKind;
+use asterism_domain::{BrowserBridgeSessionId, SessionKind};
 use asterism_provider_api::{
     CredentialReplacement, ProviderError, ProviderErrorKind, ProviderResult,
 };
@@ -22,6 +22,34 @@ const MAX_CAPTURE_VALUE_BYTES: usize = 64 * 1_024;
 pub const CIDAREN_CAPTURE_COMMAND_TYPE: &str = "cidaren.capture.snapshot";
 /// Stable Core `BrowserBridge` exchange type for one Cidaren Capture result.
 pub const CIDAREN_CAPTURE_RESULT_TYPE: &str = "cidaren.capture.snapshot.result";
+
+/// Encrypted-at-rest command material required to validate a helper result
+/// after process recovery. The digest remains safe for the ordinary exchange
+/// ledger; only Core's encrypted artifact boundary may persist the value.
+pub struct EncodedCidarenBrowserCommandArtifact {
+    value: SecretValue,
+    digest: [u8; 32],
+}
+
+impl EncodedCidarenBrowserCommandArtifact {
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub fn into_secret_value(self) -> SecretValue {
+        self.value
+    }
+}
+
+impl fmt::Debug for EncodedCidarenBrowserCommandArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncodedCidarenBrowserCommandArtifact")
+            .field("value", &"[REDACTED]")
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
 
 /// Owned raw Capture result delivered by the shared helper boundary.
 ///
@@ -142,12 +170,73 @@ impl CidarenBrowserCommandEnvelope {
     ///
     /// Returns a typed error if serialization unexpectedly fails.
     pub fn exchange_digest(&self) -> ProviderResult<[u8; 32]> {
+        Ok(self.encode_artifact()?.digest())
+    }
+
+    /// Encodes the exact issued command for Core's encrypted recovery
+    /// boundary. The serialized session nonce is owned by a zeroizing secret
+    /// value and never enters the ordinary exchange row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if command validation or serialization fails.
+    pub fn encode_artifact(&self) -> ProviderResult<EncodedCidarenBrowserCommandArtifact> {
         self.validate()?;
-        let mut encoded = serde_json::to_vec(self)
-            .map_err(|_| invalid_response("Cidaren Capture command cannot be hashed"))?;
-        let digest = Sha256::digest(&encoded).into();
-        encoded.zeroize();
-        Ok(digest)
+        let mut encoded = Zeroizing::new(
+            serde_json::to_vec(self)
+                .map_err(|_| invalid_response("Cidaren Capture command cannot be encoded"))?,
+        );
+        let digest = Sha256::digest(encoded.as_slice()).into();
+        let value = SecretValue::new(std::mem::take(&mut *encoded));
+        Ok(EncodedCidarenBrowserCommandArtifact { value, digest })
+    }
+
+    /// Resolves one encrypted command artifact and repeats every independent
+    /// Core binding before a helper result can be accepted after recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for digest/schema drift or a foreign
+    /// session/Task/sequence/recipe binding.
+    pub fn decode_artifact_bound(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+        expected_session_id: BrowserBridgeSessionId,
+        expected_remote_task_id: &str,
+        expected_sequence: u64,
+        expected_mode: CidarenCaptureMode,
+    ) -> ProviderResult<Self> {
+        let bytes = value.expose_secret();
+        if bytes.is_empty() || bytes.len() > MAX_BROWSER_DOCUMENT_BYTES {
+            return Err(invalid_response(
+                "Cidaren Capture command artifact is empty or oversized",
+            ));
+        }
+        if Sha256::digest(bytes).as_slice() != expected_digest {
+            return Err(protocol_drift(
+                "Cidaren Capture command artifact digest changed",
+            ));
+        }
+        let expected_sequence = u32::try_from(expected_sequence).map_err(|_| {
+            protocol_drift("Cidaren Capture command artifact sequence is unrepresentable")
+        })?;
+        let command: Self = serde_json::from_slice(bytes)
+            .map_err(|_| protocol_drift("Cidaren Capture command artifact schema changed"))?;
+        command.validate()?;
+        if command.session_nonce != expected_session_id.to_string()
+            || command.remote_task_id != expected_remote_task_id
+            || command.sequence != expected_sequence
+            || command.command
+                != (CidarenBrowserCommand::CaptureSnapshot {
+                    mode: expected_mode,
+                })
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Cidaren Capture command artifact binding is stale or foreign",
+            ));
+        }
+        Ok(command)
     }
 
     /// Builds a recipe-versioned Capture snapshot command.
@@ -698,6 +787,73 @@ mod tests {
             serde_json::to_string(&command)
                 .unwrap()
                 .contains("capture_snapshot")
+        );
+    }
+
+    #[test]
+    fn encrypted_command_artifact_rebinds_every_recovery_authority() {
+        let session_id = BrowserBridgeSessionId::new();
+        let command = CidarenBrowserCommandEnvelope::capture_snapshot(
+            session_id.to_string(),
+            "frame-recovery".to_owned(),
+            "class-task:2002".to_owned(),
+            7,
+            CidarenCaptureMode::Composite,
+        )
+        .unwrap();
+        let artifact = command.encode_artifact().unwrap();
+        let digest = artifact.digest();
+        assert_eq!(digest, command.exchange_digest().unwrap());
+        assert!(!format!("{artifact:?}").contains(&session_id.to_string()));
+        let value = artifact.into_secret_value();
+
+        let restored = CidarenBrowserCommandEnvelope::decode_artifact_bound(
+            &value,
+            digest,
+            session_id,
+            "class-task:2002",
+            7,
+            CidarenCaptureMode::Composite,
+        )
+        .unwrap();
+        assert_eq!(restored, command);
+        assert!(
+            CidarenBrowserCommandEnvelope::decode_artifact_bound(
+                &value,
+                [9; 32],
+                session_id,
+                "class-task:2002",
+                7,
+                CidarenCaptureMode::Composite,
+            )
+            .is_err()
+        );
+        for (task, sequence, mode) in [
+            ("class-task:2003", 7, CidarenCaptureMode::Composite),
+            ("class-task:2002", 8, CidarenCaptureMode::Composite),
+            ("class-task:2002", 7, CidarenCaptureMode::TokenOnly),
+        ] {
+            assert_eq!(
+                CidarenBrowserCommandEnvelope::decode_artifact_bound(
+                    &value, digest, session_id, task, sequence, mode,
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::RemoteChanged
+            );
+        }
+        assert_eq!(
+            CidarenBrowserCommandEnvelope::decode_artifact_bound(
+                &value,
+                digest,
+                BrowserBridgeSessionId::new(),
+                "class-task:2002",
+                7,
+                CidarenCaptureMode::Composite,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
         );
     }
 
