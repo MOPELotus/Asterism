@@ -51,10 +51,11 @@ pub use question_read_continuation::SqliteQuestionReadContinuationRepository;
 pub use question_session::SqliteQuestionSessionRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
-    AnswerBootstrapHarvestRepository, AnswerCacheRepository, AnswerCandidateRecord,
-    AnswerCandidateRepository, AnswerEvidenceProjectionState, AnswerEvidenceRecord,
-    AnswerEvidenceRecordOutcome, AnswerEvidenceRepository, AuditFilter, AuditPage,
-    AuditQueryRepository, AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
+    AnswerBootstrapHarvestCheckpoint, AnswerBootstrapHarvestCompletion,
+    AnswerBootstrapHarvestFailure, AnswerBootstrapHarvestRepository, AnswerCacheRepository,
+    AnswerCandidateRecord, AnswerCandidateRepository, AnswerEvidenceProjectionState,
+    AnswerEvidenceRecord, AnswerEvidenceRecordOutcome, AnswerEvidenceRepository, AuditFilter,
+    AuditPage, AuditQueryRepository, AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, BrowserBridgeCommandArtifactRepository,
@@ -67,8 +68,9 @@ pub use repository::{
     BrowserBridgeResultResolveRequest, BrowserBridgeRuntimeBindingRecord,
     BrowserBridgeRuntimeStateIssue, BrowserBridgeSessionRepository,
     BrowserBridgeWorkflowCommitOutcome, BrowserBridgeWorkflowCommitRequest,
-    BrowserBridgeWorkflowContextIssue, BrowserBridgeWorkflowPlanIssue, CreditQueryRepository,
-    CreditRepository, CreditReservationDetail, CreditReservationPage, CreditTransactionPage,
+    BrowserBridgeWorkflowContextIssue, BrowserBridgeWorkflowPlanIssue,
+    ClaimedAnswerBootstrapHarvest, CreditQueryRepository, CreditRepository,
+    CreditReservationDetail, CreditReservationPage, CreditTransactionPage,
     DispatchedBrowserBridgeCommand, ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
     ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,

@@ -74,7 +74,8 @@ impl SqliteSchedulerRepository {
              SET state = 'claimed', worker_id = ?, lease_expires_at = ?, updated_at = ? \
              WHERE id IN ( \
                  SELECT id FROM scheduled_jobs \
-                 WHERE state = 'pending' AND run_at <= ? \
+                 WHERE state = 'pending' AND job_kind <> 'answer_bootstrap_harvest' \
+                   AND run_at <= ? \
                  ORDER BY run_at, id LIMIT ? \
              ) \
              RETURNING id, payload_json, run_at, attempts, idempotency_key, created_at, updated_at"

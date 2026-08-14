@@ -91,6 +91,68 @@ pub trait AnswerBootstrapHarvestRepository: Send + Sync {
         provider_account_id: ProviderAccountId,
         generation: u32,
     ) -> Result<Option<AnswerBootstrapHarvest>, StorageError>;
+
+    async fn claim_due_answer_bootstrap_harvests(
+        &self,
+        worker_id: &str,
+        now: Timestamp,
+        lease_expires_at: Timestamp,
+        limit: u32,
+    ) -> Result<Vec<ClaimedAnswerBootstrapHarvest>, StorageError>;
+
+    async fn checkpoint_answer_bootstrap_harvest(
+        &self,
+        request: AnswerBootstrapHarvestCheckpoint<'_>,
+    ) -> Result<AnswerBootstrapHarvest, StorageError>;
+
+    async fn complete_answer_bootstrap_harvest(
+        &self,
+        request: AnswerBootstrapHarvestCompletion<'_>,
+    ) -> Result<AnswerBootstrapHarvest, StorageError>;
+
+    async fn fail_answer_bootstrap_harvest(
+        &self,
+        request: AnswerBootstrapHarvestFailure<'_>,
+    ) -> Result<AnswerBootstrapHarvest, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimedAnswerBootstrapHarvest {
+    pub harvest: AnswerBootstrapHarvest,
+    pub worker_id: String,
+    pub lease_expires_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnswerBootstrapHarvestCheckpoint<'a> {
+    pub harvest_id: asterism_domain::AnswerBootstrapHarvestId,
+    pub schedule_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub scanned_task_count: u32,
+    pub total_task_count: Option<u32>,
+    pub watermark_sanitized: &'a serde_json::Value,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnswerBootstrapHarvestCompletion<'a> {
+    pub harvest_id: asterism_domain::AnswerBootstrapHarvestId,
+    pub schedule_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub scanned_task_count: u32,
+    pub total_task_count: u32,
+    pub watermark_sanitized: &'a serde_json::Value,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnswerBootstrapHarvestFailure<'a> {
+    pub harvest_id: asterism_domain::AnswerBootstrapHarvestId,
+    pub schedule_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub error_sanitized: &'a str,
+    pub retry_at: Option<Timestamp>,
+    pub at: Timestamp,
 }
 
 /// Persistence contract consumed by task services. It intentionally contains no

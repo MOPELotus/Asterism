@@ -23,7 +23,7 @@ pub enum AnswerBootstrapHarvestState {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AnswerBootstrapHarvest {
     pub id: AnswerBootstrapHarvestId,
     pub owner_user_id: UserId,

@@ -3989,3 +3989,23 @@ future rescans must use a new generation and a separately authorized path.
 Migration 055 adds the durable ledger; this slice creates only the read-only
 job authority and does not enumerate history, create remote Attempts or mutate
 Provider Tasks.
+
+## Two-hundred-and-twenty-first Phase 0 slice
+
+Answer Bootstrap Harvest jobs now have an atomic, bounded worker lifecycle.
+Claiming a due job binds one worker lease and moves its exact harvest from
+pending or paused into running in the same immediate transaction. An expired
+lease can be reclaimed without losing the persisted watermark; repeated lease
+loss consumes the same five-attempt budget as explicit retry failures, and an
+exhausted job becomes a failed harvest plus scheduler dead letter instead of
+looping indefinitely.
+
+Every checkpoint rechecks harvest ID, scheduler ID, worker identity and a live
+lease before accepting monotonic scanned/total progress and a sanitized
+watermark. Retryable failure atomically pauses the harvest and reschedules its
+job; terminal failure closes both records. Successful completion requires the
+final scanned count to equal the declared total, then completes the harvest and
+scheduler job together. Wrong workers, expired leases, regressing progress,
+changed totals and malformed errors leave both records unchanged. This remains
+a protocol-neutral read-only lifecycle: Provider history enumeration and
+evidence extraction adapters are still separate capability work.
