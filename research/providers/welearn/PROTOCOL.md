@@ -213,12 +213,18 @@ Three donor wire modes remain separate:
   immediate keep plus one preserved-time keep after each complete configured
   interval, wait a trailing partial interval without inventing another keep,
   then save the preserved completion/progress/score/success tuple;
-- `client_counter` matches current Fanyuchang: always start, send exactly one
-  keep per real second with `session_time` and `total_time` progressing from 0,
-  and leave completion to the following ResourceExecution step;
-- `implicit_server` matches Auto_WeLearn: always start, wait before each
-  60-second keep, omit explicit time fields, wait any trailing partial interval,
-  then issue the donor's bare save.
+- `client_counter` covers current Fanyuchang's duration phase: always start and
+  send exactly one keep per real second with `session_time` and `total_time`
+  progressing from 0; its donor then completes in the same operation;
+- `implicit_server` matches Auto_WeLearn's single-file duration route: always
+  start, wait before each 60-second keep, omit explicit time fields, wait any
+  trailing partial interval, then issue the donor's bare save.
+
+Modular Auto shares the implicit wait/keep phase but replaces the bare save
+with one completion-bearing save. Current Fanyuchang similarly reuses its one
+start before final `setscoinfo`/save. Those two exact flows are atomic
+duration-completion operations, not a singleton DurationReport followed by a
+new ResourceExecution session.
 
 The start payload also follows that selected wire mode. Current Fanyuchang
 sends `uid/cid/scoid/classid/tid=-1`; YZBRH and Auto_WeLearn send only
@@ -241,21 +247,22 @@ The client-counter and implicit modes require their evidenced 1-second and
 60-second intervals respectively. Current Fanyuchang requires accepted
 integer `ret=0` at start and accepts heartbeat `ret=0/1`. A different integer
 heartbeat result is an explicit rejection: its donor stops later keeps, then
-continues to the separately mapped completion phase. Asterism records that
-rejection, stops the keep loop and performs the fresh duration read; a verified
-change can therefore let the durable composite proceed to its independently
-authorized ResourceExecution step. The historical modes record every
-well-formed integer receipt and continue their donor sequence. Missing,
+continues to completion within the same operation. The singleton phase
+implementation records that rejection, stops the keep loop and performs a fresh
+duration read without crossing ResourceExecution authority. The historical
+modes record every well-formed integer receipt and continue their donor
+sequence. Missing,
 string, malformed, authentication or network outcomes remain ambiguous and
 stop with no replay or later-mutation authority.
-These duration modes keep their heartbeat/final-save wire lifecycle separate
-from the completion capability's `setscoinfo` boundary; both capabilities
-remain independently available and auditable.
+The phase and final-mutation forms remain independently encoded and auditable.
+Only the YZBRH and Auto single-file preservation/bare-save modes are complete
+singleton DurationReport lifecycles; the two completion-bearing flows require
+the atomic shape recorded below.
 
-After finalization, a fresh CMI read must preserve completion, progress, score
-and success status with the same explicit field presence while changing at
-least one raw time observation. An absent or partial readback is protocol drift,
-not evidence that a default-valued state was preserved. HTTP
+After singleton finalization, a fresh CMI read must preserve completion,
+progress, score and success status with the same explicit field presence while
+changing at least one raw time observation. An absent or partial readback is
+protocol drift, not evidence that a default-valued state was preserved. HTTP
 success alone is never a verified outcome. Authentication may renew once before
 the first mutation. A mutation is never replayed after authentication fails;
 only the final read-only verification may renew if the operation has not already
@@ -317,11 +324,12 @@ literal `[INTERACTIONINFO]` immediately after that JSON. Runtime setting
 body before appending the marker.
 
 Mutation family is also explicit. Exercise completion uses `set_then_save`.
-Auto_WeLearn's duration worker instead uses `save_only`, directly sending the
-completed/progress-100/score-0 tuple after its duration lifecycle. Both still
-issue `startsco160928` and end with the same goal-bound fresh CMI verification.
-The native transport prepares any CMI document before the first mutation and
-omits it entirely for `save_only`.
+Auto_WeLearn's modular duration worker instead uses `save_only`, directly
+sending the completed/progress-100/score-0 tuple after its duration lifecycle.
+The native ResourceExecution transport can encode and verify that save family,
+prepares no CMI document for it, and keeps it independently testable. It does
+not claim that a split DurationReport then a newly started ResourceExecution is
+the donor's one-session sequence.
 
 The completion donors also pair two different start forms with different
 Referers. Current Fanyuchang sends the full
@@ -352,20 +360,19 @@ both bounded scalar fields before starting any mutation, writes them unchanged,
 and compares them with the immediate fresh readback. It does not synthesize
 missing time values.
 
-The completion-time setting defaults to `auto`. It consults Core's immutable
-capability plan without broadening the current step's mutation authority: only
-the exact second step of `DurationReport → ResourceExecution` selects
-`preserve_fresh_time`; standalone completion selects `zero_time`. An explicit
-task setting overrides this inference, including Auto_WeLearn's composite
-zero-time profile. Malformed plan/position bindings fail before fresh detail or
-transport calls.
+The completion-time setting defaults to `auto`. It can retain current
+Fanyuchang's fresh post-duration time facts in the Resource mutation plan, while
+standalone completion selects `zero_time`. An explicit task setting keeps the
+Auto modular zero-time final tuple representable. These settings freeze the
+wire facts but do not grant cross-step mutation authority.
 
-This also leaves Auto_WeLearn's separate duration-completion behavior
-expressible without a private flow: its duration worker starts and heartbeats,
-then saves `completed`, progress 100 and score 0 without `setscoinfo`. Asterism's
-durable `DurationReport → ResourceExecution` plan with fixed score 0,
-`selected_score` and `zero_time` reaches the same externally observed final CMI
-goal, while retaining fresh rediscovery and verification around both phases.
+`WellearnBatchExecutionShape::AtomicDurationCompletion` now marks current
+Fanyuchang duration and modular Auto duration and requires both child
+capabilities. Core still needs one durable atomic/current-step authority and
+recovery boundary so the Provider can issue exactly one start, the evidenced
+keeps and the donor's final completion mutation. Splitting them would add a
+bare save or second start; for modular Auto targets below 60 seconds it can also
+fail an intermediate time-change check before the only completion-bearing save.
 
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or
@@ -457,6 +464,12 @@ keeps, so it belongs to per-child concurrent rather than a synthetic shared
 heartbeat protocol. The Core layer must persist dispatch with the immutable
 flow, membership and derived targets; crash recovery must not silently switch
 semantics.
+
+`WellearnBatchPlan.execution_shape` independently records whether each child is
+ResourceExecution-only, DurationReport-only, or an atomic duration-completion
+flow. This is not permission for the Provider to perform the later capability
+inside a singleton step; the shared durable layer must authorize and recover
+the atomic shape explicitly.
 
 `WellearnBatchPlan.target_strategy` records the corresponding target boundary:
 Fanyuchang, YZBRH and Auto completion resolve score or duration targets per

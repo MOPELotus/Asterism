@@ -149,12 +149,13 @@ only structural field names, response codes and bounded placeholder shapes.
 - Authentication failure after a mutation never replays the lifecycle.
 - ResourceExecution requires fresh identity rebind, exact completion/progress/
   selected-score readback and goal-bound recovery with no mutation replay.
-- ResourceExecution exposes ordinary zero-time and duration-then-completion
-  fresh-time CMI semantics separately; the preservation mode verifies both
-  time fields against its immediate fresh readback.
+- ResourceExecution exposes ordinary zero-time and donor fresh-time CMI facts
+  separately; standalone preservation-mode tests verify both time fields, but
+  do not claim the split call reproduces the pending atomic donor lifecycle.
 - ResourceExecution can emit either plain JSON or the exact donor
   `[INTERACTIONINFO]` CMI suffix without changing the underlying document.
-- ResourceExecution distinguishes set-then-save from save-only and treats
+- ResourceExecution distinguishes set-then-save from the modular Auto
+  completion-bearing save-only tuple and treats
   per-call acceptance as a receipt, never the success predicate; an explicit
   rejection may continue to the donor's next write, while ambiguity stops.
 - ResourceExecution freezes the current full/simple-Referer or historical
@@ -167,18 +168,21 @@ only structural field names, response codes and bounded placeholder shapes.
 - The preservation-mode schedule sends an initial keep and one keep per full
   interval, while a trailing partial interval adds elapsed time but no
   unevidenced final keep.
-- Client-counter mode always starts and sends exactly one paired counter keep
-  per real second; implicit-server mode always starts, sends no initial keep,
-  uses the evidenced 60-second cadence and ends with a bare save.
+- Client-counter phase mode always starts and sends exactly one paired counter
+  keep per real second. Singleton implicit-server matches Auto single-file: it
+  starts, sends no initial keep, uses the 60-second cadence and ends bare.
 - Preservation mode retains YZBRH's two-second pre-read/start/first-keep/final
   gaps outside the requested duration, omits current-only keep fields, writes
   literal final `status=unknown`, and exposes accepted/rejected receipt counts.
 - Well-formed negative historical duration receipts may continue and can only
   succeed after exact fresh preservation/readback; malformed or network-
   ambiguous receipts still stop with no replay.
-- Completion `auto` uses immutable plan/position only as context, selects fresh
-  time for exact ResourceExecution step 2 after DurationReport, and rejects a
-  malformed binding before Provider transport.
+- Completion `auto` tests freeze fresh-time versus zero-time facts and reject a
+  malformed plan binding before Provider transport; immutable plan context is
+  not authority to execute the pending atomic duration-completion flow.
+- Batch tests mark Fanyuchang duration and modular Auto duration as
+  `AtomicDurationCompletion`, require both child capabilities and keep YZBRH/
+  Auto single-file singleton duration separate.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

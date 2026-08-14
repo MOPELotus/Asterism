@@ -66,13 +66,17 @@ duration-then-completion CMI carrying accumulated session/total time; both
 shapes are independently configurable and fixture-covered. Current
 Fanyuchang's plain JSON and the YZBRH/Auto_WeLearn `[INTERACTIONINFO]` envelope
 are likewise separate settings. Auto_WeLearn's save-only duration completion
-and the exercise donors' set-then-save mutation family are separately exposed;
+and the exercise donors' set-then-save mutation family are separately encoded;
 well-formed negative receipts do not suppress later evidenced writes. They
 also preserve distinct start requests: current Fanyuchang uses full route
 identity with a simple Referer, while YZBRH/Auto use minimal SCO identity and a
 task Referer for exercise completion. The current route appends `?uid=...` to
 `/Ajax/SCO.aspx`; both historical donors use the plain endpoint. These are
-explicit profiles rather than one merged superset request. They
+explicit profiles rather than one merged superset request. Current
+Fanyuchang duration and modular Auto duration each reuse one start through the
+final completion mutation; Provider batch plans mark that atomic execution
+shape, while shared durable authority/recovery remains required before claiming
+the combined sequence is executable. They
 also detect authentication challenges but contain no reliable automated solver
 or task BrowserBridge implementation to port. Asterism provides immutable
 Capture v4/v5 alternatives for AssistedSession and ExternalBrowserOauth Cookies

@@ -60,11 +60,12 @@ pub enum WellearnDurationProtocolMode {
     /// YZBRH sends an immediate preserved-state keep, interval keeps and a
     /// final preservation save.
     PreserveFresh,
-    /// Current Fanyuchang sends one client-counter keep per second and leaves
-    /// final completion to the following `ResourceExecution` step.
+    /// Current Fanyuchang sends one client-counter keep per second. Its final
+    /// completion belongs to Core's pending atomic duration-completion shape.
     ClientCounter,
     /// `Auto_WeLearn` waits before interval keeps, omits explicit time fields and
-    /// finishes with a bare save.
+    /// finishes with a bare save. Its modular completion-bearing variant needs
+    /// Core's atomic duration-completion authority instead of this singleton.
     ImplicitServer,
 }
 
@@ -157,7 +158,8 @@ impl WellearnResourceCompletionCmiFormat {
 pub enum WellearnResourceCompletionWriteMode {
     /// Exercise completion donors submit CMI and then save progress/score.
     SetThenSave,
-    /// `Auto_WeLearn`'s duration-completion path directly saves the final tuple.
+    /// `Auto_WeLearn`'s modular duration-completion path directly saves the final
+    /// tuple once Core authorizes the complete atomic lifecycle.
     SaveOnly,
 }
 
@@ -1143,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn donor_duration_completion_profiles_are_composable() {
+    fn donor_duration_completion_wire_facts_are_representable() {
         let schema = runtime_settings_schema();
         for (score, time_mode, expected_score, expected_time_mode) in [
             (

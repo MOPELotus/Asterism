@@ -9,8 +9,8 @@
 | TaskDetail | Fresh Course/Unit/SCO inventory | FromScratch | Re-lists Courses and re-runs one complete Course scan, then requires exactly one matching stable SCO identity; live pending |
 | TaskProgressRead | YZBRH | Reference | Implemented through a fresh non-mutating `getscoinfo_v7` CMI request; completion, progress, score and time observations are parsed independently; live pending |
 | DurationRead | YZBRH + Fanyuchang 2026 | Reference | Independent fresh CMI reader maps donor-observed canonical integer `total_time` to bounded seconds, returns zero for explicit no-CMI/not-started state and fails closed on unknown grammar; live pending |
-| ResourceExecution | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Native fresh rebind → optional completed preflight → `startsco160928` → optional `setscoinfo` → selected-score `savescoinfo160928` → optional current-donor second `crate=100` save → exact fresh CMI verification is implemented. Settings expose fixed/uniform/clamped-Gaussian selection, selected-score/current-dual-save sequences, set-then-save/save-only mutation families, normal zero-time versus duration-then-completion fresh-time semantics, plain-JSON versus `[INTERACTIONINFO]` CMI envelopes, and the current query-uid/full/simple-Referer versus historical plain/minimal/task-Referer mutation profiles separately. Explicit negative receipts are recorded and later donor mutations continue; ambiguous results never replay. Current Fanyuchang deliberately includes hidden/NotOpen SCOs, so Provider advertises and fresh-rebinds that route while preserving the honest remote state; shared exact-action admission is integrated and live behavior remains pending |
-| DurationReport | YZBRH + Fanyuchang 2026 + Auto_WeLearn | Reference | Native fresh-read → donor-specific start → complete preservation baseline → bounded real-time heartbeat → donor-specific finalization → strict fresh-read lifecycle is offline/native-boundary covered. Settings expose YZBRH preserve-fresh, current donor client-counter and Auto implicit-server wire plans plus fixed/bounded-random duration; endpoint/start payload, keep fields, YZBRH fixed request gaps and receipt-continuation behavior follow the selected evidenced mode. Current client-counter `ret` outside `0/1` is recorded as an explicit rejection and stops later keeps before fresh verification, matching the donor without treating an unambiguous result as a replay hazard; fresh verification remains authoritative and live validation is pending |
+| ResourceExecution | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Native standalone fresh rebind → optional completed preflight → `startsco160928` → optional `setscoinfo` → selected-score `savescoinfo160928` → optional current-donor second `crate=100` save → exact fresh CMI verification is implemented. Settings expose fixed/uniform/clamped-Gaussian selection, selected-score/current-dual-save sequences, set-then-save/save-only families, zero/fresh-time semantics, both CMI envelopes and both mutation profiles. The save-only final tuple is encoded and fixture-covered, but modular Auto and current Fanyuchang duration require Core's atomic duration-completion authority to reuse one start rather than a split second Resource session. Explicit negative receipts continue only across unambiguous donor writes; ambiguous results never replay |
+| DurationReport | YZBRH + Fanyuchang 2026 + Auto_WeLearn | Reference | Native fresh-read → donor-specific start → complete preservation baseline → bounded heartbeat → donor-specific finalization → strict fresh-read lifecycle is offline/native-boundary covered for YZBRH and Auto single-file singleton duration. Settings separately encode current donor client-counter and Auto implicit phases. Current Fanyuchang duration and modular Auto duration are marked `AtomicDurationCompletion`; their exact one-session final completion mutation remains a shared Core contract gap rather than being approximated by split singleton executions. Current client-counter rejection stops later keeps without ambiguous replay; live validation remains pending |
 | Assessment/exercise behavior | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Audited donors do not expose Question/Answer endpoints; their exercise behavior is the direct SCO completion/progress/score preset mapped to `ResourceExecution`, now implemented offline/native-boundary; audit remains open to new evidence |
 | Result verification | Fresh Course/SCO/CMI reads | FromScratch | DurationReport verifies preservation plus changed time; ResourceExecution implements goal-bound `verify_execution` over the frozen settings and exact completion/progress/score tuple, so Core recovery fresh-reads without replay |
 | BrowserBridge / Capture | Fanyuchang 2026 Cookie mode + SSO browser implementation + 2026-08-13 public login audit | Reference | Capture recipes v4/v5 separate five exact navigation origins from the sole WELearn credential-read origin, distinguish assisted versus external-browser-OAuth acquisition, and require the current loader's exact `GET /ajax/authCourse.aspx?action=gmc` to receive `200 application/json` before resolving the Cookie. The helper enforces that response gate, so the audited anonymous `200 text/html` login script cannot complete Capture; native Course parsing remains final authority. Manual captcha/SMS and QQ/WeChat/Apple navigation are evidenced; exact third-party choice and callback live validation remain pending, while no Task BrowserBridge behavior exists in the donors |
@@ -97,20 +97,22 @@ setting keeps the normal donor completion CMI's zero `session_time` and
 `total_time`, or carries the fresh post-duration values into `setscoinfo` like
 current Fanyuchang's duration-then-completion path. The latter requires both
 fresh values before the first mutation and compares both against the immediate
-readback. A strict fresh CMI
-read must show `completed`, progress `1` and the exact final score. No
+readback. A strict fresh CMI read must show `completed`, progress `1` and the
+exact final score. No
 post-mutation failure is automatically replayed. `ExecutionVerify` reuses the
 frozen runtime settings, performs another full TaskDetail identity rebind and
 calls only the non-mutating fresh CMI read. It proves the exact selected tuple,
 not generic Completed state, so ambiguous results and crash recovery never
 repeat start/setscoinfo/save.
 
-The write-mode setting keeps exercise `set_then_save` separate from
-Auto_WeLearn duration completion's `save_only`. Each mutation response exposes
-an acceptance boolean. A well-formed explicit rejection does not falsely prove
-failure or suppress the donor's later independent save; exact fresh CMI remains
-the sole success predicate. Network, authentication, malformed-response and
-other ambiguous failures stop without replay and require recovery review.
+The write-mode setting keeps exercise `set_then_save` separate from Auto's
+completion-bearing `save_only` final tuple. It encodes the latter for the
+pending atomic boundary; a standalone ResourceExecution is not claimed as the
+exact modular duration sequence. Each mutation response exposes an acceptance
+boolean. A well-formed explicit rejection does not falsely prove failure or
+suppress the donor's later independent save; exact fresh CMI remains the sole
+success predicate. Network, authentication, malformed-response and other
+ambiguous failures stop without replay and require recovery review.
 
 Visibility remains an observation rather than a Provider capability ban. The
 current Fanyuchang donor disables both visibility and completed checks; YZBRH
@@ -134,13 +136,13 @@ DurationReport milestones are checkpoints only; they are not stopping
 conditions. Capture/BrowserBridge and further assessment families remain in
 scope whenever donor or sanitized live evidence establishes their protocol.
 
-The durable duration-then-completion composite can also express Auto_WeLearn's
-time worker final state with implicit-server duration, fixed score 0,
-selected-score sequence and explicit zero-time completion mode. Current
-Fanyuchang's corresponding client-counter path uses score 100; the default
-completion-time `auto` observes Core's immutable plan/position and selects
-fresh-time for that exact second step. Current mutation authority remains the
-singleton step, and malformed plan bindings fail before transport.
+Provider settings encode Auto modular's implicit phase plus fixed score 0,
+selected-score/save-only and zero-time final tuple, and current Fanyuchang's
+client-counter plus fresh-time set/save tuple. `WellearnBatchExecutionShape`
+marks both as atomic duration-completion children. Current singleton mutation
+authority deliberately does not execute either exact combined flow until Core
+can persist, authorize and recover it without inserting a bare save or second
+start.
 
 One donor-level orchestration contract remains a shared Core gap. The Provider
 now freezes bounded Unit identity, all/explicit selection, explicit order,
@@ -152,4 +154,5 @@ target independently; Auto_WeLearn filters visible SCOs, samples one aggregate
 minute budget, floors one equal per-child share and discards the remainder.
 Immutable Core Execution identity now makes donor-style per-Execution random
 duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
-persisted capability-step plan covers the duration-then-completion composite.
+persisted capability-step plan still needs the atomic duration-completion
+extension described above.

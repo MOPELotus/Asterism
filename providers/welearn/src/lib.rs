@@ -32,8 +32,8 @@ pub use authentication::{
     classify_password_login_response, encode_password_at,
 };
 pub use batch_plan::{
-    WellearnBatchDispatch, WellearnBatchEntry, WellearnBatchFlow, WellearnBatchPlan,
-    WellearnBatchTargetStrategy, WellearnBatchUnitSelection, build_batch_plan,
+    WellearnBatchDispatch, WellearnBatchEntry, WellearnBatchExecutionShape, WellearnBatchFlow,
+    WellearnBatchPlan, WellearnBatchTargetStrategy, WellearnBatchUnitSelection, build_batch_plan,
     build_selected_batch_plan,
 };
 pub use cmi::{

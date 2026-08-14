@@ -39,6 +39,16 @@ pub enum WellearnBatchTargetStrategy {
     AggregateEqualFloor,
 }
 
+/// Capability authority shape required by one donor batch child. Atomic
+/// duration-completion flows remain a Provider fact until Core can authorize
+/// and recover the combined mutation without crossing singleton step authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WellearnBatchExecutionShape {
+    ResourceExecution,
+    DurationReport,
+    AtomicDurationCompletion,
+}
+
 /// Unit selection shape frozen before donor-specific SCO filtering. Explicit
 /// indices preserve the caller's order, which current Fanyuchang accepts for
 /// comma-separated multi-Unit selections.
@@ -94,21 +104,28 @@ impl WellearnBatchFlow {
         matches!(self, Self::YzbrhCompletion | Self::AutoCompletion)
     }
 
-    const fn is_duration(self) -> bool {
-        matches!(
-            self,
-            Self::FanyuchangDuration
-                | Self::YzbrhDuration
-                | Self::AutoDuration
-                | Self::AutoLegacyDuration
-        )
+    pub const fn execution_shape(self) -> WellearnBatchExecutionShape {
+        match self {
+            Self::FanyuchangCompletion | Self::YzbrhCompletion | Self::AutoCompletion => {
+                WellearnBatchExecutionShape::ResourceExecution
+            }
+            Self::YzbrhDuration | Self::AutoLegacyDuration => {
+                WellearnBatchExecutionShape::DurationReport
+            }
+            Self::FanyuchangDuration | Self::AutoDuration => {
+                WellearnBatchExecutionShape::AtomicDurationCompletion
+            }
+        }
     }
 
-    const fn required_capability(self) -> TaskCapability {
-        if self.is_duration() {
-            TaskCapability::DurationReport
-        } else {
-            TaskCapability::ResourceExecution
+    const fn required_capabilities(self) -> &'static [TaskCapability] {
+        match self.execution_shape() {
+            WellearnBatchExecutionShape::ResourceExecution => &[TaskCapability::ResourceExecution],
+            WellearnBatchExecutionShape::DurationReport => &[TaskCapability::DurationReport],
+            WellearnBatchExecutionShape::AtomicDurationCompletion => &[
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ],
         }
     }
 
@@ -160,6 +177,7 @@ pub struct WellearnBatchPlan {
     pub flow: WellearnBatchFlow,
     pub dispatch: WellearnBatchDispatch,
     pub target_strategy: WellearnBatchTargetStrategy,
+    pub execution_shape: WellearnBatchExecutionShape,
     pub selection: WellearnBatchUnitSelection,
     pub selected_units: Vec<WellearnUnitObservation>,
     pub entries: Vec<WellearnBatchEntry>,
@@ -276,7 +294,11 @@ pub fn build_selected_batch_plan(
                 "WELearn batch selection spans multiple Courses",
             ));
         }
-        if !task.capabilities.contains(&flow.required_capability()) {
+        if !flow
+            .required_capabilities()
+            .iter()
+            .all(|capability| task.capabilities.contains(capability))
+        {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
                 "WELearn batch task does not advertise the selected donor capability",
@@ -426,6 +448,7 @@ pub fn build_selected_batch_plan(
         flow,
         dispatch: flow.dispatch(),
         target_strategy: flow.target_strategy(),
+        execution_shape: flow.execution_shape(),
         selection,
         selected_units,
         entries,
@@ -1074,6 +1097,54 @@ mod tests {
             WellearnBatchFlow::AutoLegacyDuration.target_strategy(),
             WellearnBatchTargetStrategy::PerChild
         );
+        assert_eq!(
+            WellearnBatchFlow::FanyuchangCompletion.execution_shape(),
+            WellearnBatchExecutionShape::ResourceExecution
+        );
+        assert_eq!(
+            WellearnBatchFlow::YzbrhCompletion.execution_shape(),
+            WellearnBatchExecutionShape::ResourceExecution
+        );
+        assert_eq!(
+            WellearnBatchFlow::AutoCompletion.execution_shape(),
+            WellearnBatchExecutionShape::ResourceExecution
+        );
+        assert_eq!(
+            WellearnBatchFlow::YzbrhDuration.execution_shape(),
+            WellearnBatchExecutionShape::DurationReport
+        );
+        assert_eq!(
+            WellearnBatchFlow::AutoLegacyDuration.execution_shape(),
+            WellearnBatchExecutionShape::DurationReport
+        );
+        assert_eq!(
+            WellearnBatchFlow::FanyuchangDuration.execution_shape(),
+            WellearnBatchExecutionShape::AtomicDurationCompletion
+        );
+        assert_eq!(
+            WellearnBatchFlow::AutoDuration.execution_shape(),
+            WellearnBatchExecutionShape::AtomicDurationCompletion
+        );
+    }
+
+    #[test]
+    fn atomic_duration_flows_require_both_child_capabilities() {
+        let mut task = tasks().remove(0);
+        task.capabilities
+            .retain(|capability| *capability != TaskCapability::ResourceExecution);
+        for flow in [
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchFlow::AutoDuration,
+        ] {
+            assert!(
+                build_batch_plan(
+                    std::slice::from_ref(&task),
+                    flow,
+                    (flow == WellearnBatchFlow::AutoDuration).then_some(1),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
