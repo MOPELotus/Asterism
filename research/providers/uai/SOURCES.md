@@ -55,6 +55,14 @@ same Course/Group/version-bound verification readback supplies an optional
 fixed-point `score_avg`, including explicit zero, while receipts alone never
 carry verified score.
 
+That exact MIT response also carries receipt-scoped Task policy and submit
+state. Asterism now retains the complete typed `strategyId`, `required`,
+recording flags, Task minimum score, availability window, submit-window flags
+and last-submit time in a result-digest-bound Provider-private owner for the
+ordinary verifier. These observations neither authorize a completed-Task
+retake nor establish precedence over Group, Unit or Course scoring facts;
+shared ingestion/reconciliation remains a Main-owned contract gap.
+
 The MIT donor separately calls `courseStudyStrategy/detail` with the fresh
 CourseResource strategy ID, then uses the returned per-Unit `requiredTask`
 lists as its execution selection set. The same response evidences Unit and
@@ -193,6 +201,12 @@ shared workflow-callback checkpoint on 2026-08-14. Apache `bef0d29155ce`, MIT
 `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and current Rust `40ead69c7dabf`
 remained unchanged; compact-plan/fresh-inventory recovery and shared result
 construction introduced no donor protocol or capability delta.
+
+The same four default branches and complete tag refs were queried at the
+receipt-bound user-module policy-evidence checkpoint on 2026-08-15. Apache
+`bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and current Rust
+`40ead69c7dabf` remained unchanged, so preserving the already-evidenced policy
+fields introduced no upstream protocol or capability delta.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends

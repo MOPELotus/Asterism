@@ -11,8 +11,20 @@
           "group_id": "group-1",
           "version": "submit-version-42",
           "state": {
+            "expired": false,
+            "lastSubmit": 1786752000,
+            "not_start": false,
             "score_avg": 37.5
-          }
+          },
+          "strategy": {
+            "endTime": 1790812800,
+            "record_every_submit": false,
+            "record_max_submit": true,
+            "required": true,
+            "startTime": 1785542400,
+            "task_mini_score_pct": 60
+          },
+          "strategyId": 3001
         },
         "__SUMMARY__": {
           "answerList": {

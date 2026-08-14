@@ -112,6 +112,7 @@ facts, which must remain independently bound:
 | Per-child judgement | `__SUMMARY__.answerList` exposes `done`, `right`, `questionType`, submitted-answer and protocol versions | The field is protocol evidence, but its entries can be child-level while the shared Draft is module-level Composite. Do not map it by row number until Core/Domain has a lossless child-evidence contract |
 | Official/reference answer | encrypted standard-answer route exposes ProviderNative answers for the current Task | It is a current resolver read, not a historical result enumeration surface; corpus storage/matching remains Core-owned |
 | Score | counted `questionType=1|3` authorizes exact `score_avg` in the same bound readback | Preserve fixed-point zero through 100, but never promote overall score into per-Question correctness |
+| Receipt policy | exact result may carry strategy identity, required/recording flags, Task minimum score, availability and submit state/time | Preserve the complete typed facts behind a result-digest-bound Provider owner; all-absent legacy policy is compatible, partial policy fails closed, and recording flags grant no retake authority |
 
 Normal SubmissionVerify is therefore the immediately usable incremental feed:
 it already proves the exact submitted values and optional score. Corpus append
@@ -134,6 +135,9 @@ Core; UAI contributes facts rather than owning either state machine.
   `scoreType`, Course `scoringMode`, and Task `scoreTaskFlag` are separate facts.
   No donor establishes a universal precedence rule, so live/provider-specific
   policy reconciliation must fail closed rather than choosing one threshold.
+  The ordinary verifier now preserves the complete receipt-bound user-module
+  fact and exact-result digest Provider-privately; this does not choose a shared
+  precedence rule, and upload/compound evidence projection remains separate.
 - Strict Completion may submit another normal Attempt only while a fresh Group
   remains incomplete, is exact `tab_type=task`, and is inside its availability
   window. The usual immutable Draft, mutation ledger and verification rules

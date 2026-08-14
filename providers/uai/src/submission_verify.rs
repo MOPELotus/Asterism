@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc};
 use asterism_domain::{
     SubmissionDraft, SubmissionQuestionVerification, SubmissionQuestionVerificationStatus,
     SubmissionReceipt, SubmissionScore, SubmissionVerificationSnapshot,
-    SubmissionVerificationStatus, TaskCapability,
+    SubmissionVerificationStatus, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
@@ -13,6 +13,7 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
@@ -29,6 +30,139 @@ const MAX_NESTED_CONTEXT_BYTES: usize = 64 * 1_024;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 const MAX_VERIFICATION_SCORE_ENTRIES: usize = 5_000;
+
+/// Receipt-bound Task scoring and recording facts from one exact user-module.
+///
+/// The recording flags remain observations only. Neither flag authorizes a
+/// completed-Task retake or selects a shared score policy.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiSubmissionPolicyEvidence {
+    group_id: String,
+    submission_version: String,
+    result_digest: [u8; 32],
+    strategy_id: u64,
+    required: bool,
+    recording: UaiSubmissionRecordingPolicy,
+    task_minimum_score_milli_percent: u32,
+    opens_at: Option<Timestamp>,
+    closes_at: Option<Timestamp>,
+    submit_state: UaiSubmissionStateEvidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UaiSubmissionRecordingPolicy {
+    every_submit: bool,
+    maximum_submit: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UaiSubmissionStateEvidence {
+    expired: bool,
+    not_started: bool,
+    last_submit_at: Option<Timestamp>,
+}
+
+impl UaiSubmissionPolicyEvidence {
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    pub fn submission_version(&self) -> &str {
+        &self.submission_version
+    }
+
+    pub const fn result_digest(&self) -> [u8; 32] {
+        self.result_digest
+    }
+
+    pub const fn strategy_id(&self) -> u64 {
+        self.strategy_id
+    }
+
+    pub const fn required(&self) -> bool {
+        self.required
+    }
+
+    pub const fn record_every_submit(&self) -> bool {
+        self.recording.every_submit
+    }
+
+    pub const fn record_max_submit(&self) -> bool {
+        self.recording.maximum_submit
+    }
+
+    pub const fn task_minimum_score_milli_percent(&self) -> u32 {
+        self.task_minimum_score_milli_percent
+    }
+
+    pub const fn opens_at(&self) -> Option<Timestamp> {
+        self.opens_at
+    }
+
+    pub const fn closes_at(&self) -> Option<Timestamp> {
+        self.closes_at
+    }
+
+    pub const fn submit_expired(&self) -> bool {
+        self.submit_state.expired
+    }
+
+    pub const fn submit_not_started(&self) -> bool {
+        self.submit_state.not_started
+    }
+
+    pub const fn last_submit_at(&self) -> Option<Timestamp> {
+        self.submit_state.last_submit_at
+    }
+}
+
+impl fmt::Debug for UaiSubmissionPolicyEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiSubmissionPolicyEvidence")
+            .field("binding", &"[REDACTED]")
+            .field("strategy_id", &self.strategy_id)
+            .field("required", &self.required)
+            .field("recording", &self.recording)
+            .field(
+                "task_minimum_score_milli_percent",
+                &self.task_minimum_score_milli_percent,
+            )
+            .field("opens_at", &self.opens_at)
+            .field("closes_at", &self.closes_at)
+            .field("submit_state", &self.submit_state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for UaiSubmissionPolicyEvidence {
+    fn drop(&mut self) {
+        self.group_id.zeroize();
+        self.submission_version.zeroize();
+        self.result_digest.zeroize();
+    }
+}
+
+/// Shared verification plus the independently preserved Provider policy facts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UaiVerificationEvidenceSnapshot {
+    verification: SubmissionVerificationSnapshot,
+    policy: Option<UaiSubmissionPolicyEvidence>,
+}
+
+impl UaiVerificationEvidenceSnapshot {
+    pub const fn verification(&self) -> &SubmissionVerificationSnapshot {
+        &self.verification
+    }
+
+    pub const fn policy(&self) -> Option<&UaiSubmissionPolicyEvidence> {
+        self.policy.as_ref()
+    }
+
+    pub fn into_verification(self) -> SubmissionVerificationSnapshot {
+        self.verification
+    }
+}
 
 /// Redacted ownership wrapper for one bounded fresh UAI user-module response.
 pub struct UaiVerificationDocument(String);
@@ -230,6 +364,24 @@ pub fn parse_verification_snapshot(
     plan: &UaiSubmissionPlan,
     draft: &SubmissionDraft,
 ) -> ProviderResult<SubmissionVerificationSnapshot> {
+    parse_verification_evidence_snapshot(document, expected_group_id, expected_version, plan, draft)
+        .map(UaiVerificationEvidenceSnapshot::into_verification)
+}
+
+/// Parses one exact user-module into shared verification and independently
+/// bound Provider-private scoring/recording policy evidence.
+///
+/// # Errors
+///
+/// Returns invalid-response, protocol-drift, or remote-changed errors for
+/// malformed nesting, partial policy material, route drift or changed answers.
+pub fn parse_verification_evidence_snapshot(
+    document: &str,
+    expected_group_id: &str,
+    expected_version: &str,
+    plan: &UaiSubmissionPlan,
+    draft: &SubmissionDraft,
+) -> ProviderResult<UaiVerificationEvidenceSnapshot> {
     if document.is_empty() || document.len() > MAX_VERIFICATION_DOCUMENT_BYTES {
         return Err(invalid_response(
             "UAI submission verification response is empty or exceeds the size limit",
@@ -242,6 +394,12 @@ pub fn parse_verification_snapshot(
     let state = bound_verification_state(response.as_value(), expected_group_id, expected_version)?;
     parse_remote_questions(state, plan, draft.items.len())?;
     let score = verified_submission_score(state)?;
+    let policy = verified_submission_policy(
+        state,
+        expected_group_id,
+        expected_version,
+        Sha256::digest(document.as_bytes()).into(),
+    )?;
 
     let snapshot = SubmissionVerificationSnapshot {
         status: SubmissionVerificationStatus::Confirmed,
@@ -261,7 +419,10 @@ pub fn parse_verification_snapshot(
     snapshot
         .validate()
         .map_err(|_| invalid_response("UAI submission verification snapshot is invalid"))?;
-    Ok(snapshot)
+    Ok(UaiVerificationEvidenceSnapshot {
+        verification: snapshot,
+        policy,
+    })
 }
 
 pub(crate) fn bound_verification_state<'a>(
@@ -373,6 +534,147 @@ pub(crate) fn verified_submission_score(
         .validate()
         .map_err(|_| protocol_drift("UAI user-module average score is out of range"))?;
     Ok(Some(score))
+}
+
+fn verified_submission_policy(
+    state: &serde_json::Map<String, Value>,
+    expected_group_id: &str,
+    expected_version: &str,
+    result_digest: [u8; 32],
+) -> ProviderResult<Option<UaiSubmissionPolicyEvidence>> {
+    let submit = state
+        .get("__EXTEND_DATA__")
+        .and_then(Value::as_object)
+        .and_then(|extend| extend.get("__SUBMIT_INFO__"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| protocol_drift("UAI user-module has no submit-info binding"))?;
+    let strategy_id = submit.get("strategyId");
+    let strategy = submit.get("strategy");
+    if strategy_id.is_none() && strategy.is_none() {
+        return Ok(None);
+    }
+    let strategy_id = strategy_id
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| protocol_drift("UAI user-module strategy identity is invalid"))?;
+    let strategy = strategy
+        .and_then(Value::as_object)
+        .ok_or_else(|| protocol_drift("UAI user-module strategy is missing or invalid"))?;
+    let submit_state = submit
+        .get("state")
+        .and_then(Value::as_object)
+        .ok_or_else(|| protocol_drift("UAI user-module policy has no submit state"))?;
+
+    let start = required_policy_epoch(strategy.get("startTime"), "start time")?;
+    let end = required_policy_epoch(strategy.get("endTime"), "end time")?;
+    let (opens_at, closes_at) = policy_window(start, end)?;
+    let last_submit = required_policy_epoch(submit_state.get("lastSubmit"), "last submit")?;
+    let last_submit_at = if last_submit == 0 {
+        None
+    } else {
+        Some(policy_timestamp(last_submit, "last submit")?)
+    };
+
+    Ok(Some(UaiSubmissionPolicyEvidence {
+        group_id: expected_group_id.to_owned(),
+        submission_version: expected_version.to_owned(),
+        result_digest,
+        strategy_id,
+        required: required_policy_bool(strategy.get("required"), "required")?,
+        recording: UaiSubmissionRecordingPolicy {
+            every_submit: required_policy_bool(
+                strategy.get("record_every_submit"),
+                "record-every-submit",
+            )?,
+            maximum_submit: required_policy_bool(
+                strategy.get("record_max_submit"),
+                "record-max-submit",
+            )?,
+        },
+        task_minimum_score_milli_percent: policy_milli_percent(
+            strategy.get("task_mini_score_pct"),
+        )?,
+        opens_at,
+        closes_at,
+        submit_state: UaiSubmissionStateEvidence {
+            expired: required_policy_bool(submit_state.get("expired"), "expired")?,
+            not_started: required_policy_bool(submit_state.get("not_start"), "not-started")?,
+            last_submit_at,
+        },
+    }))
+}
+
+fn required_policy_bool(value: Option<&Value>, label: &'static str) -> ProviderResult<bool> {
+    value
+        .as_ref()
+        .and_then(|value| value.as_bool())
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                format!("UAI user-module policy {label} is invalid"),
+            )
+        })
+}
+
+fn required_policy_epoch(value: Option<&Value>, label: &'static str) -> ProviderResult<i64> {
+    value
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                format!("UAI user-module policy {label} is invalid"),
+            )
+        })
+}
+
+fn policy_window(start: i64, end: i64) -> ProviderResult<(Option<Timestamp>, Option<Timestamp>)> {
+    if start == 0 || end == 0 {
+        return Ok((None, None));
+    }
+    if start >= end {
+        return Err(protocol_drift(
+            "UAI user-module policy availability window is invalid",
+        ));
+    }
+    Ok((
+        Some(policy_timestamp(start, "start time")?),
+        Some(policy_timestamp(end, "end time")?),
+    ))
+}
+
+fn policy_timestamp(value: i64, label: &'static str) -> ProviderResult<Timestamp> {
+    chrono::DateTime::from_timestamp(value, 0).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            format!("UAI user-module policy {label} is out of range"),
+        )
+    })
+}
+
+fn policy_milli_percent(value: Option<&Value>) -> ProviderResult<u32> {
+    let encoded = match value {
+        Some(Value::Number(value)) => value.to_string(),
+        Some(Value::String(value))
+            if !value.is_empty()
+                && value.len() <= 32
+                && value.trim() == value
+                && value.is_ascii() =>
+        {
+            value.clone()
+        }
+        _ => {
+            return Err(protocol_drift(
+                "UAI user-module Task minimum score is invalid",
+            ));
+        }
+    };
+    decimal_milli_points(&encoded)
+        .and_then(|value| {
+            u32::try_from(value)
+                .map_err(|_| protocol_drift("UAI user-module Task minimum score is out of range"))
+        })
+        .map_err(|_| protocol_drift("UAI user-module Task minimum score is invalid"))
 }
 
 fn decimal_milli_points(encoded: &str) -> ProviderResult<u64> {
@@ -957,6 +1259,109 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn receipt_bound_user_module_preserves_task_policy_without_retaking() {
+        let draft = draft().await;
+        let plan = UaiSubmissionPlan::from_draft(&draft, &["multichoice".to_owned()]).unwrap();
+        let evidence = parse_verification_evidence_snapshot(
+            SCORED_VERIFIED,
+            "group-1",
+            "submit-version-42",
+            &plan,
+            &draft,
+        )
+        .unwrap();
+        assert_eq!(
+            evidence.verification().score,
+            Some(SubmissionScore {
+                earned_milli_points: 37_500,
+                possible_milli_points: 100_000,
+            })
+        );
+        let policy = evidence.policy().unwrap();
+        assert_eq!(policy.group_id(), "group-1");
+        assert_eq!(policy.submission_version(), "submit-version-42");
+        assert_eq!(policy.strategy_id(), 3001);
+        assert!(policy.required());
+        assert!(!policy.record_every_submit());
+        assert!(policy.record_max_submit());
+        assert_eq!(policy.task_minimum_score_milli_percent(), 60_000);
+        assert_eq!(policy.opens_at().unwrap().timestamp(), 1_785_542_400);
+        assert_eq!(policy.closes_at().unwrap().timestamp(), 1_790_812_800);
+        assert_eq!(policy.last_submit_at().unwrap().timestamp(), 1_786_752_000);
+        assert!(!policy.submit_expired());
+        assert!(!policy.submit_not_started());
+        assert_eq!(
+            policy.result_digest(),
+            <[u8; 32]>::from(Sha256::digest(SCORED_VERIFIED.as_bytes()))
+        );
+        let debug = format!("{policy:?}");
+        assert!(!debug.contains("group-1"));
+        assert!(!debug.contains("submit-version-42"));
+
+        let legacy = parse_verification_evidence_snapshot(
+            VERIFIED,
+            "group-1",
+            "submit-version-42",
+            &plan,
+            &draft,
+        )
+        .unwrap();
+        assert!(legacy.policy().is_none());
+    }
+
+    #[tokio::test]
+    async fn partial_or_invalid_user_module_policy_fails_closed() {
+        let draft = draft().await;
+        let plan = UaiSubmissionPlan::from_draft(&draft, &["multichoice".to_owned()]).unwrap();
+        let mut invalid_documents = Vec::new();
+
+        let mut missing_strategy: Value = serde_json::from_str(SCORED_VERIFIED).unwrap();
+        missing_strategy["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]
+            .as_object_mut()
+            .unwrap()
+            .remove("strategy");
+        invalid_documents.push(missing_strategy);
+
+        let mut zero_strategy: Value = serde_json::from_str(SCORED_VERIFIED).unwrap();
+        zero_strategy["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]["strategyId"] =
+            serde_json::json!(0);
+        invalid_documents.push(zero_strategy);
+
+        let mut invalid_boolean: Value = serde_json::from_str(SCORED_VERIFIED).unwrap();
+        invalid_boolean["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]["strategy"]["record_max_submit"] =
+            serde_json::json!(1);
+        invalid_documents.push(invalid_boolean);
+
+        let mut invalid_threshold: Value = serde_json::from_str(SCORED_VERIFIED).unwrap();
+        invalid_threshold["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]["strategy"]["task_mini_score_pct"] =
+            serde_json::json!(100.001);
+        invalid_documents.push(invalid_threshold);
+
+        let mut invalid_window: Value = serde_json::from_str(SCORED_VERIFIED).unwrap();
+        invalid_window["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]["strategy"]["startTime"] =
+            serde_json::json!(1_800_000_000);
+        invalid_documents.push(invalid_window);
+
+        let mut invalid_last_submit: Value = serde_json::from_str(SCORED_VERIFIED).unwrap();
+        invalid_last_submit["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]["state"]["lastSubmit"] =
+            serde_json::json!(-1);
+        invalid_documents.push(invalid_last_submit);
+
+        for document in invalid_documents {
+            assert!(
+                parse_verification_evidence_snapshot(
+                    &serde_json::to_string(&document).unwrap(),
+                    "group-1",
+                    "submit-version-42",
+                    &plan,
+                    &draft,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[tokio::test]

@@ -156,8 +156,9 @@ pub use submission_execute::{
     UaiSubmissionTransport, build_submission_request, parse_submission_receipt,
 };
 pub use submission_verify::{
-    UaiSubmissionVerify, UaiVerificationDocument, UaiVerificationTransport,
-    parse_verification_snapshot,
+    UaiSubmissionPolicyEvidence, UaiSubmissionVerify, UaiVerificationDocument,
+    UaiVerificationEvidenceSnapshot, UaiVerificationTransport,
+    parse_verification_evidence_snapshot, parse_verification_snapshot,
 };
 pub use task_detail::UaiTaskDetail;
 pub use task_inventory::parse_task_inventory;
