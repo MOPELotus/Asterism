@@ -71,6 +71,14 @@ implemented. The shared hash-only owner/account/AuthSession-bound pending
 record, atomic claim/consume, Provider callback exchange and credential commit
 are also implemented; end-to-end live validation remains pending.
 
+The shared BrowserBridge runner now consumes Cidaren's strict command artifact,
+reads only the Provider-declared request-header/local/session-storage sources
+and emits the exact typed terminal result. Its deliberately temporary Chromium
+profile does not inherit authenticated PC WeChat XWeb storage or reproduce the
+public donor's system-proxy/certificate lifecycle. That remaining acquisition
+problem needs shared environment support or an authorized login plus live
+validation; it is no longer an unimplemented Cidaren command/result boundary.
+
 The complete side-by-side audit is frozen in
 [`DONOR_DIFFERENCES.md`](DONOR_DIFFERENCES.md). In particular, the reopened
 public source augments rather than supersedes the owner-supplied `jv=99` and

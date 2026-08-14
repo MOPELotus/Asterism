@@ -256,11 +256,14 @@ parses the typed result, hashes that exact bounded document and returns a
 terminal copy of the same exchange. The persisted recovery variant additionally
 rebinds Core's encrypted command and result artifacts before invoking that same
 parser. The zeroizing snapshot stays separate for Capture credential commit.
-This closes command/result-record mismatch inside the Provider. The registered
-shared trait currently exposes only
-`browser_session_spec`, so Core still needs a bounded Provider-generic opaque
-command/result boundary before the helper can dispatch this JSON, accept the
-owned credential-bearing result and atomically commit its replacement.
+This closes command/result-record mismatch inside the Provider. The shared
+trait now also declares the exact credential result type, classifies it as
+terminal and validates the recovered request into an atomic credential +
+completed-exchange pair. The Chromium runner dispatches the opaque command,
+performs only its fixed reads and emits that typed result. What remains is not
+another command/result contract: the runner's temporary profile must obtain a
+real authenticated Cidaren document, or shared environment support must bridge
+the donors' system-proxy/XWeb context, before live validation can complete.
 
 After the terminal exchange is accepted,
 `CidarenCaptureSnapshot::into_credential_replacement` consumes the zeroizing

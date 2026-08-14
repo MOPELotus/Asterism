@@ -463,6 +463,59 @@ from 2026-07-06 remains the most recently updated item and no newer route,
 crypto, authentication or task behavior was reported. No revision, tag,
 release or issue-evidence delta entered this checkpoint.
 
+### 2026-08-14 post-terminal remaining-capability audit
+
+Pre- and post-audit symbolic ref checks both resolved
+`ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`,
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and
+historical `github123666/main@1409858800f3c4bd27577a08049bf1f8d17a069c`.
+Public tag `1.5.4` still targets
+`7e29ee43692f4c0807fae8cf7f74a5a674793097`; GitHub still reports it as the
+latest Release, published 2025-12-09, with the same 103,462,537-byte
+`Easy_Cidaren1_5_4.zip`. `MOPELotus` still exposes no GitHub Release. The
+complete public issue feed remains headed by issue 112, last updated
+2026-07-06. No commit, tag, release, issue, route, response transform, Capture
+field or assessment-operation delta entered this checkpoint.
+
+The remaining-capability audit was repeated after Core's credential terminal
+path landed. The shared `asterism-capture` runner now consumes Cidaren's opaque
+command owner, validates its exact dispatch binding, reads only the projected
+request-header/local/session-storage sources and emits the typed terminal
+artifact. Engine/Core now persist and atomically accept that credential result.
+The earlier generic-helper-dispatch gap is therefore closed and must not be
+reported as unfinished Provider work.
+
+No evidenced donor call site remains both unimplemented and solvable in the
+Cidaren crate. Four concrete gates remain:
+
+- `CIDAREN-BLOCKER-BROWSER-CONTEXT`: the shared runner deliberately creates a
+  temporary isolated Chromium profile. It cannot inherit the owner donor's
+  authenticated PC WeChat XWeb storage, and it does not implement the public
+  donor's Windows system-proxy, certificate and `mitmdump` lifecycle. This
+  requires an authorized login in the isolated document or shared environment
+  support for attach/proxy/XWeb acquisition, followed by live validation; no
+  further Cidaren source enum, command, result or credential code can supply
+  that external state.
+- `CIDAREN-BLOCKER-LIVE-ACCOUNT`: every audited read/parser/crypto path has
+  synthetic coverage, but current account, inventory/status vocabulary,
+  duration, score and `jv=99` behavior require a supplied real account and
+  sanitized observations. Provider metadata remains Development.
+- `CIDAREN-BLOCKER-LIVE-MUTATION`: production validation of the five implemented
+  mutations changes remote learning state and therefore requires explicit
+  authorization plus an eligible Task. Ambiguous no-replay cannot be weakened
+  to manufacture offline validation.
+- `CIDAREN-BLOCKER-EVIDENCE-73`: issue 99 and unchanged donor code expose the
+  multi-blank payload but explicitly do not implement its direct answer wire
+  encoding. The evidenced Skip path is implemented. A new upstream commit or
+  authorized trace is required before Answer execution can expand.
+
+No Cidaren-specific Core contract blocker remains. The audited donors expose
+neither a refresh endpoint nor per-Question answer-history readback, and the
+packaged telemetry/device-block modules remain non-platform behavior. Those
+absences are evidence boundaries, not Provider features to invent. This
+checkpoint therefore updates the audit/blocker record rather than duplicating
+the completed Capture credential path or adding speculative code.
+
 ## Check procedure
 
 For the next checkpoint:

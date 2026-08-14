@@ -19,8 +19,8 @@ differences are frozen in [`DONOR_DIFFERENCES.md`](DONOR_DIFFERENCES.md).
 | SubmissionBuild | Current donor | Reference | Registry-advertised one-current-Question immutable Draft preview is implemented for selection/text/matching and explicit Skip. Answer previews contain only Verify/advance field names; Skip has a distinct format with only `skip.topic_code` and `skip.time_spent`. Neither form persists topic codes, signatures, endpoints or answer values |
 | SubmissionExecute | Current donor | PortSource | Registered native execution plus a one-shot Provider state machine cover `SubmitChoseWord`, `StartAnswer`, sequential `VerifyAnswer`, `SubmitAnswerAndSave` and `SkipAnswer`. The session-aware adapter revalidates the immutable Draft preview, freshly rebinds the Task, restores either question or pre-question artifacts and freezes exactly one operation. Same-Question Verify rotates Continue; definite next Questions atomically consume the old session and create a new immutable Snapshot/session while returning the Task to Ready; reading-card/selection stages rotate the pre-question artifact; terminal Completed closes the session without inventing a continuation and proceeds to fresh verification. Issued/ambiguous/failed-closed states prevent replay and ambiguity recovery remains `None` |
 | SubmissionVerify | Fresh class task/detail read + current public donor score read | FromScratch | The read-only verifier is implemented and registered independently of mutation execution. It is Draft/preview/task bound: a receipt or localized completion message is insufficient, fresh exact release/list completion is required, and the independently observed bounded 0-100 score is converted to Core thousandth-points when present. Per-Question status remains honestly `Unverified` because no answer-history endpoint is evidenced. SubmissionExecute is integrated with durable Core Attempt/session transitions and verification remains a separate fresh phase |
-| Capture bootstrap | Current donors + PC WeChat XWeb audit | PortSource + Reference | Token-only and Composite ingestion plus separate bounded token-only request-header and Composite browser-storage recipes are implemented and advertised as ordered alternatives. Core freezes one exact version per bootstrap and never mixes their outputs. Cidaren validates a typed Provider-private `CaptureSnapshot` command/result for those recipes, including exact origin/frame/Task/sequence binding and `jv=99` context parsing, then converts only an exact token-only or atomic token+crypto replacement for the shared credential commit; the donor-observed but unused `CDR_USER_SESSION` is not persisted. The generic helper's isolated Edge/Chrome profile still cannot observe an authenticated PC WeChat XWeb storage context, so actual PC WeChat/system-proxy helper execution remains shared work rather than a false end-to-end claim. OAuth bootstrap no longer depends on XWeb/MITM: users can return the preserved random-marker callback URL from an audited WeChat device flow |
-| BrowserBridge | Current donor | PortSource | Provider policy revision 3 is implemented and advertised for freshly rebound class/study Tasks: visible, account/task hash-isolated, started at the audited `https://app.vocabgo.com/student/` page and restricted to its exact `https://app.vocabgo.com` origin plus the exact read-source union (`usertoken` request header, local/session `CDR_USER_TOKEN`, local/session `CDR_LOGIN_INFO`). The Provider has a typed CaptureSnapshot command/result boundary (TokenOnly v1 and Composite v2), fresh-Task command construction/result parsing and an immutable adapter to Core's durable one-shot ledger. It derives the command nonce from the exact Core session ID, freezes type/digest/sequence at issue, repeats fresh rebinding before acceptance and returns only zeroizing Provider-private Capture material plus terminal hash metadata. Helper-side projection authenticates Core's exact command artifact and independently binds actual origin/frame/session/sequence before returning only the TokenOnly or Composite action and that mode's fixed source subset; arbitrary selector/script shapes fail strict decoding. Core persists contiguous sequencing plus exact encrypted command and raw-result artifacts. Cidaren rebinds recovered command authority, then accepts only the persisted result type/session/sequence/digest/receive-time tuple whose encrypted bytes hash exactly, and produces the paired replacement + terminal exchange required by Core's atomic transaction. Actual DOM execution remains a shared helper concern; Cidaren assessment mutations remain native HTTP because no donor browser action for those routes was evidenced |
+| Capture bootstrap | Current donors + PC WeChat XWeb audit | PortSource + Reference | Token-only and Composite ingestion plus separate bounded token-only request-header and Composite browser-storage recipes are implemented and advertised as ordered alternatives. Core freezes one exact version per bootstrap and never mixes their outputs. Cidaren validates a typed Provider-private `CaptureSnapshot` command/result for those recipes, including exact origin/frame/Task/sequence binding and `jv=99` context parsing, then converts only an exact token-only or atomic token+crypto replacement for the shared credential commit; the donor-observed but unused `CDR_USER_SESSION` is not persisted. The shared runner executes those exact reads and terminal result construction, but its isolated Edge/Chrome profile cannot inherit an authenticated PC WeChat XWeb context or reproduce the donor's system-proxy lifecycle. Acquiring that external browser state and validating it live remain shared environment gates. OAuth bootstrap no longer depends on XWeb/MITM: users can return the preserved random-marker callback URL from an audited WeChat device flow |
+| BrowserBridge | Current donor | PortSource | Provider policy revision 3 is implemented and advertised for freshly rebound class/study Tasks: visible, account/task hash-isolated, started at the audited `https://app.vocabgo.com/student/` page and restricted to its exact `https://app.vocabgo.com` origin plus the exact read-source union (`usertoken` request header, local/session `CDR_USER_TOKEN`, local/session `CDR_LOGIN_INFO`). The Provider has a typed CaptureSnapshot command/result boundary (TokenOnly v1 and Composite v2), fresh-Task command construction/result parsing and an immutable adapter to Core's durable one-shot ledger. It derives the command nonce from the exact Core session ID, freezes type/digest/sequence at issue, repeats fresh rebinding before acceptance and returns only zeroizing Provider-private Capture material plus terminal hash metadata. Helper-side projection authenticates Core's exact command artifact and independently binds actual origin/frame/session/sequence before returning only the TokenOnly or Composite action and that mode's fixed source subset; arbitrary selector/script shapes fail strict decoding. The shared Chromium runner executes the projection and fixed reads, while Core persists exact encrypted command/result artifacts and atomically commits the credential terminal. Only authenticated-context acquisition/live validation remains; Cidaren assessment mutations remain native HTTP because no donor browser action for those routes was evidenced |
 
 ## Current implementation checkpoint
 
@@ -224,8 +224,10 @@ The current checkpoint (not a completion boundary):
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now
 integrates explicit Skip, terminal-without-artifact and atomic next-Question
-transitions across Provider, Storage and Engine. Remaining shared work includes
-alternate Capture/BrowserBridge helper execution and live validation.
+transitions across Provider, Storage and Engine. The shared Chromium runner now
+executes the exact Cidaren command/read/result projection; remaining work is
+authenticated-browser acquisition and live validation rather than another
+Provider command or credential path.
 Fresh post-mutation verification and the durable one-shot External OAuth path
 are already implemented. A checkpoint or Core Gap is not a Provider stopping
 condition.
@@ -234,6 +236,45 @@ Cidaren is complete only when all audited donor capabilities have current
 executable implementation/verification, or every remainder has a concrete
 hard blocker that cannot be resolved through further audit, Capture,
 BrowserBridge, protocol work or a Main-owned Core change.
+
+## Concrete remaining blockers
+
+No current donor call site remains both unimplemented and solvable through a
+Cidaren-only code change. The remaining executable gates are:
+
+1. **Authenticated BrowserBridge context (`CIDAREN-BLOCKER-BROWSER-CONTEXT`).**
+   The shared runner launches a new temporary Chromium profile and now fully
+   executes Cidaren's strict command, fixed read-source set and typed terminal
+   result. The public donor instead captures a system-wide proxied request,
+   while the owner donor reads an already authenticated WeChat XWeb document.
+   A fresh profile has neither state. Resolution requires an authorized user
+   login in that profile or a shared attach/proxy/XWeb acquisition boundary,
+   followed by live proof that `UserToken` and `CDR_LOGIN_INFO` are observed
+   from the same bound document. No Provider literal, parser or result path is
+   missing.
+2. **Real-account protocol validation (`CIDAREN-BLOCKER-LIVE-ACCOUNT`).**
+   Synthetic fixtures cover every audited route and transform, but cannot
+   establish current account binding, inventory vocabulary, non-zero duration,
+   post-run score or `jv=99` behavior against production. Resolution requires
+   an explicitly supplied test account and sanitized captures; metadata remains
+   Development until the live gates in `DRIFT.md` pass.
+3. **Authorized mutation validation (`CIDAREN-BLOCKER-LIVE-MUTATION`).**
+   `SubmitChoseWord`, `StartAnswer`, `VerifyAnswer`,
+   `SubmitAnswerAndSave` and `SkipAnswer` are implemented with durable no-replay
+   semantics, but production validation changes remote learning state.
+   Resolution requires explicit live-test authorization and an eligible Task;
+   offline retries or fabricated receipts cannot remove this blocker.
+4. **Mode 73 answer encoding (`CIDAREN-BLOCKER-EVIDENCE-73`).** Public issue 99
+   and the donor source expose the two-blank payload while explicitly leaving
+   direct answer encoding unimplemented. Asterism already preserves the
+   evidenced explicit Skip path. Answer execution can expand only after a new
+   upstream commit or authorized trace establishes the ordered multi-answer
+   wire shape; guessing it is not a remaining donor capability port.
+
+No current Core contract blocker remains for Cidaren's typed Capture credential
+terminal. No refresh or per-Question answer-history route is present in any
+audited donor, so those absences are evidence boundaries rather than deferred
+Provider implementations.
 
 ## Frozen donor executable-surface parity
 
