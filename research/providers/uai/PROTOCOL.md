@@ -411,7 +411,13 @@ zeroizing Provider-private media owner. That owner repeats the exact remote
 Task and Question identities, and the opaque attachment digest hashes both
 with the canonical URL, so the same CDN URL cannot authorize cross-Task reuse.
 The persisted Question receives only that attachment ID, kind, bounded label
-and subtitle flag, never a fetch URL. Embedded WEBVTT is parsed with bounded
+and subtitle flag, never a fetch URL. When a media-bearing Question enters the
+durable QuestionSession lifecycle, its routes are encoded as a bounded,
+zeroizing Provider artifact and encrypted at rest by Core. The session digest
+binds the exact Core Task, remote Group/Question, position, Question content
+fingerprint, ordered attachment set and canonical routes; decode revalidates
+the schema, digest, every identity, URL normalization, kind and recomputed
+attachment ID before a source can be exposed. Embedded WEBVTT is parsed with bounded
 input/output, strips its header, cue ordinals and timestamp rows, normalizes
 only cue text into transcript metadata and is excluded from the display stem. The
 current donor sends its default authorization/cookie header set through its

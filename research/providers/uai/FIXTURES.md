@@ -63,9 +63,14 @@ making a transport request.
 Media parsing fixtures cover audio/video content paths, subtitle tracks,
 bounded embedded WEBVTT cue extraction with header/ordinal/timestamp removal,
 stable Task+remote-Question+URL-bound opaque attachment IDs,
-fragment-free ephemeral HTTPS routes, URL redaction, different IDs for the same
-URL under another Task, and rejection of non-HTTPS or literal-IP routes.
-Persisted Questions never contain a fetch URL; DNS/private-range resolution,
+fragment-free HTTPS routes, URL redaction, different IDs for the same URL
+under another Task, and rejection of non-HTTPS or literal-IP routes. Durable
+artifact fixtures cover deterministic encoding, redacted debug output, exact
+Task/Group/Question/position/content-fingerprint binding, ordered attachment
+set equality, URL/kind/attachment-ID recomputation, unknown fields, digest
+substitution and the encoded-size ceiling. Persisted Domain Questions never
+contain a fetch URL; only Core's encrypted QuestionSession continuation can
+retain the Provider-private route. DNS/private-range resolution,
 redirect handling and host-scoped authenticated media fetching remain the
 shared downloader boundary.
 

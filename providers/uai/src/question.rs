@@ -315,6 +315,14 @@ impl fmt::Debug for UaiQuestionMediaSource {
 }
 
 impl ParsedUaiQuestion {
+    pub(crate) fn remote_id(&self) -> &str {
+        &self.remote_id
+    }
+
+    pub(crate) const fn position(&self) -> u32 {
+        self.position
+    }
+
     pub fn media_sources(&self) -> &[UaiQuestionMediaSource] {
         &self.media_sources
     }
@@ -448,7 +456,7 @@ pub fn parse_question_content(
     Ok(questions)
 }
 
-fn parse_question_entry(
+pub(crate) fn parse_question_entry(
     entry: &Value,
     position: u32,
     task_type: &str,
@@ -855,14 +863,11 @@ fn push_media_source(
             "UAI Question media sources exceed the item limit",
         ));
     }
-    let mut digest = Sha256::new();
-    digest.update(b"asterism:uai:question-media:v1\0");
-    digest.update(binding.remote_task_id.as_bytes());
-    digest.update(b"\0");
-    digest.update(binding.remote_question_id.as_bytes());
-    digest.update(b"\0");
-    digest.update(canonical_url.as_bytes());
-    let attachment_id = format!("uai-media-v1:{:x}", digest.finalize());
+    let attachment_id = media_attachment_id(
+        binding.remote_task_id,
+        binding.remote_question_id,
+        &canonical_url,
+    );
     let label = raw_label
         .map(normalize_rich_text)
         .filter(|label| !label.is_empty() && label.len() <= MAX_MEDIA_LABEL_BYTES);
@@ -886,7 +891,7 @@ fn push_media_source(
     Ok(())
 }
 
-fn canonical_media_url(
+pub(crate) fn canonical_media_url(
     raw_url: &str,
     subtitle: bool,
 ) -> ProviderResult<(String, QuestionAttachmentKind)> {
@@ -917,6 +922,21 @@ fn canonical_media_url(
             .ok_or_else(|| protocol_drift("UAI Question media URL has an unknown media kind"))?
     };
     Ok((url.to_string(), kind))
+}
+
+pub(crate) fn media_attachment_id(
+    remote_task_id: &str,
+    remote_question_id: &str,
+    canonical_url: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:question-media:v1\0");
+    digest.update(remote_task_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(remote_question_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(canonical_url.as_bytes());
+    format!("uai-media-v1:{:x}", digest.finalize())
 }
 
 fn media_kind(value: &str) -> Option<QuestionAttachmentKind> {
@@ -1369,7 +1389,7 @@ fn valid_component(value: &str) -> ProviderResult<String> {
     Ok(value.to_owned())
 }
 
-fn valid_question_identity(value: &str) -> ProviderResult<()> {
+pub(crate) fn valid_question_identity(value: &str) -> ProviderResult<()> {
     if value.is_empty()
         || value.len() > 512
         || value.trim() != value
@@ -1378,6 +1398,10 @@ fn valid_question_identity(value: &str) -> ProviderResult<()> {
         return Err(protocol_drift("UAI Question identity is invalid"));
     }
     Ok(())
+}
+
+pub(crate) fn validate_remote_task_identity(value: &str) -> ProviderResult<()> {
+    GroupIdentity::parse(value).map(|_| ())
 }
 
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {

@@ -25,6 +25,7 @@ mod native_http;
 mod progress;
 mod provider;
 mod question;
+mod question_artifact;
 mod resource_execution;
 mod runtime_settings;
 mod stored_session;
@@ -97,6 +98,10 @@ pub use provider::{
 pub use question::{
     ParsedUaiQuestion, UaiQuestionDocument, UaiQuestionMediaSource, UaiQuestionRead,
     UaiQuestionTransport, parse_question_content,
+};
+pub use question_artifact::{
+    EncodedUaiQuestionArtifact, UAI_QUESTION_ARTIFACT_PHASE, UAI_QUESTION_ARTIFACT_TYPE,
+    UaiQuestionArtifact, UaiQuestionArtifactMediaSource,
 };
 pub use resource_execution::{
     UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiResourceExecution,
