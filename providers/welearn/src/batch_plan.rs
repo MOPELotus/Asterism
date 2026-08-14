@@ -1545,6 +1545,7 @@ mod tests {
         let mut hidden_leaf = tasks[1].clone();
         hidden_leaf.normalized["sco_visible"] = serde_json::json!(false);
         hidden_leaf.normalized["visible"] = serde_json::json!(false);
+        hidden_leaf.remote_state = RemoteState::NotOpen;
         let error = validate_fresh_batch_entry(&plan, 0, &detail(hidden_leaf)).unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
 

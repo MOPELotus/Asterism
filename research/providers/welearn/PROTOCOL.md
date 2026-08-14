@@ -408,7 +408,10 @@ the public `RemoteTaskDetail.task.normalized` and nested
 fails as `ProtocolDrift`; execution cannot combine capability/state facts from
 one inventory snapshot with route or Unit/SCO facts from another. The same
 boundary recomputes the inventory's versioned normalized-Task fingerprint and
-rejects a stale or substituted snapshot before trusting its route facts. If
+rejects a stale or substituted snapshot before trusting its route facts. It
+also reprojects public `remote_state` from the same normalized visibility and
+completion observations, including the hidden-to-`NotOpen` rule, so execution
+cannot consume contradictory state and membership facts. If
 the baseline CMI is already Completed with the exact frozen score, it skips all
 mutation and verifies that fact. The exact donor uninitialized marker cannot
 prove that preflight, but zero-time/set-then-save and save-only plans may

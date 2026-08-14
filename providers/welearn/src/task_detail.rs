@@ -9,7 +9,10 @@ use asterism_provider_api::{
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
-use crate::{metadata::development_metadata, task_inventory::task_fingerprint};
+use crate::{
+    metadata::development_metadata,
+    task_inventory::{task_fingerprint, task_remote_state},
+};
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
@@ -83,6 +86,11 @@ pub(crate) fn validate_fresh_execution_detail(
     if detail.task.fingerprint != task_fingerprint(&detail.task.normalized)? {
         return Err(protocol_drift(
             "WELearn fresh SCO detail fingerprint does not bind its normalized Task",
+        ));
+    }
+    if task_remote_state(&detail.task.normalized) != Some(detail.task.remote_state) {
+        return Err(protocol_drift(
+            "WELearn fresh SCO public state contradicts its normalized observations",
         ));
     }
     if normalized.get("schema").and_then(Value::as_str) != Some("welearn.sco.v2")
@@ -422,6 +430,31 @@ mod tests {
             .unwrap();
         detail.task.normalized["unit_title"] = json!("Changed Unit");
         detail.normalized_detail["task"]["unit_title"] = json!("Changed Unit");
+
+        let error = validate_fresh_execution_detail(
+            &detail,
+            "sco:1001:301",
+            "1001",
+            "301",
+            &[TaskCapability::ResourceExecution],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+    }
+
+    #[tokio::test]
+    async fn execution_rebind_rejects_a_contradictory_public_state() {
+        let inventory = Arc::new(FixtureInventory::new());
+        let capability = WellearnTaskDetail::try_new(inventory.clone(), inventory).unwrap();
+        let mut detail = capability
+            .task_detail(&context(), "sco:1001:301")
+            .await
+            .unwrap();
+        detail.task.remote_state = if detail.task.remote_state == RemoteState::Pending {
+            RemoteState::Completed
+        } else {
+            RemoteState::Pending
+        };
 
         let error = validate_fresh_execution_detail(
             &detail,

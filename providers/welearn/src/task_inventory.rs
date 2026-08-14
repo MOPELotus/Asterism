@@ -215,11 +215,6 @@ fn parse_leaves(
         let completion_raw = optional_scalar_text(object.get("iscomplete"), "SCO completion")?;
         let completion_observation = classify_completion(completion_raw.as_deref());
         let duration_raw = optional_scalar_text(object.get("learntime"), "SCO learning time")?;
-        let remote_state = if visible {
-            completion_observation
-        } else {
-            RemoteState::NotOpen
-        };
         let remote_id = format!("sco:{course_id}:{sco_id}");
         let normalized = serde_json::json!({
             "schema": "welearn.sco.v2",
@@ -235,6 +230,9 @@ fn parse_leaves(
             "completion_observation": completion_observation,
             "duration_raw": duration_raw,
         });
+        let remote_state = task_remote_state(&normalized).ok_or_else(|| {
+            protocol_drift("WELearn normalized Task has inconsistent state observations")
+        })?;
         let capabilities = vec![
             TaskCapability::ProgressRead,
             TaskCapability::ResourceExecution,
@@ -347,6 +345,25 @@ pub(crate) fn task_fingerprint(normalized: &Value) -> Result<String, ProviderErr
     let bytes = serde_json::to_vec(normalized)
         .map_err(|_| invalid_response("WELearn normalized Task cannot be encoded"))?;
     Ok(format!("v1:{:x}", Sha256::digest(bytes)))
+}
+
+pub(crate) fn task_remote_state(normalized: &Value) -> Option<RemoteState> {
+    let visible = normalized.get("visible")?.as_bool()?;
+    let completion = match normalized.get("completion_observation")?.as_str()? {
+        "unknown" => RemoteState::Unknown,
+        "not_open" => RemoteState::NotOpen,
+        "pending" => RemoteState::Pending,
+        "in_progress" => RemoteState::InProgress,
+        "completed" => RemoteState::Completed,
+        "expired" => RemoteState::Expired,
+        "removed" => RemoteState::Removed,
+        _ => return None,
+    };
+    Some(if visible {
+        completion
+    } else {
+        RemoteState::NotOpen
+    })
 }
 
 #[cfg(test)]

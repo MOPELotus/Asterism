@@ -159,6 +159,9 @@ only structural field names, response codes and bounded placeholder shapes.
 - Every normalized Task fingerprint uses an explicit version prefix and is
   recomputed at execution rebind; a stale fingerprint cannot authorize changed
   normalized facts even when the public and nested views agree.
+- Fresh execution rebind reprojects public `remote_state` from normalized
+  visibility and completion observations; hidden Tasks must be `NotOpen`, and
+  every contradictory public state fails before transport.
 - Duration reporting preserves completion, progress, score and success status;
   any drift rejects the entire execution outcome.
 - A successful mutation response is insufficient unless fresh CMI changes a raw
