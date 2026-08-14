@@ -457,8 +457,10 @@ Asterism parses this as `QuestionKind::FillBlank`, requires the answer count to
 equal the bounded word-length count and keeps the token ephemeral. The common
 `SkipAnswer` mutation remains available, so the attempt can continue. No
 evidence defines whether two answers are comma-joined, separately verified or
-encoded another way; AnswerResolve, SubmissionBuild and Verify therefore fail
-closed for mode 73 instead of inventing a score-affecting wire format.
+encoded another way; AnswerResolve and ordinary answer Build/Verify therefore
+fail closed for mode 73 instead of inventing a score-affecting wire format.
+The distinct explicit Skip Draft contains no guessed answer fields and remains
+executable through the independently evidenced `SkipAnswer` route.
 
 The remote topic counters are not the state machine's local `position` and do
 not participate in Question identity, answer selection or mutation routing.

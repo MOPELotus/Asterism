@@ -77,8 +77,8 @@ The synthetic mode-73 fixture retains only the public issue 99 structural
 facts: two answers, two positive word lengths, no options and placeholder
 text/token values. Parser tests require `FillBlank`, answer-count/length
 agreement and token omission from serialized Questions. It is not answer-wire
-evidence; resolver/build/verify stay fail-closed while the common Skip path is
-available.
+evidence; AnswerResolve and ordinary answer Build/Verify stay fail-closed,
+while the distinct explicit Skip Draft/execution path is available.
 
 The BrowserBridge fixtures are synthetic result transport documents generated
 from the Provider typed boundary; tests pair each one with a constructor-built
