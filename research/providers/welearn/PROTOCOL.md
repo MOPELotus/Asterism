@@ -202,13 +202,16 @@ Completion != Progress != Session Time != Total Time
 The implemented `DurationReport` lifecycle acquires a fresh Course route and
 CMI document using one resolved Cookie. YZBRH explicitly treats a response
 containing `学习数据不正确` as uninitialized, starts the SCO and reads CMI
-again; Asterism preserves that exact marker alongside a valid no-CMI document
-as the only initialization signals in this mutation-capable path. Because the
-donor checks raw response text, the CMI reader retains this one bounded marker
-even under an unexpected media type, but only after structural login-page
-detection; all other unexpected HTML still fails. Unrelated malformed or
-ambiguous reads never trigger start. Every mode establishes a post-start
-baseline and requires the complete audited CMI preservation set; a
+again; Asterism preserves that exact marker as the only conditional-start
+signal in this mutation-capable path. A valid JSON response without `cmi` does
+not trigger start because YZBRH does not start there; its donor-synthesized
+empty preservation fields are not reliable enough to copy, so Asterism stops
+before keep/finalize instead. Because the donor checks raw response text, the
+CMI reader retains this one bounded marker even under an unexpected media type,
+but only after structural login-page detection; all other unexpected HTML
+still fails. Unrelated malformed or ambiguous reads never trigger start. Every
+mode requires a complete audited CMI preservation baseline after any required
+start; a
 still-uninitialized, absent or partial CMI stops before any heartbeat or
 finalization rather than synthesizing defaults. The baseline binds bounded
 `completion_status`, `progress_measure`, `score.scaled`, `success_status`,
@@ -220,10 +223,11 @@ no-mutation rule and never consume the marker as a fallback.
 
 Three donor wire modes remain separate:
 
-- `preserve_fresh` matches YZBRH: start only when CMI is absent, send one
-  immediate keep plus one preserved-time keep after each complete configured
-  interval, wait a trailing partial interval without inventing another keep,
-  then save the preserved completion/progress/score/success tuple;
+- `preserve_fresh` matches YZBRH: start only after its explicit uninitialized
+  marker, send one immediate keep plus one preserved-time keep after each
+  complete configured interval, wait a trailing partial interval without
+  inventing another keep, then save the preserved completion/progress/score/
+  success tuple;
 - `client_counter` covers current Fanyuchang's duration phase: always start and
   send exactly one keep per real second with `session_time` and `total_time`
   progressing from 0; its donor then completes in the same operation;

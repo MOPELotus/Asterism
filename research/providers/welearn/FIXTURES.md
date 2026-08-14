@@ -138,9 +138,10 @@ only structural field names, response codes and bounded placeholder shapes.
   DurationRead accepts only donor-observed bounded canonical integer seconds
   and fails closed on every other grammar.
 - Read-only Progress/DurationRead never starts a missing or malformed CMI.
-  DurationReport accepts only valid no-CMI or the exact audited YZBRH
-  uninitialized marker as a start signal; every other malformed baseline and
-  every malformed post-start read fails closed.
+  PreserveFresh DurationReport accepts only the exact audited YZBRH
+  uninitialized marker as a start signal; valid no-CMI remains non-mutating
+  and fails before keep instead of synthesizing donor defaults. Every other
+  malformed baseline and every malformed post-start read fails closed.
 - A missing, string-valued or non-zero outer CMI `ret` fails closed before the
   nested `comment` document can be treated as an observation.
 - A post-start baseline or final readback without the complete preservation set

@@ -50,7 +50,9 @@ exists.
   completion/progress/score behavior on product-policy grounds.
 - Use the YZBRH donor to cross-check the full duration lifecycle: read CMI,
   treat its exact `学习数据不正确` response as uninitialized, start if
-  absent, heartbeat while retaining existing values, then finalize.
+  explicitly marked, heartbeat while retaining existing values, then finalize.
+  Its valid no-CMI branch synthesizes empty fields; Asterism instead stops
+  before mutation until live evidence can establish safe preservation values.
 - Use Auto_WeLearn as a historical architecture, route, configuration and
   multi-account/concurrency cross-check; require a current donor or live
   evidence before treating a historical-only protocol difference as current.

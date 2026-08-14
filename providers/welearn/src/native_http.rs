@@ -651,10 +651,7 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         let mut snapshot = parse_mutation_cmi_baseline(before.as_str())?;
         let mut started = false;
         let mut start_accepted = None;
-        let must_start = match snapshot.as_ref() {
-            Some(snapshot) => duration_requires_start(protocol_mode, snapshot.cmi_present()),
-            None => true,
-        };
+        let must_start = duration_requires_start(protocol_mode, snapshot.is_none());
         if must_start {
             events
                 .log(duration_log(
@@ -889,10 +886,10 @@ fn record_duration_receipt(accepted: bool, accepted_count: &mut u32, rejected_co
 
 const fn duration_requires_start(
     mode: crate::WellearnDurationProtocolMode,
-    cmi_present: bool,
+    explicitly_uninitialized: bool,
 ) -> bool {
     match mode {
-        crate::WellearnDurationProtocolMode::PreserveFresh => !cmi_present,
+        crate::WellearnDurationProtocolMode::PreserveFresh => explicitly_uninitialized,
         crate::WellearnDurationProtocolMode::ClientCounter
         | crate::WellearnDurationProtocolMode::ImplicitServer => true,
     }
@@ -1819,8 +1816,8 @@ mod tests {
     fn donor_duration_wire_plans_remain_distinct() {
         use crate::WellearnDurationProtocolMode::{ClientCounter, ImplicitServer, PreserveFresh};
 
-        assert!(!duration_requires_start(PreserveFresh, true));
-        assert!(duration_requires_start(PreserveFresh, false));
+        assert!(!duration_requires_start(PreserveFresh, false));
+        assert!(duration_requires_start(PreserveFresh, true));
         assert!(duration_requires_start(ClientCounter, true));
         assert!(duration_requires_start(ImplicitServer, true));
 
@@ -1849,6 +1846,15 @@ mod tests {
         )
         .unwrap();
         assert!(initialized.is_some());
+
+        let valid_no_cmi = parse_mutation_cmi_baseline(r#"{"ret":0,"comment":"{}"}"#)
+            .unwrap()
+            .unwrap();
+        assert!(!valid_no_cmi.cmi_present());
+        assert!(!duration_requires_start(
+            crate::WellearnDurationProtocolMode::PreserveFresh,
+            false,
+        ));
     }
 
     #[test]
