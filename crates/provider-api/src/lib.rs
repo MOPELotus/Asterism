@@ -2,12 +2,14 @@
 
 mod capability;
 mod error;
+mod history_harvest;
 mod metadata;
 mod registry;
 mod settings;
 
 pub use capability::*;
 pub use error::{ProviderError, ProviderErrorKind, ProviderResult};
+pub use history_harvest::*;
 pub use metadata::{ProviderCapability, ProviderMetadata, VerificationLevel};
 pub use registry::{ProviderEntry, ProviderRegistry, RegistryError};
 pub use settings::{

@@ -4026,3 +4026,22 @@ the incentive to fabricate an Asterism Execution merely to import read-only
 history and gives the upcoming Provider harvest protocol a valid provenance
 target while preserving the bootstrap rule that collection creates no remote
 or local task Attempt.
+
+## Two-hundred-and-twenty-third Phase 0 slice
+
+Provider API now defines a credential-free, read-only Answer History Harvest
+contract. A Provider enumerates bounded pages of safely readable historical
+Task/Attempt references using a versioned, Provider-prefixed, sanitized cursor;
+each reference carries a non-zero Provider Attempt digest and ephemeral
+non-serialized route context. Empty intermediate pages, duplicate Attempt
+identity, cross-Provider cursors, secret-shaped metadata and ambiguous terminal
+cursors fail closed.
+
+After Core maps a reference to its owner-private local Task, the Provider may
+return one exact result snapshot: bounded normalized Questions, submitted and
+official answers, per-Question correctness, fixed-point score, retake facts,
+result digest, Provider Attempt digest and sanitized provenance. Question,
+answer and Task bindings are validated before ingestion. Diagnostics expose
+only counts and digest markers, not stems or answers. The contract grants no
+submission, unlock or retake method; capability advertisement/registry wiring
+and the first evidenced Provider adapter remain the next slices.
