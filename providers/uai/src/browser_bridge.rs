@@ -3302,6 +3302,59 @@ mod tests {
         (batch, plan, command, cursor)
     }
 
+    fn clicking_first_tab_cursor(
+        session_id: BrowserBridgeSessionId,
+    ) -> (
+        crate::UaiCourseResidenceBatchPlan,
+        UaiBrowserResidencePlan,
+        UaiBrowserCommandEnvelope,
+        crate::UaiBrowserResidenceCursor,
+    ) {
+        let (batch, plan, command, cursor) = scanning_tabs_cursor(session_id);
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )
+        .unwrap();
+        let tabs = vec![
+            UaiBrowserPageEntry::try_new(
+                &plan,
+                &binding,
+                UaiBrowserPageScope::Tab,
+                0,
+                "Overview".to_owned(),
+                true,
+            )
+            .unwrap(),
+            UaiBrowserPageEntry::try_new(
+                &plan,
+                &binding,
+                UaiBrowserPageScope::Tab,
+                1,
+                "Practice".to_owned(),
+                false,
+            )
+            .unwrap(),
+        ];
+        let completed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::PageList {
+                scope: UaiBrowserPageScope::Tab,
+                entries: tabs,
+            },
+            [3; 32],
+        );
+        let clicked = cursor
+            .advance_tab_list(&batch, &plan, &command, &completed)
+            .unwrap();
+        let (cursor, command) = clicked.into_parts();
+        (batch, plan, command, cursor)
+    }
+
     #[test]
     fn encrypted_accumulated_cursor_artifact_is_stable_redacted_and_recoverable() {
         let (batch, plan, command, cursor) = initial_residence_cursor("nonce-cursor");
@@ -3778,6 +3831,48 @@ mod tests {
                 scope: UaiBrowserPageScope::Task
             }
         ));
+    }
+
+    #[test]
+    fn completed_tab_click_advances_cursor_to_current_task_scan() {
+        let session_id = BrowserBridgeSessionId::new();
+        let (batch, plan, command, cursor) = clicking_first_tab_cursor(session_id);
+        let handle = match &command.command {
+            UaiBrowserCommand::ClickTab { handle } => handle.clone(),
+            other => panic!("expected Tab click, got {other:?}"),
+        };
+        let completed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::ClickResult {
+                handle,
+                clicked: true,
+            },
+            [4; 32],
+        );
+        let advanced = cursor
+            .advance_tab_click(&batch, &plan, &command, &completed)
+            .unwrap();
+
+        assert_eq!(
+            advanced.cursor().stage(),
+            crate::UaiBrowserCursorStage::ScanningTasks
+        );
+        assert_eq!(advanced.cursor().tab_snapshot().len(), 2);
+        assert_eq!(advanced.cursor().current_tab_ordinal(), Some(0));
+        assert_eq!(advanced.cursor().next_tab_ordinal(), 1);
+        assert!(advanced.cursor().task_snapshot().is_empty());
+        assert_eq!(advanced.cursor().processed_tabs(), 0);
+        assert_eq!(advanced.cursor().prior_result_digest(), Some([4; 32]));
+        assert_eq!(advanced.command().sequence, 5);
+        assert!(matches!(
+            advanced.command().command,
+            UaiBrowserCommand::ScanPage {
+                scope: UaiBrowserPageScope::Task
+            }
+        ));
+        assert_eq!(cursor.stage(), crate::UaiBrowserCursorStage::ClickingTab);
     }
 
     #[tokio::test]
