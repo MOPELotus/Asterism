@@ -1,95 +1,163 @@
-# Answer evidence and completion policy
+# Identity, answer evidence and completion policy
 
-This document defines shared Core ownership for reusable answer evidence and
-post-submission task completion. Provider implementations supply audited reads,
-mutations and verification facts; they do not own the corpus or either policy
-state machine.
+This document is the shared Core contract for identity ownership, reusable
+answer evidence and post-submission completion. Provider implementations own
+audited platform steps and wire details; they do not own either corpus layer or
+the shared policy state machines.
 
-## Owner-global Answer Evidence Corpus
+## Multi-user identity invariant
 
-The reusable corpus is scoped by `owner_user_id`. It is not partitioned into
-independent Provider-account, Course or Task caches. Evidence learned from any
-account, platform, Course, Task or Attempt owned by the same user may be
-considered by answer resolution for another Task only after conservative
-question/content matching.
+Asterism remains multi-user. QQ Identity is part of Domain and Storage identity;
+one QQ identity binds one independent Asterism `User`. That User owns their own
+ProviderAccounts, Tasks, Executions, Secrets, raw QuestionSnapshots,
+Submissions, Attempts and Audit records. A bot/server owner is a high-privilege
+`Master` User, not the owner of every other User's platform accounts or private
+learning data. Existing Master, Operator and User authorization boundaries stay
+in force.
 
-Every corpus assertion retains provenance instead of flattening reliable values
-into an unqualified answer:
+## Two evidence layers
 
-- Provider and source account;
-- Course, Task, Question snapshot and Attempt when available;
-- result page or other audited evidence surface;
-- original answer source and candidate identity when applicable;
-- evidence class (`Official` / `ProviderNative`, `VerifiedHistorical` or
-  `Unverified`);
-- observed and verified timestamps, score and per-Question judgement facts;
-- exact and future semantic content fingerprints used for matching.
+Private Answer Evidence is strictly scoped by `owner_user_id`. It preserves the
+complete raw Question and private provenance: ProviderAccount, Course, Task,
+Attempt, submitted answer, result/readback, official/reference answer,
+per-Question judgement, score, retake facts and timestamps.
 
-Evidence class and answer source are independent. An AI or manually sourced
-answer may become `VerifiedHistorical` after exact per-Question verification;
-it does not become `ProviderNative`. Conflicting assertions and all provenance
-records remain visible. Core must not promote a task-level score or overall
-completion flag into per-Question correctness.
+The Server/Instance Global Answer Corpus contains normalized, verified and
+de-identified reusable assets projected from Private Evidence. It can be used
+across Users on the same Asterism instance, but ordinary consumers cannot read
+source QQ identity, ProviderAccount, Course identity, Attempt or other private
+provenance.
 
-The existing same-Task `LocalAnswerCache` remains a conservative exact cache.
-It does not replace the owner-global corpus and does not silently broaden its
-matching scope.
+These are not independent competing answer banks. Every evidence assertion
+reliable enough for normal AnswerResolve/cache reuse must eventually have an
+idempotent Global Corpus projection:
 
-## Bootstrap harvest
+- Provider-published Official / ProviderNative answers become positive global
+  evidence;
+- an actually submitted answer explicitly judged correct per Question becomes
+  `VerifiedHistorical` positive evidence;
+- an actually submitted answer explicitly judged wrong becomes
+  `NegativeEvidence` and excludes that semantic candidate;
+- an overall score or Task completion flag never creates per-Question evidence.
 
-The first successful authentication/binding of a ProviderAccount creates one
-durable, idempotent bootstrap-harvest job by default. Its authority is read
-only. It may enumerate every safely readable historical completed Task for that
-account and collect bounded normalized Questions, official/reference answers,
-the user's submitted answers, per-Question judgement, score and retake facts.
+When a safe global Question identity cannot yet be built because parsing,
+shared context/options, child hierarchy or semantic normalization is
+incomplete, Core records `PendingCorpusProjection` / `UnmatchedEvidence`. It
+retains the raw private assertion for later reprocessing instead of guessing a
+merge, dropping it or leaving reliable evidence permanently in a local cache.
+Projection is replay-safe and cannot double-count the same source evidence.
 
-The job must never create an Attempt, unlock a Task, submit an answer, trigger a
-retake or mutate remote state to reveal evidence. A missing permission, dynamic
-browser requirement or unsupported history surface becomes an explicit partial
-report or blocker. Crash recovery resumes bounded reads without duplicating
-corpus provenance. Completion of the first scan prevents repeated full scans
-unless an explicit rescan policy creates a new generation.
+The existing owner/Task-scoped `LocalAnswerCache` remains a private exact-
+fingerprint shortcut. It is not merged with the Global Corpus and cannot be the
+long-term endpoint for Official, VerifiedHistorical or NegativeEvidence.
 
-Normal execution is incremental: after `SubmissionVerify` obtains reliable
-per-Question facts, Core atomically appends or merges those facts into the same
-owner-global corpus. Binding and using more accounts therefore grows one corpus
-without requiring repeated manual full scans.
+## Evidence history and arbitration
+
+`AnswerSource` and evidence verification status are independent dimensions.
+Official, ProviderNative, VerifiedHistorical, ExternalBank, AI and Manual facts
+are not overwritten by a last-write-wins value. Core preserves answer versions,
+`first_seen`, `last_seen`, `verified_at`, positive/negative counts,
+superseded/changed facts and source categories. A later conflicting Official
+answer raises the new fact's priority and invalidates or lowers older evidence
+without deleting history.
+
+The Global Corpus stores de-identified aggregate positive and negative evidence
+and source classes. It does not expose identity-bearing private provenance.
+Consensus among independent sources may raise confidence only when no stronger
+evidence exists. Consensus cannot override Official evidence or vote a
+candidate back into validity after explicit NegativeEvidence.
+
+Core tracks empirical resolver accuracy from real per-Question readback, with
+bounded dimensions such as QuestionKind, Provider and course category. Answer
+selection may combine evidence quality, empirical accuracy, cost, latency and
+declared confidence, but statistics never bypass authorization, assessment or
+manual-review policy.
+
+## Semantic Question identity
+
+Cross-Attempt/Task/Course reuse requires conservative semantic identity and
+answer rebinding. Evidence stores semantic option/child answers, not only
+letters or positions. A current QuestionSnapshot is matched first, then the old
+semantic answer is rebound to its actual current option/child identity. Shared
+context, shared options, ordered children, reading material, attachments and
+compound hierarchy are identity inputs.
+
+Cross-Provider deduplication is allowed only with strict unique semantic
+evidence. Similar stems or fuzzy/vector similarity alone cannot automatically
+merge Questions. Ambiguous matches remain separate Corpus entries.
+
+## Bootstrap and incremental ingestion
+
+The first transition of each ProviderAccount into valid authenticated state
+creates one default read-only bootstrap-harvest job. The job is durable,
+idempotent, interruptible and recoverable, with persisted state, progress,
+watermark and completion. Session renewal, Cookie rotation and later
+reauthentication do not repeat a completed full scan. A User may explicitly
+request a new full-scan generation; future incremental harvests are separate.
+
+Bootstrap may enumerate safely readable historical completed Tasks and collect
+Questions, shared context, official/reference answers, submitted answers,
+per-Question correctness, score and retake facts. It never creates an Attempt,
+unlocks a Task, submits, retakes or performs another mutation to reveal data.
+Raw facts first enter Private Evidence and all reusable assertions are then
+projected idempotently into the Global Corpus.
+
+Normal operation is incremental. `SubmissionVerify` and any other reliable
+result read atomically append Private Official, VerifiedHistorical and Negative
+facts and enqueue/perform their Global projection. More Users, accounts and
+verified Tasks therefore grow one privacy-safe instance corpus naturally.
+
+## Answer and Draft policy
+
+Answer policy supports source priority, minimum confidence, AI/external cost
+budgets and explicit `LeaveBlank` / `ManualReview` fallback. Partial submission
+coverage is calculated against the complete fresh QuestionSnapshot; unknown,
+unsupported or unresolved Questions lower coverage and are never silently
+removed from the denominator or filled with invented values.
+
+Shared Draft semantics may express `DraftOnly`, `SaveOnly` and
+`SubmitWhenCoverageReached` when audited Providers support them. Endpoint,
+payload, DOM and exact recovery remain Provider-private. Immutable Drafts freeze
+the complete snapshot partition and resolved policy. Attempt History records
+every attempt's state, score, Question results, selected candidates/sources/
+evidence, newly learned evidence and score delta.
 
 ## Strict Completion
 
-Strict Completion is a distinct, default-enabled state machine whose only goal
-is to reach the platform-defined `Completed` or `Passed` state for a Task point.
-One accepted submission is not automatically completion. When an audited
-platform permits another Attempt and fresh verification remains
-`Pending`/`InProgress`/not-passed, Core may create a new Question snapshot,
-Draft and Attempt, resolve again using current corpus and configured answer
-sources, submit through the normal mutation ledger and verify independently.
+Strict Completion means fresh remote verification reaches platform-defined
+`Completed` or `Passed`; a successful mutation or accepted receipt is not
+completion. Core records a structured `CompletionDiagnosis`, including at least
+`score_below_threshold`, `duration_insufficient`, `required_children_pending`,
+`prerequisite_locked`, `teacher_review_pending`, `human_action_required`,
+`unsupported_capability`, `protocol_drift`, `attempt_limit_reached`,
+`window_closed` and `remote_unknown`.
 
-The loop stops immediately when fresh remote state is `Completed` or `Passed`.
-It also stops at any explicit attempt, elapsed-time or policy limit; remote
-attempt/time/unlock/manual-review restrictions are hard bounds. Ambiguous
-Attempt creation or submission is recovered and verified, never blindly
-replayed. Core never fabricates progress or weakens the Provider's pass rule.
+Within audited, safely recoverable bounds, Strict Completion may default on for
+mechanical work such as video, reading, duration, resource completion,
+prerequisites and technical-failure recovery. It stops at Completed/Passed or an
+explicit attempt/time/policy/remote limit. Ambiguous non-idempotent operations
+are verified, never blindly replayed. Scored assessments must not use AI or the
+Corpus in an unsupervised submit-until-pass loop; a failed assessment enters
+review/confirmation or an explicitly controlled retry/retake policy.
 
-## Score Improvement
+## Score Improvement / Retake
 
-Score Improvement / Retake is a separate, default-enabled state machine entered
-only after the Task is already `Completed`/`Passed` and only when the platform
-explicitly allows another retake/redo. It may use official answers,
-`VerifiedHistorical` evidence and configured resolvers to pursue a target score
-within independent attempt/time/policy limits.
+Score Improvement is separate from Completion and is explicit opt-in after the
+Task is already Completed/Passed. Before a retake, Core reads and freezes the
+Provider's `RetakeScorePolicy` (highest score, last attempt, average, teacher
+rule or unknown). It never assumes a retake is harmless.
 
-Failure to improve, exhausted retakes or a lower later score cannot change the
-already established completion state back to incomplete. Disabling Score
-Improvement cannot disable Strict Completion, and disabling Strict Completion
-cannot implicitly authorize score retakes.
+Each authorized retake gets a fresh QuestionSnapshot, Draft, Attempt, mutation
+ledger and verification. It prefers current Official and VerifiedHistorical
+evidence within answer policy. It is finitely bounded and not an unbounded
+background loop. Failure to improve, a lower later score or unavailable retake
+cannot reverse an already verified completed Task.
 
-## Policy ownership
+## Policy ownership and snapshots
 
-Both state machines are enabled by default, with conservative finite limits.
-All settings have administrator/Owner-managed defaults. Where user, account,
-Course or Task overrides are exposed, Core persists the resolved immutable
-policy snapshot and its source attribution for each run. The Owner can change
-defaults and administratively replace previously changed options through the
-management surface; a policy edit affects new state-machine decisions and does
-not rewrite historical Attempts or evidence.
+Product profiles may define Conservative, Balanced and StrictCompletion
+defaults. Administrator/Master-managed defaults and permitted User,
+ProviderAccount and Task overrides remain within existing authorization. Core
+uses the established Provider default -> ProviderAccount override -> Task
+override -> immutable Execution settings snapshot rule, records source
+attribution, and does not rewrite historical Attempts when policy changes.

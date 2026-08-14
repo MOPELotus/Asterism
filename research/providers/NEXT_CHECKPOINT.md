@@ -205,7 +205,7 @@ reuse must match semantic option content/context first and then remap the old
 answer to the current option identity. Never reuse a cached letter such as `B`
 when only the option order changed.
 
-## 8. Owner-global corpus and separate completion state machines
+## 8. Private evidence, instance corpus and separate completion state machines
 
 Provider re-audits must also record the evidence needed by
 `docs/architecture/answer-evidence-and-completion.md`:
@@ -221,9 +221,15 @@ Provider re-audits must also record the evidence needed by
 - the distinction between another Attempt required to finish an incomplete
   Task and an optional score-improvement retake after completion.
 
-Do not model the corpus as ProviderAccount, Course or Task private state. Do not
-let an overall score stand in for per-Question evidence, and do not let a failed
-score-improvement attempt reverse an already verified completed Task.
+Raw evidence remains `owner_user_id`-private with complete provenance. Every
+reliable Official, VerifiedHistorical or Negative assertion must also receive
+an idempotent, de-identified projection into the instance Global Corpus; an
+unsafe semantic identity becomes explicit pending/unmatched projection state.
+Do not expose private account/Course/Attempt provenance through Corpus reads,
+let an overall score stand in for per-Question evidence, or let a failed
+score-improvement attempt reverse an already verified completed Task. Scored
+assessment retry remains controlled/user-authorized rather than an unattended
+submit-until-pass loop.
 
 ## Checkpoint exit criteria
 
