@@ -134,7 +134,9 @@ pub use submission_verify::{
 pub use task_detail::UaiTaskDetail;
 pub use task_inventory::parse_task_inventory;
 pub use upload::{
-    UaiMultipartUpload, UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadPreparation,
-    UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification, UaiUploadedArtifact,
-    build_upload_multipart, parse_upload_grant, parse_upload_result, parse_upload_verification,
+    UaiMultipartUpload, UaiUploadArtifact, UaiUploadGrant, UaiUploadGrantRequest, UaiUploadIntent,
+    UaiUploadPreparation, UaiUploadSubmission, UaiUploadSubmissionRequest, UaiUploadTransport,
+    UaiUploadVerification, UaiUploadedArtifact, build_upload_grant_request, build_upload_multipart,
+    build_upload_submission_request, parse_upload_grant, parse_upload_result,
+    parse_upload_verification,
 };

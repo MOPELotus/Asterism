@@ -6,6 +6,7 @@ use asterism_provider_api::{
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use reqwest::Url;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -26,6 +27,11 @@ const MAX_UPLOAD_VERIFICATION_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_UPLOAD_NESTED_ANSWER_BYTES: usize = 1_024 * 1_024;
 const MINIMAL_MP3_BYTES: usize = 4_096;
 const QINIU_UPLOAD_ROUTE: &str = "https://upload-z1.qiniup.com/";
+const UAI_UPLOAD_GRANT_ROUTE: &str = "https://ucontent.unipus.cn/media/user_resource/cms/token";
+const UAI_UPLOAD_SUBMISSION_ROUTE: &str =
+    "https://ucontent.unipus.cn/course/api/v3/newExploration/submit";
+const UAI_UPLOAD_REFERER: &str = "https://ucontent.unipus.cn/";
+const UAI_UPLOAD_SUBMISSION_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 
 /// Provider-private boundary for the audited grant, object-store and final
 /// single-upload mutation stages. Shared Core still owns the durable
@@ -599,6 +605,86 @@ impl Drop for UaiUploadArtifact {
     }
 }
 
+/// Exact fresh CMS grant request for one bound upload intent and account.
+/// Its URL remains redacted while the digest can be registered before dispatch.
+pub struct UaiUploadGrantRequest {
+    url: Zeroizing<String>,
+    referer: &'static str,
+    request_digest: [u8; 32],
+}
+
+impl UaiUploadGrantRequest {
+    /// Stable identity over method, exact query URL and required Referer.
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    pub(crate) fn expose_url(&self) -> &str {
+        self.url.as_str()
+    }
+
+    pub(crate) const fn referer(&self) -> &'static str {
+        self.referer
+    }
+}
+
+impl Drop for UaiUploadGrantRequest {
+    fn drop(&mut self) {
+        self.request_digest.zeroize();
+    }
+}
+
+impl fmt::Debug for UaiUploadGrantRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiUploadGrantRequest")
+            .field("url", &"[ACCOUNT-BOUND ROUTE]")
+            .field("request_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+/// Builds the donor-audited CMS grant request only after fresh Course-instance
+/// and app-user discovery.
+///
+/// # Errors
+///
+/// Rejects a foreign artifact, malformed fresh identity or invalid fixed URL.
+pub fn build_upload_grant_request(
+    intent: &UaiUploadIntent,
+    artifact: &UaiUploadArtifact,
+    course_instance_id: &str,
+    app_user_id: &str,
+) -> ProviderResult<UaiUploadGrantRequest> {
+    if !intent.matches_artifact(artifact)
+        || !is_remote_component(course_instance_id)
+        || !is_account_identity(app_user_id)
+    {
+        return Err(invalid_input(
+            "UAI upload grant request identity or artifact is invalid",
+        ));
+    }
+    let mut url = Url::parse(UAI_UPLOAD_GRANT_ROUTE)
+        .map_err(|_| invalid_response("UAI upload grant route is invalid"))?;
+    url.query_pairs_mut()
+        .append_pair("name", artifact.filename())
+        .append_pair("filetype", "audio")
+        .append_pair("isconvert", "0")
+        .append_pair("courseid", course_instance_id)
+        .append_pair("userid", app_user_id);
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:upload-grant-request:v1\0");
+    digest.update(b"GET\0");
+    digest.update(url.as_str().as_bytes());
+    digest.update(b"\0referer\0");
+    digest.update(UAI_UPLOAD_REFERER.as_bytes());
+    Ok(UaiUploadGrantRequest {
+        url: Zeroizing::new(url.into()),
+        referer: UAI_UPLOAD_REFERER,
+        request_digest: digest.finalize().into(),
+    })
+}
+
 /// Complete zeroizing multipart body for the fixed Qiniu upload route.
 pub struct UaiMultipartUpload {
     content_type: String,
@@ -644,6 +730,51 @@ impl fmt::Debug for UaiMultipartUpload {
 impl Drop for UaiMultipartUpload {
     fn drop(&mut self) {
         self.content_type.zeroize();
+    }
+}
+
+/// Complete zeroizing final UAI upload-submission request.
+pub struct UaiUploadSubmissionRequest {
+    url: Zeroizing<String>,
+    content_type: &'static str,
+    body: Zeroizing<String>,
+    request_digest: [u8; 32],
+}
+
+impl UaiUploadSubmissionRequest {
+    pub fn expose_body(&self) -> &str {
+        self.body.as_str()
+    }
+
+    /// Exact pre-dispatch identity over method, route, content type and body.
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    pub(crate) fn expose_url(&self) -> &str {
+        self.url.as_str()
+    }
+
+    pub(crate) const fn content_type(&self) -> &'static str {
+        self.content_type
+    }
+}
+
+impl Drop for UaiUploadSubmissionRequest {
+    fn drop(&mut self) {
+        self.request_digest.zeroize();
+    }
+}
+
+impl fmt::Debug for UaiUploadSubmissionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiUploadSubmissionRequest")
+            .field("url", &"[ROUTE]")
+            .field("content_type", &self.content_type)
+            .field("body", &"[REDACTED]")
+            .field("request_digest", &"[HASHED]")
+            .finish()
     }
 }
 
@@ -927,15 +1058,19 @@ fn build_upload_submission(
     })
 }
 
-/// Builds the donor-audited upload answer inside the native mutation boundary.
+/// Builds the donor-audited upload request inside the native mutation boundary.
 /// The Apache donor provides the `instanceId=0`/file-key child semantics while
 /// the current Rust donor provides the minimal question/judge envelope and
 /// fresh Course publish-version binding.
-pub(crate) fn build_upload_submission_body(
+///
+/// # Errors
+///
+/// Rejects malformed fresh route/account identities or an oversized body.
+pub fn build_upload_submission_request(
     submission: &UaiUploadSubmission,
     course_instance_id: &str,
     open_id: &str,
-) -> ProviderResult<Zeroizing<String>> {
+) -> ProviderResult<UaiUploadSubmissionRequest> {
     if !is_remote_component(course_instance_id)
         || open_id.is_empty()
         || open_id.len() > 8 * 1_024
@@ -1002,7 +1137,22 @@ pub(crate) fn build_upload_submission_body(
             "UAI upload submission body exceeds the size limit",
         ));
     }
-    Ok(encoded)
+    let url = Url::parse(UAI_UPLOAD_SUBMISSION_ROUTE)
+        .map_err(|_| invalid_response("UAI upload submission route is invalid"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:upload-submission-request:v1\0");
+    digest.update(b"POST\0");
+    digest.update(url.as_str().as_bytes());
+    digest.update(b"\0content-type\0");
+    digest.update(UAI_UPLOAD_SUBMISSION_CONTENT_TYPE.as_bytes());
+    digest.update(b"\0body\0");
+    digest.update(encoded.as_bytes());
+    Ok(UaiUploadSubmissionRequest {
+        url: Zeroizing::new(url.into()),
+        content_type: UAI_UPLOAD_SUBMISSION_CONTENT_TYPE,
+        body: encoded,
+        request_digest: digest.finalize().into(),
+    })
 }
 
 /// Verifies one uploaded key through the exact receipt-versioned user-module
@@ -1187,6 +1337,15 @@ fn is_remote_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+fn is_account_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
 fn upload_boundary(file_key: &str, bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(b"asterism:uai:upload-boundary:v1\0");
@@ -1259,6 +1418,54 @@ mod tests {
     fn upload_grant_is_bounded_and_redacted() {
         let artifact = UaiUploadArtifact::donor_minimal_mp3();
         let intent = fixture_intent(&artifact);
+        let request =
+            build_upload_grant_request(&intent, &artifact, "course-instance-1", "app-user-1")
+                .unwrap();
+        let request_digest = request.request_digest();
+        assert_ne!(request_digest, [0; 32]);
+        assert_eq!(request.request_digest(), request_digest);
+        assert_eq!(
+            request.expose_url(),
+            "https://ucontent.unipus.cn/media/user_resource/cms/token?name=nothing.mp3&filetype=audio&isconvert=0&courseid=course-instance-1&userid=app-user-1"
+        );
+        assert!(!format!("{request:?}").contains("app-user-1"));
+        assert_ne!(
+            build_upload_grant_request(&intent, &artifact, "course-instance-1", "app-user-2",)
+                .unwrap()
+                .request_digest(),
+            request_digest
+        );
+        assert!(
+            build_upload_grant_request(
+                &intent,
+                &artifact,
+                "course-instance-1",
+                "tenant:app-user.3",
+            )
+            .is_ok()
+        );
+        assert!(
+            build_upload_grant_request(&intent, &artifact, "unsafe/course", "app-user-1").is_err()
+        );
+        assert!(
+            build_upload_grant_request(&intent, &artifact, "course-instance-1", "unsafe/user")
+                .is_err()
+        );
+        let foreign_artifact = UaiUploadArtifact::try_new(
+            "different.mp3",
+            "audio/mpeg",
+            vec![7_u8; MINIMAL_MP3_BYTES],
+        )
+        .unwrap();
+        assert!(
+            build_upload_grant_request(
+                &intent,
+                &foreign_artifact,
+                "course-instance-1",
+                "app-user-1",
+            )
+            .is_err()
+        );
         let grant = parse_upload_grant(
             r#"{"code":200,"upToken":"secret-upload-token","fileKey":"course/42/nothing.mp3"}"#,
             &intent,
@@ -1382,9 +1589,24 @@ mod tests {
         );
         assert!(!format!("{submission:?}").contains("course/42/nothing.mp3"));
 
-        let body =
-            build_upload_submission_body(&submission, "course-instance-1", "openid-1").unwrap();
-        let parsed: Value = serde_json::from_str(body.as_str()).unwrap();
+        let request =
+            build_upload_submission_request(&submission, "course-instance-1", "openid-1").unwrap();
+        let request_digest = request.request_digest();
+        assert_ne!(request_digest, [0; 32]);
+        assert_eq!(request.request_digest(), request_digest);
+        assert_eq!(
+            request.expose_url(),
+            "https://ucontent.unipus.cn/course/api/v3/newExploration/submit"
+        );
+        assert_eq!(request.content_type(), "application/json; charset=utf-8");
+        assert!(!format!("{request:?}").contains("openid-1"));
+        assert_ne!(
+            build_upload_submission_request(&submission, "course-instance-1", "openid-2")
+                .unwrap()
+                .request_digest(),
+            request_digest
+        );
+        let parsed: Value = serde_json::from_str(request.expose_body()).unwrap();
         assert_eq!(parsed["groupId"], "group-upload");
         assert_eq!(parsed["quesDatas"][0]["instanceId"], "0");
         assert_eq!(parsed["isCompleted"], serde_json::json!([true]));

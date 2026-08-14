@@ -35,7 +35,8 @@ use crate::{
     annotator::generate_annotator_token,
     build_compound_oral_submission_body, build_compound_upload_submission_body,
     build_discussion_reply_page_request, build_discussion_reply_request,
-    build_discussion_topic_request, build_upload_multipart,
+    build_discussion_topic_request, build_upload_grant_request, build_upload_multipart,
+    build_upload_submission_request,
     course_inventory::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
         required_remote_component,
@@ -50,7 +51,6 @@ use crate::{
     submission_execute::valid_submission_version,
     submission_verify::validate_verification_course_binding,
     task_inventory::parse_task_tree_unit_ids,
-    upload::build_upload_submission_body,
     user_identity::parse_user_identity,
 };
 
@@ -958,17 +958,19 @@ impl NativeUaiInventoryTransport {
                 )
             })?;
         annotator_header.set_sensitive(true);
+        let request = build_upload_grant_request(
+            intent,
+            artifact,
+            route.course_instance_id(),
+            identity.app_user_id(),
+        )?;
         let response = self
             .client
-            .get(upload_grant_url(
-                route.course_instance_id(),
-                identity.app_user_id(),
-                artifact,
-            )?)
+            .get(request.expose_url())
             .header(ACCEPT, "application/json")
             .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
-            .header("Referer", UCONTENT_REFERER)
+            .header("Referer", request.referer())
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
@@ -1044,7 +1046,7 @@ impl NativeUaiInventoryTransport {
             &group_id,
             Utc::now(),
         )?;
-        let body = build_upload_submission_body(
+        let request = build_upload_submission_request(
             submission,
             route.course_instance_id(),
             session.expose_open_id(),
@@ -1060,12 +1062,12 @@ impl NativeUaiInventoryTransport {
         annotator_header.set_sensitive(true);
         let response = self
             .client
-            .post(submission_url()?)
+            .post(request.expose_url())
             .header(ACCEPT, "application/json")
-            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(CONTENT_TYPE, request.content_type())
             .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
-            .body(body.as_bytes().to_vec())
+            .body(request.expose_body().as_bytes().to_vec())
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
@@ -2352,21 +2354,6 @@ fn discussion_replies_url() -> ProviderResult<Url> {
 
 fn discussion_reply_mutation_url() -> ProviderResult<Url> {
     route_url(UCLOUD_ORIGIN, &["api", "bbs", "ureply", "add"])
-}
-
-fn upload_grant_url(
-    course_instance_id: &str,
-    user_id: &str,
-    artifact: &UaiUploadArtifact,
-) -> ProviderResult<Url> {
-    let mut url = route_url(UCONTENT_ORIGIN, &["media", "user_resource", "cms", "token"])?;
-    url.query_pairs_mut()
-        .append_pair("name", artifact.filename())
-        .append_pair("filetype", "audio")
-        .append_pair("isconvert", "0")
-        .append_pair("courseid", course_instance_id)
-        .append_pair("userid", user_id);
-    Ok(url)
 }
 
 fn verification_url(

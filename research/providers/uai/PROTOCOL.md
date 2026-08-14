@@ -633,9 +633,14 @@ the granted file key. Because that request is fully determined before dispatch,
 the Provider hashes its fixed POST origin, deterministic content type and full
 zeroizing multipart body (including token, key and artifact bytes) into a
 stable request digest. A changed token or any body byte changes the digest. CMS
-grant and final Group submit include freshly resolved account/Course-instance
-material, so their semantic intent fingerprints are deliberately not presented
-as exact network-request digests. A successful response becomes a strong uploaded-artifact
+grant now materializes one redacted immutable request only after fresh
+Course-instance and app-user discovery; its digest binds the exact GET query
+URL and required Referer. Final Group submit likewise materializes one
+zeroizing request after fresh Course/progress/account rebinding; its distinct
+digest binds exact POST origin, content type and complete body, including the
+fresh Course instance and openid. Native HTTP sends the URL, headers and body
+from those same request owners, while semantic intent fingerprints remain
+separate. A successful response becomes a strong uploaded-artifact
 owner retaining remote Task, Task fingerprint, Course/Unit/Group, positional
 upload module, exact key, artifact digest and intent fingerprint; its route
 data is redacted in debug and zeroized on drop. It also preserves the donor's
@@ -647,7 +652,9 @@ Course/Unit/Group identities, upload position 1 and current positive Course
 publish version. The immutable Provider-private final plan uses the donor's
 `instanceId=0` with one completed child whose `value` is the exact uploaded
 key. The outer minimal question/judge body uses the fresh publish version and
-is built only inside the native mutation boundary. Immediately before the
+is built only inside the native mutation boundary. The resulting redacted
+request exposes only its digest for durable pre-dispatch registration and
+zeroizes the full body on drop. Immediately before the
 single POST, native HTTP refreshes Course instance and the exact incomplete,
 available `tab_type=task` Unit-progress leaf. A version-bearing response is a
 receipt only. The key-bearing body and route identities stay in zeroizing
