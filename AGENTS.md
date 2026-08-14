@@ -41,6 +41,24 @@ donors' default branches, tags/releases and relevant new commits. Record the
 new revision and protocol/capability delta, then continue incremental audit,
 porting, fixtures and regression coverage when upstream behavior changed.
 
+### Mandatory next-checkpoint full upstream sweep
+
+The **next meaningful Provider checkpoint** has an additional one-time
+requirement: perform a full capability re-audit for **Chaoxing, WELearn, UAI and
+Cidaren**, not merely a delta scan since the pinned revisions. Re-enumerate the
+recorded donors' README/configuration surface, current implementation, default
+branches, tags/releases, relevant issues/examples and fixtures, then compare the
+whole observed feature surface with Asterism. This is specifically intended to
+catch capabilities or settings that already existed upstream but were missed in
+the first migration pass.
+
+Treat `research/providers/NEXT_CHECKPOINT.md` as a mandatory checkpoint input.
+It records the accepted Chaoxing partial-submit/coverage semantics, observed
+Question-family completion rule, result-answer harvesting and retake direction,
+answer-evidence bootstrap scan, compound/shared-context modeling follow-up, and
+the required four-Provider full upstream sweep. Do not declare the next
+checkpoint complete until its exit criteria are satisfied.
+
 ## Architecture invariants
 
 Capability completeness does not weaken reliability. Preserve Thick Core,
