@@ -2,12 +2,56 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::Question;
 use asterism_provider_api::{ProviderContext, ProviderError, ProviderErrorKind, ProviderResult};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{CidarenAnswerEvidence, CidarenAnswerEvidenceBinding, CidarenAnswerEvidenceTransport};
 
 const MAX_CANDIDATES: usize = 1_024;
 const MAX_CANDIDATE_BYTES: usize = 32 * 1_024;
+
+#[derive(Default)]
+struct ZeroizingStringSet(BTreeSet<String>);
+
+impl ZeroizingStringSet {
+    fn insert(&mut self, value: &str) -> bool {
+        if self.0.contains(value) {
+            false
+        } else {
+            self.0.insert(value.to_owned());
+            true
+        }
+    }
+}
+
+impl Drop for ZeroizingStringSet {
+    fn drop(&mut self) {
+        for mut value in std::mem::take(&mut self.0) {
+            value.zeroize();
+        }
+    }
+}
+
+#[derive(Default)]
+struct ZeroizingAliases(Vec<(String, String)>);
+
+impl ZeroizingAliases {
+    fn push(&mut self, alias: &str, target: &str) {
+        self.0.push((alias.to_owned(), target.to_owned()));
+    }
+
+    fn finish(mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for ZeroizingAliases {
+    fn drop(&mut self) {
+        for (alias, target) in &mut self.0 {
+            alias.zeroize();
+            target.zeroize();
+        }
+    }
+}
 
 /// Loads the minimum fresh word evidence needed by one current Cidaren
 /// Question, including the donor's authenticated `Course/SearchWord`
@@ -33,26 +77,28 @@ pub async fn load_answer_evidence(
         .get("topic_mode")
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| protocol_drift("Cidaren Question has no topic mode"))?;
-    let (candidate_values, prompt_evidence_required) = candidate_words(question, mode)?;
-    let candidates = Zeroizing::new(candidate_values);
+    let (candidates, prompt_evidence_required) = candidate_words(question, mode)?;
     let inventory = transport.fetch_word_inventory(context, binding).await?;
-    let mut candidate_keys = BTreeSet::new();
+    let mut candidate_keys = ZeroizingStringSet::default();
     let mut lookup_keys = BTreeSet::new();
     let mut lookups = Vec::new();
-    let mut aliases = Vec::new();
+    let mut aliases = ZeroizingAliases::default();
 
     for candidate in candidates.iter() {
-        let normalized_candidate = candidate.to_lowercase();
-        if !candidate_keys.insert(normalized_candidate.clone()) {
+        let normalized_candidate = Zeroizing::new(candidate.to_lowercase());
+        if !candidate_keys.insert(normalized_candidate.as_str()) {
             continue;
         }
         let mut used_prototype = false;
         let lookup = if let Some(lookup) = inventory.lookup(candidate) {
             Some(lookup)
         } else if valid_search_word(candidate) {
-            let prototype = transport.resolve_word_prototype(context, candidate).await?;
-            prototype.and_then(|prototype| {
-                let lookup = inventory.lookup(&prototype);
+            let prototype = transport
+                .resolve_word_prototype(context, candidate)
+                .await?
+                .map(Zeroizing::new);
+            prototype.as_ref().and_then(|prototype| {
+                let lookup = inventory.lookup(prototype.as_str());
                 used_prototype = lookup.is_some();
                 lookup
             })
@@ -68,9 +114,9 @@ pub async fn load_answer_evidence(
             }
             continue;
         };
-        let target = lookup.cloned_word().to_lowercase();
-        if used_prototype && normalized_candidate != target {
-            aliases.push((normalized_candidate, target));
+        let target = Zeroizing::new(lookup.cloned_word().to_lowercase());
+        if used_prototype && normalized_candidate.as_str() != target.as_str() {
+            aliases.push(normalized_candidate.as_str(), target.as_str());
         }
         if lookup_keys.insert(lookup.dedup_key()) {
             lookups.push(lookup);
@@ -80,7 +126,7 @@ pub async fn load_answer_evidence(
     if matches!(mode, 51..=54) {
         let (prefix, answer_length) = completion_query(question)?;
         for lookup in
-            inventory.completion_evidence_lookups(&prefix, answer_length, MAX_CANDIDATES)?
+            inventory.completion_evidence_lookups(prefix.as_str(), answer_length, MAX_CANDIDATES)?
         {
             if lookup_keys.insert(lookup.dedup_key()) {
                 lookups.push(lookup);
@@ -92,11 +138,14 @@ pub async fn load_answer_evidence(
     for lookup in &lookups {
         word_infos.push(transport.fetch_word_evidence(context, lookup).await?);
     }
-    inventory.into_answer_evidence_with_aliases(word_infos, aliases)
+    inventory.into_answer_evidence_with_aliases(word_infos, aliases.finish())
 }
 
-fn candidate_words(question: &Question, mode: i64) -> ProviderResult<(Vec<String>, bool)> {
-    let candidates = match mode {
+fn candidate_words(
+    question: &Question,
+    mode: i64,
+) -> ProviderResult<(Zeroizing<Vec<String>>, bool)> {
+    let candidates = Zeroizing::new(match mode {
         11 | 15 | 16 | 21 | 22 => vec![prompt_word(question)?.to_owned()],
         13 | 31 | 51..=54 => Vec::new(),
         17 | 18 | 32 => option_words(question, false)?,
@@ -107,7 +156,7 @@ fn candidate_words(question: &Question, mode: i64) -> ProviderResult<(Vec<String
                 "Cidaren evidence loader does not recognize this topic mode",
             ));
         }
-    };
+    });
     if candidates.len() > MAX_CANDIDATES {
         return Err(invalid_response(
             "Cidaren Question exceeds the answer-evidence candidate limit",
@@ -141,29 +190,30 @@ fn option_words(question: &Question, sentence_mode: bool) -> ProviderResult<Vec<
                     protocol_drift("Cidaren sentence option contains an invalid parent candidate")
                 })?;
             match top_level.get(&index) {
-                Some(existing) if existing != content => {
+                Some(existing) if *existing != content => {
                     return Err(protocol_drift(
                         "Cidaren sentence options disagree on their parent candidate",
                     ));
                 }
                 Some(_) => {}
                 None => {
-                    top_level.insert(index, content.to_owned());
+                    top_level.insert(index, content);
                 }
             }
         }
-        return Ok(top_level.into_values().collect());
+        return Ok(top_level.into_values().map(ToOwned::to_owned).collect());
     }
-    question
+    let candidates = question
         .options
         .iter()
         .filter_map(|option| option.content.as_deref())
         .map(|value| {
             valid_candidate(value)
-                .then(|| value.to_owned())
+                .then_some(value)
                 .ok_or_else(|| protocol_drift("Cidaren Question contains an invalid candidate"))
         })
-        .collect()
+        .collect::<ProviderResult<Vec<_>>>()?;
+    Ok(candidates.into_iter().map(ToOwned::to_owned).collect())
 }
 
 fn prompt_word(question: &Question) -> ProviderResult<&str> {
@@ -185,14 +235,18 @@ fn braced_word(value: &str) -> Option<&str> {
     (start < end).then(|| &value[start..end])
 }
 
-fn completion_query(question: &Question) -> ProviderResult<(String, usize)> {
-    let prefix = question
-        .metadata_sanitized
-        .get("word_tip")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| valid_candidate(value))
-        .map(str::to_lowercase)
-        .ok_or_else(|| protocol_drift("Cidaren completion Question has no bounded word prefix"))?;
+fn completion_query(question: &Question) -> ProviderResult<(Zeroizing<String>, usize)> {
+    let prefix = Zeroizing::new(
+        question
+            .metadata_sanitized
+            .get("word_tip")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| valid_candidate(value))
+            .map(str::to_lowercase)
+            .ok_or_else(|| {
+                protocol_drift("Cidaren completion Question has no bounded word prefix")
+            })?,
+    );
     let answer_length = question
         .metadata_sanitized
         .get("word_lengths")
