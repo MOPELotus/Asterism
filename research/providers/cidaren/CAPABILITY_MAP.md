@@ -152,6 +152,11 @@ The current checkpoint (not a completion boundary):
     rotates only to the reselection phase, so the next operation rebuilds the
     map from fresh evidence; ambiguous recovery returns `None` because neither
     donor exposes a safe current-attempt readback.
+34. clears Provider-owned protocol intermediates on every exit path: Capture
+    command serialization zeroizes the Core session nonce after hashing, and
+    answer-evidence parsing/loading zeroizes partial word inventories,
+    prototype aliases, completion prefixes and normalized deduplication keys
+    across duplicate, identity-drift and asynchronous transport failures.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. The remaining shared work is post-materialization

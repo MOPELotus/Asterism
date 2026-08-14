@@ -333,14 +333,36 @@ first real Question for the public task endpoint. All 135 Cidaren Provider
 tests passed against that shared integration.
 
 The same 2026-08-14 checkpoint refreshed the public issue and release feeds,
-not only Git refs. No issue had changed after 2026-07-06 and the repository
-still publishes tags without GitHub Release records. Issues 109 and 113 report
-only local proxy/Capture-helper interference; issue 112's maintainer response
-identifies a ban or network failure without exposing a device-binding route or
-algorithm; issue 108 is the already audited encoding transition covered by the
-current public transforms and owner `jv=99` line. These reports add no new
-Provider capability or protocol fact, while retaining the existing shared
+not only Git refs. No issue had changed after 2026-07-06. Issues 109 and 113
+report only local proxy/Capture-helper interference; issue 112's maintainer
+response identifies a ban or network failure without exposing a
+device-binding route or algorithm; issue 108 is the already audited encoding
+transition covered by the current public transforms and owner `jv=99` line.
+The public GitHub Release feed does exist: latest `1.5.4` was published on
+2025-12-09 and its `Easy_Cidaren1_5_4.zip` asset has SHA-256
+`526011a4ccd14cc38887a663d54a5c78c33d8ea3d48e6c424a32128b6d0d8aca`.
+This corrects the prior tag-only description but introduces no newer protocol
+or capability delta. The reports likewise retain the existing shared
 helper-execution and live-validation gates.
+
+The subsequent 2026-08-14 Provider-hardening checkpoint again resolved
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`,
+`ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`, public
+`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097` and historical
+`github123666/main@1409858800f3c4bd27577a08049bf1f8d17a069c`. Historical
+latest Release remained `v3.73` from 2024-04-02; owner release metadata
+remained unavailable. The public issue ordering remained headed by issue 112
+at 2026-07-06, so no new route, crypto transform, authentication flow or
+assessment operation entered scope.
+
+With no upstream behavior delta, the checkpoint tightened only Provider-owned
+secret/evidence lifetimes. Capture command digest bytes containing Core's
+session nonce are cleared immediately after hashing. Partial word inventories,
+case-folded keys, prototype results, aliases and completion prefixes now use
+RAII zeroization through duplicate, identity-drift and asynchronous transport
+failure paths; candidate validation borrows the immutable Question before any
+owned copy. All 137 Cidaren Provider tests, all-target strict clippy, package
+formatting and scoped diff checks passed.
 
 ## Check procedure
 
