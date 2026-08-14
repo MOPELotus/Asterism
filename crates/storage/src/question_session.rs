@@ -289,6 +289,111 @@ pub(crate) async fn claim_optional_question_session_for_scheduled_execution(
     Ok(true)
 }
 
+/// Atomically consumes the optional durable Question session with a successful
+/// Execution. Every registered remote operation must have a definite accepted
+/// outcome, and the final continuation must be the rotation produced by the
+/// latest operation.
+pub(crate) async fn consume_question_session_for_succeeded_execution(
+    transaction: &mut Transaction<'_, Sqlite>,
+    execution_id: ExecutionId,
+    consumed_at: Timestamp,
+    correlation_id: &str,
+) -> Result<(), StorageError> {
+    validate_correlation_id(correlation_id)?;
+    let query = format!("{SESSION_SELECT} WHERE execution_id = ?");
+    let Some(row) = sqlx::query(&query)
+        .bind(execution_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+    else {
+        return Ok(());
+    };
+    let mut session = decode_session(&row)?;
+    if session.state != QuestionSessionState::Claimed
+        || session.execution_id != Some(execution_id)
+        || !binding_is_valid(transaction, &session).await?
+        || !accepted_operation_chain_is_complete(transaction, &session, consumed_at).await?
+    {
+        return Err(StorageError::InvalidData(
+            "successful Execution has an unresolved Question session".to_owned(),
+        ));
+    }
+    let expected_revision = session.revision;
+    session
+        .consume(consumed_at)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    persist_transition(transaction, &session, expected_revision).await?;
+    insert_audit(
+        transaction,
+        ("execution", Some(execution_id.to_string())),
+        "question_session_consumed",
+        correlation_id,
+        &session,
+    )
+    .await
+}
+
+async fn accepted_operation_chain_is_complete(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &QuestionSession,
+    consumed_at: Timestamp,
+) -> Result<bool, StorageError> {
+    let row = sqlx::query(
+        "SELECT continuation.execution_id, continuation.revision, continuation.updated_at, \
+                COUNT(operation.sequence) AS operation_count, \
+                SUM(CASE WHEN operation.state = 'accepted' THEN 0 ELSE 1 END) AS unresolved_count, \
+                MAX(operation.sequence) AS latest_sequence \
+         FROM question_session_continuations AS continuation \
+         LEFT JOIN question_session_operations AS operation \
+           ON operation.session_id = continuation.session_id \
+         WHERE continuation.session_id = ? \
+         GROUP BY continuation.execution_id, continuation.revision, continuation.updated_at",
+    )
+    .bind(session.id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let continuation_execution_id = row
+        .try_get::<Option<&str>, _>("execution_id")?
+        .map(parse_id)
+        .transpose()?;
+    let continuation_revision = u32::try_from(row.try_get::<i64, _>("revision")?)
+        .map_err(|_| StorageError::InvalidData("invalid continuation revision".to_owned()))?;
+    let continuation_updated_at = decode_timestamp(row.try_get("updated_at")?)?;
+    let operation_count = row.try_get::<i64, _>("operation_count")?;
+    let unresolved_count = row.try_get::<i64, _>("unresolved_count")?;
+    let latest_sequence = row.try_get::<Option<i64>, _>("latest_sequence")?;
+    let latest = if let Some(sequence) = latest_sequence {
+        sqlx::query(
+            "SELECT continuation_revision, completed_at FROM question_session_operations \
+             WHERE session_id = ? AND sequence = ? AND state = 'accepted'",
+        )
+        .bind(session.id.to_string())
+        .bind(sequence)
+        .fetch_optional(&mut **transaction)
+        .await?
+    } else {
+        None
+    };
+    let Some(latest) = latest else {
+        return Ok(false);
+    };
+    let latest_revision = u32::try_from(latest.try_get::<i64, _>("continuation_revision")?)
+        .map_err(|_| StorageError::InvalidData("invalid operation revision".to_owned()))?;
+    let latest_completed_at = latest
+        .try_get::<Option<&str>, _>("completed_at")?
+        .map(decode_timestamp)
+        .transpose()?;
+    Ok(continuation_execution_id == session.execution_id
+        && operation_count > 0
+        && unresolved_count == 0
+        && latest_revision.checked_add(1) == Some(continuation_revision)
+        && continuation_updated_at <= consumed_at
+        && latest_completed_at.is_some_and(|completed_at| completed_at <= consumed_at))
+}
+
 pub(crate) async fn insert_question_session_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     session: &QuestionSession,

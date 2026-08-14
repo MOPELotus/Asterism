@@ -534,6 +534,12 @@ pub trait QuestionSessionArtifactRepository: Send + Sync {
     ) -> Result<QuestionSessionOperationFinishOutcome, SecretStoreError>;
 }
 
+/// Creates one permanently Provider-scoped post-materialization artifact
+/// boundary selected from Core-owned account binding.
+pub trait QuestionSessionArtifactRepositoryFactory: Send + Sync {
+    fn for_provider(&self, provider_id: ProviderId) -> Arc<dyn QuestionSessionArtifactRepository>;
+}
+
 /// One immutable candidate returned by a specific `AnswerSource` and bound to a
 /// Question inside an immutable `QuestionSnapshot`.
 #[derive(Clone, Debug, PartialEq)]

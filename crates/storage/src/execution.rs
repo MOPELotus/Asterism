@@ -19,7 +19,10 @@ use sqlx::Row;
 
 use crate::credit::settle_execution_reservation;
 use crate::outbox::enqueue_in_transaction;
-use crate::question_session::claim_optional_question_session_for_scheduled_execution;
+use crate::question_session::{
+    claim_optional_question_session_for_scheduled_execution,
+    consume_question_session_for_succeeded_execution,
+};
 use crate::{
     Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
     ExecutionBillingReservation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
@@ -1267,6 +1270,15 @@ async fn apply_attempt_finish(
     expected_execution_state: ExecutionState,
     expected_task_state: OrchestrationState,
 ) -> Result<(), StorageError> {
+    if request.final_state == ExecutionState::Succeeded {
+        consume_question_session_for_succeeded_execution(
+            transaction,
+            request.execution_id,
+            request.at,
+            request.correlation_id,
+        )
+        .await?;
+    }
     let attempt_update = sqlx::query(
         "UPDATE execution_attempts SET finished_at = ?, result = ?, error_class = ?, \
              provider_trace_id = ? \

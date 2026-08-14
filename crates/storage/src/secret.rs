@@ -24,7 +24,6 @@ use chacha20poly1305::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
-use crate::QuestionReadContinuationRepositoryFactory;
 use crate::{
     AuthBootstrapCredentialCommit, AuthBootstrapCredentialCommitOutcome,
     AuthBootstrapCredentialCommitRequest, AuthBootstrapCredentialRepository,
@@ -32,6 +31,7 @@ use crate::{
     auth_bootstrap::{authenticate_access_in_transaction, complete_auth_bootstrap_in_transaction},
     auth_session::update_auth_session_in_transaction,
 };
+use crate::{QuestionReadContinuationRepositoryFactory, QuestionSessionArtifactRepositoryFactory};
 
 const MAX_SECRET_BYTES: usize = 1024 * 1024;
 
@@ -138,6 +138,19 @@ impl SqliteSecretStore {
         )
     }
 
+    /// Builds a permanently Provider-scoped encrypted continuation repository
+    /// for operations on a materialized `QuestionSession`.
+    pub fn question_session_artifacts(
+        &self,
+        provider_id: ProviderId,
+    ) -> crate::SqliteQuestionSessionArtifactRepository {
+        crate::SqliteQuestionSessionArtifactRepository::new(
+            self.database.clone(),
+            self.keyring.clone(),
+            provider_id,
+        )
+    }
+
     async fn replace_provider_credentials_internal(
         &self,
         request: CredentialSetCommit<'_>,
@@ -220,6 +233,15 @@ impl QuestionReadContinuationRepositoryFactory for SqliteSecretStore {
         provider_id: ProviderId,
     ) -> Arc<dyn crate::QuestionReadContinuationRepository> {
         Arc::new(self.question_read_continuations(provider_id))
+    }
+}
+
+impl QuestionSessionArtifactRepositoryFactory for SqliteSecretStore {
+    fn for_provider(
+        &self,
+        provider_id: ProviderId,
+    ) -> Arc<dyn crate::QuestionSessionArtifactRepository> {
+        Arc::new(self.question_session_artifacts(provider_id))
     }
 }
 

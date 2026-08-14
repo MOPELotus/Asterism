@@ -4,8 +4,9 @@ use asterism_domain::Timestamp;
 use asterism_provider_api::ProviderRegistry;
 use asterism_storage::{
     ExecutionCapabilityStepRepository, ExecutionLeaseRepository, ExecutionRepository,
-    ExecutionVerificationRecoveryRepository, ProviderAccountRuntimeRepository, SchedulerRepository,
-    StorageError, TaskRuntimeRepository,
+    ExecutionVerificationRecoveryRepository, ProviderAccountRuntimeRepository,
+    QuestionSessionArtifactRepositoryFactory, SchedulerRepository, StorageError,
+    TaskRuntimeRepository,
 };
 use futures_util::{StreamExt as _, stream};
 
@@ -81,6 +82,15 @@ where
             runner,
             config,
         })
+    }
+
+    #[must_use]
+    pub fn with_question_session_artifacts(
+        mut self,
+        artifacts: Arc<dyn QuestionSessionArtifactRepositoryFactory>,
+    ) -> Self {
+        self.runner = self.runner.with_question_session_artifacts(artifacts);
+        self
     }
 }
 

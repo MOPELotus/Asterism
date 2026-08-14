@@ -171,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
     let secret_store =
         secret_keyring.map(|keyring| SqliteSecretStore::new(database.clone(), keyring));
     let secret_store_configured = secret_store.is_some();
+    let execution_secret_store = secret_store.clone();
     let providers = Arc::new(build_provider_registry(&config, secret_store.as_ref())?);
     let events = EventBus::new(LIVE_EVENT_CAPACITY);
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
@@ -199,8 +200,13 @@ async fn main() -> anyhow::Result<()> {
         &config,
         shutdown_receiver.clone(),
     )?;
-    let execution_scheduler_handle =
-        start_execution_scheduler(&database, providers, &config, shutdown_receiver)?;
+    let execution_scheduler_handle = start_execution_scheduler(
+        &database,
+        providers,
+        execution_secret_store,
+        &config,
+        shutdown_receiver,
+    )?;
 
     let graceful_shutdown_sender = shutdown_sender.clone();
     let server_result = axum::serve(
@@ -473,6 +479,7 @@ fn start_scan_scheduler(
 fn start_execution_scheduler(
     database: &Database,
     providers: Arc<ProviderRegistry>,
+    secret_store: Option<SqliteSecretStore>,
     config: &Config,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
@@ -505,6 +512,11 @@ fn start_execution_scheduler(
             },
         )
         .context("failed to configure the execution scheduler")?;
+        let worker = if let Some(secret_store) = secret_store {
+            worker.with_question_session_artifacts(Arc::new(secret_store))
+        } else {
+            worker
+        };
         let tick_interval = std::time::Duration::from_secs(config.scheduler.tick_interval_seconds);
         Some(tokio::spawn(run_execution_scheduler(
             database.clone(),

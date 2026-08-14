@@ -15,30 +15,40 @@ use asterism_domain::{
     SubmissionVerificationStatus, Task, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
-    ExecutionEventSink, ExecutionRequest as ProviderExecutionRequest, ProviderCapability,
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionConcurrency,
-    ProviderExecutionLog, ProviderProgress, ProviderRegistry, ResolvedProviderRuntimeSettings,
+    AmbiguousProviderQuestionSessionOperation, ExecutionEventSink,
+    ExecutionRequest as ProviderExecutionRequest, ProviderCapability, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderExecutionConcurrency, ProviderExecutionLog,
+    ProviderProgress, ProviderRegistry, ProviderSubmissionStepOutcome,
+    ResolvedProviderQuestionSessionContinuation, ResolvedProviderRuntimeSettings,
     SubmissionExecuteCapability, SubmissionVerifyCapability, TaskExecutionCapability,
     TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
 };
+use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionCapabilityStep,
     ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
     ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
     ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionRecoveryFinishRequest,
     ExecutionRepository, ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository,
-    LeaseAcquireOutcome, ProviderAccountRuntimeRepository, SchedulerRepository, StorageError,
-    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, TaskRuntimeRepository,
-    VerificationRecoveryStartRequest,
+    LeaseAcquireOutcome, ProviderAccountRuntimeRepository, QuestionSessionArtifactRepository,
+    QuestionSessionArtifactRepositoryFactory, QuestionSessionOperation,
+    QuestionSessionOperationAcceptRequest, QuestionSessionOperationFinishOutcome,
+    QuestionSessionOperationIssueOutcome, QuestionSessionOperationIssueRequest,
+    QuestionSessionOperationState, ResolvedQuestionSessionContinuation, SchedulerRepository,
+    StorageError, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
+    TaskRuntimeRepository, VerificationRecoveryStartRequest,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::Notify;
 
 use crate::{FormalAssessmentPolicy, TaskAction, authorize_task_action};
+
+const MAX_DURABLE_SUBMISSION_OPERATIONS: usize = 512;
+const MAX_DURABLE_SUBMISSION_DELAY_SECONDS: u64 = 15 * 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionRunnerConfig {
@@ -167,7 +177,6 @@ fn decrement_or_remove<K: Ord + Clone>(values: &mut BTreeMap<K, u32>, key: &K) {
     }
 }
 
-#[derive(Debug)]
 pub struct ScheduledExecutionRunner<E, L, S, A, T> {
     registry: Arc<ProviderRegistry>,
     executions: E,
@@ -175,6 +184,7 @@ pub struct ScheduledExecutionRunner<E, L, S, A, T> {
     scheduler: S,
     accounts: A,
     tasks: T,
+    question_sessions: Option<Arc<dyn QuestionSessionArtifactRepositoryFactory>>,
     admission: Arc<ExecutionAdmissionController>,
     config: ExecutionRunnerConfig,
 }
@@ -203,11 +213,38 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
             scheduler,
             accounts,
             tasks,
+            question_sessions: None,
             admission: Arc::new(ExecutionAdmissionController::new(
                 config.global_concurrency_limit,
             )),
             config,
         })
+    }
+
+    #[must_use]
+    pub fn with_question_session_artifacts(
+        mut self,
+        artifacts: Arc<dyn QuestionSessionArtifactRepositoryFactory>,
+    ) -> Self {
+        self.question_sessions = Some(artifacts);
+        self
+    }
+}
+
+impl<E, L, S, A, T> std::fmt::Debug for ScheduledExecutionRunner<E, L, S, A, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScheduledExecutionRunner")
+            .field("registry", &self.registry)
+            .field("executions", &"configured")
+            .field("leases", &"configured")
+            .field("scheduler", &"configured")
+            .field("accounts", &"configured")
+            .field("tasks", &"configured")
+            .field("question_sessions", &self.question_sessions.is_some())
+            .field("admission", &self.admission)
+            .field("config", &self.config)
+            .finish()
     }
 }
 
@@ -684,7 +721,7 @@ where
                 )
                 .await;
         };
-        let receipt = self
+        let mut receipt = self
             .executions
             .find_active_submission_receipt(execution_id)
             .await?;
@@ -703,15 +740,154 @@ where
                 )
                 .await;
         }
+        let artifacts = self
+            .question_sessions
+            .as_ref()
+            .map(|factory| factory.for_provider(prepared.context.provider_id.clone()));
+        let access = SecretAccess {
+            actor: SecretActor::CoreService("execution-worker"),
+            correlation_id: correlation_id.to_owned(),
+            reason: "durable QuestionSession submission recovery".to_owned(),
+        };
+        let mut resolved_session = if let Some(artifacts) = artifacts.as_ref() {
+            artifacts
+                .resolve_question_session_continuation(execution_id, &access)
+                .await?
+        } else {
+            None
+        };
+        if let (Some(artifacts), Some(resolved)) = (artifacts.as_ref(), resolved_session.as_ref())
+            && let Some(mut operation) = resolved.latest_operation.clone()
+            && matches!(
+                operation.state,
+                QuestionSessionOperationState::Issued | QuestionSessionOperationState::Ambiguous
+            )
+        {
+            if operation.state == QuestionSessionOperationState::Issued {
+                operation = match artifacts
+                    .finish_question_session_operation(
+                        &operation,
+                        QuestionSessionOperationState::Ambiguous,
+                        None,
+                        now.max(operation.issued_at),
+                        correlation_id,
+                    )
+                    .await?
+                {
+                    QuestionSessionOperationFinishOutcome::Finished(operation)
+                    | QuestionSessionOperationFinishOutcome::Duplicate(operation)
+                        if operation.state == QuestionSessionOperationState::Ambiguous =>
+                    {
+                        operation
+                    }
+                    _ => return Err(ScheduledExecutionRunError::StateConflict),
+                };
+            }
+            let recovered = {
+                let continuation = provider_session_continuation(resolved);
+                let ambiguous = provider_ambiguous_operation(&operation);
+                let provider = prepared.execute.recover_ambiguous_submission_operation(
+                    &prepared.context,
+                    &prepared.remote_task_id,
+                    &prepared.draft,
+                    continuation,
+                    &ambiguous,
+                    &prepared.runtime_settings,
+                );
+                tokio::pin!(provider);
+                let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                heartbeat.tick().await;
+                loop {
+                    tokio::select! {
+                        result = &mut provider => break result,
+                        _ = heartbeat.tick() => self.renew_claims(job, execution_id).await?,
+                    }
+                }
+            };
+            let recovered = match recovered {
+                Ok(recovered) => recovered,
+                Err(error) => {
+                    return self
+                        .finish_from_recovery_error(job, &error, now, correlation_id)
+                        .await;
+                }
+            };
+            if recovered.is_none() {
+                return self
+                    .defer_or_require_submission_review(
+                        job,
+                        ProviderErrorClass::InvalidRemoteState,
+                        now,
+                        correlation_id,
+                    )
+                    .await;
+            }
+            if let Some(outcome) = recovered {
+                let recovered_receipt = accept_durable_submission_outcome(
+                    artifacts.as_ref(),
+                    &operation,
+                    outcome,
+                    &access,
+                )
+                .await?;
+                if let Some(recovered_receipt) = recovered_receipt {
+                    let record = SubmissionAttemptReceipt {
+                        submission_draft_id: prepared.draft.id,
+                        execution_id,
+                        execution_attempt_id: attempt_id,
+                        receipt: recovered_receipt.clone(),
+                    };
+                    record
+                        .validate_for_draft(&prepared.draft)
+                        .map_err(|_| ScheduledExecutionRunError::StateConflict)?;
+                    self.executions
+                        .persist_submission_receipt(SubmissionReceiptPersistRequest {
+                            record: &record,
+                            scheduler_job_id: job.id,
+                            worker_id: claimed_worker(job)?,
+                            correlation_id,
+                            at: Utc::now().max(now),
+                        })
+                        .await?;
+                    receipt = Some(record);
+                } else {
+                    let retry_at = self.recovery_retry_at(job, now)?.unwrap_or(now);
+                    return self
+                        .finish_recovery(
+                            job,
+                            ExecutionState::RetryWaiting,
+                            Some(ProviderErrorClass::InvalidRemoteState),
+                            Some(retry_at),
+                            now,
+                            correlation_id,
+                        )
+                        .await;
+                }
+                resolved_session = artifacts
+                    .resolve_question_session_continuation(execution_id, &access)
+                    .await?;
+            }
+        }
         let _admission = self
             .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
             .await?;
-        let provider = prepared.verify.verify_submission(
-            &prepared.context,
-            &prepared.remote_task_id,
-            &prepared.draft,
-            receipt.as_ref().map(|record| &record.receipt),
-        );
+        let provider = if let Some(resolved) = resolved_session.as_ref() {
+            prepared.verify.verify_submission_with_session(
+                &prepared.context,
+                &prepared.remote_task_id,
+                &prepared.draft,
+                receipt.as_ref().map(|record| &record.receipt),
+                provider_session_continuation(resolved),
+            )
+        } else {
+            prepared.verify.verify_submission(
+                &prepared.context,
+                &prepared.remote_task_id,
+                &prepared.draft,
+                receipt.as_ref().map(|record| &record.receipt),
+            )
+        };
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2067,6 +2243,10 @@ where
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the entry keeps shared admission and legacy/durable submission dispatch visible"
+    )]
     async fn call_submission(
         &self,
         job: &ScheduledJob,
@@ -2091,6 +2271,32 @@ where
             correlation_id,
             claim_lost: Arc::clone(&claim_lost),
         };
+        if let Some(factory) = self.question_sessions.as_ref() {
+            let artifacts = factory.for_provider(prepared.context.provider_id.clone());
+            let access = SecretAccess {
+                actor: SecretActor::CoreService("execution-worker"),
+                correlation_id: correlation_id.to_owned(),
+                reason: "durable QuestionSession submission".to_owned(),
+            };
+            if let Some(resolved) = artifacts
+                .resolve_question_session_continuation(attempt.execution_id, &access)
+                .await?
+            {
+                return self
+                    .call_durable_submission_claimed(
+                        job,
+                        attempt,
+                        prepared,
+                        artifacts,
+                        resolved,
+                        &access,
+                        &sink,
+                        &claim_lost,
+                        correlation_id,
+                    )
+                    .await;
+            }
+        }
         let provider = prepared.execute.execute_submission(
             &prepared.context,
             &prepared.remote_task_id,
@@ -2157,6 +2363,333 @@ where
             .await
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the durable loop keeps resolve, issue-before-send, ambiguity, continuation rotation and receipt persistence in one auditable path"
+    )]
+    async fn call_durable_submission_claimed(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        prepared: &PreparedSubmissionCall,
+        artifacts: Arc<dyn QuestionSessionArtifactRepository>,
+        mut resolved: ResolvedQuestionSessionContinuation,
+        access: &SecretAccess,
+        sink: &(dyn ExecutionEventSink + Send + Sync),
+        claim_lost: &AtomicBool,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        for _ in 0..MAX_DURABLE_SUBMISSION_OPERATIONS {
+            if let Some(latest) = resolved.latest_operation.clone() {
+                match latest.state {
+                    QuestionSessionOperationState::Issued => {
+                        let finished = artifacts
+                            .finish_question_session_operation(
+                                &latest,
+                                QuestionSessionOperationState::Ambiguous,
+                                None,
+                                Utc::now().max(latest.issued_at),
+                                correlation_id,
+                            )
+                            .await?;
+                        if !matches!(
+                            finished,
+                            QuestionSessionOperationFinishOutcome::Finished(_)
+                                | QuestionSessionOperationFinishOutcome::Duplicate(_)
+                        ) {
+                            return Err(ScheduledExecutionRunError::StateConflict);
+                        }
+                        return self
+                            .begin_verification_recovery(
+                                job,
+                                attempt,
+                                ProviderErrorClass::Network,
+                                correlation_id,
+                            )
+                            .await;
+                    }
+                    QuestionSessionOperationState::Ambiguous => {
+                        let recovered = {
+                            let continuation = provider_session_continuation(&resolved);
+                            let ambiguous = provider_ambiguous_operation(&latest);
+                            let provider = prepared.execute.recover_ambiguous_submission_operation(
+                                &prepared.context,
+                                &prepared.remote_task_id,
+                                &prepared.draft,
+                                continuation,
+                                &ambiguous,
+                                &prepared.runtime_settings,
+                            );
+                            tokio::pin!(provider);
+                            let mut heartbeat =
+                                tokio::time::interval(self.config.heartbeat_interval);
+                            heartbeat
+                                .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                            heartbeat.tick().await;
+                            loop {
+                                tokio::select! {
+                                    result = &mut provider => break result,
+                                    _ = heartbeat.tick() => self.renew_claims(job, attempt.execution_id).await?,
+                                }
+                            }
+                        };
+                        if claim_lost.load(Ordering::Acquire) {
+                            return Err(ScheduledExecutionRunError::ClaimLost);
+                        }
+                        let recovered = match recovered {
+                            Ok(recovered) => recovered,
+                            Err(error) => {
+                                return self
+                                    .begin_verification_recovery(
+                                        job,
+                                        attempt,
+                                        provider_error_class(&error),
+                                        correlation_id,
+                                    )
+                                    .await;
+                            }
+                        };
+                        let Some(outcome) = recovered else {
+                            return self
+                                .begin_verification_recovery(
+                                    job,
+                                    attempt,
+                                    ProviderErrorClass::Network,
+                                    correlation_id,
+                                )
+                                .await;
+                        };
+                        if let Some(receipt) = accept_durable_submission_outcome(
+                            artifacts.as_ref(),
+                            &latest,
+                            outcome,
+                            access,
+                        )
+                        .await?
+                        {
+                            return self
+                                .persist_durable_submission_receipt_and_verify(
+                                    job,
+                                    attempt,
+                                    prepared,
+                                    receipt,
+                                    correlation_id,
+                                )
+                                .await;
+                        }
+                        resolved = artifacts
+                            .resolve_question_session_continuation(attempt.execution_id, access)
+                            .await?
+                            .ok_or(ScheduledExecutionRunError::StateConflict)?;
+                        continue;
+                    }
+                    QuestionSessionOperationState::Rejected => {
+                        return self
+                            .finish_failure(
+                                job,
+                                attempt,
+                                ProviderErrorClass::InvalidRemoteState,
+                                FailureDisposition::Failed,
+                                Utc::now().max(attempt.started_at),
+                                correlation_id,
+                            )
+                            .await;
+                    }
+                    QuestionSessionOperationState::Accepted => {}
+                }
+            }
+
+            let continuation = provider_session_continuation(&resolved);
+            let prepared_operation = prepared
+                .execute
+                .prepare_submission_operation(
+                    &prepared.context,
+                    &prepared.remote_task_id,
+                    &prepared.draft,
+                    continuation,
+                    &prepared.runtime_settings,
+                )
+                .await;
+            let Some(operation) = (match prepared_operation {
+                Ok(operation) => operation,
+                Err(error) => {
+                    return self
+                        .begin_verification_recovery(
+                            job,
+                            attempt,
+                            provider_error_class(&error),
+                            correlation_id,
+                        )
+                        .await;
+                }
+            }) else {
+                return self
+                    .begin_verification_recovery(
+                        job,
+                        attempt,
+                        ProviderErrorClass::ProtocolDrift,
+                        correlation_id,
+                    )
+                    .await;
+            };
+            let operation_type = operation.operation_type().to_owned();
+            let request_digest = operation.request_digest();
+            let delay_seconds = operation.delay_before_execute_seconds();
+            if !valid_question_session_label(&prepared.context.provider_id, &operation_type)
+                || request_digest == [0; 32]
+                || delay_seconds > MAX_DURABLE_SUBMISSION_DELAY_SECONDS
+            {
+                return self
+                    .begin_verification_recovery(
+                        job,
+                        attempt,
+                        ProviderErrorClass::ProtocolDrift,
+                        correlation_id,
+                    )
+                    .await;
+            }
+            let issued_at = Utc::now().max(resolved.metadata.updated_at);
+            let issued = match artifacts
+                .issue_question_session_operation(QuestionSessionOperationIssueRequest {
+                    execution_id: attempt.execution_id,
+                    execution_attempt_id: attempt.id,
+                    expected_continuation_revision: resolved.metadata.revision,
+                    operation_type,
+                    request_digest,
+                    issued_at,
+                    correlation_id: correlation_id.to_owned(),
+                })
+                .await?
+            {
+                QuestionSessionOperationIssueOutcome::Issued(operation) => operation,
+                QuestionSessionOperationIssueOutcome::Duplicate(_)
+                | QuestionSessionOperationIssueOutcome::Conflict
+                | QuestionSessionOperationIssueOutcome::Unavailable => {
+                    return self
+                        .begin_verification_recovery(
+                            job,
+                            attempt,
+                            ProviderErrorClass::Network,
+                            correlation_id,
+                        )
+                        .await;
+                }
+            };
+            if delay_seconds > 0 {
+                let delay = tokio::time::sleep(StdDuration::from_secs(delay_seconds));
+                tokio::pin!(delay);
+                let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                heartbeat.tick().await;
+                loop {
+                    tokio::select! {
+                        () = &mut delay => break,
+                        _ = heartbeat.tick() => self.renew_claims(job, attempt.execution_id).await?,
+                    }
+                }
+            }
+            let provider = operation.execute(&prepared.context, sink);
+            tokio::pin!(provider);
+            let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            heartbeat.tick().await;
+            let outcome = loop {
+                tokio::select! {
+                    result = &mut provider => break result,
+                    _ = heartbeat.tick() => self.renew_claims(job, attempt.execution_id).await?,
+                }
+            };
+            if claim_lost.load(Ordering::Acquire) {
+                return Err(ScheduledExecutionRunError::ClaimLost);
+            }
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let finished = artifacts
+                        .finish_question_session_operation(
+                            &issued,
+                            QuestionSessionOperationState::Ambiguous,
+                            None,
+                            Utc::now().max(issued.issued_at),
+                            correlation_id,
+                        )
+                        .await?;
+                    if !matches!(
+                        finished,
+                        QuestionSessionOperationFinishOutcome::Finished(_)
+                            | QuestionSessionOperationFinishOutcome::Duplicate(_)
+                    ) {
+                        return Err(ScheduledExecutionRunError::StateConflict);
+                    }
+                    return self
+                        .begin_verification_recovery(
+                            job,
+                            attempt,
+                            provider_error_class(&error),
+                            correlation_id,
+                        )
+                        .await;
+                }
+            };
+            if let Some(receipt) =
+                accept_durable_submission_outcome(artifacts.as_ref(), &issued, outcome, access)
+                    .await?
+            {
+                return self
+                    .persist_durable_submission_receipt_and_verify(
+                        job,
+                        attempt,
+                        prepared,
+                        receipt,
+                        correlation_id,
+                    )
+                    .await;
+            }
+            resolved = artifacts
+                .resolve_question_session_continuation(attempt.execution_id, access)
+                .await?
+                .ok_or(ScheduledExecutionRunError::StateConflict)?;
+        }
+        self.begin_verification_recovery(
+            job,
+            attempt,
+            ProviderErrorClass::ProtocolDrift,
+            correlation_id,
+        )
+        .await
+    }
+
+    async fn persist_durable_submission_receipt_and_verify(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        prepared: &PreparedSubmissionCall,
+        receipt: asterism_domain::SubmissionReceipt,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let record = SubmissionAttemptReceipt {
+            submission_draft_id: prepared.draft.id,
+            execution_id: attempt.execution_id,
+            execution_attempt_id: attempt.id,
+            receipt: receipt.clone(),
+        };
+        record
+            .validate_for_draft(&prepared.draft)
+            .map_err(|_| ScheduledExecutionRunError::StateConflict)?;
+        self.executions
+            .persist_submission_receipt(SubmissionReceiptPersistRequest {
+                record: &record,
+                scheduler_job_id: job.id,
+                worker_id: claimed_worker(job)?,
+                correlation_id,
+                at: Utc::now().max(attempt.started_at),
+            })
+            .await?;
+        self.verify_submission_claimed(job, attempt, prepared, Some(&receipt), correlation_id)
+            .await
+    }
+
     async fn verify_submission_without_mutation(
         &self,
         job: &ScheduledJob,
@@ -2185,12 +2718,38 @@ where
         receipt: Option<&asterism_domain::SubmissionReceipt>,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
-        let provider = prepared.verify.verify_submission(
-            &prepared.context,
-            &prepared.remote_task_id,
-            &prepared.draft,
-            receipt,
-        );
+        let artifacts = self
+            .question_sessions
+            .as_ref()
+            .map(|factory| factory.for_provider(prepared.context.provider_id.clone()));
+        let access = SecretAccess {
+            actor: SecretActor::CoreService("execution-worker"),
+            correlation_id: correlation_id.to_owned(),
+            reason: "durable QuestionSession submission verification".to_owned(),
+        };
+        let resolved = if let Some(artifacts) = artifacts.as_ref() {
+            artifacts
+                .resolve_question_session_continuation(attempt.execution_id, &access)
+                .await?
+        } else {
+            None
+        };
+        let provider = if let Some(resolved) = resolved.as_ref() {
+            prepared.verify.verify_submission_with_session(
+                &prepared.context,
+                &prepared.remote_task_id,
+                &prepared.draft,
+                receipt,
+                provider_session_continuation(resolved),
+            )
+        } else {
+            prepared.verify.verify_submission(
+                &prepared.context,
+                &prepared.remote_task_id,
+                &prepared.draft,
+                receipt,
+            )
+        };
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2510,6 +3069,96 @@ async fn execution_id_to_task<E: ExecutionRepository>(
         .await?
         .map(|execution| execution.task_id)
         .ok_or(ScheduledExecutionRunError::ExecutionMissing(execution_id))
+}
+
+fn provider_session_continuation(
+    resolved: &ResolvedQuestionSessionContinuation,
+) -> ResolvedProviderQuestionSessionContinuation<'_> {
+    ResolvedProviderQuestionSessionContinuation {
+        continuation_type: &resolved.metadata.continuation_type,
+        continuation_digest: resolved.metadata.continuation_digest,
+        phase: &resolved.metadata.phase,
+        revision: resolved.metadata.revision,
+        value: &resolved.value,
+    }
+}
+
+fn provider_ambiguous_operation(
+    operation: &QuestionSessionOperation,
+) -> AmbiguousProviderQuestionSessionOperation {
+    AmbiguousProviderQuestionSessionOperation {
+        continuation_revision: operation.continuation_revision,
+        operation_type: operation.operation_type.clone(),
+        request_digest: operation.request_digest,
+        issued_at: operation.issued_at,
+        ambiguous_at: operation.completed_at.unwrap_or(operation.issued_at),
+    }
+}
+
+async fn accept_durable_submission_outcome(
+    artifacts: &dyn QuestionSessionArtifactRepository,
+    operation: &QuestionSessionOperation,
+    outcome: ProviderSubmissionStepOutcome,
+    access: &SecretAccess,
+) -> Result<Option<asterism_domain::SubmissionReceipt>, ScheduledExecutionRunError> {
+    let (continuation, receipt, response_digest, received_at) = match outcome {
+        ProviderSubmissionStepOutcome::Continue {
+            continuation,
+            response_digest,
+            received_at,
+        } => (continuation, None, response_digest, received_at),
+        ProviderSubmissionStepOutcome::Submitted {
+            continuation,
+            receipt,
+            response_digest,
+            received_at,
+        } => (continuation, Some(receipt), response_digest, received_at),
+    };
+    if response_digest == [0; 32]
+        || received_at < operation.issued_at
+        || receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.validate().is_err())
+    {
+        return Err(ScheduledExecutionRunError::StateConflict);
+    }
+    let (next_type, expected_digest, next_phase, replacement, _) = continuation.into_parts();
+    let accepted = artifacts
+        .accept_question_session_operation(QuestionSessionOperationAcceptRequest {
+            operation,
+            next_continuation_type: &next_type,
+            next_phase: &next_phase,
+            replacement,
+            result_digest: response_digest,
+            accepted_at: received_at,
+            access,
+        })
+        .await?;
+    match accepted {
+        QuestionSessionOperationFinishOutcome::Accepted { continuation, .. }
+            if continuation.continuation_digest == expected_digest =>
+        {
+            Ok(receipt)
+        }
+        QuestionSessionOperationFinishOutcome::Duplicate(_) => Ok(receipt),
+        QuestionSessionOperationFinishOutcome::Accepted { .. }
+        | QuestionSessionOperationFinishOutcome::Finished(_)
+        | QuestionSessionOperationFinishOutcome::Conflict
+        | QuestionSessionOperationFinishOutcome::Unavailable => {
+            Err(ScheduledExecutionRunError::StateConflict)
+        }
+    }
+}
+
+fn valid_question_session_label(provider_id: &ProviderId, value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+        && value
+            .strip_prefix(provider_id.as_str())
+            .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
 }
 
 struct PreparedProviderCall {
@@ -2960,35 +3609,42 @@ pub enum ScheduledExecutionRunError {
     RetryPolicy(#[from] RetryPolicyError),
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    SecretStore(#[from] SecretStoreError),
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeSet,
+        collections::{BTreeMap, BTreeSet},
         sync::{Arc, Mutex},
     };
 
     use asterism_domain::{
         AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, AssessmentClass,
         AuditActor, NormalizedAnswer, ProviderAccountId, ProviderId, ProviderRuntimeSettingsId,
-        Question, QuestionId, QuestionKind, QuestionOption, QuestionSnapshotId, RequestSource,
-        SelectedAnswer, SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadEncoding,
-        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, TaskId, UserId,
+        Question, QuestionId, QuestionKind, QuestionOption, QuestionSession, QuestionSnapshotId,
+        RequestSource, SelectedAnswer, SubmissionDraftId, SubmissionDraftItem,
+        SubmissionPayloadEncoding, SubmissionPayloadFieldPreview, SubmissionPayloadPreview, TaskId,
+        UserId,
     };
     use asterism_provider_api::{
-        ExecutionOutcome, ProviderCapability, ProviderEntry, ProviderIdentity, ProviderMetadata,
-        ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingDefinition,
-        ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, RemoteProgress,
+        ExecutionOutcome, PreparedProviderSubmissionOperation, ProviderCapability, ProviderEntry,
+        ProviderIdentity, ProviderMetadata, ProviderQuestionReadContinuation, ProviderResult,
+        ProviderRuntimeSettingsSchema, ProviderSettingDefinition, ProviderSettingKind,
+        ProviderSettingScope, ProviderSettingValue, ProviderSubmissionStepOutcome, RemoteProgress,
         SubmissionExecuteCapability, SubmissionVerifyCapability, TaskProgressCapability,
         VerificationLevel,
     };
+    use asterism_secrets::{SecretKey, SecretValue};
     use asterism_storage::{
         AnswerCandidateRecord, AnswerCandidateRepository, Database,
         ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-        ExecutionScheduleRequest, QuestionSnapshot, QuestionSnapshotRepository,
+        ExecutionScheduleRequest, QuestionSessionArtifactAttachRequest, QuestionSessionRepository,
+        QuestionSnapshot, QuestionSnapshotRepository, SecretKeyring,
         SqliteExecutionLeaseRepository, SqliteExecutionRepository, SqliteProviderAccountRepository,
-        SqliteQuestionSnapshotRepository, SqliteSchedulerRepository, SqliteTaskQueryRepository,
+        SqliteQuestionSessionRepository, SqliteQuestionSnapshotRepository,
+        SqliteSchedulerRepository, SqliteSecretStore, SqliteTaskQueryRepository,
         SubmissionDraftRepository,
     };
     use sqlx::Row;
@@ -3008,6 +3664,8 @@ mod tests {
         SubmissionConfirmed,
         SubmissionPending,
         SubmissionExecuteNetwork,
+        DurableSubmissionConfirmed,
+        DurableSubmissionAmbiguous,
     }
 
     #[tokio::test]
@@ -3076,6 +3734,8 @@ mod tests {
         calls: Mutex<u32>,
         progress_calls: Mutex<u32>,
         submission_verify_calls: Mutex<u32>,
+        durable_calls: Arc<Mutex<u32>>,
+        database: Database,
     }
 
     impl ProviderIdentity for FakeExecution {
@@ -3107,7 +3767,9 @@ mod tests {
                 ProviderBehavior::CompositeSuccess => request.requested_capabilities.clone(),
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionPending
-                | ProviderBehavior::SubmissionExecuteNetwork => {
+                | ProviderBehavior::SubmissionExecuteNetwork
+                | ProviderBehavior::DurableSubmissionConfirmed
+                | ProviderBehavior::DurableSubmissionAmbiguous => {
                     panic!("submission behaviors use the independent mutation slot")
                 }
                 _ => vec![TaskCapability::ResourceExecution],
@@ -3179,7 +3841,9 @@ mod tests {
                 }),
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionPending
-                | ProviderBehavior::SubmissionExecuteNetwork => {
+                | ProviderBehavior::SubmissionExecuteNetwork
+                | ProviderBehavior::DurableSubmissionConfirmed
+                | ProviderBehavior::DurableSubmissionAmbiguous => {
                     panic!("submission behaviors use the independent mutation slot")
                 }
             }
@@ -3235,7 +3899,9 @@ mod tests {
                 }),
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionPending
-                | ProviderBehavior::SubmissionExecuteNetwork => {
+                | ProviderBehavior::SubmissionExecuteNetwork
+                | ProviderBehavior::DurableSubmissionConfirmed
+                | ProviderBehavior::DurableSubmissionAmbiguous => {
                     panic!("submission recovery must use SubmissionVerify")
                 }
             }
@@ -3283,7 +3949,9 @@ mod tests {
                 }
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionPending
-                | ProviderBehavior::SubmissionExecuteNetwork => {
+                | ProviderBehavior::SubmissionExecuteNetwork
+                | ProviderBehavior::DurableSubmissionConfirmed
+                | ProviderBehavior::DurableSubmissionAmbiguous => {
                     panic!("submission recovery must use SubmissionVerify")
                 }
             }
@@ -3300,6 +3968,14 @@ mod tests {
             _runtime_settings: &ResolvedProviderRuntimeSettings,
             _events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<asterism_domain::SubmissionReceipt> {
+            assert!(
+                !matches!(
+                    self.behavior,
+                    ProviderBehavior::DurableSubmissionConfirmed
+                        | ProviderBehavior::DurableSubmissionAmbiguous
+                ),
+                "durable submission must use registered operations"
+            );
             *self.calls.lock().unwrap() += 1;
             assert_eq!(draft.provider_id, self.metadata.id);
             if self.behavior == ProviderBehavior::SubmissionExecuteNetwork {
@@ -3314,6 +3990,134 @@ mod tests {
                 provider_trace_id: Some("submission-trace".to_owned()),
                 received_at: Utc::now(),
             })
+        }
+
+        async fn prepare_submission_operation(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+            draft: &SubmissionDraft,
+            continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+            _runtime_settings: &ResolvedProviderRuntimeSettings,
+        ) -> ProviderResult<Option<Box<dyn PreparedProviderSubmissionOperation>>> {
+            if !matches!(
+                self.behavior,
+                ProviderBehavior::DurableSubmissionConfirmed
+                    | ProviderBehavior::DurableSubmissionAmbiguous
+            ) {
+                return Ok(None);
+            }
+            assert_eq!(draft.provider_id, self.metadata.id);
+            let (phase, expected_value, final_step, request_digest) = match continuation.phase {
+                "provider-alpha.questions-ready" => {
+                    ("answers-save", b"attempt-v1".as_slice(), false, [31; 32])
+                }
+                "provider-alpha.answers-saved" => {
+                    ("submit", b"attempt-v2".as_slice(), true, [32; 32])
+                }
+                _ => {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::ProtocolDrift,
+                        "fixture continuation phase is invalid",
+                    ));
+                }
+            };
+            assert_eq!(continuation.value.expose_secret(), expected_value);
+            Ok(Some(Box::new(FakeDurableSubmissionOperation {
+                database: self.database.clone(),
+                provider_id: self.metadata.id.clone(),
+                operation_type: format!("provider-alpha.{phase}"),
+                request_digest,
+                final_step,
+                fail_after_issue: self.behavior == ProviderBehavior::DurableSubmissionAmbiguous,
+                calls: self.durable_calls.clone(),
+            })))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeDurableSubmissionOperation {
+        database: Database,
+        provider_id: ProviderId,
+        operation_type: String,
+        request_digest: [u8; 32],
+        final_step: bool,
+        fail_after_issue: bool,
+        calls: Arc<Mutex<u32>>,
+    }
+
+    #[async_trait]
+    impl PreparedProviderSubmissionOperation for FakeDurableSubmissionOperation {
+        fn operation_type(&self) -> &str {
+            &self.operation_type
+        }
+
+        fn request_digest(&self) -> [u8; 32] {
+            self.request_digest
+        }
+
+        fn delay_before_execute_seconds(&self) -> u64 {
+            0
+        }
+
+        async fn execute(
+            self: Box<Self>,
+            _context: &ProviderContext,
+            _events: &(dyn ExecutionEventSink + Send + Sync),
+        ) -> ProviderResult<ProviderSubmissionStepOutcome> {
+            let issued: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM question_session_operations \
+                 WHERE operation_type = ? AND request_digest = ? AND state = 'issued'",
+            )
+            .bind(&self.operation_type)
+            .bind(self.request_digest.as_slice())
+            .fetch_one(self.database.pool())
+            .await
+            .map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "fixture could not inspect issued operation",
+                )
+            })?;
+            assert_eq!(issued, 1, "Provider ran before exact operation issue");
+            *self.calls.lock().unwrap() += 1;
+            if self.fail_after_issue {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "fixture operation outcome is ambiguous",
+                ));
+            }
+            let received_at = Utc::now();
+            let continuation = ProviderQuestionReadContinuation::try_new(
+                &self.provider_id,
+                "provider-alpha.question-attempt.v1",
+                if self.final_step {
+                    "provider-alpha.submitted"
+                } else {
+                    "provider-alpha.answers-saved"
+                },
+                SecretValue::new(if self.final_step {
+                    b"attempt-v3".to_vec()
+                } else {
+                    b"attempt-v2".to_vec()
+                }),
+                300,
+            )?;
+            if self.final_step {
+                ProviderSubmissionStepOutcome::submitted(
+                    continuation,
+                    asterism_domain::SubmissionReceipt {
+                        remote_status: "accepted".to_owned(),
+                        message_sanitized: None,
+                        provider_trace_id: Some("durable-submission".to_owned()),
+                        received_at,
+                    },
+                    [42; 32],
+                    received_at,
+                )
+            } else {
+                ProviderSubmissionStepOutcome::continuing(continuation, [41; 32], received_at)
+            }
         }
     }
 
@@ -3355,6 +4159,20 @@ mod tests {
                     .collect(),
                 verified_at: Utc::now(),
             })
+        }
+
+        async fn verify_submission_with_session(
+            &self,
+            context: &ProviderContext,
+            remote_task_id: &str,
+            draft: &SubmissionDraft,
+            receipt: Option<&asterism_domain::SubmissionReceipt>,
+            continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        ) -> ProviderResult<SubmissionVerificationSnapshot> {
+            assert_eq!(continuation.phase, "provider-alpha.submitted");
+            assert_eq!(continuation.value.expose_secret(), b"attempt-v3");
+            self.verify_submission(context, remote_task_id, draft, receipt)
+                .await
         }
     }
 
@@ -3672,6 +4490,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_submission_issues_each_operation_before_provider_dispatch() {
+        let fixture =
+            Fixture::durable_submission(ProviderBehavior::DurableSubmissionConfirmed).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        assert_eq!(*fixture.provider.durable_calls.lock().unwrap(), 2);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 1);
+        let operations: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT sequence, operation_type, state FROM question_session_operations \
+             ORDER BY sequence",
+        )
+        .fetch_all(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            operations,
+            vec![
+                (
+                    1,
+                    "provider-alpha.answers-save".to_owned(),
+                    "accepted".to_owned()
+                ),
+                (2, "provider-alpha.submit".to_owned(), "accepted".to_owned()),
+            ]
+        );
+        let continuation: (String, i64) = sqlx::query_as(
+            "SELECT phase, revision FROM question_session_continuations \
+             WHERE execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(continuation, ("provider-alpha.submitted".to_owned(), 3));
+        let session: (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT state, revision, closed_at FROM question_sessions WHERE execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(session.0, "consumed");
+        assert_eq!(session.1, 3);
+        assert!(session.2.is_some());
+    }
+
+    #[tokio::test]
+    async fn unresolved_durable_operation_never_falls_through_to_overall_verification() {
+        let mut fixture =
+            Fixture::durable_submission(ProviderBehavior::DurableSubmissionAmbiguous).await;
+        let first = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            first,
+            ScheduledExecutionOutcome::RecoveryScheduled(_)
+        ));
+        assert_eq!(*fixture.provider.durable_calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 0);
+
+        let recovery_at = Utc::now();
+        fixture.job = fixture.claim_recovery(recovery_at).await;
+        let recovered = fixture
+            .runner
+            .run_claimed(&fixture.job, recovery_at)
+            .await
+            .unwrap();
+        assert!(matches!(
+            recovered,
+            ScheduledExecutionOutcome::Deferred { .. }
+        ));
+        assert_eq!(*fixture.provider.durable_calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 0);
+        let persisted: (String, String) = sqlx::query_as(
+            "SELECT operation.state, session.state \
+             FROM question_session_operations AS operation \
+             INNER JOIN question_sessions AS session ON session.id = operation.session_id \
+             WHERE session.execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(persisted, ("ambiguous".to_owned(), "claimed".to_owned()));
+    }
+
+    #[tokio::test]
     async fn unknown_submission_executes_once_under_its_independent_verify_contract() {
         let fixture = Fixture::submission(ProviderBehavior::SubmissionConfirmed).await;
         sqlx::query("UPDATE tasks SET remote_state = 'unknown'")
@@ -3968,6 +4880,7 @@ mod tests {
 
     struct Fixture {
         database: Database,
+        secret_store: SqliteSecretStore,
         runner: TestRunner,
         provider: Arc<FakeExecution>,
         job: ScheduledJob,
@@ -4000,6 +4913,8 @@ mod tests {
                 calls: Mutex::new(0),
                 progress_calls: Mutex::new(0),
                 submission_verify_calls: Mutex::new(0),
+                durable_calls: Arc::new(Mutex::new(0)),
+                database: database.clone(),
             });
             let mut registry = ProviderRegistry::default();
             registry
@@ -4022,6 +4937,19 @@ mod tests {
                     browser_bridge: None,
                 })
                 .unwrap();
+            let secret_store = SqliteSecretStore::new(
+                database.clone(),
+                Arc::new(
+                    SecretKeyring::new(
+                        "execution-test-key".to_owned(),
+                        BTreeMap::from([(
+                            "execution-test-key".to_owned(),
+                            SecretKey::new([17; 32]),
+                        )]),
+                    )
+                    .unwrap(),
+                ),
+            );
             let runner = ScheduledExecutionRunner::new(
                 Arc::new(registry),
                 SqliteExecutionRepository::new(database.clone()),
@@ -4031,10 +4959,12 @@ mod tests {
                 SqliteTaskQueryRepository::new(database.clone()),
                 runner_config(),
             )
-            .unwrap();
+            .unwrap()
+            .with_question_session_artifacts(Arc::new(secret_store.clone()));
             let _ = account_id;
             Self {
                 database,
+                secret_store,
                 runner,
                 provider,
                 job,
@@ -4154,6 +5084,92 @@ mod tests {
             .execute(fixture.database.pool())
             .await
             .unwrap();
+            fixture
+        }
+
+        async fn durable_submission(behavior: ProviderBehavior) -> Self {
+            let fixture = Self::submission(behavior).await;
+            let repository = SqliteExecutionRepository::new(fixture.database.clone());
+            let task_id = execution_id_to_task(&repository, fixture.execution_id)
+                .await
+                .unwrap();
+            let draft = repository
+                .find_execution_submission_draft(fixture.execution_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let (owner_text, account_text): (String, String) = sqlx::query_as(
+                "SELECT account.owner_user_id, account.id FROM tasks AS task \
+                 INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+                 WHERE task.id = ?",
+            )
+            .bind(task_id.to_string())
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+            let owner: UserId = owner_text.parse().unwrap();
+            let account_id: ProviderAccountId = account_text.parse().unwrap();
+            let provider_id = ProviderId::new("provider-alpha").unwrap();
+            let initial = b"attempt-v1";
+            let initial_digest = ProviderQuestionReadContinuation::try_new(
+                &provider_id,
+                "provider-alpha.question-attempt.v1",
+                "provider-alpha.questions-ready",
+                SecretValue::new(initial.to_vec()),
+                300,
+            )
+            .unwrap()
+            .continuation_digest();
+            let session = QuestionSession::active(
+                owner,
+                account_id,
+                task_id,
+                provider_id.clone(),
+                "test".to_owned(),
+                draft.question_snapshot_id,
+                "provider-alpha.question-attempt.v1".to_owned(),
+                initial_digest,
+                fixture.now,
+                fixture.now + chrono::Duration::minutes(5),
+            )
+            .unwrap();
+            let sessions = SqliteQuestionSessionRepository::new(fixture.database.clone());
+            sessions
+                .create_question_session(
+                    &session,
+                    AuditActor::User(owner),
+                    "durable-submission-session",
+                )
+                .await
+                .unwrap();
+            let access = SecretAccess {
+                actor: SecretActor::CoreService("execution-worker-test"),
+                correlation_id: "durable-submission-artifact".to_owned(),
+                reason: "durable submission fixture".to_owned(),
+            };
+            fixture
+                .secret_store
+                .question_session_artifacts(provider_id)
+                .attach_question_session_artifact(QuestionSessionArtifactAttachRequest {
+                    session_id: session.id,
+                    phase: "provider-alpha.questions-ready",
+                    value: SecretValue::new(initial.to_vec()),
+                    attached_at: fixture.now,
+                    access: &access,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                sessions
+                    .claim_question_session_for_execution(
+                        fixture.execution_id,
+                        fixture.now,
+                        "durable-submission-claim",
+                    )
+                    .await
+                    .unwrap(),
+                asterism_storage::QuestionSessionClaimOutcome::Claimed(_)
+            ));
             fixture
         }
 

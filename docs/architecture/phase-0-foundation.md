@@ -3217,3 +3217,28 @@ expired, already claimed or digest-drifted state rejects scheduling and leaves
 the Task ready with no Execution or Job. This closes the persistence gap before
 the following worker slice resolves the claimed continuation and records each
 Provider mutation command before dispatch.
+
+## One-hundred-and-eighty-sixth Phase 0 slice
+
+Artifact-bearing submissions now run through a shared durable operation loop.
+The Provider receives the exact encrypted continuation selected by the
+immutable Draft and freezes one bounded operation type, request digest and
+optional delay at a time. Core persists that operation as `issued` before any
+remote dispatch. A definite response atomically marks the operation accepted
+and rotates the encrypted continuation; a final step separately yields a
+Receipt and still requires fresh Submission verification.
+
+An `issued` operation found after interruption is first made `ambiguous` and
+can never be sent again. Recovery may rotate it only when the Provider's fresh
+readback returns a definite continuation bound to the same operation digest.
+No readback result keeps the operation ambiguous and defers or requires human
+review instead of falling through to whole-submission verification. The
+original QuestionSession deadline remains authoritative and cannot be extended
+by a Provider continuation.
+
+After fresh verification confirms the exact Draft as remotely completed,
+SQLite consumes the claimed QuestionSession in the same transaction that
+finishes the Execution. That terminal transition requires every registered
+operation to be accepted and the current continuation revision to be the
+rotation produced by the latest operation. Legacy submissions without a
+QuestionSession retain their existing one-shot Submit/verify path.

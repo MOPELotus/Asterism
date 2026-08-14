@@ -784,6 +784,16 @@ pub struct ResolvedProviderQuestionReadContinuation<'a> {
     pub value: &'a SecretValue,
 }
 
+/// Provider-private state attached to a claimed `QuestionSession`. This is the
+/// same encrypted continuation shape used while materializing Questions, now
+/// named for post-materialization Answer/Save/Submit operations.
+pub type ResolvedProviderQuestionSessionContinuation<'a> =
+    ResolvedProviderQuestionReadContinuation<'a>;
+
+/// Exact last issued post-materialization operation retained for read-only
+/// ambiguity recovery.
+pub type AmbiguousProviderQuestionSessionOperation = AmbiguousProviderQuestionReadOperation;
+
 impl fmt::Debug for ResolvedProviderQuestionReadContinuation<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1132,6 +1142,45 @@ mod question_read_flow_tests {
             } if response_digest == [9; 32]
         ));
     }
+
+    #[test]
+    fn durable_submission_steps_require_rotated_state_and_response_evidence() {
+        let provider_id = ProviderId::new("chaoxing").unwrap();
+        let continuation = || {
+            ProviderQuestionReadContinuation::try_new(
+                &provider_id,
+                "chaoxing.exam-question-attempt.v1",
+                "chaoxing.exam-answer-saved",
+                SecretValue::new(b"rotated-exam-state".to_vec()),
+                600,
+            )
+            .unwrap()
+        };
+        let received_at = chrono::Utc::now();
+        assert!(
+            ProviderSubmissionStepOutcome::continuing(continuation(), [0; 32], received_at)
+                .is_err()
+        );
+        let receipt = SubmissionReceipt {
+            remote_status: "accepted".to_owned(),
+            message_sanitized: None,
+            provider_trace_id: Some("attempt-1".to_owned()),
+            received_at,
+        };
+        assert!(matches!(
+            ProviderSubmissionStepOutcome::submitted(
+                continuation(),
+                receipt,
+                [5; 32],
+                received_at,
+            )
+            .unwrap(),
+            ProviderSubmissionStepOutcome::Submitted {
+                response_digest,
+                ..
+            } if response_digest == [5; 32]
+        ));
+    }
 }
 
 /// Provider-native answer lookup kept separate from question parsing, draft
@@ -1161,6 +1210,85 @@ pub trait SubmissionBuildCapability: ProviderIdentity {
     ) -> ProviderResult<SubmissionPayloadPreview>;
 }
 
+/// Result of one accepted post-materialization Question-session operation.
+/// Every accepted step rotates encrypted Provider state. A final submission
+/// additionally yields a Receipt, which remains distinct from verification.
+#[derive(Debug)]
+pub enum ProviderSubmissionStepOutcome {
+    Continue {
+        continuation: ProviderQuestionReadContinuation,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+    },
+    Submitted {
+        continuation: ProviderQuestionReadContinuation,
+        receipt: SubmissionReceipt,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+    },
+}
+
+impl ProviderSubmissionStepOutcome {
+    /// # Errors
+    ///
+    /// Rejects an accepted continuation without an exact response digest.
+    pub fn continuing(
+        continuation: ProviderQuestionReadContinuation,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+    ) -> ProviderResult<Self> {
+        if response_digest == [0; 32] {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider Question-session continuation response digest is empty",
+            ));
+        }
+        Ok(Self::Continue {
+            continuation,
+            response_digest,
+            received_at,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Rejects an invalid Receipt or missing response digest.
+    pub fn submitted(
+        continuation: ProviderQuestionReadContinuation,
+        receipt: SubmissionReceipt,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+    ) -> ProviderResult<Self> {
+        if response_digest == [0; 32] || receipt.validate().is_err() {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider Question-session submission result is invalid",
+            ));
+        }
+        Ok(Self::Submitted {
+            continuation,
+            receipt,
+            response_digest,
+            received_at,
+        })
+    }
+}
+
+/// One in-memory Provider command whose exact identity is persisted before a
+/// post-materialization Answer/Save/Submit mutation can run.
+#[async_trait]
+pub trait PreparedProviderSubmissionOperation: fmt::Debug + Send {
+    fn operation_type(&self) -> &str;
+    fn request_digest(&self) -> [u8; 32];
+    fn delay_before_execute_seconds(&self) -> u64;
+
+    async fn execute(
+        self: Box<Self>,
+        context: &ProviderContext,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ProviderSubmissionStepOutcome>;
+}
+
 /// Performs only the remote mutation represented by one validated immutable
 /// draft. Verification remains a separate capability and a receipt alone never
 /// marks the Task complete.
@@ -1174,6 +1302,34 @@ pub trait SubmissionExecuteCapability: ProviderIdentity {
         runtime_settings: &ResolvedProviderRuntimeSettings,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<SubmissionReceipt>;
+
+    /// Freezes the exact next mutation for an artifact-bearing
+    /// `QuestionSession`. Returning `None` selects the legacy single-call path
+    /// only when no claimed session exists.
+    async fn prepare_submission_operation(
+        &self,
+        _context: &ProviderContext,
+        _remote_task_id: &str,
+        _draft: &SubmissionDraft,
+        _continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<Box<dyn PreparedProviderSubmissionOperation>>> {
+        Ok(None)
+    }
+
+    /// Performs fresh read-only recovery for one ambiguous issued operation.
+    /// Returning `None` keeps the session locked and grants no replay.
+    async fn recover_ambiguous_submission_operation(
+        &self,
+        _context: &ProviderContext,
+        _remote_task_id: &str,
+        _draft: &SubmissionDraft,
+        _continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        _operation: &AmbiguousProviderQuestionSessionOperation,
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderSubmissionStepOutcome>> {
+        Ok(None)
+    }
 }
 
 /// Re-reads remote state after submission and returns bounded verification
@@ -1187,6 +1343,20 @@ pub trait SubmissionVerifyCapability: ProviderIdentity {
         draft: &SubmissionDraft,
         receipt: Option<&SubmissionReceipt>,
     ) -> ProviderResult<SubmissionVerificationSnapshot>;
+
+    /// Verifies a submission while exposing the latest claimed, encrypted
+    /// Provider continuation. Legacy submissions use `verify_submission`.
+    async fn verify_submission_with_session(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        receipt: Option<&SubmissionReceipt>,
+        _continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+    ) -> ProviderResult<SubmissionVerificationSnapshot> {
+        self.verify_submission(context, remote_task_id, draft, receipt)
+            .await
+    }
 }
 
 #[async_trait]

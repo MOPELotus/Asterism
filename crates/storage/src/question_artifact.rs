@@ -342,7 +342,10 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(QuestionSessionOperationFinishOutcome::Unavailable);
         };
-        if existing.state != QuestionSessionOperationState::Issued {
+        if !matches!(
+            existing.state,
+            QuestionSessionOperationState::Issued | QuestionSessionOperationState::Ambiguous
+        ) {
             let same_rotation = if existing.state == QuestionSessionOperationState::Accepted
                 && existing.result_digest == Some(request.result_digest)
             {
@@ -448,11 +451,12 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         if continuation_updated.rows_affected() != 1 {
             return Err(SecretStoreError::VersionConflict);
         }
+        let expected_state = existing.state;
         let mut accepted = existing;
         accepted.state = QuestionSessionOperationState::Accepted;
         accepted.result_digest = Some(request.result_digest);
         accepted.completed_at = Some(request.accepted_at);
-        persist_operation_finish(&mut transaction, &accepted).await?;
+        persist_operation_finish(&mut transaction, &accepted, expected_state).await?;
         insert_secret_audit(
             &mut transaction,
             request.access,
@@ -525,7 +529,12 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         finished.state = terminal_state;
         finished.result_digest = result_digest;
         finished.completed_at = Some(completed_at);
-        persist_operation_finish(&mut transaction, &finished).await?;
+        persist_operation_finish(
+            &mut transaction,
+            &finished,
+            QuestionSessionOperationState::Issued,
+        )
+        .await?;
         insert_operation_audit(
             &mut transaction,
             correlation_id,
@@ -816,16 +825,18 @@ fn decode_operation(row: &SqliteRow) -> Result<QuestionSessionOperation, SecretS
 async fn persist_operation_finish(
     transaction: &mut Transaction<'_, Sqlite>,
     operation: &QuestionSessionOperation,
+    expected_state: QuestionSessionOperationState,
 ) -> Result<(), SecretStoreError> {
     let result = sqlx::query(
         "UPDATE question_session_operations SET state = ?, result_digest = ?, completed_at = ? \
-         WHERE session_id = ? AND sequence = ? AND state = 'issued'",
+         WHERE session_id = ? AND sequence = ? AND state = ?",
     )
     .bind(operation_state_name(operation.state))
     .bind(operation.result_digest.map(|digest| digest.to_vec()))
     .bind(operation.completed_at.map(encode_timestamp))
     .bind(operation.session_id.to_string())
     .bind(i64::try_from(operation.sequence).map_err(|_| SecretStoreError::InvalidValue)?)
+    .bind(operation_state_name(expected_state))
     .execute(&mut **transaction)
     .await
     .map_err(storage_error)?;
@@ -927,9 +938,13 @@ fn validate_accept_request(
 ) -> Result<(), SecretStoreError> {
     validate_label(request.next_continuation_type)?;
     validate_label(request.next_phase)?;
-    if request.operation.state != QuestionSessionOperationState::Issued
+    let operation_shape_valid = match request.operation.state {
+        QuestionSessionOperationState::Issued => request.operation.completed_at.is_none(),
+        QuestionSessionOperationState::Ambiguous => request.operation.completed_at.is_some(),
+        QuestionSessionOperationState::Accepted | QuestionSessionOperationState::Rejected => false,
+    };
+    if !operation_shape_valid
         || request.operation.result_digest.is_some()
-        || request.operation.completed_at.is_some()
         || request.result_digest == [0; 32]
         || request.accepted_at < request.operation.issued_at
     {
@@ -1227,7 +1242,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_operation_blocks_revision_and_provider_scope_is_enforced() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression keeps issue, ambiguity, replay rejection, verified rotation and provider scoping in one lifecycle"
+    )]
+    async fn ambiguity_blocks_replay_but_verified_recovery_can_rotate_state() {
         let fixture = Fixture::new().await;
         let (_, execution_id, attempt_id) = fixture.claimed(b"cidaren-topic-v1").await;
         let issue = QuestionSessionOperationIssueRequest {
@@ -1258,11 +1277,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(
-            finished,
-            QuestionSessionOperationFinishOutcome::Finished(finished)
-                if finished.state == QuestionSessionOperationState::Ambiguous
-        ));
+        let QuestionSessionOperationFinishOutcome::Finished(ambiguous) = finished else {
+            panic!("expected ambiguous operation");
+        };
+        assert_eq!(ambiguous.state, QuestionSessionOperationState::Ambiguous);
         assert_eq!(
             fixture
                 .artifacts
@@ -1279,6 +1297,27 @@ mod tests {
                 .unwrap(),
             QuestionSessionOperationIssueOutcome::Conflict
         );
+        let recovery = fixture
+            .artifacts
+            .accept_question_session_operation(QuestionSessionOperationAcceptRequest {
+                operation: &ambiguous,
+                next_continuation_type: "chaoxing.exam-attempt.v1",
+                next_phase: "submission-readback-confirmed",
+                replacement: SecretValue::new(b"cidaren-topic-v2".to_vec()),
+                result_digest: [6; 32],
+                accepted_at: fixture.now + Duration::seconds(5),
+                access: &fixture.access("cidaren-recovery-accepted"),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            recovery,
+            QuestionSessionOperationFinishOutcome::Accepted {
+                operation,
+                continuation,
+            } if operation.state == QuestionSessionOperationState::Accepted
+                && continuation.revision == 2
+        ));
 
         let foreign = SqliteQuestionSessionArtifactRepository::new(
             fixture.database.clone(),
