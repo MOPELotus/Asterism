@@ -124,6 +124,9 @@ pub struct PrivateAnswerEvidence {
     pub question_snapshot_id: QuestionSnapshotId,
     pub question_id: QuestionId,
     pub execution_attempt_id: Option<ExecutionAttemptId>,
+    /// Digest of an authenticated Provider-native historical Attempt identity.
+    /// This preserves bootstrap provenance without inventing a local Execution.
+    pub provider_attempt_digest: Option<[u8; 32]>,
     pub source_candidate_id: Option<AnswerCandidateId>,
     pub question: Question,
     pub question_content_fingerprint: QuestionContentFingerprint,
@@ -163,7 +166,8 @@ impl PrivateAnswerEvidence {
             }
             AnswerEvidenceClass::VerifiedHistorical | AnswerEvidenceClass::Negative => {
                 if self.source_candidate_id.is_none()
-                    || self.execution_attempt_id.is_none()
+                    || (self.execution_attempt_id.is_none()
+                        && self.provider_attempt_digest.is_none())
                     || self.result_digest.is_none_or(|digest| digest == [0; 32])
                 {
                     return Err(PrivateAnswerEvidenceValidationError::InvalidEvidence);
@@ -171,6 +175,9 @@ impl PrivateAnswerEvidence {
             }
         }
         if self.result_digest == Some([0; 32]) {
+            return Err(PrivateAnswerEvidenceValidationError::InvalidEvidence);
+        }
+        if self.provider_attempt_digest == Some([0; 32]) {
             return Err(PrivateAnswerEvidenceValidationError::InvalidEvidence);
         }
         if matches!(self.projection, CorpusProjectionEligibility::Exact)
@@ -418,6 +425,7 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             question_id: question.id,
             execution_attempt_id: Some(ExecutionAttemptId::new()),
+            provider_attempt_digest: None,
             source_candidate_id: Some(AnswerCandidateId::new()),
             question,
             question_content_fingerprint: fingerprint,
@@ -478,6 +486,20 @@ mod tests {
     fn private_provenance_rejects_secret_shaped_keys() {
         let mut evidence = evidence(CorpusProjectionEligibility::Exact);
         evidence.provenance_sanitized = serde_json::json!({"access_token": "hidden"});
+        assert_eq!(
+            evidence.validate(),
+            Err(PrivateAnswerEvidenceValidationError::InvalidEvidence)
+        );
+    }
+
+    #[test]
+    fn bootstrap_history_uses_provider_attempt_without_local_execution() {
+        let mut evidence = evidence(CorpusProjectionEligibility::Exact);
+        evidence.execution_attempt_id = None;
+        evidence.provider_attempt_digest = Some([8; 32]);
+        assert!(evidence.validate().is_ok());
+
+        evidence.provider_attempt_digest = None;
         assert_eq!(
             evidence.validate(),
             Err(PrivateAnswerEvidenceValidationError::InvalidEvidence)

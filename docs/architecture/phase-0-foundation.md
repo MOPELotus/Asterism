@@ -4009,3 +4009,20 @@ scheduler job together. Wrong workers, expired leases, regressing progress,
 changed totals and malformed errors leave both records unchanged. This remains
 a protocol-neutral read-only lifecycle: Provider history enumeration and
 evidence extraction adapters are still separate capability work.
+
+## Two-hundred-and-twenty-second Phase 0 slice
+
+Private Answer Evidence can now bind historical verification to an exact
+authenticated Provider Attempt digest without requiring a local
+`ExecutionAttemptId`. Verified historical and negative evidence still require
+a bound source candidate and non-zero result digest; they now require at least
+one real Attempt provenance path: a local execution Attempt, a Provider-native
+historical Attempt digest, or both. Zero digests remain invalid.
+
+Migration 056 persists the Provider Attempt digest inside the owner-private
+evidence layer, and the stable evidence-fact digest includes it for idempotent
+replay. It is never copied into the identity-free Global Corpus. This removes
+the incentive to fabricate an Asterism Execution merely to import read-only
+history and gives the upcoming Provider harvest protocol a valid provenance
+target while preserving the bootstrap rule that collection creates no remote
+or local task Attempt.

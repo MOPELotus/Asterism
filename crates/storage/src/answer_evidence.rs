@@ -128,6 +128,7 @@ impl EncodedPrivateEvidence {
             "question_snapshot_id": evidence.question_snapshot_id,
             "question_id": evidence.question_id,
             "execution_attempt_id": evidence.execution_attempt_id,
+            "provider_attempt_digest": evidence.provider_attempt_digest,
             "source_candidate_id": evidence.source_candidate_id,
             "question_content_fingerprint": evidence.question_content_fingerprint,
             "answer": evidence.answer,
@@ -231,10 +232,11 @@ async fn insert_private_evidence(
         "INSERT INTO private_answer_evidence \
          (id, evidence_digest, owner_user_id, provider_id, provider_account_id, course_id, \
           task_id, question_snapshot_id, question_id, execution_attempt_id, \
+          provider_attempt_digest, \
           source_candidate_id, question_json, question_content_fingerprint, answer_json, \
           answer_source, evidence_class, result_digest, provenance_sanitized_json, \
           projection_state, unmatched_reason, observed_at, verified_at, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(evidence.id.to_string())
     .bind(encoded.digest.to_vec())
@@ -246,6 +248,11 @@ async fn insert_private_evidence(
     .bind(evidence.question_snapshot_id.to_string())
     .bind(evidence.question_id.to_string())
     .bind(evidence.execution_attempt_id.map(|id| id.to_string()))
+    .bind(
+        evidence
+            .provider_attempt_digest
+            .map(|digest| digest.to_vec()),
+    )
     .bind(evidence.source_candidate_id.map(|id| id.to_string()))
     .bind(&encoded.question_json)
     .bind(evidence.question_content_fingerprint.as_str())
@@ -690,6 +697,7 @@ mod tests {
                 question_snapshot_id: self.snapshot.id,
                 question_id: question.id,
                 execution_attempt_id: Some(self.attempt),
+                provider_attempt_digest: None,
                 source_candidate_id: Some(self.candidate.id),
                 question,
                 question_content_fingerprint: self.snapshot.questions[0]
@@ -848,5 +856,31 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!((private_count, global_count), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn provider_history_attempt_does_not_require_a_local_execution_attempt() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let fixture = Fixture::insert(
+            &database,
+            "bootstrap-history-owner",
+            QuestionKind::SingleChoice,
+        )
+        .await;
+        let repository = SqliteAnswerEvidenceRepository::new(database.clone());
+        let mut evidence = fixture.evidence(CorpusProjectionEligibility::Exact);
+        evidence.execution_attempt_id = None;
+        evidence.provider_attempt_digest = Some([9; 32]);
+        let outcome = repository.record_answer_evidence(&evidence).await.unwrap();
+        assert!(matches!(outcome, AnswerEvidenceRecordOutcome::Inserted(_)));
+        let stored_digest: Vec<u8> = sqlx::query_scalar(
+            "SELECT provider_attempt_digest FROM private_answer_evidence WHERE id = ?",
+        )
+        .bind(evidence.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(stored_digest, vec![9; 32]);
     }
 }
