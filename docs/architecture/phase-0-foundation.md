@@ -3639,3 +3639,30 @@ a private artifact, and scheduling stores its exact type and payload under that
 Execution. This hook makes fresh Provider-owned batch preparation possible, but
 the public Course/Unit selection and parent/child Execution contract remains a
 separate orchestration slice.
+
+## Two-hundred-and-fourth Phase 0 slice
+
+The local Capture library now implements the complete outbound BrowserBridge
+helper transport already exposed by Core. It consumes a pairing token once,
+keeps the rotated access token only in zeroizing memory, validates the frozen
+session/spec binding and permits only an exact allowlisted origin plus bounded
+frame identity before command retrieval.
+
+Command dispatch is sequence-bound and deliberately non-replayable. The client
+accepts only a Provider-namespaced type, canonical SHA-256 header and non-empty
+binary body up to 256 KiB, recomputes the digest before exposing redacted
+`SecretValue` bytes, and refuses another command while one result is active. A
+failed command GET is never automatically retried because Core may already have
+marked the command dispatched.
+
+Result submission retains the active sequence, Provider namespace and bounded
+zeroizing body. An ambiguous POST may repeat the exact type and bytes because
+Core's existing first-writer digest comparison returns a duplicate receipt;
+changed evidence conflicts. Unauthorized responses clear the in-memory access
+token, pairing and access token shapes cannot substitute for each other, and
+command/result digests plus artifacts remain redacted from `Debug` output.
+
+This closes the reusable helper-side HTTP transport, not Provider action
+execution. A subsequent slice must connect typed Provider command handling and
+actual DOM/browser actions to this stateful client; no arbitrary JSON or
+selector interpreter is introduced by the transport layer.

@@ -5,7 +5,9 @@ mod recipe;
 
 pub use browser::ChromiumCapture;
 pub use client::{
-    CaptureClient, CaptureCredentialAccepted, CaptureCredentialField, CaptureCredentialSubmission,
-    CaptureEventReceipt, CaptureHealth, ClaimedCaptureSession,
+    BrowserBridgeCommand, BrowserBridgeResultReceipt, BrowserBridgeRuntimeBindingReceipt,
+    BrowserBridgeSessionSnapshot, CaptureClient, CaptureCredentialAccepted, CaptureCredentialField,
+    CaptureCredentialSubmission, CaptureEventReceipt, CaptureHealth, ClaimedBrowserBridgeSession,
+    ClaimedCaptureSession,
 };
 pub use recipe::{CaptureResolution, CaptureSnapshot};

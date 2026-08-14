@@ -4,10 +4,11 @@ use anyhow::{Context, bail};
 use asterism_domain::{
     AuthBootstrapClientEvent, AuthBootstrapClientEventKind, AuthBootstrapPurpose,
     AuthBootstrapSession, AuthBootstrapSessionId, AuthBootstrapState, AuthMethod,
-    ProviderAccountId, SessionKind, Timestamp,
+    BrowserBridgeSessionId, BrowserBridgeSessionState, ProviderAccountId, ProviderId, SessionKind,
+    TaskId, Timestamp,
 };
 use asterism_provider_api::{CaptureRecipe, SessionStatus};
-use asterism_secrets::{SecretPurpose, SecretString};
+use asterism_secrets::{SecretPurpose, SecretString, SecretValue};
 use bytes::Bytes;
 use chrono::Utc;
 use reqwest::{
@@ -16,11 +17,17 @@ use reqwest::{
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024;
 const MAX_BOOTSTRAP_TOKEN_BYTES: usize = 128;
 const MAX_CREDENTIAL_FIELD_BYTES: usize = 1024 * 1024;
+const MAX_BROWSER_BRIDGE_ARTIFACT_BYTES: usize = 256 * 1024;
+const MAX_BROWSER_BRIDGE_LABEL_BYTES: usize = 128;
+const X_BROWSER_COMMAND_TYPE: &str = "x-asterism-browser-command-type";
+const X_BROWSER_COMMAND_DIGEST: &str = "x-asterism-browser-command-digest";
+const X_BROWSER_RESULT_TYPE: &str = "x-asterism-browser-result-type";
 
 #[derive(Debug)]
 pub struct CaptureClient {
@@ -92,6 +99,265 @@ impl CaptureClient {
             .context("failed to submit the Asterism pairing claim")?;
         let claimed: ClaimResponse = deserialize_response(response, &[StatusCode::OK]).await?;
         claimed.into_session(session_id)
+    }
+
+    /// Consumes one `BrowserBridge` pairing token and retains the resulting
+    /// session-scoped access token only in zeroizing memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid token, rejected claim, unsafe browser
+    /// policy or a response bound to another session.
+    pub async fn claim_browser_bridge(
+        &self,
+        session_id: BrowserBridgeSessionId,
+        pairing_token: &SecretString,
+    ) -> anyhow::Result<ClaimedBrowserBridgeSession> {
+        validate_browser_bridge_token(pairing_token.expose_secret(), true)?;
+        let url = self
+            .base_url
+            .join(&format!(
+                "api/v1/browser-bridge/sessions/{session_id}/claim"
+            ))
+            .context("failed to construct the BrowserBridge claim endpoint")?;
+        let response = self
+            .http
+            .post(url)
+            .header(
+                AUTHORIZATION,
+                browser_bridge_authorization(pairing_token, true)?,
+            )
+            .send()
+            .await
+            .context("failed to submit the BrowserBridge pairing claim")?;
+        let claimed: BrowserBridgeClaimResponse =
+            deserialize_response(response, &[StatusCode::OK]).await?;
+        claimed.into_session(session_id)
+    }
+
+    /// Binds the helper to one exact allowed top-level origin and browser
+    /// frame before any opaque Provider command can be dispatched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a terminal session, unsafe/foreign binding,
+    /// rejected access token or mismatched server receipt.
+    pub async fn bind_browser_bridge_runtime(
+        &self,
+        claimed: &mut ClaimedBrowserBridgeSession,
+        observed_origin: &str,
+        frame_id: &str,
+    ) -> anyhow::Result<BrowserBridgeRuntimeBindingReceipt> {
+        claimed.ensure_live()?;
+        if !claimed
+            .spec
+            .allowed_origins
+            .iter()
+            .any(|allowed| allowed == observed_origin)
+            || !valid_browser_bridge_frame_id(frame_id)
+        {
+            bail!("BrowserBridge runtime binding is outside the frozen browser policy");
+        }
+        let session_id = claimed.session.id;
+        let url = self
+            .base_url
+            .join(&format!(
+                "api/v1/browser-bridge/sessions/{session_id}/binding"
+            ))
+            .context("failed to construct the BrowserBridge binding endpoint")?;
+        let response = self
+            .http
+            .put(url)
+            .header(
+                AUTHORIZATION,
+                browser_bridge_authorization(&claimed.access_token, false)?,
+            )
+            .json(&BrowserBridgeRuntimeBindingRequest {
+                observed_origin,
+                frame_id,
+            })
+            .send()
+            .await
+            .context("failed to bind the BrowserBridge runtime")?;
+        let access_rejected = response.status() == StatusCode::UNAUTHORIZED;
+        let result = deserialize_response(response, &[StatusCode::OK]).await;
+        if access_rejected {
+            claimed.invalidate_access();
+        }
+        let receipt: BrowserBridgeRuntimeBindingReceipt = result?;
+        if receipt.session_id != session_id
+            || receipt.observed_origin != observed_origin
+            || receipt.frame_id != frame_id
+            || receipt.bound_at
+                < claimed
+                    .session
+                    .claimed_at
+                    .unwrap_or(claimed.session.created_at)
+        {
+            bail!("Asterism server returned a mismatched BrowserBridge binding receipt");
+        }
+        claimed.binding = Some(receipt.clone());
+        Ok(receipt)
+    }
+
+    /// Dispatches the next opaque Provider command exactly once and verifies
+    /// its type plus SHA-256 identity before exposing zeroizing bytes.
+    ///
+    /// A transport failure after the GET is deliberately not retried: Core may
+    /// already have marked the command dispatched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing runtime binding, concurrent command,
+    /// rejected access, unsafe metadata, oversized body or digest mismatch.
+    pub async fn dispatch_browser_bridge_command(
+        &self,
+        claimed: &mut ClaimedBrowserBridgeSession,
+    ) -> anyhow::Result<BrowserBridgeCommand> {
+        claimed.ensure_live()?;
+        if claimed.binding.is_none() || claimed.active_command.is_some() {
+            bail!("BrowserBridge command dispatch requires one idle bound runtime");
+        }
+        let session_id = claimed.session.id;
+        let sequence = claimed.next_sequence;
+        let url = self
+            .base_url
+            .join(&format!(
+                "api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}"
+            ))
+            .context("failed to construct the BrowserBridge command endpoint")?;
+        let response = self
+            .http
+            .get(url)
+            .header(
+                AUTHORIZATION,
+                browser_bridge_authorization(&claimed.access_token, false)?,
+            )
+            .send()
+            .await
+            .context("failed to dispatch the BrowserBridge command; it must not be replayed")?;
+        if response.status() != StatusCode::OK {
+            if response.status() == StatusCode::UNAUTHORIZED {
+                claimed.invalidate_access();
+            }
+            let _: serde_json::Value = deserialize_response(response, &[StatusCode::OK]).await?;
+            unreachable!("unexpected BrowserBridge command response passed validation");
+        }
+        require_octet_stream(&response)?;
+        let command_type = response
+            .headers()
+            .get(X_BROWSER_COMMAND_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| valid_provider_label(&claimed.session.provider_id, value))
+            .context("Asterism server returned an invalid BrowserBridge command type")?
+            .to_owned();
+        let command_digest = response
+            .headers()
+            .get(X_BROWSER_COMMAND_DIGEST)
+            .and_then(|value| value.to_str().ok())
+            .and_then(decode_digest)
+            .context("Asterism server returned an invalid BrowserBridge command digest")?;
+        let body =
+            read_bounded_body_with_limit(response, MAX_BROWSER_BRIDGE_ARTIFACT_BYTES).await?;
+        let actual_digest: [u8; 32] = Sha256::digest(&body).into();
+        if body.is_empty() || actual_digest != command_digest {
+            bail!("BrowserBridge command bytes do not match their durable digest");
+        }
+        claimed.active_command = Some(ActiveBrowserBridgeCommand {
+            sequence,
+            command_type: command_type.clone(),
+            command_digest,
+        });
+        Ok(BrowserBridgeCommand {
+            session_id,
+            sequence,
+            command_type,
+            command_digest,
+            command_artifact: SecretValue::new(body),
+        })
+    }
+
+    /// Submits one opaque result for the active command. Retrying the exact
+    /// same result after an ambiguous response is safe because Core compares
+    /// its type and digest before returning a duplicate receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign result type, empty/oversized bytes,
+    /// missing active command, rejected access or mismatched receipt.
+    pub async fn submit_browser_bridge_result(
+        &self,
+        claimed: &mut ClaimedBrowserBridgeSession,
+        result_type: &str,
+        result_artifact: &SecretValue,
+    ) -> anyhow::Result<BrowserBridgeResultReceipt> {
+        claimed.ensure_live()?;
+        let active = claimed
+            .active_command
+            .as_ref()
+            .context("BrowserBridge result requires one active dispatched command")?;
+        if !valid_provider_label(&claimed.session.provider_id, &active.command_type)
+            || active.command_digest == [0; 32]
+            || !valid_provider_label(&claimed.session.provider_id, result_type)
+            || result_artifact.expose_secret().is_empty()
+            || result_artifact.expose_secret().len() > MAX_BROWSER_BRIDGE_ARTIFACT_BYTES
+        {
+            bail!("BrowserBridge result metadata or bytes are invalid");
+        }
+        let session_id = claimed.session.id;
+        let sequence = active.sequence;
+        let result_digest: [u8; 32] = Sha256::digest(result_artifact.expose_secret()).into();
+        let url = self
+            .base_url
+            .join(&format!(
+                "api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}/result"
+            ))
+            .context("failed to construct the BrowserBridge result endpoint")?;
+        let body = Zeroizing::new(result_artifact.expose_secret().to_vec());
+        let response = self
+            .http
+            .post(url)
+            .header(
+                AUTHORIZATION,
+                browser_bridge_authorization(&claimed.access_token, false)?,
+            )
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .header(X_BROWSER_RESULT_TYPE, result_type)
+            .body(Bytes::from_owner(ZeroizingRequestBody(body)))
+            .send()
+            .await
+            .context("failed to submit the BrowserBridge result")?;
+        let access_rejected = response.status() == StatusCode::UNAUTHORIZED;
+        let result = deserialize_response(response, &[StatusCode::OK, StatusCode::ACCEPTED]).await;
+        if access_rejected {
+            claimed.invalidate_access();
+        }
+        let receipt: BrowserBridgeResultReceiptWire = result?;
+        if receipt.session_id != session_id
+            || receipt.sequence != sequence
+            || receipt.result_type != result_type
+            || decode_digest(&receipt.result_digest) != Some(result_digest)
+            || receipt.received_at
+                < claimed
+                    .session
+                    .claimed_at
+                    .unwrap_or(claimed.session.created_at)
+        {
+            bail!("Asterism server returned a mismatched BrowserBridge result receipt");
+        }
+        claimed.active_command = None;
+        claimed.next_sequence = claimed
+            .next_sequence
+            .checked_add(1)
+            .context("BrowserBridge command sequence exhausted")?;
+        Ok(BrowserBridgeResultReceipt {
+            session_id: receipt.session_id,
+            sequence: receipt.sequence,
+            result_type: receipt.result_type,
+            result_digest,
+            received_at: receipt.received_at,
+            duplicate: receipt.duplicate,
+        })
     }
 
     /// Polls the server-side snapshot for a claimed Capture session.
@@ -273,6 +539,200 @@ pub struct ClaimedCaptureSession {
     recipe: CaptureRecipe,
     access_token: SecretString,
     next_sequence: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BrowserBridgeSessionSnapshot {
+    pub id: BrowserBridgeSessionId,
+    pub task_id: TaskId,
+    pub provider_id: ProviderId,
+    pub provider_version: String,
+    pub spec_version: u32,
+    pub state: BrowserBridgeSessionState,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub claimed_at: Option<Timestamp>,
+    pub revision: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BrowserBridgeRuntimeBindingReceipt {
+    pub session_id: BrowserBridgeSessionId,
+    pub observed_origin: String,
+    pub frame_id: String,
+    pub bound_at: Timestamp,
+    pub duplicate: bool,
+}
+
+pub struct BrowserBridgeCommand {
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub command_type: String,
+    pub command_digest: [u8; 32],
+    pub command_artifact: SecretValue,
+}
+
+impl fmt::Debug for BrowserBridgeCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeCommand")
+            .field("session_id", &self.session_id)
+            .field("sequence", &self.sequence)
+            .field("command_type", &self.command_type)
+            .field("command_digest", &"[HASHED]")
+            .field("command_artifact", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct BrowserBridgeResultReceipt {
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub result_type: String,
+    pub result_digest: [u8; 32],
+    pub received_at: Timestamp,
+    pub duplicate: bool,
+}
+
+impl fmt::Debug for BrowserBridgeResultReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeResultReceipt")
+            .field("session_id", &self.session_id)
+            .field("sequence", &self.sequence)
+            .field("result_type", &self.result_type)
+            .field("result_digest", &"[HASHED]")
+            .field("received_at", &self.received_at)
+            .field("duplicate", &self.duplicate)
+            .finish()
+    }
+}
+
+pub struct ClaimedBrowserBridgeSession {
+    session: BrowserBridgeSessionSnapshot,
+    spec: asterism_provider_api::BrowserSessionSpec,
+    access_token: SecretString,
+    binding: Option<BrowserBridgeRuntimeBindingReceipt>,
+    next_sequence: u64,
+    active_command: Option<ActiveBrowserBridgeCommand>,
+}
+
+impl ClaimedBrowserBridgeSession {
+    pub const fn session(&self) -> &BrowserBridgeSessionSnapshot {
+        &self.session
+    }
+
+    pub const fn spec(&self) -> &asterism_provider_api::BrowserSessionSpec {
+        &self.spec
+    }
+
+    pub const fn binding(&self) -> Option<&BrowserBridgeRuntimeBindingReceipt> {
+        self.binding.as_ref()
+    }
+
+    pub const fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    fn ensure_live(&mut self) -> anyhow::Result<()> {
+        if self.session.state != BrowserBridgeSessionState::Claimed
+            || self.session.expires_at <= Utc::now()
+            || self.access_token.expose_secret().is_empty()
+        {
+            self.invalidate_access();
+            bail!("BrowserBridge pairing session is no longer active");
+        }
+        Ok(())
+    }
+
+    fn invalidate_access(&mut self) {
+        self.access_token.zeroize();
+    }
+
+    #[cfg(test)]
+    fn access_token(&self) -> &SecretString {
+        &self.access_token
+    }
+}
+
+impl fmt::Debug for ClaimedBrowserBridgeSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaimedBrowserBridgeSession")
+            .field("session", &self.session)
+            .field("spec", &self.spec)
+            .field("access_token", &self.access_token)
+            .field("binding", &self.binding)
+            .field("next_sequence", &self.next_sequence)
+            .field("active_command", &self.active_command)
+            .finish()
+    }
+}
+
+struct ActiveBrowserBridgeCommand {
+    sequence: u64,
+    command_type: String,
+    command_digest: [u8; 32],
+}
+
+impl fmt::Debug for ActiveBrowserBridgeCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ActiveBrowserBridgeCommand")
+            .field("sequence", &self.sequence)
+            .field("command_type", &self.command_type)
+            .field("command_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct BrowserBridgeRuntimeBindingRequest<'a> {
+    observed_origin: &'a str,
+    frame_id: &'a str,
+}
+
+#[derive(Deserialize)]
+struct BrowserBridgeClaimResponse {
+    session: BrowserBridgeSessionSnapshot,
+    spec: asterism_provider_api::BrowserSessionSpec,
+    access_token: String,
+}
+
+impl BrowserBridgeClaimResponse {
+    fn into_session(
+        mut self,
+        expected_id: BrowserBridgeSessionId,
+    ) -> anyhow::Result<ClaimedBrowserBridgeSession> {
+        validate_browser_bridge_session(&self.session, expected_id, &self.spec)?;
+        validate_browser_bridge_token(&self.access_token, false)?;
+        Ok(ClaimedBrowserBridgeSession {
+            session: self.session.clone(),
+            spec: self.spec.clone(),
+            access_token: SecretString::new(std::mem::take(&mut self.access_token)),
+            binding: None,
+            next_sequence: 1,
+            active_command: None,
+        })
+    }
+}
+
+impl Drop for BrowserBridgeClaimResponse {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+    }
+}
+
+#[derive(Deserialize)]
+struct BrowserBridgeResultReceiptWire {
+    session_id: BrowserBridgeSessionId,
+    sequence: u64,
+    result_type: String,
+    result_digest: String,
+    received_at: Timestamp,
+    duplicate: bool,
 }
 
 impl ClaimedCaptureSession {
@@ -652,10 +1112,18 @@ fn validate_session_progress(
     Ok(())
 }
 
-async fn read_bounded_body(mut response: Response) -> anyhow::Result<Vec<u8>> {
-    if response.content_length().is_some_and(|length| {
-        length > u64::try_from(MAX_RESPONSE_BODY_BYTES).expect("response limit fits u64")
-    }) {
+async fn read_bounded_body(response: Response) -> anyhow::Result<Vec<u8>> {
+    read_bounded_body_with_limit(response, MAX_RESPONSE_BODY_BYTES).await
+}
+
+async fn read_bounded_body_with_limit(
+    mut response: Response,
+    limit: usize,
+) -> anyhow::Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > u64::try_from(limit).expect("response limit fits u64"))
+    {
         bail!("Asterism server response exceeds the safety limit");
     }
     let mut body = Vec::new();
@@ -664,7 +1132,7 @@ async fn read_bounded_body(mut response: Response) -> anyhow::Result<Vec<u8>> {
         .await
         .context("failed to read the Asterism server response")?
     {
-        if chunk.len() > MAX_RESPONSE_BODY_BYTES.saturating_sub(body.len()) {
+        if chunk.len() > limit.saturating_sub(body.len()) {
             bail!("Asterism server response exceeds the safety limit");
         }
         body.extend_from_slice(&chunk);
@@ -680,6 +1148,129 @@ fn bootstrap_authorization(token: &SecretString) -> anyhow::Result<HeaderValue> 
         .context("pairing token cannot be represented as an HTTP header")?;
     value.set_sensitive(true);
     Ok(value)
+}
+
+fn browser_bridge_authorization(
+    token: &SecretString,
+    pairing: bool,
+) -> anyhow::Result<HeaderValue> {
+    validate_browser_bridge_token(token.expose_secret(), pairing)?;
+    let plaintext = Zeroizing::new(format!("BrowserBridge {}", token.expose_secret()).into_bytes());
+    let shared = Bytes::from_owner(ZeroizingRequestBody(plaintext));
+    let mut value = HeaderValue::from_maybe_shared(shared)
+        .context("BrowserBridge token cannot be represented as an HTTP header")?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+fn validate_browser_bridge_token(token: &str, pairing: bool) -> anyhow::Result<()> {
+    let prefix = if pairing {
+        "ast_bridge_pair_"
+    } else {
+        "ast_bridge_"
+    };
+    if !token.starts_with(prefix)
+        || (!pairing && token.starts_with("ast_bridge_pair_"))
+        || token.len() <= prefix.len()
+        || token.len() > MAX_BOOTSTRAP_TOKEN_BYTES
+        || token.chars().any(char::is_control)
+    {
+        bail!("BrowserBridge token is empty or malformed");
+    }
+    Ok(())
+}
+
+fn validate_browser_bridge_session(
+    session: &BrowserBridgeSessionSnapshot,
+    expected_id: BrowserBridgeSessionId,
+    spec: &asterism_provider_api::BrowserSessionSpec,
+) -> anyhow::Result<()> {
+    spec.validate()
+        .context("Asterism server returned an invalid BrowserBridge policy")?;
+    let provider_id = ProviderId::new(session.provider_id.as_str().to_owned())
+        .context("Asterism server returned an invalid BrowserBridge Provider")?;
+    let claimed_at = session
+        .claimed_at
+        .context("Asterism server returned an unclaimed BrowserBridge session")?;
+    let ttl = session.expires_at.signed_duration_since(session.created_at);
+    if session.id != expected_id
+        || session.provider_id != provider_id
+        || session.provider_version.is_empty()
+        || session.provider_version.len() > 64
+        || session.provider_version.trim() != session.provider_version
+        || session.provider_version.chars().any(char::is_control)
+        || session.spec_version != spec.version
+        || session.state != BrowserBridgeSessionState::Claimed
+        || session.revision != 2
+        || ttl.num_seconds() <= 0
+        || ttl.num_seconds() > 12 * 60 * 60
+        || session.created_at > claimed_at
+        || session.updated_at != claimed_at
+        || claimed_at >= session.expires_at
+        || session.expires_at <= Utc::now()
+    {
+        bail!("Asterism server returned a mismatched BrowserBridge session");
+    }
+    Ok(())
+}
+
+fn valid_provider_label(provider_id: &ProviderId, value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_BROWSER_BRIDGE_LABEL_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+        && value
+            .strip_prefix(provider_id.as_str())
+            .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
+}
+
+fn valid_browser_bridge_frame_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn require_octet_stream(response: &Response) -> anyhow::Result<()> {
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_type == Some("application/octet-stream") {
+        Ok(())
+    } else {
+        bail!("Asterism server returned a non-binary BrowserBridge command");
+    }
+}
+
+fn decode_digest(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (position, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(chunk[0])?;
+        let low = hex_nibble(chunk[1])?;
+        digest[position] = (high << 4) | low;
+    }
+    Some(digest)
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn validate_bootstrap_token(token: &str) -> anyhow::Result<()> {
@@ -729,9 +1320,11 @@ mod tests {
 
     use axum::{
         Json, Router,
+        body::{Body, Bytes as AxumBytes},
         extract::{Path, State},
         http::HeaderMap,
-        routing::{get, post},
+        response::Response as AxumResponse,
+        routing::{get, post, put},
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use serde_json::{Value, json};
@@ -763,6 +1356,179 @@ mod tests {
         assert!(validate_base_url("https://example.test/base", false).is_err());
         assert!(validate_base_url("https://example.test?token=value", false).is_err());
         assert!(validate_base_url("asterism://auth", false).is_err());
+    }
+
+    #[test]
+    fn browser_bridge_tokens_and_digests_have_distinct_canonical_shapes() {
+        assert!(validate_browser_bridge_token("ast_bridge_pair_test", true).is_ok());
+        assert!(validate_browser_bridge_token("ast_bridge_access_test", false).is_ok());
+        assert!(validate_browser_bridge_token("ast_bridge_pair_test", false).is_err());
+        assert!(decode_digest(&"ab".repeat(32)).is_some());
+        assert!(decode_digest(&"AB".repeat(32)).is_none());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the transport regression keeps claim, binding, one-shot dispatch, digest verification and result receipt in one session"
+    )]
+    async fn browser_bridge_transport_is_bound_digest_checked_and_one_command_at_a_time() {
+        let command = br#"{"version":1,"action":"scan"}"#;
+        let command_digest: [u8; 32] = Sha256::digest(command).into();
+        let command_digest_hex = encode_test_digest(command_digest);
+        let app = Router::new()
+            .route(
+                "/api/v1/browser-bridge/sessions/{session_id}/claim",
+                post(
+                    |Path(session_id): Path<String>, headers: HeaderMap| async move {
+                        assert_eq!(session_id, SESSION_ID);
+                        assert_eq!(
+                            authorization_text(&headers),
+                            "BrowserBridge ast_bridge_pair_test"
+                        );
+                        let claimed_at = Utc::now();
+                        Json(json!({
+                            "session": {
+                                "id": SESSION_ID,
+                                "task_id": ACCOUNT_ID,
+                                "provider_id": "uai",
+                                "provider_version": "test",
+                                "spec_version": 1,
+                                "state": "claimed",
+                                "created_at": claimed_at - ChronoDuration::seconds(1),
+                                "updated_at": claimed_at,
+                                "expires_at": claimed_at + ChronoDuration::minutes(10),
+                                "claimed_at": claimed_at,
+                                "revision": 2
+                            },
+                            "spec": {
+                                "version": 1,
+                                "start_url": "https://ucontent.unipus.cn/task/a",
+                                "isolation_key": "uai-task-a",
+                                "allowed_origins": ["https://ucontent.unipus.cn"],
+                                "headless": false
+                            },
+                            "access_token": "ast_bridge_access_test"
+                        }))
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/browser-bridge/sessions/{session_id}/binding",
+                put(
+                    |Path(session_id): Path<String>,
+                     headers: HeaderMap,
+                     Json(payload): Json<Value>| async move {
+                        assert_eq!(session_id, SESSION_ID);
+                        assert_eq!(
+                            authorization_text(&headers),
+                            "BrowserBridge ast_bridge_access_test"
+                        );
+                        Json(json!({
+                            "session_id": SESSION_ID,
+                            "observed_origin": payload["observed_origin"],
+                            "frame_id": payload["frame_id"],
+                            "bound_at": Utc::now(),
+                            "duplicate": false
+                        }))
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}",
+                get({
+                    let command_digest_hex = command_digest_hex.clone();
+                    move |Path((session_id, sequence)): Path<(String, u64)>, headers: HeaderMap| {
+                        let command_digest_hex = command_digest_hex.clone();
+                        async move {
+                            assert_eq!((session_id.as_str(), sequence), (SESSION_ID, 1));
+                            assert_eq!(
+                                authorization_text(&headers),
+                                "BrowserBridge ast_bridge_access_test"
+                            );
+                            AxumResponse::builder()
+                                .header(CONTENT_TYPE, "application/octet-stream")
+                                .header(X_BROWSER_COMMAND_TYPE, "uai.browser.scan.v1")
+                                .header(X_BROWSER_COMMAND_DIGEST, command_digest_hex)
+                                .body(Body::from(command.as_slice()))
+                                .unwrap()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}/result",
+                post(
+                    |Path((session_id, sequence)): Path<(String, u64)>,
+                     headers: HeaderMap,
+                     body: AxumBytes| async move {
+                        assert_eq!((session_id.as_str(), sequence), (SESSION_ID, 1));
+                        assert_eq!(
+                            authorization_text(&headers),
+                            "BrowserBridge ast_bridge_access_test"
+                        );
+                        assert_eq!(headers[X_BROWSER_RESULT_TYPE], "uai.browser.scan-result.v1");
+                        let result_digest: [u8; 32] = Sha256::digest(&body).into();
+                        (
+                            StatusCode::ACCEPTED,
+                            Json(json!({
+                                "session_id": SESSION_ID,
+                                "sequence": 1,
+                                "result_type": "uai.browser.scan-result.v1",
+                                "result_digest": encode_test_digest(result_digest),
+                                "received_at": Utc::now(),
+                                "duplicate": false
+                            })),
+                        )
+                    },
+                ),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = CaptureClient::new(&format!("http://{address}"), true).unwrap();
+        let session_id = BrowserBridgeSessionId::from_str(SESSION_ID).unwrap();
+        let pairing_token = SecretString::new("ast_bridge_pair_test");
+
+        let mut claimed = client
+            .claim_browser_bridge(session_id, &pairing_token)
+            .await
+            .unwrap();
+        assert_eq!(claimed.session().id, session_id);
+        assert_eq!(
+            claimed.access_token().expose_secret(),
+            "ast_bridge_access_test"
+        );
+        assert!(!format!("{claimed:?}").contains("ast_bridge_access_test"));
+        let binding = client
+            .bind_browser_bridge_runtime(&mut claimed, "https://ucontent.unipus.cn", "top-frame:1")
+            .await
+            .unwrap();
+        assert_eq!(binding.frame_id, "top-frame:1");
+
+        let dispatched = client
+            .dispatch_browser_bridge_command(&mut claimed)
+            .await
+            .unwrap();
+        assert_eq!(dispatched.command_digest, command_digest);
+        assert_eq!(dispatched.command_artifact.expose_secret(), command);
+        assert!(!format!("{dispatched:?}").contains("action"));
+        assert!(
+            client
+                .dispatch_browser_bridge_command(&mut claimed)
+                .await
+                .is_err()
+        );
+
+        let raw_result = SecretValue::new(br#"{"version":1,"tasks":2}"#.to_vec());
+        let receipt = client
+            .submit_browser_bridge_result(&mut claimed, "uai.browser.scan-result.v1", &raw_result)
+            .await
+            .unwrap();
+        let expected_result_digest: [u8; 32] = Sha256::digest(raw_result.expose_secret()).into();
+        assert_eq!(receipt.result_digest, expected_result_digest);
+        assert_eq!(claimed.next_sequence(), 2);
+        server.abort();
     }
 
     #[tokio::test]
@@ -1120,6 +1886,16 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned()
+    }
+
+    fn encode_test_digest(digest: [u8; 32]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = String::with_capacity(64);
+        for byte in digest {
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        encoded
     }
 
     fn claimed_response() -> ClaimResponse {
