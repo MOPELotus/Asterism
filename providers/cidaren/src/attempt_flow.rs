@@ -144,6 +144,7 @@ pub struct CidarenIssuedOutcome {
     flow_binding: [u8; 32],
     operation: CidarenAttemptOperation,
     response: CidarenAssessmentResponse,
+    received_at: asterism_domain::Timestamp,
 }
 
 impl CidarenAttemptFlow {
@@ -505,7 +506,7 @@ impl CidarenAttemptFlow {
                 "Cidaren attempt outcome operation does not match",
             ));
         }
-        let applied = self.apply_response(continuation, outcome.response);
+        let applied = self.apply_response(continuation, outcome.response, outcome.received_at);
         if applied.is_err() {
             self.phase = Some(CidarenAttemptPhase::FailedClosed(operation));
         }
@@ -576,6 +577,7 @@ impl CidarenAttemptFlow {
         &mut self,
         continuation: CidarenAttemptContinuation,
         response: CidarenAssessmentResponse,
+        received_at: asterism_domain::Timestamp,
     ) -> ProviderResult<()> {
         match continuation {
             CidarenAttemptContinuation::SelectWords => match response {
@@ -591,7 +593,7 @@ impl CidarenAttemptFlow {
                 )),
             },
             CidarenAttemptContinuation::Start => {
-                self.apply_next_step_response(response, self.position)
+                self.apply_next_step_response(response, self.position, received_at)
             }
             CidarenAttemptContinuation::Verify { remaining } => {
                 let CidarenAssessmentResponse::Payload(payload) = response else {
@@ -611,7 +613,7 @@ impl CidarenAttemptFlow {
                 Ok(())
             }
             CidarenAttemptContinuation::NextStep { position } => {
-                self.apply_next_step_response(response, position)
+                self.apply_next_step_response(response, position, received_at)
             }
         }
     }
@@ -620,6 +622,7 @@ impl CidarenAttemptFlow {
         &mut self,
         response: CidarenAssessmentResponse,
         position: u32,
+        received_at: asterism_domain::Timestamp,
     ) -> ProviderResult<()> {
         self.position = position;
         match response {
@@ -646,7 +649,7 @@ impl CidarenAttemptFlow {
                 self.phase = Some(CidarenAttemptPhase::Receipt {
                     kind,
                     message_sanitized,
-                    received_at: Utc::now(),
+                    received_at,
                 });
                 Ok(())
             }
@@ -757,6 +760,7 @@ impl CidarenIssuedCommand {
             flow_binding: self.flow_binding,
             operation: self.operation,
             response,
+            received_at: Utc::now(),
         })
     }
 }
@@ -991,6 +995,7 @@ mod tests {
     };
     use asterism_provider_api::RemoteTask;
     use async_trait::async_trait;
+    use chrono::TimeZone;
     use serde_json::{Map, Value, json};
 
     use super::*;
@@ -1223,6 +1228,31 @@ mod tests {
             CidarenAttemptFlowStatus::Ambiguous(CidarenAttemptOperation::StartAnswer)
         );
         assert!(flow.issue_start().is_err());
+    }
+
+    #[test]
+    fn terminal_receipt_preserves_the_outcome_observation_time() {
+        let context = context();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail(),
+            None,
+        )
+        .unwrap();
+        let command = flow.issue_start().unwrap();
+        let received_at = Utc.with_ymd_and_hms(2026, 8, 14, 1, 2, 3).unwrap();
+        let outcome = CidarenIssuedOutcome {
+            flow_binding: flow.flow_binding,
+            operation: command.operation(),
+            response: receipt(CidarenAssessmentReceiptKind::Completed),
+            received_at,
+        };
+        drop(command);
+
+        flow.accept(outcome).unwrap();
+        assert_eq!(flow.completion_receipt().unwrap().received_at, received_at);
     }
 
     #[tokio::test]

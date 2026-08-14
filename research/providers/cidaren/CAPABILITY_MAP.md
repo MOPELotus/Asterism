@@ -99,6 +99,9 @@ The current checkpoint (not a completion boundary):
 23. converts the validated snapshot into Core's existing zeroizing
     `CredentialReplacement` boundary: token-only and Composite shapes remain
     distinct and optional unused browser session data is discarded.
+24. preserves the actual one-shot response observation time through outcome
+    acceptance so delayed durable recovery cannot fabricate a later terminal
+    receipt timestamp.
 
 The remaining work is durable shared QuestionSession/Attempt registration for
 QuestionInventory/QuestionParse and SubmissionExecute, shared execution for

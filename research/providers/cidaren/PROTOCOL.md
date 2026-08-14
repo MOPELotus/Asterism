@@ -464,7 +464,10 @@ public Capability because Core still needs durable storage/recovery for each
 issued edge. Only the donor's terminal Completed acknowledgement can be
 projected into a bounded `SubmissionReceipt`; intermediate success and
 word-selection acknowledgements cannot, and even the terminal receipt remains
-verification context rather than proof of success.
+verification context rather than proof of success. The receipt timestamp is
+captured when the one-shot transport returns and travels with its bound
+outcome; delayed acceptance or recovery cannot replace it with a later
+wall-clock time.
 
 Native answer evidence is also implemented. Inventory routes remain bound to
 the fresh class/study Task; `Course/StudyWordInfo` retains only meanings,
