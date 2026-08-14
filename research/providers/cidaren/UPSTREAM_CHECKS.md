@@ -393,6 +393,19 @@ the standalone `api.translate` helper but the packaged executable omits it;
 there is still no executable donor translation capability to port. This
 release-asset delta therefore required documentation, not Provider behavior.
 
+The same checkpoint separately audited the built-in token helper added on the
+reopened public default branch after release `1.5.4`. `TokenCaptureService`
+clears `fetch_token/token.txt`, preserves the current Windows system-proxy
+configuration, enables fixed `127.0.0.1:8888`, starts
+`mitmdump -s addon.py --listen-port 8888 --quiet --set
+console_eventlog_verbosity=error`, and polls the token file every 500 ms. It
+returns only the first observed `UserToken`; success, explicit stop and error
+all terminate the child, wait up to three seconds before killing it, and
+restore the old proxy. Although FiddlerCore binaries are present in the donor
+tree, the current helper does not import or execute them. This refines the
+shared helper-dispatch and cleanup requirements without adding another
+Provider credential shape, Capture field or platform capability.
+
 ## Check procedure
 
 For the next checkpoint:

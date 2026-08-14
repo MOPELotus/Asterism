@@ -38,6 +38,18 @@ recipe version into each bootstrap session and never combines their outputs.
 callback/helper challenge rather than pretending a native password flow
 exists.
 
+The reopened public master's built-in `TokenCaptureService` is a GUI wrapper
+around that token-only recipe, not a second Capture protocol. It clears
+`fetch_token/token.txt`, saves the current Windows system-proxy state, enables
+the fixed proxy `127.0.0.1:8888`, launches
+`mitmdump -s addon.py --listen-port 8888 --quiet --set
+console_eventlog_verbosity=error`, and polls the token file every 500 ms. Its
+only successful result is the first observed opaque `UserToken`. Stop, success
+and error paths terminate the child, wait at most three seconds before killing
+it, and restore the prior system proxy. FiddlerCore files are present beside
+the donor, but this service does not import or invoke them; their presence is
+not evidence for an alternate executable dispatch path.
+
 The donor capture helper also records `CDR_USER_SESSION` when present, but its
 own completion gate requires only the token plus `CDR_LOGIN_INFO`, and the
 `jv=99` decoder consumes only the latter. The declarative recipe therefore
@@ -111,6 +123,13 @@ Capture credential service. Cidaren's StartAnswer, VerifyAnswer,
 SubmitAnswerAndSave, SkipAnswer and SubmitChoseWord remain native HTTP
 mutations; no donor evidence justifies inventing a BrowserBridge replacement
 for those routes.
+
+The public helper lifecycle above is evidence for a shared local-helper
+dispatcher, not Provider-owned process or proxy management. Such a dispatcher
+must preserve and restore the exact previous proxy state, bind the one helper
+process to one acquisition, consume only the selected recipe's result and
+clean up on cancellation or failure. The Provider continues to own the typed,
+bounded command/result validation and the exact token-only credential shape.
 
 Before issuing a command, `CidarenBrowserBridge::capture_snapshot_command`
 freshly calls the existing TaskDetail capability and requires the returned
