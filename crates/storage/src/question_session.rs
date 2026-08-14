@@ -33,41 +33,9 @@ impl QuestionSessionRepository for SqliteQuestionSessionRepository {
         actor: AuditActor,
         correlation_id: &str,
     ) -> Result<(), StorageError> {
-        validate_new_session(session)?;
-        validate_correlation_id(correlation_id)?;
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
-        ensure_binding(&mut transaction, session).await?;
-        sqlx::query(
-            "INSERT INTO question_sessions \
-             (id, owner_user_id, provider_account_id, task_id, provider_id, provider_version, \
-              question_snapshot_id, artifact_type, artifact_digest, state, execution_id, \
-              revision, expires_at, claimed_at, closed_at, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?)",
-        )
-        .bind(session.id.to_string())
-        .bind(session.owner_user_id.to_string())
-        .bind(session.provider_account_id.to_string())
-        .bind(session.task_id.to_string())
-        .bind(session.provider_id.as_str())
-        .bind(&session.provider_version)
-        .bind(session.question_snapshot_id.to_string())
-        .bind(&session.artifact_type)
-        .bind(session.artifact_digest.as_slice())
-        .bind(state_name(session.state))
-        .bind(i64::from(session.revision))
-        .bind(encode_timestamp(session.expires_at))
-        .bind(encode_timestamp(session.created_at))
-        .bind(encode_timestamp(session.updated_at))
-        .execute(&mut *transaction)
-        .await?;
-        insert_audit(
-            &mut transaction,
-            actor_type(actor),
-            "question_session_created",
-            correlation_id,
-            session,
-        )
-        .await?;
+        insert_question_session_in_transaction(&mut transaction, session, actor, correlation_id)
+            .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -273,6 +241,48 @@ impl QuestionSessionRepository for SqliteQuestionSessionRepository {
         transaction.commit().await?;
         Ok(true)
     }
+}
+
+pub(crate) async fn insert_question_session_in_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &QuestionSession,
+    actor: AuditActor,
+    correlation_id: &str,
+) -> Result<(), StorageError> {
+    validate_new_session(session)?;
+    validate_correlation_id(correlation_id)?;
+    ensure_binding(transaction, session).await?;
+    sqlx::query(
+        "INSERT INTO question_sessions \
+         (id, owner_user_id, provider_account_id, task_id, provider_id, provider_version, \
+          question_snapshot_id, artifact_type, artifact_digest, state, execution_id, \
+          revision, expires_at, claimed_at, closed_at, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?)",
+    )
+    .bind(session.id.to_string())
+    .bind(session.owner_user_id.to_string())
+    .bind(session.provider_account_id.to_string())
+    .bind(session.task_id.to_string())
+    .bind(session.provider_id.as_str())
+    .bind(&session.provider_version)
+    .bind(session.question_snapshot_id.to_string())
+    .bind(&session.artifact_type)
+    .bind(session.artifact_digest.as_slice())
+    .bind(state_name(session.state))
+    .bind(i64::from(session.revision))
+    .bind(encode_timestamp(session.expires_at))
+    .bind(encode_timestamp(session.created_at))
+    .bind(encode_timestamp(session.updated_at))
+    .execute(&mut **transaction)
+    .await?;
+    insert_audit(
+        transaction,
+        actor_type(actor),
+        "question_session_created",
+        correlation_id,
+        session,
+    )
+    .await
 }
 
 #[derive(Clone, Debug)]

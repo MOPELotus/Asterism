@@ -9,7 +9,7 @@ use asterism_domain::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
-use sqlx::{Row, sqlite::SqliteRow};
+use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
 use crate::{
     AnswerCacheRepository, AnswerCandidateRecord, AnswerCandidateRepository, Database,
@@ -45,56 +45,8 @@ impl QuestionSnapshotRepository for SqliteQuestionSnapshotRepository {
         &self,
         snapshot: &QuestionSnapshot,
     ) -> Result<(), StorageError> {
-        let encoded = validate_and_encode(snapshot)?;
         let mut transaction = self.database.pool().begin().await?;
-        let actual_provider: Option<String> = sqlx::query_scalar(
-            "SELECT account.provider_id FROM tasks AS task \
-             INNER JOIN provider_accounts AS account \
-                ON account.id = task.provider_account_id \
-             WHERE task.id = ?",
-        )
-        .bind(snapshot.task_id.to_string())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if actual_provider.as_deref() != Some(snapshot.provider_id.as_str()) {
-            return Err(StorageError::InvalidData(
-                "question snapshot task/provider binding is invalid".to_owned(),
-            ));
-        }
-
-        sqlx::query(
-            "INSERT INTO question_snapshots \
-             (id, task_id, provider_id, provider_version, captured_at, \
-              question_count, total_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(snapshot.id.to_string())
-        .bind(snapshot.task_id.to_string())
-        .bind(snapshot.provider_id.as_str())
-        .bind(&snapshot.provider_version)
-        .bind(encode_timestamp(snapshot.captured_at))
-        .bind(i64::try_from(encoded.len()).expect("bounded Question count fits i64"))
-        .bind(
-            i64::try_from(encoded.total_bytes)
-                .expect("bounded Question snapshot byte count fits i64"),
-        )
-        .execute(&mut *transaction)
-        .await?;
-
-        for question in encoded.questions {
-            sqlx::query(
-                "INSERT INTO question_snapshot_items \
-                 (snapshot_id, question_id, remote_question_id, position, question_json, \
-                  content_fingerprint) VALUES (?, ?, ?, ?, ?, ?)",
-            )
-            .bind(snapshot.id.to_string())
-            .bind(question.id.to_string())
-            .bind(question.remote_id)
-            .bind(i64::from(question.position))
-            .bind(question.json)
-            .bind(question.content_fingerprint.as_str())
-            .execute(&mut *transaction)
-            .await?;
-        }
+        save_question_snapshot_in_transaction(&mut transaction, snapshot).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -149,6 +101,58 @@ impl QuestionSnapshotRepository for SqliteQuestionSnapshotRepository {
             None => Ok(None),
         }
     }
+}
+
+pub(crate) async fn save_question_snapshot_in_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    snapshot: &QuestionSnapshot,
+) -> Result<(), StorageError> {
+    let encoded = validate_and_encode(snapshot)?;
+    let actual_provider: Option<String> = sqlx::query_scalar(
+        "SELECT account.provider_id FROM tasks AS task \
+         INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+         WHERE task.id = ?",
+    )
+    .bind(snapshot.task_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if actual_provider.as_deref() != Some(snapshot.provider_id.as_str()) {
+        return Err(StorageError::InvalidData(
+            "question snapshot task/provider binding is invalid".to_owned(),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO question_snapshots \
+         (id, task_id, provider_id, provider_version, captured_at, question_count, total_bytes) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(snapshot.id.to_string())
+    .bind(snapshot.task_id.to_string())
+    .bind(snapshot.provider_id.as_str())
+    .bind(&snapshot.provider_version)
+    .bind(encode_timestamp(snapshot.captured_at))
+    .bind(i64::try_from(encoded.len()).expect("bounded Question count fits i64"))
+    .bind(
+        i64::try_from(encoded.total_bytes).expect("bounded Question snapshot byte count fits i64"),
+    )
+    .execute(&mut **transaction)
+    .await?;
+    for question in encoded.questions {
+        sqlx::query(
+            "INSERT INTO question_snapshot_items \
+             (snapshot_id, question_id, remote_question_id, position, question_json, \
+              content_fingerprint) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(snapshot.id.to_string())
+        .bind(question.id.to_string())
+        .bind(question.remote_id)
+        .bind(i64::from(question.position))
+        .bind(question.json)
+        .bind(question.content_fingerprint.as_str())
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn decode_question_snapshot(

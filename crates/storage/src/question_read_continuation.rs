@@ -1,7 +1,7 @@
 use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
-    AuditRecordId, ProviderId, QuestionReadAttempt, QuestionReadAttemptId,
+    AuditActor, AuditRecordId, ProviderId, QuestionReadAttempt, QuestionReadAttemptId,
     QuestionReadAttemptState, SecretId, Timestamp,
 };
 use asterism_secrets::{SecretAccess, SecretPurpose, SecretRef, SecretStoreError, SecretValue};
@@ -12,10 +12,13 @@ use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
 use crate::{
     Database, QuestionReadContinuation, QuestionReadContinuationAttachRequest,
-    QuestionReadContinuationRepository, QuestionReadOperation, QuestionReadOperationAcceptRequest,
+    QuestionReadContinuationRepository, QuestionReadMaterializeOutcome,
+    QuestionReadMaterializeRequest, QuestionReadOperation, QuestionReadOperationAcceptRequest,
     QuestionReadOperationFinishOutcome, QuestionReadOperationIssueOutcome,
     QuestionReadOperationIssueRequest, QuestionReadOperationState,
     ResolvedQuestionReadContinuation, SecretKeyring,
+    question::save_question_snapshot_in_transaction,
+    question_session::insert_question_session_in_transaction,
     secret::{
         authorize, decrypt, encrypt, fetch_secret, insert_secret_audit, insert_secret_blob,
         validate_secret,
@@ -423,6 +426,146 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
         })
     }
 
+    #[allow(clippy::too_many_lines)]
+    async fn materialize_question_read_operation(
+        &self,
+        request: QuestionReadMaterializeRequest<'_>,
+    ) -> Result<QuestionReadMaterializeOutcome, SecretStoreError> {
+        validate_provider_label(&self.provider_id, &request.session.artifact_type)?;
+        validate_provider_label(&self.provider_id, request.artifact_phase)?;
+        validate_secret(&request.artifact)?;
+        request
+            .session
+            .validate()
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+        let artifact_digest = digest(request.artifact.expose_secret());
+        if request.result_digest == [0; 32]
+            || artifact_digest != request.session.artifact_digest
+            || request.materialized_at < request.operation.issued_at
+        {
+            return Err(SecretStoreError::InvalidValue);
+        }
+        let mut transaction = begin(&self.database).await?;
+        let Some(existing) = fetch_operation(
+            &mut transaction,
+            request.operation.attempt_id,
+            request.operation.sequence,
+        )
+        .await?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionReadMaterializeOutcome::Unavailable);
+        };
+        let Some(binding) = fetch_binding(&mut transaction, existing.attempt_id).await? else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionReadMaterializeOutcome::Unavailable);
+        };
+        authorize_scoped(&binding.attempt, &self.provider_id, request.access)?;
+        if existing.state != QuestionReadOperationState::Issued {
+            let duplicate = existing.state == QuestionReadOperationState::Accepted
+                && existing.result_digest == Some(request.result_digest)
+                && exact_materialization_exists(&mut transaction, &binding.attempt, &request)
+                    .await?;
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(if duplicate {
+                QuestionReadMaterializeOutcome::Duplicate {
+                    operation: existing,
+                    attempt: binding.attempt,
+                    session: request.session.clone(),
+                }
+            } else {
+                QuestionReadMaterializeOutcome::Conflict
+            });
+        }
+        if &existing != request.operation
+            || binding.attempt.state != QuestionReadAttemptState::Active
+            || binding.attempt.revision != existing.continuation_revision
+            || binding.continuation.revision != existing.continuation_revision
+            || binding.secret_version != existing.continuation_revision
+            || !materialization_input_matches(&binding.attempt, &request)
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionReadMaterializeOutcome::Conflict);
+        }
+
+        save_question_snapshot_in_transaction(&mut transaction, request.snapshot)
+            .await
+            .map_err(storage_error)?;
+        insert_question_session_in_transaction(
+            &mut transaction,
+            request.session,
+            AuditActor::User(binding.attempt.owner_user_id),
+            &request.access.correlation_id,
+        )
+        .await
+        .map_err(storage_error)?;
+
+        let (key_id, key) = self.keyring.active();
+        let secret = SecretRef {
+            id: SecretId::new(),
+            owner_user_id: binding.attempt.owner_user_id,
+            purpose: SecretPurpose::BrowserJobCredential,
+            version: 1,
+            key_id: key_id.to_owned(),
+            created_at: request.materialized_at,
+            updated_at: request.materialized_at,
+        };
+        let (nonce, encrypted_data) = encrypt(key, &secret, request.artifact.expose_secret())?;
+        insert_secret_blob(&mut transaction, &secret, &nonce, &encrypted_data).await?;
+        sqlx::query(
+            "INSERT INTO question_session_continuations \
+             (session_id, execution_id, secret_blob_id, continuation_type, continuation_digest, \
+              phase, revision, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, ?, 1, ?, ?)",
+        )
+        .bind(request.session.id.to_string())
+        .bind(secret.id.to_string())
+        .bind(&request.session.artifact_type)
+        .bind(artifact_digest.as_slice())
+        .bind(request.artifact_phase)
+        .bind(encode_timestamp(request.materialized_at))
+        .bind(encode_timestamp(request.materialized_at))
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+
+        let mut attempt = binding.attempt;
+        attempt
+            .materialize(
+                request.snapshot.id,
+                request.session.id,
+                request.result_digest,
+                request.materialized_at,
+            )
+            .map_err(|_| SecretStoreError::VersionConflict)?;
+        update_attempt(&mut transaction, &attempt, existing.continuation_revision).await?;
+        let mut accepted = existing;
+        accepted.state = QuestionReadOperationState::Accepted;
+        accepted.result_digest = Some(request.result_digest);
+        accepted.completed_at = Some(request.materialized_at);
+        persist_operation_finish(&mut transaction, &accepted).await?;
+        insert_secret_audit(
+            &mut transaction,
+            request.access,
+            "question_session_artifact_stored",
+            &secret,
+        )
+        .await
+        .map_err(storage_error)?;
+        insert_operation_audit(
+            &mut transaction,
+            request.access,
+            "question_read_operation_materialized",
+            &accepted,
+        )
+        .await?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(QuestionReadMaterializeOutcome::Materialized {
+            operation: accepted,
+            attempt,
+            session: request.session.clone(),
+        })
+    }
+
     async fn finish_question_read_operation(
         &self,
         operation: &QuestionReadOperation,
@@ -520,6 +663,130 @@ struct AttemptBinding {
     continuation: QuestionReadContinuation,
     secret_id: SecretId,
     secret_version: u32,
+}
+
+fn materialization_input_matches(
+    attempt: &QuestionReadAttempt,
+    request: &QuestionReadMaterializeRequest<'_>,
+) -> bool {
+    let snapshot = request.snapshot;
+    let session = request.session;
+    attempt.owner_user_id == session.owner_user_id
+        && attempt.provider_account_id == session.provider_account_id
+        && attempt.task_id == snapshot.task_id
+        && attempt.task_id == session.task_id
+        && attempt.provider_id == snapshot.provider_id
+        && attempt.provider_id == session.provider_id
+        && attempt.provider_version == snapshot.provider_version
+        && attempt.provider_version == session.provider_version
+        && snapshot.id == session.question_snapshot_id
+        && snapshot.captured_at == request.materialized_at
+        && session.created_at == request.materialized_at
+        && session.updated_at == request.materialized_at
+        && session.state == asterism_domain::QuestionSessionState::Active
+        && session.execution_id.is_none()
+        && session.revision == 1
+        && session.expires_at > request.materialized_at
+        && !snapshot.questions.is_empty()
+        && snapshot
+            .questions
+            .iter()
+            .all(|question| question.task_id == attempt.task_id)
+}
+
+async fn exact_materialization_exists(
+    transaction: &mut Transaction<'_, Sqlite>,
+    attempt: &QuestionReadAttempt,
+    request: &QuestionReadMaterializeRequest<'_>,
+) -> Result<bool, SecretStoreError> {
+    if attempt.state != QuestionReadAttemptState::Materialized
+        || attempt.question_snapshot_id != Some(request.snapshot.id)
+        || attempt.question_session_id != Some(request.session.id)
+        || attempt.response_digest != Some(request.result_digest)
+        || attempt.updated_at != request.materialized_at
+        || !materialization_input_matches(attempt, request)
+    {
+        return Ok(false);
+    }
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM question_sessions AS session \
+         INNER JOIN question_snapshots AS snapshot ON snapshot.id = session.question_snapshot_id \
+         INNER JOIN question_session_continuations AS continuation \
+            ON continuation.session_id = session.id \
+         INNER JOIN secret_blobs AS secret ON secret.id = continuation.secret_blob_id \
+         WHERE session.id = ? AND snapshot.id = ? AND snapshot.task_id = ? \
+           AND snapshot.provider_id = ? AND snapshot.provider_version = ? \
+           AND snapshot.captured_at = ? AND session.owner_user_id = ? \
+           AND session.provider_account_id = ? AND session.task_id = ? AND session.provider_id = ? \
+           AND session.provider_version = ? AND session.artifact_type = ? \
+           AND session.artifact_digest = ? AND session.state = 'active' \
+           AND session.execution_id IS NULL AND continuation.continuation_type = ? \
+           AND continuation.continuation_digest = ? AND continuation.phase = ? \
+           AND continuation.revision = 1 AND secret.owner_user_id = ? \
+           AND secret.purpose = 'browser_job_credential' AND secret.version = 1)",
+    )
+    .bind(request.session.id.to_string())
+    .bind(request.snapshot.id.to_string())
+    .bind(attempt.task_id.to_string())
+    .bind(attempt.provider_id.as_str())
+    .bind(&attempt.provider_version)
+    .bind(encode_timestamp(request.snapshot.captured_at))
+    .bind(attempt.owner_user_id.to_string())
+    .bind(attempt.provider_account_id.to_string())
+    .bind(attempt.task_id.to_string())
+    .bind(attempt.provider_id.as_str())
+    .bind(&attempt.provider_version)
+    .bind(&request.session.artifact_type)
+    .bind(request.session.artifact_digest.as_slice())
+    .bind(&request.session.artifact_type)
+    .bind(request.session.artifact_digest.as_slice())
+    .bind(request.artifact_phase)
+    .bind(attempt.owner_user_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if !exists {
+        return Ok(false);
+    }
+    let rows = sqlx::query(
+        "SELECT question_id, remote_question_id, position, question_json, content_fingerprint \
+         FROM question_snapshot_items WHERE snapshot_id = ? ORDER BY position",
+    )
+    .bind(request.snapshot.id.to_string())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if rows.len() != request.snapshot.questions.len() {
+        return Ok(false);
+    }
+    for (row, question) in rows.iter().zip(&request.snapshot.questions) {
+        let json = serde_json::to_string(question).map_err(storage_error)?;
+        let fingerprint = question
+            .content_fingerprint()
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+        if row
+            .try_get::<&str, _>("question_id")
+            .map_err(storage_error)?
+            != question.id.to_string()
+            || row
+                .try_get::<Option<&str>, _>("remote_question_id")
+                .map_err(storage_error)?
+                != question.remote_question_id.as_deref()
+            || row.try_get::<i64, _>("position").map_err(storage_error)?
+                != i64::from(question.position)
+            || row
+                .try_get::<&str, _>("question_json")
+                .map_err(storage_error)?
+                != json
+            || row
+                .try_get::<&str, _>("content_fingerprint")
+                .map_err(storage_error)?
+                != fingerprint.as_str()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 async fn begin(database: &Database) -> Result<Transaction<'_, Sqlite>, SecretStoreError> {
@@ -839,10 +1106,13 @@ async fn update_attempt(
     expected_revision: u32,
 ) -> Result<(), SecretStoreError> {
     let result = sqlx::query(
-        "UPDATE question_read_attempts SET state = ?, response_digest = ?, revision = ?, \
-         completed_at = ?, updated_at = ? WHERE id = ? AND revision = ?",
+        "UPDATE question_read_attempts SET state = ?, question_snapshot_id = ?, \
+         question_session_id = ?, response_digest = ?, revision = ?, completed_at = ?, \
+         updated_at = ? WHERE id = ? AND revision = ?",
     )
     .bind(attempt_state_name(attempt.state))
+    .bind(attempt.question_snapshot_id.map(|id| id.to_string()))
+    .bind(attempt.question_session_id.map(|id| id.to_string()))
     .bind(attempt.response_digest.map(|digest| digest.to_vec()))
     .bind(i64::from(attempt.revision))
     .bind(attempt.completed_at.map(encode_timestamp))
@@ -1066,12 +1336,17 @@ fn storage_error(_: impl std::fmt::Display) -> SecretStoreError {
 mod tests {
     use std::collections::BTreeMap;
 
-    use asterism_domain::{AuditActor, ProviderAccountId, QuestionReadAttempt, TaskId, UserId};
+    use asterism_domain::{
+        AuditActor, ProviderAccountId, Question, QuestionId, QuestionKind, QuestionReadAttempt,
+        QuestionSession, QuestionSnapshotId, TaskId, UserId,
+    };
     use asterism_secrets::{SecretActor, SecretKey};
     use chrono::{Duration, Utc};
 
     use super::*;
-    use crate::{QuestionReadAttemptRepository, SqliteQuestionReadAttemptRepository};
+    use crate::{
+        QuestionReadAttemptRepository, QuestionSnapshot, SqliteQuestionReadAttemptRepository,
+    };
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
@@ -1331,6 +1606,112 @@ mod tests {
                 .await,
             Err(SecretStoreError::VersionConflict)
         ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn materialization_is_atomic_bound_and_exactly_idempotent() {
+        let fixture = Fixture::new().await;
+        let attempt = fixture.attempt(b"cidaren-ready-to-start").await;
+        let QuestionReadOperationIssueOutcome::Issued(operation) = fixture
+            .continuations
+            .issue_question_read_operation(QuestionReadOperationIssueRequest {
+                attempt_id: attempt.id,
+                expected_continuation_revision: 1,
+                operation_type: "cidaren.start-answer.v1".to_owned(),
+                request_digest: [11; 32],
+                issued_at: fixture.now + Duration::seconds(1),
+                access: &fixture.access("materialize-issue"),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected an issued operation");
+        };
+        let materialized_at = fixture.now + Duration::seconds(2);
+        let artifact = b"cidaren-question-topic";
+        let snapshot = QuestionSnapshot {
+            id: QuestionSnapshotId::new(),
+            task_id: fixture.task,
+            provider_id: fixture.provider.clone(),
+            provider_version: "attempt-v1".to_owned(),
+            captured_at: materialized_at,
+            questions: vec![Question {
+                id: QuestionId::new(),
+                task_id: fixture.task,
+                remote_question_id: Some("topic-1".to_owned()),
+                kind: QuestionKind::Unknown,
+                stem: "Bounded question".to_owned(),
+                options: Vec::new(),
+                attachments: Vec::new(),
+                metadata_sanitized: serde_json::json!({}),
+                position: 1,
+            }],
+        };
+        let session = QuestionSession::active(
+            fixture.owner,
+            fixture.account,
+            fixture.task,
+            fixture.provider.clone(),
+            "attempt-v1".to_owned(),
+            snapshot.id,
+            "cidaren.question-attempt.v1".to_owned(),
+            digest(artifact),
+            materialized_at,
+            materialized_at + Duration::minutes(5),
+        )
+        .unwrap();
+        let materialize_access = fixture.access("materialize-accept");
+        let materialize = |value: &[u8]| QuestionReadMaterializeRequest {
+            operation: &operation,
+            snapshot: &snapshot,
+            session: &session,
+            artifact_phase: "cidaren.current-question",
+            artifact: SecretValue::new(value.to_vec()),
+            result_digest: [12; 32],
+            materialized_at,
+            access: &materialize_access,
+        };
+        assert!(matches!(
+            fixture
+                .continuations
+                .materialize_question_read_operation(materialize(artifact))
+                .await
+                .unwrap(),
+            QuestionReadMaterializeOutcome::Materialized { operation, attempt, session: stored }
+                if operation.state == QuestionReadOperationState::Accepted
+                    && attempt.state == QuestionReadAttemptState::Materialized
+                    && stored == session
+        ));
+        assert!(matches!(
+            fixture
+                .continuations
+                .materialize_question_read_operation(materialize(artifact))
+                .await
+                .unwrap(),
+            QuestionReadMaterializeOutcome::Duplicate { session: stored, .. }
+                if stored == session
+        ));
+        assert!(matches!(
+            fixture
+                .continuations
+                .materialize_question_read_operation(materialize(b"substituted-topic"))
+                .await,
+            Err(SecretStoreError::InvalidValue)
+        ));
+        let snapshot_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM question_snapshots WHERE id = ?")
+                .bind(snapshot.id.to_string())
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        let session_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM question_sessions WHERE id = ?")
+                .bind(session.id.to_string())
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert_eq!((snapshot_count, session_count), (1, 1));
     }
 
     struct Fixture {

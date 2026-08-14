@@ -263,6 +263,18 @@ pub struct QuestionReadOperationAcceptRequest<'a> {
     pub access: &'a SecretAccess,
 }
 
+#[derive(Debug)]
+pub struct QuestionReadMaterializeRequest<'a> {
+    pub operation: &'a QuestionReadOperation,
+    pub snapshot: &'a QuestionSnapshot,
+    pub session: &'a QuestionSession,
+    pub artifact_phase: &'a str,
+    pub artifact: SecretValue,
+    pub result_digest: [u8; 32],
+    pub materialized_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QuestionReadOperationFinishOutcome {
     Accepted {
@@ -275,6 +287,22 @@ pub enum QuestionReadOperationFinishOutcome {
         attempt: QuestionReadAttempt,
     },
     Duplicate(QuestionReadOperation),
+    Conflict,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QuestionReadMaterializeOutcome {
+    Materialized {
+        operation: QuestionReadOperation,
+        attempt: QuestionReadAttempt,
+        session: QuestionSession,
+    },
+    Duplicate {
+        operation: QuestionReadOperation,
+        attempt: QuestionReadAttempt,
+        session: QuestionSession,
+    },
     Conflict,
     Unavailable,
 }
@@ -303,6 +331,11 @@ pub trait QuestionReadContinuationRepository: Send + Sync {
         &self,
         request: QuestionReadOperationAcceptRequest<'_>,
     ) -> Result<QuestionReadOperationFinishOutcome, SecretStoreError>;
+
+    async fn materialize_question_read_operation(
+        &self,
+        request: QuestionReadMaterializeRequest<'_>,
+    ) -> Result<QuestionReadMaterializeOutcome, SecretStoreError>;
 
     /// `Accepted` records a definite completed-before-first-Question
     /// response; continuing responses use `accept_question_read_operation`.
