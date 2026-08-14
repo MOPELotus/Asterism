@@ -57,7 +57,7 @@ impl fmt::Debug for EncodedCidarenBrowserCommandArtifact {
 /// The document can contain the account token and current crypto context, so
 /// the high-level `BrowserBridge` adapter consumes this zeroizing owner instead
 /// of borrowing an ordinary `String` whose cleanup it cannot enforce.
-pub struct CidarenBrowserResultDocument(Zeroizing<String>);
+pub(crate) struct CidarenBrowserResultDocument(Zeroizing<String>);
 
 impl CidarenBrowserResultDocument {
     /// Takes ownership of one bounded raw helper result.
@@ -160,7 +160,7 @@ impl CidarenCaptureMode {
 /// Core Capture recipe remains the authority for which source is allowed.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CidarenCaptureTokenSource {
+pub(crate) enum CidarenCaptureTokenSource {
     RequestHeader,
     LocalStorage,
     SessionStorage,
@@ -169,7 +169,7 @@ pub enum CidarenCaptureTokenSource {
 /// Source of the optional Composite login-info object.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CidarenCaptureStorageSource {
+pub(crate) enum CidarenCaptureStorageSource {
     LocalStorage,
     SessionStorage,
 }
@@ -357,7 +357,7 @@ impl Drop for CidarenBrowserCommandEnvelope {
 
 #[derive(Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CidarenBrowserEvent {
+pub(crate) enum CidarenBrowserEvent {
     CaptureSnapshot {
         user_token: Option<String>,
         user_token_source: Option<CidarenCaptureTokenSource>,
@@ -375,7 +375,7 @@ impl fmt::Debug for CidarenBrowserEvent {
 
 #[derive(Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct CidarenBrowserEventEnvelope {
+pub(crate) struct CidarenBrowserEventEnvelope {
     pub version: u32,
     pub session_nonce: String,
     pub origin: String,
@@ -387,7 +387,7 @@ pub struct CidarenBrowserEventEnvelope {
 
 impl CidarenBrowserEventEnvelope {
     /// Returns the stable durable exchange type used by Core.
-    pub const fn exchange_type() -> &'static str {
+    pub(crate) const fn exchange_type() -> &'static str {
         CIDAREN_CAPTURE_RESULT_TYPE
     }
 }
@@ -508,7 +508,7 @@ impl Drop for CidarenBrowserEventEnvelope {
 /// Zeroizing Provider-private Capture output. It is intentionally not a
 /// `CredentialBundle`: Core must validate the recipe/session binding before
 /// committing secrets to the `SecretStore`.
-pub struct CidarenCaptureSnapshot {
+pub(crate) struct CidarenCaptureSnapshot {
     user_token: Option<String>,
     user_token_source: Option<CidarenCaptureTokenSource>,
     login_info: Option<String>,
@@ -517,23 +517,23 @@ pub struct CidarenCaptureSnapshot {
 }
 
 impl CidarenCaptureSnapshot {
-    pub fn user_token(&self) -> Option<&str> {
+    #[cfg(test)]
+    pub(crate) fn user_token(&self) -> Option<&str> {
         self.user_token.as_deref()
     }
 
-    pub const fn user_token_source(&self) -> Option<CidarenCaptureTokenSource> {
-        self.user_token_source
-    }
-
-    pub fn login_info(&self) -> Option<&str> {
+    #[cfg(test)]
+    pub(crate) fn login_info(&self) -> Option<&str> {
         self.login_info.as_deref()
     }
 
-    pub const fn login_info_source(&self) -> Option<CidarenCaptureStorageSource> {
+    #[cfg(test)]
+    pub(crate) const fn login_info_source(&self) -> Option<CidarenCaptureStorageSource> {
         self.login_info_source
     }
 
-    pub fn user_session(&self) -> Option<&str> {
+    #[cfg(test)]
+    pub(crate) fn user_session(&self) -> Option<&str> {
         self.user_session.as_deref()
     }
 
@@ -549,7 +549,7 @@ impl CidarenCaptureSnapshot {
     ///
     /// Returns an internal error only if an invalid snapshot was constructed
     /// inside this module without passing the typed parser.
-    pub fn into_credential_replacement(mut self) -> ProviderResult<CredentialReplacement> {
+    pub(crate) fn into_credential_replacement(mut self) -> ProviderResult<CredentialReplacement> {
         let token = self.user_token.take().ok_or_else(|| {
             ProviderError::new(
                 ProviderErrorKind::Internal,
@@ -611,7 +611,7 @@ impl Drop for CidarenCaptureSnapshot {
 /// # Errors
 ///
 /// Returns a typed error for oversized, malformed or foreign results.
-pub fn parse_browser_event(
+pub(crate) fn parse_browser_event(
     document: &str,
     command: &CidarenBrowserCommandEnvelope,
     observed_origin: &str,
@@ -634,7 +634,7 @@ pub fn parse_browser_event(
 /// # Errors
 ///
 /// Returns a typed error when the document is empty or oversized.
-pub fn browser_event_exchange_digest(document: &str) -> ProviderResult<[u8; 32]> {
+pub(crate) fn browser_event_exchange_digest(document: &str) -> ProviderResult<[u8; 32]> {
     if document.is_empty() || document.len() > MAX_BROWSER_DOCUMENT_BYTES {
         return Err(invalid_response(
             "Cidaren BrowserBridge result is empty or oversized",

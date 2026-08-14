@@ -176,6 +176,11 @@ Core's selected recipe, but cannot independently accept a raw result or caller
 completion time. The persisted entry must first bind Core's encrypted result
 artifact and receipt metadata, then delegates to the same fresh Task binding
 and owned result-document completion path as an in-process exchange.
+The crate root exposes no raw result document, event envelope, parser,
+snapshot or snapshot-only consuming handoff. Core can issue the opaque command,
+call persisted completion and consume only credential replacement + terminal
+exchange; it cannot bypass the encrypted result inbox through a lower-level
+Cidaren API.
 Committed TokenOnly/Composite command fixtures are byte-identical to the
 compact JSON stored in the encrypted artifact and hashed into the exchange;
 helper dispatch and recovery therefore cannot evolve separate wire shapes.

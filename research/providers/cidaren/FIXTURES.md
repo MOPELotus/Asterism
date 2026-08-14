@@ -167,6 +167,9 @@ placeholder identities, result codes, status values and pagination shape.
   Encrypted result restoration checks the persisted digest before UTF-8/JSON
   parsing: changed bytes are ProtocolDrift, while correctly digest-bound empty,
   oversized or non-UTF-8 artifacts retain their InvalidResponse classification.
+  Public-surface doctests keep command issue, persisted completion and paired
+  credential commit available while proving raw result documents, envelopes,
+  snapshots and parsers cannot be imported from the Provider crate.
 - Class-task pagination is complete and total-consistent before normalization.
 - Course identity is `course:{course_id}` and duplicate rows must agree.
 - Task identity is `class-task:{release_id}` even when `task_id == -1`.

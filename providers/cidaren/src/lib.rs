@@ -6,6 +6,30 @@
 //! current `jv=99` crypto boundary, task-bound answer evidence and a one-shot
 //! assessment state machine. Public durable attempt integration and live
 //! compatibility remain in progress.
+//!
+//! Browser result bytes remain opaque outside the Provider. The public runtime
+//! surface issues typed commands, accepts only Core-persisted results and
+//! consumes validated credentials together with their terminal exchange.
+//!
+//! ```
+//! use asterism_provider_cidaren::{
+//!     CidarenBrowserBridge, CidarenCaptureExchangeCompleted, CidarenCaptureMode,
+//! };
+//!
+//! let _ = CidarenBrowserBridge::capture_snapshot_exchange;
+//! let _ = CidarenBrowserBridge::complete_persisted_capture_snapshot_exchange;
+//! let _ = CidarenCaptureExchangeCompleted::into_credential_commit_parts;
+//! let _: CidarenCaptureMode = CidarenCaptureMode::Composite;
+//! ```
+//!
+//! Raw result parsing is deliberately not an external escape hatch.
+//!
+//! ```compile_fail
+//! use asterism_provider_cidaren::{
+//!     CidarenBrowserEventEnvelope, CidarenBrowserResultDocument,
+//!     CidarenCaptureSnapshot, parse_browser_event,
+//! };
+//! ```
 
 mod answer;
 mod answer_evidence_loader;
@@ -80,10 +104,7 @@ pub use browser_bridge::{
 };
 pub use browser_protocol::{
     CIDAREN_CAPTURE_COMMAND_TYPE, CIDAREN_CAPTURE_RESULT_TYPE, CidarenBrowserCommand,
-    CidarenBrowserCommandEnvelope, CidarenBrowserEvent, CidarenBrowserEventEnvelope,
-    CidarenBrowserResultDocument, CidarenCaptureMode, CidarenCaptureSnapshot,
-    CidarenCaptureStorageSource, CidarenCaptureTokenSource, EncodedCidarenBrowserCommandArtifact,
-    browser_event_exchange_digest, parse_browser_event,
+    CidarenBrowserCommandEnvelope, CidarenCaptureMode, EncodedCidarenBrowserCommandArtifact,
 };
 pub use capture_recipe::{cidaren_capture_recipe_v2, cidaren_token_capture_recipe_v1};
 pub use class_tasks::{parse_course_inventory, parse_task_inventory};

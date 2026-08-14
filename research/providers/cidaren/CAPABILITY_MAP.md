@@ -197,7 +197,9 @@ The current checkpoint (not a completion boundary):
     uses that stored receive time, so callers cannot supply those fields as
     independent acceptance authority. Command-only recovery remains an
     internal implementation step and is not an alternate public result-
-    acceptance entry.
+    acceptance entry. Raw result envelopes, parsers, snapshots and snapshot-
+    only handoffs are also crate-private; the external runtime can consume only
+    the persisted completion's credential replacement + terminal exchange pair.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

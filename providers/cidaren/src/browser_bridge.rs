@@ -14,9 +14,12 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CidarenBrowserCommandEnvelope, CidarenBrowserResultDocument, CidarenCaptureMode,
-    CidarenCaptureSnapshot, EncodedCidarenBrowserCommandArtifact, metadata::development_metadata,
-    parse_browser_event,
+    browser_protocol::{
+        CidarenBrowserCommandEnvelope, CidarenBrowserEventEnvelope, CidarenBrowserResultDocument,
+        CidarenCaptureMode, CidarenCaptureSnapshot, EncodedCidarenBrowserCommandArtifact,
+        parse_browser_event,
+    },
+    metadata::development_metadata,
 };
 
 const CIDAREN_ORIGIN: &str = "https://app.vocabgo.com";
@@ -80,7 +83,8 @@ pub struct CidarenCaptureExchangeCompleted {
 }
 
 impl CidarenCaptureExchangeCompleted {
-    pub const fn snapshot(&self) -> &CidarenCaptureSnapshot {
+    #[cfg(test)]
+    const fn snapshot(&self) -> &CidarenCaptureSnapshot {
         &self.snapshot
     }
 
@@ -91,7 +95,7 @@ impl CidarenCaptureExchangeCompleted {
     /// Transfers the zeroizing credential material together with the exact
     /// completed ledger metadata so acceptance cannot silently discard either
     /// half of the result.
-    pub fn into_parts(self) -> (CidarenCaptureSnapshot, BrowserBridgeExchange) {
+    fn into_parts(self) -> (CidarenCaptureSnapshot, BrowserBridgeExchange) {
         (self.snapshot, self.exchange)
     }
 
@@ -237,7 +241,8 @@ impl CidarenBrowserBridge {
     /// Returns a typed error when the fresh Task no longer authorizes the
     /// session, the command binding differs from that Task, or the result is
     /// malformed/foreign.
-    pub async fn parse_capture_snapshot_result(
+    #[cfg(test)]
+    async fn parse_capture_snapshot_result(
         &self,
         context: &ProviderContext,
         remote_task_id: &str,
@@ -288,7 +293,8 @@ impl CidarenBrowserBridge {
     ///
     /// Returns a typed error when fresh Task rebinding fails, the result is
     /// foreign or malformed, or its completion time regresses.
-    pub async fn complete_capture_snapshot_exchange(
+    #[cfg(test)]
+    async fn complete_capture_snapshot_exchange(
         &self,
         context: &ProviderContext,
         remote_task_id: &str,
@@ -393,7 +399,7 @@ impl CidarenBrowserBridge {
         if result_metadata.validate().is_err()
             || result_metadata.session_id != issued_exchange.session_id
             || result_metadata.sequence != issued_exchange.sequence
-            || result_metadata.result_type != crate::CidarenBrowserEventEnvelope::exchange_type()
+            || result_metadata.result_type != CidarenBrowserEventEnvelope::exchange_type()
             || result_metadata.received_at < issued_exchange.issued_at
         {
             return Err(ProviderError::new(
@@ -445,7 +451,7 @@ impl CidarenBrowserBridge {
         let mut exchange = issued_exchange.clone();
         exchange
             .complete(
-                crate::CidarenBrowserEventEnvelope::exchange_type().to_owned(),
+                CidarenBrowserEventEnvelope::exchange_type().to_owned(),
                 result_digest,
                 completed_at,
             )
@@ -575,6 +581,7 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use super::*;
+    use crate::browser_protocol::{CidarenCaptureStorageSource, browser_event_exchange_digest};
 
     #[derive(Debug)]
     struct FixtureDetail {
@@ -835,7 +842,7 @@ mod tests {
             "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
         )
         .replace("synthetic-session-nonce", &session_id.to_string());
-        let expected_result_digest = crate::browser_event_exchange_digest(&document).unwrap();
+        let expected_result_digest = browser_event_exchange_digest(&document).unwrap();
         let completed = capability
             .complete_capture_snapshot_exchange(
                 &context(),
@@ -861,7 +868,7 @@ mod tests {
         );
         assert_eq!(
             completed.exchange().result_type.as_deref(),
-            Some(crate::CidarenBrowserEventEnvelope::exchange_type())
+            Some(CidarenBrowserEventEnvelope::exchange_type())
         );
         let (snapshot, completed_exchange) = completed.into_parts();
         assert_eq!(snapshot.user_token(), Some("synthetic-user-token"));
@@ -880,7 +887,7 @@ mod tests {
     #[tokio::test]
     async fn persisted_capture_result_resolves_command_authority_before_result() {
         let fixture = recovered_capture_fixture().await;
-        let result_digest = crate::browser_event_exchange_digest(&fixture.document).unwrap();
+        let result_digest = browser_event_exchange_digest(&fixture.document).unwrap();
         let result_artifact = SecretValue::new(fixture.document.into_bytes());
         let result_metadata = BrowserBridgeResultArtifactMetadata {
             session_id: fixture.session_id,
@@ -913,7 +920,7 @@ mod tests {
     #[tokio::test]
     async fn persisted_capture_result_rejects_receipt_metadata_drift() {
         let fixture = recovered_capture_fixture().await;
-        let result_digest = crate::browser_event_exchange_digest(&fixture.document).unwrap();
+        let result_digest = browser_event_exchange_digest(&fixture.document).unwrap();
         let result_artifact = SecretValue::new(fixture.document.into_bytes());
         let result_metadata = BrowserBridgeResultArtifactMetadata {
             session_id: fixture.session_id,
@@ -969,7 +976,7 @@ mod tests {
     #[tokio::test]
     async fn persisted_capture_result_uses_core_receipt_and_commits_exact_pair() {
         let fixture = recovered_capture_fixture().await;
-        let result_digest = crate::browser_event_exchange_digest(&fixture.document).unwrap();
+        let result_digest = browser_event_exchange_digest(&fixture.document).unwrap();
         let result_artifact = SecretValue::new(fixture.document.into_bytes());
         let result_metadata = BrowserBridgeResultArtifactMetadata {
             session_id: fixture.session_id,
@@ -1002,7 +1009,7 @@ mod tests {
         );
         assert_eq!(
             completed.snapshot().login_info_source(),
-            Some(crate::CidarenCaptureStorageSource::LocalStorage)
+            Some(CidarenCaptureStorageSource::LocalStorage)
         );
         let (replacement, completed_exchange) = completed.into_credential_commit_parts().unwrap();
         assert_eq!(replacement.session_kind, SessionKind::Composite);
