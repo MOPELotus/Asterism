@@ -76,10 +76,13 @@ impl WellearnBatchFlow {
         }
     }
 
-    const fn keeps_hidden(self) -> bool {
+    const fn requires_raw_sco_visibility(self) -> bool {
         matches!(
             self,
-            Self::FanyuchangCompletion | Self::FanyuchangDuration | Self::YzbrhDuration
+            Self::YzbrhCompletion
+                | Self::AutoCompletion
+                | Self::AutoDuration
+                | Self::AutoLegacyDuration
         )
     }
 
@@ -354,10 +357,11 @@ pub fn build_selected_batch_plan(
                 "WELearn batch selection has no independent completion observation",
             )
         })?;
-        let keep = (flow.keeps_hidden() || visible)
+        let raw_sco_visible = sco_visible != Some(false);
+        let keep = (!flow.requires_raw_sco_visibility() || raw_sco_visible)
             && (!flow.skips_completed() || completion != RemoteState::Completed)
             && (!flow.requires_pending_completion() || completion == RemoteState::Pending);
-        if !keep || (!unit_visible && !flow.keeps_hidden()) {
+        if !keep {
             continue;
         }
         entries.push(WellearnBatchEntry {
@@ -677,6 +681,12 @@ mod tests {
         tasks
     }
 
+    fn pending_hidden_unit_tasks() -> Vec<RemoteTask> {
+        let mut tasks = pending_tasks();
+        tasks[2].normalized["completion_observation"] = serde_json::json!("pending");
+        tasks
+    }
+
     fn units() -> Vec<WellearnUnitObservation> {
         parse_unit_inventory(UNITS).unwrap()
     }
@@ -709,6 +719,42 @@ mod tests {
     }
 
     #[test]
+    fn yzbrh_and_auto_filter_raw_sco_visibility_not_unit_visibility() {
+        let tasks = pending_hidden_unit_tasks();
+        for flow in [
+            WellearnBatchFlow::YzbrhCompletion,
+            WellearnBatchFlow::AutoCompletion,
+        ] {
+            let plan = build_batch_plan(&tasks, flow, None).unwrap();
+            assert_eq!(
+                plan.entries
+                    .iter()
+                    .map(|entry| entry.remote_task_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["sco:1001:302", "sco:1001:401"]
+            );
+            assert!(!plan.entries[1].unit_visible);
+            assert_eq!(plan.entries[1].sco_visible, Some(true));
+            assert!(!plan.entries[1].visible);
+        }
+    }
+
+    #[test]
+    fn auto_flows_skip_an_explicitly_hidden_sco() {
+        let mut tasks = pending_tasks();
+        tasks[1].normalized["sco_visible"] = serde_json::json!(false);
+        tasks[1].normalized["visible"] = serde_json::json!(false);
+        let plan = build_batch_plan(&tasks, WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| entry.remote_task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["sco:1001:301", "sco:1001:401"]
+        );
+    }
+
+    #[test]
     fn yzbrh_duration_keeps_hidden_and_completed_rows() {
         let plan = build_batch_plan(&tasks(), WellearnBatchFlow::YzbrhDuration, None).unwrap();
         assert_eq!(
@@ -733,7 +779,7 @@ mod tests {
     #[test]
     fn auto_duration_freezes_one_budget_and_discards_remainder() {
         let plan = build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
-        assert_eq!(plan.entries.len(), 2);
+        assert_eq!(plan.entries.len(), 3);
         assert_eq!(plan.aggregate_duration_seconds, Some(60));
         assert_eq!(plan.discarded_remainder_seconds, 0);
         assert_eq!(plan.dispatch, WellearnBatchDispatch::BoundedThreadPool);
@@ -744,7 +790,7 @@ mod tests {
         assert!(
             plan.entries
                 .iter()
-                .all(|entry| entry.target_seconds == Some(30))
+                .all(|entry| entry.target_seconds == Some(20))
         );
     }
 
@@ -756,7 +802,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.remote_task_id.as_str())
                 .collect::<Vec<_>>(),
-            ["sco:1001:301", "sco:1001:302"]
+            ["sco:1001:301", "sco:1001:302", "sco:1001:401"]
         );
         assert_eq!(plan.dispatch, WellearnBatchDispatch::Sequential);
         assert_eq!(plan.target_strategy, WellearnBatchTargetStrategy::PerChild);

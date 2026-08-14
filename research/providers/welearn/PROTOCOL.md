@@ -111,8 +111,9 @@ visibility, completion and duration must not be used as identity. The current
 normalized `welearn.sco.v2` observation also freezes the response-order
 `sco_index`, Unit-level visibility, optional raw SCO visibility and an
 independent `completion_observation`. The derived `visible`/`NotOpen` state is
-kept separate so batch planning can reproduce each donor's filtering rule
-without losing evidence.
+kept separate from the raw Unit and SCO facts. Batch planning uses the exact
+donor field: YZBRH and Auto skip only an explicitly false SCO `isvisible` and
+do not treat Unit-level `visible=false` as an additional membership filter.
 
 The current Fanyuchang donor intentionally leaves both the hidden-SCO and
 already-completed skip conditions disabled while building its work list. Thus
@@ -121,6 +122,9 @@ the donor-evidenced ResourceExecution, ExecutionVerify or DurationReport
 capabilities. Asterism retains the visibility boolean through fresh discovery
 and verification; the dispatcher grants Core's NotOpen exception only to the
 exact evidenced WELearn action sets and never to Expired or Removed tasks.
+YZBRH completion and both Auto entry points do retain their raw SCO-level skip,
+but a selected hidden Unit does not override a missing/true SCO visibility
+field. YZBRH duration and current Fanyuchang retain every returned SCO.
 
 The audited `scoLeaves` shape does not expose a trustworthy assessment-nature
 field. Every SCO therefore keeps `assessment_class=Unknown`; a Resource module
@@ -409,11 +413,11 @@ orchestration semantics are:
 |---|---|---|---|
 | Current Fanyuchang completion | one, several or every Unit; every returned SCO is retained, including hidden and already-completed rows | fixed score or one clamped-Gaussian score sampled independently for each SCO | one thread per selected SCO |
 | Current Fanyuchang duration | one, several or every Unit; every returned SCO is retained | fixed seconds or one inclusive uniform-range duration sampled independently for each SCO | one thread per selected SCO |
-| YZBRH completion | one Unit or every Unit; hidden SCOs and any SCO whose raw completion does not contain the donor's `未` marker are skipped | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | sequential SCO mutations |
+| YZBRH completion | one Unit or every Unit; SCOs with raw `isvisible=false` and any SCO whose raw completion does not contain the donor's `未` marker are skipped; Unit visibility is not a filter | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | sequential SCO mutations |
 | YZBRH duration | one Unit or every Unit; every returned SCO is retained, including hidden and completed rows | fixed seconds or one inclusive uniform-range duration sampled independently for each selected SCO | one concurrently created coroutine per SCO; each coroutine owns its read/start/network-keep/save lifecycle |
-| Auto_WeLearn completion | one or several Units; hidden SCOs and any SCO outside the raw `iscomplete` contains `未` branch are skipped | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | Units and SCOs are processed sequentially |
-| Auto_WeLearn duration | one or several Units; all visible SCOs are first collected into one membership set | sample `actual_minutes = max(1, configured_minutes + uniform(-range,+range))` once from configured 1–300 and offset 0–30 minute UI bounds, then give every child `floor(actual_minutes * 60 / child_count)` seconds; the remainder is deliberately discarded | bounded thread pool, configured from 1 through 100 |
-| Auto_WeLearn single-file duration | one Unit or every Unit; hidden SCOs are skipped while completed visible SCOs remain | fixed seconds or one inclusive uniform-range duration sampled independently for each visible SCO | Units and SCOs are processed sequentially |
+| Auto_WeLearn completion | one or several Units; SCOs with raw `isvisible=false` and any SCO outside the raw `iscomplete` contains `未` branch are skipped; Unit visibility is not a filter | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | Units and SCOs are processed sequentially |
+| Auto_WeLearn duration | one or several Units; all SCOs not explicitly hidden at leaf level are first collected into one membership set, regardless of Unit visibility | sample `actual_minutes = max(1, configured_minutes + uniform(-range,+range))` once from configured 1–300 and offset 0–30 minute UI bounds, then give every child `floor(actual_minutes * 60 / child_count)` seconds; the remainder is deliberately discarded | bounded thread pool, configured from 1 through 100 |
+| Auto_WeLearn single-file duration | one Unit or every Unit; raw `isvisible=false` SCOs are skipped while completed leaf-visible SCOs remain, regardless of Unit visibility | fixed seconds or one inclusive uniform-range duration sampled independently for each retained SCO | Units and SCOs are processed sequentially |
 
 These are orchestration semantics over the already implemented native SCO
 operations, not new WELearn endpoints. In particular, Auto's minutes value is

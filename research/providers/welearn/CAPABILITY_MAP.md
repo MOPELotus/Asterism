@@ -113,14 +113,15 @@ the sole success predicate. Network, authentication, malformed-response and
 other ambiguous failures stop without replay and require recovery review.
 
 Visibility remains an observation rather than a Provider capability ban. The
-current Fanyuchang donor has both visibility and already-completed skip checks
-explicitly disabled before it builds the execution list, so hidden SCOs retain
-`NotOpen` while still advertising ResourceExecution, ExecutionVerify and
-DurationReport. The Provider validates that a fresh boolean visibility fact is
-still present and binds the same Course/SCO identity; it does not relabel the
-SCO as open. Its dispatcher opts into Core's exact-action NotOpen exception
-only for ResourceExecution, DurationReport, or their audited composite; Core
-still rejects Expired and Removed.
+current Fanyuchang donor disables both visibility and completed checks; YZBRH
+duration also keeps every row. YZBRH completion and Auto filter only the raw
+SCO `isvisible=false` field, not Unit visibility, so a selected hidden Unit's
+missing/true leaf remains eligible while the merged Task state honestly stays
+`NotOpen`. The Provider retains separate Unit, SCO and merged visibility facts,
+fresh-binds the same Course/SCO identity and never relabels the Task as open.
+Its dispatcher opts into Core's exact-action NotOpen exception only for
+ResourceExecution, DurationReport, or their audited composite; Core still
+rejects Expired and Removed.
 
 The shared Engine now evaluates a DurationReport-only execution against the
 duration goal instead of requiring the remote Task to become Completed. A
