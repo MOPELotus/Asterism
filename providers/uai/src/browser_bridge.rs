@@ -148,6 +148,10 @@ pub struct UaiBrowserCursorExchangeIssued {
 }
 
 impl UaiBrowserCursorExchangeIssued {
+    pub const fn command_issuance(&self) -> &UaiBrowserExchangeIssued {
+        &self.issued
+    }
+
     pub const fn command(&self) -> &UaiBrowserCommandEnvelope {
         self.issued.command()
     }
@@ -3471,6 +3475,102 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_menu_scan_advances_cursor_to_one_exact_click() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let (batch, plan, command, cursor) = initial_residence_cursor(&session_nonce);
+        let issued_at = chrono::Utc::now();
+        let issued = bridge
+            .issue_cursor_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                session_id,
+                &cursor,
+                command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, &session_nonce, UCONTENT_ORIGIN, "frame-1")
+                .unwrap();
+        let target = UaiBrowserMenuEntry::try_new(
+            &plan,
+            &binding,
+            0,
+            "Unit Z".to_owned(),
+            "Section Z".to_owned(),
+            "Micro Z".to_owned(),
+        )
+        .unwrap();
+        let target_handle = target.handle.clone();
+        let document = UaiBrowserEventDocument::try_new(
+            serde_json::json!({
+                "version": UAI_BROWSER_PLAN_VERSION,
+                "session_nonce": session_nonce,
+                "origin": UCONTENT_ORIGIN,
+                "frame_id": "frame-1",
+                "remote_task_id": "group:2001:unit-z:group-z",
+                "reply_to_sequence": 1,
+                "event": {"kind": "menu_list", "entries": [target]},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let result_digest = document.exchange_digest().unwrap();
+        let mut completed = bridge
+            .complete_event_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                issued.command_issuance(),
+                document,
+                UCONTENT_ORIGIN,
+                issued_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+        let advanced = cursor
+            .advance_menu_list(&batch, &plan, issued.command(), &completed)
+            .unwrap();
+        assert_eq!(
+            advanced.cursor().stage(),
+            crate::UaiBrowserCursorStage::ClickingMenu
+        );
+        assert_eq!(advanced.cursor().prior_result_sequence(), Some(1));
+        assert_eq!(advanced.cursor().prior_result_digest(), Some(result_digest));
+        assert!(matches!(
+            advanced.command().command,
+            UaiBrowserCommand::ClickMenu { ref handle } if *handle == target_handle
+        ));
+        assert_eq!(advanced.command().sequence, 2);
+        assert_eq!(
+            advanced.cursor().next_command_digest(),
+            advanced.command().exchange_digest(&plan).unwrap()
+        );
+        assert_eq!(cursor.stage(), crate::UaiBrowserCursorStage::ScanningMenu);
+        assert_eq!(cursor.prior_result_digest(), None);
+        advanced
+            .cursor()
+            .encode_artifact(&batch, &plan, advanced.command())
+            .unwrap();
+
+        completed.exchange.command_digest = [7; 32];
+        assert_eq!(
+            cursor
+                .advance_menu_list(&batch, &plan, issued.command(), &completed)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
         );
     }
 

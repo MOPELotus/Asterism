@@ -72,7 +72,8 @@ pub use browser_bridge::{
     browser_start_url_from_detail, parse_browser_event, parse_browser_residence_result,
 };
 pub use browser_cursor::{
-    EncodedUaiBrowserCursorArtifact, UaiBrowserCursorStage, UaiBrowserResidenceCursor,
+    EncodedUaiBrowserCursorArtifact, UaiBrowserCursorAdvance, UaiBrowserCursorStage,
+    UaiBrowserResidenceCursor,
 };
 pub use compound_oral::{
     UaiCompoundOralPreparation, UaiCompoundOralSubmission, UaiCompoundOralSubmissionRequest,

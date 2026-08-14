@@ -1,5 +1,6 @@
 use std::fmt;
 
+use asterism_domain::BrowserBridgeExchangeState;
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,8 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    UaiBrowserCommand, UaiBrowserCommandEnvelope, UaiBrowserPageEntry, UaiBrowserPageScope,
+    UaiBrowserCommand, UaiBrowserCommandEnvelope, UaiBrowserEvent, UaiBrowserEventEnvelope,
+    UaiBrowserEventExchangeCompleted, UaiBrowserPageEntry, UaiBrowserPageScope,
     UaiBrowserResidenceControl, UaiBrowserResidencePlan, UaiBrowserSessionBinding,
     UaiCourseResidenceBatchPlan,
 };
@@ -42,6 +44,27 @@ impl fmt::Debug for EncodedUaiBrowserCursorArtifact {
             .field("value", &"[REDACTED]")
             .field("digest", &self.digest)
             .finish()
+    }
+}
+
+/// One immutable accumulated cursor transition and its exact next command.
+#[derive(Debug)]
+pub struct UaiBrowserCursorAdvance {
+    cursor: UaiBrowserResidenceCursor,
+    command: UaiBrowserCommandEnvelope,
+}
+
+impl UaiBrowserCursorAdvance {
+    pub const fn cursor(&self) -> &UaiBrowserResidenceCursor {
+        &self.cursor
+    }
+
+    pub const fn command(&self) -> &UaiBrowserCommandEnvelope {
+        &self.command
+    }
+
+    pub fn into_parts(self) -> (UaiBrowserResidenceCursor, UaiBrowserCommandEnvelope) {
+        (self.cursor, self.command)
     }
 }
 
@@ -217,6 +240,62 @@ impl UaiBrowserResidenceCursor {
 
     pub const fn prior_result_digest(&self) -> Option<[u8; 32]> {
         self.prior_result_digest
+    }
+
+    /// Advances the initial menu scan to its unique target-bound click.
+    ///
+    /// The completed event owner retains the exact raw-result digest and
+    /// durable exchange correlation. The old cursor remains unchanged; the
+    /// returned cursor owns the only next command authorized by that result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error unless this cursor owns the issued `ScanMenu`,
+    /// the completed exchange matches it exactly and the menu contains one
+    /// unique fresh hierarchy target.
+    pub fn advance_menu_list(
+        &self,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+        completed: &UaiBrowserEventExchangeCompleted,
+    ) -> ProviderResult<UaiBrowserCursorAdvance> {
+        self.validate_for_command(batch, plan, command)?;
+        if self.stage != UaiBrowserCursorStage::ScanningMenu
+            || !matches!(command.command, UaiBrowserCommand::ScanMenu)
+        {
+            return Err(stale_cursor());
+        }
+        let result_digest = completed_event_digest(self, command, completed)?;
+        completed
+            .event()
+            .validate_for_command(plan, command, &completed.event().origin)?;
+        let UaiBrowserEvent::MenuList { entries } = &completed.event().event else {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI accumulated cursor requires a completed menu-list event",
+            ));
+        };
+        let binding = UaiBrowserSessionBinding::try_new(
+            plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )?;
+        let target = plan.select_target_menu_entry(&binding, entries)?;
+        let next_sequence = command.sequence.checked_add(1).ok_or_else(invalid_cursor)?;
+        let next_command =
+            UaiBrowserCommandEnvelope::click_menu(plan, &binding, next_sequence, &target)?;
+        let mut next = self.clone();
+        next.stage = UaiBrowserCursorStage::ClickingMenu;
+        next.prior_result_sequence = Some(command.sequence);
+        next.prior_result_digest = Some(result_digest);
+        next.next_command_digest = next_command.exchange_digest(plan)?;
+        next.validate_for_command(batch, plan, &next_command)?;
+        Ok(UaiBrowserCursorAdvance {
+            cursor: next,
+            command: next_command,
+        })
     }
 
     /// Encodes this validated accumulated cursor for encrypted persistence.
@@ -419,6 +498,30 @@ fn validate_prior_result(
         }
         _ => Err(stale_cursor()),
     }
+}
+
+fn completed_event_digest(
+    cursor: &UaiBrowserResidenceCursor,
+    command: &UaiBrowserCommandEnvelope,
+    completed: &UaiBrowserEventExchangeCompleted,
+) -> ProviderResult<[u8; 32]> {
+    let exchange = completed.exchange();
+    let result_digest = exchange.result_digest.ok_or_else(stale_cursor)?;
+    if exchange.validate().is_err()
+        || exchange.state != BrowserBridgeExchangeState::Completed
+        || exchange.session_id.to_string() != command.session_nonce
+        || exchange.sequence != u64::from(command.sequence)
+        || exchange.command_type != UaiBrowserCommandEnvelope::exchange_type()
+        || exchange.command_digest != cursor.next_command_digest
+        || exchange.result_type.as_deref() != Some(UaiBrowserEventEnvelope::exchange_type())
+        || result_digest == [0; 32]
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "UAI accumulated cursor event exchange is stale or foreign",
+        ));
+    }
+    Ok(result_digest)
 }
 
 fn validate_snapshot(

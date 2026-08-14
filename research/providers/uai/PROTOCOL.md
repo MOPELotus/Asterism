@@ -419,6 +419,18 @@ sequence cannot be paired with that cursor. Core remains responsible for
 atomically persisting both encrypted artifacts and the cursor digest before
 dispatch.
 
+The first cursor transition is now executable at the Provider boundary. A
+completed `ScanMenu` exchange must retain the same Core session, sequence,
+command type/digest and raw `uai.browser.event` result digest as the cursor's
+issued command. Only its already validated `MenuList` can select the unique
+fresh Unit/Section/Micro target. The Provider then returns a new immutable
+cursor plus sequence-next `ClickMenu`; the old cursor remains unchanged, and
+the new cursor binds the prior raw result sequence/digest and exact click
+command digest before it can be encrypted or issued. Replacing the completed
+exchange command digest fails before advancing. Later Click/Menu/Tab/Task and
+residence transitions remain incremental Provider work around the shared
+dispatcher.
+
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.
 
