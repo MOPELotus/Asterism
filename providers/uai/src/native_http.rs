@@ -37,13 +37,12 @@ use crate::{
     annotator::generate_annotator_token,
     build_compound_oral_submission_request, build_compound_upload_submission_request,
     build_discussion_reply_page_request, build_discussion_reply_request,
-    build_discussion_topic_request, build_upload_grant_request, build_upload_multipart,
-    build_upload_submission_request,
+    build_discussion_topic_request, build_submission_request, build_upload_grant_request,
+    build_upload_multipart, build_upload_submission_request,
     course_inventory::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
         required_remote_component,
     },
-    encrypted::ZeroizingJsonValue,
     parse_compound_oral_verification, parse_compound_upload_verification, parse_course_context,
     parse_course_progress, parse_discussion_binding, parse_discussion_reply_page,
     parse_discussion_reply_receipt, parse_discussion_topic, parse_group_progress,
@@ -558,12 +557,12 @@ impl NativeUaiInventoryTransport {
             &group_id,
             Utc::now(),
         )?;
-        let body = Zeroizing::new(build_submission_body(
+        let request = build_submission_request(
             route.course_instance_id(),
             session.expose_open_id(),
             &group_id,
             plan,
-        )?);
+        )?;
         let annotator = generate_annotator_token(session.expose_open_id())?;
         let mut annotator_header =
             HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
@@ -575,12 +574,12 @@ impl NativeUaiInventoryTransport {
         annotator_header.set_sensitive(true);
         let response = self
             .client
-            .post(submission_url()?)
+            .post(request.expose_url())
             .header(ACCEPT, "application/json")
-            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(CONTENT_TYPE, request.content_type())
             .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
-            .body(body.as_bytes().to_vec())
+            .body(request.expose_body().as_bytes().to_vec())
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error));
@@ -2576,105 +2575,6 @@ fn verification_url(
     )
 }
 
-fn build_submission_body(
-    course_instance_id: &str,
-    open_id: &str,
-    group_id: &str,
-    plan: &UaiSubmissionPlan,
-) -> ProviderResult<String> {
-    let (context_version, answer_version) = if plan.questions().len() == 1 {
-        (0, 0)
-    } else {
-        (1, 1)
-    };
-    let protocol_versions = plan.protocol_versions();
-    let mut question_data = ZeroizingJsonValue::new(serde_json::Value::Array(Vec::with_capacity(
-        plan.questions().len(),
-    )));
-    let mut is_completed = Vec::new();
-    let mut judges = ZeroizingJsonValue::new(serde_json::Value::Array(Vec::new()));
-    for question in plan.questions() {
-        let children = question
-            .answer_children()
-            .iter()
-            .map(|values| {
-                serde_json::json!({
-                    "value": values,
-                    "isDone": true,
-                    "isRight": true,
-                    "replyCategory": "objective",
-                })
-            })
-            .collect::<Vec<_>>();
-        let inner_answer_value = ZeroizingJsonValue::new(serde_json::json!({
-                "value": [],
-                "children": children,
-                "progress": {},
-                "record": {"url": ""},
-        }));
-        let inner_answer = Zeroizing::new(
-            serde_json::to_string(inner_answer_value.as_value())
-                .map_err(|_| static_submission_error())?,
-        );
-        question_data
-            .as_value_mut()
-            .as_array_mut()
-            .ok_or_else(static_submission_error)?
-            .push(serde_json::json!({
-                "instanceId": question.remote_question_id(),
-                "answer": inner_answer.as_str(),
-                "context": "{\"state\":\"submitted\"}",
-                "contextVersion": context_version,
-                "answerVersion": answer_version,
-            }));
-        if question.judges().len() != question.answer_children().len() {
-            return Err(static_submission_error());
-        }
-        for (values, judge) in question.answer_children().iter().zip(question.judges()) {
-            is_completed.push(true);
-            judges
-                .as_value_mut()
-                .as_array_mut()
-                .ok_or_else(static_submission_error)?
-                .push(serde_json::json!({
-                    "value": values.join(","),
-                    "question_type": judge.question_type(),
-                    "reply_type": judge.reply_type(),
-                    "versions": {
-                        "course": protocol_versions.course(),
-                        "group": 1,
-                        "template": 1,
-                        "answer": protocol_versions.answer(),
-                        "content": 0,
-                    },
-                    "payloads": [],
-                }));
-        }
-    }
-    let judges = Zeroizing::new(
-        serde_json::to_string(judges.as_value()).map_err(|_| static_submission_error())?,
-    );
-    let body = ZeroizingJsonValue::new(serde_json::json!({
-        "quesDatas": question_data.as_value(),
-        "groupId": group_id,
-        "isCompleted": is_completed,
-        "thirdPartyJudges": judges.as_str(),
-        "submitType": plan.submit_type(),
-        "hideLoading": false,
-        "associationGroupId": "",
-        "courseId": course_instance_id,
-        "openId": open_id,
-        "version": "default",
-    }));
-    let mut encoded =
-        serde_json::to_string(body.as_value()).map_err(|_| static_submission_error())?;
-    if encoded.is_empty() || encoded.len() > MAX_SUBMISSION_REQUEST_BYTES {
-        encoded.zeroize();
-        return Err(static_submission_error());
-    }
-    Ok(encoded)
-}
-
 fn build_empty_completion_body(
     course_instance_id: &str,
     open_id: &str,
@@ -3337,14 +3237,14 @@ mod tests {
             "multichoice",
             vec![vec!["A".to_owned(), "B".to_owned()]],
         );
-        let body = build_submission_body(
+        let request = build_submission_request(
             "course-v2:synthetic+rw",
             "synthetic-open-id",
             "group-1",
             &plan,
         )
         .unwrap();
-        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let body: serde_json::Value = serde_json::from_str(request.expose_body()).unwrap();
         assert_eq!(body["groupId"], "group-1");
         assert_eq!(body["courseId"], "course-v2:synthetic+rw");
         assert_eq!(body["openId"], "synthetic-open-id");
@@ -3367,6 +3267,73 @@ mod tests {
     }
 
     #[test]
+    fn submission_request_digest_binds_route_account_and_complete_body() {
+        let plan = UaiSubmissionPlan::fixture("1001", "multichoice", vec![vec!["A".to_owned()]]);
+        let request = build_submission_request(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-1",
+            &plan,
+        )
+        .unwrap();
+        let duplicate = build_submission_request(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-1",
+            &plan,
+        )
+        .unwrap();
+        let changed_answer =
+            UaiSubmissionPlan::fixture("1001", "multichoice", vec![vec!["B".to_owned()]]);
+        assert_ne!(request.request_digest(), [0; 32]);
+        assert_eq!(request.request_digest(), duplicate.request_digest());
+        assert_ne!(
+            request.request_digest(),
+            build_submission_request(
+                "course-v2:changed+rw",
+                "synthetic-open-id",
+                "group-1",
+                &plan,
+            )
+            .unwrap()
+            .request_digest()
+        );
+        assert_ne!(
+            request.request_digest(),
+            build_submission_request("course-v2:synthetic+rw", "other-open-id", "group-1", &plan,)
+                .unwrap()
+                .request_digest()
+        );
+        assert_ne!(
+            request.request_digest(),
+            build_submission_request(
+                "course-v2:synthetic+rw",
+                "synthetic-open-id",
+                "group-1",
+                &changed_answer,
+            )
+            .unwrap()
+            .request_digest()
+        );
+        let debug = format!("{request:?}");
+        assert!(debug.contains("[ROUTE]") && debug.contains("[REDACTED]"));
+        assert!(!debug.contains("synthetic-open-id") && !debug.contains("1001"));
+    }
+
+    #[test]
+    fn submission_request_rejects_unbounded_or_unsafe_identities() {
+        let plan = UaiSubmissionPlan::fixture("1001", "multichoice", vec![vec!["A".to_owned()]]);
+        assert!(build_submission_request("", "openid-1", "group-1", &plan).is_err());
+        assert!(
+            build_submission_request("course-instance-1", "open\nid", "group-1", &plan).is_err()
+        );
+        assert!(
+            build_submission_request("course-instance-1", "openid-1", "group/1", &plan).is_err()
+        );
+        assert!(build_submission_request(&"c".repeat(513), "openid-1", "group-1", &plan,).is_err());
+    }
+
+    #[test]
     fn submission_body_uses_the_fresh_current_course_publish_version() {
         let plan = UaiSubmissionPlan::fixture_current(
             "1001",
@@ -3374,14 +3341,14 @@ mod tests {
             vec![vec!["A".to_owned()]],
             123_290,
         );
-        let body = build_submission_body(
+        let request = build_submission_request(
             "course-v2:synthetic+rw",
             "synthetic-open-id",
             "group-1",
             &plan,
         )
         .unwrap();
-        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let body: serde_json::Value = serde_json::from_str(request.expose_body()).unwrap();
         let judges: serde_json::Value =
             serde_json::from_str(body["thirdPartyJudges"].as_str().unwrap()).unwrap();
 
@@ -3392,14 +3359,14 @@ mod tests {
     #[test]
     fn video_popup_answer_submission_uses_the_donor_study_submit_type() {
         let plan = UaiSubmissionPlan::fixture("2101", "video-popup", vec![vec!["A".to_owned()]]);
-        let body = build_submission_body(
+        let request = build_submission_request(
             "course-v2:synthetic+rw",
             "synthetic-open-id",
             "group-video-popup",
             &plan,
         )
         .unwrap();
-        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let body: serde_json::Value = serde_json::from_str(request.expose_body()).unwrap();
 
         assert_eq!(body["submitType"], 2);
         assert_eq!(body["quesDatas"][0]["instanceId"], "2101");
@@ -3422,14 +3389,14 @@ mod tests {
                 vec![("basic", "text-area"), ("basic", "text-area")],
             ),
         ]);
-        let body = build_submission_body(
+        let request = build_submission_request(
             "course-v2:synthetic+rw",
             "synthetic-open-id",
             "group-1",
             &plan,
         )
         .unwrap();
-        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let body: serde_json::Value = serde_json::from_str(request.expose_body()).unwrap();
         assert_eq!(body["quesDatas"].as_array().unwrap().len(), 2);
         assert_eq!(body["quesDatas"][0]["instanceId"], "1001");
         assert_eq!(body["quesDatas"][1]["instanceId"], "1002");

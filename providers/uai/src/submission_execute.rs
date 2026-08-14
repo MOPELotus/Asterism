@@ -11,8 +11,10 @@ use asterism_provider_api::{
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use reqwest::Url;
 use serde_json::Value;
-use zeroize::Zeroize;
+use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     UaiSubmissionBuild,
@@ -31,7 +33,12 @@ const MAX_ANSWER_VALUES_PER_CHILD: usize = 256;
 const MAX_QUESTIONS_PER_SUBMISSION: usize = 5_000;
 const MAX_JUDGE_TYPE_BYTES: usize = 128;
 const MAX_SUBMISSION_RESPONSE_BYTES: usize = 1_024 * 1_024;
+const MAX_SUBMISSION_REQUEST_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_SUBMISSION_VERSION_BYTES: usize = 128;
+const MAX_COURSE_INSTANCE_ID_BYTES: usize = 512;
+const MAX_OPEN_ID_BYTES: usize = 8 * 1_024;
+const UAI_SUBMISSION_ROUTE: &str = "https://ucontent.unipus.cn/course/api/v3/newExploration/submit";
+const UAI_SUBMISSION_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 
 #[cfg(test)]
 type UaiSubmissionFixture<'a> = (&'a str, &'a str, Vec<Vec<String>>, Vec<(&'a str, &'a str)>);
@@ -395,6 +402,51 @@ pub struct UaiSubmissionPlan {
     protocol_versions: UaiSubmissionProtocolVersions,
 }
 
+/// Complete zeroizing request for one ordinary answer-bearing mutation.
+pub struct UaiSubmissionRequest {
+    url: Zeroizing<String>,
+    content_type: &'static str,
+    body: Zeroizing<String>,
+    request_digest: [u8; 32],
+}
+
+impl UaiSubmissionRequest {
+    /// Exact pre-dispatch identity over method, route, content type and body.
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    pub(crate) fn expose_url(&self) -> &str {
+        self.url.as_str()
+    }
+
+    pub(crate) const fn content_type(&self) -> &'static str {
+        self.content_type
+    }
+
+    pub(crate) fn expose_body(&self) -> &str {
+        self.body.as_str()
+    }
+}
+
+impl fmt::Debug for UaiSubmissionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiSubmissionRequest")
+            .field("url", &"[ROUTE]")
+            .field("content_type", &self.content_type)
+            .field("body", &"[REDACTED]")
+            .field("request_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+impl Drop for UaiSubmissionRequest {
+    fn drop(&mut self) {
+        self.request_digest.zeroize();
+    }
+}
+
 /// Donor-observed `thirdPartyJudges[].versions` protocol material. A fresh
 /// Course publish version selects the current donor's `answer=3` shape; an
 /// absent publish version retains the independently evidenced MIT `0/0`
@@ -583,6 +635,148 @@ impl UaiSubmissionPlan {
                 .collect(),
         }
     }
+}
+
+/// Materializes the exact answer-bearing request only after fresh route and
+/// account rebinding.
+///
+/// # Errors
+///
+/// Rejects malformed route/account identities, invalid plan cardinality or an
+/// oversized body before any remote mutation can occur.
+pub fn build_submission_request(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+    plan: &UaiSubmissionPlan,
+) -> ProviderResult<UaiSubmissionRequest> {
+    if !valid_request_text(course_instance_id, MAX_COURSE_INSTANCE_ID_BYTES)
+        || !valid_request_text(open_id, MAX_OPEN_ID_BYTES)
+        || valid_component(Some(group_id)).is_err()
+    {
+        return Err(invalid_input("UAI submission request identity is invalid"));
+    }
+    let body = build_submission_request_body(course_instance_id, open_id, group_id, plan)?;
+    let url = Url::parse(UAI_SUBMISSION_ROUTE)
+        .map_err(|_| invalid_response("UAI submission route is invalid"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:submission-request:v1\0");
+    digest.update(b"POST\0");
+    digest.update(url.as_str().as_bytes());
+    digest.update(b"\0content-type\0");
+    digest.update(UAI_SUBMISSION_CONTENT_TYPE.as_bytes());
+    digest.update(b"\0body\0");
+    digest.update(body.as_bytes());
+    Ok(UaiSubmissionRequest {
+        url: Zeroizing::new(url.into()),
+        content_type: UAI_SUBMISSION_CONTENT_TYPE,
+        body,
+        request_digest: digest.finalize().into(),
+    })
+}
+
+fn build_submission_request_body(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+    plan: &UaiSubmissionPlan,
+) -> ProviderResult<Zeroizing<String>> {
+    let (context_version, answer_version) = if plan.questions().len() == 1 {
+        (0, 0)
+    } else {
+        (1, 1)
+    };
+    let protocol_versions = plan.protocol_versions();
+    let mut question_data =
+        ZeroizingJsonValue::new(Value::Array(Vec::with_capacity(plan.questions().len())));
+    let mut is_completed = Vec::new();
+    let mut judges = ZeroizingJsonValue::new(Value::Array(Vec::new()));
+    for question in plan.questions() {
+        let children = question
+            .answer_children()
+            .iter()
+            .map(|values| {
+                serde_json::json!({
+                    "value": values,
+                    "isDone": true,
+                    "isRight": true,
+                    "replyCategory": "objective",
+                })
+            })
+            .collect::<Vec<_>>();
+        let inner_answer_value = ZeroizingJsonValue::new(serde_json::json!({
+            "value": [],
+            "children": children,
+            "progress": {},
+            "record": {"url": ""},
+        }));
+        let inner_answer = Zeroizing::new(
+            serde_json::to_string(inner_answer_value.as_value())
+                .map_err(|_| invalid_response("UAI submission answer cannot be serialized"))?,
+        );
+        question_data
+            .as_value_mut()
+            .as_array_mut()
+            .ok_or_else(|| invalid_response("UAI submission Question buffer is invalid"))?
+            .push(serde_json::json!({
+                "instanceId": question.remote_question_id(),
+                "answer": inner_answer.as_str(),
+                "context": "{\"state\":\"submitted\"}",
+                "contextVersion": context_version,
+                "answerVersion": answer_version,
+            }));
+        if question.judges().len() != question.answer_children().len() {
+            return Err(protocol_drift(
+                "UAI submission judge cardinality changed during request materialization",
+            ));
+        }
+        for (values, judge) in question.answer_children().iter().zip(question.judges()) {
+            is_completed.push(true);
+            judges
+                .as_value_mut()
+                .as_array_mut()
+                .ok_or_else(|| invalid_response("UAI submission judge buffer is invalid"))?
+                .push(serde_json::json!({
+                    "value": values.join(","),
+                    "question_type": judge.question_type(),
+                    "reply_type": judge.reply_type(),
+                    "versions": {
+                        "course": protocol_versions.course(),
+                        "group": 1,
+                        "template": 1,
+                        "answer": protocol_versions.answer(),
+                        "content": 0,
+                    },
+                    "payloads": [],
+                }));
+        }
+    }
+    let judges = Zeroizing::new(
+        serde_json::to_string(judges.as_value())
+            .map_err(|_| invalid_response("UAI submission judges cannot be serialized"))?,
+    );
+    let body = ZeroizingJsonValue::new(serde_json::json!({
+        "quesDatas": question_data.as_value(),
+        "groupId": group_id,
+        "isCompleted": is_completed,
+        "thirdPartyJudges": judges.as_str(),
+        "submitType": plan.submit_type(),
+        "hideLoading": false,
+        "associationGroupId": "",
+        "courseId": course_instance_id,
+        "openId": open_id,
+        "version": "default",
+    }));
+    let encoded = Zeroizing::new(
+        serde_json::to_string(body.as_value())
+            .map_err(|_| invalid_response("UAI submission request cannot be serialized"))?,
+    );
+    if encoded.is_empty() || encoded.len() > MAX_SUBMISSION_REQUEST_BYTES {
+        return Err(invalid_response(
+            "UAI submission request body exceeds the size limit",
+        ));
+    }
+    Ok(encoded)
 }
 
 fn submission_judges(
@@ -920,6 +1114,13 @@ fn valid_component(value: Option<&str>) -> ProviderResult<String> {
         })
         .map(str::to_owned)
         .ok_or_else(|| invalid_input("UAI Group Task identity is invalid"))
+}
+
+fn valid_request_text(value: &str, maximum_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum_bytes
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 fn valid_question_identity(value: &str) -> bool {

@@ -510,8 +510,12 @@ the Course detail and exact Unit progress through the same account session. It
 requires the exact Group to be an incomplete `tab_type=task` leaf and requires
 the fresh donor availability window to contain the current time. A completed,
 non-task, unavailable, missing or identity-mismatched leaf fails before body
-construction and transport. The mutation client then sends the account-bound
-JWT and annotator token.
+construction and transport. Only then does it materialize a redacted zeroizing
+request owner. The owner's digest binds the exact POST URL, content type and
+complete body, including fresh Course instance, account openid and all immutable
+answers; Native HTTP sends those same owned bytes rather than rebuilding the
+request. This pre-dispatch identity remains distinct from the Draft and semantic
+plan. The mutation client then sends the account-bound JWT and annotator token.
 Capture recipe v4 additionally preserves the donor-proven browser Cookie and
 optional `u-school` header. The native transport injects those optional values
 only into `ucontent` requests, along with the exact account-bound

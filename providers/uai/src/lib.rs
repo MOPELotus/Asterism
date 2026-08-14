@@ -125,8 +125,8 @@ pub use stored_session::StoredUaiSessionResolver;
 pub use submission_build::UaiSubmissionBuild;
 pub use submission_execute::{
     UaiSubmissionExecute, UaiSubmissionJudgePlan, UaiSubmissionPlan, UaiSubmissionProtocolVersions,
-    UaiSubmissionQuestionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
-    parse_submission_receipt,
+    UaiSubmissionQuestionPlan, UaiSubmissionRequest, UaiSubmissionResponseDocument,
+    UaiSubmissionTransport, build_submission_request, parse_submission_receipt,
 };
 pub use submission_verify::{
     UaiSubmissionVerify, UaiVerificationDocument, UaiVerificationTransport,
