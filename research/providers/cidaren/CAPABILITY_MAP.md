@@ -3,6 +3,9 @@
 This map combines the reopened `ularch@bce9559`, owner-supplied
 `MOPELotus@a74b4a2` and OAuth V2 assisted-bootstrap handoff. Their additive
 differences are frozen in [`DONOR_DIFFERENCES.md`](DONOR_DIFFERENCES.md).
+The mandatory from-scratch comparison against every recorded README, config,
+tag/release, issue, example, fixture and implementation call site is recorded
+in [`FULL_UPSTREAM_SWEEP.md`](FULL_UPSTREAM_SWEEP.md).
 
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
@@ -275,6 +278,29 @@ No current Core contract blocker remains for Cidaren's typed Capture credential
 terminal. No refresh or per-Question answer-history route is present in any
 audited donor, so those absences are evidence boundaries rather than deferred
 Provider implementations.
+
+The shared owner-global Answer Evidence Corpus and the two default-on policy
+state machines require one explicit Main-owned representation boundary:
+
+- Cidaren has no historical-attempt or per-Question correctness readback, so
+  first-bind bootstrap yields no verified answer records and ordinary
+  SubmissionVerify can contribute only task-level completion/score;
+- Strict Completion is supported by fresh exact `Completed + 100%` and is
+  independent of the optional score; no separate passing threshold exists;
+- Score Improvement has no evidenced retake/reset/eligibility protocol.
+  `chance_num` is current-Question state, not retake authority, so a completed
+  Task must not be restarted speculatively.
+
+These are not missing Cidaren parsers: the absent wire facts must remain
+unknown/unsupported in shared state until a new donor or authorized trace
+establishes them.
+
+The one-time full upstream sweep found no migration omission: the historical
+batch/class-vs-study flags compose already complete TaskInventory and durable
+per-Task execution; all donor timing semantics are present in runtime schema
+revision 2; compression, updater, logs, music and first-run state are transport
+or UI concerns; and the old `get_all_task` symbol is an uncalled no-request
+stub. Future checkpoints return to normal revision/delta review.
 
 ## Frozen donor executable-surface parity
 

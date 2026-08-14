@@ -312,7 +312,37 @@ placeholder identities, result codes, status values and pagination shape.
   the Task goal while per-Question answer history stays explicitly Unverified;
   a terminal receipt with incomplete readback remains Pending, and stale
   Draft/preview/state combinations fail closed.
+- No fixture fabricates a history/result/retake endpoint. The full donor sweep
+  found no per-Question correctness readback, passing threshold or retake
+  eligibility shape; `chance_num` remains current-Question data. Shared corpus
+  bootstrap and Score Improvement must preserve that absence, while Strict
+  Completion can consume the existing fresh 100%/Completed fixture.
 - Unknown response fields are dropped.
 - Capability advertisement follows implemented registry slots; an unfinished
   shared integration is recorded as a concrete Core Gap, never as a policy
   exclusion or Provider completion boundary.
+
+## Full-sweep evidence coverage
+
+The one-time full upstream sweep found no donor-owned automated test or fixture
+directory. Existing sanitized fixtures cover every reusable platform shape
+found in source, inline examples, public issues and the previously verified
+release archive:
+
+- auth fixtures cover opaque token acceptance/rejection; OAuth V2 remains a
+  deterministic crypto/request vector rather than copied live credentials;
+- class/study fixtures cover complete pagination, selected Course, stable
+  release/list identity, `task_id=-1`, progress, duration and score;
+- answer fixtures cover CoursePage, StudyTask Info, StudyWordInfo and prototype
+  evidence families used by every source answer mode;
+- Question fixtures cover ordinary, reading, matching/nested tags and the
+  issue-99 mode-73 structural boundary;
+- Browser fixtures cover both exact Capture command/result recipes and their
+  durable credential terminal.
+
+Historical tag inspection added no distinct executable response shape. The old
+`get_all_task` function has no request and no caller; issue requests for direct
+cumulative-duration mutation, batch-all UI and additional self-study selection
+were never implemented upstream. They therefore do not justify synthetic wire
+fixtures. The complete evidence-to-classification ledger is
+`FULL_UPSTREAM_SWEEP.md`.

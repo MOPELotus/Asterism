@@ -1,11 +1,15 @@
 # Cidaren donor and protocol differences
 
-Audit date: 2026-08-13. Each revision below is an immutable evidence point for
+Audit date: 2026-08-14. Each revision below is an immutable evidence point for
 this audit, while the upstream tracking target remains renewable. Branch,
 tag/release and key-commit movement is logged in
 [`UPSTREAM_CHECKS.md`](UPSTREAM_CHECKS.md) before a new snapshot is adopted;
 generated release pages and local helper binaries are never silently
 substituted for source evidence.
+
+The complete from-scratch comparison across all configs, tags/releases,
+issues, examples and call sites is in
+[`FULL_UPSTREAM_SWEEP.md`](FULL_UPSTREAM_SWEEP.md).
 
 ## Frozen lines
 

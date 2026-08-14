@@ -1,6 +1,15 @@
 # Cidaren protocol notes
 
-Audit date: 2026-08-13. These notes describe frozen donor behavior and
+The mandatory one-time full donor re-audit is recorded in
+[`FULL_UPSTREAM_SWEEP.md`](FULL_UPSTREAM_SWEEP.md). It re-enumerates all
+README/config keys, implementation call sites, default branches, tags/releases,
+105 public issues, inline examples and known fixtures. No additional platform
+route or semantic setting was found beyond the protocol below. In particular,
+historical batch/task-family controls are scheduling composition, Brotli is a
+transport compatibility toggle, and UI/update/log/music state is not Provider
+wire behavior.
+
+Audit date: 2026-08-14. These notes describe frozen donor behavior and
 synthetic parser targets, not live compatibility.
 
 The reopened `ularch@bce9559`, owner-supplied `MOPELotus@a74b4a2` and
@@ -756,6 +765,27 @@ observation.
 The platform exposes no audited answer-history readback, so the Task goal may
 be confirmed while each Question remains explicitly Unverified; incomplete
 readback stays Pending even after a terminal acknowledgement.
+
+This also fixes Cidaren's boundary for the owner-global Answer Evidence Corpus.
+Neither first account binding nor normal post-submission verification can
+harvest a platform-attested per-Question answer: inventory/Info reads expose
+only current Task state and an optional task-level score, while `VerifyAnswer`
+exposes only the next rotated `topic_code`. The current Question's
+`chance_num`/`answer_state` fields are not attempt history or correctness
+receipts. AnswerResolve's word/phrase/example candidates remain useful
+source-derived evidence, but cannot be relabelled as verified historical
+outcomes.
+
+The completion and improvement policies are independent. Strict Completion is
+fully observable through a fresh, consistent `RemoteState::Completed` plus
+`progress == 100`; neither expiry nor score proves it. The donors specify no
+passing-score threshold. Their historical `95+ correctness` claim is expected
+solver quality, and the current ordinary-study `progress <= 97` selector is a
+filtering quirk rather than a 97% terminal rule. No audited route or field
+enumerates attempts, resets a completed Task or states retake eligibility;
+rerunning the GUI merely calls `StartAnswer`, and completed class Tasks are
+filtered from execution. Therefore Score Improvement cannot safely start a
+Cidaren retake until new upstream/live evidence establishes its allowed range.
 
 `AnswerResolve` and `SubmissionVerify` are independent public Provider
 capabilities. Answer resolution freshly binds the Task's Course/unit inventory,

@@ -516,6 +516,64 @@ absences are evidence boundaries, not Provider features to invent. This
 checkpoint therefore updates the audit/blocker record rather than duplicating
 the completed Capture credential path or adding speculative code.
 
+### 2026-08-14 mandatory one-time full upstream sweep
+
+This checkpoint applied the additional `AGENTS.md` and
+`research/providers/NEXT_CHECKPOINT.md` requirement. It did not start from the
+previous pins or limit review to later commits. Fresh full clones were used to
+enumerate all three Git donor trees, READMEs/configs, every Python call site,
+all branches and tags, all GitHub Releases, all 105 public non-PR issues and
+comments, inline payload examples, screenshots and the already hash-verified
+1.5.4 package inventory. All imported H5/capture/XWeb/OAuth handoff manifests
+and documents were reread. The reproducible ledger is
+`FULL_UPSTREAM_SWEEP.md`.
+
+The sweep confirmed the same refs and release heads recorded above. Across all
+14 public tags and 10 historical tags, the executable platform surface
+converges on the already mapped Student/Main, class/study inventory/detail,
+CoursePage/SearchWord/StudyWordInfo evidence and five assessment mutations.
+Historical `v1.0/v1.1` contains a `get_all_task` symbol mentioning
+`/Student/ClassTask/PageTask`, but its body makes no request and it has no
+caller; it is not a retired capability. Later tags add updater, cancellation,
+logging, music, GUI and compression compatibility without another platform
+route.
+
+Every donor config key was classified. Real answer delay, reported answer time
+and Skip duration match runtime schema revision 2. Historical
+`class_task/myself_task`, manual task type/name choice and batch iteration are
+product scheduling over complete TaskInventory plus durable per-Task execution.
+`br_choices/accept_encoding` is HTTP transport compatibility. Token is secret
+material; version/known-version/read/music fields are UI. Issues 51, 64 and
+68/69 confirm cumulative-duration mutation, batch-all UX and additional
+self-study selection were requests explicitly not implemented by the donor.
+
+The complete question-mode list remains 0, 11, 13, 15-18, 21-22, 31-32,
+41-44 and 51-54, all mapped by Asterism. Issue 99 remains only structural
+evidence for mode 73 and the maintainer explicitly reports no direct encoding;
+the existing explicit Skip path is the full evidenced ability. The issue sweep
+found no other sanitized Question or mutation wire shape. Release-only device
+blocking/telemetry, dormant uncalled translation, updates, logs and UI are
+non-platform behavior.
+
+The shared corpus/policy addendum was checked across the same full evidence
+set. No route enumerates attempt history, submitted answers, per-Question
+correctness, a passing threshold, retake count/eligibility or reset. The inline
+`chance_num`/`answer_state` values describe only the current Question, and
+VerifyAnswer returns only a rotated topic token. First-bind history bootstrap
+therefore has no Cidaren answer evidence to harvest; normal SubmissionVerify
+continues to verify only task-level 100%/Completed plus optional score. Strict
+Completion is supported, but Score Improvement has no safe retake operation.
+Main must keep those states independent and represent Cidaren retake/evidence
+availability as unknown/unsupported rather than deriving it from score.
+
+No migration omission and no new Cidaren-owned route/parser gap was found. No
+code or fabricated fixture was added merely to make the sweep look productive.
+Current sanitized fixtures already cover every reusable observed shape, and
+the full Provider suite plus strict Clippy remain the executable regression
+gate. The authenticated-browser, live-account, authorized-mutation and mode-73
+evidence blockers remain exact. This completes Cidaren's one-time full sweep;
+future checkpoints resume ordinary branch/release/issue delta review.
+
 ## Check procedure
 
 For the next checkpoint:

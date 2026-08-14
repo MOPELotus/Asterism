@@ -6,6 +6,12 @@ commits are rechecked before and after each meaningful Provider checkpoint;
 changes are recorded in [`UPSTREAM_CHECKS.md`](UPSTREAM_CHECKS.md) before an
 incremental audit/port/test cycle.
 
+The mandatory one-time README/config/default-branch/tag/release/issue/example/
+implementation/fixture re-audit is recorded in
+[`FULL_UPSTREAM_SWEEP.md`](FULL_UPSTREAM_SWEEP.md). It supersedes any earlier
+assumption that the pinned-revision delta alone represented the complete donor
+surface.
+
 | Source | Revision | Capability evidence | Use | License |
 |---|---|---|---|---|
 | [`MOPELotus/Easy_Cidaren`](https://github.com/MOPELotus/Easy_Cidaren) | `a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` | Current imported `UserToken`, account validation, class Course/task inventory, learning/test execution, response obfuscation and 2026 `jv=99` crypto/capture changes | PortSource | GPL-3.0 |
