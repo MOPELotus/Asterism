@@ -33,6 +33,7 @@
 | Type 10 is normalized uniformly | OCS currently treats code 10 as completion while existing Asterism evidence maps it Composite | Preserve route/type provenance and block submission until a route-specific sanitized fixture resolves the conflict |
 | Shared-option/composite Questions are flattened | OCS types 14/15 expose children and issue #297 reports a shared-option shape | Add shared Domain context/options/children; do not store an opaque answer string or reuse option letters across attempts |
 | Fill/short result text is assumed uniquely correct | `chaoxing-exam` uses editors and batch evidence reports pending manual grading | Require exact result DOM plus standard/reference/pending label fixtures before harvesting or confirming these types |
+| Synthetic history transport is mistaken for live support | The audited Chapter result is iframe-bound and no current Native list/read endpoint is established | Keep `AnswerHistoryHarvest` absent from the Native factory until a real BrowserBridge/Capture transport proves pagination, `workAnswerId` binding and read-only result access |
 
 ## Live-validation gate
 

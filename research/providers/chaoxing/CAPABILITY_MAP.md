@@ -17,6 +17,7 @@ source modules even when their assessments share field names or HTML shapes.
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Document/Read/Video/Live resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live-account validation still pending |
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
 | AnswerResolve | `chaoxing-exam` completed Chapter result | Samueli Tiku, CxKitty searchers, OCS wrappers/cache, agent pre-computed answers | Reference | A typed but unregistered component rebinds fresh completed Chapter Work detail and consumes one abstract bound result document before producing strict ProviderNative candidates; all other donor sources are external/manual/random and no pending Work/Exam standard-answer protocol exists |
+| AnswerHistoryHarvest | `chaoxing-exam` completed Chapter result | Samueli issue #607, OCS result cache | Reference | A typed capability pages only completed Chapter Work references supplied by a bounded read-only transport, binds the audited `workAnswerId` into a Provider attempt digest, hashes the exact result document, applies Core's TaskId to parsed Questions and emits submitted/official/correctness/score/structural `RedoTest` facts. The native development factory does not advertise it until a real BrowserBridge/Capture list/read transport exists |
 | SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts. Exam has a separate value-free preview and durable one-operation-at-a-time native chain: donor signature and request digest are frozen before dispatch, each accepted answer save advances one cursor and rotates `enc`/timing state, and the final submit yields only a Receipt. No Exam mutation is routed through Work payloads or replayed after ambiguity |
 | SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has strict current verification / standard-answer parsers awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, confirms Questions solely from exact Draft ID/order/type/value result evidence, and projects the independent bounded result score as fixed thousandths |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
@@ -241,13 +242,16 @@ contracts:
   read-only, strictly rebound result route; task completion, score, `我的答案`,
   `正确答案` and per-Question correctness remain separate facts;
 - first account binding defaults to bounded read-only historical bootstrap, and
-  normal `SubmissionVerify` contributes incremental evidence, but neither
-  lifecycle exists in the shared capability/storage model yet;
-- a Provider-local Chapter history parser now closes the supported result-DOM
+  normal `SubmissionVerify` contributes incremental evidence. Core now owns the
+  harvest/evidence lifecycle; Chaoxing still needs a verified live history
+  transport and incremental verification-ingestion wiring;
+- a Provider-local Chapter history parser and typed `AnswerHistoryHarvest`
+  implementation now close the supported result-DOM
   fact boundary: it keeps submitted and official answers, their exact
   per-Question equality judgement, fixed-point score and structural `redoTest`
-  entry separate. It is not a registered harvest/retake capability and carries
-  no inferred owner/Attempt identity;
+  entry separate. The capability binds Core's TaskId plus separate attempt and
+  result digests, but remains absent from the native factory pending a real
+  read-only list/read transport and never authorizes retake;
 - Strict Completion and Score Improvement are independent default-enabled
   state machines. A score-improvement retake needs an explicit capability,
   fresh snapshot/Draft, bounded attempt authority and exact result-proven

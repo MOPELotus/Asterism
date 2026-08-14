@@ -248,6 +248,13 @@ mod tests {
         );
         assert!(entry.submission_execute.is_some());
         assert!(entry.submission_verify.is_some());
+        assert!(entry.answer_history_harvest.is_none());
+        assert!(
+            !entry
+                .metadata
+                .capabilities
+                .contains(&ProviderCapability::AnswerHistoryHarvest)
+        );
         assert!(entry.task_detail.is_some());
         assert_eq!(entry.runtime_settings.version, 5);
         assert_eq!(entry.runtime_settings.definitions.len(), 6);

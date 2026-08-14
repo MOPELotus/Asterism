@@ -557,15 +557,27 @@ source. Normal SubmissionVerify may append the same evidence incrementally.
 The owner-level corpus, evidence status and bootstrap lifecycle are Main-owned
 and are not represented by the current `AnswerCandidate` contract.
 
-The Provider now exposes a typed but unregistered Chapter Work history parser
+The Provider exposes a typed Chapter Work history parser
 over the already bounded `selectWorkQuestionYiPiYue` document. For the supported
 0/1/3 subset it requires complete QID/order/type/current-option binding and both
 visible labels, then returns the submitted value, official value, exact
 per-Question equality judgement, fixed-point score and an optional exact
 `redoTest(...)` entry. It does not construct Private Evidence, infer owner or
 Attempt identity, classify an overall score as per-Question evidence, or invoke
-the retake. Answer values are redacted from `Debug`. Shared bootstrap ingestion
-must add owner/account/course/task/attempt and result-digest bindings later.
+the retake. Answer values are redacted from `Debug`.
+
+`ChaoxingAnswerHistoryHarvest` now adapts that parser to Core's read-only
+history contract. Its private transport pages only completed Chapter Work
+records and supplies the audited attempt-local `workAnswerId` without exposing
+an endpoint. The Provider length-prefix hashes schema, stable Task/Course
+identity and `workAnswerId` into `provider_attempt_digest`; the exact bounded
+result document receives a separate domain-separated `result_digest`. Read
+reconstructs Questions with Core's supplied TaskId and preserves submitted,
+official, equality, score and structural `RedoTest` facts. Cursor state contains
+only a sanitized increasing page ordinal. The default Native factory does not
+advertise this capability until BrowserBridge/Capture provides a verified
+read-only list/result implementation; the synthetic transport is test-only and
+does not invent a native endpoint.
 
 Strict Completion stops after independently verified completion. Score
 Improvement evaluates fresh score and result-route retake eligibility under a

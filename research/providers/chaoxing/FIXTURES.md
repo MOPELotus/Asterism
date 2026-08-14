@@ -129,6 +129,15 @@ and a lookalike `notRedoTest(...)` handler does not create retake availability.
 The fixture neither grants mutation authority nor proves BrowserBridge access
 to a live historical result.
 
+The same fixture now contains the minimum result-page stem/type/current-option
+DOM needed to reconstruct Questions under the Core-provided TaskId. A synthetic
+two-page `ChaoxingAnswerHistoryTransport` proves sanitized ordinal cursors,
+strict `workAnswerId`-based Provider attempt digests, an exact result-document
+digest, Task-bound Questions and separate submitted/official/correctness/score/
+retake output. Invalid cursor zero, a changed attempt digest and lookalike
+retake handlers fail before the result transport. No synthetic route is used by
+the native development factory.
+
 Capability-level tests wrap the same bounded fixture with a fake fresh
 TaskDetail and result transport. They prove that the typed resolver emits three
 bound ProviderNative candidates only after exact completed
