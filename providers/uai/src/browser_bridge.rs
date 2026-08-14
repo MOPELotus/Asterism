@@ -623,6 +623,7 @@ impl UaiBrowserResidenceResult {
             || self.processed_tabs > plan.max_tabs_per_micro
             || self
                 .processed_tabs
+                .max(self.processed_micros)
                 .checked_mul(plan.max_tasks_per_tab)
                 .is_none_or(|max_tasks| self.processed_tasks > max_tasks)
             || self.video_seconds > plan.max_video_seconds
@@ -4417,6 +4418,88 @@ mod tests {
                 )
                 .unwrap()
                 .digest()
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_residence_checkpoint_accounts_exact_leaf_and_requires_readback() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let (batch, plan, command, cursor) = residing_cursor(session_id);
+        let task_handle = match &command.command {
+            UaiBrowserCommand::ResidenceTarget { task_handle, .. } => task_handle.clone(),
+            other => panic!("expected residence target, got {other:?}"),
+        };
+        let issued_at = chrono::Utc::now();
+        let issued = bridge
+            .issue_cursor_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                session_id,
+                &cursor,
+                command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let document = UaiBrowserResidenceResultDocument::try_new(
+            serde_json::json!({
+                "version": UAI_BROWSER_PLAN_VERSION,
+                "session_nonce": session_nonce,
+                "origin": UCONTENT_ORIGIN,
+                "frame_id": "frame-1",
+                "remote_task_id": "group:2001:unit-z:group-z",
+                "reply_to_sequence": 7,
+                "target_task_handle": task_handle,
+                "planned_residence_seconds": 100,
+                "observed_active_seconds": 100,
+                "processed_micros": 1,
+                "processed_tabs": 1,
+                "processed_tasks": 1,
+                "video_seconds": 0,
+                "cancelled": false,
+                "last_label": "Task Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let result_digest = document.exchange_digest().unwrap();
+        let mut completed = bridge
+            .complete_residence_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                issued.command_issuance(),
+                document,
+                UCONTENT_ORIGIN,
+                issued_at + chrono::Duration::seconds(100),
+            )
+            .await
+            .unwrap();
+        let checkpoint = cursor
+            .complete_residence(&batch, &plan, issued.command(), &completed)
+            .unwrap();
+        assert_eq!(checkpoint.completed_command_sequence(), 7);
+        assert_eq!(checkpoint.result_digest(), result_digest);
+        assert_eq!(checkpoint.remaining_active_seconds(), 1_100);
+        assert_eq!(checkpoint.observed_video_seconds(), 0);
+        assert_eq!(checkpoint.processed_micros(), 1);
+        assert_eq!(checkpoint.processed_tabs(), 1);
+        assert_eq!(checkpoint.processed_tasks(), 1);
+        assert!(checkpoint.requires_fresh_duration_read());
+
+        completed.result.observed_active_seconds = 99;
+        assert_eq!(
+            cursor
+                .complete_residence(&batch, &plan, issued.command(), &completed)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
         );
     }
 

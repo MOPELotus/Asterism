@@ -73,7 +73,7 @@ pub use browser_bridge::{
 };
 pub use browser_cursor::{
     EncodedUaiBrowserCursorArtifact, UaiBrowserCursorAdvance, UaiBrowserCursorStage,
-    UaiBrowserResidenceCursor,
+    UaiBrowserResidenceCheckpoint, UaiBrowserResidenceCursor,
 };
 pub use compound_oral::{
     UaiCompoundOralPreparation, UaiCompoundOralSubmission, UaiCompoundOralSubmissionRequest,

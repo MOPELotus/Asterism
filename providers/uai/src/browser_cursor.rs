@@ -10,8 +10,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     UaiBrowserCommand, UaiBrowserCommandEnvelope, UaiBrowserEvent, UaiBrowserEventEnvelope,
     UaiBrowserEventExchangeCompleted, UaiBrowserPageEntry, UaiBrowserPageScope,
-    UaiBrowserResidenceControl, UaiBrowserResidencePlan, UaiBrowserSessionBinding,
-    UaiCourseResidenceBatchPlan,
+    UaiBrowserResidenceControl, UaiBrowserResidenceExchangeCompleted, UaiBrowserResidencePlan,
+    UaiBrowserResidenceResult, UaiBrowserSessionBinding, UaiCourseResidenceBatchPlan,
 };
 
 const UAI_BROWSER_CURSOR_VERSION: u32 = 4;
@@ -65,6 +65,59 @@ impl UaiBrowserCursorAdvance {
 
     pub fn into_parts(self) -> (UaiBrowserResidenceCursor, UaiBrowserCommandEnvelope) {
         (self.cursor, self.command)
+    }
+}
+
+/// Non-replayable terminal accounting for one completed residence leaf.
+///
+/// This Provider-local checkpoint is not an acceptance receipt and cannot
+/// produce another command. Fresh `DurationRead` remains mandatory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UaiBrowserResidenceCheckpoint {
+    batch_plan_digest: [u8; 32],
+    browser_plan_digest: [u8; 32],
+    current_micro_identity_digest: [u8; 32],
+    completed_command_sequence: u32,
+    completed_command_digest: [u8; 32],
+    result_digest: [u8; 32],
+    remaining_active_seconds: u64,
+    observed_video_seconds: u64,
+    processed_micros: u32,
+    processed_tabs: u32,
+    processed_tasks: u32,
+}
+
+impl UaiBrowserResidenceCheckpoint {
+    pub const fn completed_command_sequence(&self) -> u32 {
+        self.completed_command_sequence
+    }
+
+    pub const fn result_digest(&self) -> [u8; 32] {
+        self.result_digest
+    }
+
+    pub const fn remaining_active_seconds(&self) -> u64 {
+        self.remaining_active_seconds
+    }
+
+    pub const fn observed_video_seconds(&self) -> u64 {
+        self.observed_video_seconds
+    }
+
+    pub const fn processed_micros(&self) -> u32 {
+        self.processed_micros
+    }
+
+    pub const fn processed_tabs(&self) -> u32 {
+        self.processed_tabs
+    }
+
+    pub const fn processed_tasks(&self) -> u32 {
+        self.processed_tasks
+    }
+
+    pub const fn requires_fresh_duration_read(&self) -> bool {
+        true
     }
 }
 
@@ -664,6 +717,71 @@ impl UaiBrowserResidenceCursor {
         })
     }
 
+    /// Accounts for one exact terminal residence observation without creating
+    /// replay or cross-leaf authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error unless the completed exchange owns this exact
+    /// residence command, reports the full non-cancelled leaf budget and
+    /// agrees with the cursor's accumulated navigation counts.
+    pub fn complete_residence(
+        &self,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+        completed: &UaiBrowserResidenceExchangeCompleted,
+    ) -> ProviderResult<UaiBrowserResidenceCheckpoint> {
+        self.validate_for_command(batch, plan, command)?;
+        if self.stage != UaiBrowserCursorStage::Residing
+            || !matches!(&command.command, UaiBrowserCommand::ResidenceTarget { .. })
+        {
+            return Err(stale_cursor());
+        }
+        let result_digest = completed_residence_digest(self, command, completed)?;
+        let result = completed.result();
+        result.validate_for_command(plan, command, &result.origin)?;
+        let leaf_seconds = expected_leaf_seconds(self, batch)?;
+        let processed_micros = self
+            .processed_micros
+            .checked_add(1)
+            .ok_or_else(invalid_cursor)?;
+        if result.cancelled
+            || result.observed_active_seconds != leaf_seconds
+            || result.planned_residence_seconds != leaf_seconds
+            || result.processed_micros != 1
+            || result.processed_tabs != self.processed_tabs
+            || result.processed_tasks != self.processed_tasks
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI terminal residence observation disagrees with its accumulated cursor",
+            ));
+        }
+        let remaining_active_seconds = self
+            .remaining_active_seconds
+            .checked_sub(result.observed_active_seconds)
+            .ok_or_else(invalid_cursor)?;
+        let observed_video_seconds = self
+            .observed_video_seconds
+            .checked_add(result.video_seconds)
+            .filter(|seconds| *seconds <= plan.max_video_seconds)
+            .ok_or_else(invalid_cursor)?;
+        Ok(UaiBrowserResidenceCheckpoint {
+            batch_plan_digest: self.batch_plan_digest,
+            browser_plan_digest: self.browser_plan_digest,
+            current_micro_identity_digest: self.current_micro_identity_digest,
+            completed_command_sequence: command.sequence,
+            completed_command_digest: self.next_command_digest,
+            result_digest,
+            remaining_active_seconds,
+            observed_video_seconds,
+            processed_micros,
+            processed_tabs: self.processed_tabs,
+            processed_tasks: self.processed_tasks,
+        })
+    }
+
     /// Encodes this validated accumulated cursor for encrypted persistence.
     ///
     /// # Errors
@@ -902,6 +1020,30 @@ fn completed_event_digest(
         return Err(ProviderError::new(
             ProviderErrorKind::ProtocolDrift,
             "UAI accumulated cursor event exchange is stale or foreign",
+        ));
+    }
+    Ok(result_digest)
+}
+
+fn completed_residence_digest(
+    cursor: &UaiBrowserResidenceCursor,
+    command: &UaiBrowserCommandEnvelope,
+    completed: &UaiBrowserResidenceExchangeCompleted,
+) -> ProviderResult<[u8; 32]> {
+    let exchange = completed.exchange();
+    let result_digest = exchange.result_digest.ok_or_else(stale_cursor)?;
+    if exchange.validate().is_err()
+        || exchange.state != BrowserBridgeExchangeState::Completed
+        || exchange.session_id.to_string() != command.session_nonce
+        || exchange.sequence != u64::from(command.sequence)
+        || exchange.command_type != UaiBrowserCommandEnvelope::exchange_type()
+        || exchange.command_digest != cursor.next_command_digest
+        || exchange.result_type.as_deref() != Some(UaiBrowserResidenceResult::exchange_type())
+        || result_digest == [0; 32]
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "UAI accumulated cursor residence exchange is stale or foreign",
         ));
     }
     Ok(result_digest)

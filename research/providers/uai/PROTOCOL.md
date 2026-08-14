@@ -457,6 +457,17 @@ command issuance continues to require the full plan budget, so a smaller leaf
 command is dispatchable only through cursor-aware issuance and its fresh batch
 revalidation.
 
+An exact completed residence exchange can now produce a non-replayable
+Provider-local terminal checkpoint. The exchange must repeat the cursor's Core
+session, sequence and command digest and retain the exact raw residence-result
+digest. The observation must be non-cancelled, report the complete leaf active
+seconds and agree with the cursor's Micro/Tab/Task counts. Checked accounting
+subtracts that leaf from remaining active budget, adds bounded video time and
+records the completed command/result identities. The checkpoint carries no
+next command and cannot be encoded as a resumable cursor; it still explicitly
+requires fresh DurationRead and does not authorize cross-leaf scheduling or
+Core acceptance.
+
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.
 
