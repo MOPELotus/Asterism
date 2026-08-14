@@ -430,7 +430,15 @@ every identity, URL normalization, kind and recomputed attachment ID before any
 source can be exposed or any answer network read can begin. It subsequently
 refreshes Task detail and encrypted content, so a valid old artifact cannot
 bypass protocol drift. The legacy no-artifact standard-answer path remains
-unchanged. Embedded WEBVTT is parsed with bounded
+unchanged. The same complete manifest is rebound again when an artifact-bearing
+SubmissionExecute session is claimed. Only after that validation and a fresh
+Task/detail plan does Native HTTP refresh Course/account/progress, freeze its
+authenticated session, generated annotator token and exact zeroizing POST
+owner, and return the prepared `uai.answer-submit.v1` operation. Core records
+the request digest before dispatch. The operation sends once and returns a
+separate exact response-body digest plus the accepted receipt; an ambiguous
+issued mutation has no Provider replay path. Media-free snapshots retain the
+legacy single-call execution path. Embedded WEBVTT is parsed with bounded
 input/output, strips its header, cue ordinals and timestamp rows, normalizes
 only cue text into transcript metadata and is excluded from the display stem. The
 current donor sends its default authorization/cookie header set through its
@@ -662,8 +670,9 @@ Cross-Provider registration still requires a shared immutable discussion
 Draft/attempt contract so both mutations and their independent readbacks remain
 durably recoverable without ambiguous replay. External media-source
 orchestration still requires the shared downloader/model contracts; ordinary
-QuestionSession persistence and session-aware AnswerResolve handoff are now
-integrated. The Provider-private upload
+QuestionSession persistence, session-aware AnswerResolve and ordinary
+answer-bearing prepared SubmissionExecute handoff are now integrated. The
+Provider-private upload
 boundary starts by canonicalizing the platform's camel-case
 `multiFileUpload` label at Task-tree parsing; ordinary UAI labels remain
 lowercase, but this label is never stored as an unreachable

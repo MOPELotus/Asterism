@@ -7,8 +7,10 @@ use std::{
 use asterism_domain::SubmissionReceipt;
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteCourse,
+    ExecutionEventSink, PreparedProviderSubmissionOperation, ProviderContext, ProviderError,
+    ProviderErrorKind, ProviderResult, ProviderSubmissionStepOutcome, RemoteCourse,
 };
+use asterism_secrets::SecretString;
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::{
@@ -16,6 +18,7 @@ use reqwest::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, RETRY_AFTER},
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
@@ -527,6 +530,22 @@ impl NativeUaiInventoryTransport {
         group_id: &str,
         plan: &UaiSubmissionPlan,
     ) -> ProviderResult<SubmissionReceipt> {
+        let mutation = self
+            .freeze_submission_with_session(session, course_resource_id, unit_id, group_id, plan)
+            .await?;
+        execute_frozen_submission(&self.client, session, mutation)
+            .await
+            .map(|(receipt, _)| receipt)
+    }
+
+    async fn freeze_submission_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        plan: &UaiSubmissionPlan,
+    ) -> ProviderResult<FrozenNativeUaiSubmission> {
         let course_resource_id = required_remote_component(
             Some(&serde_json::Value::String(course_resource_id.to_owned())),
             "submission Course-resource ID",
@@ -564,30 +583,12 @@ impl NativeUaiInventoryTransport {
             plan,
         )?;
         let annotator = generate_annotator_token(session.expose_open_id())?;
-        let mut annotator_header =
-            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
-                ProviderError::new(
-                    ProviderErrorKind::Internal,
-                    "UAI annotator token cannot be encoded as a request header",
-                )
-            })?;
-        annotator_header.set_sensitive(true);
-        let response = self
-            .client
-            .post(request.expose_url())
-            .header(ACCEPT, "application/json")
-            .header(CONTENT_TYPE, request.content_type())
-            .headers(ucontent_session_headers(session)?)
-            .header("x-annotator-auth-token", annotator_header)
-            .body(request.expose_body().as_bytes().to_vec())
-            .send()
-            .await
-            .map_err(|error| classify_reqwest_error(&error));
-        let response = response?;
-        let document = UaiSubmissionResponseDocument::try_new(
-            read_json_response(response, ResponseRoute::Submission).await?,
-        )?;
-        parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
+        Ok(FrozenNativeUaiSubmission {
+            request,
+            annotator,
+            course_instance_id: Zeroizing::new(route.course_instance_id().to_owned()),
+            group_id: Zeroizing::new(group_id),
+        })
     }
 
     async fn complete_preset_with_session(
@@ -1638,6 +1639,152 @@ impl UaiSubmissionTransport for NativeUaiInventoryTransport {
             result => result,
         }
     }
+
+    async fn prepare_submission(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        plan: &UaiSubmissionPlan,
+    ) -> ProviderResult<Box<dyn PreparedProviderSubmissionOperation>> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .freeze_submission_with_session(&session, course_resource_id, unit_id, group_id, plan)
+            .await
+        {
+            Ok(mutation) => Ok(Box::new(PreparedNativeUaiSubmissionOperation {
+                client: self.client.clone(),
+                session,
+                mutation,
+            })),
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                let mutation = self
+                    .freeze_submission_with_session(
+                        &session,
+                        course_resource_id,
+                        unit_id,
+                        group_id,
+                        plan,
+                    )
+                    .await?;
+                Ok(Box::new(PreparedNativeUaiSubmissionOperation {
+                    client: self.client.clone(),
+                    session,
+                    mutation,
+                }))
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+struct FrozenNativeUaiSubmission {
+    request: crate::UaiSubmissionRequest,
+    annotator: SecretString,
+    course_instance_id: Zeroizing<String>,
+    group_id: Zeroizing<String>,
+}
+
+impl fmt::Debug for FrozenNativeUaiSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FrozenNativeUaiSubmission")
+            .field("request", &self.request)
+            .field("annotator", &"[REDACTED]")
+            .field("course_instance_id", &"[REDACTED]")
+            .field("group_id", &"[REDACTED]")
+            .finish()
+    }
+}
+
+struct PreparedNativeUaiSubmissionOperation {
+    client: Client,
+    session: UaiJwtSession,
+    mutation: FrozenNativeUaiSubmission,
+}
+
+impl fmt::Debug for PreparedNativeUaiSubmissionOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedNativeUaiSubmissionOperation")
+            .field("client", &"configured")
+            .field("session", &"[REDACTED]")
+            .field("mutation", &self.mutation)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl PreparedProviderSubmissionOperation for PreparedNativeUaiSubmissionOperation {
+    fn operation_type(&self) -> &str {
+        crate::submission_execute::UAI_SUBMISSION_OPERATION_TYPE
+    }
+
+    fn request_digest(&self) -> [u8; 32] {
+        self.mutation.request.request_digest()
+    }
+
+    fn delay_before_execute_seconds(&self) -> u64 {
+        0
+    }
+
+    async fn execute(
+        self: Box<Self>,
+        _context: &ProviderContext,
+        _events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ProviderSubmissionStepOutcome> {
+        let Self {
+            client,
+            session,
+            mutation,
+        } = *self;
+        let (receipt, response_digest) =
+            execute_frozen_submission(&client, &session, mutation).await?;
+        let received_at = receipt.received_at;
+        ProviderSubmissionStepOutcome::submitted(receipt, response_digest, received_at)
+    }
+}
+
+async fn execute_frozen_submission(
+    client: &Client,
+    session: &UaiJwtSession,
+    mutation: FrozenNativeUaiSubmission,
+) -> ProviderResult<(SubmissionReceipt, [u8; 32])> {
+    let FrozenNativeUaiSubmission {
+        request,
+        annotator,
+        course_instance_id,
+        group_id,
+    } = mutation;
+    let mut annotator_header = HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "UAI annotator token cannot be encoded as a request header",
+        )
+    })?;
+    annotator_header.set_sensitive(true);
+    let response = client
+        .post(request.expose_url())
+        .header(ACCEPT, "application/json")
+        .header(CONTENT_TYPE, request.content_type())
+        .headers(ucontent_session_headers(session)?)
+        .header("x-annotator-auth-token", annotator_header)
+        .body(request.expose_body().as_bytes().to_vec())
+        .send()
+        .await
+        .map_err(|error| classify_reqwest_error(&error))?;
+    let document = UaiSubmissionResponseDocument::try_new(
+        read_json_response(response, ResponseRoute::Submission).await?,
+    )?;
+    let response_digest = Sha256::digest(document.as_str().as_bytes()).into();
+    let receipt = parse_submission_receipt(
+        document.as_str(),
+        course_instance_id.as_str(),
+        group_id.as_str(),
+    )?;
+    Ok((receipt, response_digest))
 }
 
 #[async_trait]

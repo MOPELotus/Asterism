@@ -1,11 +1,13 @@
 use std::{fmt, sync::Arc};
 
 use asterism_domain::{
-    NormalizedAnswer, QuestionKind, SubmissionDraft, SubmissionReceipt, TaskCapability,
+    NormalizedAnswer, ProviderAccountId, ProviderId, QuestionKind, SubmissionDraft,
+    SubmissionReceipt, TaskCapability,
 };
 use asterism_provider_api::{
-    ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema,
+    ExecutionEventSink, PreparedProviderSubmissionOperation, ProviderContext, ProviderError,
+    ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
+    ProviderRuntimeSettingsSchema, ResolvedProviderQuestionSessionContinuation,
     ResolvedProviderRuntimeSettings, SubmissionBuildCapability, SubmissionExecuteCapability,
     TaskDetailCapability,
 };
@@ -17,6 +19,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    UAI_QUESTION_SET_ARTIFACT_PHASE, UAI_QUESTION_SET_ARTIFACT_TYPE, UaiQuestionArtifactSet,
     UaiSubmissionBuild,
     encrypted::ZeroizingJsonValue,
     metadata::development_metadata,
@@ -39,6 +42,7 @@ const MAX_COURSE_INSTANCE_ID_BYTES: usize = 512;
 const MAX_OPEN_ID_BYTES: usize = 8 * 1_024;
 const UAI_SUBMISSION_ROUTE: &str = "https://ucontent.unipus.cn/course/api/v3/newExploration/submit";
 const UAI_SUBMISSION_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+pub(crate) const UAI_SUBMISSION_OPERATION_TYPE: &str = "uai.answer-submit.v1";
 
 #[cfg(test)]
 type UaiSubmissionFixture<'a> = (&'a str, &'a str, Vec<Vec<String>>, Vec<(&'a str, &'a str)>);
@@ -845,6 +849,22 @@ pub trait UaiSubmissionTransport: Send + Sync {
         group_id: &str,
         plan: &UaiSubmissionPlan,
     ) -> ProviderResult<SubmissionReceipt>;
+
+    /// Freezes the exact native mutation after all read-only route, account and
+    /// progress rebinding has completed. The returned operation must not send
+    /// the mutation until Core has persisted its request digest.
+    async fn prepare_submission(
+        &self,
+        _context: &ProviderContext,
+        _course_resource_id: &str,
+        _unit_id: &str,
+        _group_id: &str,
+        _plan: &UaiSubmissionPlan,
+    ) -> ProviderResult<Box<dyn PreparedProviderSubmissionOperation>> {
+        Err(unsupported(
+            "UAI submission transport does not support durable session execution",
+        ))
+    }
 }
 
 /// Independent UAI remote mutation. It returns only an acknowledgement receipt;
@@ -876,37 +896,14 @@ impl UaiSubmissionExecute {
             transport,
         })
     }
-}
 
-impl fmt::Debug for UaiSubmissionExecute {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("UaiSubmissionExecute")
-            .field("metadata", &self.metadata)
-            .field("runtime_settings", &self.runtime_settings)
-            .field("details", &"configured")
-            .field("preview", &self.preview)
-            .field("transport", &"configured")
-            .finish()
-    }
-}
-
-impl ProviderIdentity for UaiSubmissionExecute {
-    fn metadata(&self) -> &ProviderMetadata {
-        &self.metadata
-    }
-}
-
-#[async_trait]
-impl SubmissionExecuteCapability for UaiSubmissionExecute {
-    async fn execute_submission(
+    async fn validate_draft(
         &self,
         context: &ProviderContext,
         remote_task_id: &str,
         draft: &SubmissionDraft,
         runtime_settings: &ResolvedProviderRuntimeSettings,
-        _events: &(dyn ExecutionEventSink + Send + Sync),
-    ) -> ProviderResult<SubmissionReceipt> {
+    ) -> ProviderResult<GroupIdentity> {
         validate_context(context, &self.metadata)?;
         self.runtime_settings
             .validate_resolved(runtime_settings)
@@ -939,14 +936,61 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
                 "UAI submission execution draft preview is stale or foreign",
             ));
         }
+        Ok(identity)
+    }
 
+    async fn fresh_plan(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        identity: &GroupIdentity,
+    ) -> ProviderResult<UaiSubmissionPlan> {
         let detail = self.details.task_detail(context, remote_task_id).await?;
-        let fresh = validate_fresh_detail(&detail, &identity, remote_task_id, draft.items.len())?;
-        let plan = UaiSubmissionPlan::from_draft_with_versions(
+        let fresh = validate_fresh_detail(&detail, identity, remote_task_id, draft.items.len())?;
+        UaiSubmissionPlan::from_draft_with_versions(
             draft,
             &fresh.task_types,
             fresh.protocol_versions,
-        )?;
+        )
+    }
+}
+
+impl fmt::Debug for UaiSubmissionExecute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiSubmissionExecute")
+            .field("metadata", &self.metadata)
+            .field("runtime_settings", &self.runtime_settings)
+            .field("details", &"configured")
+            .field("preview", &self.preview)
+            .field("transport", &"configured")
+            .finish()
+    }
+}
+
+impl ProviderIdentity for UaiSubmissionExecute {
+    fn metadata(&self) -> &ProviderMetadata {
+        &self.metadata
+    }
+}
+
+#[async_trait]
+impl SubmissionExecuteCapability for UaiSubmissionExecute {
+    async fn execute_submission(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+        _events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<SubmissionReceipt> {
+        let identity = self
+            .validate_draft(context, remote_task_id, draft, runtime_settings)
+            .await?;
+        let plan = self
+            .fresh_plan(context, remote_task_id, draft, &identity)
+            .await?;
         let receipt = self
             .transport
             .submit(
@@ -971,6 +1015,109 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
             ));
         }
         Ok(receipt)
+    }
+
+    async fn prepare_submission_operation(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<Box<dyn PreparedProviderSubmissionOperation>>> {
+        let identity = self
+            .validate_draft(context, remote_task_id, draft, runtime_settings)
+            .await?;
+        if continuation.continuation_type != UAI_QUESTION_SET_ARTIFACT_TYPE
+            || continuation.phase != UAI_QUESTION_SET_ARTIFACT_PHASE
+            || continuation.revision == 0
+        {
+            return Err(protocol_drift(
+                "UAI submission continuation metadata is stale or foreign",
+            ));
+        }
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        UaiQuestionArtifactSet::decode_bound(
+            continuation.value,
+            continuation.continuation_digest,
+            remote_task_id,
+            &questions,
+        )?;
+        let plan = self
+            .fresh_plan(context, remote_task_id, draft, &identity)
+            .await?;
+        let operation = self
+            .transport
+            .prepare_submission(
+                context,
+                &identity.course_resource,
+                &identity.unit,
+                &identity.group,
+                &plan,
+            )
+            .await?;
+        if operation.operation_type() != UAI_SUBMISSION_OPERATION_TYPE
+            || operation.request_digest() == [0; 32]
+            || operation.delay_before_execute_seconds() != 0
+        {
+            return Err(invalid_response(
+                "UAI submission transport prepared an invalid operation",
+            ));
+        }
+        Ok(Some(Box::new(BoundUaiPreparedSubmissionOperation {
+            provider_id: context.provider_id.clone(),
+            account_id: context.account_id,
+            operation,
+        })))
+    }
+}
+
+struct BoundUaiPreparedSubmissionOperation {
+    provider_id: ProviderId,
+    account_id: ProviderAccountId,
+    operation: Box<dyn PreparedProviderSubmissionOperation>,
+}
+
+impl fmt::Debug for BoundUaiPreparedSubmissionOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BoundUaiPreparedSubmissionOperation")
+            .field("provider_id", &self.provider_id)
+            .field("account_id", &self.account_id)
+            .field("operation", &self.operation)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl PreparedProviderSubmissionOperation for BoundUaiPreparedSubmissionOperation {
+    fn operation_type(&self) -> &str {
+        self.operation.operation_type()
+    }
+
+    fn request_digest(&self) -> [u8; 32] {
+        self.operation.request_digest()
+    }
+
+    fn delay_before_execute_seconds(&self) -> u64 {
+        self.operation.delay_before_execute_seconds()
+    }
+
+    async fn execute(
+        self: Box<Self>,
+        context: &ProviderContext,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<asterism_provider_api::ProviderSubmissionStepOutcome> {
+        if context.provider_id != self.provider_id || context.account_id != self.account_id {
+            return Err(internal(
+                "UAI prepared submission received a foreign execution context",
+            ));
+        }
+        self.operation.execute(context, events).await
     }
 }
 
@@ -1271,7 +1418,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct FixtureTransport {
-        calls: Mutex<Vec<RecordedSubmission>>,
+        calls: Arc<Mutex<Vec<RecordedSubmission>>>,
     }
 
     type RecordedQuestion = (String, String, Vec<Vec<String>>);
@@ -1295,31 +1442,108 @@ mod tests {
             group_id: &str,
             plan: &UaiSubmissionPlan,
         ) -> ProviderResult<SubmissionReceipt> {
-            self.calls.lock().unwrap().push(RecordedSubmission {
-                course_resource_id: course_resource_id.to_owned(),
-                unit_id: unit_id.to_owned(),
-                group_id: group_id.to_owned(),
-                protocol_versions: plan.protocol_versions(),
-                questions: plan
-                    .questions()
-                    .iter()
-                    .map(|question| {
-                        (
-                            question.remote_question_id().to_owned(),
-                            question.task_type().to_owned(),
-                            question.answer_children().to_vec(),
-                        )
-                    })
-                    .collect(),
-            });
-            Ok(SubmissionReceipt {
-                remote_status: "accepted".to_owned(),
-                message_sanitized: Some(
-                    "UAI accepted the submission for later verification".to_owned(),
-                ),
-                provider_trace_id: Some("submit-version-42".to_owned()),
-                received_at: Utc::now(),
-            })
+            self.calls.lock().unwrap().push(recorded_submission(
+                course_resource_id,
+                unit_id,
+                group_id,
+                plan,
+            ));
+            Ok(fixture_receipt())
+        }
+
+        async fn prepare_submission(
+            &self,
+            _context: &ProviderContext,
+            course_resource_id: &str,
+            unit_id: &str,
+            group_id: &str,
+            plan: &UaiSubmissionPlan,
+        ) -> ProviderResult<Box<dyn PreparedProviderSubmissionOperation>> {
+            Ok(Box::new(PreparedFixtureSubmission {
+                calls: self.calls.clone(),
+                submission: recorded_submission(course_resource_id, unit_id, group_id, plan),
+            }))
+        }
+    }
+
+    struct PreparedFixtureSubmission {
+        calls: Arc<Mutex<Vec<RecordedSubmission>>>,
+        submission: RecordedSubmission,
+    }
+
+    impl fmt::Debug for PreparedFixtureSubmission {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("PreparedFixtureSubmission")
+                .field("calls", &"configured")
+                .field("submission", &self.submission)
+                .finish()
+        }
+    }
+
+    #[async_trait]
+    impl PreparedProviderSubmissionOperation for PreparedFixtureSubmission {
+        fn operation_type(&self) -> &str {
+            UAI_SUBMISSION_OPERATION_TYPE
+        }
+
+        fn request_digest(&self) -> [u8; 32] {
+            [41; 32]
+        }
+
+        fn delay_before_execute_seconds(&self) -> u64 {
+            0
+        }
+
+        async fn execute(
+            self: Box<Self>,
+            _context: &ProviderContext,
+            _events: &(dyn ExecutionEventSink + Send + Sync),
+        ) -> ProviderResult<asterism_provider_api::ProviderSubmissionStepOutcome> {
+            self.calls.lock().unwrap().push(self.submission);
+            let receipt = fixture_receipt();
+            let received_at = receipt.received_at;
+            asterism_provider_api::ProviderSubmissionStepOutcome::submitted(
+                receipt,
+                [42; 32],
+                received_at,
+            )
+        }
+    }
+
+    fn recorded_submission(
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        plan: &UaiSubmissionPlan,
+    ) -> RecordedSubmission {
+        RecordedSubmission {
+            course_resource_id: course_resource_id.to_owned(),
+            unit_id: unit_id.to_owned(),
+            group_id: group_id.to_owned(),
+            protocol_versions: plan.protocol_versions(),
+            questions: plan
+                .questions()
+                .iter()
+                .map(|question| {
+                    (
+                        question.remote_question_id().to_owned(),
+                        question.task_type().to_owned(),
+                        question.answer_children().to_vec(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn fixture_receipt() -> SubmissionReceipt {
+        SubmissionReceipt {
+            remote_status: "accepted".to_owned(),
+            message_sanitized: Some(
+                "UAI accepted the submission for later verification".to_owned(),
+            ),
+            provider_trace_id: Some("submit-version-42".to_owned()),
+            received_at: Utc::now(),
         }
     }
 
@@ -1712,6 +1936,111 @@ mod tests {
         assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
     }
 
+    #[tokio::test]
+    async fn media_session_freezes_digest_before_one_submission_mutation() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
+        let context = context();
+        let (draft, value, digest) = media_draft_and_artifact().await;
+        let continuation = ResolvedProviderQuestionSessionContinuation {
+            continuation_type: UAI_QUESTION_SET_ARTIFACT_TYPE,
+            continuation_digest: digest,
+            phase: UAI_QUESTION_SET_ARTIFACT_PHASE,
+            revision: 1,
+            value: &value,
+        };
+        let operation = capability
+            .prepare_submission_operation(
+                &context,
+                "group:2001:unit-1:group-1",
+                &draft,
+                continuation,
+                &runtime_settings(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.operation_type(), "uai.answer-submit.v1");
+        assert_eq!(operation.request_digest(), [41; 32]);
+        assert!(transport.calls.lock().unwrap().is_empty());
+
+        let outcome = operation.execute(&context, &NoopEvents).await.unwrap();
+        let asterism_provider_api::ProviderSubmissionStepOutcome::Submitted {
+            receipt,
+            response_digest,
+            ..
+        } = outcome
+        else {
+            panic!("UAI answer submit must be a terminal session mutation");
+        };
+        assert_eq!(receipt.remote_status, "accepted");
+        assert_eq!(response_digest, [42; 32]);
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_media_submission_rejects_a_foreign_account_before_send() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
+        let owner_context = context();
+        let (draft, value, digest) = media_draft_and_artifact().await;
+        let operation = capability
+            .prepare_submission_operation(
+                &owner_context,
+                "group:2001:unit-1:group-1",
+                &draft,
+                ResolvedProviderQuestionSessionContinuation {
+                    continuation_type: UAI_QUESTION_SET_ARTIFACT_TYPE,
+                    continuation_digest: digest,
+                    phase: UAI_QUESTION_SET_ARTIFACT_PHASE,
+                    revision: 1,
+                    value: &value,
+                },
+                &runtime_settings(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let error = operation
+            .execute(&context(), &NoopEvents)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn foreign_media_session_fails_before_transport_preparation() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
+        let (draft, value, digest) = media_draft_and_artifact().await;
+        let continuation = ResolvedProviderQuestionSessionContinuation {
+            continuation_type: "uai.foreign-artifact.v1",
+            continuation_digest: digest,
+            phase: UAI_QUESTION_SET_ARTIFACT_PHASE,
+            revision: 1,
+            value: &value,
+        };
+        let error = capability
+            .prepare_submission_operation(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &draft,
+                continuation,
+                &runtime_settings(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
     async fn draft() -> SubmissionDraft {
         let task_id = TaskId::new();
         let mut question = parse_question_content(
@@ -1754,6 +2083,80 @@ mod tests {
             payload_preview: preview,
             created_at: Utc::now(),
         }
+    }
+
+    async fn media_draft_and_artifact() -> (SubmissionDraft, asterism_secrets::SecretValue, [u8; 32])
+    {
+        let remote_task_id = "group:2001:unit-1:group-1";
+        let task_id = TaskId::new();
+        let parsed = crate::question::parse_question_entry(
+            &serde_json::json!({
+                "id": "1001",
+                "content": {
+                    "type": "basic",
+                    "direction": {"text": "Choose every matching answer"},
+                    "contents": [{
+                        "name": "Listening.mp3",
+                        "path": "https://media.example.edu/listening.mp3"
+                    }],
+                    "children": [{
+                        "type": "basic",
+                        "replyType": "multichoice",
+                        "options": [
+                            {"name": "A", "text": "Alpha"},
+                            {"name": "B", "text": "Beta"}
+                        ]
+                    }]
+                }
+            }),
+            1,
+            "multichoice",
+            remote_task_id,
+        )
+        .unwrap();
+        let question = parsed.to_question(task_id).unwrap();
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer: NormalizedAnswer::Selections(vec!["A".to_owned(), "B".to_owned()]),
+            source: AnswerSource::Manual,
+            confidence: None,
+        };
+        let preview = UaiSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context(),
+                remote_task_id,
+                std::slice::from_ref(&question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            std::slice::from_ref(&parsed),
+            std::slice::from_ref(&question),
+            remote_task_id,
+        )
+        .unwrap()
+        .unwrap()
+        .encode()
+        .unwrap();
+        let digest = artifact.digest();
+        let value = artifact.into_secret_value();
+        (
+            SubmissionDraft {
+                id: SubmissionDraftId::new(),
+                task_id,
+                question_snapshot_id: QuestionSnapshotId::new(),
+                provider_id: ProviderId::new("uai").unwrap(),
+                provider_version: development_metadata().unwrap().implementation_version,
+                items: vec![SubmissionDraftItem { question, selected }],
+                payload_preview: preview,
+                created_at: Utc::now(),
+            },
+            value,
+            digest,
+        )
     }
 
     async fn multiple_draft() -> SubmissionDraft {
