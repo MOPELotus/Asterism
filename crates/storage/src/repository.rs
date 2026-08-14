@@ -185,6 +185,135 @@ pub trait QuestionReadAttemptRepository: Send + Sync {
     ) -> Result<bool, StorageError>;
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuestionReadContinuation {
+    pub attempt_id: QuestionReadAttemptId,
+    pub continuation_type: String,
+    pub continuation_digest: [u8; 32],
+    pub phase: String,
+    pub revision: u32,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct ResolvedQuestionReadContinuation {
+    pub metadata: QuestionReadContinuation,
+    pub latest_operation: Option<QuestionReadOperation>,
+    pub value: SecretValue,
+}
+
+#[derive(Debug)]
+pub struct QuestionReadContinuationAttachRequest<'a> {
+    pub attempt_id: QuestionReadAttemptId,
+    pub continuation_type: &'a str,
+    pub phase: &'a str,
+    pub value: SecretValue,
+    pub attached_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuestionReadOperationState {
+    Issued,
+    Accepted,
+    Rejected,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuestionReadOperation {
+    pub attempt_id: QuestionReadAttemptId,
+    pub sequence: u64,
+    pub continuation_revision: u32,
+    pub operation_type: String,
+    pub request_digest: [u8; 32],
+    pub state: QuestionReadOperationState,
+    pub result_digest: Option<[u8; 32]>,
+    pub issued_at: Timestamp,
+    pub completed_at: Option<Timestamp>,
+}
+
+#[derive(Clone, Debug)]
+pub struct QuestionReadOperationIssueRequest<'a> {
+    pub attempt_id: QuestionReadAttemptId,
+    pub expected_continuation_revision: u32,
+    pub operation_type: String,
+    pub request_digest: [u8; 32],
+    pub issued_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QuestionReadOperationIssueOutcome {
+    Issued(QuestionReadOperation),
+    Duplicate(QuestionReadOperation),
+    Conflict,
+    Unavailable,
+}
+
+#[derive(Debug)]
+pub struct QuestionReadOperationAcceptRequest<'a> {
+    pub operation: &'a QuestionReadOperation,
+    pub next_continuation_type: &'a str,
+    pub next_phase: &'a str,
+    pub replacement: SecretValue,
+    pub result_digest: [u8; 32],
+    pub accepted_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QuestionReadOperationFinishOutcome {
+    Accepted {
+        operation: QuestionReadOperation,
+        continuation: QuestionReadContinuation,
+        attempt: QuestionReadAttempt,
+    },
+    Finished {
+        operation: QuestionReadOperation,
+        attempt: QuestionReadAttempt,
+    },
+    Duplicate(QuestionReadOperation),
+    Conflict,
+    Unavailable,
+}
+
+/// Provider-scoped encrypted state and ambiguity ledger for operations that
+/// occur before the first immutable Question snapshot exists.
+#[async_trait]
+pub trait QuestionReadContinuationRepository: Send + Sync {
+    async fn attach_question_read_continuation(
+        &self,
+        request: QuestionReadContinuationAttachRequest<'_>,
+    ) -> Result<QuestionReadContinuation, SecretStoreError>;
+
+    async fn resolve_question_read_continuation(
+        &self,
+        attempt_id: QuestionReadAttemptId,
+        access: &SecretAccess,
+    ) -> Result<Option<ResolvedQuestionReadContinuation>, SecretStoreError>;
+
+    async fn issue_question_read_operation(
+        &self,
+        request: QuestionReadOperationIssueRequest<'_>,
+    ) -> Result<QuestionReadOperationIssueOutcome, SecretStoreError>;
+
+    async fn accept_question_read_operation(
+        &self,
+        request: QuestionReadOperationAcceptRequest<'_>,
+    ) -> Result<QuestionReadOperationFinishOutcome, SecretStoreError>;
+
+    async fn finish_question_read_operation(
+        &self,
+        operation: &QuestionReadOperation,
+        terminal_state: QuestionReadOperationState,
+        result_digest: Option<[u8; 32]>,
+        completed_at: Timestamp,
+        access: &SecretAccess,
+    ) -> Result<QuestionReadOperationFinishOutcome, SecretStoreError>;
+}
+
 /// Result of atomically claiming the Question session selected by one
 /// Execution's immutable `SubmissionDraft`.
 #[derive(Clone, Debug, Eq, PartialEq)]

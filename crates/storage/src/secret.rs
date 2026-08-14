@@ -124,6 +124,19 @@ impl SqliteSecretStore {
         Self { database, keyring }
     }
 
+    /// Builds a permanently Provider-scoped encrypted continuation repository
+    /// for operations that occur before the first real Question snapshot.
+    pub fn question_read_continuations(
+        &self,
+        provider_id: ProviderId,
+    ) -> crate::SqliteQuestionReadContinuationRepository {
+        crate::SqliteQuestionReadContinuationRepository::new(
+            self.database.clone(),
+            self.keyring.clone(),
+            provider_id,
+        )
+    }
+
     async fn replace_provider_credentials_internal(
         &self,
         request: CredentialSetCommit<'_>,

@@ -5,17 +5,15 @@ use crate::{
     TaskId, Timestamp, UserId,
 };
 
-const MAX_OPERATION_TYPE_BYTES: usize = 96;
 const MAX_PROVIDER_VERSION_BYTES: usize = 128;
 
-/// A pre-Question remote start must finish or become recoverable promptly.
+/// A pre-Question flow must finish or remain explicitly recoverable promptly.
 pub const MAX_QUESTION_READ_ATTEMPT_TTL_SECONDS: i64 = 30 * 60;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionReadAttemptState {
-    Prepared,
-    Issued,
+    Active,
     Ambiguous,
     Materialized,
     Rejected,
@@ -23,12 +21,14 @@ pub enum QuestionReadAttemptState {
     Expired,
 }
 
-/// Durable ledger for a non-idempotent Provider operation required before a
-/// real Question snapshot exists (for example `StartAnswer` or Exam start).
+/// Durable owner/account/Task lifecycle for Provider operations that must run
+/// before the first real `QuestionSnapshot` exists.
 ///
-/// The exact Provider request stays outside Domain; its stable type and digest
-/// are frozen before dispatch. A successful or recovered operation can bind
-/// exactly one real `QuestionSnapshot` and `QuestionSession` afterwards.
+/// Provider commands and mutable state are encrypted outside Domain. Each
+/// non-idempotent request is recorded in a separate operation ledger, allowing
+/// an accepted request to rotate the pre-Question continuation and advance to
+/// another operation without pretending that every response contains a real
+/// Question.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QuestionReadAttempt {
     pub id: QuestionReadAttemptId,
@@ -37,8 +37,6 @@ pub struct QuestionReadAttempt {
     pub task_id: TaskId,
     pub provider_id: ProviderId,
     pub provider_version: String,
-    pub operation_type: String,
-    pub request_digest: [u8; 32],
     pub state: QuestionReadAttemptState,
     pub question_snapshot_id: Option<QuestionSnapshotId>,
     pub question_session_id: Option<QuestionSessionId>,
@@ -46,28 +44,23 @@ pub struct QuestionReadAttempt {
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub expires_at: Timestamp,
-    pub issued_at: Option<Timestamp>,
     pub completed_at: Option<Timestamp>,
     pub revision: u32,
 }
 
 impl QuestionReadAttempt {
-    /// Creates a pre-dispatch attempt with an immutable Provider request
-    /// identity.
+    /// Creates an active attempt before any Provider request can be issued.
     ///
     /// # Errors
     ///
-    /// Rejects malformed Provider metadata, operation type, request digest or
-    /// TTL.
+    /// Rejects malformed Provider metadata or an invalid TTL.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepared(
+    pub fn active(
         owner_user_id: UserId,
         provider_account_id: ProviderAccountId,
         task_id: TaskId,
         provider_id: ProviderId,
         provider_version: String,
-        operation_type: String,
-        request_digest: [u8; 32],
         created_at: Timestamp,
         expires_at: Timestamp,
     ) -> Result<Self, QuestionReadAttemptError> {
@@ -78,16 +71,13 @@ impl QuestionReadAttempt {
             task_id,
             provider_id,
             provider_version,
-            operation_type,
-            request_digest,
-            state: QuestionReadAttemptState::Prepared,
+            state: QuestionReadAttemptState::Active,
             question_snapshot_id: None,
             question_session_id: None,
             response_digest: None,
             created_at,
             updated_at: created_at,
             expires_at,
-            issued_at: None,
             completed_at: None,
             revision: 1,
         };
@@ -95,41 +85,33 @@ impl QuestionReadAttempt {
         Ok(attempt)
     }
 
-    /// Records dispatch before the non-idempotent request can leave Core.
+    /// Records an accepted pre-Question operation that rotated encrypted
+    /// Provider state but did not yet produce a real Question.
     ///
     /// # Errors
     ///
-    /// Rejects expired, already issued, terminal or timestamp-regressing
-    /// attempts.
-    pub fn issue(&mut self, at: Timestamp) -> Result<(), QuestionReadAttemptError> {
-        self.require_timestamp(at)?;
-        if self.state != QuestionReadAttemptState::Prepared {
-            return Err(QuestionReadAttemptError::InvalidTransition);
-        }
-        if self.is_expired_at(at) {
-            return Err(QuestionReadAttemptError::AttemptExpired);
-        }
-        self.advance(QuestionReadAttemptState::Issued, at)?;
-        self.issued_at = Some(at);
-        Ok(())
+    /// Rejects terminal, expired, or timestamp-regressing attempts.
+    pub fn advance_active(&mut self, at: Timestamp) -> Result<(), QuestionReadAttemptError> {
+        self.require_active(at)?;
+        self.advance(QuestionReadAttemptState::Active, at)
     }
 
-    /// Conservatively records an issued request whose remote outcome is not
-    /// known. The same attempt cannot be issued again.
+    /// Conservatively locks a flow whose last issued remote outcome is unknown.
+    /// The operation ledger retains the exact request and forbids replay.
     ///
     /// # Errors
     ///
-    /// Rejects non-issued or timestamp-regressing attempts.
+    /// Rejects terminal or timestamp-regressing attempts.
     pub fn mark_ambiguous(&mut self, at: Timestamp) -> Result<(), QuestionReadAttemptError> {
-        self.finish_issued(QuestionReadAttemptState::Ambiguous, None, at)
+        self.finish_active(QuestionReadAttemptState::Ambiguous, None, at)
     }
 
-    /// Records an unambiguous Provider rejection without attaching fabricated
-    /// Question entities.
+    /// Records an unambiguous Provider rejection without fabricating Question
+    /// entities.
     ///
     /// # Errors
     ///
-    /// Rejects non-issued attempts, zero response digests or timestamp
+    /// Rejects zero response digests, terminal attempts, or timestamp
     /// regression.
     pub fn reject(
         &mut self,
@@ -139,20 +121,20 @@ impl QuestionReadAttempt {
         if response_digest == [0; 32] {
             return Err(QuestionReadAttemptError::InvalidResponseDigest);
         }
-        self.finish_issued(
+        self.finish_active(
             QuestionReadAttemptState::Rejected,
             Some(response_digest),
             at,
         )
     }
 
-    /// Binds an accepted or freshly recovered start to the real immutable
-    /// Question entities created from its response.
+    /// Binds an accepted flow, or an ambiguous flow resolved by fresh
+    /// rediscovery, to the first real immutable Question entities.
     ///
     /// # Errors
     ///
-    /// Rejects attempts that were never issued, terminal attempts, zero
-    /// response digests or timestamp regression.
+    /// Rejects terminal attempts, zero response digests, or timestamp
+    /// regression.
     pub fn materialize(
         &mut self,
         question_snapshot_id: QuestionSnapshotId,
@@ -163,7 +145,7 @@ impl QuestionReadAttempt {
         self.require_timestamp(at)?;
         if !matches!(
             self.state,
-            QuestionReadAttemptState::Issued | QuestionReadAttemptState::Ambiguous
+            QuestionReadAttemptState::Active | QuestionReadAttemptState::Ambiguous
         ) {
             return Err(QuestionReadAttemptError::InvalidTransition);
         }
@@ -178,27 +160,38 @@ impl QuestionReadAttempt {
         Ok(())
     }
 
-    /// Cancels a request that has not been issued.
+    /// Cancels an active flow before another request is issued.
     ///
     /// # Errors
     ///
-    /// Rejects issued, terminal or timestamp-regressing attempts.
+    /// Rejects terminal or timestamp-regressing attempts.
     pub fn cancel(&mut self, at: Timestamp) -> Result<(), QuestionReadAttemptError> {
-        self.finish_prepared(QuestionReadAttemptState::Cancelled, at)
+        self.require_active(at)?;
+        if self.is_expired_at(at) {
+            return Err(QuestionReadAttemptError::AttemptExpired);
+        }
+        self.advance(QuestionReadAttemptState::Cancelled, at)?;
+        self.completed_at = Some(at);
+        Ok(())
     }
 
-    /// Expires a request that was never issued once its deadline is reached.
-    /// Issued and ambiguous attempts remain durable for recovery.
+    /// Expires an active flow once its deadline is reached. Issued operations
+    /// must first be accepted, rejected, or marked ambiguous by the ledger.
     ///
     /// # Errors
     ///
-    /// Rejects early expiry, issued/terminal attempts or timestamp regression.
+    /// Rejects early expiry, terminal attempts, or timestamp regression.
     pub fn expire(&mut self, at: Timestamp) -> Result<(), QuestionReadAttemptError> {
         self.require_timestamp(at)?;
+        if self.state != QuestionReadAttemptState::Active {
+            return Err(QuestionReadAttemptError::InvalidTransition);
+        }
         if !self.is_expired_at(at) {
             return Err(QuestionReadAttemptError::AttemptNotExpired);
         }
-        self.finish_prepared(QuestionReadAttemptState::Expired, at)
+        self.advance(QuestionReadAttemptState::Expired, at)?;
+        self.completed_at = Some(at);
+        Ok(())
     }
 
     pub fn is_expired_at(&self, at: Timestamp) -> bool {
@@ -209,9 +202,8 @@ impl QuestionReadAttempt {
     ///
     /// # Errors
     ///
-    /// Rejects malformed metadata, timestamps, revisions or state fields.
+    /// Rejects malformed metadata, timestamps, revisions, or state fields.
     pub fn validate(&self) -> Result<(), QuestionReadAttemptError> {
-        validate_label(&self.operation_type)?;
         if self.provider_version.is_empty()
             || self.provider_version.len() > MAX_PROVIDER_VERSION_BYTES
             || self
@@ -221,17 +213,12 @@ impl QuestionReadAttempt {
         {
             return Err(QuestionReadAttemptError::InvalidProviderVersion);
         }
-        if self.request_digest == [0; 32] {
-            return Err(QuestionReadAttemptError::InvalidRequestDigest);
-        }
         let ttl = self.expires_at.signed_duration_since(self.created_at);
         if ttl.num_seconds() <= 0 || ttl.num_seconds() > MAX_QUESTION_READ_ATTEMPT_TTL_SECONDS {
             return Err(QuestionReadAttemptError::InvalidExpiry);
         }
-        if self.updated_at < self.created_at
-            || self.issued_at.is_some_and(|at| {
-                at < self.created_at || at >= self.expires_at || at > self.updated_at
-            })
+        if self.revision == 0
+            || self.updated_at < self.created_at
             || self
                 .completed_at
                 .is_some_and(|at| at < self.created_at || at > self.updated_at)
@@ -246,31 +233,23 @@ impl QuestionReadAttempt {
         let materialized = self.question_snapshot_id.is_some()
             && self.question_session_id.is_some()
             && self.response_digest.is_some();
-        let valid_shape = match (self.state, self.issued_at, self.completed_at, self.revision) {
-            (QuestionReadAttemptState::Prepared, None, None, 1) => {
-                unbound && self.updated_at == self.created_at
-            }
-            (QuestionReadAttemptState::Issued, Some(issued_at), None, 2) => {
-                unbound && self.updated_at == issued_at
-            }
-            (QuestionReadAttemptState::Ambiguous, Some(_), Some(completed_at), 3) => {
+        let valid_shape = match (self.state, self.completed_at) {
+            (QuestionReadAttemptState::Active, None) => unbound,
+            (QuestionReadAttemptState::Ambiguous, Some(completed_at)) => {
                 unbound && self.updated_at == completed_at
             }
-            (QuestionReadAttemptState::Rejected, Some(_), Some(completed_at), 3) => {
-                !materialized
-                    && self.question_snapshot_id.is_none()
+            (QuestionReadAttemptState::Rejected, Some(completed_at)) => {
+                self.question_snapshot_id.is_none()
                     && self.question_session_id.is_none()
                     && self.response_digest.is_some()
                     && self.updated_at == completed_at
             }
-            (QuestionReadAttemptState::Materialized, Some(_), Some(completed_at), 3 | 4) => {
+            (QuestionReadAttemptState::Materialized, Some(completed_at)) => {
                 materialized && self.updated_at == completed_at
             }
             (
                 QuestionReadAttemptState::Cancelled | QuestionReadAttemptState::Expired,
-                None,
                 Some(completed_at),
-                2,
             ) => {
                 unbound
                     && self.updated_at == completed_at
@@ -286,32 +265,23 @@ impl QuestionReadAttempt {
         }
     }
 
-    fn finish_issued(
+    fn require_active(&self, at: Timestamp) -> Result<(), QuestionReadAttemptError> {
+        self.require_timestamp(at)?;
+        if self.state != QuestionReadAttemptState::Active {
+            return Err(QuestionReadAttemptError::InvalidTransition);
+        }
+        Ok(())
+    }
+
+    fn finish_active(
         &mut self,
         next: QuestionReadAttemptState,
         response_digest: Option<[u8; 32]>,
         at: Timestamp,
     ) -> Result<(), QuestionReadAttemptError> {
-        self.require_timestamp(at)?;
-        if self.state != QuestionReadAttemptState::Issued {
-            return Err(QuestionReadAttemptError::InvalidTransition);
-        }
+        self.require_active(at)?;
         self.advance(next, at)?;
         self.response_digest = response_digest;
-        self.completed_at = Some(at);
-        Ok(())
-    }
-
-    fn finish_prepared(
-        &mut self,
-        next: QuestionReadAttemptState,
-        at: Timestamp,
-    ) -> Result<(), QuestionReadAttemptError> {
-        self.require_timestamp(at)?;
-        if self.state != QuestionReadAttemptState::Prepared {
-            return Err(QuestionReadAttemptError::InvalidTransition);
-        }
-        self.advance(next, at)?;
         self.completed_at = Some(at);
         Ok(())
     }
@@ -339,27 +309,10 @@ impl QuestionReadAttempt {
     }
 }
 
-fn validate_label(value: &str) -> Result<(), QuestionReadAttemptError> {
-    if value.is_empty()
-        || value.len() > MAX_OPERATION_TYPE_BYTES
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
-        })
-    {
-        Err(QuestionReadAttemptError::InvalidOperationType)
-    } else {
-        Ok(())
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum QuestionReadAttemptError {
-    #[error("Question read attempt operation type is invalid or unbounded")]
-    InvalidOperationType,
     #[error("Question read attempt Provider version is invalid or unbounded")]
     InvalidProviderVersion,
-    #[error("Question read attempt request digest must be non-zero")]
-    InvalidRequestDigest,
     #[error("Question read attempt response digest must be non-zero")]
     InvalidResponseDigest,
     #[error("Question read attempt expiry must be within the short TTL limit")]
@@ -385,35 +338,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepted_start_materializes_real_question_entities_once() {
+    fn accepted_pre_question_steps_advance_until_real_question_materializes() {
         let now = Utc::now();
         let mut attempt = attempt(now);
-        attempt.issue(now + Duration::seconds(1)).unwrap();
+        attempt.advance_active(now + Duration::seconds(1)).unwrap();
+        attempt.advance_active(now + Duration::seconds(2)).unwrap();
         attempt
             .materialize(
                 QuestionSnapshotId::new(),
                 QuestionSessionId::new(),
                 [2; 32],
-                now + Duration::seconds(2),
+                now + Duration::seconds(3),
             )
             .unwrap();
         assert_eq!(attempt.state, QuestionReadAttemptState::Materialized);
-        assert_eq!(attempt.revision, 3);
+        assert_eq!(attempt.revision, 4);
         attempt.validate().unwrap();
-        assert_eq!(
-            attempt.mark_ambiguous(now + Duration::seconds(3)),
-            Err(QuestionReadAttemptError::InvalidTransition)
-        );
     }
 
     #[test]
-    fn ambiguous_start_is_not_reissued_but_can_materialize_after_fresh_recovery() {
+    fn ambiguous_operation_is_not_advanced_but_can_materialize_after_recovery() {
         let now = Utc::now();
         let mut attempt = attempt(now);
-        attempt.issue(now + Duration::seconds(1)).unwrap();
-        attempt.mark_ambiguous(now + Duration::seconds(2)).unwrap();
+        attempt.mark_ambiguous(now + Duration::seconds(1)).unwrap();
         assert_eq!(
-            attempt.issue(now + Duration::seconds(3)),
+            attempt.advance_active(now + Duration::seconds(2)),
             Err(QuestionReadAttemptError::InvalidTransition)
         );
         attempt
@@ -421,15 +370,14 @@ mod tests {
                 QuestionSnapshotId::new(),
                 QuestionSessionId::new(),
                 [3; 32],
-                now + Duration::seconds(4),
+                now + Duration::seconds(3),
             )
             .unwrap();
-        assert_eq!(attempt.revision, 4);
         attempt.validate().unwrap();
     }
 
     #[test]
-    fn only_unissued_attempts_expire_or_cancel() {
+    fn only_active_attempts_expire_or_cancel() {
         let now = Utc::now();
         let mut early = attempt(now);
         assert_eq!(
@@ -439,23 +387,23 @@ mod tests {
         early.expire(now + Duration::minutes(5)).unwrap();
         early.validate().unwrap();
 
-        let mut issued = attempt(now);
-        issued.issue(now + Duration::seconds(1)).unwrap();
+        let mut ambiguous = attempt(now);
+        ambiguous
+            .mark_ambiguous(now + Duration::seconds(1))
+            .unwrap();
         assert_eq!(
-            issued.expire(now + Duration::minutes(5)),
+            ambiguous.cancel(now + Duration::seconds(2)),
             Err(QuestionReadAttemptError::InvalidTransition)
         );
     }
 
     fn attempt(now: Timestamp) -> QuestionReadAttempt {
-        QuestionReadAttempt::prepared(
+        QuestionReadAttempt::active(
             UserId::new(),
             ProviderAccountId::new(),
             TaskId::new(),
             ProviderId::new("cidaren").unwrap(),
             "jv99-v1".to_owned(),
-            "cidaren.start-answer.v1".to_owned(),
-            [1; 32],
             now,
             now + Duration::minutes(5),
         )

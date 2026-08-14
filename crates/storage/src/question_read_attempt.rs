@@ -11,9 +11,9 @@ use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use crate::{Database, QuestionReadAttemptRepository, StorageError};
 
 const ATTEMPT_SELECT: &str = "SELECT id, owner_user_id, provider_account_id, task_id, \
-    provider_id, provider_version, operation_type, request_digest, state, question_snapshot_id, \
-    question_session_id, response_digest, revision, expires_at, issued_at, completed_at, \
-    created_at, updated_at FROM question_read_attempts";
+    provider_id, provider_version, state, question_snapshot_id, question_session_id, \
+    response_digest, revision, expires_at, completed_at, created_at, updated_at \
+    FROM question_read_attempts";
 
 #[derive(Clone, Debug)]
 pub struct SqliteQuestionReadAttemptRepository {
@@ -36,18 +36,13 @@ impl QuestionReadAttemptRepository for SqliteQuestionReadAttemptRepository {
     ) -> Result<(), StorageError> {
         validate_new_attempt(attempt)?;
         validate_correlation_id(correlation_id)?;
-        if !label_belongs_to_provider(&attempt.provider_id, &attempt.operation_type) {
-            return Err(StorageError::InvalidData(
-                "Question read operation is outside its Provider scope".to_owned(),
-            ));
-        }
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
         ensure_task_binding(&mut transaction, attempt).await?;
         sqlx::query(
             "INSERT INTO question_read_attempts \
              (id, owner_user_id, provider_account_id, task_id, provider_id, provider_version, \
-              operation_type, request_digest, state, revision, expires_at, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', 1, ?, ?, ?)",
+              state, revision, expires_at, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)",
         )
         .bind(attempt.id.to_string())
         .bind(attempt.owner_user_id.to_string())
@@ -55,8 +50,6 @@ impl QuestionReadAttemptRepository for SqliteQuestionReadAttemptRepository {
         .bind(attempt.task_id.to_string())
         .bind(attempt.provider_id.as_str())
         .bind(&attempt.provider_version)
-        .bind(&attempt.operation_type)
-        .bind(attempt.request_digest.as_slice())
         .bind(encode_timestamp(attempt.expires_at))
         .bind(encode_timestamp(attempt.created_at))
         .bind(encode_timestamp(attempt.updated_at))
@@ -157,15 +150,14 @@ impl QuestionReadAttemptRepository for SqliteQuestionReadAttemptRepository {
         }
         let result = sqlx::query(
             "UPDATE question_read_attempts SET state = ?, question_snapshot_id = ?, \
-             question_session_id = ?, response_digest = ?, revision = ?, issued_at = ?, \
-             completed_at = ?, updated_at = ? WHERE id = ? AND revision = ?",
+             question_session_id = ?, response_digest = ?, revision = ?, completed_at = ?, \
+             updated_at = ? WHERE id = ? AND revision = ?",
         )
         .bind(state_name(attempt.state))
         .bind(attempt.question_snapshot_id.map(|id| id.to_string()))
         .bind(attempt.question_session_id.map(|id| id.to_string()))
         .bind(attempt.response_digest.map(|value| value.to_vec()))
         .bind(i64::from(attempt.revision))
-        .bind(attempt.issued_at.map(encode_timestamp))
         .bind(attempt.completed_at.map(encode_timestamp))
         .bind(encode_timestamp(attempt.updated_at))
         .bind(attempt.id.to_string())
@@ -194,7 +186,7 @@ fn replay_transition(
     target: &QuestionReadAttempt,
 ) -> Result<(), StorageError> {
     let result = match target.state {
-        QuestionReadAttemptState::Issued => current.issue(target.updated_at),
+        QuestionReadAttemptState::Active => current.advance_active(target.updated_at),
         QuestionReadAttemptState::Ambiguous => current.mark_ambiguous(target.updated_at),
         QuestionReadAttemptState::Materialized => current.materialize(
             target.question_snapshot_id.ok_or_else(invalid_target)?,
@@ -208,9 +200,6 @@ fn replay_transition(
         ),
         QuestionReadAttemptState::Cancelled => current.cancel(target.updated_at),
         QuestionReadAttemptState::Expired => current.expire(target.updated_at),
-        QuestionReadAttemptState::Prepared => {
-            Err(asterism_domain::QuestionReadAttemptError::InvalidTransition)
-        }
     };
     result.map_err(|error| StorageError::InvalidData(error.to_string()))
 }
@@ -234,7 +223,6 @@ async fn fetch_attempt(
 }
 
 fn decode_attempt(row: &SqliteRow) -> Result<QuestionReadAttempt, StorageError> {
-    let request_digest = decode_digest(row.try_get("request_digest")?)?;
     let response_digest = row
         .try_get::<Option<Vec<u8>>, _>("response_digest")?
         .map(decode_digest)
@@ -247,8 +235,6 @@ fn decode_attempt(row: &SqliteRow) -> Result<QuestionReadAttempt, StorageError> 
         provider_id: ProviderId::new(row.try_get::<String, _>("provider_id")?)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
         provider_version: row.try_get("provider_version")?,
-        operation_type: row.try_get("operation_type")?,
-        request_digest,
         state: decode_state(row.try_get("state")?)?,
         question_snapshot_id: row
             .try_get::<Option<&str>, _>("question_snapshot_id")?
@@ -262,7 +248,6 @@ fn decode_attempt(row: &SqliteRow) -> Result<QuestionReadAttempt, StorageError> 
         revision: u32::try_from(row.try_get::<i64, _>("revision")?)
             .map_err(|_| StorageError::InvalidData("invalid attempt revision".to_owned()))?,
         expires_at: decode_timestamp(row.try_get("expires_at")?)?,
-        issued_at: decode_optional_timestamp(row.try_get("issued_at")?)?,
         completed_at: decode_optional_timestamp(row.try_get("completed_at")?)?,
         created_at: decode_timestamp(row.try_get("created_at")?)?,
         updated_at: decode_timestamp(row.try_get("updated_at")?)?,
@@ -277,9 +262,9 @@ fn validate_new_attempt(attempt: &QuestionReadAttempt) -> Result<(), StorageErro
     attempt
         .validate()
         .map_err(|error| StorageError::InvalidData(error.to_string()))?;
-    if attempt.state != QuestionReadAttemptState::Prepared || attempt.revision != 1 {
+    if attempt.state != QuestionReadAttemptState::Active || attempt.revision != 1 {
         return Err(StorageError::InvalidData(
-            "new Question read attempt must be prepared".to_owned(),
+            "new Question read attempt must be active".to_owned(),
         ));
     }
     Ok(())
@@ -385,8 +370,6 @@ async fn insert_audit(
             "provider_id": attempt.provider_id,
             "provider_version": attempt.provider_version,
             "task_id": attempt.task_id,
-            "operation_type": attempt.operation_type,
-            "request_digest": "[HASHED]",
             "response_digest": attempt.response_digest.map(|_| "[HASHED]"),
             "question_snapshot_id": attempt.question_snapshot_id,
             "question_session_id": attempt.question_session_id,
@@ -400,8 +383,7 @@ async fn insert_audit(
 
 fn state_name(state: QuestionReadAttemptState) -> &'static str {
     match state {
-        QuestionReadAttemptState::Prepared => "prepared",
-        QuestionReadAttemptState::Issued => "issued",
+        QuestionReadAttemptState::Active => "active",
         QuestionReadAttemptState::Ambiguous => "ambiguous",
         QuestionReadAttemptState::Materialized => "materialized",
         QuestionReadAttemptState::Rejected => "rejected",
@@ -412,8 +394,7 @@ fn state_name(state: QuestionReadAttemptState) -> &'static str {
 
 fn decode_state(value: &str) -> Result<QuestionReadAttemptState, StorageError> {
     match value {
-        "prepared" => Ok(QuestionReadAttemptState::Prepared),
-        "issued" => Ok(QuestionReadAttemptState::Issued),
+        "active" => Ok(QuestionReadAttemptState::Active),
         "ambiguous" => Ok(QuestionReadAttemptState::Ambiguous),
         "materialized" => Ok(QuestionReadAttemptState::Materialized),
         "rejected" => Ok(QuestionReadAttemptState::Rejected),
@@ -427,20 +408,13 @@ fn decode_state(value: &str) -> Result<QuestionReadAttemptState, StorageError> {
 
 fn action_name(state: QuestionReadAttemptState) -> &'static str {
     match state {
-        QuestionReadAttemptState::Issued => "question_read_attempt_issued",
+        QuestionReadAttemptState::Active => "question_read_attempt_advanced",
         QuestionReadAttemptState::Ambiguous => "question_read_attempt_ambiguous",
         QuestionReadAttemptState::Materialized => "question_read_attempt_materialized",
         QuestionReadAttemptState::Rejected => "question_read_attempt_rejected",
         QuestionReadAttemptState::Cancelled => "question_read_attempt_cancelled",
         QuestionReadAttemptState::Expired => "question_read_attempt_expired",
-        QuestionReadAttemptState::Prepared => unreachable!(),
     }
-}
-
-fn label_belongs_to_provider(provider_id: &ProviderId, value: &str) -> bool {
-    value
-        .strip_prefix(provider_id.as_str())
-        .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
 }
 
 fn actor_type(actor: AuditActor) -> (&'static str, Option<String>) {
@@ -503,13 +477,15 @@ mod tests {
     use crate::{QuestionSessionRepository, SqliteQuestionSessionRepository};
 
     #[tokio::test]
-    async fn issued_attempt_materializes_only_with_bound_snapshot_session_and_artifact() {
+    async fn active_attempt_materializes_only_with_bound_snapshot_session_and_artifact() {
         let fixture = Fixture::new().await;
         let mut attempt = fixture.attempt();
         fixture.create(&attempt).await;
         let revision = attempt.revision;
-        attempt.issue(fixture.now + Duration::seconds(1)).unwrap();
-        assert!(fixture.update(&attempt, revision, "read-issued").await);
+        attempt
+            .advance_active(fixture.now + Duration::seconds(1))
+            .unwrap();
+        assert!(fixture.update(&attempt, revision, "read-advanced").await);
 
         let (snapshot_id, session_id) = fixture.question_material().await;
         let revision = attempt.revision;
@@ -542,11 +518,8 @@ mod tests {
         let mut attempt = fixture.attempt();
         fixture.create(&attempt).await;
         let revision = attempt.revision;
-        attempt.issue(fixture.now + Duration::seconds(1)).unwrap();
-        assert!(fixture.update(&attempt, revision, "read-issued").await);
-        let revision = attempt.revision;
         attempt
-            .mark_ambiguous(fixture.now + Duration::seconds(2))
+            .mark_ambiguous(fixture.now + Duration::seconds(1))
             .unwrap();
         assert!(fixture.update(&attempt, revision, "read-ambiguous").await);
 
@@ -557,11 +530,11 @@ mod tests {
                 snapshot_id,
                 session_id,
                 [8; 32],
-                fixture.now + Duration::seconds(3),
+                fixture.now + Duration::seconds(2),
             )
             .unwrap();
         assert!(fixture.update(&attempt, revision, "read-recovered").await);
-        assert_eq!(attempt.revision, 4);
+        assert_eq!(attempt.revision, 3);
     }
 
     #[tokio::test]
@@ -570,15 +543,12 @@ mod tests {
         let mut attempt = fixture.attempt();
         fixture.create(&attempt).await;
         let revision = attempt.revision;
-        attempt.issue(fixture.now + Duration::seconds(1)).unwrap();
-        assert!(fixture.update(&attempt, revision, "read-issued").await);
-        let revision = attempt.revision;
         attempt
             .materialize(
                 QuestionSnapshotId::new(),
                 QuestionSessionId::new(),
                 [7; 32],
-                fixture.now + Duration::seconds(2),
+                fixture.now + Duration::seconds(1),
             )
             .unwrap();
         assert!(!fixture.update(&attempt, revision, "read-foreign").await);
@@ -656,14 +626,12 @@ mod tests {
         }
 
         fn attempt(&self) -> QuestionReadAttempt {
-            QuestionReadAttempt::prepared(
+            QuestionReadAttempt::active(
                 self.owner,
                 self.account,
                 self.task,
                 self.provider.clone(),
                 "jv99-v1".to_owned(),
-                "cidaren.start-answer.v1".to_owned(),
-                [1; 32],
                 self.now,
                 self.now + Duration::minutes(5),
             )
