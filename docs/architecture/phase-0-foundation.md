@@ -3200,3 +3200,20 @@ HTML and answer content never enter the artifact. Exam-code, face and captcha
 branches remain typed `HumanRequired` for the pending BrowserBridge/Capture
 execution path, and ambiguous start recovery remains locked until fresh
 readback behavior is proven rather than guessed.
+
+## One-hundred-and-eighty-fifth Phase 0 slice
+
+Submission scheduling now atomically claims an optional `QuestionSession` from
+the exact immutable Draft snapshot. The scheduling transaction first inserts
+the Execution, then validates the session's owner/account/Task/Snapshot,
+Provider/version, initial encrypted continuation digest and expiry before
+binding both session and continuation to that Execution. The Task transition,
+credit reservation, Execution, scheduler Job and claim therefore commit or
+roll back together.
+
+Submissions whose Question snapshots carry no Provider artifact retain the
+existing path. When an artifact-bearing session exists, stale, foreign,
+expired, already claimed or digest-drifted state rejects scheduling and leaves
+the Task ready with no Execution or Job. This closes the persistence gap before
+the following worker slice resolves the claimed continuation and records each
+Provider mutation command before dispatch.

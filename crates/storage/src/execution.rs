@@ -19,6 +19,7 @@ use sqlx::Row;
 
 use crate::credit::settle_execution_reservation;
 use crate::outbox::enqueue_in_transaction;
+use crate::question_session::claim_optional_question_session_for_scheduled_execution;
 use crate::{
     Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
     ExecutionBillingReservation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
@@ -150,6 +151,18 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .bind(request.idempotency_key)
         .execute(&mut *transaction)
         .await?;
+
+        if !claim_optional_question_session_for_scheduled_execution(
+            &mut transaction,
+            execution.id,
+            execution.created_at,
+            request.correlation_id,
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(ExecutionScheduleOutcome::SubmissionDraftConflict);
+        }
 
         for (index, capability) in request.capability_plan.iter().copied().enumerate() {
             sqlx::query(
@@ -2674,20 +2687,26 @@ fn decode_optional_timestamp(value: Option<&str>) -> Result<Option<Timestamp>, S
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, sync::Arc};
 
     use asterism_domain::{
         CreditAmount, CreditReservation, CreditReservationId, PriceQuote, PriceQuoteId,
-        ProviderAccountId, QuestionSnapshotId, RequestSource, SubmissionAttemptReceipt,
-        SubmissionDraftId, SubmissionReceipt, TaskId,
+        ProviderAccountId, ProviderId, QuestionSession, QuestionSnapshotId, RequestSource,
+        SubmissionAttemptReceipt, SubmissionDraftId, SubmissionReceipt, TaskId,
     };
     use asterism_provider_api::{
         ProviderRuntimeSettingsSchema, ProviderSettingDefinition, ProviderSettingKind,
         ProviderSettingScope,
     };
+    use asterism_secrets::{SecretAccess, SecretActor, SecretKey, SecretValue};
+    use sha2::Digest as _;
     use sqlx::Row;
 
     use super::*;
+    use crate::{
+        QuestionSessionArtifactRepository, QuestionSessionRepository,
+        SqliteQuestionSessionRepository,
+    };
 
     #[tokio::test]
     async fn scheduling_is_atomic_and_idempotent() {
@@ -2889,6 +2908,138 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(execution_count, 1);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression proves rollback on artifact drift and the subsequent atomic claim in one setup"
+    )]
+    async fn scheduling_atomically_claims_the_draft_question_session() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let (draft_id, snapshot_id) =
+            insert_submission_draft_with_snapshot(&database, task_id, now).await;
+        let account_id: ProviderAccountId =
+            sqlx::query_scalar::<_, String>("SELECT provider_account_id FROM tasks WHERE id = ?")
+                .bind(task_id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap()
+                .parse()
+                .unwrap();
+        let provider_id = ProviderId::new("test").unwrap();
+        let artifact = b"encrypted-at-rest-provider-attempt";
+        let artifact_digest = sha2::Sha256::digest(artifact).into();
+        let session = QuestionSession::active(
+            owner,
+            account_id,
+            task_id,
+            provider_id.clone(),
+            "0.1.0".to_owned(),
+            snapshot_id,
+            "test.question-attempt.v1".to_owned(),
+            artifact_digest,
+            now,
+            now + chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        SqliteQuestionSessionRepository::new(database.clone())
+            .create_question_session(&session, AuditActor::User(owner), "schedule-session-create")
+            .await
+            .unwrap();
+        let keyring = Arc::new(
+            crate::SecretKeyring::new(
+                "test-key".to_owned(),
+                [("test-key".to_owned(), SecretKey::new([11; 32]))]
+                    .into_iter()
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        let access = SecretAccess {
+            actor: SecretActor::CoreService("execution-scheduler-test"),
+            correlation_id: "schedule-artifact-attach".to_owned(),
+            reason: "test QuestionSession scheduling claim".to_owned(),
+        };
+        crate::SqliteQuestionSessionArtifactRepository::new(database.clone(), keyring, provider_id)
+            .attach_question_session_artifact(crate::QuestionSessionArtifactAttachRequest {
+                session_id: session.id,
+                phase: "test.questions-ready",
+                value: SecretValue::new(artifact.to_vec()),
+                attached_at: now,
+                access: &access,
+            })
+            .await
+            .unwrap();
+
+        let mut execution = scheduled_execution(owner, task_id, now);
+        execution.requested_capabilities = vec![TaskCapability::SubmissionExecute];
+        execution.submission_draft_id = Some(draft_id);
+        sqlx::query(
+            "UPDATE question_session_continuations SET continuation_digest = ? \
+             WHERE session_id = ?",
+        )
+        .bind([99_u8; 32].as_slice())
+        .bind(session.id.to_string())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            repository
+                .schedule_execution(test_request(&execution, owner, "session-bound-draft"))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::SubmissionDraftConflict
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM executions")
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT orchestration_state FROM tasks WHERE id = ?",)
+                .bind(task_id.to_string())
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+            "ready"
+        );
+        sqlx::query(
+            "UPDATE question_session_continuations SET continuation_digest = ? \
+             WHERE session_id = ?",
+        )
+        .bind(artifact_digest.as_slice())
+        .bind(session.id.to_string())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            repository
+                .schedule_execution(test_request(&execution, owner, "session-bound-draft"))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::Created(execution.clone())
+        );
+        let claimed: (String, String, i64) = sqlx::query_as(
+            "SELECT state, execution_id, revision FROM question_sessions WHERE id = ?",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(claimed, ("claimed".to_owned(), execution.id.to_string(), 2));
+        let continuation_execution: String = sqlx::query_scalar(
+            "SELECT execution_id FROM question_session_continuations WHERE session_id = ?",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(continuation_execution, execution.id.to_string());
     }
 
     #[tokio::test]
@@ -4129,6 +4280,16 @@ mod tests {
         task_id: TaskId,
         now: Timestamp,
     ) -> SubmissionDraftId {
+        insert_submission_draft_with_snapshot(database, task_id, now)
+            .await
+            .0
+    }
+
+    async fn insert_submission_draft_with_snapshot(
+        database: &Database,
+        task_id: TaskId,
+        now: Timestamp,
+    ) -> (SubmissionDraftId, QuestionSnapshotId) {
         let snapshot_id = QuestionSnapshotId::new();
         sqlx::query(
             "INSERT INTO question_snapshots \
@@ -4158,7 +4319,7 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        draft_id
+        (draft_id, snapshot_id)
     }
 
     async fn insert_credit_account(

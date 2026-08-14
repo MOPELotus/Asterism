@@ -243,6 +243,52 @@ impl QuestionSessionRepository for SqliteQuestionSessionRepository {
     }
 }
 
+/// Claims the optional `QuestionSession` selected through a newly inserted
+/// Submission Execution without leaving the scheduling transaction. A Draft
+/// with no Provider artifact remains a valid legacy submission; an existing
+/// session must be fresh, initial, fully bound and claimable.
+pub(crate) async fn claim_optional_question_session_for_scheduled_execution(
+    transaction: &mut Transaction<'_, Sqlite>,
+    execution_id: ExecutionId,
+    claimed_at: Timestamp,
+    correlation_id: &str,
+) -> Result<bool, StorageError> {
+    validate_correlation_id(correlation_id)?;
+    let Some(binding) = fetch_execution_binding(transaction, execution_id).await? else {
+        return Ok(true);
+    };
+    if !binding.is_submission_execution() {
+        return Ok(true);
+    }
+    let Some(mut session) = fetch_by_snapshot(transaction, binding.snapshot_id).await? else {
+        return Ok(true);
+    };
+    if !binding.matches(&session)
+        || !binding_is_valid(transaction, &session).await?
+        || session.state != QuestionSessionState::Active
+        || session.execution_id.is_some()
+        || session.is_expired_at(claimed_at)
+        || !continuation_matches_claim(transaction, &session, None, true).await?
+    {
+        return Ok(false);
+    }
+    let expected_revision = session.revision;
+    session
+        .claim(execution_id, claimed_at)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    persist_transition(transaction, &session, expected_revision).await?;
+    bind_continuation_to_execution(transaction, session.id, execution_id).await?;
+    insert_audit(
+        transaction,
+        ("execution", Some(execution_id.to_string())),
+        "question_session_claimed",
+        correlation_id,
+        &session,
+    )
+    .await?;
+    Ok(true)
+}
+
 pub(crate) async fn insert_question_session_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     session: &QuestionSession,
@@ -299,7 +345,7 @@ impl ExecutionBinding {
         self.requested_capabilities == [TaskCapability::SubmissionExecute]
             && matches!(
                 self.state.as_str(),
-                "running" | "recovering" | "retry_waiting"
+                "scheduled" | "running" | "recovering" | "retry_waiting"
             )
     }
 
