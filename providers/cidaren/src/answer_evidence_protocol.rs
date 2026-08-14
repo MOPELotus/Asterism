@@ -399,6 +399,35 @@ struct CidarenWordLocation {
     list_id: String,
 }
 
+impl Drop for CidarenWordLocation {
+    fn drop(&mut self) {
+        self.word.zeroize();
+        self.list_id.zeroize();
+    }
+}
+
+#[derive(Default)]
+struct ZeroizingWordKeys(BTreeSet<String>);
+
+impl ZeroizingWordKeys {
+    fn insert(&mut self, value: &str) -> bool {
+        if self.0.contains(value) {
+            false
+        } else {
+            self.0.insert(value.to_owned());
+            true
+        }
+    }
+}
+
+impl Drop for ZeroizingWordKeys {
+    fn drop(&mut self) {
+        for mut value in std::mem::take(&mut self.0) {
+            value.zeroize();
+        }
+    }
+}
+
 /// Bounded current word inventory with first-occurrence Course-unit routing.
 /// The current donor also uses the first Course-page occurrence when a word
 /// appears in multiple units.
@@ -603,10 +632,6 @@ impl fmt::Debug for CidarenWordInventory {
 impl Drop for CidarenWordInventory {
     fn drop(&mut self) {
         self.course_id.zeroize();
-        for entry in &mut self.words {
-            entry.word.zeroize();
-            entry.list_id.zeroize();
-        }
     }
 }
 
@@ -886,21 +911,25 @@ fn parse_word_locations(
             "Cidaren word inventory count is empty or exceeds the limit",
         ));
     }
-    let mut unique = BTreeSet::new();
+    let mut unique = ZeroizingWordKeys::default();
     let mut words = Vec::with_capacity(values.len());
     for value in values {
         let object = value
             .as_object()
             .ok_or_else(|| protocol_drift("Cidaren word inventory contains a non-object row"))?;
-        let word = required_text(object.get("word"), "word")?;
-        let list_id = required_component(object.get("list_id"), "list ID")?;
-        if expected_list_id.is_some_and(|expected| expected != list_id) {
+        let mut word = Zeroizing::new(required_text(object.get("word"), "word")?);
+        let mut list_id = Zeroizing::new(required_component(object.get("list_id"), "list ID")?);
+        if expected_list_id.is_some_and(|expected| expected != list_id.as_str()) {
             return Err(remote_changed(
                 "Cidaren StudyTask/Info returned a word from another unit",
             ));
         }
-        if unique.insert(word.to_lowercase()) {
-            words.push(CidarenWordLocation { word, list_id });
+        let normalized = Zeroizing::new(word.to_lowercase());
+        if unique.insert(normalized.as_str()) {
+            words.push(CidarenWordLocation {
+                word: std::mem::take(&mut *word),
+                list_id: std::mem::take(&mut *list_id),
+            });
         }
     }
     if words.is_empty() {
