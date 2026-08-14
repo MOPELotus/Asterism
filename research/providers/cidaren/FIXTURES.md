@@ -175,6 +175,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Legacy response decoding is bounded and exact-version only; `jv=99` requires
   a fresh account-bound Capture context and zeroizes crypto JSON, key and
   plaintext buffers.
+- Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
+  base64 decode boundary, so a later field failure or size rejection also
+  clears already decoded key material.
 - Parsed Capture result envelopes cannot be cloned. Consuming one moves its
   token and crypto JSON directly into the zeroizing snapshot while replacing
   the source event with an empty value before its own Drop cleanup.

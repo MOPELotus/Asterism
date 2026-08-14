@@ -48,10 +48,10 @@ impl CidarenCryptoContext {
         let root = ZeroizingJsonValue::new(
             serde_json::from_slice(document).map_err(|_| invalid_capture_context())?,
         );
-        let (shared_secret, salt) = decode_login_info(root.as_value())?;
+        let login_info = decode_login_info(root.as_value())?;
         Ok(Self {
-            shared_secret: Zeroizing::new(shared_secret),
-            salt: Zeroizing::new(salt),
+            shared_secret: login_info.shared_secret,
+            salt: login_info.salt,
         })
     }
 
@@ -126,7 +126,12 @@ impl fmt::Debug for CidarenCryptoContext {
     }
 }
 
-fn decode_login_info(root: &Value) -> ProviderResult<(Vec<u8>, Vec<u8>)> {
+struct DecodedLoginInfo {
+    shared_secret: Zeroizing<Vec<u8>>,
+    salt: Zeroizing<Vec<u8>>,
+}
+
+fn decode_login_info(root: &Value) -> ProviderResult<DecodedLoginInfo> {
     let root = root.as_object().ok_or_else(invalid_capture_context)?;
     let selected = ["login_info", "CDR_LOGIN_INFO", "loginInfo"]
         .into_iter()
@@ -150,11 +155,11 @@ fn decode_login_info(root: &Value) -> ProviderResult<(Vec<u8>, Vec<u8>)> {
 
 fn decode_login_info_fields(
     login_info: &serde_json::Map<String, Value>,
-) -> ProviderResult<(Vec<u8>, Vec<u8>)> {
-    Ok((
-        decode_capture_field(login_info.get("a"), b'h')?,
-        decode_capture_field(login_info.get("b"), b'a')?,
-    ))
+) -> ProviderResult<DecodedLoginInfo> {
+    Ok(DecodedLoginInfo {
+        shared_secret: decode_capture_field(login_info.get("a"), b'h')?,
+        salt: decode_capture_field(login_info.get("b"), b'a')?,
+    })
 }
 
 struct ZeroizingJsonValue(Value);
@@ -184,7 +189,7 @@ fn zeroize_json(value: &mut Value) {
     }
 }
 
-fn decode_capture_field(value: Option<&Value>, prefix: u8) -> ProviderResult<Vec<u8>> {
+fn decode_capture_field(value: Option<&Value>, prefix: u8) -> ProviderResult<Zeroizing<Vec<u8>>> {
     let encoded = value
         .and_then(Value::as_str)
         .filter(|value| {
@@ -198,9 +203,11 @@ fn decode_capture_field(value: Option<&Value>, prefix: u8) -> ProviderResult<Vec
         .as_bytes()
         .strip_prefix(&[prefix])
         .unwrap_or(encoded.as_bytes());
-    let decoded = STANDARD
-        .decode(encoded)
-        .map_err(|_| invalid_capture_context())?;
+    let decoded = Zeroizing::new(
+        STANDARD
+            .decode(encoded)
+            .map_err(|_| invalid_capture_context())?,
+    );
     if decoded.is_empty() || decoded.len() > MAX_CAPTURE_FIELD_BYTES {
         return Err(invalid_capture_context());
     }
