@@ -110,9 +110,14 @@ pub fn build_development_provider(
         course_inventory.clone(),
         task_inventory.clone(),
     )?);
-    let browser_bridge = Arc::new(UaiBrowserBridge::try_new(task_detail.clone())?);
     let task_progress = Arc::new(UaiTaskProgress::try_new(transports.progress)?);
     let task_duration = Arc::new(UaiTaskDuration::try_new(transports.duration)?);
+    let browser_bridge = Arc::new(UaiBrowserBridge::try_new_with_workflow(
+        task_detail.clone(),
+        course_inventory.clone(),
+        task_inventory.clone(),
+        task_duration.clone(),
+    )?);
     let question_read = Arc::new(UaiQuestionRead::try_new(
         task_detail.clone(),
         transports.question,

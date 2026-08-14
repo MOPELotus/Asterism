@@ -143,8 +143,12 @@ checkpoint, not a Provider completion boundary. It:
     fresh Task/settings/batch and recovered cursor stage. Intermediate yields
     only one immutable next transition; ExecutionTerminal yields only a
     completed exchange plus non-resumable checkpoint requiring fresh
-    DurationRead. Shared execution-terminal callback/orchestration is the
-    remaining exact Core Gap. The same
+    DurationRead. The shared workflow callback now fresh-rebuilds the compact
+    child projection through Provider inventory, verifies runtime binding,
+    returns contiguous Intermediate command/state through the shared
+    constructor, and performs independent DurationRead before a conservative
+    ExecutionTerminal `RemoteProgress`. Engine/daemon callback invocation is
+    the remaining exact Core Gap. The same
     projection accepts only
     action-matched bounded typed observations, reconstructs every binding and
     opaque handle itself and emits the existing zeroizing event/residence

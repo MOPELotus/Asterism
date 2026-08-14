@@ -2,9 +2,11 @@ use std::{collections::BTreeSet, fmt};
 
 use asterism_domain::{ProviderId, TaskCapability};
 use asterism_provider_api::{
-    ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderResult, RemoteCourse,
-    RemoteTask, ResolvedProviderRuntimeSettings,
+    BrowserBridgeWorkflowPlanArtifact, ProviderError, ProviderErrorKind,
+    ProviderExecutionPlanArtifact, ProviderResult, RemoteCourse, RemoteTask,
+    ResolvedProviderRuntimeSettings,
 };
+use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -198,6 +200,63 @@ impl UaiCourseResidenceChildPlan {
             ProviderId::new(PROVIDER_ID).map_err(|_| invalid_child_plan())?,
             UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE,
             serde_json::to_value(payload).map_err(|_| invalid_child_plan())?,
+        )
+    }
+
+    /// Moves the same compact child projection into Core's encrypted browser
+    /// workflow-plan owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for projection encoding drift or a typed
+    /// shared-contract error when the artifact cannot be represented.
+    pub fn to_browser_workflow_plan_artifact(
+        &self,
+    ) -> ProviderResult<BrowserBridgeWorkflowPlanArtifact> {
+        let artifact = self.to_provider_execution_plan_artifact()?;
+        let encoded = serde_json::to_vec(artifact.payload_sanitized())
+            .map_err(|_| invalid_child_artifact())?;
+        BrowserBridgeWorkflowPlanArtifact::try_new(
+            UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE.to_owned(),
+            SecretValue::new(encoded),
+        )
+    }
+
+    /// Consumes Core's encrypted compact workflow plan and reconstructs the
+    /// exact child/batch only from complete fresh Provider inventory and the
+    /// frozen settings supplied with this workflow result.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign type/schema, changed settings, Course/Task membership,
+    /// fingerprints, start authority or any projected digest.
+    pub fn from_browser_workflow_plan_artifact_bound(
+        artifact: BrowserBridgeWorkflowPlanArtifact,
+        course: &RemoteCourse,
+        tasks: &[RemoteTask],
+        settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<(Self, UaiCourseResidenceBatchPlan)> {
+        let (artifact_type, _, artifact) = artifact.into_parts();
+        if artifact_type != UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE {
+            return Err(invalid_child_artifact());
+        }
+        let payload_value: Value = serde_json::from_slice(artifact.expose_secret())
+            .map_err(|_| invalid_child_artifact())?;
+        let payload: UaiCourseResidenceArtifactPayload =
+            serde_json::from_value(payload_value.clone()).map_err(|_| invalid_child_artifact())?;
+        payload.validate()?;
+        let runtime_profile_digest = payload.runtime_profile_digest;
+        let artifact = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new(PROVIDER_ID).map_err(|_| invalid_child_artifact())?,
+            UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE,
+            payload_value,
+        )?;
+        Self::from_provider_execution_plan_artifact_bound(
+            &artifact,
+            course,
+            tasks,
+            settings,
+            runtime_profile_digest,
         )
     }
 
@@ -1515,6 +1574,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one matrix compares the compact execution and encrypted workflow projections against the same full fresh rebuild"
+    )]
     fn child_plan_artifact_round_trips_only_through_fresh_full_rebuild() {
         let (course, tasks) = inventory();
         let settings = browser_settings(1_200, true);
@@ -1563,6 +1626,22 @@ mod tests {
             .unwrap();
         assert_eq!(restored, child);
         assert_eq!(batch.plan_digest(), child.batch_plan_digest);
+        let workflow_artifact = child.to_browser_workflow_plan_artifact().unwrap();
+        assert_eq!(
+            workflow_artifact.artifact_type(),
+            UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE
+        );
+        assert_ne!(workflow_artifact.artifact_digest(), [0; 32]);
+        let (workflow_restored, workflow_batch) =
+            UaiCourseResidenceChildPlan::from_browser_workflow_plan_artifact_bound(
+                workflow_artifact,
+                &course,
+                &tasks,
+                &settings,
+            )
+            .unwrap();
+        assert_eq!(workflow_restored, child);
+        assert_eq!(workflow_batch, batch);
 
         let mut changed = tasks.clone();
         changed[0].fingerprint = format!("v1:{}", "b".repeat(64));

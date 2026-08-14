@@ -534,10 +534,29 @@ the `Residing` stage and full leaf accounting. Its consumed parsed result is
 reduced to the completed Core exchange plus a non-resumable immutable
 `UaiBrowserResidenceCheckpoint`; there is no next command and fresh
 DurationRead remains explicit. Debug for the classifier and both adaptations
-is redacted. Shared `BrowserBridgeCapability` currently exposes a completion
-hook only for `CredentialTerminal`, and Engine has no Provider callback for
-`ExecutionTerminal`; persisting/orchestrating these Provider outcomes is the
-exact remaining Core Gap rather than authority for UAI to modify shared code.
+is redacted.
+
+UAI now implements the shared consuming workflow callback. Core's compact
+encrypted workflow plan carries the same bounded child-plan JSON projection,
+not the full Course batch. The callback checks its exact type/schema and frozen
+profile identity, then uses Provider-owned CourseInventory and TaskInventory
+transports to fresh-read the complete Course and ordered Tasks; rebuilding must
+reproduce every child, membership, start and batch digest under the callback's
+frozen settings. The runtime sidecar and command/result artifacts then enter
+the existing persisted cursor-result adapter. Core's runtime origin/frame must
+also equal the recovered command rather than merely passing generic syntax.
+
+For Intermediate, UAI issues the returned immutable cursor/command at the
+current result's trusted receive time, derives a new exact command artifact and
+`uai.browser.cursor.v4` sidecar, and returns them only through the shared
+contiguous-next constructor. For ExecutionTerminal, UAI calls the independently
+injected DurationRead transport with the non-resumable checkpoint before using
+the shared terminal constructor. It reports the exact fresh duration and
+observation time with `RemoteState::Unknown` and no percent, preserving the
+fact without inventing completion from residence or the study-record route.
+Core already freezes workflow context and atomically stores callback outcomes;
+the remaining exact shared gap is the Engine/daemon result processor that
+claims an eligible UAI inbox and invokes this callback.
 
 The accumulated residence cursor is a separate encrypted artifact from the
 issued command and raw result owners. It contains the bounded snapshots,
@@ -568,8 +587,9 @@ never dispatched to the helper. It stores the accumulated cursor, not the
 complete immutable Course batch. The bounded child-plan value now owns the
 frozen start/settings-profile/ordered-fingerprint authority; Core persists its
 compact artifact projection and must still supply complete fresh ordered
-Course/Task inventory plus the same resolved settings/profile digest to rebuild the exact
-`UaiCourseResidenceBatchPlan` before Provider recovery.
+settings and that encrypted projection. UAI itself re-reads complete fresh
+Course/Task inventory and recovers the embedded profile identity to rebuild the
+exact `UaiCourseResidenceBatchPlan` before cursor parsing.
 
 The first cursor transition is now executable at the Provider boundary. A
 completed `ScanMenu` exchange must retain the same Core session, sequence,
