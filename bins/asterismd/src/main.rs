@@ -9,10 +9,11 @@ use asterism_config::{
 use asterism_domain::ProviderId;
 use asterism_engine::{
     BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorConfig,
-    BrowserBridgeCredentialTickReport, DispatchConfig, DispatchReport, ExecutionRunnerConfig,
-    ExecutionSchedulerConfig, ExecutionSchedulerTickReport, ExecutionSchedulerWorker,
-    FormalAssessmentPolicy, OutboxDispatcher, ProviderScanService, ScanSchedulerConfig,
-    ScanSchedulerTickReport, ScanSchedulerWorker,
+    BrowserBridgeCredentialTickReport, BrowserBridgeWorkflowProcessor,
+    BrowserBridgeWorkflowProcessorConfig, BrowserBridgeWorkflowTickReport, DispatchConfig,
+    DispatchReport, ExecutionRunnerConfig, ExecutionSchedulerConfig, ExecutionSchedulerTickReport,
+    ExecutionSchedulerWorker, FormalAssessmentPolicy, OutboxDispatcher, ProviderScanService,
+    ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedulerWorker,
 };
 use asterism_events::EventBus;
 use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
@@ -181,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
     let secret_store_configured = secret_store.is_some();
     let execution_secret_store = secret_store.clone();
     let browser_bridge_secret_store = secret_store.clone();
+    let browser_bridge_workflow_secret_store = secret_store.clone();
     let providers = Arc::new(build_provider_registry(&config, secret_store.as_ref())?);
     let events = EventBus::new(LIVE_EVENT_CAPACITY);
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
@@ -218,8 +220,15 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let browser_bridge_credential_handle = start_browser_bridge_credential_processor(
         &database,
-        providers,
+        providers.clone(),
         browser_bridge_secret_store,
+        &config,
+        shutdown_receiver.clone(),
+    );
+    let browser_bridge_workflow_handle = start_browser_bridge_workflow_processor(
+        &database,
+        providers,
+        browser_bridge_workflow_secret_store,
         &config,
         shutdown_receiver,
     );
@@ -245,6 +254,11 @@ async fn main() -> anyhow::Result<()> {
         handle
             .await
             .context("BrowserBridge credential processor task panicked")?;
+    }
+    if let Some(handle) = browser_bridge_workflow_handle {
+        handle
+            .await
+            .context("BrowserBridge workflow processor task panicked")?;
     }
     outbox_dispatcher_handle
         .await
@@ -677,6 +691,138 @@ async fn run_browser_bridge_credential_processor(
     tracing::info!("BrowserBridge credential processor stopped");
 }
 
+fn start_browser_bridge_workflow_processor(
+    database: &Database,
+    providers: Arc<ProviderRegistry>,
+    secret_store: Option<SqliteSecretStore>,
+    config: &Config,
+    shutdown: watch::Receiver<bool>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let secret_store = secret_store?;
+    let has_workflow_results = providers.metadata().any(|metadata| {
+        providers
+            .get(&metadata.id)
+            .and_then(|entry| entry.browser_bridge.as_ref())
+            .is_some_and(|capability| {
+                !capability
+                    .browser_bridge_intermediate_result_types()
+                    .is_empty()
+                    || !capability
+                        .browser_bridge_execution_result_types()
+                        .is_empty()
+            })
+    });
+    if !has_workflow_results {
+        return None;
+    }
+    Some(tokio::spawn(run_browser_bridge_workflow_processor(
+        database.clone(),
+        providers,
+        secret_store,
+        RetryPolicy {
+            max_attempts: config.scheduler.retry_max_attempts,
+            initial_delay_seconds: config.scheduler.retry_initial_delay_seconds,
+            multiplier: config.scheduler.retry_multiplier,
+            max_delay_seconds: config.scheduler.retry_max_delay_seconds,
+        },
+        std::time::Duration::from_secs(config.scheduler.claim_ttl_seconds),
+        shutdown,
+    )))
+}
+
+async fn run_browser_bridge_workflow_processor(
+    database: Database,
+    providers: Arc<ProviderRegistry>,
+    secret_store: SqliteSecretStore,
+    retry_policy: RetryPolicy,
+    claim_ttl: std::time::Duration,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(BROWSER_BRIDGE_CREDENTIAL_TICK_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        let should_tick = tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                false
+            }
+            _ = interval.tick() => true,
+        };
+        if !should_tick {
+            continue;
+        }
+        let provider_ids = providers
+            .metadata()
+            .filter(|metadata| {
+                providers
+                    .get(&metadata.id)
+                    .and_then(|entry| entry.browser_bridge.as_ref())
+                    .is_some_and(|capability| {
+                        !capability
+                            .browser_bridge_intermediate_result_types()
+                            .is_empty()
+                            || !capability
+                                .browser_bridge_execution_result_types()
+                                .is_empty()
+                    })
+            })
+            .map(|metadata| metadata.id.clone())
+            .collect::<Vec<_>>();
+        for provider_id in provider_ids {
+            let processor = BrowserBridgeWorkflowProcessor::new(
+                provider_id.clone(),
+                providers.clone(),
+                SqliteBrowserBridgeSessionRepository::new(database.clone()),
+                secret_store.browser_bridge_commands(provider_id.clone()),
+                SqliteTaskQueryRepository::new(database.clone()),
+                SqliteProviderAccountRepository::new(database.clone()),
+                BrowserBridgeWorkflowProcessorConfig {
+                    worker_id: format!(
+                        "asterismd-browser-workflow-{}-{provider_id}",
+                        std::process::id()
+                    ),
+                    claim_ttl,
+                    retry_policy,
+                },
+            );
+            let Ok(processor) = processor else {
+                tracing::error!(
+                    provider = %provider_id,
+                    "BrowserBridge workflow processor configuration is invalid"
+                );
+                continue;
+            };
+            match processor.tick(chrono::Utc::now()).await {
+                Ok(report) if report != BrowserBridgeWorkflowTickReport::default() => {
+                    tracing::info!(
+                        provider = %provider_id,
+                        selected = report.selected,
+                        intermediate_committed = report.intermediate_committed,
+                        terminal_committed = report.terminal_committed,
+                        conflicted = report.conflicted,
+                        retry_scheduled = report.retry_scheduled,
+                        dead_lettered = report.dead_lettered,
+                        failed = report.failed,
+                        "BrowserBridge workflow processor tick completed"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        provider = %provider_id,
+                        %error,
+                        "BrowserBridge workflow processor tick failed"
+                    );
+                }
+            }
+        }
+    }
+    tracing::info!("BrowserBridge workflow processor stopped");
+}
+
 async fn run_scan_scheduler(
     worker: DaemonScanWorker,
     tick_interval: std::time::Duration,
@@ -900,6 +1046,40 @@ mod tests {
             shutdown_receiver,
         )
         .expect("Cidaren declares a credential-terminal BrowserBridge result");
+        shutdown_sender.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+        database.close().await;
+    }
+
+    #[tokio::test]
+    async fn browser_bridge_workflow_processor_starts_for_uai_result_inboxes() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let keyring = load_secret_keyring(
+            Some("key-a".to_owned()),
+            Some(SecretString::new(format!(
+                "key-a={}",
+                STANDARD.encode([8; 32])
+            ))),
+        )
+        .unwrap()
+        .unwrap();
+        let store = SqliteSecretStore::new(database.clone(), keyring);
+        let mut config = Config::default();
+        config.providers.enable_development_uai = true;
+        let providers = Arc::new(build_provider_registry(&config, Some(&store)).unwrap());
+        let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+        let handle = start_browser_bridge_workflow_processor(
+            &database,
+            providers,
+            Some(store),
+            &config,
+            shutdown_receiver,
+        )
+        .expect("UAI declares intermediate and terminal BrowserBridge results");
         shutdown_sender.send(true).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), handle)
             .await

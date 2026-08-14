@@ -3912,3 +3912,20 @@ This setting is policy input, not permission to invent answers or silently
 drop Questions. The following Draft slice must calculate it against the full
 immutable Question snapshot and persist the selected/unanswered partition plus
 the resolved threshold before a subset can become executable.
+
+## Two-hundred-and-seventeenth Phase 0 slice
+
+Engine and `asterismd` now consume declared BrowserBridge intermediate and
+execution-terminal result inboxes. Validation reconstructs the encrypted
+command, optional runtime sidecar and session-level workflow context, then
+rebinds owner, account, Task, Provider version, runtime origin and the frozen
+settings schema before invoking the Provider callback. Missing context,
+undeclared result types and changed plan digests fail before Provider code can
+return a transition.
+
+The daemon starts this worker only for Providers with non-empty workflow result
+sets. Each Provider has a separate repository scope and worker identity; each
+tick claims at most one result. A validated transition enters Storage's atomic
+commit boundary, while recovery/validation/storage failures use the existing
+bounded retry and dead-letter ledger. Binding, sequence or claim conflicts are
+terminal and never dispatch or replay a browser command.

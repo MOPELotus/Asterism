@@ -78,6 +78,8 @@ pub use browser_bridge_session::{
     BrowserBridgeWorkflowContextIssue, BrowserBridgeWorkflowPlanIssue,
 };
 pub use browser_bridge_workflow::{
+    BrowserBridgeWorkflowProcessor, BrowserBridgeWorkflowProcessorConfig,
+    BrowserBridgeWorkflowProcessorError, BrowserBridgeWorkflowTickReport,
     BrowserBridgeWorkflowValidationError, BrowserBridgeWorkflowValidationService,
     ValidateBrowserBridgeWorkflowCommand, ValidatedBrowserBridgeWorkflow,
 };

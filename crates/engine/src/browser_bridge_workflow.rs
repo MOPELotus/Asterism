@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use asterism_domain::{
     AuthState, BrowserBridgeSessionState, ProviderAccountId, ProviderId, TaskCapability, TaskId,
@@ -9,8 +9,14 @@ use asterism_provider_api::{
     BrowserBridgeWorkflowResultRequest, BrowserBridgeWorkflowRuntimeState, ProviderContext,
     ProviderError, ProviderRegistry,
 };
+use asterism_scheduler::{RetryPolicy, RetryPolicyError};
 use asterism_secrets::{SecretAccess, SecretStoreError};
-use asterism_storage::{ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository};
+use asterism_storage::{
+    BrowserBridgeCommandArtifactRepository, BrowserBridgeResultAttemptFinishRequest,
+    BrowserBridgeSessionRepository, BrowserBridgeWorkflowCommitOutcome,
+    BrowserBridgeWorkflowCommitRequest, PendingBrowserBridgeResult,
+    ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository,
+};
 
 use crate::BrowserBridgeRuntimeRecoverySnapshot;
 
@@ -207,6 +213,309 @@ pub struct ValidatedBrowserBridgeWorkflow {
     pub access: SecretAccess,
 }
 
+/// Core-owned durable processor for one Provider's intermediate and execution
+/// terminal `BrowserBridge` result inboxes.
+#[derive(Clone, Debug)]
+pub struct BrowserBridgeWorkflowProcessor<S, C, Q, A> {
+    provider_id: ProviderId,
+    registry: Arc<ProviderRegistry>,
+    sessions: S,
+    commands: C,
+    tasks: Q,
+    accounts: A,
+    config: BrowserBridgeWorkflowProcessorConfig,
+}
+
+impl<S, C, Q, A> BrowserBridgeWorkflowProcessor<S, C, Q, A> {
+    /// # Errors
+    ///
+    /// Rejects an unsafe worker identity, lease bound or retry policy.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Core repositories and their fixed Provider scope remain explicit at composition"
+    )]
+    pub fn new(
+        provider_id: ProviderId,
+        registry: Arc<ProviderRegistry>,
+        sessions: S,
+        commands: C,
+        tasks: Q,
+        accounts: A,
+        config: BrowserBridgeWorkflowProcessorConfig,
+    ) -> Result<Self, BrowserBridgeWorkflowProcessorError> {
+        config.validate()?;
+        Ok(Self {
+            provider_id,
+            registry,
+            sessions,
+            commands,
+            tasks,
+            accounts,
+            config,
+        })
+    }
+}
+
+impl<S, C, Q, A> BrowserBridgeWorkflowProcessor<S, C, Q, A>
+where
+    S: BrowserBridgeSessionRepository + Clone,
+    C: BrowserBridgeCommandArtifactRepository + Clone,
+    Q: TaskQueryRepository + Clone,
+    A: ProviderAccountRuntimeRepository + Clone,
+{
+    /// Processes at most one exact Provider workflow result. Failures become
+    /// durable retry/dead-letter state and never replay a browser command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when inbox selection or Provider declarations are
+    /// invalid before a result attempt begins.
+    pub async fn tick(
+        &self,
+        now: asterism_domain::Timestamp,
+    ) -> Result<BrowserBridgeWorkflowTickReport, BrowserBridgeWorkflowProcessorError> {
+        let entry = self.registry.get(&self.provider_id).ok_or_else(|| {
+            BrowserBridgeWorkflowProcessorError::ProviderNotRegistered(self.provider_id.clone())
+        })?;
+        let capability = entry.browser_bridge.as_ref().ok_or_else(|| {
+            BrowserBridgeWorkflowProcessorError::CapabilityUnavailable(self.provider_id.clone())
+        })?;
+        let mut result_types = capability
+            .browser_bridge_intermediate_result_types()
+            .iter()
+            .copied()
+            .map(|result_type| (result_type, BrowserBridgeResultDisposition::Intermediate))
+            .chain(
+                capability
+                    .browser_bridge_execution_result_types()
+                    .iter()
+                    .copied()
+                    .map(|result_type| {
+                        (
+                            result_type,
+                            BrowserBridgeResultDisposition::ExecutionTerminal,
+                        )
+                    }),
+            )
+            .collect::<Vec<_>>();
+        result_types.sort_unstable_by_key(|(result_type, _)| *result_type);
+        if result_types.is_empty()
+            || result_types.windows(2).any(|pair| pair[0].0 == pair[1].0)
+            || result_types.iter().any(|(result_type, expected)| {
+                capability.browser_bridge_result_disposition(result_type) != Some(*expected)
+            })
+        {
+            return Err(
+                BrowserBridgeWorkflowProcessorError::InvalidResultTypeDeclaration(
+                    self.provider_id.clone(),
+                ),
+            );
+        }
+        let result_type_refs = result_types
+            .iter()
+            .map(|(result_type, _)| *result_type)
+            .collect::<Vec<_>>();
+        let lease_expires_at = now
+            .checked_add_signed(
+                chrono::Duration::from_std(self.config.claim_ttl)
+                    .map_err(|_| BrowserBridgeWorkflowProcessorError::InvalidConfig)?,
+            )
+            .ok_or(BrowserBridgeWorkflowProcessorError::InvalidConfig)?;
+        let pending = self
+            .sessions
+            .claim_pending_browser_bridge_results(
+                now,
+                &self.provider_id,
+                &result_type_refs,
+                1,
+                &self.config.worker_id,
+                lease_expires_at,
+            )
+            .await?;
+        let mut report = BrowserBridgeWorkflowTickReport {
+            selected: u32::try_from(pending.len()).unwrap_or(u32::MAX),
+            ..BrowserBridgeWorkflowTickReport::default()
+        };
+        for candidate in pending {
+            self.process_candidate(candidate, now, &mut report).await;
+        }
+        Ok(report)
+    }
+
+    async fn process_candidate(
+        &self,
+        candidate: PendingBrowserBridgeResult,
+        now: asterism_domain::Timestamp,
+        report: &mut BrowserBridgeWorkflowTickReport,
+    ) {
+        let access = SecretAccess {
+            actor: asterism_secrets::SecretActor::CoreService("browser-bridge-workflow"),
+            correlation_id: format!("bridge-workflow:{}", candidate.session_id),
+            reason: "recover and commit Provider-validated BrowserBridge workflow result"
+                .to_owned(),
+        };
+        let recovery = crate::BrowserBridgeRuntimeRecoveryService::new(
+            self.sessions.clone(),
+            self.commands.clone(),
+        )
+        .recover(crate::BrowserBridgeRuntimeRecoveryRequest {
+            owner_user_id: candidate.owner_user_id,
+            session_id: candidate.session_id,
+            access: access.clone(),
+        })
+        .await;
+        let Ok(recovery) = recovery else {
+            self.record_failure(&candidate, now, "recovery", false, report)
+                .await;
+            return;
+        };
+        let validated = BrowserBridgeWorkflowValidationService::new(
+            self.registry.clone(),
+            self.tasks.clone(),
+            self.accounts.clone(),
+        )
+        .validate(ValidateBrowserBridgeWorkflowCommand {
+            owner_user_id: candidate.owner_user_id,
+            recovery,
+            access,
+        })
+        .await;
+        let Ok(validated) = validated else {
+            self.record_failure(&candidate, now, "provider_validation", false, report)
+                .await;
+            return;
+        };
+        let outcome = self
+            .commands
+            .commit_browser_bridge_workflow_result(BrowserBridgeWorkflowCommitRequest {
+                owner_user_id: validated.owner_user_id,
+                provider_account_id: validated.provider_account_id,
+                task_id: validated.task_id,
+                transition: validated.transition,
+                worker_id: &self.config.worker_id,
+                committed_at: std::cmp::max(now, chrono::Utc::now()),
+                access: &validated.access,
+            })
+            .await;
+        match outcome {
+            Ok(BrowserBridgeWorkflowCommitOutcome::IntermediateCommitted { .. }) => {
+                report.intermediate_committed += 1;
+            }
+            Ok(BrowserBridgeWorkflowCommitOutcome::ExecutionTerminalCommitted { .. }) => {
+                report.terminal_committed += 1;
+            }
+            Ok(
+                BrowserBridgeWorkflowCommitOutcome::BindingConflict
+                | BrowserBridgeWorkflowCommitOutcome::SequenceConflict
+                | BrowserBridgeWorkflowCommitOutcome::ClaimConflict,
+            ) => {
+                report.conflicted += 1;
+                self.record_failure(&candidate, now, "commit_conflict", true, report)
+                    .await;
+            }
+            Err(_) => {
+                self.record_failure(&candidate, now, "commit_storage", false, report)
+                    .await;
+            }
+        }
+    }
+
+    async fn record_failure(
+        &self,
+        candidate: &PendingBrowserBridgeResult,
+        failed_at: asterism_domain::Timestamp,
+        error_kind: &'static str,
+        force_dead_letter: bool,
+        report: &mut BrowserBridgeWorkflowTickReport,
+    ) {
+        let delay = if force_dead_letter {
+            None
+        } else {
+            let Ok(delay) = self.config.retry_policy.delay_after(candidate.attempt_no) else {
+                report.failed += 1;
+                return;
+            };
+            delay
+        };
+        let retry_at = delay.and_then(|delay| {
+            chrono::Duration::from_std(delay)
+                .ok()
+                .and_then(|delay| failed_at.checked_add_signed(delay))
+        });
+        if delay.is_some() && retry_at.is_none() {
+            report.failed += 1;
+            return;
+        }
+        match self
+            .sessions
+            .finish_browser_bridge_result_attempt(BrowserBridgeResultAttemptFinishRequest {
+                session_id: candidate.session_id,
+                sequence: candidate.sequence,
+                worker_id: &self.config.worker_id,
+                failed_at,
+                retry_at,
+                error_kind,
+            })
+            .await
+        {
+            Ok(true) if retry_at.is_some() => report.retry_scheduled += 1,
+            Ok(true) => report.dead_lettered += 1,
+            Ok(false) | Err(_) => report.failed += 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeWorkflowProcessorConfig {
+    pub worker_id: String,
+    pub claim_ttl: Duration,
+    pub retry_policy: RetryPolicy,
+}
+
+impl BrowserBridgeWorkflowProcessorConfig {
+    fn validate(&self) -> Result<(), BrowserBridgeWorkflowProcessorError> {
+        if self.worker_id.is_empty()
+            || self.worker_id.len() > 128
+            || self.worker_id.trim() != self.worker_id
+            || self.worker_id.chars().any(char::is_control)
+            || self.claim_ttl.is_zero()
+            || self.claim_ttl > Duration::from_hours(1)
+            || self.retry_policy.max_attempts > 32
+        {
+            return Err(BrowserBridgeWorkflowProcessorError::InvalidConfig);
+        }
+        self.retry_policy.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BrowserBridgeWorkflowTickReport {
+    pub selected: u32,
+    pub intermediate_committed: u32,
+    pub terminal_committed: u32,
+    pub conflicted: u32,
+    pub retry_scheduled: u32,
+    pub dead_lettered: u32,
+    pub failed: u32,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BrowserBridgeWorkflowProcessorError {
+    #[error("BrowserBridge workflow processor configuration is invalid")]
+    InvalidConfig,
+    #[error("provider `{0}` is not registered")]
+    ProviderNotRegistered(ProviderId),
+    #[error("provider `{0}` exposes no BrowserBridge capability")]
+    CapabilityUnavailable(ProviderId),
+    #[error("provider `{0}` has an invalid BrowserBridge workflow-result declaration")]
+    InvalidResultTypeDeclaration(ProviderId),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error(transparent)]
+    RetryPolicy(#[from] RetryPolicyError),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserBridgeWorkflowValidationError {
     #[error("BrowserBridge recovery evidence is invalid or cross-bound")]
@@ -265,6 +574,40 @@ mod tests {
 
     use super::*;
     use crate::BrowserBridgeRecoveredExchange;
+
+    #[test]
+    fn processor_configuration_is_bounded() {
+        let valid = BrowserBridgeWorkflowProcessorConfig {
+            worker_id: "browser-workflow-test".to_owned(),
+            claim_ttl: std::time::Duration::from_secs(30),
+            retry_policy: RetryPolicy {
+                max_attempts: 5,
+                initial_delay_seconds: 1,
+                multiplier: 2,
+                max_delay_seconds: 30,
+            },
+        };
+        assert!(valid.validate().is_ok());
+        assert!(
+            BrowserBridgeWorkflowProcessorConfig {
+                worker_id: " bad-worker".to_owned(),
+                ..valid.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            BrowserBridgeWorkflowProcessorConfig {
+                retry_policy: RetryPolicy {
+                    max_attempts: 33,
+                    ..valid.retry_policy
+                },
+                ..valid
+            }
+            .validate()
+            .is_err()
+        );
+    }
 
     #[derive(Debug)]
     struct FakeBrowser {
