@@ -359,12 +359,41 @@ impl WellearnPreparedAtomicChildPlan {
         &self.child_plan
     }
 
+    /// Revalidates the exact child projection against its rebuilt batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for batch, ordinal, flow, identity, profile
+    /// or target drift.
+    pub fn validate(&self) -> ProviderResult<()> {
+        validate_batch_plan_integrity(&self.batch_plan)?;
+        let fanyuchang_target = (self.child_plan.flow == WellearnBatchFlow::FanyuchangDuration)
+            .then_some(self.child_plan.target_seconds);
+        self.child_plan.validate_for_batch_entry(
+            &self.batch_plan,
+            self.entry_index,
+            fanyuchang_target,
+        )
+    }
+
+    /// Rebinds the prepared child to one complete fresh Task detail.
+    ///
+    /// # Errors
+    ///
+    /// Returns the prepared-plan validation error or the existing exact fresh
+    /// batch-entry identity/capability/eligibility error.
+    pub fn validate_fresh_detail(&self, fresh_detail: &RemoteTaskDetail) -> ProviderResult<()> {
+        self.validate()?;
+        validate_fresh_batch_entry(&self.batch_plan, self.entry_index, fresh_detail)
+    }
+
     /// Converts the rebound exact child into Core's generic immutable artifact.
     ///
     /// # Errors
     ///
     /// Returns the child plan's typed validation or artifact conversion error.
     pub fn provider_plan_artifact(&self) -> ProviderResult<ProviderExecutionPlanArtifact> {
+        self.validate()?;
         self.child_plan.to_provider_execution_plan_artifact()
     }
 }
@@ -460,6 +489,22 @@ impl WellearnAtomicChildPlan {
 
     pub const fn target_seconds(&self) -> u64 {
         self.target_seconds
+    }
+
+    /// Expands the frozen child profile and target into the complete native
+    /// atomic wire plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for any restored child-plan drift.
+    pub fn duration_completion_plan(
+        &self,
+    ) -> ProviderResult<crate::WellearnAtomicDurationCompletionPlan> {
+        self.validate()?;
+        crate::WellearnAtomicDurationCompletionPlan::try_new(
+            self.atomic_completion_profile,
+            self.target_seconds,
+        )
     }
 
     /// Revalidates every restored Provider-private plan fact.
@@ -1660,10 +1705,21 @@ fn normalized_completion(task: &RemoteTask) -> Option<RemoteState> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use asterism_domain::ProviderAccountId;
+    use asterism_provider_api::{
+        ExecutionEventSink, ProviderContext, ProviderExecutionLog, ProviderIdentity,
+        ProviderMetadata, ProviderProgress, TaskDetailCapability,
+    };
+    use async_trait::async_trait;
+
     use super::*;
     use crate::{
-        WellearnScoLeavesDocument, parse_course_inventory, parse_task_inventory,
-        parse_unit_inventory,
+        WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionDocuments,
+        WellearnAtomicDurationCompletionPlan, WellearnAtomicDurationCompletionReceipts,
+        WellearnAtomicDurationCompletionTransport, WellearnCmiDocument, WellearnScoLeavesDocument,
+        development_metadata, parse_course_inventory, parse_task_inventory, parse_unit_inventory,
     };
 
     const COURSES: &str =
@@ -1713,6 +1769,132 @@ mod tests {
                 "schema": "welearn.sco-task-detail.v2",
                 "task": normalized,
             }),
+        }
+    }
+
+    #[derive(Debug)]
+    struct AtomicFixtureDetail {
+        metadata: ProviderMetadata,
+        detail: RemoteTaskDetail,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ProviderIdentity for AtomicFixtureDetail {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl TaskDetailCapability for AtomicFixtureDetail {
+        async fn task_detail(
+            &self,
+            _context: &ProviderContext,
+            remote_task_id: &str,
+        ) -> ProviderResult<RemoteTaskDetail> {
+            self.calls.lock().unwrap().push(remote_task_id.to_owned());
+            Ok(self.detail.clone())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AtomicFixtureTransport {
+        calls: Mutex<Vec<(String, String, WellearnAtomicDurationCompletionPlan)>>,
+    }
+
+    #[async_trait]
+    impl WellearnAtomicDurationCompletionTransport for AtomicFixtureTransport {
+        async fn complete_duration_atomically(
+            &self,
+            _context: &ProviderContext,
+            course_id: &str,
+            sco_id: &str,
+            plan: WellearnAtomicDurationCompletionPlan,
+            _events: &(dyn ExecutionEventSink + Send + Sync),
+        ) -> ProviderResult<WellearnAtomicDurationCompletionDocuments> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((course_id.to_owned(), sco_id.to_owned(), plan));
+            let (after_duration, after_completion, receipts) = match plan.profile() {
+                WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => (
+                    Some(completed_atomic_cmi("100")),
+                    completed_atomic_cmi("100"),
+                    WellearnAtomicDurationCompletionReceipts::new(
+                        true,
+                        vec![true; usize::try_from(plan.target_seconds()).unwrap()],
+                        Some(true),
+                        true,
+                    ),
+                ),
+                WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => (
+                    None,
+                    completed_atomic_cmi("0"),
+                    WellearnAtomicDurationCompletionReceipts::new(
+                        false,
+                        vec![
+                            true;
+                            usize::try_from(
+                                plan.target_seconds() / plan.heartbeat_interval_seconds()
+                            )
+                            .unwrap()
+                        ],
+                        None,
+                        false,
+                    ),
+                ),
+            };
+            WellearnAtomicDurationCompletionDocuments::try_new(
+                plan,
+                WellearnCmiDocument::try_new("{}".to_owned()).unwrap(),
+                after_duration,
+                after_completion,
+                receipts,
+            )
+        }
+    }
+
+    #[derive(Debug)]
+    struct AtomicFixtureEvents;
+
+    #[async_trait]
+    impl ExecutionEventSink for AtomicFixtureEvents {
+        async fn report(&self, _update: ProviderProgress) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
+            Ok(())
+        }
+    }
+
+    fn completed_atomic_cmi(score: &str) -> WellearnCmiDocument {
+        WellearnCmiDocument::try_new(
+            serde_json::json!({
+                "ret": 0,
+                "comment": serde_json::json!({
+                    "cmi": {
+                        "completion_status": "completed",
+                        "progress_measure": "1",
+                        "score": {"scaled": score},
+                        "success_status": "unknown",
+                        "session_time": "0",
+                        "total_time": "0",
+                    }
+                })
+                .to_string(),
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn atomic_context() -> ProviderContext {
+        ProviderContext {
+            provider_id: ProviderId::new(PROVIDER_ID).unwrap(),
+            account_id: ProviderAccountId::new(),
+            credential_refs: Vec::new(),
+            correlation_id: "welearn-atomic-prepared".to_owned(),
         }
     }
 
@@ -2028,6 +2210,138 @@ mod tests {
                 .payload_sanitized()["target_seconds"],
             0
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_atomic_executor_fresh_rebinds_calls_once_and_verifies() {
+        let fresh_tasks = tasks();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::AutoDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            None,
+            Some(1),
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&fresh_tasks, &units(), &authority)
+                .unwrap();
+        let detail_calls = Arc::new(Mutex::new(Vec::new()));
+        let transport = Arc::new(AtomicFixtureTransport::default());
+        let executor = WellearnAtomicDurationCompletion::try_new(
+            Arc::new(AtomicFixtureDetail {
+                metadata: development_metadata().unwrap(),
+                detail: detail(fresh_tasks[0].clone()),
+                calls: Arc::clone(&detail_calls),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        let outcome = executor
+            .execute_prepared(&atomic_context(), &prepared, &AtomicFixtureEvents)
+            .await
+            .unwrap();
+
+        assert!(outcome.verified);
+        assert_eq!(outcome.remote_state, RemoteState::Completed);
+        assert_eq!(
+            outcome.result_sanitized["schema"],
+            "welearn.atomic-duration-completion.v1"
+        );
+        assert_eq!(
+            outcome.result_sanitized["profile"],
+            "auto_zero_time_save_only_0"
+        );
+        assert_eq!(outcome.result_sanitized["target_seconds"], 20);
+        assert_eq!(outcome.result_sanitized["score_percent"], 0);
+        assert_eq!(detail_calls.lock().unwrap().as_slice(), &["sco:1001:301"]);
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            &[(
+                "1001".to_owned(),
+                "301".to_owned(),
+                prepared.child_plan().duration_completion_plan().unwrap(),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_atomic_executor_verifies_fanyuchang_fresh_time_profile() {
+        let fresh_tasks = tasks();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&fresh_tasks, &units(), &authority)
+                .unwrap();
+        let transport = Arc::new(AtomicFixtureTransport::default());
+        let executor = WellearnAtomicDurationCompletion::try_new(
+            Arc::new(AtomicFixtureDetail {
+                metadata: development_metadata().unwrap(),
+                detail: detail(fresh_tasks[0].clone()),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        let outcome = executor
+            .execute_prepared(&atomic_context(), &prepared, &AtomicFixtureEvents)
+            .await
+            .unwrap();
+
+        assert!(outcome.verified);
+        assert_eq!(
+            outcome.result_sanitized["profile"],
+            "fanyuchang_fresh_set_save_100"
+        );
+        assert_eq!(outcome.result_sanitized["score_percent"], 100);
+        assert_eq!(outcome.result_sanitized["time_preservation_verified"], true);
+        assert_eq!(outcome.result_sanitized["heartbeat_count"], 1);
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_atomic_executor_stops_on_fresh_child_drift_before_transport() {
+        let fresh_tasks = tasks();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::AutoDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            None,
+            Some(1),
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&fresh_tasks, &units(), &authority)
+                .unwrap();
+        let transport = Arc::new(AtomicFixtureTransport::default());
+        let executor = WellearnAtomicDurationCompletion::try_new(
+            Arc::new(AtomicFixtureDetail {
+                metadata: development_metadata().unwrap(),
+                detail: detail(fresh_tasks[1].clone()),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        assert!(
+            executor
+                .execute_prepared(&atomic_context(), &prepared, &AtomicFixtureEvents)
+                .await
+                .is_err()
+        );
+        assert!(transport.calls.lock().unwrap().is_empty());
     }
 
     #[test]

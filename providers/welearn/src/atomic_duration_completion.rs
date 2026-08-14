@@ -1,15 +1,19 @@
+use std::{fmt, sync::Arc};
+
 use asterism_domain::RemoteState;
 use asterism_provider_api::{
-    ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderResult,
+    ExecutionEventSink, ExecutionOutcome, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderIdentity, ProviderMetadata, ProviderResult, TaskDetailCapability,
 };
 use async_trait::async_trait;
 
 use crate::{
     WellearnAtomicCompletionProfile, WellearnCmiDocument, WellearnDurationProtocolMode,
-    WellearnResourceCompletionCmiFormat, WellearnResourceCompletionSequence,
-    WellearnResourceCompletionTimeMode, WellearnResourceCompletionWriteMode,
-    WellearnResourceExecutionPlan, WellearnResourceMutationProfile, parse_cmi_snapshot,
-    runtime_settings::MAX_DURATION_REPORT_SECONDS,
+    WellearnPreparedAtomicChildPlan, WellearnResourceCompletionCmiFormat,
+    WellearnResourceCompletionSequence, WellearnResourceCompletionTimeMode,
+    WellearnResourceCompletionWriteMode, WellearnResourceExecutionPlan,
+    WellearnResourceMutationProfile, cmi::parse_sco_identity, metadata::development_metadata,
+    parse_cmi_snapshot, runtime_settings::MAX_DURATION_REPORT_SECONDS,
 };
 
 /// Stable Provider operation type for one remote mutation inside the atomic
@@ -112,6 +116,130 @@ fn atomic_goal_changed() -> ProviderError {
         ProviderErrorKind::RemoteChanged,
         "WELearn atomic duration-completion goal was not visible in fresh CMI",
     )
+}
+
+/// Coordinates one already-planned atomic child through fresh Task rebinding,
+/// one Provider transport call and exact final verification.
+///
+/// This boundary does not build parent selection, schedule children or grant
+/// Core mutation authority. It remains unregistered until the shared parent
+/// batch contract can supply a persisted [`WellearnPreparedAtomicChildPlan`].
+pub struct WellearnAtomicDurationCompletion {
+    metadata: ProviderMetadata,
+    details: Arc<dyn TaskDetailCapability>,
+    transport: Arc<dyn WellearnAtomicDurationCompletionTransport>,
+}
+
+impl WellearnAtomicDurationCompletion {
+    /// Builds the high-level atomic child coordinator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the fresh-detail implementation belongs
+    /// to another Provider contract.
+    pub fn try_new(
+        details: Arc<dyn TaskDetailCapability>,
+        transport: Arc<dyn WellearnAtomicDurationCompletionTransport>,
+    ) -> ProviderResult<Self> {
+        let metadata = development_metadata()?;
+        if details.metadata() != &metadata {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn atomic execution detail boundary has mismatched metadata",
+            ));
+        }
+        Ok(Self {
+            metadata,
+            details,
+            transport,
+        })
+    }
+
+    /// Executes one exact Core-prepared atomic child.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for Provider/context drift, invalid parent/child
+    /// planning evidence, fresh Task drift, transport ambiguity or failed exact
+    /// completion/time verification.
+    pub async fn execute_prepared(
+        &self,
+        context: &ProviderContext,
+        prepared: &WellearnPreparedAtomicChildPlan,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        if context.provider_id != self.metadata.id {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn atomic execution received a foreign Provider context",
+            ));
+        }
+        prepared.validate()?;
+        let child = prepared.child_plan();
+        let plan = child.duration_completion_plan()?;
+        let (course_id, sco_id) = parse_sco_identity(child.remote_task_id())?;
+        let detail = self
+            .details
+            .task_detail(context, child.remote_task_id())
+            .await?;
+        prepared.validate_fresh_detail(&detail)?;
+        let documents = self
+            .transport
+            .complete_duration_atomically(context, &course_id, &sco_id, plan, events)
+            .await?;
+        let verification = verify_atomic_duration_completion(plan, &documents)?;
+        let receipts = documents.receipts();
+        let heartbeat_accepted = receipts
+            .heartbeat_acceptances()
+            .iter()
+            .filter(|accepted| **accepted)
+            .count();
+        let heartbeat_rejected = receipts.heartbeat_acceptances().len() - heartbeat_accepted;
+        Ok(ExecutionOutcome {
+            remote_state: RemoteState::Completed,
+            verified: true,
+            result_sanitized: serde_json::json!({
+                "schema": "welearn.atomic-duration-completion.v1",
+                "profile": atomic_profile_name(verification.profile()),
+                "target_seconds": plan.target_seconds(),
+                "score_percent": verification.score_percent(),
+                "time_preservation_verified": verification.time_preservation_verified(),
+                "start_accepted": receipts.start_accepted(),
+                "heartbeat_count": receipts.heartbeat_acceptances().len(),
+                "heartbeat_accepted": heartbeat_accepted,
+                "heartbeat_rejected": heartbeat_rejected,
+                "set_accepted": receipts.set_accepted(),
+                "save_accepted": receipts.save_accepted(),
+                "verification": "provider_fresh_cmi",
+            }),
+        })
+    }
+}
+
+impl fmt::Debug for WellearnAtomicDurationCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WellearnAtomicDurationCompletion")
+            .field("metadata", &self.metadata)
+            .field("details", &"configured")
+            .field("transport", &"configured")
+            .finish()
+    }
+}
+
+impl ProviderIdentity for WellearnAtomicDurationCompletion {
+    fn metadata(&self) -> &ProviderMetadata {
+        &self.metadata
+    }
+}
+
+const fn atomic_profile_name(profile: WellearnAtomicCompletionProfile) -> &'static str {
+    match profile {
+        WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+            "fanyuchang_fresh_set_save_100"
+        }
+        WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => "auto_zero_time_save_only_0",
+    }
 }
 
 /// Ordered mutation receipts emitted by one authorized atomic lifecycle.

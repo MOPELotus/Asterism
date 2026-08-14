@@ -157,11 +157,14 @@ no post-duration/set slot and supports an empty zero-target keep list. Explicit
 negative receipts remain diagnostics; no bundle grants mutation authority.
 An unregistered Provider-owned native transport now consumes only this
 validated plan and emits the combined bundle in one session/route lifecycle.
-It implements the exact request sequence and no-replay error boundary, but is
-not present in Provider capability registration and cannot be reached from
-singleton TaskExecution. Core must still persist, authorize and recover the
-composite attempt before an execution entry may call it without inserting a
-bare save or second start.
+It implements the exact request sequence and no-replay error boundary. An
+unregistered high-level `WellearnAtomicDurationCompletion` coordinator now also
+revalidates one prepared batch child, fresh-rebinds its complete TaskDetail,
+calls that transport once and applies the exact verifier before returning a
+sanitized outcome. Neither boundary is present in Provider capability
+registration or reachable from singleton TaskExecution. Core must still
+persist, authorize and recover the composite attempt before an execution entry
+may call it without inserting a bare save or second start.
 
 `verify_atomic_duration_completion` is a separate pure readback boundary over
 the validated plan and combined documents. It requires exact

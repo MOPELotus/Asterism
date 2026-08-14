@@ -226,6 +226,11 @@ only structural field names, response codes and bounded placeholder shapes.
   membership yields and retains zero-second children, and singleton flows,
   duplicate/missing selection, missing target, unselected child or disappeared
   child cannot be guessed into a plan.
+- Prepared atomic-executor fixtures prove one complete fresh TaskDetail rebind
+  occurs before exactly one transport call and exact final CMI verification.
+  A foreign fresh child stops before transport; successful Auto and Fanyuchang
+  fixtures return only the frozen profile/target, time proof and sanitized
+  receipt diagnostics.
 - Native atomic transport tests bind current duration/completion to the
   query-uid endpoint and simple Referer, while Auto binds its duration phase to
   plain endpoint/simple Referer and switches only final completion to the

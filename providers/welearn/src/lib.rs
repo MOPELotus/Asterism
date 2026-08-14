@@ -29,10 +29,10 @@ mod task_detail;
 mod task_inventory;
 
 pub use atomic_duration_completion::{
-    WellearnAtomicDurationCompletionDocuments, WellearnAtomicDurationCompletionPlan,
-    WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionTransport,
-    WellearnAtomicDurationCompletionVerification, WellearnAtomicMutationKind,
-    verify_atomic_duration_completion,
+    WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionDocuments,
+    WellearnAtomicDurationCompletionPlan, WellearnAtomicDurationCompletionReceipts,
+    WellearnAtomicDurationCompletionTransport, WellearnAtomicDurationCompletionVerification,
+    WellearnAtomicMutationKind, verify_atomic_duration_completion,
 };
 pub use authentication::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCookieSession,

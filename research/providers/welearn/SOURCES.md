@@ -46,6 +46,14 @@ The post-mutation-baseline checkpoint on 2026-08-14 repeated default-head,
 tag and GitHub-release queries after porting YZBRH's explicit uninitialized-CMI
 branch. All three revisions and release surfaces remained unchanged, so that
 control-flow correction introduced no new pinned revision.
+The post-parent-planning checkpoint on 2026-08-14 queried every remote head and
+tag again. Fanyuchang `master` remains full revision
+`afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2`; its sole tag and GitHub release
+remain `v4.0.0` at older revision `5d1df60cb0078f70679be2a22f2afbf1ef4fa88a`.
+YZBRH `main` remains `bd160e91d0452b8bf483087fbdd3bdd58d855e13`, and
+Auto_WeLearn `master` remains `85918caaccd93b73b1e41fe537b4e9a11377b759`;
+both still expose no tags or GitHub releases. No revision, release, protocol or
+capability delta was available to port at this checkpoint.
 
 ## Source selection
 

@@ -460,6 +460,17 @@ authentication failure may renew once for a fresh read-only verification. The
 transport remains absent from capability registration until Core supplies the
 durable composite authority and per-transition persistence boundary.
 
+`WellearnAtomicDurationCompletion` now supplies the unregistered high-level
+Provider coordinator for a fully prepared child. It revalidates the rebuilt
+batch/child projection, fetches one complete fresh `TaskDetail`, applies the
+existing exact batch-entry identity/capability/eligibility rebind, expands the
+frozen child into its complete wire plan, invokes the atomic transport once and
+runs `verify_atomic_duration_completion` before returning a sanitized verified
+outcome. Fresh child drift stops before transport. It accepts no ordinary
+`ExecutionRequest` and does not build selection authority, so this completed
+Provider boundary does not bypass the parent-planning Core gap or register the
+atomic capability prematurely.
+
 Fresh goal proof remains independent from that mutation lifecycle.
 `verify_atomic_duration_completion` first revalidates the plan/document shape,
 then parses only the returned evidence and requires exact `completed`, progress
