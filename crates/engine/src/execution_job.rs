@@ -2069,6 +2069,10 @@ where
         }))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Provider preparation keeps authorization, persisted plan evidence and account/settings binding visible in one fail-closed chain"
+    )]
     async fn prepare_provider_call(
         &self,
         execution_id: ExecutionId,
@@ -2136,6 +2140,16 @@ where
         if runtime_settings.provider_id != account.provider_id {
             return Ok(Err(internal_prepared_failure()));
         }
+        let provider_plan_artifact = self
+            .executions
+            .find_execution_provider_plan_artifact(execution_id)
+            .await?;
+        if provider_plan_artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.provider_id() != &account.provider_id)
+        {
+            return Ok(Err(internal_prepared_failure()));
+        }
         let Ok(concurrency) = entry
             .runtime_settings
             .execution_concurrency(&runtime_settings.resolved)
@@ -2151,6 +2165,7 @@ where
             capability_plan: capability_plan.to_vec(),
             capability_step_position,
             runtime_settings: runtime_settings.resolved,
+            provider_plan_artifact,
         };
         if !request.has_valid_capability_step() {
             return Ok(Err(internal_prepared_failure()));
@@ -4193,6 +4208,8 @@ mod tests {
         calls: Mutex<u32>,
         progress_calls: Mutex<u32>,
         submission_verify_calls: Mutex<u32>,
+        received_provider_plan_artifacts:
+            Mutex<Vec<Option<asterism_provider_api::ProviderExecutionPlanArtifact>>>,
         durable_calls: Arc<Mutex<u32>>,
         database: Database,
     }
@@ -4221,6 +4238,10 @@ mod tests {
             events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<ExecutionOutcome> {
             *self.calls.lock().unwrap() += 1;
+            self.received_provider_plan_artifacts
+                .lock()
+                .unwrap()
+                .push(request.provider_plan_artifact.clone());
             let expected_capabilities = match self.behavior {
                 ProviderBehavior::DurationSuccess | ProviderBehavior::DurationNetworkFailure => {
                     vec![TaskCapability::DurationReport]
@@ -4321,6 +4342,10 @@ mod tests {
             request: &ProviderExecutionRequest,
         ) -> ProviderResult<ExecutionOutcome> {
             *self.progress_calls.lock().unwrap() += 1;
+            self.received_provider_plan_artifacts
+                .lock()
+                .unwrap()
+                .push(request.provider_plan_artifact.clone());
             assert_eq!(
                 request
                     .runtime_settings
@@ -4747,6 +4772,30 @@ mod tests {
         assert_eq!(mutation.2, vec![41; 32]);
         assert_eq!(mutation.3, vec![42; 32]);
         assert!(mutation.4);
+    }
+
+    #[tokio::test]
+    async fn recovery_injects_the_exact_frozen_provider_plan_artifact() {
+        let fixture = Fixture::verified_recovering(ProviderBehavior::Success).await;
+        let artifact = fixture.attach_provider_plan_artifact().await;
+
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+        assert_eq!(
+            *fixture
+                .provider
+                .received_provider_plan_artifacts
+                .lock()
+                .unwrap(),
+            vec![Some(artifact)]
+        );
     }
 
     #[tokio::test]
@@ -5527,6 +5576,7 @@ mod tests {
                 calls: Mutex::new(0),
                 progress_calls: Mutex::new(0),
                 submission_verify_calls: Mutex::new(0),
+                received_provider_plan_artifacts: Mutex::new(Vec::new()),
                 durable_calls: Arc::new(Mutex::new(0)),
                 database: database.clone(),
             });
@@ -5869,6 +5919,32 @@ mod tests {
                 .unwrap()
                 .pop()
                 .unwrap()
+        }
+
+        async fn attach_provider_plan_artifact(
+            &self,
+        ) -> asterism_provider_api::ProviderExecutionPlanArtifact {
+            let artifact = asterism_provider_api::ProviderExecutionPlanArtifact::try_new(
+                ProviderId::new("provider-alpha").unwrap(),
+                "provider-alpha.execution-plan.v1",
+                serde_json::json!({"target_seconds": 120}),
+            )
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO execution_provider_plan_artifacts \
+                 (execution_id, provider_id, artifact_type, artifact_digest, payload_json, captured_at) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(self.execution_id.to_string())
+            .bind(artifact.provider_id().as_str())
+            .bind(artifact.artifact_type())
+            .bind(artifact.artifact_digest().as_slice())
+            .bind(serde_json::to_string(artifact.payload_sanitized()).unwrap())
+            .bind(self.now.to_rfc3339())
+            .execute(self.database.pool())
+            .await
+            .unwrap();
+            artifact
         }
 
         async fn persisted_state(&self) -> (String, String, i64) {

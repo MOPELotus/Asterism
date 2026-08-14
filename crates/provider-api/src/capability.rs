@@ -2322,6 +2322,11 @@ pub struct ExecutionRequest {
     /// Immutable Core-resolved settings captured when this Execution was
     /// scheduled. Retries receive the same versioned values.
     pub runtime_settings: ResolvedProviderRuntimeSettings,
+    /// Optional credential-free Provider-private planning evidence frozen in
+    /// the same scheduling transaction. It is read-only context and never
+    /// broadens the active capability authority above.
+    #[serde(skip)]
+    pub provider_plan_artifact: Option<ProviderExecutionPlanArtifact>,
 }
 
 impl ExecutionRequest {
@@ -2362,6 +2367,7 @@ mod execution_request_tests {
                 schema_version: 1,
                 values: BTreeMap::new(),
             },
+            provider_plan_artifact: None,
         }
     }
 
@@ -2385,6 +2391,25 @@ mod execution_request_tests {
         let mut missing_plan = request();
         missing_plan.capability_plan.clear();
         assert!(!missing_plan.has_valid_capability_step());
+    }
+
+    #[test]
+    fn private_plan_artifact_stays_out_of_generic_request_serialization() {
+        let mut request = request();
+        request.provider_plan_artifact = Some(
+            ProviderExecutionPlanArtifact::try_new(
+                ProviderId::new("test").unwrap(),
+                "test.execution-plan.v1",
+                serde_json::json!({"target_seconds": 120}),
+            )
+            .unwrap(),
+        );
+
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(!encoded.contains("provider_plan_artifact"));
+        assert!(!encoded.contains("target_seconds"));
+        let decoded: ExecutionRequest = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.provider_plan_artifact.is_none());
     }
 }
 

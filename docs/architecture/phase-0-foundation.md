@@ -3592,3 +3592,26 @@ mutate. It is not yet injected into `ExecutionRequest`; that remains a separate
 contract change so every Provider adapter must explicitly accept and validate
 the new frozen input. WELearn's atomic child plan and UAI's Course batch/start
 plan can use this boundary once their adapters implement that contract.
+
+## Two-hundred-and-second Phase 0 slice
+
+Every Provider execution and verify-only recovery request now carries the
+optional scheduling-time plan artifact. Engine reloads it through Storage's
+Provider, capture-time and digest checks while preparing the call, repeats the
+runtime account binding, and supplies the exact typed value without widening
+the active capability slice. Recovery therefore cannot silently reconstruct a
+different private goal from current defaults, and a corrupt artifact fails
+before Provider code runs.
+
+The private artifact is deliberately skipped by generic `ExecutionRequest`
+serialization and its existing `Debug` representation remains redacted. It is
+read-only evidence, not credential material or mutation authority. A Provider
+that owns an artifact must validate its namespaced type and decode/rebind the
+payload against fresh remote facts before use; Providers without one receive
+an explicit `None`.
+
+This does not authorize Core to synthesize Course batch evidence from one Task.
+WELearn and UAI child plans require complete, freshly validated Course/Task
+membership plus an exact start/target decision. Their future batch scheduling
+entry must freeze those inputs first and then pass the resulting artifact into
+this already durable execution boundary.
