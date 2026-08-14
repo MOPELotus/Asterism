@@ -1522,6 +1522,168 @@ pub trait TaskExecutionCapability: ProviderIdentity {
     }
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExecutionMutationIssue {
+    ordinal: u32,
+    operation_type: String,
+    request_digest: [u8; 32],
+}
+
+impl fmt::Debug for ExecutionMutationIssue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationIssue")
+            .field("ordinal", &self.ordinal)
+            .field("operation_type", &self.operation_type)
+            .field("request_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+impl ExecutionMutationIssue {
+    /// Creates one bounded Provider mutation identity for durable issuance.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty ordinal or digest and operation labels which cannot be
+    /// safely persisted. Core additionally requires a current-Provider prefix.
+    pub fn new(
+        ordinal: u32,
+        operation_type: impl Into<String>,
+        request_digest: [u8; 32],
+    ) -> ProviderResult<Self> {
+        let operation_type = operation_type.into();
+        if !(1..=100_000).contains(&ordinal)
+            || !valid_execution_mutation_operation_type(&operation_type)
+            || request_digest == [0; 32]
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation issue is invalid",
+            ));
+        }
+        Ok(Self {
+            ordinal,
+            operation_type,
+            request_digest,
+        })
+    }
+
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    pub fn operation_type(&self) -> &str {
+        &self.operation_type
+    }
+
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ExecutionMutationReceipt {
+    ordinal: u32,
+    response_digest: [u8; 32],
+    accepted: bool,
+}
+
+impl fmt::Debug for ExecutionMutationReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationReceipt")
+            .field("ordinal", &self.ordinal)
+            .field("response_digest", &"[HASHED]")
+            .field("accepted", &self.accepted)
+            .finish()
+    }
+}
+
+impl ExecutionMutationReceipt {
+    /// Creates one explicit remote response identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty ordinal or response digest.
+    pub fn new(ordinal: u32, response_digest: [u8; 32], accepted: bool) -> ProviderResult<Self> {
+        if !(1..=100_000).contains(&ordinal) || response_digest == [0; 32] {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation receipt is invalid",
+            ));
+        }
+        Ok(Self {
+            ordinal,
+            response_digest,
+            accepted,
+        })
+    }
+
+    pub const fn ordinal(self) -> u32 {
+        self.ordinal
+    }
+
+    pub const fn response_digest(self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    pub const fn accepted(self) -> bool {
+        self.accepted
+    }
+}
+
+#[async_trait]
+pub trait ExecutionMutationSink {
+    /// Persists the exact request identity before the Provider performs the
+    /// corresponding remote mutation. A repeated issuance fails closed.
+    async fn issue(&self, issue: &ExecutionMutationIssue) -> ProviderResult<()>;
+
+    /// Persists a definite, parsed remote response before another ordinal may
+    /// be issued. Missing or ambiguous responses must not call this method.
+    async fn record_receipt(&self, receipt: ExecutionMutationReceipt) -> ProviderResult<()>;
+}
+
+fn valid_execution_mutation_operation_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value.trim() == value
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod execution_mutation_tests {
+    use super::*;
+
+    #[test]
+    fn issue_and_receipt_are_bounded_and_digest_redacted() {
+        let issue = ExecutionMutationIssue::new(1, "welearn.atomic.start", [7; 32]).unwrap();
+        assert_eq!(issue.ordinal(), 1);
+        assert_eq!(issue.operation_type(), "welearn.atomic.start");
+        assert_eq!(issue.request_digest(), [7; 32]);
+        let debug = format!("{issue:?}");
+        assert!(debug.contains("[HASHED]"));
+        assert!(!debug.contains("7, 7"));
+
+        let receipt = ExecutionMutationReceipt::new(1, [9; 32], false).unwrap();
+        assert_eq!(receipt.ordinal(), 1);
+        assert_eq!(receipt.response_digest(), [9; 32]);
+        assert!(!receipt.accepted());
+        let debug = format!("{receipt:?}");
+        assert!(debug.contains("[HASHED]"));
+        assert!(!debug.contains("9, 9"));
+
+        assert!(ExecutionMutationIssue::new(0, "welearn.atomic.start", [7; 32]).is_err());
+        assert!(ExecutionMutationIssue::new(1, "foreign operation", [7; 32]).is_err());
+        assert!(ExecutionMutationIssue::new(1, "welearn.atomic.start", [0; 32]).is_err());
+        assert!(ExecutionMutationReceipt::new(100_001, [9; 32], true).is_err());
+        assert!(ExecutionMutationReceipt::new(1, [0; 32], true).is_err());
+    }
+}
+
 #[async_trait]
 pub trait BrowserBridgeCapability: ProviderIdentity {
     async fn browser_session_spec(
@@ -1536,6 +1698,12 @@ pub trait ExecutionEventSink {
     async fn report(&self, update: ProviderProgress) -> ProviderResult<()>;
 
     async fn log(&self, event: ProviderExecutionLog) -> ProviderResult<()>;
+
+    /// Returns the durable mutation boundary supplied by Core for a real
+    /// execution attempt. Lightweight or read-only callers provide none.
+    fn mutation_sink(&self) -> Option<&(dyn ExecutionMutationSink + Send + Sync)> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]

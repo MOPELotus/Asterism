@@ -3519,3 +3519,26 @@ the attempt ledger, but neither Core nor a Provider may infer rejection, skip
 the missing response, or replay that ordinal. This is the persistence boundary
 needed by WELearn's multi-request duration completion transport; injecting it
 through the Provider execution API remains a separate contract slice.
+
+## One-hundred-and-ninety-ninth Phase 0 slice
+
+The execution runtime now injects the atomic mutation ledger through a narrow
+Provider API sink. Provider code supplies only an ordinal, a namespaced bounded
+operation type and request digest before a mutation, followed by a response
+digest and explicit acceptance bit after parsing a definite response. Engine
+retains the Execution, attempt, scheduler job, worker and correlation binding;
+those ownership identifiers never enter Provider code.
+
+The sink is available only during Core's persisted `TaskExecutionCapability`
+call, so unit fixtures, read-only callers and the independently durable
+Submission path do not accidentally claim this authority. Engine rejects
+operation types outside the current Provider namespace. Only a newly issued row
+or newly recorded receipt succeeds: encountering an existing issue or receipt
+fails closed into read-only/human recovery rather than granting a new native
+session permission to replay or skip a request.
+
+Claim loss is still surfaced to the runner even when Provider code observes a
+sanitized sink error. A receipt persistence failure is treated as potentially
+post-mutation and therefore ambiguous. WELearn can now adapt its Provider-owned
+atomic duration sink to this generic boundary; registration remains blocked
+until every start/keep/set/save transition actually uses it.

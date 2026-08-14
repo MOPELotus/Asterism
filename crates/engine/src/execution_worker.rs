@@ -3,8 +3,8 @@ use std::{sync::Arc, time::Duration as StdDuration};
 use asterism_domain::Timestamp;
 use asterism_provider_api::ProviderRegistry;
 use asterism_storage::{
-    ExecutionCapabilityStepRepository, ExecutionLeaseRepository, ExecutionRepository,
-    ExecutionVerificationRecoveryRepository, ProviderAccountRuntimeRepository,
+    ExecutionAtomicMutationRepository, ExecutionCapabilityStepRepository, ExecutionLeaseRepository,
+    ExecutionRepository, ExecutionVerificationRecoveryRepository, ProviderAccountRuntimeRepository,
     QuestionSessionArtifactRepositoryFactory, SchedulerRepository, StorageError,
     TaskRuntimeRepository,
 };
@@ -97,6 +97,7 @@ where
 impl<E, L, S, A, T> ExecutionSchedulerWorker<E, L, S, A, T>
 where
     E: ExecutionRepository
+        + ExecutionAtomicMutationRepository
         + ExecutionCapabilityStepRepository
         + asterism_storage::ExecutionSubmissionRepository
         + ExecutionVerificationRecoveryRepository,

@@ -9,27 +9,31 @@ use std::{
 
 use asterism_domain::{
     AttemptResult, AuthState, Execution, ExecutionAttempt, ExecutionId, ExecutionLease,
-    ExecutionProgress, ExecutionStage, ExecutionState, OrchestrationState, ProviderAccountId,
-    ProviderErrorClass, ProviderId, QuestionSnapshotId, RemoteState, SubmissionAttemptReceipt,
-    SubmissionDraft, SubmissionResult, SubmissionResultId, SubmissionResultStatus,
-    SubmissionVerificationSnapshot, SubmissionVerificationStatus, Task, TaskCapability, Timestamp,
+    ExecutionProgress, ExecutionStage, ExecutionState, HumanRequiredReason, OrchestrationState,
+    ProviderAccountId, ProviderErrorClass, ProviderId, QuestionSnapshotId, RemoteState,
+    SubmissionAttemptReceipt, SubmissionDraft, SubmissionResult, SubmissionResultId,
+    SubmissionResultStatus, SubmissionVerificationSnapshot, SubmissionVerificationStatus, Task,
+    TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
-    AmbiguousProviderQuestionSessionOperation, ExecutionEventSink,
-    ExecutionRequest as ProviderExecutionRequest, ProviderCapability, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderExecutionConcurrency, ProviderExecutionLog,
-    ProviderProgress, ProviderQuestionMaterialization, ProviderRegistry,
-    ProviderSubmissionStepOutcome, ResolvedProviderQuestionSessionContinuation,
-    ResolvedProviderRuntimeSettings, SubmissionExecuteCapability, SubmissionVerifyCapability,
-    TaskExecutionCapability, TaskProgressCapability,
+    AmbiguousProviderQuestionSessionOperation, ExecutionEventSink, ExecutionMutationIssue,
+    ExecutionMutationReceipt, ExecutionMutationSink, ExecutionRequest as ProviderExecutionRequest,
+    ProviderCapability, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderExecutionConcurrency, ProviderExecutionLog, ProviderProgress,
+    ProviderQuestionMaterialization, ProviderRegistry, ProviderSubmissionStepOutcome,
+    ResolvedProviderQuestionSessionContinuation, ResolvedProviderRuntimeSettings,
+    SubmissionExecuteCapability, SubmissionVerifyCapability, TaskExecutionCapability,
+    TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
-    ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionCapabilityStep,
-    ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
+    ExecutionAtomicMutationIssueOutcome, ExecutionAtomicMutationIssueRequest,
+    ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,
+    ExecutionAtomicMutationRepository, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
+    ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
     ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
     ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest,
     ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionSubmissionRepository,
@@ -253,6 +257,7 @@ impl<E, L, S, A, T> std::fmt::Debug for ScheduledExecutionRunner<E, L, S, A, T> 
 impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T>
 where
     E: ExecutionRepository
+        + ExecutionAtomicMutationRepository
         + ExecutionCapabilityStepRepository
         + ExecutionSubmissionRepository
         + ExecutionVerificationRecoveryRepository,
@@ -1720,8 +1725,11 @@ where
                 executions: &self.executions,
                 execution_id: attempt.execution_id,
                 attempt_id: attempt.id,
+                scheduler_job_id: job.id,
                 worker_id: claimed_worker(job)?,
                 correlation_id,
+                provider_id: prepared.context.provider_id.clone(),
+                mutations_enabled: true,
                 claim_lost: Arc::clone(&claim_lost),
             };
             let mutation = prepared
@@ -2116,8 +2124,11 @@ where
             executions: &self.executions,
             execution_id: attempt.execution_id,
             attempt_id: attempt.id,
+            scheduler_job_id: job.id,
             worker_id: claimed_worker(job)?,
             correlation_id,
+            provider_id: prepared.context.provider_id.clone(),
+            mutations_enabled: true,
             claim_lost: Arc::clone(&claim_lost),
         };
         let provider = prepared
@@ -2300,8 +2311,11 @@ where
             executions: &self.executions,
             execution_id: attempt.execution_id,
             attempt_id: attempt.id,
+            scheduler_job_id: job.id,
             worker_id: claimed_worker(job)?,
             correlation_id,
+            provider_id: prepared.context.provider_id.clone(),
+            mutations_enabled: false,
             claim_lost: Arc::clone(&claim_lost),
         };
         if let Some(factory) = self.question_sessions.as_ref() {
@@ -3442,13 +3456,19 @@ struct PersistedExecutionEventSink<'a, E> {
     executions: &'a E,
     execution_id: ExecutionId,
     attempt_id: asterism_domain::ExecutionAttemptId,
+    scheduler_job_id: asterism_domain::ScheduleId,
     worker_id: &'a str,
     correlation_id: &'a str,
+    provider_id: ProviderId,
+    mutations_enabled: bool,
     claim_lost: Arc<AtomicBool>,
 }
 
 #[async_trait]
-impl<E: ExecutionRepository> ExecutionEventSink for PersistedExecutionEventSink<'_, E> {
+impl<E> ExecutionEventSink for PersistedExecutionEventSink<'_, E>
+where
+    E: ExecutionRepository + ExecutionAtomicMutationRepository,
+{
     async fn report(&self, update: ProviderProgress) -> Result<(), ProviderError> {
         let progress = ExecutionProgress {
             execution_id: self.execution_id,
@@ -3511,6 +3531,105 @@ impl<E: ExecutionRepository> ExecutionEventSink for PersistedExecutionEventSink<
                 )
             })
     }
+
+    fn mutation_sink(&self) -> Option<&(dyn ExecutionMutationSink + Send + Sync)> {
+        self.mutations_enabled
+            .then_some(self as &(dyn ExecutionMutationSink + Send + Sync))
+    }
+}
+
+#[async_trait]
+impl<E: ExecutionAtomicMutationRepository> ExecutionMutationSink
+    for PersistedExecutionEventSink<'_, E>
+{
+    async fn issue(&self, issue: &ExecutionMutationIssue) -> Result<(), ProviderError> {
+        if !issue
+            .operation_type()
+            .starts_with(&format!("{}.", self.provider_id))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation type is outside its namespace",
+            ));
+        }
+        match self
+            .executions
+            .issue_execution_atomic_mutation(ExecutionAtomicMutationIssueRequest {
+                execution_id: self.execution_id,
+                attempt_id: self.attempt_id,
+                ordinal: issue.ordinal(),
+                scheduler_job_id: self.scheduler_job_id,
+                worker_id: self.worker_id,
+                operation_type: issue.operation_type(),
+                request_digest: issue.request_digest(),
+                correlation_id: self.correlation_id,
+                at: Utc::now(),
+            })
+            .await
+        {
+            Ok(ExecutionAtomicMutationIssueOutcome::Issued(_)) => Ok(()),
+            Ok(ExecutionAtomicMutationIssueOutcome::AlreadyIssued(_)) => {
+                Err(ambiguous_mutation_error())
+            }
+            Err(error) => Err(self.map_mutation_storage_error(&error, false)),
+        }
+    }
+
+    async fn record_receipt(&self, receipt: ExecutionMutationReceipt) -> Result<(), ProviderError> {
+        match self
+            .executions
+            .record_execution_atomic_mutation_receipt(ExecutionAtomicMutationReceiptRequest {
+                execution_id: self.execution_id,
+                attempt_id: self.attempt_id,
+                ordinal: receipt.ordinal(),
+                scheduler_job_id: self.scheduler_job_id,
+                worker_id: self.worker_id,
+                response_digest: receipt.response_digest(),
+                accepted: receipt.accepted(),
+                correlation_id: self.correlation_id,
+                at: Utc::now(),
+            })
+            .await
+        {
+            Ok(ExecutionAtomicMutationReceiptOutcome::Recorded(_)) => Ok(()),
+            Ok(ExecutionAtomicMutationReceiptOutcome::AlreadyRecorded(_)) => {
+                Err(ambiguous_mutation_error())
+            }
+            Err(error) => Err(self.map_mutation_storage_error(&error, true)),
+        }
+    }
+}
+
+impl<E> PersistedExecutionEventSink<'_, E> {
+    fn map_mutation_storage_error(
+        &self,
+        error: &StorageError,
+        mutation_may_have_completed: bool,
+    ) -> ProviderError {
+        if matches!(
+            error,
+            StorageError::ExecutionClaimLost
+                | StorageError::SchedulerClaimLost
+                | StorageError::LeaseLost
+        ) {
+            self.claim_lost.store(true, Ordering::Release);
+        }
+        if mutation_may_have_completed {
+            ambiguous_mutation_error()
+        } else {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Core could not persist Provider mutation issuance",
+            )
+        }
+    }
+}
+
+fn ambiguous_mutation_error() -> ProviderError {
+    ProviderError::human_required(
+        "Provider mutation history requires fresh read-only recovery",
+        HumanRequiredReason::ManualIntervention,
+    )
 }
 
 fn map_provider_stage(stage: &str) -> ExecutionStage {
@@ -4018,6 +4137,9 @@ mod tests {
             );
             match self.behavior {
                 ProviderBehavior::Success | ProviderBehavior::VerifiedPending => {
+                    if self.behavior == ProviderBehavior::Success {
+                        persist_fixture_mutation(events).await?;
+                    }
                     events
                         .report(ProviderProgress {
                             percent: Some(50),
@@ -4145,6 +4267,22 @@ mod tests {
         }
     }
 
+    async fn persist_fixture_mutation(
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<()> {
+        let mutations = events
+            .mutation_sink()
+            .expect("Core execution fixture supplies durable mutation sink");
+        mutations
+            .issue(
+                &ExecutionMutationIssue::new(1, "provider-alpha.fixture.save", [41; 32]).unwrap(),
+            )
+            .await?;
+        mutations
+            .record_receipt(ExecutionMutationReceipt::new(1, [42; 32], true).unwrap())
+            .await
+    }
+
     #[async_trait]
     impl TaskProgressCapability for FakeExecution {
         async fn read_progress(
@@ -4204,8 +4342,9 @@ mod tests {
             _remote_task_id: &str,
             draft: &SubmissionDraft,
             _runtime_settings: &ResolvedProviderRuntimeSettings,
-            _events: &(dyn ExecutionEventSink + Send + Sync),
+            events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<asterism_domain::SubmissionReceipt> {
+            assert!(events.mutation_sink().is_none());
             assert!(
                 !matches!(
                     self.behavior,
@@ -4307,8 +4446,9 @@ mod tests {
         async fn execute(
             self: Box<Self>,
             _context: &ProviderContext,
-            _events: &(dyn ExecutionEventSink + Send + Sync),
+            events: &(dyn ExecutionEventSink + Send + Sync),
         ) -> ProviderResult<ProviderSubmissionStepOutcome> {
+            assert!(events.mutation_sink().is_none());
             let issued: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM question_session_operations \
                  WHERE operation_type = ? AND request_digest = ? AND state = 'issued'",
@@ -4486,6 +4626,19 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(live_log, 1);
+        let mutation: (i64, String, Vec<u8>, Vec<u8>, bool) = sqlx::query_as(
+            "SELECT ordinal, operation_type, request_digest, response_digest, accepted \
+             FROM execution_atomic_mutations WHERE execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(mutation.0, 1);
+        assert_eq!(mutation.1, "provider-alpha.fixture.save");
+        assert_eq!(mutation.2, vec![41; 32]);
+        assert_eq!(mutation.3, vec![42; 32]);
+        assert!(mutation.4);
     }
 
     #[tokio::test]
