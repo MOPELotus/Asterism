@@ -22,6 +22,7 @@ fixtures/providers/cidaren/
   answers/study-word-info-means.json
   questions/start-answer-envelope.json
   questions/start-answer-single.json
+  questions/start-answer-fill-blank-73.json
   browser/capture-snapshot-token-only.json
   browser/capture-snapshot-composite.json
 ```
@@ -71,6 +72,13 @@ donor-read topic/stem/option shape plus synthetic
 payload is copied into the repository. Counter tests keep the remote
 completed/total observation separate from local attempt position and reject
 inconsistent or unbounded values.
+
+The synthetic mode-73 fixture retains only the public issue 99 structural
+facts: two answers, two positive word lengths, no options and placeholder
+text/token values. Parser tests require `FillBlank`, answer-count/length
+agreement and token omission from serialized Questions. It is not answer-wire
+evidence; resolver/build/verify stay fail-closed while the common Skip path is
+available.
 
 The BrowserBridge fixtures are synthetic result transport documents generated
 from the Provider typed boundary; tests pair each one with a constructor-built
@@ -179,6 +187,8 @@ placeholder identities, result codes, status values and pagination shape.
   and reject any operation outside the audited five-operation allowlist.
 - `SubmitChoseWord` accepts only its acknowledgement response family; the
   assessment-step parser still rejects missing decoded data.
+- Mode 73 parses as FillBlank only when its bounded answer count equals its
+  word-length count; no answer wire shape is inferred from the public log.
 - `SearchWord` parsing bounds both JSON and the donor's literal
   Unicode-escape layer before extracting a prototype.
 - Phrase and example evidence are not merged; completion evidence fetches only

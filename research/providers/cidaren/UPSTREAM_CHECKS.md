@@ -272,6 +272,15 @@ selection submission, the attempt requires fresh Task/word-plan rediscovery
 before another selection and cannot proceed to Start. The Provider suite
 reached 120 passing tests with strict clippy clean.
 
+The same issue refresh found public issue 99, where the current donor exits on
+`topic_mode=73` and the maintainer confirms it is unimplemented. Its public
+diagnostic attachment was read only in a temporary directory with values
+redacted; the stable shape is two answers, two positive word lengths and no
+options. A synthetic fixture now freezes only that structure. Asterism parses
+it as a bounded FillBlank Question and can use the already evidenced Skip
+operation, but does not guess the missing multi-answer Verify encoding. The
+Provider suite reached 121 passing tests with strict clippy clean.
+
 ## Check procedure
 
 For the next checkpoint:

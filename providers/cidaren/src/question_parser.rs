@@ -262,7 +262,8 @@ impl Drop for ParsedCidarenAttemptQuestion {
 /// an answer or performing any mutation.
 ///
 /// Donor-observed topic modes are mapped as follows: 11/13/15-18/21-22 and
-/// 41-44 are single-choice; 31 is matching; 32 and 51-54 are text answers.
+/// 41-44 are single-choice; 31 is matching; 32 and 51-54 are text answers;
+/// public issue 99 establishes mode 73 as a multi-blank stage.
 /// Mode 0 is a reading card rather than a Question and remains a distinct task
 /// execution stage. Unknown modes fail closed.
 ///
@@ -383,6 +384,7 @@ fn question_kind(topic_mode: i64) -> ProviderResult<QuestionKind> {
         11 | 13 | 15..=18 | 21 | 22 | 41..=44 => Ok(QuestionKind::SingleChoice),
         31 => Ok(QuestionKind::Matching),
         32 | 51..=54 => Ok(QuestionKind::ShortAnswer),
+        73 => Ok(QuestionKind::FillBlank),
         _ => Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
             "Cidaren attempt uses an unaudited topic mode",
@@ -468,7 +470,11 @@ fn parse_stem(stem: &Map<String, Value>) -> ProviderResult<String> {
 
 fn parse_options(value: Option<&Value>, kind: QuestionKind) -> ProviderResult<Vec<QuestionOption>> {
     let entries = match value {
-        None | Some(Value::Null) if kind == QuestionKind::ShortAnswer => return Ok(Vec::new()),
+        None | Some(Value::Null)
+            if matches!(kind, QuestionKind::ShortAnswer | QuestionKind::FillBlank) =>
+        {
+            return Ok(Vec::new());
+        }
         Some(Value::Array(entries)) => entries,
         _ => {
             return Err(protocol_drift(
@@ -476,7 +482,10 @@ fn parse_options(value: Option<&Value>, kind: QuestionKind) -> ProviderResult<Ve
             ));
         }
     };
-    if entries.len() > MAX_OPTIONS || (entries.is_empty() && kind != QuestionKind::ShortAnswer) {
+    if entries.len() > MAX_OPTIONS
+        || (entries.is_empty()
+            && !matches!(kind, QuestionKind::ShortAnswer | QuestionKind::FillBlank))
+    {
         return Err(invalid_response("Cidaren Question option count is invalid"));
     }
     let mut options = Vec::new();
@@ -544,7 +553,10 @@ fn parse_options(value: Option<&Value>, kind: QuestionKind) -> ProviderResult<Ve
             )?;
         }
     }
-    if options.len() > MAX_OPTIONS || (options.is_empty() && kind != QuestionKind::ShortAnswer) {
+    if options.len() > MAX_OPTIONS
+        || (options.is_empty()
+            && !matches!(kind, QuestionKind::ShortAnswer | QuestionKind::FillBlank))
+    {
         return Err(invalid_response(
             "Cidaren flattened Question options exceed the limit",
         ));
@@ -662,6 +674,27 @@ fn sanitized_metadata(
             ));
         }
     };
+    let answer_count = match object.get("answer_num") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| (1..=MAX_RELATIONS).contains(value))
+            .ok_or_else(|| protocol_drift("Cidaren Question answer count is invalid"))
+            .map(Some)?,
+        _ => {
+            return Err(protocol_drift(
+                "Cidaren Question answer count has an unknown shape",
+            ));
+        }
+    };
+    if kind == QuestionKind::FillBlank
+        && (answer_count.is_none() || answer_count != Some(word_lengths.len()))
+    {
+        return Err(protocol_drift(
+            "Cidaren multi-blank Question count disagrees with its word lengths",
+        ));
+    }
     let word_tip = optional_text(object.get("w_tip"), MAX_OPTION_BYTES, "word tip")?;
     Ok(json!({
         "schema": "cidaren.attempt-question.v1",
@@ -672,6 +705,7 @@ fn sanitized_metadata(
         "prompt_content": prompt_content,
         "prompt_remark": prompt_remark,
         "word_lengths": word_lengths,
+        "answer_count": answer_count,
         "word_tip": word_tip,
         "stem_sha256": format!("{:x}", Sha256::digest(stem.as_bytes())),
         "option_count": options.len(),
@@ -907,6 +941,42 @@ mod tests {
         assert_eq!(question.kind, QuestionKind::ShortAnswer);
         assert!(question.options.is_empty());
         assert_eq!(question.metadata_sanitized["word_lengths"], json!([8]));
+    }
+
+    #[test]
+    fn public_mode_73_is_a_bounded_multi_blank_question() {
+        let mut payload: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
+        ))
+        .unwrap();
+        let parsed = parse_attempt_question(&payload, "class-task:2002", 2).unwrap();
+        assert!(!format!("{parsed:?}").contains("synthetic-mode-73-topic-code"));
+        let question = parsed.to_question(TaskId::new()).unwrap();
+        assert_eq!(question.kind, QuestionKind::FillBlank);
+        assert!(question.options.is_empty());
+        assert_eq!(question.metadata_sanitized["answer_count"], json!(2));
+        assert_eq!(question.metadata_sanitized["word_lengths"], json!([7, 2]));
+        assert!(
+            !serde_json::to_string(&question)
+                .unwrap()
+                .contains("synthetic-mode-73-topic-code")
+        );
+
+        payload["answer_num"] = json!(1);
+        assert_eq!(
+            parse_attempt_question(&payload, "class-task:2002", 2)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        payload["answer_num"] = json!(2);
+        payload["w_lens"] = json!([7, 0]);
+        assert_eq!(
+            parse_attempt_question(&payload, "class-task:2002", 2)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
     }
 
     #[test]

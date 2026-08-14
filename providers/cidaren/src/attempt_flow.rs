@@ -1441,6 +1441,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_mode_73_can_use_the_evidenced_skip_path() {
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(&mode_73_payload()),
+                receipt(CidarenAssessmentReceiptKind::Completed),
+            ])),
+            operations: Mutex::new(Vec::new()),
+        });
+        let context = context();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail(),
+            None,
+        )
+        .unwrap();
+        let outcome = flow
+            .issue_start()
+            .unwrap()
+            .execute(transport.clone(), &context)
+            .await
+            .unwrap();
+        flow.accept(outcome).unwrap();
+        assert_eq!(
+            flow.current_question().unwrap().kind,
+            QuestionKind::FillBlank
+        );
+
+        let outcome = flow
+            .issue_skip(&settings())
+            .unwrap()
+            .execute(transport.clone(), &context)
+            .await
+            .unwrap();
+        flow.accept(outcome).unwrap();
+        assert_eq!(
+            flow.status(),
+            CidarenAttemptFlowStatus::Receipt(CidarenAssessmentReceiptKind::Completed)
+        );
+        assert_eq!(
+            *transport.operations.lock().unwrap(),
+            [
+                CidarenAttemptOperation::StartAnswer,
+                CidarenAttemptOperation::SkipAnswer,
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn unexpected_acknowledgement_fails_closed() {
         let transport = Arc::new(FixtureTransport {
             responses: Mutex::new(VecDeque::from([receipt(
@@ -1567,6 +1617,13 @@ mod tests {
             "stem": {"content": "Synthetic reading card", "remark": ""},
             "options": []
         })
+    }
+
+    fn mode_73_payload() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
+        ))
+        .unwrap()
     }
 
     fn word_selection_plan() -> (RemoteTaskDetail, CidarenWordSelectionPlan) {

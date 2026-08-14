@@ -419,12 +419,23 @@ The current clean-room protocol layer additionally freezes:
 - `VerifyAnswer` answer/topic/timestamp/version signing;
 - `SubmitAnswerAndSave` and `SkipAnswer` duration/topic signing;
 - compact `SubmitChoseWord` word-map signing;
-- donor-observed topic modes for single-choice, matching and text Questions;
+- donor-observed topic modes for single-choice, matching and text Questions,
+  plus issue 99's mode-73 multi-blank structural parse;
 - optional integer `topic_done_num/topic_total` progress counters observed by
   the reopened donor for its live progress display;
 - nested answer-tag flattening without persisting executable topic codes,
   while retaining sanitized top-level order, parent tag and child wire content
   needed to reproduce the donor's sentence-selection semantics exactly.
+
+Public issue 99 contains a current `topic_mode=73` payload which the donor
+explicitly does not implement. Its redacted structure has `answer_num=2`, two
+positive `w_lens`, no options and one ordinary rotating `topic_code`.
+Asterism parses this as `QuestionKind::FillBlank`, requires the answer count to
+equal the bounded word-length count and keeps the token ephemeral. The common
+`SkipAnswer` mutation remains available, so the attempt can continue. No
+evidence defines whether two answers are comma-joined, separately verified or
+encoded another way; AnswerResolve, SubmissionBuild and Verify therefore fail
+closed for mode 73 instead of inventing a score-affecting wire format.
 
 The remote topic counters are not the state machine's local `position` and do
 not participate in Question identity, answer selection or mutation routing.
