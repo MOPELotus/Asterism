@@ -2,9 +2,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor, AuditRecord,
-    AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId, AuthSession,
-    AuthSessionId, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
+    AnswerBootstrapHarvest, AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor,
+    AuditRecord, AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId,
+    AuthSession, AuthSessionId, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
     BrowserBridgeRuntimeBinding, BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession,
     BrowserBridgeSessionId, CreditAccount, CreditReservation, CreditReservationId,
     CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId,
@@ -81,6 +81,16 @@ pub trait AnswerEvidenceRepository: Send + Sync {
         &self,
         question_content_fingerprint: &QuestionContentFingerprint,
     ) -> Result<Vec<GlobalAnswerCorpusEvidence>, StorageError>;
+}
+
+#[async_trait]
+pub trait AnswerBootstrapHarvestRepository: Send + Sync {
+    async fn find_owned_answer_bootstrap_harvest(
+        &self,
+        owner_user_id: UserId,
+        provider_account_id: ProviderAccountId,
+        generation: u32,
+    ) -> Result<Option<AnswerBootstrapHarvest>, StorageError>;
 }
 
 /// Persistence contract consumed by task services. It intentionally contains no

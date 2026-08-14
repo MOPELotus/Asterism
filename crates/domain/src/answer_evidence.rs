@@ -4,12 +4,90 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AnswerCandidateId, AnswerSource, CourseId, ExecutionAttemptId, NormalizedAnswer,
-    PrivateAnswerEvidenceId, ProviderAccountId, ProviderId, Question, QuestionContentFingerprint,
-    QuestionId, QuestionKind, QuestionSnapshotId, TaskId, Timestamp, UserId,
+    AnswerBootstrapHarvestId, AnswerCandidateId, AnswerSource, CourseId, ExecutionAttemptId,
+    NormalizedAnswer, PrivateAnswerEvidenceId, ProviderAccountId, ProviderId, Question,
+    QuestionContentFingerprint, QuestionId, QuestionKind, QuestionSnapshotId, ScheduleId, TaskId,
+    Timestamp, UserId,
 };
 
 const MAX_PROVENANCE_BYTES: usize = 256 * 1_024;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerBootstrapHarvestState {
+    Pending,
+    Running,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AnswerBootstrapHarvest {
+    pub id: AnswerBootstrapHarvestId,
+    pub owner_user_id: UserId,
+    pub provider_id: ProviderId,
+    pub provider_account_id: ProviderAccountId,
+    pub generation: u32,
+    pub schedule_id: ScheduleId,
+    pub state: AnswerBootstrapHarvestState,
+    pub scanned_task_count: u32,
+    pub total_task_count: Option<u32>,
+    pub watermark_sanitized: Value,
+    pub created_at: Timestamp,
+    pub started_at: Option<Timestamp>,
+    pub updated_at: Timestamp,
+    pub completed_at: Option<Timestamp>,
+}
+
+impl AnswerBootstrapHarvest {
+    /// # Errors
+    ///
+    /// Rejects zero generations, impossible progress/timestamps and unsafe
+    /// watermarks before a harvest can be persisted or resumed.
+    pub fn validate(&self) -> Result<(), AnswerBootstrapHarvestValidationError> {
+        if self.generation == 0
+            || self
+                .total_task_count
+                .is_some_and(|total| self.scanned_task_count > total)
+            || !valid_provenance(&self.watermark_sanitized)
+            || self.updated_at < self.created_at
+            || self
+                .started_at
+                .is_some_and(|started| started < self.created_at || started > self.updated_at)
+            || self
+                .completed_at
+                .is_some_and(|completed| completed < self.created_at || completed > self.updated_at)
+        {
+            return Err(AnswerBootstrapHarvestValidationError);
+        }
+        let timestamps_match = match self.state {
+            AnswerBootstrapHarvestState::Pending => {
+                self.started_at.is_none()
+                    && self.completed_at.is_none()
+                    && self.scanned_task_count == 0
+            }
+            AnswerBootstrapHarvestState::Running | AnswerBootstrapHarvestState::Paused => {
+                self.started_at.is_some() && self.completed_at.is_none()
+            }
+            AnswerBootstrapHarvestState::Completed
+            | AnswerBootstrapHarvestState::Failed
+            | AnswerBootstrapHarvestState::Cancelled => {
+                self.started_at.is_some() && self.completed_at.is_some()
+            }
+        };
+        if timestamps_match {
+            Ok(())
+        } else {
+            Err(AnswerBootstrapHarvestValidationError)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("answer bootstrap harvest state, progress or timestamps are invalid")]
+pub struct AnswerBootstrapHarvestValidationError;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -273,6 +351,34 @@ mod tests {
     use crate::QuestionOption;
 
     use super::*;
+
+    #[test]
+    fn initial_bootstrap_harvest_is_pending_and_bounded() {
+        let now = Utc::now();
+        let mut harvest = AnswerBootstrapHarvest {
+            id: AnswerBootstrapHarvestId::new(),
+            owner_user_id: UserId::new(),
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            provider_account_id: ProviderAccountId::new(),
+            generation: 1,
+            schedule_id: ScheduleId::new(),
+            state: AnswerBootstrapHarvestState::Pending,
+            scanned_task_count: 0,
+            total_task_count: None,
+            watermark_sanitized: serde_json::json!({}),
+            created_at: now,
+            started_at: None,
+            updated_at: now,
+            completed_at: None,
+        };
+        harvest.validate().unwrap();
+
+        harvest.scanned_task_count = 1;
+        assert_eq!(
+            harvest.validate(),
+            Err(AnswerBootstrapHarvestValidationError)
+        );
+    }
 
     fn evidence(projection: CorpusProjectionEligibility) -> PrivateAnswerEvidence {
         let task_id = TaskId::new();

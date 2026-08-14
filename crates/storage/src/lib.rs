@@ -2,6 +2,7 @@
 
 mod admin;
 mod answer_evidence;
+mod answer_harvest;
 mod auth_bootstrap;
 mod auth_session;
 mod browser_bridge;
@@ -31,6 +32,7 @@ mod user;
 
 pub use admin::SqliteAdminRepository;
 pub use answer_evidence::SqliteAnswerEvidenceRepository;
+pub use answer_harvest::SqliteAnswerBootstrapHarvestRepository;
 pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
 pub use browser_bridge::SqliteBrowserBridgeSessionRepository;
@@ -49,10 +51,10 @@ pub use question_read_continuation::SqliteQuestionReadContinuationRepository;
 pub use question_session::SqliteQuestionSessionRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
-    AnswerCacheRepository, AnswerCandidateRecord, AnswerCandidateRepository,
-    AnswerEvidenceProjectionState, AnswerEvidenceRecord, AnswerEvidenceRecordOutcome,
-    AnswerEvidenceRepository, AuditFilter, AuditPage, AuditQueryRepository,
-    AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
+    AnswerBootstrapHarvestRepository, AnswerCacheRepository, AnswerCandidateRecord,
+    AnswerCandidateRepository, AnswerEvidenceProjectionState, AnswerEvidenceRecord,
+    AnswerEvidenceRecordOutcome, AnswerEvidenceRepository, AuditFilter, AuditPage,
+    AuditQueryRepository, AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, BrowserBridgeCommandArtifactRepository,

@@ -23,6 +23,7 @@ pub mod user;
 
 pub use account::{Course, ProviderAccount, ProviderId};
 pub use answer_evidence::{
+    AnswerBootstrapHarvest, AnswerBootstrapHarvestState, AnswerBootstrapHarvestValidationError,
     AnswerEvidenceClass, CorpusProjectionEligibility, GlobalCorpusQuestionAsset,
     GlobalCorpusQuestionOption, GlobalSemanticAnswer, PrivateAnswerEvidence,
     PrivateAnswerEvidenceValidationError, UnmatchedEvidenceReason,

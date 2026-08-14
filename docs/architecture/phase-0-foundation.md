@@ -3967,3 +3967,25 @@ context-dependent shapes remain durable explicit unmatched evidence instead of
 being guessed or discarded. Migration 054 persists both layers and their exact
 projection link; the public Corpus read model exposes no owner, QQ, account,
 Course, Task, snapshot, candidate, Attempt or private provenance identity.
+
+## Two-hundred-and-twentieth Phase 0 slice
+
+The first verified transition of a Provider account into `Authenticated` now
+atomically creates one durable generation-1 read-only Answer Bootstrap Harvest
+and its scheduler job. The trigger is centralized in the credential transaction
+shared by normal credential commits, authentication Bootstrap, BrowserBridge
+credential capture and runtime renewal, so a successful account transition
+cannot commit without its initial harvest record. Merely creating an idle
+account or storing an unverified credential does not claim authentication and
+does not start a harvest.
+
+The harvest persists owner, Provider/account binding, generation, scheduler
+identity, lifecycle state, bounded progress, sanitized watermark and recovery
+timestamps. Its owner-scoped read model verifies the exact scheduler payload
+before returning it. The `(provider_account_id, generation)` uniqueness and
+stable scheduler idempotency key ensure Cookie rotation, renewal, repair and
+later reauthentication cannot create another default full scan. Explicit
+future rescans must use a new generation and a separately authorized path.
+Migration 055 adds the durable ledger; this slice creates only the read-only
+job authority and does not enumerate history, create remote Attempts or mutate
+Provider Tasks.

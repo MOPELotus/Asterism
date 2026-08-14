@@ -339,7 +339,9 @@ const fn scheduled_execution_id(kind: &ScheduledJobKind) -> Option<ExecutionId> 
         ScheduledJobKind::Execution { execution_id }
         | ScheduledJobKind::Retry { execution_id, .. }
         | ScheduledJobKind::Recovery { execution_id } => Some(*execution_id),
-        ScheduledJobKind::Scan { .. } | ScheduledJobKind::Notification { .. } => None,
+        ScheduledJobKind::AnswerBootstrapHarvest { .. }
+        | ScheduledJobKind::Scan { .. }
+        | ScheduledJobKind::Notification { .. } => None,
     }
 }
 

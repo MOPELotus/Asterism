@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
-use asterism_domain::{ExecutionId, NotificationId, ProviderAccountId, ScheduleId, Timestamp};
+use asterism_domain::{
+    AnswerBootstrapHarvestId, ExecutionId, NotificationId, ProviderAccountId, ScheduleId, Timestamp,
+};
 use chrono::Duration as ChronoDuration;
 use serde::{Deserialize, Serialize};
 
@@ -126,6 +128,11 @@ fn validate_interval(interval_seconds: u64) -> Result<(), ScanScheduleError> {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "payload")]
 pub enum ScheduledJobKind {
+    AnswerBootstrapHarvest {
+        harvest_id: AnswerBootstrapHarvestId,
+        provider_account_id: ProviderAccountId,
+        generation: u32,
+    },
     Scan {
         provider_account_id: ProviderAccountId,
     },

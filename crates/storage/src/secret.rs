@@ -31,6 +31,7 @@ use crate::{
     AuthenticatedCredentialRepository, BrowserBridgeCredentialCommit,
     BrowserBridgeCredentialCommitOutcome, BrowserBridgeCredentialCommitRequest,
     BrowserBridgeCredentialRepository, Database,
+    answer_harvest::ensure_initial_answer_bootstrap_harvest,
     auth_bootstrap::{authenticate_access_in_transaction, complete_auth_bootstrap_in_transaction},
     auth_session::update_auth_session_in_transaction,
     browser_bridge::{fetch_exchange, find_claimed_session_for_exchange, insert_exchange_audit},
@@ -1645,6 +1646,21 @@ async fn authenticate_provider_account(
     provider_id: &ProviderId,
     updated_at: Timestamp,
 ) -> Result<(), SecretStoreError> {
+    let previous_auth_state_json: Option<String> = sqlx::query_scalar(
+        "SELECT auth_state_json FROM provider_accounts \
+         WHERE id = ? AND owner_user_id = ? AND provider_id = ?",
+    )
+    .bind(provider_account_id.to_string())
+    .bind(owner_user_id.to_string())
+    .bind(provider_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    let Some(previous_auth_state_json) = previous_auth_state_json else {
+        return Err(SecretStoreError::VersionConflict);
+    };
+    let previous_was_authenticated =
+        account_auth_state_was_authenticated(&previous_auth_state_json)?;
     let result = sqlx::query(
         "UPDATE provider_accounts SET auth_state_json = ?, updated_at = ? \
          WHERE id = ? AND owner_user_id = ? AND provider_id = ?",
@@ -1657,10 +1673,41 @@ async fn authenticate_provider_account(
     .execute(&mut **transaction)
     .await
     .map_err(storage_error)?;
-    if result.rows_affected() == 1 {
-        Ok(())
-    } else {
-        Err(SecretStoreError::VersionConflict)
+    if result.rows_affected() != 1 {
+        return Err(SecretStoreError::VersionConflict);
+    }
+    if !previous_was_authenticated {
+        ensure_initial_answer_bootstrap_harvest(
+            transaction,
+            owner_user_id,
+            provider_id,
+            provider_account_id,
+            updated_at,
+        )
+        .await
+        .map_err(|_| SecretStoreError::Storage)?;
+    }
+    Ok(())
+}
+
+fn account_auth_state_was_authenticated(value: &str) -> Result<bool, SecretStoreError> {
+    if let Ok(state) = serde_json::from_str::<AuthState>(value) {
+        return Ok(state == AuthState::Authenticated);
+    }
+    let legacy = serde_json::from_str::<String>(value).map_err(|_| SecretStoreError::Storage)?;
+    match legacy.as_str() {
+        "authenticated" => Ok(true),
+        "idle"
+        | "starting"
+        | "exchanging_credential"
+        | "validating_credential"
+        | "refreshing"
+        | "expired"
+        | "auth_failed"
+        | "provider_unavailable"
+        | "client_update_required"
+        | "cancelled" => Ok(false),
+        _ => Err(SecretStoreError::Storage),
     }
 }
 
@@ -2237,7 +2284,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AuthBootstrapSessionRepository, ProviderAccountRepository,
+        AnswerBootstrapHarvestRepository, AuthBootstrapSessionRepository,
+        ProviderAccountRepository, SqliteAnswerBootstrapHarvestRepository,
         SqliteAuthBootstrapSessionRepository, SqliteProviderAccountRepository,
     };
 
@@ -2828,6 +2876,8 @@ mod tests {
         assert_eq!(denied, AuthBootstrapCredentialCommitOutcome::AccessRejected);
         assert_eq!(table_count(&database, "provider_accounts").await, 0);
         assert_eq!(table_count(&database, "secret_blobs").await, 0);
+        assert_eq!(table_count(&database, "answer_bootstrap_harvests").await, 0);
+        assert_eq!(table_count(&database, "scheduled_jobs").await, 0);
 
         let access = core_access("bootstrap-secret-commit");
         let committed = store
@@ -2865,6 +2915,7 @@ mod tests {
         );
         assert_eq!(table_count(&database, "provider_accounts").await, 1);
         assert_eq!(table_count(&database, "secret_blobs").await, 1);
+        assert_initial_harvest(&database, owner_id, &account, completed_at).await;
     }
 
     #[tokio::test]
@@ -2890,6 +2941,8 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(table_count(&database, "answer_bootstrap_harvests").await, 0);
+        assert_eq!(table_count(&database, "scheduled_jobs").await, 0);
         let account = SqliteProviderAccountRepository::new(database.clone())
             .find_provider_account(owner_id, account_id)
             .await
@@ -2953,6 +3006,8 @@ mod tests {
         ));
         assert_eq!(table_count(&database, "provider_accounts").await, 1);
         assert_eq!(table_count(&database, "secret_blobs").await, 1);
+        assert_eq!(table_count(&database, "answer_bootstrap_harvests").await, 1);
+        assert_eq!(table_count(&database, "scheduled_jobs").await, 1);
         assert!(
             SqliteAuthBootstrapSessionRepository::new(database)
                 .authenticate_auth_bootstrap_access(session.id, &access_digest, Utc::now())
@@ -3077,6 +3132,35 @@ mod tests {
             }],
             user_id_hint: None,
         }
+    }
+
+    async fn assert_initial_harvest(
+        database: &Database,
+        owner_id: UserId,
+        account: &ProviderAccount,
+        created_at: Timestamp,
+    ) {
+        assert_eq!(table_count(database, "answer_bootstrap_harvests").await, 1);
+        assert_eq!(table_count(database, "scheduled_jobs").await, 1);
+        let repository = SqliteAnswerBootstrapHarvestRepository::new(database.clone());
+        let harvest = repository
+            .find_owned_answer_bootstrap_harvest(owner_id, account.id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            harvest.state,
+            asterism_domain::AnswerBootstrapHarvestState::Pending
+        );
+        assert_eq!(harvest.provider_id, account.provider_id);
+        assert_eq!(harvest.created_at, created_at);
+        assert!(
+            repository
+                .find_owned_answer_bootstrap_harvest(UserId::new(), account.id, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     async fn table_count(database: &Database, table: &str) -> i64 {

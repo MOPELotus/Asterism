@@ -556,6 +556,7 @@ fn decode_claimed_job(
 
 fn job_kind_name(kind: &ScheduledJobKind) -> &'static str {
     match kind {
+        ScheduledJobKind::AnswerBootstrapHarvest { .. } => "answer_bootstrap_harvest",
         ScheduledJobKind::Scan { .. } => "scan",
         ScheduledJobKind::Execution { .. } => "execution",
         ScheduledJobKind::Retry { .. } => "retry",
