@@ -7,7 +7,7 @@ use asterism_provider_api::{
 use asterism_secrets::{CredentialField, SecretPurpose, SecretValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::CidarenCryptoContext;
 
@@ -22,6 +22,53 @@ const MAX_CAPTURE_VALUE_BYTES: usize = 64 * 1_024;
 pub const CIDAREN_CAPTURE_COMMAND_TYPE: &str = "cidaren.capture.snapshot";
 /// Stable Core `BrowserBridge` exchange type for one Cidaren Capture result.
 pub const CIDAREN_CAPTURE_RESULT_TYPE: &str = "cidaren.capture.snapshot.result";
+
+/// Owned raw Capture result delivered by the shared helper boundary.
+///
+/// The document can contain the account token and current crypto context, so
+/// the high-level `BrowserBridge` adapter consumes this zeroizing owner instead
+/// of borrowing an ordinary `String` whose cleanup it cannot enforce.
+pub struct CidarenBrowserResultDocument(Zeroizing<String>);
+
+impl CidarenBrowserResultDocument {
+    /// Takes ownership of one bounded raw helper result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for an empty or oversized document.
+    pub fn try_new(document: String) -> ProviderResult<Self> {
+        if document.is_empty() || document.len() > MAX_BROWSER_DOCUMENT_BYTES {
+            return Err(invalid_response(
+                "Cidaren BrowserBridge result is empty or oversized",
+            ));
+        }
+        Ok(Self(Zeroizing::new(document)))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Hashes the exact owned result for Core's durable exchange record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if the document no longer satisfies the Provider
+    /// transport bound.
+    pub(crate) fn exchange_digest(&self) -> ProviderResult<[u8; 32]> {
+        browser_event_exchange_digest(self.as_str())
+    }
+}
+
+impl fmt::Debug for CidarenBrowserResultDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenBrowserResultDocument")
+            .field("bytes", &self.0.len())
+            .field("contents", &"[REDACTED]")
+            .finish()
+    }
+}
 
 /// Selects one audited Capture recipe without combining its output with any
 /// other recipe. Version 1 is the public donor's token-only proxy path;
@@ -650,6 +697,21 @@ mod tests {
             serde_json::to_string(&command)
                 .unwrap()
                 .contains("capture_snapshot")
+        );
+    }
+
+    #[test]
+    fn owned_result_document_is_bounded_and_redacted() {
+        let document =
+            CidarenBrowserResultDocument::try_new(document(CidarenCaptureMode::Composite)).unwrap();
+        assert_ne!(document.exchange_digest().unwrap(), [0; 32]);
+        let debug = format!("{document:?}");
+        assert!(debug.contains("REDACTED"));
+        assert!(!debug.contains("synthetic-user-token"));
+        assert!(CidarenBrowserResultDocument::try_new(String::new()).is_err());
+        assert!(
+            CidarenBrowserResultDocument::try_new("x".repeat(MAX_BROWSER_DOCUMENT_BYTES + 1))
+                .is_err()
         );
     }
 

@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CidarenBrowserCommandEnvelope, CidarenCaptureMode, CidarenCaptureSnapshot,
-    browser_event_exchange_digest, metadata::development_metadata, parse_browser_event,
+    CidarenBrowserCommandEnvelope, CidarenBrowserResultDocument, CidarenCaptureMode,
+    CidarenCaptureSnapshot, metadata::development_metadata, parse_browser_event,
 };
 
 const CIDAREN_ORIGIN: &str = "https://app.vocabgo.com";
@@ -191,6 +191,24 @@ impl CidarenBrowserBridge {
         context: &ProviderContext,
         remote_task_id: &str,
         command: &CidarenBrowserCommandEnvelope,
+        document: CidarenBrowserResultDocument,
+        observed_origin: &str,
+    ) -> ProviderResult<CidarenCaptureSnapshot> {
+        self.parse_capture_snapshot_result_inner(
+            context,
+            remote_task_id,
+            command,
+            document.as_str(),
+            observed_origin,
+        )
+        .await
+    }
+
+    async fn parse_capture_snapshot_result_inner(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        command: &CidarenBrowserCommandEnvelope,
         document: &str,
         observed_origin: &str,
     ) -> ProviderResult<CidarenCaptureSnapshot> {
@@ -224,16 +242,17 @@ impl CidarenBrowserBridge {
         context: &ProviderContext,
         remote_task_id: &str,
         issued: &CidarenCaptureExchangeIssued,
-        document: &str,
+        document: CidarenBrowserResultDocument,
         observed_origin: &str,
         completed_at: Timestamp,
     ) -> ProviderResult<CidarenCaptureExchangeCompleted> {
+        let result_digest = document.exchange_digest()?;
         let snapshot = self
-            .parse_capture_snapshot_result(
+            .parse_capture_snapshot_result_inner(
                 context,
                 remote_task_id,
                 issued.command(),
-                document,
+                document.as_str(),
                 observed_origin,
             )
             .await?;
@@ -241,7 +260,7 @@ impl CidarenBrowserBridge {
         exchange
             .complete(
                 crate::CidarenBrowserEventEnvelope::exchange_type().to_owned(),
-                browser_event_exchange_digest(document)?,
+                result_digest,
                 completed_at,
             )
             .map_err(|_| {
@@ -545,9 +564,13 @@ mod tests {
                 &context(),
                 "class-task:2002",
                 &command,
-                include_str!(
-                    "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
-                ),
+                CidarenBrowserResultDocument::try_new(
+                    include_str!(
+                        "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
+                    )
+                    .to_owned(),
+                )
+                .unwrap(),
                 CIDAREN_ORIGIN,
             )
             .await
@@ -560,9 +583,13 @@ mod tests {
                     &context(),
                     "class-task:2003",
                     &command,
-                    include_str!(
-                        "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
-                    ),
+                    CidarenBrowserResultDocument::try_new(
+                        include_str!(
+                            "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
+                        )
+                        .to_owned(),
+                    )
+                    .unwrap(),
                     CIDAREN_ORIGIN,
                 )
                 .await
@@ -606,12 +633,13 @@ mod tests {
             "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
         )
         .replace("synthetic-session-nonce", &session_id.to_string());
+        let expected_result_digest = crate::browser_event_exchange_digest(&document).unwrap();
         let completed = capability
             .complete_capture_snapshot_exchange(
                 &context(),
                 "class-task:2002",
                 &issued,
-                &document,
+                CidarenBrowserResultDocument::try_new(document).unwrap(),
                 CIDAREN_ORIGIN,
                 issued_at + Duration::seconds(1),
             )
@@ -627,7 +655,7 @@ mod tests {
         );
         assert_eq!(
             completed.exchange().result_digest,
-            Some(browser_event_exchange_digest(&document).unwrap())
+            Some(expected_result_digest)
         );
         assert_eq!(
             completed.exchange().result_type.as_deref(),
@@ -679,7 +707,7 @@ mod tests {
                     &context(),
                     "class-task:2002",
                     &issued,
-                    &document,
+                    CidarenBrowserResultDocument::try_new(document).unwrap(),
                     CIDAREN_ORIGIN,
                     issued_at - Duration::seconds(1),
                 )

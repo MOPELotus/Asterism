@@ -153,6 +153,10 @@ persists only these type strings and SHA-256 digests with the session sequence.
 The command/result JSON, token, `login_info`, optional `user_session` and
 validated `CidarenCaptureSnapshot` remain outside Domain storage and are
 zeroized/committed through the existing Capture credential path.
+The high-level Provider adapter accepts the raw result only as an owned,
+bounded `CidarenBrowserResultDocument`. Its contents are unavailable through
+Debug or the public API, and the consumed transport buffer is zeroized after
+parse/digest/completion even when fresh rebinding or exchange completion fails.
 
 `CidarenBrowserBridge::capture_snapshot_exchange` is the immutable Provider
 adapter to that ledger. It derives `session_nonce` from the exact

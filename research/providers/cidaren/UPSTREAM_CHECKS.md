@@ -406,6 +406,16 @@ tree, the current helper does not import or execute them. This refines the
 shared helper-dispatch and cleanup requirements without adding another
 Provider credential shape, Capture field or platform capability.
 
+The post-helper hardening ref check again resolved
+`ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`, public
+`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`,
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and historical
+`github123666/main@1409858800f3c4bd27577a08049bf1f8d17a069c`; no revision
+delta entered the checkpoint. The Provider's high-level Capture result now
+consumes an owned, bounded and Debug-redacted raw document so the token/crypto
+JSON transport copy is zeroized after validation, hashing or any error path.
+All 138 Cidaren tests and all-target strict clippy passed.
+
 ## Check procedure
 
 For the next checkpoint:

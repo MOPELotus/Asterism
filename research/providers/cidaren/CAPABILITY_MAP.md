@@ -156,7 +156,11 @@ The current checkpoint (not a completion boundary):
     command serialization zeroizes the Core session nonce after hashing, and
     answer-evidence parsing/loading zeroizes partial word inventories,
     prototype aliases, completion prefixes and normalized deduplication keys
-    across duplicate, identity-drift and asynchronous transport failures.
+    across duplicate, identity-drift and asynchronous transport failures. The
+    high-level BrowserBridge result boundary now also consumes one bounded,
+    Debug-redacted owner for the raw credential-bearing JSON, so parse,
+    digest, fresh-rebinding and completion errors cannot leave the Provider's
+    transport copy uncleared.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. The remaining shared work is post-materialization
