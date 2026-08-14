@@ -75,8 +75,10 @@ pub trait UaiDurationTransport: Send + Sync {
 /// capability; the other facts keep their Provider-specific semantics.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UaiTaskStudyRecord {
+    course_resource_id: String,
     unit_id: String,
     group_id: String,
+    remote_task_id: String,
     finish_progress_percent: Option<f64>,
     duration_seconds: u64,
     required: Option<bool>,
@@ -86,12 +88,20 @@ pub struct UaiTaskStudyRecord {
 }
 
 impl UaiTaskStudyRecord {
+    pub fn course_resource_id(&self) -> &str {
+        &self.course_resource_id
+    }
+
     pub fn unit_id(&self) -> &str {
         &self.unit_id
     }
 
     pub fn group_id(&self) -> &str {
         &self.group_id
+    }
+
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
     }
 
     pub const fn finish_progress_percent(&self) -> Option<f64> {
@@ -155,7 +165,12 @@ impl UaiTaskDuration {
             .transport
             .fetch_duration(context, &identity.course_resource, &identity.unit)
             .await?;
-        parse_task_study_record(document.as_str(), &identity.unit, &identity.group)
+        parse_task_study_record(
+            document.as_str(),
+            &identity.course_resource,
+            &identity.unit,
+            &identity.group,
+        )
     }
 
     /// Reads and binds the independent fresh Task study record required after
@@ -230,10 +245,16 @@ impl DurationReadCapability for UaiTaskDuration {
 /// unsupported, duplicate, unbound or missing duration state.
 pub fn parse_task_duration(
     document: &str,
+    expected_course_resource_id: &str,
     expected_unit_id: &str,
     expected_group_id: &str,
 ) -> ProviderResult<RemoteDuration> {
-    let record = parse_task_study_record(document, expected_unit_id, expected_group_id)?;
+    let record = parse_task_study_record(
+        document,
+        expected_course_resource_id,
+        expected_unit_id,
+        expected_group_id,
+    )?;
     Ok(RemoteDuration {
         duration_seconds: record.duration_seconds(),
         updated_at: record.observed_at(),
@@ -249,6 +270,7 @@ pub fn parse_task_duration(
 /// unsupported, duplicate, unbound or out-of-range state.
 pub fn parse_task_study_record(
     document: &str,
+    expected_course_resource_id: &str,
     expected_unit_id: &str,
     expected_group_id: &str,
 ) -> ProviderResult<UaiTaskStudyRecord> {
@@ -257,6 +279,10 @@ pub fn parse_task_study_record(
             "UAI duration response is empty or exceeds the size limit",
         ));
     }
+    let expected_course_resource_id = validated_component(
+        expected_course_resource_id,
+        "expected duration Course-resource ID",
+    )?;
     let expected_unit_id = validated_component(expected_unit_id, "expected duration Unit ID")?;
     let expected_group_id = validated_component(expected_group_id, "expected duration Group ID")?;
     let root: Value = serde_json::from_str(document)
@@ -298,8 +324,12 @@ pub fn parse_task_study_record(
     visit_duration_node(unit, 1, &mut state)?;
     match (state.matches, state.facts) {
         (1, Some(facts)) => Ok(UaiTaskStudyRecord {
+            remote_task_id: format!(
+                "group:{expected_course_resource_id}:{expected_unit_id}:{expected_group_id}"
+            ),
+            course_resource_id: expected_course_resource_id,
             unit_id: expected_unit_id.clone(),
-            group_id: expected_group_id.clone(),
+            group_id: expected_group_id,
             finish_progress_percent: facts.finish_progress_percent,
             duration_seconds: facts.duration_seconds,
             required: facts.required,
@@ -547,29 +577,32 @@ mod tests {
 
     #[test]
     fn parser_reads_only_exact_bound_task_seconds() {
-        let record = parse_task_study_record(DURATION, "unit-1", "group-1").unwrap();
+        let record = parse_task_study_record(DURATION, "2001", "unit-1", "group-1").unwrap();
+        assert_eq!(record.course_resource_id(), "2001");
         assert_eq!(record.unit_id(), "unit-1");
         assert_eq!(record.group_id(), "group-1");
+        assert_eq!(record.remote_task_id(), "group:2001:unit-1:group-1");
         assert_eq!(record.finish_progress_percent(), Some(100.0));
         assert_eq!(record.duration_seconds(), 445);
         assert_eq!(record.required(), Some(true));
         assert_eq!(record.score_task(), Some(true));
         assert_eq!(record.question_total_score(), Some(100));
         assert_eq!(
-            parse_task_duration(DURATION, "unit-1", "group-1")
+            parse_task_duration(DURATION, "2001", "unit-1", "group-1")
                 .unwrap()
                 .duration_seconds,
             445
         );
         assert_eq!(
-            parse_task_duration(DURATION, "unit-1", "group-2")
+            parse_task_duration(DURATION, "2001", "unit-1", "group-2")
                 .unwrap()
                 .duration_seconds,
             0
         );
-        assert!(parse_task_duration(DURATION, "other-unit", "group-1").is_err());
-        assert!(parse_task_duration(DURATION, "unit-1", "missing").is_err());
-        let unscored = parse_task_study_record(DURATION, "unit-1", "group-2").unwrap();
+        assert!(parse_task_duration(DURATION, "2001", "other-unit", "group-1").is_err());
+        assert!(parse_task_duration(DURATION, "2001", "unit-1", "missing").is_err());
+        assert!(parse_task_duration(DURATION, "bad:course", "unit-1", "group-1").is_err());
+        let unscored = parse_task_study_record(DURATION, "2001", "unit-1", "group-2").unwrap();
         assert_eq!(unscored.finish_progress_percent(), Some(0.0));
         assert_eq!(unscored.score_task(), Some(false));
         assert_eq!(unscored.question_total_score(), None);
@@ -578,10 +611,11 @@ mod tests {
     #[test]
     fn parser_rejects_duplicate_unknown_missing_negative_and_overflow_state() {
         let duplicate = DURATION.replace("\"group-2\"", "\"group-1\"");
-        assert!(parse_task_duration(&duplicate, "unit-1", "group-1").is_err());
+        assert!(parse_task_duration(&duplicate, "2001", "unit-1", "group-1").is_err());
         assert!(
             parse_task_duration(
                 r#"{"code":1,"success":true,"value":{"list":[{"nodeId":"unit-1","role":"unit","children":[{"nodeId":"group-1","role":"future","duration":1}]}]}}"#,
+                "2001",
                 "unit-1",
                 "group-1",
             )
@@ -591,7 +625,7 @@ mod tests {
             let document = format!(
                 r#"{{"code":1,"success":true,"value":{{"list":[{{"nodeId":"unit-1","role":"unit","children":[{{"nodeId":"group-1","role":"link","duration":{duration}}}]}}]}}}}"#
             );
-            assert!(parse_task_duration(&document, "unit-1", "group-1").is_err());
+            assert!(parse_task_duration(&document, "2001", "unit-1", "group-1").is_err());
         }
         for invalid in [
             DURATION.replacen("\"finishProgress\": 100", "\"finishProgress\": 100.1", 1),
@@ -608,7 +642,7 @@ mod tests {
                 1,
             ),
         ] {
-            assert!(parse_task_study_record(&invalid, "unit-1", "group-1").is_err());
+            assert!(parse_task_study_record(&invalid, "2001", "unit-1", "group-1").is_err());
         }
     }
 
@@ -624,6 +658,8 @@ mod tests {
             .read_study_record(&provider_context(), "group:2001:unit-1:group-1")
             .await
             .unwrap();
+        assert_eq!(record.course_resource_id(), "2001");
+        assert_eq!(record.remote_task_id(), "group:2001:unit-1:group-1");
         assert_eq!(record.finish_progress_percent(), Some(100.0));
         assert_eq!(record.score_task(), Some(true));
         assert!(

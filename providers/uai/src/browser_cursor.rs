@@ -152,6 +152,10 @@ impl UaiBrowserResidenceCheckpoint {
         batch.validate()?;
         plan.validate()?;
         let browser_plan_digest = browser_plan_digest(plan)?;
+        let course_resource_id = batch
+            .course_remote_id()
+            .strip_prefix("course-resource:")
+            .ok_or_else(stale_cursor)?;
         let mut matching_micros = batch
             .micros()
             .iter()
@@ -161,6 +165,8 @@ impl UaiBrowserResidenceCheckpoint {
             || self.batch_plan_digest != batch.plan_digest()
             || self.browser_plan_digest != browser_plan_digest
             || self.remote_task_id != plan.target_remote_task_id
+            || self.remote_task_id != study_record.remote_task_id()
+            || course_resource_id != study_record.course_resource_id()
             || micro.unit_id() != study_record.unit_id()
             || !micro
                 .tasks()
@@ -169,18 +175,7 @@ impl UaiBrowserResidenceCheckpoint {
         {
             return Err(stale_cursor());
         }
-        let course_resource_id = batch
-            .course_remote_id()
-            .strip_prefix("course-resource:")
-            .ok_or_else(stale_cursor)?;
-        let expected_remote_task_id = format!(
-            "group:{course_resource_id}:{}:{}",
-            study_record.unit_id(),
-            study_record.group_id()
-        );
-        if expected_remote_task_id != self.remote_task_id
-            || study_record.observed_at() < self.completed_at
-        {
+        if study_record.observed_at() < self.completed_at {
             return Err(ProviderError::new(
                 ProviderErrorKind::RemoteChanged,
                 "UAI duration readback is stale or foreign to its residence checkpoint",

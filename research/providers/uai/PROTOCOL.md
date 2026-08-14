@@ -216,7 +216,11 @@ bounded `appUserId` and `ssoId` facts from a fresh user-info response, then
 reads `unitTaskSituation` for the exact CourseResource and Unit. The parser
 requires exactly one matching Unit, unique node identities and exactly one
 matching Group identity with audited `link` or `group` role and an explicit
-unsigned duration. The exact Group record separately preserves a finite
+unsigned duration. The resulting immutable study-record owner retains the
+validated CourseResource route, Unit and Group as both separate components and
+the complete `group:{resourceId}:{unitId}:{groupId}` Task identity; the
+CourseResource no longer disappears after the response parser returns. The
+exact Group record separately preserves a finite
 `finishProgress` in `0..=100`, optional boolean required/score-task flags and a
 bounded unsigned optional Question total score. Unknown roles, duplicate IDs,
 missing/negative/overflow duration, malformed optional facts and every identity
