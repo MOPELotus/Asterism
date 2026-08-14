@@ -6,6 +6,7 @@
 //! explicit daemon opt-in. Its parser/native-boundary coverage makes no claim
 //! of live compatibility.
 
+mod atomic_duration_completion;
 mod authentication;
 mod batch_plan;
 mod cmi;
@@ -26,6 +27,7 @@ mod stored_session;
 mod task_detail;
 mod task_inventory;
 
+pub use atomic_duration_completion::WellearnAtomicDurationCompletionPlan;
 pub use authentication::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCookieSession,
     WellearnLoginRedirect, WellearnPasswordCipher, WellearnSessionResolver,

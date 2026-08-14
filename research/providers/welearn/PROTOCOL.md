@@ -419,6 +419,19 @@ keeps and the donor's final completion mutation. Splitting them would add a
 bare save or second start; for modular Auto targets below 60 seconds it can also
 fail an intermediate time-change check before the only completion-bearing save.
 
+The Provider-owned `WellearnAtomicDurationCompletionPlan` is the typed wire
+payload for that authority. Its constructor derives all fields from one
+`WellearnAtomicCompletionProfile` plus the frozen target, and its validator
+rechecks the complete tuple before any future fresh discovery or mutation.
+Current Fanyuchang permits `1..=19,800` seconds and binds client-counter cadence
+1 to its score-100 fresh-time JSON set plus one current-route save. Modular Auto
+permits `0..=19,800` seconds and binds implicit-server cadence 60 to its
+score-0 zero-time interaction-suffix save-only legacy-route final. In
+particular, target zero remains a valid atomic Auto plan even though it is not
+a valid singleton `DurationReport` plan. The value provides no persistence,
+scheduling or mutation authority by itself; Core must carry it with the exact
+selected capabilities and durable attempt binding.
+
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or
 submit individual answers. Their user-facing “exercise accuracy” choice is a

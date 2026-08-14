@@ -141,10 +141,16 @@ selected-score/save-only and zero-time final tuple, and current Fanyuchang's
 client-counter plus fresh-time set/save tuple. `WellearnBatchExecutionShape`
 marks both as atomic duration-completion children, while
 `WellearnAtomicCompletionProfile` freezes Fanyuchang's single score-100
-fresh-time set/save versus Auto's score-0 zero-time save-only final. Current singleton mutation
-authority deliberately does not execute either exact combined flow until Core
-can persist, authorize and recover it without inserting a bare save or second
-start.
+fresh-time set/save versus Auto's score-0 zero-time save-only final.
+`WellearnAtomicDurationCompletionPlan` expands either profile and one frozen
+target into the complete immutable cadence, duration protocol, score, CMI,
+time, write, save-sequence and endpoint/Referer facts, and rejects every
+restored cross-donor mixture. Auto's evidenced equal-floor zero-second target
+is valid only in its atomic profile; current Fanyuchang still requires at least
+one client-counter second. This Provider plan neither persists nor schedules an
+operation. Current singleton mutation authority deliberately does not execute
+either exact combined flow until Core can persist, authorize and recover it
+without inserting a bare save or second start.
 
 One donor-level orchestration contract remains a shared Core gap. The Provider
 now freezes bounded Unit identity, all/explicit selection, explicit order,

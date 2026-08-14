@@ -195,6 +195,12 @@ only structural field names, response codes and bounded placeholder shapes.
 - Resource execution plans accept only the four complete audited current,
   legacy and atomic-final wire profiles. Cross-donor combinations fail both at
   TaskExecution preparation and the native transport boundary before I/O.
+- Atomic duration-completion plan tests derive each complete profile from one
+  profile discriminator and frozen target, accept Auto's zero-second floor but
+  reject current Fanyuchang zero, enforce the shared 19,800-second ceiling, and
+  reject restored profile/cadence/protocol/score/CMI/write-family drift. These
+  are pure plan tests and do not claim persistence, scheduling or mutation
+  authority.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.
