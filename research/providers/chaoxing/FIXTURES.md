@@ -58,8 +58,10 @@ folder discovery, class-scoped identity,
 unopened-course filtering, bounded metadata, ephemeral `cpi`, and strict
 allowlisting of the current course entry route. The Work course-page fixture
 covers strict discovery of a fresh Work iframe route. The mixed expectation
-files cover normalized identity, source module and remote state. The detail
-fixtures cover the conservative Work redirect classification.
+files cover normalized identity, source module and remote state. The mixed Exam
+fixture additionally covers an optional bounded decimal score, structural
+`reTest(...)` availability, and minute text that must not become a score. The
+detail fixtures cover the conservative Work redirect classification.
 The Chapter and Resource fixtures cover stable knowledge/job identity, locked
 and completed state, the exact resource type split, empty card slots, execution
 token redaction, immediate Document/Read routing, Video object/report metadata,
@@ -152,6 +154,10 @@ every fixture before staging it.
 - Chapter Work, independent Work and Exam receive distinct source types even when
   their question markup is identical.
 - Unknown status text is retained as sanitized evidence and maps to `Unknown`.
+- Exam score accepts only 0-100 with at most three fractional digits; malformed,
+  out-of-range or conflicting evidence fails closed, and `分钟` is never a score.
+- Exam retake availability requires an exact row-local `reTest(...)` handler;
+  lookalike handlers stay false and the fact never changes state or capability.
 - Remote IDs remain stable across scans while mutable status/time facts produce a
   typed diff.
 - Exam start fixtures must prove that the read-only cover freezes the exact

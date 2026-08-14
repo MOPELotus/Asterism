@@ -232,7 +232,7 @@ mod tests {
         ) -> ProviderResult<Vec<RemoteTask>> {
             self.task_calls.fetch_add(1, Ordering::Relaxed);
             assert_eq!(course.unwrap().remote_id, "course:100:200");
-            Ok(vec![task()])
+            Ok(vec![task(), exam_task()])
         }
     }
 
@@ -269,6 +269,23 @@ mod tests {
 
         let missing = capability.task_detail(&context(), "work:999:200:1").await;
         assert_eq!(missing.unwrap_err().kind, ProviderErrorKind::RemoteChanged);
+    }
+
+    #[tokio::test]
+    async fn fresh_exam_detail_exposes_score_and_retake_facts() {
+        let inventory = Arc::new(FixtureInventory::new());
+        let capability = ChaoxingTaskDetail::try_new(inventory.clone(), inventory).unwrap();
+
+        let detail = capability
+            .task_detail(&context(), "exam:100:200:exam-1")
+            .await
+            .unwrap();
+
+        assert_eq!(detail.task, exam_task());
+        assert_eq!(detail.normalized_detail["task"]["score"], 82.5);
+        assert_eq!(detail.normalized_detail["task"]["retake_available"], true);
+        assert_eq!(detail.task.remote_state, RemoteState::Completed);
+        assert_eq!(detail.task.capabilities, Vec::new());
     }
 
     fn context() -> ProviderContext {
@@ -317,6 +334,33 @@ mod tests {
                 "detail_remote_state": "pending",
             }),
             raw_sanitized: json!({"detail_remote_state": "pending"}),
+        }
+    }
+
+    fn exam_task() -> RemoteTask {
+        RemoteTask {
+            remote_id: "exam:100:200:exam-1".to_owned(),
+            course_remote_id: Some("course:100:200".to_owned()),
+            title: "Exam one".to_owned(),
+            source_type: SourceType::Exam,
+            assessment_class: AssessmentClass::Unknown,
+            remote_state: RemoteState::Completed,
+            opens_at: None,
+            due_at: None,
+            closes_at: None,
+            capabilities: Vec::new(),
+            fingerprint: "v1:exam-detail".to_owned(),
+            normalized: json!({
+                "schema": "chaoxing.inventory.v1",
+                "module": "exam",
+                "remote_state": "completed",
+                "score": 82.5,
+                "retake_available": true,
+            }),
+            raw_sanitized: json!({
+                "score": 82.5,
+                "retake_available": true,
+            }),
         }
     }
 }

@@ -19,6 +19,12 @@ pub(crate) struct ChaoxingParsedInventoryTask {
     entry: SecretString,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ExamListFacts {
+    score: Option<f64>,
+    retake_available: bool,
+}
+
 impl ChaoxingParsedInventoryTask {
     pub(crate) const fn task(&self) -> &RemoteTask {
         &self.task
@@ -222,7 +228,8 @@ fn parse_inventory(
         let time_text = extract_time_text(row);
         let remote_state = classify_list_state(&status_text);
         let entry_kind = classify_entry_kind(&entry, source_type);
-        let normalized = json!({
+        let exam_facts = parse_exam_list_facts(row, source_type)?;
+        let mut normalized = json!({
             "schema": "chaoxing.inventory.v1",
             "module": source_label(source_type),
             "course_id": scope.course,
@@ -234,6 +241,7 @@ fn parse_inventory(
             "time_text": time_text,
             "entry_kind": entry_kind,
         });
+        insert_exam_list_facts(&mut normalized, exam_facts);
         let capabilities = if source_type == SourceType::Exam
             && remote_state == RemoteState::Pending
             && entry.to_ascii_lowercase().contains("gotest(")
@@ -249,6 +257,8 @@ fn parse_inventory(
         } else {
             vec![TaskCapability::ProgressRead]
         };
+        let raw_sanitized =
+            sanitized_inventory_facts(&status_text, time_text.as_deref(), entry_kind, exam_facts);
         let task = RemoteTask {
             remote_id,
             course_remote_id: Some(scope.course_remote.clone()),
@@ -262,11 +272,7 @@ fn parse_inventory(
             capabilities,
             fingerprint: fingerprint(&normalized)?,
             normalized,
-            raw_sanitized: json!({
-                "status_text": status_text,
-                "time_text": time_text,
-                "entry_kind": entry_kind,
-            }),
+            raw_sanitized,
         };
         tasks.push(ChaoxingParsedInventoryTask {
             task,
@@ -274,6 +280,45 @@ fn parse_inventory(
         });
     }
     Ok(tasks)
+}
+
+fn parse_exam_list_facts(
+    row: ElementRef<'_>,
+    source_type: SourceType,
+) -> ProviderResult<Option<ExamListFacts>> {
+    if source_type != SourceType::Exam {
+        return Ok(None);
+    }
+    Ok(Some(ExamListFacts {
+        score: extract_exam_score(row)?,
+        retake_available: exam_retake_available(row),
+    }))
+}
+
+fn insert_exam_list_facts(value: &mut Value, facts: Option<ExamListFacts>) {
+    let Some(facts) = facts else {
+        return;
+    };
+    let object = value
+        .as_object_mut()
+        .expect("Chaoxing inventory facts are an object");
+    object.insert("score".to_owned(), json!(facts.score));
+    object.insert("retake_available".to_owned(), json!(facts.retake_available));
+}
+
+fn sanitized_inventory_facts(
+    status_text: &str,
+    time_text: Option<&str>,
+    entry_kind: &str,
+    exam_facts: Option<ExamListFacts>,
+) -> Value {
+    let mut value = json!({
+        "status_text": status_text,
+        "time_text": time_text,
+        "entry_kind": entry_kind,
+    });
+    insert_exam_list_facts(&mut value, exam_facts);
+    value
 }
 
 pub(crate) fn apply_work_detail_state(
@@ -431,6 +476,160 @@ fn extract_time_text(row: ElementRef<'_>) -> Option<String> {
     })
 }
 
+fn extract_exam_score(row: ElementRef<'_>) -> ProviderResult<Option<f64>> {
+    let score_selector = selector(".exam-score, .score, [data-score]");
+    let mut candidates = Vec::new();
+    if let Some(value) = row.value().attr("data-score") {
+        candidates.push(parse_explicit_score(value)?);
+    }
+    for node in row.select(&score_selector) {
+        if let Some(value) = node.value().attr("data-score") {
+            candidates.push(parse_explicit_score(value)?);
+        }
+        let candidate_count = candidates.len();
+        let text = normalize_evidence(&node.text().collect::<Vec<_>>().join(" "));
+        collect_score_candidates(&text, true, &mut candidates)?;
+        if candidates.len() == candidate_count
+            && text.bytes().any(|byte| byte.is_ascii_digit())
+            && text.contains('分')
+        {
+            return Err(protocol_drift(
+                "Chaoxing Exam row contains an invalid score fact",
+            ));
+        }
+    }
+    if candidates.is_empty() {
+        let row_text = normalize_evidence(&row.text().collect::<Vec<_>>().join(" "));
+        collect_score_candidates(&row_text, false, &mut candidates)?;
+    }
+    let Some(score) = candidates.first().copied() else {
+        return Ok(None);
+    };
+    if candidates.iter().any(|candidate| *candidate != score) {
+        return Err(protocol_drift(
+            "Chaoxing Exam row contains conflicting score facts",
+        ));
+    }
+    Ok(Some(f64::from(score) / 1_000.0))
+}
+
+fn collect_score_candidates(
+    text: &str,
+    explicit_score_node: bool,
+    candidates: &mut Vec<u32>,
+) -> ProviderResult<()> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if !bytes[cursor].is_ascii_digit()
+            || cursor.checked_sub(1).is_some_and(|previous| {
+                bytes[previous].is_ascii_alphanumeric() || bytes[previous] == b'.'
+            })
+        {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        if cursor < bytes.len() && bytes[cursor] == b'.' {
+            cursor += 1;
+            let fraction_start = cursor;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            if fraction_start == cursor {
+                continue;
+            }
+        }
+        let number_end = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        let suffix = &text[cursor..];
+        if !suffix.starts_with('分') || suffix.starts_with("分钟") {
+            continue;
+        }
+        let context_start = text[..start]
+            .char_indices()
+            .rev()
+            .nth(8)
+            .map_or(0, |(index, _)| index);
+        let context = &text[context_start..start];
+        if explicit_score_node || context.contains("成绩") || context.contains("得分") {
+            candidates.push(parse_score_milli(&text[start..number_end])?);
+        }
+        cursor += '分'.len_utf8();
+    }
+    Ok(())
+}
+
+fn parse_explicit_score(value: &str) -> ProviderResult<u32> {
+    let value = value.trim();
+    let value = value.strip_suffix('分').map_or(value, str::trim_end);
+    parse_score_milli(value)
+}
+
+fn parse_score_milli(value: &str) -> ProviderResult<u32> {
+    let (whole, fraction) = value.split_once('.').map_or((value, ""), |parts| parts);
+    if whole.is_empty()
+        || whole.len() > 3
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 3
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(protocol_drift(
+            "Chaoxing Exam row contains an invalid score fact",
+        ));
+    }
+    let whole = whole
+        .parse::<u32>()
+        .map_err(|_| protocol_drift("Chaoxing Exam row contains an invalid score fact"))?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u32>()
+            .map_err(|_| protocol_drift("Chaoxing Exam row contains an invalid score fact"))?
+            * 10_u32.pow(u32::try_from(3 - fraction.len()).expect("bounded score precision"))
+    };
+    whole
+        .checked_mul(1_000)
+        .and_then(|whole| whole.checked_add(fraction))
+        .filter(|score| *score <= 100_000)
+        .ok_or_else(|| protocol_drift("Chaoxing Exam row score is out of range"))
+}
+
+fn exam_retake_available(row: ElementRef<'_>) -> bool {
+    row.value()
+        .attr("onclick")
+        .is_some_and(|value| contains_javascript_call(value, "retest"))
+        || row.select(&selector("[onclick]")).any(|node| {
+            node.value()
+                .attr("onclick")
+                .is_some_and(|value| contains_javascript_call(value, "retest"))
+        })
+}
+
+fn contains_javascript_call(value: &str, function: &str) -> bool {
+    let value = value.as_bytes();
+    value
+        .windows(function.len())
+        .enumerate()
+        .filter(|(_, candidate)| candidate.eq_ignore_ascii_case(function.as_bytes()))
+        .any(|(start, _)| {
+            let valid_start = start == 0
+                || !value[start - 1].is_ascii_alphanumeric()
+                    && !matches!(value[start - 1], b'_' | b'$');
+            let mut end = start + function.len();
+            while end < value.len() && value[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            valid_start && value.get(end) == Some(&b'(')
+        })
+}
+
 fn classify_list_state(status: &str) -> RemoteState {
     if contains_any(status, &["已完成", "已提交", "待批阅", "已批阅"]) {
         RemoteState::Completed
@@ -577,7 +776,7 @@ mod tests {
     #[test]
     fn exam_inventory_keeps_source_state_and_unknown_status_separate() {
         let tasks = parse_exam_inventory(EXAM_MIXED, &scope()).unwrap();
-        assert_eq!(selected_facts(&tasks), expected(EXAM_EXPECTED));
+        assert_eq!(selected_exam_facts(&tasks), expected(EXAM_EXPECTED));
         assert!(tasks.iter().all(|task| {
             task.source_type == SourceType::Exam
                 && task.assessment_class == AssessmentClass::Unknown
@@ -693,6 +892,46 @@ mod tests {
         assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
     }
 
+    #[test]
+    fn exam_score_and_retake_facts_are_bounded_without_changing_capabilities() {
+        let tasks = parse_exam_inventory(EXAM_MIXED, &scope()).unwrap();
+        let completed = tasks
+            .iter()
+            .find(|task| task.remote_id.ends_with(":exam-2"))
+            .unwrap();
+        assert_eq!(completed.normalized["score"], 82.5);
+        assert_eq!(completed.normalized["retake_available"], true);
+        assert_eq!(completed.raw_sanitized["score"], 82.5);
+        assert_eq!(completed.raw_sanitized["retake_available"], true);
+        assert_eq!(completed.remote_state, RemoteState::Completed);
+        assert_eq!(completed.capabilities, [TaskCapability::ProgressRead]);
+
+        let remaining_minutes = tasks
+            .iter()
+            .find(|task| task.remote_id.ends_with(":exam-5"))
+            .unwrap();
+        assert_eq!(remaining_minutes.normalized["score"], Value::Null);
+
+        for score in ["100.001", "101", "1.2345", "1e2"] {
+            let html = format!(
+                r#"<div class="exam-list-item" data-exam-id="exam-x" data="/exam/preview?examId=exam-x"><span class="exam-name">Synthetic</span><span class="exam-status">已完成</span><span class="exam-score">成绩：{score} 分</span></div>"#
+            );
+            assert!(parse_exam_inventory(&html, &scope()).is_err(), "{score}");
+        }
+    }
+
+    #[test]
+    fn exam_conflicting_scores_and_lookalike_retake_handlers_fail_closed() {
+        let conflicting = r#"<div class="exam-list-item" data-exam-id="exam-x" data="/exam/preview?examId=exam-x"><span class="exam-name">Synthetic</span><span class="exam-status">已完成</span><span class="exam-score">成绩：80 分</span><span data-score="81"></span></div>"#;
+        assert!(parse_exam_inventory(conflicting, &scope()).is_err());
+
+        let lookalike = r#"<div class="exam-list-item" data-exam-id="exam-x" data="/exam/preview?examId=exam-x"><span class="exam-name">Synthetic</span><span class="exam-status">已完成</span><button onclick="prepareTest()">查看</button><button onclick="notReTest()">不可重考</button></div>"#;
+        let task = parse_exam_inventory(lookalike, &scope()).unwrap().remove(0);
+        assert_eq!(task.normalized["retake_available"], false);
+        assert_eq!(task.remote_state, RemoteState::Completed);
+        assert_eq!(task.capabilities, [TaskCapability::ProgressRead]);
+    }
+
     fn scope() -> ChaoxingCourseScope {
         ChaoxingCourseScope::new("course:100:200", "100", "200").unwrap()
     }
@@ -708,6 +947,25 @@ mod tests {
                         "source_type": task.source_type,
                         "assessment_class": task.assessment_class,
                         "remote_state": task.remote_state,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn selected_exam_facts(tasks: &[RemoteTask]) -> Value {
+        Value::Array(
+            tasks
+                .iter()
+                .map(|task| {
+                    json!({
+                        "remote_id": task.remote_id,
+                        "title": task.title,
+                        "source_type": task.source_type,
+                        "assessment_class": task.assessment_class,
+                        "remote_state": task.remote_state,
+                        "score": task.normalized["score"],
+                        "retake_available": task.normalized["retake_available"],
                     })
                 })
                 .collect(),

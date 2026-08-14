@@ -190,6 +190,14 @@ Expected status facts include `待做`, `未开始`, `已完成`, `已过期`, r
 score and a per-task entry action. CxKitty provides an older mobile alternative at
 `/exam/phone/task-list`; it remains a fallback hypothesis until live-tested.
 
+The bounded Exam row parser retains a missing score as `null` or a decimal
+`score` in the inclusive 0-100 range with at most three fractional digits.
+Structural score fields and contextual `成绩`/`得分` text are accepted;
+minute-duration text is excluded and conflicting or malformed score facts fail
+closed. `retake_available` is true only when that exact row contains a
+structural `reTest(...)` handler. Both values are fresh read-only facts: they do
+not change `RemoteState`, advertise a mutation capability, or execute a retake.
+
 ## Detail, submission and verification
 
 The current `TaskDetail` checkpoint does not trust a previously stored Task
@@ -198,14 +206,15 @@ the current account course list, selects exactly one matching course through
 ephemeral route context, and reruns the bounded all-or-nothing Task inventory
 for that course. The exact remote Task must still exist exactly once. Work tasks
 therefore include their followed final-route state; Exam tasks currently retain
-the freshly parsed list state until a dedicated entry/detail fixture contract is
-available.
+the freshly parsed list state, bounded score and retake-availability facts until
+a dedicated entry/detail fixture contract is available.
 
 `TaskProgressRead` preserves the same module split. Executable Resource tasks
 retain the targeted fresh-card lookup used for crash recovery. Chapter, Work and
 Exam tasks use exact Task rediscovery; `Completed` and `Pending` expose only
 binary 100/0 completion while all other remote states leave percentage absent.
-No duration or fractional score is inferred from list text.
+No duration or fractional completion is inferred from the independent score
+fact.
 
 ## Native independent Work question read
 

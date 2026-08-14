@@ -12,8 +12,8 @@ source modules even when their assessments share field names or HTML shapes.
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
 | ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls plus signed interval-based Video progress, idempotence and fresh-card verification are offline-covered; Live remains pending |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
-| ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
-| TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
+| ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text is parsed after removing scripts, while bounded score and structural `reTest(...)` availability remain read-only facts |
+| TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, and Exam exposes fresh list-level state/score/retake facts without enabling retake execution |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
 | SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts. Exam has a separate value-free preview and durable one-operation-at-a-time native chain: donor signature and request digest are frozen before dispatch, each accepted answer save advances one cursor and rotates `enc`/timing state, and the final submit yields only a Receipt. No Exam mutation is routed through Work payloads or replayed after ambiguity |
@@ -69,6 +69,10 @@ policy and remains independently guarded.
   resolved session. Any request or parse failure aborts the entire inventory.
 - Independent Work and Exam list parsers are covered by synthetic sanitized
   fixtures and compose behind `TaskInventoryCapability`.
+- Exam rows retain an optional 0-100 score and structural `reTest(...)`
+  availability. Minute text, malformed precision/range, conflicting scores and
+  lookalike handlers are regression-covered; neither fact changes state or
+  capabilities, and no retake command is implemented by this checkpoint.
 - Course/class identity and `cpi` cross the course-to-task boundary only through
   the non-serialized ephemeral route context.
 - The Native HTTP adapter uses the shared NetworkProfile, an injected session
@@ -101,7 +105,8 @@ policy and remains independently guarded.
   Missing courses/tasks become `RemoteChanged`, duplicate identities fail as
   protocol drift, and the returned normalized detail contains no route context.
   Work therefore includes the existing followed detail-state check; Exam detail
-  remains conservative list evidence until dedicated current fixtures exist.
+  returns the freshly rebound list state plus bounded score and retake facts,
+  while dedicated current entry/detail fixtures remain pending.
 - Module-aware progress now keeps executable Resource recovery on its targeted
   fresh-card path while Chapter, independent Work and Exam reuse exact Task
   rediscovery. Completed/Pending become conservative 100/0 binary completion;
