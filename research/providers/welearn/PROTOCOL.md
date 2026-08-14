@@ -460,6 +460,16 @@ authentication failure may renew once for a fresh read-only verification. The
 transport remains absent from capability registration until Core supplies the
 durable composite authority and per-transition persistence boundary.
 
+Fresh goal proof remains independent from that mutation lifecycle.
+`verify_atomic_duration_completion` first revalidates the plan/document shape,
+then parses only the returned evidence and requires exact `completed`, progress
+`1` and the profile score. For current Fanyuchang it additionally requires
+post-duration `session_time` and `total_time` to exist and remain exactly equal
+in final CMI. Modular Auto requires score `0` but does not assert final time is
+zero: its save-only completion request carries no CMI time document, so such a
+predicate would be invented rather than evidenced. Explicit negative mutation
+receipts remain diagnostics and cannot weaken or strengthen the fresh-CMI goal.
+
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or
 submit individual answers. Their user-facing “exercise accuracy” choice is a

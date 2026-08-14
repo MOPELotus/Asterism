@@ -217,6 +217,12 @@ only structural field names, response codes and bounded placeholder shapes.
   first mutation maps to non-retryable HumanRequired. The transport trait and
   native implementation remain unregistered and unreachable from singleton
   TaskExecution.
+- Pure atomic verification tests require exact completed/progress-100/profile
+  score CMI, prove current-donor post-duration session/total time is preserved,
+  and reject score or time drift as RemoteChanged. Auto verification accepts
+  arbitrary observed time while requiring score 0 because its save-only final
+  does not write a zero-time CMI payload. False mutation receipts remain
+  diagnostic when the independent fresh readback proves the exact goal.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.

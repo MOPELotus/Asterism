@@ -1,3 +1,4 @@
+use asterism_domain::RemoteState;
 use asterism_provider_api::{
     ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderResult,
 };
@@ -7,9 +8,88 @@ use crate::{
     WellearnAtomicCompletionProfile, WellearnCmiDocument, WellearnDurationProtocolMode,
     WellearnResourceCompletionCmiFormat, WellearnResourceCompletionSequence,
     WellearnResourceCompletionTimeMode, WellearnResourceCompletionWriteMode,
-    WellearnResourceExecutionPlan, WellearnResourceMutationProfile,
+    WellearnResourceExecutionPlan, WellearnResourceMutationProfile, parse_cmi_snapshot,
     runtime_settings::MAX_DURATION_REPORT_SECONDS,
 };
+
+/// Sanitized proof returned after exact fresh CMI verification of an atomic
+/// duration-completion result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WellearnAtomicDurationCompletionVerification {
+    profile: WellearnAtomicCompletionProfile,
+    score_percent: u8,
+    time_preservation_verified: Option<bool>,
+}
+
+impl WellearnAtomicDurationCompletionVerification {
+    pub const fn profile(self) -> WellearnAtomicCompletionProfile {
+        self.profile
+    }
+
+    pub const fn score_percent(self) -> u8 {
+        self.score_percent
+    }
+
+    pub const fn time_preservation_verified(self) -> Option<bool> {
+        self.time_preservation_verified
+    }
+}
+
+/// Verifies one completed atomic lifecycle from its independent fresh CMI
+/// evidence without entering any mutation or transport path.
+///
+/// # Errors
+///
+/// Returns a protocol error for malformed CMI and `RemoteChanged` when the
+/// exact completion/progress/score goal or current-donor time preservation is
+/// not visible.
+pub fn verify_atomic_duration_completion(
+    plan: WellearnAtomicDurationCompletionPlan,
+    documents: &WellearnAtomicDurationCompletionDocuments,
+) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+    documents.validate_for_plan(plan)?;
+    let final_snapshot = parse_cmi_snapshot(documents.after_completion().as_str())?;
+    let score_percent = plan.completion().score_percent;
+    let expected_score = score_percent.to_string();
+    if !final_snapshot.cmi_present()
+        || final_snapshot.remote_state() != RemoteState::Completed
+        || final_snapshot.percent() != Some(100)
+        || final_snapshot.score_scaled_raw() != Some(expected_score.as_str())
+    {
+        return Err(atomic_goal_changed());
+    }
+
+    let time_preservation_verified = match plan.profile() {
+        WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+            let after_duration = documents
+                .after_duration()
+                .ok_or_else(invalid_atomic_documents)?;
+            let duration_snapshot = parse_cmi_snapshot(after_duration.as_str())?;
+            if !duration_snapshot.cmi_present()
+                || duration_snapshot.session_time_raw().is_none()
+                || duration_snapshot.total_time_raw().is_none()
+                || duration_snapshot.session_time_raw() != final_snapshot.session_time_raw()
+                || duration_snapshot.total_time_raw() != final_snapshot.total_time_raw()
+            {
+                return Err(atomic_goal_changed());
+            }
+            Some(true)
+        }
+        WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => None,
+    };
+    Ok(WellearnAtomicDurationCompletionVerification {
+        profile: plan.profile(),
+        score_percent,
+        time_preservation_verified,
+    })
+}
+
+fn atomic_goal_changed() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::RemoteChanged,
+        "WELearn atomic duration-completion goal was not visible in fresh CMI",
+    )
+}
 
 /// Ordered mutation receipts emitted by one authorized atomic lifecycle.
 /// Explicit rejection remains diagnostic; only fresh CMI verification can
@@ -628,7 +708,123 @@ mod tests {
         }
     }
 
+    #[test]
+    fn verifier_proves_current_goal_and_preserved_fresh_times() {
+        let plan = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
+            1,
+        )
+        .unwrap();
+        let documents = WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            cmi(),
+            Some(snapshot_cmi(
+                "incomplete",
+                "0.25",
+                "20",
+                Some("15"),
+                Some("45"),
+            )),
+            snapshot_cmi("completed", "1", "100", Some("15"), Some("45")),
+            WellearnAtomicDurationCompletionReceipts::new(true, vec![true], Some(false), false),
+        )
+        .unwrap();
+
+        let verification = verify_atomic_duration_completion(plan, &documents).unwrap();
+        assert_eq!(verification.profile(), plan.profile());
+        assert_eq!(verification.score_percent(), 100);
+        assert_eq!(verification.time_preservation_verified(), Some(true));
+    }
+
+    #[test]
+    fn verifier_proves_auto_goal_without_inventing_a_time_predicate() {
+        let plan = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
+            0,
+        )
+        .unwrap();
+        let documents = WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            cmi(),
+            None,
+            snapshot_cmi("completed", "1", "0", Some("87"), Some("120")),
+            WellearnAtomicDurationCompletionReceipts::new(false, Vec::new(), None, false),
+        )
+        .unwrap();
+
+        let verification = verify_atomic_duration_completion(plan, &documents).unwrap();
+        assert_eq!(verification.score_percent(), 0);
+        assert_eq!(verification.time_preservation_verified(), None);
+    }
+
+    #[test]
+    fn verifier_rejects_final_goal_or_current_time_drift() {
+        let current = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
+            1,
+        )
+        .unwrap();
+        for (after_duration, after_completion) in [
+            (
+                snapshot_cmi("incomplete", "0.25", "20", Some("15"), Some("45")),
+                snapshot_cmi("completed", "1", "99", Some("15"), Some("45")),
+            ),
+            (
+                snapshot_cmi("incomplete", "0.25", "20", Some("15"), Some("45")),
+                snapshot_cmi("completed", "1", "100", Some("16"), Some("45")),
+            ),
+            (
+                snapshot_cmi("incomplete", "0.25", "20", None, Some("45")),
+                snapshot_cmi("completed", "1", "100", None, Some("45")),
+            ),
+        ] {
+            let documents = WellearnAtomicDurationCompletionDocuments::try_new(
+                current,
+                cmi(),
+                Some(after_duration),
+                after_completion,
+                WellearnAtomicDurationCompletionReceipts::new(true, vec![true], Some(true), true),
+            )
+            .unwrap();
+            assert_eq!(
+                verify_atomic_duration_completion(current, &documents)
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::RemoteChanged
+            );
+        }
+    }
+
     fn cmi() -> WellearnCmiDocument {
         WellearnCmiDocument::try_new("{}".to_owned()).unwrap()
+    }
+
+    fn snapshot_cmi(
+        completion: &str,
+        progress: &str,
+        score: &str,
+        session_time: Option<&str>,
+        total_time: Option<&str>,
+    ) -> WellearnCmiDocument {
+        let mut cmi = serde_json::json!({
+            "completion_status": completion,
+            "progress_measure": progress,
+            "score": {"scaled": score},
+            "success_status": "unknown",
+        });
+        if let Some(session_time) = session_time {
+            cmi["session_time"] = serde_json::json!(session_time);
+        }
+        if let Some(total_time) = total_time {
+            cmi["total_time"] = serde_json::json!(total_time);
+        }
+        WellearnCmiDocument::try_new(
+            serde_json::json!({
+                "ret": 0,
+                "comment": serde_json::json!({"cmi": cmi}).to_string(),
+            })
+            .to_string(),
+        )
+        .unwrap()
     }
 }

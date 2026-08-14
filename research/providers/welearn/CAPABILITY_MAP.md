@@ -163,6 +163,15 @@ singleton TaskExecution. Core must still persist, authorize and recover the
 composite attempt before an execution entry may call it without inserting a
 bare save or second start.
 
+`verify_atomic_duration_completion` is a separate pure readback boundary over
+the validated plan and combined documents. It requires exact
+completed/progress-100/profile-score CMI for both flows. Current Fanyuchang
+also requires both fresh session/total-time fields from the post-duration CMI
+to remain byte-identical in final CMI; modular Auto verifies score 0 without
+inventing a zero-time readback predicate that its save-only request does not
+write. Receipt booleans never affect this goal predicate. The verifier performs
+no I/O and still does not register or authorize atomic execution.
+
 One donor-level orchestration contract remains a shared Core gap. The Provider
 now freezes bounded Unit identity, all/explicit selection, explicit order,
 selected-but-empty Units, donor flow, SCO membership and target facts. Core/API
