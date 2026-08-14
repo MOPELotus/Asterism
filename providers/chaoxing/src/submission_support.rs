@@ -12,7 +12,7 @@ use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use chrono::Utc;
 use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 640;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
@@ -424,6 +424,43 @@ impl Drop for ChaoxingWorkVerificationDocument {
     }
 }
 
+/// Zeroizing owner for one strictly route-bound fresh Exam result page.
+pub struct ChaoxingExamVerificationDocument {
+    document: String,
+}
+
+impl ChaoxingExamVerificationDocument {
+    /// Owns one bounded Exam result document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-response error for empty or oversized pages.
+    pub fn try_new(document: String) -> ProviderResult<Self> {
+        if document.is_empty() || document.len() > MAX_RESPONSE_BYTES {
+            return Err(invalid_response(
+                "Chaoxing Exam verification page is empty or exceeds the size limit",
+            ));
+        }
+        Ok(Self { document })
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.document
+    }
+}
+
+impl fmt::Debug for ChaoxingExamVerificationDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ChaoxingExamVerificationDocument([REDACTED])")
+    }
+}
+
+impl Drop for ChaoxingExamVerificationDocument {
+    fn drop(&mut self) {
+        self.document.zeroize();
+    }
+}
+
 /// Parses an acknowledgement without treating it as completion.
 ///
 /// # Errors
@@ -486,6 +523,209 @@ pub fn parse_verification_snapshot(
             pending_snapshot(draft, RemoteState::Completed)
         }
         ChaoxingWorkVerificationRoute::View => parse_view_snapshot(&html, plan, draft),
+    }
+}
+
+/// Compares a fresh Exam result with every immutable Draft Question in exact
+/// DOM order. Score and list completion are never answer evidence.
+///
+/// # Errors
+///
+/// Returns typed errors for duplicate or malformed result identities. Missing,
+/// extra, unsupported or drifted Question evidence yields an Inconclusive
+/// snapshot instead of inferring answer consistency.
+pub fn parse_exam_verification_snapshot(
+    document: &ChaoxingExamVerificationDocument,
+    plan: &ChaoxingSubmissionPlan,
+    draft: &SubmissionDraft,
+) -> ProviderResult<SubmissionVerificationSnapshot> {
+    if plan.len() != draft.items.len() {
+        return Err(invalid_response(
+            "Chaoxing Exam verification plan does not match its immutable Draft",
+        ));
+    }
+    let html = Html::parse_document(document.as_str());
+    reject_login_or_challenge(&html)?;
+    let Some(remote_answers) = parse_exam_result_answers(&html)? else {
+        return inconclusive_snapshot(draft, RemoteState::Completed);
+    };
+    if remote_answers.len() != plan.len()
+        || draft.items.iter().enumerate().any(|(index, item)| {
+            item.question.position != u32::try_from(index + 1).unwrap_or(u32::MAX)
+        })
+    {
+        return inconclusive_snapshot(draft, RemoteState::Completed);
+    }
+    let planned = plan.answers().collect::<Vec<_>>();
+    if remote_answers
+        .iter()
+        .zip(&planned)
+        .any(|(actual, (remote_id, type_code, _))| {
+            actual.remote_id != *remote_id || actual.type_code != *type_code
+        })
+    {
+        return inconclusive_snapshot(draft, RemoteState::Completed);
+    }
+    let questions = remote_answers
+        .iter()
+        .zip(planned)
+        .zip(&draft.items)
+        .map(
+            |((actual, (_, _, expected)), item)| SubmissionQuestionVerification {
+                question_id: item.question.id,
+                status: if actual.value == expected {
+                    SubmissionQuestionVerificationStatus::Confirmed
+                } else {
+                    SubmissionQuestionVerificationStatus::Rejected
+                },
+            },
+        )
+        .collect::<Vec<_>>();
+    let status = if questions
+        .iter()
+        .all(|question| question.status == SubmissionQuestionVerificationStatus::Confirmed)
+    {
+        SubmissionVerificationStatus::Confirmed
+    } else {
+        SubmissionVerificationStatus::Rejected
+    };
+    validate_snapshot(SubmissionVerificationSnapshot {
+        status,
+        remote_state: Some(RemoteState::Completed),
+        score: None,
+        progress_percent: Some(100),
+        questions,
+        verified_at: Utc::now(),
+    })
+}
+
+struct ExamRemoteAnswer {
+    remote_id: String,
+    type_code: String,
+    value: String,
+}
+
+impl Drop for ExamRemoteAnswer {
+    fn drop(&mut self) {
+        self.remote_id.zeroize();
+        self.type_code.zeroize();
+        self.value.zeroize();
+    }
+}
+
+fn parse_exam_result_answers(html: &Html) -> ProviderResult<Option<Vec<ExamRemoteAnswer>>> {
+    let mut answers = Vec::new();
+    let mut remote_ids = BTreeSet::new();
+    for question in html.select(&selector(".questionLi")) {
+        let Some(identity) = unique_result_node(
+            question.select(&selector("input[name='questionId']")),
+            "Chaoxing Exam result contains duplicate Question identity fields",
+        )?
+        else {
+            return Ok(None);
+        };
+        let remote_id = identity
+            .value()
+            .attr("value")
+            .map(str::trim)
+            .filter(|value| valid_question_id(value))
+            .ok_or_else(|| protocol_drift("Chaoxing Exam result Question identity is invalid"))?;
+        if !remote_ids.insert(remote_id.to_owned()) {
+            return Err(protocol_drift(
+                "Chaoxing Exam result contains duplicate Question identity",
+            ));
+        }
+        let type_name = format!("type{remote_id}");
+        let Some(type_input) = unique_result_node(
+            question
+                .select(&selector("input[name]"))
+                .filter(|input| input.value().attr("name") == Some(type_name.as_str())),
+            "Chaoxing Exam result contains duplicate Question type fields",
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(type_code @ ("0" | "1" | "3")) = type_input.value().attr("value") else {
+            return Ok(None);
+        };
+        let Some(answer_node) = unique_result_node(
+            question
+                .select(&selector(".mark_answer, .stem_answer, .my-answer"))
+                .filter(|node| normalized_text(node.text()).contains("我的答案")),
+            "Chaoxing Exam result contains duplicate visible answers",
+        )?
+        else {
+            return Ok(None);
+        };
+        let text = Zeroizing::new(normalized_text(answer_node.text()));
+        let Some(value) = parse_exam_visible_answer(text.as_str(), type_code)? else {
+            return Ok(None);
+        };
+        answers.push(ExamRemoteAnswer {
+            remote_id: remote_id.to_owned(),
+            type_code: type_code.to_owned(),
+            value,
+        });
+    }
+    if answers.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(answers))
+    }
+}
+
+fn unique_result_node<'a>(
+    mut nodes: impl Iterator<Item = ElementRef<'a>>,
+    duplicate_message: &'static str,
+) -> ProviderResult<Option<ElementRef<'a>>> {
+    let node = nodes.next();
+    if nodes.next().is_some() {
+        return Err(protocol_drift(duplicate_message));
+    }
+    Ok(node)
+}
+
+fn parse_exam_visible_answer(value: &str, type_code: &str) -> ProviderResult<Option<String>> {
+    let Some((_, value)) = value.split_once("我的答案") else {
+        return Ok(None);
+    };
+    let value = value.trim_start_matches([':', '：']).trim();
+    let value = ["正确答案", "答案解析", "得分"]
+        .into_iter()
+        .filter_map(|marker| value.find(marker))
+        .min()
+        .map_or(value, |end| &value[..end])
+        .trim();
+    if value.is_empty() || value.len() > MAX_FORM_FIELD_BYTES {
+        return Ok(None);
+    }
+    match type_code {
+        "0" | "1" => {
+            let mut answer = value
+                .chars()
+                .filter(|character| {
+                    !character.is_whitespace() && !matches!(character, ',' | '，' | '、' | ';')
+                })
+                .collect::<Vec<_>>();
+            if answer.is_empty() || answer.iter().any(|value| !value.is_ascii_uppercase()) {
+                return Ok(None);
+            }
+            answer.sort_unstable();
+            if answer.windows(2).any(|pair| pair[0] == pair[1])
+                || (type_code == "0" && answer.len() != 1)
+            {
+                return Err(protocol_drift(
+                    "Chaoxing Exam result choice answer is duplicated or ambiguous",
+                ));
+            }
+            Ok(Some(answer.into_iter().collect()))
+        }
+        "3" => match value {
+            "正确" | "对" | "true" | "TRUE" | "√" => Ok(Some("true".to_owned())),
+            "错误" | "错" | "false" | "FALSE" | "×" => Ok(Some("false".to_owned())),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
     }
 }
 
@@ -590,7 +830,7 @@ fn pending_snapshot(
     validate_snapshot(snapshot)
 }
 
-fn inconclusive_snapshot(
+pub(crate) fn inconclusive_snapshot(
     draft: &SubmissionDraft,
     remote_state: RemoteState,
 ) -> ProviderResult<SubmissionVerificationSnapshot> {
@@ -910,7 +1150,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ChaoxingSubmissionBuild, parse_chapter_work_question_page, parse_work_preview_question_page,
+        ChaoxingSubmissionBuild, parse_chapter_work_question_page, parse_exam_question_page,
+        parse_work_preview_question_page,
     };
     use asterism_provider_api::{ProviderContext, SubmissionBuildCapability};
 
@@ -926,6 +1167,10 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
     const CHAPTER_EDITOR: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/chapter-submission-editor.html");
+    const EXAM_QUESTIONS: &str =
+        include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
+    const EXAM_RESULT: &str =
+        include_str!("../../../fixtures/providers/chaoxing/exam/detail-result.html");
 
     #[tokio::test]
     async fn fresh_editor_builds_allowlisted_final_submit_form() {
@@ -1023,6 +1268,75 @@ mod tests {
         let pending = parse_verification_snapshot(&editor, &plan, &draft).unwrap();
         assert_eq!(pending.status, SubmissionVerificationStatus::Pending);
         assert_eq!(pending.remote_state, Some(RemoteState::Pending));
+    }
+
+    #[tokio::test]
+    async fn exam_result_confirms_or_rejects_only_exact_visible_values() {
+        let draft = exam_draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let result = ChaoxingExamVerificationDocument::try_new(EXAM_RESULT.to_owned()).unwrap();
+        let snapshot = parse_exam_verification_snapshot(&result, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert!(snapshot.questions.iter().all(|question| {
+            question.status == SubmissionQuestionVerificationStatus::Confirmed
+        }));
+
+        let changed = EXAM_RESULT.replacen("我的答案：对", "我的答案：错", 1);
+        let changed = ChaoxingExamVerificationDocument::try_new(changed).unwrap();
+        let snapshot = parse_exam_verification_snapshot(&changed, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Rejected);
+        assert_eq!(
+            snapshot
+                .questions
+                .iter()
+                .map(|question| question.status)
+                .collect::<Vec<_>>(),
+            [
+                SubmissionQuestionVerificationStatus::Confirmed,
+                SubmissionQuestionVerificationStatus::Rejected,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn exam_result_missing_extra_or_drifted_binding_is_inconclusive() {
+        let draft = exam_draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let extra = EXAM_RESULT.replace(
+            "</main>",
+            r#"<section class="questionLi"><input name="questionId" value="exam-q-3"><input name="typeexam-q-3" value="0"><p class="my-answer">我的答案：A</p></section></main>"#,
+        );
+        let swapped = EXAM_RESULT
+            .replace("exam-q-1", "exam-q-swap")
+            .replace("exam-q-2", "exam-q-1")
+            .replace("exam-q-swap", "exam-q-2");
+        for document in [
+            EXAM_RESULT.replacen("<input name=\"typeexam-q-1\" value=\"0\">", "", 1),
+            EXAM_RESULT.replacen("typeexam-q-1\" value=\"0", "typeexam-q-1\" value=\"2", 1),
+            EXAM_RESULT.replacen("exam-q-1", "exam-q-x", 3),
+            EXAM_RESULT.replacen("class=\"my-answer\"", "class=\"answer-only\"", 1),
+            extra,
+            swapped,
+        ] {
+            let result = ChaoxingExamVerificationDocument::try_new(document).unwrap();
+            let snapshot = parse_exam_verification_snapshot(&result, &plan, &draft).unwrap();
+            assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
+            assert!(snapshot.questions.iter().all(|question| {
+                question.status == SubmissionQuestionVerificationStatus::Unverified
+            }));
+        }
+
+        let duplicate = EXAM_RESULT.replace("exam-q-2", "exam-q-1");
+        let duplicate = ChaoxingExamVerificationDocument::try_new(duplicate).unwrap();
+        assert!(parse_exam_verification_snapshot(&duplicate, &plan, &draft).is_err());
+
+        let duplicate_field = EXAM_RESULT.replacen(
+            r#"<input name="questionId" value="exam-q-1">"#,
+            r#"<input name="questionId" value="exam-q-1"><input name="questionId" value="exam-q-1">"#,
+            1,
+        );
+        let duplicate_field = ChaoxingExamVerificationDocument::try_new(duplicate_field).unwrap();
+        assert!(parse_exam_verification_snapshot(&duplicate_field, &plan, &draft).is_err());
     }
 
     #[test]
@@ -1142,6 +1456,50 @@ mod tests {
                 &questions,
                 &selected,
             )
+            .await
+            .unwrap();
+        SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            provider_version: crate::metadata::development_metadata()
+                .unwrap()
+                .implementation_version,
+            items: questions
+                .into_iter()
+                .zip(selected)
+                .map(|(question, selected)| SubmissionDraftItem { question, selected })
+                .collect(),
+            payload_preview: preview,
+            created_at: Utc::now(),
+        }
+    }
+
+    async fn exam_draft() -> SubmissionDraft {
+        let task_id = TaskId::new();
+        let questions = parse_exam_question_page(EXAM_QUESTIONS)
+            .unwrap()
+            .into_iter()
+            .take(2)
+            .map(|question| question.to_question(task_id).unwrap())
+            .collect::<Vec<_>>();
+        let selected = vec![
+            selected(
+                questions[0].id,
+                NormalizedAnswer::Selections(vec!["A".to_owned()]),
+            ),
+            selected(questions[1].id, NormalizedAnswer::Boolean(true)),
+        ];
+        let context = ProviderContext {
+            provider_id: ProviderId::new("chaoxing").unwrap(),
+            account_id: asterism_domain::ProviderAccountId::new(),
+            credential_refs: vec![asterism_domain::SecretId::new()],
+            correlation_id: "chaoxing-exam-verification-support".to_owned(),
+        };
+        let preview = ChaoxingSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(&context, "exam:100:200:exam-1", &questions, &selected)
             .await
             .unwrap();
         SubmissionDraft {

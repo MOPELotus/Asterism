@@ -366,10 +366,19 @@ individual temporary save, so ambiguity keeps that operation locked.
 Only after every Draft Question is saved does the Provider freeze a separate
 `chaoxing.exam-final-submit.v1` with `tempSave=false`, empty `qid` and
 `start=0`. Its accepted JSON is a Receipt, not completion. `SubmissionVerify`
-rebinds the same Course and exact Exam row and confirms only a fresh
-`Completed` state; without result-page answer evidence all per-Question facts
-remain `Unverified`. An ambiguous final submit may be recovered as accepted
-only when that same fresh exact row is already Completed, after which normal
+rebinds the same Course and exact Exam row. A fresh `Completed` row is task-level
+recovery evidence only; it does not prove answer consistency. Per-Question
+confirmation additionally requires the strictly bound preview result to repeat
+every immutable Draft Question ID exactly once, in DOM/Draft position order,
+with the exact `exam_mobile` type code and a visible allowlisted `我的答案`
+value. Type codes 0, 1 and 3 use bounded single-choice, sorted multi-choice and
+exact boolean grammars. Missing/extra fields, ID/order/type drift, unsupported
+type 2 result text or absent visible answers produce `Inconclusive` with
+`Unverified` Questions; duplicates fail closed. Only a fully bound value
+mismatch is `Rejected`, and matching Questions can remain individually
+`Confirmed`. Hidden inputs, CSS, score and list state are never answer evidence.
+An ambiguous final submit may be recovered as accepted only when that same
+fresh exact row is already Completed, after which this independent result
 verification still runs. Synthetic fixtures and Provider integration tests
 cover this boundary; live account validation remains pending.
 

@@ -101,10 +101,13 @@ The Exam fixtures cover the cover/start/full-preview attempt rotation and the
 separate CxKitty save/final acknowledgement shapes. They prove that each
 accepted answer save advances exactly one immutable-Draft cursor and replaces
 only monotonic timing/`enc` state, while the final response remains a Receipt
-until a fresh exact Exam list row reports Completed. Unknown compatible JSON
-extensions are ignored, but malformed state, rejection, identity drift and
-timing regression fail closed. All IDs, signatures and crypto-looking values
-are synthetic placeholders.
+until a fresh exact Exam list row reports Completed. `detail-result.html` adds
+two ordered synthetic result Questions with exact IDs, type 0/3 inputs and
+visible `我的答案` values. Tests prove exact confirmation, value rejection and
+Inconclusive handling for missing, extra, unsupported or drifted binding facts;
+duplicate IDs fail closed. Unknown compatible JSON extensions are ignored, but
+malformed state, rejection, identity drift and timing regression fail closed.
+All IDs, signatures and crypto-looking values are synthetic placeholders.
 
 ## Required live-sanitized fixture sets
 
@@ -178,5 +181,8 @@ every fixture before staging it.
 - Exam preview state supersedes start-page state. Every answer-save operation
   must have a distinct persisted request digest; only an accepted response may
   rotate the continuation. Temporary-save ambiguity is never replayed, final
-  ambiguity needs fresh Completed evidence, and task completion does not imply
-  per-Question answer verification.
+  ambiguity needs fresh Completed evidence, and task completion/score does not
+  imply per-Question answer verification. Exact result confirmation requires
+  the immutable Draft's full ID/order/type/value set; missing, extra or type-2
+  evidence is Inconclusive, duplicates fail closed, and hidden inputs/CSS are
+  ignored.

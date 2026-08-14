@@ -61,8 +61,9 @@ pub use stored_session::StoredChaoxingSessionResolver;
 pub use submission_build::ChaoxingSubmissionBuild;
 pub use submission_execute::{ChaoxingSubmissionExecute, ChaoxingSubmissionTransport};
 pub use submission_support::{
-    ChaoxingSubmissionPlan, ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute,
-    parse_submission_receipt, parse_verification_snapshot,
+    ChaoxingExamVerificationDocument, ChaoxingSubmissionPlan, ChaoxingWorkVerificationDocument,
+    ChaoxingWorkVerificationRoute, parse_exam_verification_snapshot, parse_submission_receipt,
+    parse_verification_snapshot,
 };
 pub use submission_verify::{ChaoxingSubmissionVerificationTransport, ChaoxingSubmissionVerify};
 pub use task_detail::ChaoxingTaskDetail;

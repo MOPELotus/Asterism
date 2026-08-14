@@ -22,12 +22,13 @@ use zeroize::Zeroizing;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingChapterWorkTarget,
-    ChaoxingCourseRoute, ChaoxingExamQuestionArtifact, ChaoxingExamQuestionRequest,
-    ChaoxingExamStartCommand, ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
-    ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingSubmissionBuild,
-    ChaoxingSubmissionExecute, ChaoxingSubmissionPlan, ChaoxingSubmissionTransport,
-    ChaoxingSubmissionVerificationTransport, ChaoxingSubmissionVerify, ChaoxingWorkDetailRequest,
-    ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute,
+    ChaoxingCourseRoute, ChaoxingExamDetailRequest, ChaoxingExamQuestionArtifact,
+    ChaoxingExamQuestionRequest, ChaoxingExamStartCommand, ChaoxingExamSubmissionCommand,
+    ChaoxingExamSubmissionResponse, ChaoxingExamVerificationDocument, ChaoxingInventoryDocument,
+    ChaoxingInventoryTransport, ChaoxingSubmissionBuild, ChaoxingSubmissionExecute,
+    ChaoxingSubmissionPlan, ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
+    ChaoxingSubmissionVerify, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
+    ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute,
     exam_attempt::{
         CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE, CHAOXING_EXAM_QUESTIONS_READY_PHASE,
         ChaoxingExamAttemptMaterial, parse_exam_cover,
@@ -59,6 +60,8 @@ const EXAM_SAVE_2: &str =
     include_str!("../../../fixtures/providers/chaoxing/exam/submit-save-2.json");
 const EXAM_FINAL: &str =
     include_str!("../../../fixtures/providers/chaoxing/exam/submit-final.json");
+const EXAM_RESULT: &str =
+    include_str!("../../../fixtures/providers/chaoxing/exam/detail-result.html");
 
 #[derive(Debug)]
 struct FixtureCourses {
@@ -162,7 +165,13 @@ impl ChaoxingInventoryTransport for FixturePlatform {
         _route: ChaoxingCourseRoute<'_>,
     ) -> ProviderResult<ChaoxingInventoryDocument> {
         let document = if self.exam_completed.load(Ordering::Relaxed) {
-            EXAM_LIST.replacen("待做", "已完成", 1)
+            EXAM_LIST
+                .replacen("待做", "已完成", 1)
+                .replacen(
+                    "onclick=\"goTest('100','exam-1',0,'SAFE_TIME','paper-1',false,'SAFE_ENC')\"",
+                    "data-exam-id=\"exam-1\" data=\"/exam-ans/mooc2/exam/preview?courseId=100&amp;classId=200&amp;examId=exam-1\"",
+                    1,
+                )
         } else {
             EXAM_LIST.to_owned()
         };
@@ -263,6 +272,17 @@ impl ChaoxingSubmissionVerificationTransport for FixturePlatform {
             ChaoxingWorkVerificationRoute::View,
             WORK_VIEW.to_owned(),
         )
+    }
+
+    async fn fetch_exam_verification(
+        &self,
+        _context: &ProviderContext,
+        request: ChaoxingExamDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingExamVerificationDocument> {
+        self.verifications.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(request.remote_task_id(), "exam:100:200:exam-1");
+        assert_eq!(request.exam_id(), "exam-1");
+        ChaoxingExamVerificationDocument::try_new(EXAM_RESULT.to_owned())
     }
 }
 
@@ -467,10 +487,12 @@ async fn exam_session_rotates_saves_then_verifies_the_terminal_inventory() {
         Some(asterism_domain::RemoteState::Completed)
     );
     assert!(
-        snapshot.questions.iter().all(|question| {
-            question.status == SubmissionQuestionVerificationStatus::Unverified
-        })
+        snapshot
+            .questions
+            .iter()
+            .all(|question| { question.status == SubmissionQuestionVerificationStatus::Confirmed })
     );
+    assert_eq!(platform.verifications.load(Ordering::Relaxed), 1);
 }
 
 async fn execute_exam_step(

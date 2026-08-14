@@ -20,11 +20,11 @@ use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
     ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingExamDetailFacts,
     ChaoxingExamDetailRequest, ChaoxingExamQuestionArtifact, ChaoxingExamQuestionRequest,
-    ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse, ChaoxingInventoryDocument,
-    ChaoxingInventoryTransport, ChaoxingQuestionTransport, ChaoxingSubmissionPlan,
-    ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
-    ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
-    ChaoxingWorkVerificationRoute, classify_work_detail,
+    ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
+    ChaoxingExamVerificationDocument, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
+    ChaoxingQuestionTransport, ChaoxingSubmissionPlan, ChaoxingSubmissionTransport,
+    ChaoxingSubmissionVerificationTransport, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
+    ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute, classify_work_detail,
     exam_attempt::{
         ChaoxingExamStartCommand, ChaoxingExamStartOutcome, parse_exam_attempt, parse_exam_cover,
     },
@@ -717,6 +717,15 @@ impl NativeChaoxingInventoryTransport {
         ChaoxingWorkVerificationDocument::try_new(route, document.into_string())
     }
 
+    async fn fetch_exam_verification_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        request: ChaoxingExamDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingExamVerificationDocument> {
+        let document = self.get_html(session, request.url()?).await?;
+        ChaoxingExamVerificationDocument::try_new(document.into_string())
+    }
+
     async fn complete_immediate_resource_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -1177,6 +1186,21 @@ impl ChaoxingSubmissionVerificationTransport for NativeChaoxingInventoryTranspor
             Err(error) if should_renew_after(&error, renewed) => {
                 let session = self.sessions.renew_session(context).await?;
                 self.fetch_work_verification_once(&session, request).await
+            }
+            result => result,
+        }
+    }
+
+    async fn fetch_exam_verification(
+        &self,
+        context: &ProviderContext,
+        request: ChaoxingExamDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingExamVerificationDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_exam_verification_once(&session, request).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_exam_verification_once(&session, request).await
             }
             result => result,
         }

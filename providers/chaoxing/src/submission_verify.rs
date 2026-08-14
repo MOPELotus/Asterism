@@ -15,15 +15,19 @@ use chrono::Utc;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
-    ChaoxingExamQuestionArtifact, ChaoxingInventoryTransport, ChaoxingSubmissionBuild,
-    ChaoxingSubmissionPlan, ChaoxingWorkDetailRequest, ChaoxingWorkVerificationDocument,
+    ChaoxingExamDetailRequest, ChaoxingExamQuestionArtifact, ChaoxingExamVerificationDocument,
+    ChaoxingInventoryTransport, ChaoxingSubmissionBuild, ChaoxingSubmissionPlan,
+    ChaoxingWorkDetailRequest, ChaoxingWorkVerificationDocument,
     inventory::{parse_exam_inventory_entries, parse_work_inventory_entries},
     metadata::development_metadata,
     submission_execute::{
         invalid_response, matching_course, protocol_drift, remote_changed, validate_context,
         validate_draft, validate_exam_continuation,
     },
-    submission_support::{SubmissionModule, WorkSubmissionIdentity, parse_verification_snapshot},
+    submission_support::{
+        SubmissionModule, WorkSubmissionIdentity, inconclusive_snapshot,
+        parse_exam_verification_snapshot, parse_verification_snapshot,
+    },
     task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
 };
 
@@ -35,6 +39,12 @@ pub trait ChaoxingSubmissionVerificationTransport: Send + Sync {
         context: &ProviderContext,
         request: ChaoxingWorkDetailRequest<'_>,
     ) -> ProviderResult<ChaoxingWorkVerificationDocument>;
+
+    async fn fetch_exam_verification(
+        &self,
+        context: &ProviderContext,
+        request: ChaoxingExamDetailRequest<'_>,
+    ) -> ProviderResult<ChaoxingExamVerificationDocument>;
 }
 
 /// Independent Chaoxing post-submit verification. It never calls the mutation
@@ -209,6 +219,19 @@ impl SubmissionVerifyCapability for ChaoxingSubmissionVerify {
                 "Chaoxing Exam verification was requested before every answer save",
             ));
         }
+        if draft.items.iter().enumerate().any(|(index, item)| {
+            item.question.position != u32::try_from(index + 1).unwrap_or(u32::MAX)
+                || item
+                    .question
+                    .metadata_sanitized
+                    .get("page_kind")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("exam_mobile")
+        }) {
+            return Err(invalid_response(
+                "Chaoxing Exam verification Draft has a foreign page kind or order",
+            ));
+        }
         let questions = draft
             .items
             .iter()
@@ -228,15 +251,55 @@ impl SubmissionVerifyCapability for ChaoxingSubmissionVerify {
                 "Chaoxing Exam verification Draft preview is stale or foreign",
             ));
         }
-        let state = fresh_exam_state(
+        let plan = ChaoxingSubmissionPlan::from_draft(draft)?;
+        fresh_exam_verification(
             self.courses.as_ref(),
             self.inventory.as_ref(),
+            self.transport.as_ref(),
             context,
             identity,
+            &plan,
+            draft,
         )
-        .await?;
-        task_state_snapshot(draft, state, "Exam")
+        .await
     }
+}
+
+async fn fresh_exam_verification(
+    courses: &dyn CourseInventoryCapability,
+    inventory: &dyn ChaoxingInventoryTransport,
+    transport: &dyn ChaoxingSubmissionVerificationTransport,
+    context: &ProviderContext,
+    identity: WorkSubmissionIdentity<'_>,
+    plan: &ChaoxingSubmissionPlan,
+    draft: &SubmissionDraft,
+) -> ProviderResult<SubmissionVerificationSnapshot> {
+    let courses = courses.list_courses(context).await?;
+    let course = matching_course(&courses, identity)?;
+    let route = ChaoxingCourseRoute::from_remote_course(course)?;
+    let document = inventory.fetch_exam_inventory(context, route).await?;
+    let entries = parse_exam_inventory_entries(document.as_str(), &route.parser_scope()?)?;
+    let mut matching = entries
+        .iter()
+        .filter(|entry| entry.task().remote_id == identity.remote_task_id());
+    let entry = matching
+        .next()
+        .ok_or_else(|| remote_changed("Chaoxing Exam is no longer present during verification"))?;
+    if matching.next().is_some() {
+        return Err(protocol_drift(
+            "Chaoxing Exam verification inventory contains duplicate task identity",
+        ));
+    }
+    if entry.task().remote_state != RemoteState::Completed {
+        return task_state_snapshot(draft, entry.task().remote_state, "Exam");
+    }
+    let Some(request) =
+        ChaoxingExamDetailRequest::try_new(route, identity.remote_task_id(), entry.entry())?
+    else {
+        return inconclusive_snapshot(draft, RemoteState::Completed);
+    };
+    let result = transport.fetch_exam_verification(context, request).await?;
+    parse_exam_verification_snapshot(&result, plan, draft)
 }
 
 pub(crate) async fn fresh_exam_state(
