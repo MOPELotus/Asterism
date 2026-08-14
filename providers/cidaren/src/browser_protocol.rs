@@ -95,9 +95,11 @@ impl CidarenBrowserCommandEnvelope {
     /// Returns a typed error if serialization unexpectedly fails.
     pub fn exchange_digest(&self) -> ProviderResult<[u8; 32]> {
         self.validate()?;
-        let encoded = serde_json::to_vec(self)
+        let mut encoded = serde_json::to_vec(self)
             .map_err(|_| invalid_response("Cidaren Capture command cannot be hashed"))?;
-        Ok(Sha256::digest(encoded).into())
+        let digest = Sha256::digest(&encoded).into();
+        encoded.zeroize();
+        Ok(digest)
     }
 
     /// Builds a recipe-versioned Capture snapshot command.
@@ -640,7 +642,9 @@ mod tests {
             CidarenBrowserCommandEnvelope::exchange_type(),
             CIDAREN_CAPTURE_COMMAND_TYPE
         );
-        assert_ne!(command.exchange_digest().unwrap(), [0; 32]);
+        let digest = command.exchange_digest().unwrap();
+        assert_ne!(digest, [0; 32]);
+        assert_eq!(command.exchange_digest().unwrap(), digest);
         assert!(format!("{command:?}").contains("REDACTED"));
         assert!(
             serde_json::to_string(&command)
