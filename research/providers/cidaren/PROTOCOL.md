@@ -147,6 +147,17 @@ Capture credential commit. This closes command/record mismatch inside the
 Provider, but does not claim that the shared helper can yet dispatch the JSON
 or commit its returned credential material.
 
+After the terminal exchange is accepted,
+`CidarenCaptureSnapshot::into_credential_replacement` consumes the zeroizing
+snapshot. A token-only snapshot yields exactly one
+`ProviderAccessToken` field with `ProviderSpecific` session kind. A Composite
+snapshot yields exactly `ProviderAccessToken` plus
+`ProviderCompositeSession` with `Composite` kind. The optional donor-observed
+`CDR_USER_SESSION` never becomes a third credential because neither donor
+uses it for authentication or response decoding. Core still supplies and
+validates the Capture acquisition/session/account metadata before the atomic
+SecretStore commit.
+
 The Core adapter resolves either one exact manual or token-only Capture
 `ProviderAccessToken`, or an exact two-record Composite binding containing
 `ProviderAccessToken` plus `ProviderCompositeSession`. Every record must match

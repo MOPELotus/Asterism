@@ -1,6 +1,10 @@
 use std::fmt;
 
-use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
+use asterism_domain::SessionKind;
+use asterism_provider_api::{
+    CredentialReplacement, ProviderError, ProviderErrorKind, ProviderResult,
+};
+use asterism_secrets::{CredentialField, SecretPurpose, SecretValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -341,6 +345,53 @@ impl CidarenCaptureSnapshot {
     pub fn user_session(&self) -> Option<&str> {
         self.user_session.as_deref()
     }
+
+    /// Converts one already validated snapshot into the exact secret-field
+    /// replacement expected by Core's Capture credential commit.
+    ///
+    /// Token-only Capture yields one `ProviderSpecific` access token. Composite
+    /// Capture yields one atomic token plus crypto-context pair. The donor's
+    /// optional `CDR_USER_SESSION` observation is deliberately not persisted
+    /// because neither donor uses it for authentication or `jv=99` decoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error only if an invalid snapshot was constructed
+    /// inside this module without passing the typed parser.
+    pub fn into_credential_replacement(mut self) -> ProviderResult<CredentialReplacement> {
+        let token = self.user_token.take().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Cidaren Capture snapshot lost its validated UserToken",
+            )
+        })?;
+        if self.user_token_source.is_none()
+            || self.login_info.is_some() != self.login_info_source.is_some()
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Cidaren Capture snapshot lost its validated source binding",
+            ));
+        }
+
+        let mut fields = vec![CredentialField {
+            purpose: SecretPurpose::ProviderAccessToken,
+            value: SecretValue::new(token.into_bytes()),
+        }];
+        let session_kind = if let Some(login_info) = self.login_info.take() {
+            fields.push(CredentialField {
+                purpose: SecretPurpose::ProviderCompositeSession,
+                value: SecretValue::new(login_info.into_bytes()),
+            });
+            SessionKind::Composite
+        } else {
+            SessionKind::ProviderSpecific
+        };
+        Ok(CredentialReplacement {
+            session_kind,
+            fields,
+        })
+    }
 }
 
 impl fmt::Debug for CidarenCaptureSnapshot {
@@ -679,5 +730,62 @@ mod tests {
             composite_snapshot.login_info_source(),
             Some(CidarenCaptureStorageSource::LocalStorage)
         );
+    }
+
+    #[test]
+    fn capture_snapshot_converts_only_evidenced_credential_fields() {
+        let token_command = command(CidarenCaptureMode::TokenOnly);
+        let token_replacement = parse_browser_event(
+            &document(CidarenCaptureMode::TokenOnly),
+            &token_command,
+            CIDAREN_ORIGIN,
+        )
+        .unwrap()
+        .into_capture_snapshot(&token_command, CIDAREN_ORIGIN)
+        .unwrap()
+        .into_credential_replacement()
+        .unwrap();
+        assert_eq!(
+            token_replacement.session_kind,
+            SessionKind::ProviderSpecific
+        );
+        assert_eq!(token_replacement.fields.len(), 1);
+        assert_eq!(
+            token_replacement.fields[0].purpose,
+            SecretPurpose::ProviderAccessToken
+        );
+        assert_eq!(
+            token_replacement.fields[0].value.expose_secret(),
+            b"synthetic-user-token"
+        );
+
+        let composite_command = command(CidarenCaptureMode::Composite);
+        let composite_replacement = parse_browser_event(
+            &document(CidarenCaptureMode::Composite).replace(
+                "\"user_session\":null",
+                r#""user_session":"{\"observed\":true}""#,
+            ),
+            &composite_command,
+            CIDAREN_ORIGIN,
+        )
+        .unwrap()
+        .into_capture_snapshot(&composite_command, CIDAREN_ORIGIN)
+        .unwrap()
+        .into_credential_replacement()
+        .unwrap();
+        assert_eq!(composite_replacement.session_kind, SessionKind::Composite);
+        assert_eq!(composite_replacement.fields.len(), 2);
+        assert_eq!(
+            composite_replacement.fields[0].purpose,
+            SecretPurpose::ProviderAccessToken
+        );
+        assert_eq!(
+            composite_replacement.fields[1].purpose,
+            SecretPurpose::ProviderCompositeSession
+        );
+        assert!(composite_replacement.fields.iter().all(|field| matches!(
+            field.purpose,
+            SecretPurpose::ProviderAccessToken | SecretPurpose::ProviderCompositeSession
+        )));
     }
 }

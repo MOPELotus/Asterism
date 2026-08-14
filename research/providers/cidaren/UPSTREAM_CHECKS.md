@@ -240,6 +240,14 @@ Capture credential commit remain Main-owned shared gaps, not dropped donor
 abilities. The Provider suite reached 116 passing tests with all-target
 clippy clean.
 
+The same unchanged-source checkpoint also closed the Provider-side credential
+shape conversion. A validated token-only snapshot now consumes into one
+zeroizing access-token replacement; a Composite snapshot consumes into an
+atomic access-token/crypto-context pair. Optional `CDR_USER_SESSION` remains
+an observation and is discarded, matching both donors' executable use. Core
+still owns recipe/acquisition/account validation and the atomic SecretStore
+commit. The Provider suite reached 117 passing tests with strict clippy clean.
+
 ## Check procedure
 
 For the next checkpoint:
