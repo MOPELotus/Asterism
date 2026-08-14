@@ -1,0 +1,278 @@
+use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
+use reqwest::Url;
+use sha2::{Digest, Sha256};
+
+use crate::{WellearnAtomicMutationKind, WellearnInventoryDocument};
+
+const REQUEST_DOMAIN: &[u8] = b"asterism.welearn.atomic-mutation-request.v1\0";
+const RESPONSE_DOMAIN: &[u8] = b"asterism.welearn.atomic-mutation-response.v1\0";
+const MAX_MUTATION_ORDINAL: u32 = 100_000;
+const MAX_MUTATION_FIELDS: usize = 16;
+const MAX_URL_BYTES: usize = 4_096;
+const MAX_FIELD_NAME_BYTES: usize = 64;
+const MAX_FIELD_VALUE_BYTES: usize = 1_024 * 1_024;
+
+/// Hashes one exact semantic `WELearn` mutation request without accepting a
+/// Cookie input. Field order remains part of the request identity.
+pub(crate) fn atomic_mutation_request_digest(
+    kind: WellearnAtomicMutationKind,
+    ordinal: u32,
+    endpoint: &Url,
+    referer: &Url,
+    fields: &[(&str, &str)],
+) -> ProviderResult<[u8; 32]> {
+    validate_request_identity(ordinal, endpoint, referer, fields)?;
+    let mut hash = Sha256::new();
+    hash.update(REQUEST_DOMAIN);
+    hash.update(ordinal.to_be_bytes());
+    hash_component(&mut hash, kind.as_str().as_bytes())?;
+    hash_component(&mut hash, endpoint.as_str().as_bytes())?;
+    hash_component(&mut hash, referer.as_str().as_bytes())?;
+    hash.update(
+        u32::try_from(fields.len())
+            .map_err(|_| invalid_digest_input())?
+            .to_be_bytes(),
+    );
+    for (name, value) in fields {
+        hash_component(&mut hash, name.as_bytes())?;
+        hash_component(&mut hash, value.as_bytes())?;
+    }
+    Ok(hash.finalize().into())
+}
+
+/// Hashes the exact bounded response text returned by the native reader.
+pub(crate) fn atomic_mutation_response_digest(
+    document: &WellearnInventoryDocument,
+) -> ProviderResult<[u8; 32]> {
+    let mut hash = Sha256::new();
+    hash.update(RESPONSE_DOMAIN);
+    hash_component(&mut hash, document.as_str().as_bytes())?;
+    Ok(hash.finalize().into())
+}
+
+fn validate_request_identity(
+    ordinal: u32,
+    endpoint: &Url,
+    referer: &Url,
+    fields: &[(&str, &str)],
+) -> ProviderResult<()> {
+    if !(1..=MAX_MUTATION_ORDINAL).contains(&ordinal)
+        || fields.is_empty()
+        || fields.len() > MAX_MUTATION_FIELDS
+        || !valid_https_url(endpoint)
+        || !valid_https_url(referer)
+    {
+        return Err(invalid_digest_input());
+    }
+    let mut total_field_bytes = 0_usize;
+    for (name, value) in fields {
+        total_field_bytes = total_field_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or_else(invalid_digest_input)?;
+        if name.is_empty()
+            || name.len() > MAX_FIELD_NAME_BYTES
+            || !name.is_ascii()
+            || name.chars().any(char::is_control)
+            || name.eq_ignore_ascii_case("cookie")
+            || value.len() > MAX_FIELD_VALUE_BYTES
+            || total_field_bytes > MAX_FIELD_VALUE_BYTES
+        {
+            return Err(invalid_digest_input());
+        }
+    }
+    Ok(())
+}
+
+fn valid_https_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.as_str().len() <= MAX_URL_BYTES
+        && url.fragment().is_none()
+}
+
+fn hash_component(hash: &mut Sha256, value: &[u8]) -> ProviderResult<()> {
+    hash.update(
+        u64::try_from(value.len())
+            .map_err(|_| invalid_digest_input())?
+            .to_be_bytes(),
+    );
+    hash.update(value);
+    Ok(())
+}
+
+fn invalid_digest_input() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn atomic mutation digest input is invalid",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WellearnAtomicMutationIssue;
+
+    #[test]
+    fn request_digest_is_stable_and_binds_every_ordered_component() {
+        let endpoint = url("https://welearn.sflep.com/Ajax/SCO.aspx?uid=7001");
+        let referer = url("https://welearn.sflep.com/student/StudyCourse.aspx");
+        let fields = [("action", "startsco160928"), ("cid", "1001")];
+        let baseline = atomic_mutation_request_digest(
+            WellearnAtomicMutationKind::Start,
+            1,
+            &endpoint,
+            &referer,
+            &fields,
+        )
+        .unwrap();
+        assert_eq!(
+            baseline,
+            atomic_mutation_request_digest(
+                WellearnAtomicMutationKind::Start,
+                1,
+                &endpoint,
+                &referer,
+                &fields,
+            )
+            .unwrap()
+        );
+
+        let variants = [
+            atomic_mutation_request_digest(
+                WellearnAtomicMutationKind::CounterKeep,
+                1,
+                &endpoint,
+                &referer,
+                &fields,
+            )
+            .unwrap(),
+            atomic_mutation_request_digest(
+                WellearnAtomicMutationKind::Start,
+                2,
+                &endpoint,
+                &referer,
+                &fields,
+            )
+            .unwrap(),
+            atomic_mutation_request_digest(
+                WellearnAtomicMutationKind::Start,
+                1,
+                &url("https://welearn.sflep.com/Ajax/SCO.aspx"),
+                &referer,
+                &fields,
+            )
+            .unwrap(),
+            atomic_mutation_request_digest(
+                WellearnAtomicMutationKind::Start,
+                1,
+                &endpoint,
+                &url("https://welearn.sflep.com/student/StudyCourse.aspx?cid=1001"),
+                &fields,
+            )
+            .unwrap(),
+            atomic_mutation_request_digest(
+                WellearnAtomicMutationKind::Start,
+                1,
+                &endpoint,
+                &referer,
+                &[("cid", "1001"), ("action", "startsco160928")],
+            )
+            .unwrap(),
+        ];
+        assert!(variants.into_iter().all(|digest| digest != baseline));
+    }
+
+    #[test]
+    fn length_prefixes_prevent_field_boundary_aliases() {
+        let endpoint = url("https://welearn.sflep.com/Ajax/SCO.aspx");
+        let referer = url("https://welearn.sflep.com/student/StudyCourse.aspx");
+        let left = atomic_mutation_request_digest(
+            WellearnAtomicMutationKind::Set,
+            2,
+            &endpoint,
+            &referer,
+            &[("ab", "c")],
+        )
+        .unwrap();
+        let right = atomic_mutation_request_digest(
+            WellearnAtomicMutationKind::Set,
+            2,
+            &endpoint,
+            &referer,
+            &[("a", "bc")],
+        )
+        .unwrap();
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn cookie_cannot_enter_the_request_digest_contract() {
+        let endpoint = url("https://welearn.sflep.com/Ajax/SCO.aspx");
+        let referer = url("https://welearn.sflep.com/student/StudyCourse.aspx");
+        assert!(
+            atomic_mutation_request_digest(
+                WellearnAtomicMutationKind::Start,
+                1,
+                &endpoint,
+                &referer,
+                &[("Cookie", "secret-session")],
+            )
+            .is_err()
+        );
+
+        let digest = atomic_mutation_request_digest(
+            WellearnAtomicMutationKind::Start,
+            1,
+            &endpoint,
+            &referer,
+            &[("action", "startsco160928")],
+        )
+        .unwrap();
+        let issue =
+            WellearnAtomicMutationIssue::try_new(1, WellearnAtomicMutationKind::Start, digest)
+                .unwrap();
+        let debug = format!("{issue:?}");
+        assert!(!debug.contains(endpoint.as_str()));
+        assert!(!debug.contains("startsco160928"));
+        assert!(!debug.contains("secret-session"));
+        assert!(debug.contains("[HASHED]"));
+    }
+
+    #[test]
+    fn response_digest_is_domain_separated_and_binds_bounded_original_text() {
+        let first = WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned()).unwrap();
+        let second = WellearnInventoryDocument::try_new(r#"{"ret":1}"#.to_owned()).unwrap();
+        let first_digest = atomic_mutation_response_digest(&first).unwrap();
+        assert_eq!(
+            first_digest,
+            atomic_mutation_response_digest(&first).unwrap()
+        );
+        assert_ne!(
+            first_digest,
+            atomic_mutation_response_digest(&second).unwrap()
+        );
+
+        let endpoint = url("https://welearn.sflep.com/Ajax/SCO.aspx");
+        let referer = url("https://welearn.sflep.com/student/StudyCourse.aspx");
+        let request_digest = atomic_mutation_request_digest(
+            WellearnAtomicMutationKind::Start,
+            1,
+            &endpoint,
+            &referer,
+            &[("action", "startsco160928")],
+        )
+        .unwrap();
+        assert_ne!(first_digest, request_digest);
+        assert_eq!(
+            format!("{first:?}"),
+            "WellearnInventoryDocument([REDACTED])"
+        );
+    }
+
+    fn url(value: &str) -> Url {
+        Url::parse(value).unwrap()
+    }
+}

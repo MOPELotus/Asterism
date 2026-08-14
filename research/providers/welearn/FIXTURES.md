@@ -228,6 +228,12 @@ only structural field names, response codes and bounded placeholder shapes.
   explicit false receipts representable, and prove Debug renders digest bytes
   only as `[HASHED]`. This fixture boundary imports no Storage/Core types and is
   not yet connected to native request sending.
+- Atomic digest tests prove deterministic domain-separated request/response
+  hashes, bind kind/ordinal/endpoint/Referer and ordered form fields, distinguish
+  ambiguous concatenation boundaries and reordered forms, reject Cookie form
+  input, and show issue/document Debug cannot expose route, action, session or
+  response text. Response hashing accepts only the bounded native document
+  wrapper. Native sink wiring remains intentionally absent at this checkpoint.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.

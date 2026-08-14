@@ -479,8 +479,17 @@ ordinal, response digest and explicit acceptance. Ordinals are bounded through
 their bytes. `WellearnAtomicMutationSink` owns asynchronous issue and receipt
 calls while Core's Execution/attempt/lease/worker facts stay hidden in its
 adapter. A duplicate issue must fail closed rather than return success to a new
-native session. The value/trait contract is implemented, but transport wiring
-and canonical request/response digest generation remain the next checkpoint.
+native session.
+
+Canonical request identity is also Provider-owned. The v1 request hash uses a
+separate domain and length-prefixes the kind, ordinal, exact endpoint, exact
+Referer, field count and every ordered form name/value, so concatenation
+boundaries and reordered forms cannot alias. URLs, field count/names and total
+form bytes are bounded. Cookie has no input slot and a Cookie-named form field
+is rejected. The response hash uses another domain over the exact bounded
+native response text. Neither helper stores or renders those inputs. Digest
+generation and sink values are implemented; connecting issue-before-send and
+receipt-before-next-ordinal inside native transport remains the next checkpoint.
 
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or

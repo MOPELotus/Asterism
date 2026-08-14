@@ -181,6 +181,15 @@ receipt carries the same ordinal, response digest and explicit acceptance.
 These values are validated and Debug-redacted, but the native transport does
 not consume the sink yet, so durable issue-before-send is not claimed.
 
+A crate-private canonical digest boundary is ready for that wiring. Request
+identity domain-separates and length-prefixes kind, ordinal, the exact endpoint
+URL, exact Referer and every ordered form name/value; changing order or any
+component changes the digest. The API has no Cookie parameter and rejects a
+Cookie-named form field. Response identity uses a separate domain over the
+bounded native document's exact text. Inputs and aggregate form bytes are
+bounded and only the resulting hash can enter issue/receipt values. The helper
+is offline-tested but not yet called by native transport.
+
 One donor-level orchestration contract remains a shared Core gap. The Provider
 now freezes bounded Unit identity, all/explicit selection, explicit order,
 selected-but-empty Units, donor flow, SCO membership and target facts. Core/API
