@@ -126,10 +126,14 @@ checkpoint, not a Provider completion boundary. It:
     Development entry that still requires the configured SecretStore;
 20. fresh-rediscovers the exact Group before issuing an account/Task-isolated,
     two-origin non-headless BrowserSessionSpec and advertises BrowserBridge on
-    every normalized Group; a separate versioned residence plan freezes exact
+    every normalized Group; the spec explicitly requests no browser-state read
+    sources. A separate versioned residence plan freezes exact
     donor selectors, discovery families, action/time/cardinality ceilings,
-    master-resolved settings and nonce/frame/origin security, while shared
-    session injection/action dispatch remains the executor gap;
+    master-resolved settings and nonce/frame/origin security. A consuming
+    helper projection now validates Core secret bytes/digest plus actual
+    session/origin/frame/sequence and exposes only seven typed audited actions
+    with a read-only compile-time DOM profile; shared action dispatch remains
+    the executor gap;
 21. makes no live compatibility claim until real-account validation, while
     continuing BrowserBridge DurationReport, shared discussion integration,
     upload and external AnswerResolve integration rather than treating this

@@ -35,6 +35,7 @@ const MAX_BROWSER_RESULT_LABEL_BYTES: usize = 512;
 const MAX_BROWSER_MESSAGE_BYTES: usize = 1_024 * 1_024;
 const MAX_BROWSER_COMMAND_BYTES: usize = 64 * 1_024;
 const MAX_BROWSER_BINDING_BYTES: usize = 256;
+const MAX_HELPER_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_BROWSER_MENU_LABEL_BYTES: usize = 512;
 const BROWSER_MENU_HANDLE_PREFIX: &str = "uai-menu-v1-";
 const BROWSER_PAGE_HANDLE_PREFIX: &str = "uai-page-v1-";
@@ -61,6 +62,7 @@ const POPUP_SELECTORS: [&str; 5] = [
     "button.ant-btn.ant-btn-default.ipublish-modal-footer-ok",
 ];
 const VIDEO_SELECTORS: [&str; 2] = ["video.vjs-tech", "video"];
+const HELPER_ALLOWED_ORIGINS: [&str; 2] = [UCONTENT_ORIGIN, IPUB_ORIGIN];
 
 /// Stable Core `BrowserBridge` exchange type for one typed UAI command.
 pub const UAI_BROWSER_COMMAND_TYPE: &str = "uai.browser.command";
@@ -1201,6 +1203,310 @@ pub enum UaiBrowserCommand {
     Ping,
 }
 
+/// Read-only helper view of the audited UAI DOM profile.
+///
+/// The zero-sized value exposes only Provider-compiled selectors, discovery
+/// families and bounds. No command payload can add or replace any of them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UaiBrowserHelperDomProfile;
+
+impl UaiBrowserHelperDomProfile {
+    pub const fn wire_revision(self) -> u32 {
+        UAI_BROWSER_PLAN_VERSION
+    }
+
+    pub const fn allowed_origins(self) -> &'static [&'static str] {
+        &HELPER_ALLOWED_ORIGINS
+    }
+
+    pub const fn discovery_strategies(self) -> [UaiMenuDiscoveryStrategy; 4] {
+        [
+            UaiMenuDiscoveryStrategy::LegacySlider,
+            UaiMenuDiscoveryStrategy::AntTree,
+            UaiMenuDiscoveryStrategy::AriaMenu,
+            UaiMenuDiscoveryStrategy::U3Menu,
+        ]
+    }
+
+    pub const fn iframe_selectors(self) -> &'static [&'static str] {
+        &IFRAME_SELECTORS
+    }
+
+    pub const fn tab_selectors(self) -> &'static [&'static str] {
+        &TAB_SELECTORS
+    }
+
+    pub const fn task_selectors(self) -> &'static [&'static str] {
+        &TASK_SELECTORS
+    }
+
+    pub const fn popup_selectors(self) -> &'static [&'static str] {
+        &POPUP_SELECTORS
+    }
+
+    pub const fn video_selectors(self) -> &'static [&'static str] {
+        &VIDEO_SELECTORS
+    }
+
+    pub const fn max_discovered_micros(self) -> u32 {
+        MAX_DISCOVERED_MICROS
+    }
+
+    pub const fn max_tabs_per_micro(self) -> u32 {
+        MAX_TABS_PER_MICRO
+    }
+
+    pub const fn max_tasks_per_tab(self) -> u32 {
+        MAX_TASKS_PER_TAB
+    }
+
+    pub const fn max_popup_clicks_per_stage(self) -> u32 {
+        MAX_POPUP_CLICKS_PER_STAGE
+    }
+
+    pub const fn dom_poll_millis(self) -> u64 {
+        MAX_DOM_POLL_MILLIS
+    }
+
+    pub const fn iframe_scan_timeout_millis(self) -> u64 {
+        IFRAME_SCAN_TIMEOUT_MILLIS
+    }
+
+    pub const fn iframe_scan_retry_millis(self) -> u64 {
+        IFRAME_SCAN_RETRY_MILLIS
+    }
+
+    pub const fn max_iframe_scan_retries(self) -> u32 {
+        MAX_IFRAME_SCAN_RETRIES
+    }
+
+    pub const fn max_video_seconds(self) -> u64 {
+        MAX_VIDEO_SECONDS
+    }
+
+    pub const fn message_security(self) -> UaiBrowserMessageSecurity {
+        UaiBrowserMessageSecurity::SessionNonceFrameAndExactOrigin
+    }
+}
+
+/// Exact audited helper action selected from one validated Core dispatch.
+#[derive(Clone, Eq, PartialEq)]
+pub enum UaiBrowserHelperAction {
+    ScanMenu,
+    ClickMenu {
+        handle: String,
+    },
+    ScanPage {
+        scope: UaiBrowserPageScope,
+    },
+    ClickTab {
+        handle: String,
+    },
+    ClickTask {
+        handle: String,
+    },
+    Residence {
+        task_handle: String,
+        seconds: u64,
+        play_video: bool,
+    },
+    Ping,
+}
+
+impl fmt::Debug for UaiBrowserHelperAction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ScanMenu => formatter.write_str("ScanMenu"),
+            Self::ClickMenu { .. } => formatter
+                .debug_struct("ClickMenu")
+                .field("handle", &"[REDACTED]")
+                .finish(),
+            Self::ScanPage { scope } => formatter
+                .debug_struct("ScanPage")
+                .field("scope", scope)
+                .finish(),
+            Self::ClickTab { .. } => formatter
+                .debug_struct("ClickTab")
+                .field("handle", &"[REDACTED]")
+                .finish(),
+            Self::ClickTask { .. } => formatter
+                .debug_struct("ClickTask")
+                .field("handle", &"[REDACTED]")
+                .finish(),
+            Self::Residence {
+                seconds,
+                play_video,
+                ..
+            } => formatter
+                .debug_struct("Residence")
+                .field("task_handle", &"[REDACTED]")
+                .field("seconds", seconds)
+                .field("play_video", play_video)
+                .finish(),
+            Self::Ping => formatter.write_str("Ping"),
+        }
+    }
+}
+
+/// Helper-safe projection of one exact Core-dispatched UAI command.
+///
+/// Session nonce is verified and then discarded. Selector/script authority is
+/// never read from the command; the helper receives only the typed action and
+/// the fixed [`UaiBrowserHelperDomProfile`].
+#[derive(Eq, PartialEq)]
+pub struct UaiBrowserHelperCommandProjection {
+    session_id: BrowserBridgeSessionId,
+    origin: String,
+    frame_id: String,
+    remote_task_id: String,
+    sequence: u32,
+    action: UaiBrowserHelperAction,
+}
+
+impl UaiBrowserHelperCommandProjection {
+    /// Consumes Core dispatch bytes and validates every helper-side authority.
+    ///
+    /// No DOM operation is performed by this function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty/oversized bytes, digest or strict schema drift, a foreign
+    /// wire revision/session/origin/frame/sequence, unsafe Task/handle values,
+    /// unbounded residence actions and commands outside the audited helper
+    /// action set.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "digest, Core session and observed browser transport facts are independent dispatch authorities"
+    )]
+    fn decode_dispatch(
+        value: SecretValue,
+        expected_digest: [u8; 32],
+        expected_session_id: BrowserBridgeSessionId,
+        actual_origin: &str,
+        actual_frame_id: &str,
+        expected_sequence: u64,
+    ) -> ProviderResult<Self> {
+        let bytes = value.expose_secret();
+        if bytes.is_empty() || bytes.len() > MAX_BROWSER_COMMAND_BYTES {
+            return Err(invalid_helper_dispatch(
+                "UAI helper command artifact is empty or oversized",
+            ));
+        }
+        if <[u8; 32]>::from(Sha256::digest(bytes)) != expected_digest {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI helper command artifact digest changed",
+            ));
+        }
+        let expected_sequence = u32::try_from(expected_sequence).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI helper command sequence exceeds the Provider wire boundary",
+            )
+        })?;
+        let raw: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI helper command artifact schema changed",
+            )
+        })?;
+        validate_helper_command_json_schema(&raw)?;
+        let envelope: UaiBrowserCommandEnvelope = serde_json::from_slice(bytes).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI helper command artifact schema changed",
+            )
+        })?;
+        drop(value);
+        validate_helper_dispatch_binding(
+            &envelope,
+            expected_session_id,
+            actual_origin,
+            actual_frame_id,
+            expected_sequence,
+        )?;
+        let action = helper_action_from_command(&envelope.command)?;
+        Ok(Self {
+            session_id: expected_session_id,
+            origin: actual_origin.to_owned(),
+            frame_id: actual_frame_id.to_owned(),
+            remote_task_id: envelope.remote_task_id.clone(),
+            sequence: expected_sequence,
+            action,
+        })
+    }
+
+    pub const fn session_id(&self) -> BrowserBridgeSessionId {
+        self.session_id
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub fn frame_id(&self) -> &str {
+        &self.frame_id
+    }
+
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub const fn sequence(&self) -> u32 {
+        self.sequence
+    }
+
+    pub const fn action(&self) -> &UaiBrowserHelperAction {
+        &self.action
+    }
+
+    pub const fn dom_profile(&self) -> UaiBrowserHelperDomProfile {
+        UaiBrowserHelperDomProfile
+    }
+}
+
+/// Authenticates and projects one Core-dispatched opaque UAI DOM command.
+///
+/// The actual origin and frame are trusted transport observations. This
+/// function consumes the secret artifact, returns only a typed safe view and
+/// never performs a DOM operation.
+///
+/// # Errors
+///
+/// Returns a typed error for size, digest, strict-schema, wire revision,
+/// session, origin, frame, sequence, Task, handle or action-bound drift.
+pub fn project_browser_helper_command(
+    value: SecretValue,
+    expected_digest: [u8; 32],
+    expected_session_id: BrowserBridgeSessionId,
+    actual_origin: &str,
+    actual_frame_id: &str,
+    expected_sequence: u64,
+) -> ProviderResult<UaiBrowserHelperCommandProjection> {
+    UaiBrowserHelperCommandProjection::decode_dispatch(
+        value,
+        expected_digest,
+        expected_session_id,
+        actual_origin,
+        actual_frame_id,
+        expected_sequence,
+    )
+}
+
+impl fmt::Debug for UaiBrowserHelperCommandProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperCommandProjection")
+            .field("session_id", &self.session_id)
+            .field("origin", &self.origin)
+            .field("frame_id", &"[REDACTED]")
+            .field("remote_task_id", &"[REDACTED]")
+            .field("sequence", &self.sequence)
+            .field("action", &self.action)
+            .finish()
+    }
+}
+
 #[derive(Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UaiBrowserCommandEnvelope {
@@ -1665,6 +1971,159 @@ impl UaiBrowserCommandEnvelope {
         }
         Ok(())
     }
+}
+
+fn validate_helper_command_json_schema(value: &serde_json::Value) -> ProviderResult<()> {
+    let object = value.as_object().filter(|object| {
+        has_exact_json_keys(
+            object,
+            &[
+                "version",
+                "session_nonce",
+                "origin",
+                "frame_id",
+                "remote_task_id",
+                "sequence",
+                "command",
+            ],
+        )
+    });
+    let command = object
+        .and_then(|object| object.get("command"))
+        .and_then(serde_json::Value::as_object);
+    let valid = command
+        .and_then(|command| {
+            command
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .map(|kind| (command, kind))
+        })
+        .is_some_and(|(command, kind)| match kind {
+            "scan_menu" | "ping" => has_exact_json_keys(command, &["kind"]),
+            "click_menu" | "click_tab" | "click_task" => {
+                has_exact_json_keys(command, &["kind", "handle"])
+            }
+            "scan_page" => has_exact_json_keys(command, &["kind", "scope"]),
+            "residence_target" => {
+                has_exact_json_keys(command, &["kind", "task_handle", "seconds", "play_video"])
+            }
+            "residence_control" => {
+                has_exact_json_keys(command, &["kind", "task_handle", "seconds", "control"])
+                    && command
+                        .get("control")
+                        .is_some_and(validate_helper_control_json_schema)
+            }
+            _ => false,
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "UAI helper command artifact contains unknown or missing fields",
+        ))
+    }
+}
+
+fn validate_helper_control_json_schema(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    match object.get("kind").and_then(serde_json::Value::as_str) {
+        Some("pause" | "resume") => has_exact_json_keys(object, &["kind"]),
+        Some("restart") => has_exact_json_keys(object, &["kind", "start_micro_ordinal"]),
+        _ => false,
+    }
+}
+
+fn has_exact_json_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    expected: &[&str],
+) -> bool {
+    object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
+}
+
+fn validate_helper_dispatch_binding(
+    envelope: &UaiBrowserCommandEnvelope,
+    expected_session_id: BrowserBridgeSessionId,
+    actual_origin: &str,
+    actual_frame_id: &str,
+    expected_sequence: u32,
+) -> ProviderResult<()> {
+    let expected_nonce = expected_session_id.to_string();
+    let valid_remote_task = envelope.remote_task_id.starts_with("group:")
+        && envelope.remote_task_id.len() <= MAX_HELPER_REMOTE_TASK_ID_BYTES
+        && envelope.remote_task_id.is_ascii()
+        && envelope
+            .remote_task_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'));
+    let valid = envelope.version == UAI_BROWSER_PLAN_VERSION
+        && expected_sequence != 0
+        && envelope.sequence == expected_sequence
+        && envelope.session_nonce == expected_nonce
+        && HELPER_ALLOWED_ORIGINS.contains(&actual_origin)
+        && envelope.origin == actual_origin
+        && is_browser_binding_value(actual_frame_id)
+        && envelope.frame_id == actual_frame_id
+        && valid_remote_task;
+    if valid {
+        Ok(())
+    } else {
+        Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI helper command artifact is stale or foreign to the actual browser session",
+        ))
+    }
+}
+
+fn helper_action_from_command(
+    command: &UaiBrowserCommand,
+) -> ProviderResult<UaiBrowserHelperAction> {
+    match command {
+        UaiBrowserCommand::ScanMenu => Ok(UaiBrowserHelperAction::ScanMenu),
+        UaiBrowserCommand::ClickMenu { handle } if is_browser_menu_handle(handle) => {
+            Ok(UaiBrowserHelperAction::ClickMenu {
+                handle: handle.clone(),
+            })
+        }
+        UaiBrowserCommand::ScanPage { scope } => {
+            Ok(UaiBrowserHelperAction::ScanPage { scope: *scope })
+        }
+        UaiBrowserCommand::ClickTab { handle } if is_browser_page_handle(handle) => {
+            Ok(UaiBrowserHelperAction::ClickTab {
+                handle: handle.clone(),
+            })
+        }
+        UaiBrowserCommand::ClickTask { handle } if is_browser_page_handle(handle) => {
+            Ok(UaiBrowserHelperAction::ClickTask {
+                handle: handle.clone(),
+            })
+        }
+        UaiBrowserCommand::ResidenceTarget {
+            task_handle,
+            seconds,
+            play_video,
+        } if is_browser_page_handle(task_handle) && (1..=28_800).contains(seconds) => {
+            Ok(UaiBrowserHelperAction::Residence {
+                task_handle: task_handle.clone(),
+                seconds: *seconds,
+                play_video: *play_video,
+            })
+        }
+        UaiBrowserCommand::Ping => Ok(UaiBrowserHelperAction::Ping),
+        UaiBrowserCommand::ClickMenu { .. }
+        | UaiBrowserCommand::ClickTab { .. }
+        | UaiBrowserCommand::ClickTask { .. }
+        | UaiBrowserCommand::ResidenceTarget { .. }
+        | UaiBrowserCommand::ResidenceControl { .. } => Err(invalid_helper_dispatch(
+            "UAI helper command action is invalid, unbounded or not audited for DOM dispatch",
+        )),
+    }
+}
+
+fn invalid_helper_dispatch(message: &'static str) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::InvalidResponse, message)
 }
 
 impl fmt::Debug for UaiBrowserCommandEnvelope {
@@ -2915,6 +3374,7 @@ impl BrowserBridgeCapability for UaiBrowserBridge {
             start_url: browser_start_url_from_detail(&detail)?,
             isolation_key: isolation_key(context, remote_task_id),
             allowed_origins: vec![UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()],
+            read_sources: vec![],
             // The audited donor depends on a real rendered page, DOM events,
             // iframe messaging and media state. Do not silently substitute a
             // headless-only execution mode before that boundary is verified.
@@ -3130,6 +3590,7 @@ mod tests {
             first.allowed_origins,
             [UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()]
         );
+        assert!(first.read_sources.is_empty());
         assert!(!first.headless);
         assert!(
             !first
@@ -3588,6 +4049,350 @@ mod tests {
                 UCONTENT_ORIGIN,
                 "frame-1",
                 9,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one matrix proves all seven audited helper actions and every fixed DOM profile fact"
+    )]
+    fn helper_projection_distinguishes_only_audited_actions_and_fixed_dom_profile() {
+        let plan = residence_plan(true);
+        let session_id = BrowserBridgeSessionId::new();
+        let nonce = session_id.to_string();
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, &nonce, UCONTENT_ORIGIN, "frame-helper")
+                .unwrap();
+        let menu = UaiBrowserMenuEntry::try_new(
+            &plan,
+            &binding,
+            0,
+            plan.target.unit.clone(),
+            plan.target.section.clone().unwrap(),
+            plan.target.micro.clone(),
+        )
+        .unwrap();
+        let menu = plan.select_target_menu_entry(&binding, &[menu]).unwrap();
+        let tab = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Tab,
+            0,
+            "Reading".to_owned(),
+            true,
+        )
+        .unwrap();
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            plan.target.task.clone(),
+            true,
+        )
+        .unwrap();
+        let task = plan
+            .select_target_task_entry(&binding, std::slice::from_ref(&task))
+            .unwrap();
+        let commands = [
+            (
+                UaiBrowserCommandEnvelope::scan_menu(&plan, &binding, 1).unwrap(),
+                UaiBrowserHelperAction::ScanMenu,
+            ),
+            (
+                UaiBrowserCommandEnvelope::click_menu(&plan, &binding, 2, &menu).unwrap(),
+                UaiBrowserHelperAction::ClickMenu {
+                    handle: menu.entry().handle.clone(),
+                },
+            ),
+            (
+                UaiBrowserCommandEnvelope::scan_page(&plan, &binding, 3, UaiBrowserPageScope::Tab)
+                    .unwrap(),
+                UaiBrowserHelperAction::ScanPage {
+                    scope: UaiBrowserPageScope::Tab,
+                },
+            ),
+            (
+                UaiBrowserCommandEnvelope::click_tab(&plan, &binding, 4, &tab).unwrap(),
+                UaiBrowserHelperAction::ClickTab {
+                    handle: tab.handle.clone(),
+                },
+            ),
+            (
+                UaiBrowserCommandEnvelope::click_task(&plan, &binding, 5, &task).unwrap(),
+                UaiBrowserHelperAction::ClickTask {
+                    handle: task.entry().handle.clone(),
+                },
+            ),
+            (
+                UaiBrowserCommandEnvelope::residence_target(&plan, &binding, 6, &task).unwrap(),
+                UaiBrowserHelperAction::Residence {
+                    task_handle: task.entry().handle.clone(),
+                    seconds: 1_200,
+                    play_video: true,
+                },
+            ),
+            (
+                UaiBrowserCommandEnvelope::ping(&plan, &binding, 7).unwrap(),
+                UaiBrowserHelperAction::Ping,
+            ),
+        ];
+
+        for (command, expected_action) in commands {
+            let artifact = command.encode_artifact(&plan).unwrap();
+            let digest = artifact.digest();
+            let projected = project_browser_helper_command(
+                artifact.into_secret_value(),
+                digest,
+                session_id,
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                u64::from(command.sequence),
+            )
+            .unwrap();
+            assert_eq!(projected.session_id(), session_id);
+            assert_eq!(projected.origin(), UCONTENT_ORIGIN);
+            assert_eq!(projected.frame_id(), "frame-helper");
+            assert_eq!(projected.remote_task_id(), plan.target_remote_task_id);
+            assert_eq!(projected.action(), &expected_action);
+            let debug = format!("{projected:?}");
+            assert!(!debug.contains("frame-helper"));
+            assert!(!debug.contains(&plan.target_remote_task_id));
+            if let UaiBrowserHelperAction::ClickMenu { handle }
+            | UaiBrowserHelperAction::ClickTab { handle }
+            | UaiBrowserHelperAction::ClickTask { handle } = &expected_action
+            {
+                assert!(!debug.contains(handle));
+            }
+        }
+
+        let profile = UaiBrowserHelperDomProfile;
+        assert_eq!(profile.wire_revision(), 2);
+        assert_eq!(profile.allowed_origins(), HELPER_ALLOWED_ORIGINS);
+        assert_eq!(
+            profile.discovery_strategies(),
+            [
+                UaiMenuDiscoveryStrategy::LegacySlider,
+                UaiMenuDiscoveryStrategy::AntTree,
+                UaiMenuDiscoveryStrategy::AriaMenu,
+                UaiMenuDiscoveryStrategy::U3Menu,
+            ]
+        );
+        assert_eq!(profile.iframe_selectors(), IFRAME_SELECTORS);
+        assert_eq!(profile.tab_selectors(), TAB_SELECTORS);
+        assert_eq!(profile.task_selectors(), TASK_SELECTORS);
+        assert_eq!(profile.popup_selectors(), POPUP_SELECTORS);
+        assert_eq!(profile.video_selectors(), VIDEO_SELECTORS);
+        assert_eq!(profile.max_discovered_micros(), 2_048);
+        assert_eq!(profile.max_tabs_per_micro(), 64);
+        assert_eq!(profile.max_tasks_per_tab(), 128);
+        assert_eq!(profile.max_popup_clicks_per_stage(), 16);
+        assert_eq!(profile.dom_poll_millis(), 3_000);
+        assert_eq!(profile.iframe_scan_timeout_millis(), 30_000);
+        assert_eq!(profile.iframe_scan_retry_millis(), 1_500);
+        assert_eq!(profile.max_iframe_scan_retries(), 20);
+        assert_eq!(profile.max_video_seconds(), 1_800);
+        assert_eq!(
+            profile.message_security(),
+            UaiBrowserMessageSecurity::SessionNonceFrameAndExactOrigin
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one negative matrix keeps every independent helper dispatch authority visible"
+    )]
+    fn helper_projection_rejects_echo_authority_selectors_scripts_and_controls() {
+        let plan = residence_plan(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let nonce = session_id.to_string();
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, &nonce, UCONTENT_ORIGIN, "frame-helper")
+                .unwrap();
+        let ping = UaiBrowserCommandEnvelope::ping(&plan, &binding, 1).unwrap();
+
+        let artifact = ping.encode_artifact(&plan).unwrap();
+        assert!(
+            project_browser_helper_command(
+                artifact.into_secret_value(),
+                [9; 32],
+                session_id,
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                1,
+            )
+            .is_err()
+        );
+        for (foreign_session, origin, frame, sequence) in [
+            (
+                BrowserBridgeSessionId::new(),
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                1,
+            ),
+            (session_id, IPUB_ORIGIN, "frame-helper", 1),
+            (session_id, UCONTENT_ORIGIN, "frame-foreign", 1),
+            (session_id, UCONTENT_ORIGIN, "frame-helper", 2),
+        ] {
+            let artifact = ping.encode_artifact(&plan).unwrap();
+            let digest = artifact.digest();
+            assert!(
+                UaiBrowserHelperCommandProjection::decode_dispatch(
+                    artifact.into_secret_value(),
+                    digest,
+                    foreign_session,
+                    origin,
+                    frame,
+                    sequence,
+                )
+                .is_err()
+            );
+        }
+        let artifact = ping.encode_artifact(&plan).unwrap();
+        let digest = artifact.digest();
+        assert!(
+            UaiBrowserHelperCommandProjection::decode_dispatch(
+                artifact.into_secret_value(),
+                digest,
+                session_id,
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                u64::MAX,
+            )
+            .is_err()
+        );
+
+        let artifact = ping.encode_artifact(&plan).unwrap();
+        let mut smuggled: serde_json::Value =
+            serde_json::from_slice(artifact.into_secret_value().expose_secret()).unwrap();
+        smuggled["command"]["selector"] = serde_json::json!("body *");
+        smuggled["command"]["script"] = serde_json::json!("document.cookie");
+        let smuggled = SecretValue::new(serde_json::to_vec(&smuggled).unwrap());
+        let digest = Sha256::digest(smuggled.expose_secret()).into();
+        assert!(
+            UaiBrowserHelperCommandProjection::decode_dispatch(
+                smuggled,
+                digest,
+                session_id,
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                1,
+            )
+            .is_err()
+        );
+
+        let artifact = ping.encode_artifact(&plan).unwrap();
+        let mut wrong_revision: serde_json::Value =
+            serde_json::from_slice(artifact.into_secret_value().expose_secret()).unwrap();
+        wrong_revision["version"] = serde_json::json!(1);
+        let wrong_revision = SecretValue::new(serde_json::to_vec(&wrong_revision).unwrap());
+        let digest = Sha256::digest(wrong_revision.expose_secret()).into();
+        assert!(
+            UaiBrowserHelperCommandProjection::decode_dispatch(
+                wrong_revision,
+                digest,
+                session_id,
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                1,
+            )
+            .is_err()
+        );
+
+        let tab = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Tab,
+            0,
+            "Reading".to_owned(),
+            true,
+        )
+        .unwrap();
+        let click = UaiBrowserCommandEnvelope::click_tab(&plan, &binding, 2, &tab).unwrap();
+        let artifact = click.encode_artifact(&plan).unwrap();
+        let mut unsafe_handle: serde_json::Value =
+            serde_json::from_slice(artifact.into_secret_value().expose_secret()).unwrap();
+        unsafe_handle["command"]["handle"] = serde_json::json!("#content > script");
+        let unsafe_handle = SecretValue::new(serde_json::to_vec(&unsafe_handle).unwrap());
+        let digest = Sha256::digest(unsafe_handle.expose_secret()).into();
+        assert!(
+            UaiBrowserHelperCommandProjection::decode_dispatch(
+                unsafe_handle,
+                digest,
+                session_id,
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                2,
+            )
+            .is_err()
+        );
+
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            plan.target.task.clone(),
+            true,
+        )
+        .unwrap();
+        let task = plan
+            .select_target_task_entry(&binding, std::slice::from_ref(&task))
+            .unwrap();
+        let residence =
+            UaiBrowserCommandEnvelope::residence_target(&plan, &binding, 3, &task).unwrap();
+        let artifact = residence.encode_artifact(&plan).unwrap();
+        let mut unbounded: serde_json::Value =
+            serde_json::from_slice(artifact.into_secret_value().expose_secret()).unwrap();
+        unbounded["command"]["seconds"] = serde_json::json!(28_801);
+        let unbounded = SecretValue::new(serde_json::to_vec(&unbounded).unwrap());
+        let digest = Sha256::digest(unbounded.expose_secret()).into();
+        assert!(
+            UaiBrowserHelperCommandProjection::decode_dispatch(
+                unbounded,
+                digest,
+                session_id,
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                3,
+            )
+            .is_err()
+        );
+        let control = UaiBrowserCommandEnvelope::residence_control(
+            &plan,
+            &binding,
+            4,
+            &task,
+            UaiBrowserResidenceControl::Pause,
+        )
+        .unwrap();
+        let artifact = control.encode_artifact(&plan).unwrap();
+        let digest = artifact.digest();
+        assert!(
+            UaiBrowserHelperCommandProjection::decode_dispatch(
+                artifact.into_secret_value(),
+                digest,
+                session_id,
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                4,
+            )
+            .is_err()
+        );
+        let oversized = SecretValue::new(vec![b'x'; MAX_BROWSER_COMMAND_BYTES + 1]);
+        let digest = Sha256::digest(oversized.expose_secret()).into();
+        assert!(
+            UaiBrowserHelperCommandProjection::decode_dispatch(
+                oversized,
+                digest,
+                session_id,
+                UCONTENT_ORIGIN,
+                "frame-helper",
+                4,
             )
             .is_err()
         );

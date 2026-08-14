@@ -376,7 +376,9 @@ exact credential-free HTTPS `browser_start_url_from_detail` result from that
 same fresh Group read; its `ucontent` origin must be one of those exact allowed
 origins, and its only query fact is the fresh public CourseResource `cid`.
 Cookie/JWT/openid material remains isolated session state and never enters the
-route. The Provider independently re-reads the exact Group detail before
+route. UAI requests no `BrowserBridgeReadSource`; this DOM handler checkpoint
+does not gain cookies, storage or any other browser-state read authority. The
+Provider independently re-reads the exact Group detail before
 creating a versioned private residence plan. Plan v2 binds
 the normalized Unit/Section/Micro/Task labels and freezes the four audited discovery families, exact current
 iframe/Tab/Task/popup/video selector sets, the exact iframe scan timing above,
@@ -410,6 +412,25 @@ sequence and target handle. The final observation permits at most that one Micro
 one target Task per processed Tab. Target navigation, action dispatch,
 pause/recovery, browser session injection and fresh DurationRead acceptance are
 an active shared Core integration item.
+
+The helper-side pre-dispatch boundary now consumes Core's zeroizing command
+`SecretValue` plus its digest, the exact `BrowserBridgeSessionId`, actual
+transport origin/frame and u64 sequence. Before returning any action it checks
+the 64 KiB bound and SHA-256, requires exact JSON keys for the envelope and
+each tagged action, enforces wire revision 2, derives the only accepted nonce
+from the Core session ID, compares actual allowlisted origin/frame and converts
+the sequence to a nonzero u32. It also bounds the Group identity, opaque
+menu/page handles and residence seconds. The secret owner is dropped before
+the safe projection is returned. The resulting enum distinguishes only
+`ScanMenu`, `ClickMenu`, scoped `ScanPage`, `ClickTab`, `ClickTask`,
+`Residence` and `Ping`. Its separate zero-sized read-only DOM profile exposes
+only the Provider-compiled discovery families, selector sets, cardinalities,
+popup/video ceilings and iframe/DOM timings. A command cannot provide a CSS
+selector or script; unknown `selector`/`script` fields fail strict schema
+validation even on unit actions. `ResidenceControl` remains outside this DOM
+handler until Core defines active-control cancellation/recovery ownership. This
+boundary decodes and projects only; it performs no DOM operation and accepts
+no helper echo as authority.
 
 Core's durable exchange ledger now receives only the stable message types
 `uai.browser.command`, `uai.browser.event` and
