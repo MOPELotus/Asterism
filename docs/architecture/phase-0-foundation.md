@@ -3929,3 +3929,20 @@ tick claims at most one result. A validated transition enters Storage's atomic
 commit boundary, while recovery/validation/storage failures use the existing
 bounded retry and dead-letter ledger. Binding, sequence or claim conflicts are
 terminal and never dispatch or replay a browser command.
+
+## Two-hundred-and-eighteenth Phase 0 slice
+
+An immutable `SubmissionDraft` now proves answer coverage against its complete
+fresh Question snapshot. It stores the total Question count, the resolved
+fixed-point minimum and the exact unanswered Question IDs. Domain validation
+requires selected and unanswered IDs to be a disjoint complete partition and
+uses integer arithmetic for the threshold. Unsupported or unresolved Questions
+therefore remain in the denominator without receiving invented answers.
+
+Submission build resolves the Provider default, account and Task settings and
+passes only selected Questions to the Provider's credential-free preview. A
+Provider without the portable coverage behavior remains at 100%; Chaoxing's
+audited schema declares 900 by default. Migration 053 persists the frozen
+partition. Storage compares it with the real snapshot Question IDs on both
+write and read, so a changed count or foreign unanswered ID fails closed before
+the Draft can be scheduled or recovered.

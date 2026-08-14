@@ -76,11 +76,12 @@ pub use question_session::{
     MAX_QUESTION_SESSION_TTL_SECONDS, QuestionSession, QuestionSessionError, QuestionSessionState,
 };
 pub use submission::{
-    SelectedAnswer, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftItem,
-    SubmissionDraftValidationError, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
-    SubmissionPayloadPreview, SubmissionQuestionVerification, SubmissionQuestionVerificationStatus,
-    SubmissionReceipt, SubmissionResult, SubmissionResultStatus, SubmissionResultValidationError,
-    SubmissionScore, SubmissionVerificationSnapshot, SubmissionVerificationStatus,
+    SelectedAnswer, SubmissionAnswerCoverage, SubmissionAttemptReceipt, SubmissionDraft,
+    SubmissionDraftItem, SubmissionDraftValidationError, SubmissionPayloadEncoding,
+    SubmissionPayloadFieldPreview, SubmissionPayloadPreview, SubmissionQuestionVerification,
+    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult,
+    SubmissionResultStatus, SubmissionResultValidationError, SubmissionScore,
+    SubmissionVerificationSnapshot, SubmissionVerificationStatus,
 };
 pub use task::{
     AssessmentClass, OrchestrationState, RemoteState, SourceType, Task, TaskCapability,

@@ -3,9 +3,9 @@ use std::{collections::BTreeSet, str::FromStr};
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerSource, ExecutionAttemptId, ExecutionId, ProviderId,
     Question, QuestionContentFingerprint, QuestionId, QuestionSnapshotId, SelectedAnswer,
-    SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadPreview,
-    SubmissionReceipt, SubmissionResult, SubmissionResultId, SubmissionResultStatus,
-    SubmissionVerificationSnapshot, TaskId, Timestamp, UserId,
+    SubmissionAnswerCoverage, SubmissionDraft, SubmissionDraftId, SubmissionDraftItem,
+    SubmissionPayloadPreview, SubmissionReceipt, SubmissionResult, SubmissionResultId,
+    SubmissionResultStatus, SubmissionVerificationSnapshot, TaskId, Timestamp, UserId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -454,6 +454,10 @@ impl AnswerCandidateRepository for SqliteQuestionSnapshotRepository {
 
 #[async_trait]
 impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "snapshot partition, candidate identity, immutable coverage and payload preview are verified in one transaction"
+    )]
     async fn save_submission_draft(&self, draft: &SubmissionDraft) -> Result<(), StorageError> {
         draft.validate().map_err(|_| invalid_submission_draft())?;
         let preview_json = serde_json::to_string(&draft.payload_preview)?;
@@ -461,19 +465,51 @@ impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
             return Err(invalid_submission_draft());
         }
         let preview_bytes = preview_json.len();
+        let unanswered_json =
+            serde_json::to_string(&draft.answer_coverage.unanswered_question_ids)?;
+        if unanswered_json.len() < 2 || unanswered_json.len() > 200_002 {
+            return Err(invalid_submission_draft());
+        }
 
         let mut transaction = self.database.pool().begin().await?;
-        let snapshot_binding =
-            sqlx::query("SELECT task_id, provider_id FROM question_snapshots WHERE id = ?")
-                .bind(draft.question_snapshot_id.to_string())
-                .fetch_optional(&mut *transaction)
-                .await?;
+        let snapshot_binding = sqlx::query(
+            "SELECT task_id, provider_id, question_count FROM question_snapshots WHERE id = ?",
+        )
+        .bind(draft.question_snapshot_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
         let Some(snapshot_binding) = snapshot_binding else {
             return Err(invalid_submission_draft());
         };
         if snapshot_binding.try_get::<String, _>("task_id")? != draft.task_id.to_string()
             || snapshot_binding.try_get::<String, _>("provider_id")? != draft.provider_id.as_str()
+            || snapshot_binding.try_get::<i64, _>("question_count")?
+                != i64::from(draft.answer_coverage.total_question_count)
         {
+            return Err(invalid_submission_draft());
+        }
+        let snapshot_question_ids = sqlx::query_scalar::<_, String>(
+            "SELECT question_id FROM question_snapshot_items WHERE snapshot_id = ?",
+        )
+        .bind(draft.question_snapshot_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?
+        .into_iter()
+        .map(|value| parse_id::<QuestionId>(&value))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+        let draft_question_ids = draft
+            .items
+            .iter()
+            .map(|item| item.question.id)
+            .chain(
+                draft
+                    .answer_coverage
+                    .unanswered_question_ids
+                    .iter()
+                    .copied(),
+            )
+            .collect::<BTreeSet<_>>();
+        if draft_question_ids != snapshot_question_ids {
             return Err(invalid_submission_draft());
         }
 
@@ -514,8 +550,9 @@ impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
         sqlx::query(
             "INSERT INTO submission_drafts \
              (id, question_snapshot_id, task_id, provider_id, provider_version, \
-              payload_preview_json, preview_bytes, item_count, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              payload_preview_json, preview_bytes, item_count, total_question_count, \
+              minimum_coverage_millis, unanswered_question_ids_json, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(draft.id.to_string())
         .bind(draft.question_snapshot_id.to_string())
@@ -525,6 +562,9 @@ impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
         .bind(preview_json)
         .bind(i64::try_from(preview_bytes).expect("bounded draft preview size fits i64"))
         .bind(i64::try_from(draft.items.len()).expect("bounded draft item count fits i64"))
+        .bind(i64::from(draft.answer_coverage.total_question_count))
+        .bind(i64::from(draft.answer_coverage.minimum_coverage_millis))
+        .bind(unanswered_json)
         .bind(encode_timestamp(draft.created_at))
         .execute(&mut *transaction)
         .await?;
@@ -547,6 +587,10 @@ impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "encrypted-free draft reconstruction rechecks every persisted snapshot, candidate, coverage and preview binding"
+    )]
     async fn find_owned_submission_draft(
         &self,
         owner_id: UserId,
@@ -555,7 +599,9 @@ impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
         let row = sqlx::query(
             "SELECT draft.id, draft.question_snapshot_id, draft.task_id, draft.provider_id, \
                     draft.provider_version, draft.payload_preview_json, draft.preview_bytes, \
-                    draft.item_count, draft.created_at \
+                    draft.item_count, draft.total_question_count, \
+                    draft.minimum_coverage_millis, draft.unanswered_question_ids_json, \
+                    draft.created_at \
              FROM submission_drafts AS draft \
              INNER JOIN question_snapshots AS snapshot \
                 ON snapshot.id = draft.question_snapshot_id \
@@ -588,6 +634,19 @@ impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
             return Err(invalid_submission_draft());
         }
         let payload_preview: SubmissionPayloadPreview = serde_json::from_str(preview_json)?;
+        let unanswered_json = row.try_get::<String, _>("unanswered_question_ids_json")?;
+        if unanswered_json.len() < 2 || unanswered_json.len() > 200_002 {
+            return Err(invalid_submission_draft());
+        }
+        let answer_coverage = SubmissionAnswerCoverage {
+            total_question_count: u32::try_from(row.try_get::<i64, _>("total_question_count")?)
+                .map_err(|_| invalid_submission_draft())?,
+            minimum_coverage_millis: u16::try_from(
+                row.try_get::<i64, _>("minimum_coverage_millis")?,
+            )
+            .map_err(|_| invalid_submission_draft())?,
+            unanswered_question_ids: serde_json::from_str(&unanswered_json)?,
+        };
         let item_rows = sqlx::query(
             "SELECT draft_item.question_id, draft_item.answer_candidate_id, \
                     draft_item.position, question.question_json, candidate.source, \
@@ -642,6 +701,24 @@ impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
             });
         }
 
+        let snapshot_question_ids = sqlx::query_scalar::<_, String>(
+            "SELECT question_id FROM question_snapshot_items WHERE snapshot_id = ?",
+        )
+        .bind(question_snapshot_id.to_string())
+        .fetch_all(self.database.pool())
+        .await?
+        .into_iter()
+        .map(|value| parse_id::<QuestionId>(&value))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+        let draft_question_ids = items
+            .iter()
+            .map(|item| item.question.id)
+            .chain(answer_coverage.unanswered_question_ids.iter().copied())
+            .collect::<BTreeSet<_>>();
+        if snapshot_question_ids != draft_question_ids {
+            return Err(invalid_submission_draft());
+        }
+
         let draft = SubmissionDraft {
             id: parse_id::<SubmissionDraftId>(row.try_get("id")?)?,
             task_id: parse_id::<TaskId>(row.try_get("task_id")?)?,
@@ -649,6 +726,7 @@ impl SubmissionDraftRepository for SqliteQuestionSnapshotRepository {
             provider_id: ProviderId::new(row.try_get::<String, _>("provider_id")?)
                 .map_err(|_| invalid_submission_draft())?,
             provider_version: row.try_get("provider_version")?,
+            answer_coverage,
             items,
             payload_preview,
             created_at: decode_timestamp(row.try_get("created_at")?)?,
@@ -1368,6 +1446,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partial_submission_draft_requires_the_exact_snapshot_partition() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
+        let mut snapshot = fixture.snapshot("Selected question", fixture.now);
+        let mut unanswered = snapshot.questions[0].clone();
+        unanswered.id = QuestionId::new();
+        unanswered.remote_question_id = Some("remote-question-2".to_owned());
+        unanswered.stem = "Unanswered question".to_owned();
+        unanswered.position = 2;
+        snapshot.questions.push(unanswered.clone());
+        repository.save_question_snapshot(&snapshot).await.unwrap();
+        let candidate = Fixture::candidate(&snapshot, AnswerSource::Manual, fixture.now);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&candidate))
+            .await
+            .unwrap();
+        let mut draft = fixture.draft(&snapshot, &candidate);
+        draft.answer_coverage = SubmissionAnswerCoverage {
+            total_question_count: 2,
+            minimum_coverage_millis: 500,
+            unanswered_question_ids: vec![unanswered.id],
+        };
+        repository.save_submission_draft(&draft).await.unwrap();
+        assert_eq!(
+            repository
+                .find_owned_submission_draft(fixture.owner, draft.id)
+                .await
+                .unwrap(),
+            Some(draft.clone())
+        );
+
+        sqlx::query("UPDATE submission_drafts SET unanswered_question_ids_json = ? WHERE id = ?")
+            .bind(serde_json::to_string(&[QuestionId::new()]).unwrap())
+            .bind(draft.id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .find_owned_submission_draft(fixture.owner, draft.id)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn foreign_candidate_binding_leaves_no_partial_submission_draft() {
         let fixture = Fixture::new().await;
         let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
@@ -1603,6 +1727,11 @@ mod tests {
                 question_snapshot_id: snapshot.id,
                 provider_id: snapshot.provider_id.clone(),
                 provider_version: "1.0.0-builder".to_owned(),
+                answer_coverage: SubmissionAnswerCoverage {
+                    total_question_count: 1,
+                    minimum_coverage_millis: 1_000,
+                    unanswered_question_ids: Vec::new(),
+                },
                 items: vec![SubmissionDraftItem {
                     question: snapshot.questions[0].clone(),
                     selected: SelectedAnswer {

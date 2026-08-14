@@ -537,8 +537,9 @@ pub(super) async fn build_submission_draft(
     let result = SubmissionDraftBuildService::new(
         state.providers,
         SqliteTaskQueryRepository::new(state.database.clone()),
-        SqliteProviderAccountRepository::new(state.database),
+        SqliteProviderAccountRepository::new(state.database.clone()),
         submissions,
+        SqliteProviderRuntimeSettingsRepository::new(state.database),
     )
     .build(BuildSubmissionDraftCommand {
         owner_id,
@@ -1414,7 +1415,7 @@ fn map_submission_draft_build_error(error: SubmissionDraftBuildError) -> ApiErro
         SubmissionDraftBuildError::SelectionInvalid
         | SubmissionDraftBuildError::SelectionIncomplete => ApiError::conflict(
             "submission_selection_invalid",
-            "every Question must select exactly one Candidate from this snapshot",
+            "the selected Candidates do not satisfy this snapshot's answer coverage policy",
         ),
         SubmissionDraftBuildError::AccountNotAuthenticated => ApiError::conflict(
             "provider_account_not_authenticated",
@@ -1434,6 +1435,10 @@ fn map_submission_draft_build_error(error: SubmissionDraftBuildError) -> ApiErro
                 "provider_submission_preview_invalid",
                 "the Provider returned an inconsistent submission preview",
             )
+        }
+        SubmissionDraftBuildError::RuntimeSettingsInvalid => {
+            tracing::warn!(%error, "submission coverage runtime settings are invalid");
+            ApiError::internal(error)
         }
         SubmissionDraftBuildError::Assessment(_) => ApiError::conflict(
             "formal_assessment_blocked",

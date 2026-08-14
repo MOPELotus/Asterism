@@ -61,6 +61,15 @@ pub struct SubmissionDraftItem {
     pub selected: SelectedAnswer,
 }
 
+/// Immutable proof that a selected subset satisfies the resolved answer
+/// coverage policy against the complete source Question snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmissionAnswerCoverage {
+    pub total_question_count: u32,
+    pub minimum_coverage_millis: u16,
+    pub unanswered_question_ids: Vec<QuestionId>,
+}
+
 /// An immutable, reviewable submission plan. Remote submission material is
 /// rebuilt later by a distinct execution capability instead of being persisted
 /// in the draft.
@@ -71,6 +80,7 @@ pub struct SubmissionDraft {
     pub question_snapshot_id: QuestionSnapshotId,
     pub provider_id: ProviderId,
     pub provider_version: String,
+    pub answer_coverage: SubmissionAnswerCoverage,
     pub items: Vec<SubmissionDraftItem>,
     pub payload_preview: SubmissionPayloadPreview,
     pub created_at: Timestamp,
@@ -312,6 +322,13 @@ impl SubmissionResult {
             .items
             .iter()
             .map(|item| item.question.id)
+            .chain(
+                draft
+                    .answer_coverage
+                    .unanswered_question_ids
+                    .iter()
+                    .copied(),
+            )
             .collect::<BTreeSet<_>>();
         if self
             .verification
@@ -360,6 +377,7 @@ impl SubmissionDraft {
                 return Err(SubmissionDraftValidationError::InvalidSelection);
             }
         }
+        self.answer_coverage.validate(&question_ids)?;
 
         let mut preview_fields = BTreeSet::new();
         for field in &self.payload_preview.fields {
@@ -379,6 +397,36 @@ impl SubmissionDraft {
                 .any(|field| field.question_id == *question_id)
         }) {
             return Err(SubmissionDraftValidationError::InvalidPayloadPreview);
+        }
+        Ok(())
+    }
+}
+
+impl SubmissionAnswerCoverage {
+    fn validate(
+        &self,
+        answered_question_ids: &BTreeSet<QuestionId>,
+    ) -> Result<(), SubmissionDraftValidationError> {
+        let Ok(total_question_count) = usize::try_from(self.total_question_count) else {
+            return Err(SubmissionDraftValidationError::InvalidCoverage);
+        };
+        if total_question_count == 0
+            || total_question_count > MAX_DRAFT_ITEMS
+            || !(1..=1_000).contains(&self.minimum_coverage_millis)
+            || answered_question_ids.is_empty()
+            || answered_question_ids.len() > total_question_count
+            || self.unanswered_question_ids.len() > total_question_count
+        {
+            return Err(SubmissionDraftValidationError::InvalidCoverage);
+        }
+        let mut unanswered = BTreeSet::new();
+        if self.unanswered_question_ids.iter().any(|question_id| {
+            answered_question_ids.contains(question_id) || !unanswered.insert(*question_id)
+        }) || answered_question_ids.len() + unanswered.len() != total_question_count
+            || answered_question_ids.len() * 1_000
+                < total_question_count * usize::from(self.minimum_coverage_millis)
+        {
+            return Err(SubmissionDraftValidationError::InvalidCoverage);
         }
         Ok(())
     }
@@ -423,6 +471,8 @@ pub enum SubmissionDraftValidationError {
     InvalidDraft,
     #[error("submission draft contains an invalid or duplicate answer selection")]
     InvalidSelection,
+    #[error("submission draft answer coverage is incomplete or below policy")]
+    InvalidCoverage,
     #[error("submission payload preview is foreign, unsafe, or malformed")]
     InvalidPayloadPreview,
 }
@@ -459,6 +509,11 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("chaoxing").unwrap(),
             provider_version: "0.1.0".to_owned(),
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 1,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: vec![SubmissionDraftItem {
                 question: Question {
                     id: question_id,
@@ -494,6 +549,30 @@ mod tests {
             },
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn partial_draft_requires_an_exact_snapshot_partition_and_threshold() {
+        let mut draft = draft();
+        let unanswered = QuestionId::new();
+        draft.answer_coverage = SubmissionAnswerCoverage {
+            total_question_count: 2,
+            minimum_coverage_millis: 500,
+            unanswered_question_ids: vec![unanswered],
+        };
+        draft.validate().unwrap();
+
+        draft.answer_coverage.minimum_coverage_millis = 501;
+        assert_eq!(
+            draft.validate(),
+            Err(SubmissionDraftValidationError::InvalidCoverage)
+        );
+        draft.answer_coverage.minimum_coverage_millis = 500;
+        draft.answer_coverage.unanswered_question_ids = vec![draft.items[0].question.id];
+        assert_eq!(
+            draft.validate(),
+            Err(SubmissionDraftValidationError::InvalidCoverage)
+        );
     }
 
     #[test]

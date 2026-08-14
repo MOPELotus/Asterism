@@ -6078,6 +6078,11 @@ mod tests {
             question_snapshot_id: snapshot.id,
             provider_id: snapshot.provider_id,
             provider_version: "test".to_owned(),
+            answer_coverage: asterism_domain::SubmissionAnswerCoverage {
+                total_question_count: 1,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: vec![SubmissionDraftItem {
                 question,
                 selected: SelectedAnswer {
