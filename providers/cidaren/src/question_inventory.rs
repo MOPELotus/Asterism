@@ -380,7 +380,8 @@ mod tests {
     use asterism_domain::{
         AnswerCandidateId, AnswerPair, AnswerSource, AssessmentClass, NormalizedAnswer,
         ProviderAccountId, QuestionSnapshotId, RemoteState, SecretId, SelectedAnswer, SourceType,
-        SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, TaskCapability,
+        SubmissionAnswerCoverage, SubmissionDraft, SubmissionDraftId, SubmissionDraftItem,
+        TaskCapability,
     };
     use asterism_provider_api::{
         ExecutionEventSink, ProviderExecutionLog, ProviderProgress, ProviderSubmissionStepOutcome,
@@ -400,6 +401,14 @@ mod tests {
     };
 
     const REMOTE_TASK_ID: &str = "class-task:2002";
+
+    fn complete_answer_coverage(total_question_count: usize) -> SubmissionAnswerCoverage {
+        SubmissionAnswerCoverage {
+            total_question_count: u32::try_from(total_question_count).unwrap(),
+            minimum_coverage_millis: 1_000,
+            unanswered_question_ids: Vec::new(),
+        }
+    }
 
     struct FixtureBoundaries {
         metadata: ProviderMetadata,
@@ -771,6 +780,7 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("cidaren").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: complete_answer_coverage(questions.len()),
             items: vec![SubmissionDraftItem {
                 question: question.clone(),
                 selected,
@@ -840,7 +850,6 @@ mod tests {
         let [question] = questions.as_slice() else {
             panic!("Cidaren must materialize one current Question");
         };
-        let first_question_id = question.id;
         let selected = SelectedAnswer {
             candidate_id: AnswerCandidateId::new(),
             question_id: question.id,
@@ -864,6 +873,7 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("cidaren").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: complete_answer_coverage(questions.len()),
             items: vec![SubmissionDraftItem {
                 question: question.clone(),
                 selected,
@@ -871,7 +881,6 @@ mod tests {
             payload_preview: preview,
             created_at: Utc::now(),
         };
-
         let prepared =
             prepare_submission_operation(&execute, &context, &draft, continuation, 1, &settings)
                 .await;
@@ -896,7 +905,7 @@ mod tests {
         };
         assert_eq!(next.questions().len(), 1);
         assert_eq!(next.questions()[0].position, 2);
-        assert_ne!(next.questions()[0].id, first_question_id);
+        assert_ne!(next.questions()[0].id, question.id);
         assert_eq!(
             *boundaries.operations.lock().unwrap(),
             [
@@ -984,6 +993,7 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("cidaren").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: complete_answer_coverage(questions.len()),
             items: vec![SubmissionDraftItem {
                 question: question.clone(),
                 selected,
@@ -1103,6 +1113,7 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("cidaren").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: complete_answer_coverage(questions.len()),
             items: vec![SubmissionDraftItem {
                 question: question.clone(),
                 selected,
@@ -1237,6 +1248,7 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("cidaren").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: complete_answer_coverage(questions.len()),
             items: vec![SubmissionDraftItem {
                 question: question.clone(),
                 selected,

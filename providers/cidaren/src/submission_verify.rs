@@ -243,7 +243,8 @@ fn remote_changed(message: impl Into<String>) -> ProviderError {
 mod tests {
     use asterism_domain::{
         AnswerCandidateId, AnswerSource, ProviderAccountId, ProviderId, Question,
-        QuestionSnapshotId, SecretId, SelectedAnswer, SubmissionDraftId, SubmissionScore, TaskId,
+        QuestionSnapshotId, SecretId, SelectedAnswer, SubmissionAnswerCoverage, SubmissionDraftId,
+        SubmissionScore, TaskId,
     };
     use asterism_provider_api::{RemoteTask, RemoteTaskDetail};
     use serde_json::json;
@@ -512,6 +513,11 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("cidaren").unwrap(),
             provider_version: env!("CARGO_PKG_VERSION").to_owned(),
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 1,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: vec![asterism_domain::SubmissionDraftItem { question, selected }],
             payload_preview: preview,
             created_at: Utc::now(),
