@@ -205,6 +205,26 @@ reuse must match semantic option content/context first and then remap the old
 answer to the current option identity. Never reuse a cached letter such as `B`
 when only the option order changed.
 
+## 8. Owner-global corpus and separate completion state machines
+
+Provider re-audits must also record the evidence needed by
+`docs/architecture/answer-evidence-and-completion.md`:
+
+- all safely readable historical-completion and result surfaces suitable for a
+  first-binding read-only bootstrap harvest;
+- exact official/reference answer labels, submitted-answer facts,
+  per-Question judgement, score and retake facts exposed by each surface;
+- whether history enumeration requires BrowserBridge or other bounded local
+  state, without granting mutation authority;
+- the platform's fresh `Completed`/`Passed` rules, retry/attempt limits,
+  unlock/time/manual-review constraints and safe retake detection;
+- the distinction between another Attempt required to finish an incomplete
+  Task and an optional score-improvement retake after completion.
+
+Do not model the corpus as ProviderAccount, Course or Task private state. Do not
+let an overall score stand in for per-Question evidence, and do not let a failed
+score-improvement attempt reverse an already verified completed Task.
+
 ## Checkpoint exit criteria
 
 The next Provider checkpoint is not complete until the four-Provider full
