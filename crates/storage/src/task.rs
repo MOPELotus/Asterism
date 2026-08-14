@@ -116,6 +116,43 @@ impl TaskRuntimeRepository for SqliteTaskQueryRepository {
         .await?;
         row.map(|row| decode_task(&row)).transpose()
     }
+
+    async fn find_runtime_task_by_remote_identity(
+        &self,
+        provider_account_id: ProviderAccountId,
+        remote_task_id: &str,
+    ) -> Result<Option<Task>, StorageError> {
+        if remote_task_id.is_empty()
+            || remote_task_id.len() > 512
+            || remote_task_id.trim() != remote_task_id
+            || remote_task_id.chars().any(char::is_control)
+        {
+            return Err(StorageError::InvalidData(
+                "runtime remote Task identity is invalid".to_owned(),
+            ));
+        }
+        let rows = sqlx::query(
+            "SELECT task.id, task.provider_account_id, task.course_id, task.remote_id, \
+                    task.source_type, task.assessment_class, task.title, task.remote_state, \
+                    task.orchestration_state, task.opens_at, task.due_at, task.closes_at, \
+                    task.discovered_at, task.updated_at, task.latest_snapshot_id, \
+                    task.capabilities_json \
+             FROM tasks AS task \
+             WHERE task.provider_account_id = ? AND task.remote_id = ? \
+             ORDER BY task.id LIMIT 2",
+        )
+        .bind(provider_account_id.to_string())
+        .bind(remote_task_id)
+        .fetch_all(self.database.pool())
+        .await?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [row] => decode_task(row).map(Some),
+            [..] => Err(StorageError::InvalidData(
+                "runtime remote Task identity is ambiguous across source types".to_owned(),
+            )),
+        }
+    }
 }
 
 pub(crate) fn decode_task(row: &SqliteRow) -> Result<Task, StorageError> {
@@ -231,6 +268,28 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+        assert_eq!(
+            repository
+                .find_runtime_task_by_remote_identity(account, "first")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            first
+        );
+        assert!(
+            repository
+                .find_runtime_task_by_remote_identity(second_account, "first")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            repository
+                .find_runtime_task_by_remote_identity(account, " first")
+                .await
+                .is_err()
         );
     }
 

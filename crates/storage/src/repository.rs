@@ -191,6 +191,16 @@ pub trait TaskQueryRepository: Send + Sync {
 #[async_trait]
 pub trait TaskRuntimeRepository: Send + Sync {
     async fn find_runtime_task(&self, task_id: TaskId) -> Result<Option<Task>, StorageError>;
+
+    async fn find_runtime_task_by_remote_identity(
+        &self,
+        _provider_account_id: ProviderAccountId,
+        _remote_task_id: &str,
+    ) -> Result<Option<Task>, StorageError> {
+        Err(StorageError::InvalidData(
+            "runtime repository does not support remote Task identity lookup".to_owned(),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
