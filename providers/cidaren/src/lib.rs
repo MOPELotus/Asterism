@@ -31,6 +31,7 @@ mod oauth_exchange;
 mod pre_question_artifact;
 mod provider;
 mod question_artifact;
+mod question_inventory;
 mod question_parser;
 mod response_decode;
 mod runtime_settings;
@@ -105,6 +106,7 @@ pub use question_artifact::{
     CIDAREN_READY_TO_ADVANCE_PHASE, CIDAREN_READY_TO_VERIFY_PHASE, CidarenQuestionArtifact,
     EncodedCidarenQuestionArtifact,
 };
+pub use question_inventory::CidarenQuestionInventory;
 pub use question_parser::{
     CidarenAttemptProgress, ParsedCidarenAttemptQuestion, ParsedCidarenAttemptStep,
     ParsedCidarenReadingCard, parse_attempt_question, parse_attempt_step,

@@ -208,6 +208,7 @@ fn normalize_task(row: StudyTaskRow) -> ProviderResult<RemoteTask> {
         closes_at: None,
         capabilities: [
             TaskCapability::ProgressRead,
+            TaskCapability::QuestionInventory,
             TaskCapability::SubmissionBuild,
             TaskCapability::AnswerResolve,
             TaskCapability::SubmissionVerify,
@@ -409,6 +410,7 @@ mod tests {
             tasks[0].capabilities,
             [
                 TaskCapability::ProgressRead,
+                TaskCapability::QuestionInventory,
                 TaskCapability::SubmissionBuild,
                 TaskCapability::AnswerResolve,
                 TaskCapability::SubmissionVerify,

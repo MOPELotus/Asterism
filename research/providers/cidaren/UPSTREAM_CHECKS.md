@@ -197,8 +197,10 @@ already complete and independent of remote mutation, so Cidaren now registers
 capabilities; the resolver binds fresh StudyTask/Course evidence and preserves
 all audited fallback semantics, while verification remains a separate
 completion/progress/score read and leaves each Question `Unverified`. The
-public QuestionInventory/QuestionParse and SubmissionExecute slots remain
-explicitly tied to the Main-owned durable Attempt/QuestionSession contract.
+public QuestionInventory/QuestionParse and SubmissionExecute slots were still
+explicitly tied to the Main-owned durable Attempt/QuestionSession contract at
+that checkpoint; the later pre-Question adapter checkpoint below supersedes
+the QuestionInventory part without inventing a read-only QuestionParse route.
 
 Post-registration refs remained `ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`,
 `MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and
@@ -293,6 +295,16 @@ no-replay while adding encrypted, Task-bound selection/start/reading-card
 continuations and real-Question materialization bundles. Correlation remains
 audit-only so recovery can reconstruct the same Provider/account/Task binding.
 The Provider suite reached 128 passing tests before strict-clippy closure.
+
+The public pre-Question adapter checkpoint re-resolved the same three donor
+heads/tags with no movement. Provider API integration now preserves the exact
+frozen operation type, request digest and donor delay before execution; accepts
+selection/start/reading-card responses into encrypted continuations; directly
+materializes the first real Question; and represents completion-before-first-
+Question as a distinct terminal outcome. Synthetic adapter tests cover
+`StartAnswer -> reading card -> SubmitAnswerAndSave -> Question`, repeated word
+selection and terminal completion. No current donor exposes a safe ambiguity
+readback, so recovery deliberately returns no outcome rather than replaying.
 
 ## Check procedure
 

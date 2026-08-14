@@ -482,9 +482,12 @@ Every command is Provider/account/Task-bound and consumed on execution.
 Correlation IDs are validated audit metadata, not recoverable identity. A
 transport error leaves the flow `Issued`; the caller must mark it ambiguous,
 after which no replay is possible. Unexpected response semantics enter a
-separate fail-closed terminal state. This Provider-private machine is not yet a
-public Capability because Core still needs durable storage/recovery for each
-issued edge. Only the donor's terminal Completed acknowledgement can be
+separate fail-closed terminal state. The pre-Question selection/start/reading
+subset is now exposed by the public `QuestionInventoryCapability` adapter and
+Core has durable storage/recovery for those issued edges. The post-
+materialization Verify/advance/skip subset remains Provider-private until the
+durable QuestionSession `SubmissionExecute` orchestration consumes it. Only
+the donor's terminal Completed acknowledgement can be
 projected into a bounded `SubmissionReceipt`; intermediate success and
 word-selection acknowledgements cannot, and even the terminal receipt remains
 verification context rather than proof of success. The receipt timestamp is
@@ -541,9 +544,13 @@ Question, position and content fingerprint bindings stay immutable, and phase
 labels remain Provider-scoped as `cidaren.*`.
 
 `StartAnswer` is a non-idempotent remote attempt mutation, not a harmless
-Question read. The Provider request and parser layers are implemented, while
-registry integration waits on Core's durable AttemptStart/QuestionSession
-contract so ambiguous starts are recovered/verified rather than replayed.
+Question read. The Provider request/parser layers and public
+`QuestionInventoryCapability` pre-Question adapter are implemented. The
+adapter returns an encrypted initial continuation, freshly restores and
+rebinds it before freezing one exact command, then maps an accepted result to
+another continuation, a real-Question materialization, or a typed terminal
+completion. An ambiguous start returns no recovery outcome because no donor
+current-attempt readback is evidenced; it is never replayed.
 
 Question discovery, answer resolution, submission construction, mutation and
 fresh verification remain separate capabilities. `topic_code` is redacted and
@@ -566,6 +573,13 @@ zeroizing topic code, stable card identity, sanitized stem, position and
 optional progress. Decode repeats local/remote Task binding. A new audit
 correlation can therefore resume the same account/Task state without becoming
 part of its identity hash.
+The registered adapter also handles a definite `WordSelectionRequired`
+response by rotating back to `cidaren.ready-to-select-words`. It does not
+perform another read inside acceptance or persist the old map; the next
+prepare call freshly rebinds Task detail and inventory before producing a new
+one-shot `SubmitChoseWord`. A definite `Completed` response is represented by
+the Core typed terminal outcome with its exact raw response digest and bounded
+receipt, never by an empty Question or rejection.
 
 Both current donors retry `StartAnswer` after receiving an unknown `jv`
 response, and rerunning their GUI enters `StartAnswer` again. This establishes
@@ -600,7 +614,10 @@ capabilities. Answer resolution freshly binds the Task's Course/unit inventory,
 loads only the evidence needed by each normalized Question and returns bounded
 `AnswerCandidate` values without issuing assessment mutations. Submission
 verification recomputes the immutable preview, rebinds the Task and reads
-completion/progress/score without replaying any mutation. Only the public
-`QuestionInventory`/`QuestionParse` and `SubmissionExecute` slots remain
-blocked on Main-owned durable QuestionSession/Attempt contracts; this is a
-shared contract boundary, not a Provider capability exclusion.
+completion/progress/score without replaying any mutation. The public
+mutation-backed `QuestionInventory` adapter is registered and fixture-covered;
+it materializes normalized Questions directly rather than inventing a
+read-only `QuestionParse` route the donor does not expose. The remaining shared
+work is Main-owned Engine/API orchestration and the durable
+post-materialization `SubmissionExecute` path. This is a shared contract
+boundary, not a Provider capability exclusion.

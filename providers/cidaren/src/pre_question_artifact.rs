@@ -342,16 +342,16 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("unexpected".to_owned(), json!(true));
-        assert_decode_rejected(unknown, task_id);
+        assert_decode_rejected(&unknown, task_id);
 
         let mut foreign = ready_wire(task_id, CIDAREN_READY_TO_START_PHASE);
         foreign.as_object_mut().unwrap().insert(
             "topic_code".to_owned(),
             json!("must-not-survive-ready-state"),
         );
-        assert_decode_rejected(foreign, task_id);
+        assert_decode_rejected(&foreign, task_id);
 
-        assert_decode_rejected(ready_wire(task_id, "cidaren.unknown-phase"), task_id);
+        assert_decode_rejected(&ready_wire(task_id, "cidaren.unknown-phase"), task_id);
     }
 
     #[test]
@@ -362,7 +362,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("progress_completed".to_owned(), json!(1));
-        assert_decode_rejected(incomplete, task_id);
+        assert_decode_rejected(&incomplete, task_id);
 
         let mut reversed = reading_wire(task_id);
         reversed
@@ -373,7 +373,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("progress_total".to_owned(), json!(1));
-        assert_decode_rejected(reversed, task_id);
+        assert_decode_rejected(&reversed, task_id);
 
         let mut zero_total = reading_wire(task_id);
         zero_total
@@ -384,7 +384,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("progress_total".to_owned(), json!(0));
-        assert_decode_rejected(zero_total, task_id);
+        assert_decode_rejected(&zero_total, task_id);
     }
 
     #[test]
@@ -395,7 +395,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("reading_card_id".to_owned(), json!("question:foreign"));
-        assert_decode_rejected(invalid_card, task_id);
+        assert_decode_rejected(&invalid_card, task_id);
 
         let oversized = SecretValue::new(vec![b'x'; MAX_ARTIFACT_BYTES + 1]);
         assert!(
@@ -439,7 +439,7 @@ mod tests {
         })
     }
 
-    fn assert_decode_rejected(wire: Value, task_id: TaskId) {
+    fn assert_decode_rejected(wire: &Value, task_id: TaskId) {
         let value = SecretValue::new(serde_json::to_vec(&wire).unwrap());
         let digest = Sha256::digest(value.expose_secret()).into();
         assert!(

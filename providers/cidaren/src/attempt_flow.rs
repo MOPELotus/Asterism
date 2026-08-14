@@ -442,6 +442,13 @@ impl CidarenAttemptFlow {
             CidarenAttemptPhase::CurrentReadingCard(card) => {
                 CidarenPreQuestionArtifact::reading_card(self.task_id, &self.remote_task_id, card)?
             }
+            CidarenAttemptPhase::Receipt {
+                kind: CidarenAssessmentReceiptKind::WordSelectionRequired,
+                ..
+            } => CidarenPreQuestionArtifact::ready_to_select_words(
+                self.task_id,
+                &self.remote_task_id,
+            ),
             _ => return Ok(None),
         };
         let phase = artifact.phase();
@@ -859,6 +866,32 @@ impl CidarenAttemptFlow {
             .validate()
             .map_err(|_| invalid_response("Cidaren completion receipt is invalid"))?;
         Ok(receipt)
+    }
+
+    /// Returns the definite terminal receipt together with the exact raw
+    /// response digest accepted by this flow. Non-terminal phases return
+    /// `None`; malformed terminal response binding fails closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if a completed receipt lost or changed its
+    /// response binding.
+    pub fn terminal_completion(&self) -> ProviderResult<Option<(SubmissionReceipt, [u8; 32])>> {
+        if self.status()
+            != CidarenAttemptFlowStatus::Receipt(CidarenAssessmentReceiptKind::Completed)
+        {
+            return Ok(None);
+        }
+        let receipt = self.completion_receipt()?;
+        let binding = self
+            .last_response_binding
+            .ok_or_else(|| invalid_state("Cidaren terminal receipt has no response binding"))?;
+        if binding.received_at != receipt.received_at || binding.response_digest == [0; 32] {
+            return Err(protocol_drift(
+                "Cidaren terminal receipt response binding is inconsistent",
+            ));
+        }
+        Ok(Some((receipt, binding.response_digest)))
     }
 
     /// Accepts only a response produced by the exact issued command. Each

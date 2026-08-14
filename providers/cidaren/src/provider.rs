@@ -5,9 +5,10 @@ use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::ProviderCredentialResolver;
 
 use crate::{
-    CidarenAnswerEvidenceTransport, CidarenAnswerResolve, CidarenAuthentication,
-    CidarenAuthenticationTransport, CidarenBrowserBridge, CidarenClassTaskTransport,
-    CidarenCourseInventory, CidarenDurationRead, CidarenSessionResolver, CidarenStudyTaskTransport,
+    CidarenAnswerEvidenceTransport, CidarenAnswerResolve, CidarenAssessmentTransport,
+    CidarenAuthentication, CidarenAuthenticationTransport, CidarenBrowserBridge,
+    CidarenClassTaskTransport, CidarenCourseInventory, CidarenDurationRead,
+    CidarenQuestionInventory, CidarenSessionResolver, CidarenStudyTaskTransport,
     CidarenSubmissionBuild, CidarenSubmissionVerify, CidarenTaskDetail, CidarenTaskInventory,
     CidarenTaskProgress, CidarenTaskScoreTransport, metadata::development_metadata,
     native_http::NativeCidarenTransport, runtime_settings::runtime_settings_schema,
@@ -24,6 +25,7 @@ use crate::{
 pub fn build_development_provider(
     authentication_transport: Arc<dyn CidarenAuthenticationTransport>,
     answer_evidence_transport: Arc<dyn CidarenAnswerEvidenceTransport>,
+    assessment_transport: Arc<dyn CidarenAssessmentTransport>,
     score_transport: Arc<dyn CidarenTaskScoreTransport>,
     sessions: Arc<dyn CidarenSessionResolver>,
     class_tasks: Arc<dyn CidarenClassTaskTransport>,
@@ -39,7 +41,12 @@ pub fn build_development_provider(
     )?);
     let answer_resolve = Arc::new(CidarenAnswerResolve::try_new(
         task_detail.clone(),
+        answer_evidence_transport.clone(),
+    )?);
+    let question_inventory = Arc::new(CidarenQuestionInventory::try_new(
+        task_detail.clone(),
         answer_evidence_transport,
+        assessment_transport,
     )?);
     let submission_verify = Arc::new(CidarenSubmissionVerify::try_new(
         task_detail.clone(),
@@ -63,7 +70,7 @@ pub fn build_development_provider(
         task_detail: Some(task_detail.clone()),
         task_progress: Some(task_progress),
         duration_read: Some(Arc::new(CidarenDurationRead::try_new(task_detail.clone())?)),
-        question_inventory: None,
+        question_inventory: Some(question_inventory),
         question_parse: None,
         answer_resolve: Some(answer_resolve),
         submission_build: Some(Arc::new(CidarenSubmissionBuild::try_new()?)),
@@ -88,6 +95,7 @@ pub fn build_development_provider_native(
 ) -> ProviderResult<ProviderEntry> {
     let native = Arc::new(NativeCidarenTransport::try_new(network, sessions.clone())?);
     build_development_provider(
+        native.clone(),
         native.clone(),
         native.clone(),
         native.clone(),
@@ -243,10 +251,54 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl CidarenAssessmentTransport for UnusedBoundaries {
+        async fn start_answer(
+            &self,
+            _context: &ProviderContext,
+            _request: &crate::CidarenStartAnswerRequest,
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
+            Err(unused())
+        }
+
+        async fn verify_answer(
+            &self,
+            _context: &ProviderContext,
+            _request: &crate::CidarenMutationRequest,
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
+            Err(unused())
+        }
+
+        async fn submit_answer_and_save(
+            &self,
+            _context: &ProviderContext,
+            _request: &crate::CidarenMutationRequest,
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
+            Err(unused())
+        }
+
+        async fn skip_answer(
+            &self,
+            _context: &ProviderContext,
+            _request: &crate::CidarenMutationRequest,
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
+            Err(unused())
+        }
+
+        async fn submit_chose_word(
+            &self,
+            _context: &ProviderContext,
+            _request: &crate::CidarenMutationRequest,
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
+            Err(unused())
+        }
+    }
+
     #[test]
     fn development_factory_is_registry_consistent_without_extra_slots() {
         let boundaries = Arc::new(UnusedBoundaries);
         let entry = build_development_provider(
+            boundaries.clone(),
             boundaries.clone(),
             boundaries.clone(),
             boundaries.clone(),
@@ -261,7 +313,7 @@ mod tests {
         assert!(entry.task_detail.is_some());
         assert!(entry.task_progress.is_some());
         assert!(entry.duration_read.is_some());
-        assert!(entry.question_inventory.is_none());
+        assert!(entry.question_inventory.is_some());
         assert!(entry.answer_resolve.is_some());
         assert!(entry.submission_build.is_some());
         assert!(entry.submission_execute.is_none());
