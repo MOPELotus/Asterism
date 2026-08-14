@@ -130,6 +130,17 @@ impl QuestionSessionRepository for SqliteQuestionSessionRepository {
 
         match session.state {
             QuestionSessionState::Claimed if session.execution_id == Some(execution_id) => {
+                if !continuation_matches_claim(
+                    &mut transaction,
+                    &session,
+                    Some(execution_id),
+                    false,
+                )
+                .await?
+                {
+                    transaction.rollback().await?;
+                    return Ok(QuestionSessionClaimOutcome::BindingConflict);
+                }
                 transaction.rollback().await?;
                 return Ok(QuestionSessionClaimOutcome::Existing(session));
             }
@@ -144,6 +155,11 @@ impl QuestionSessionRepository for SqliteQuestionSessionRepository {
                 return Ok(QuestionSessionClaimOutcome::StateConflict(session));
             }
             QuestionSessionState::Active => {}
+        }
+
+        if !continuation_matches_claim(&mut transaction, &session, None, true).await? {
+            transaction.rollback().await?;
+            return Ok(QuestionSessionClaimOutcome::BindingConflict);
         }
 
         let expected_revision = session.revision;
@@ -168,6 +184,7 @@ impl QuestionSessionRepository for SqliteQuestionSessionRepository {
             .claim(execution_id, claimed_at)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         persist_transition(&mut transaction, &session, expected_revision).await?;
+        bind_continuation_to_execution(&mut transaction, session.id, execution_id).await?;
         insert_audit(
             &mut transaction,
             ("execution", Some(execution_id.to_string())),
@@ -364,6 +381,72 @@ async fn persist_transition(
         ));
     }
     Ok(())
+}
+
+async fn continuation_matches_claim(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &QuestionSession,
+    expected_execution_id: Option<ExecutionId>,
+    require_initial: bool,
+) -> Result<bool, StorageError> {
+    let row = sqlx::query(
+        "SELECT continuation.execution_id, continuation.continuation_type, \
+                continuation.continuation_digest, continuation.revision, \
+                secret.owner_user_id, secret.purpose, secret.version \
+         FROM question_session_continuations AS continuation \
+         INNER JOIN secret_blobs AS secret ON secret.id = continuation.secret_blob_id \
+         WHERE continuation.session_id = ?",
+    )
+    .bind(session.id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let execution_id = row
+        .try_get::<Option<&str>, _>("execution_id")?
+        .map(parse_id)
+        .transpose()?;
+    let continuation_digest: [u8; 32] = row
+        .try_get::<Vec<u8>, _>("continuation_digest")?
+        .try_into()
+        .map_err(|_| StorageError::InvalidData("invalid continuation digest".to_owned()))?;
+    let continuation_revision = u32::try_from(row.try_get::<i64, _>("revision")?)
+        .map_err(|_| StorageError::InvalidData("invalid continuation revision".to_owned()))?;
+    let secret_version = u32::try_from(row.try_get::<i64, _>("version")?)
+        .map_err(|_| StorageError::InvalidData("invalid continuation secret version".to_owned()))?;
+    let secret_owner_user_id: UserId = parse_id(row.try_get("owner_user_id")?)?;
+    let common_valid = execution_id == expected_execution_id
+        && secret_owner_user_id == session.owner_user_id
+        && row.try_get::<&str, _>("purpose")? == "browser_job_credential"
+        && continuation_revision == secret_version;
+    Ok(common_valid
+        && (!require_initial
+            || (continuation_revision == 1
+                && row.try_get::<&str, _>("continuation_type")? == session.artifact_type
+                && continuation_digest == session.artifact_digest)))
+}
+
+async fn bind_continuation_to_execution(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: QuestionSessionId,
+    execution_id: ExecutionId,
+) -> Result<(), StorageError> {
+    let result = sqlx::query(
+        "UPDATE question_session_continuations SET execution_id = ? \
+         WHERE session_id = ? AND execution_id IS NULL",
+    )
+    .bind(execution_id.to_string())
+    .bind(session_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    if result.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(
+            "Question continuation lost its Execution claim".to_owned(),
+        ))
+    }
 }
 
 fn decode_session(row: &SqliteRow) -> Result<QuestionSession, StorageError> {
@@ -812,6 +895,37 @@ mod tests {
                 .create_question_session(session, AuditActor::User(self.owner), "question-create")
                 .await
                 .unwrap();
+            let secret_id = asterism_domain::SecretId::new();
+            let timestamp = encode_timestamp(session.created_at);
+            sqlx::query(
+                "INSERT INTO secret_blobs \
+                 (id, owner_user_id, purpose, key_id, nonce, encrypted_data, version, \
+                  created_at, updated_at) VALUES (?, ?, 'browser_job_credential', 'test-key', \
+                  ?, ?, 1, ?, ?)",
+            )
+            .bind(secret_id.to_string())
+            .bind(session.owner_user_id.to_string())
+            .bind(vec![0_u8; 24])
+            .bind(vec![0_u8; 16])
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(self.database.pool())
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO question_session_continuations \
+                 (session_id, secret_blob_id, continuation_type, continuation_digest, phase, \
+                  revision, created_at, updated_at) VALUES (?, ?, ?, ?, 'questions_ready', 1, ?, ?)",
+            )
+            .bind(session.id.to_string())
+            .bind(secret_id.to_string())
+            .bind(&session.artifact_type)
+            .bind(session.artifact_digest.as_slice())
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(self.database.pool())
+            .await
+            .unwrap();
         }
 
         async fn execution(&self, snapshot_id: QuestionSnapshotId) -> ExecutionId {

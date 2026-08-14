@@ -19,7 +19,9 @@ use asterism_provider_api::{
     BrowserSessionSpec, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
     ProviderRuntimeSettingsSchema, ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
-use asterism_secrets::{CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError};
+use asterism_secrets::{
+    CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
+};
 use async_trait::async_trait;
 
 use crate::StorageError;
@@ -200,6 +202,134 @@ pub trait QuestionSessionRepository: Send + Sync {
         actor: AuditActor,
         correlation_id: &str,
     ) -> Result<bool, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuestionSessionContinuation {
+    pub session_id: asterism_domain::QuestionSessionId,
+    pub execution_id: Option<ExecutionId>,
+    pub continuation_type: String,
+    pub continuation_digest: [u8; 32],
+    pub phase: String,
+    pub revision: u32,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct ResolvedQuestionSessionContinuation {
+    pub metadata: QuestionSessionContinuation,
+    pub latest_operation: Option<QuestionSessionOperation>,
+    pub value: SecretValue,
+}
+
+#[derive(Debug)]
+pub struct QuestionSessionArtifactAttachRequest<'a> {
+    pub session_id: asterism_domain::QuestionSessionId,
+    pub phase: &'a str,
+    pub value: SecretValue,
+    pub attached_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuestionSessionOperationState {
+    Issued,
+    Accepted,
+    Rejected,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuestionSessionOperation {
+    pub session_id: asterism_domain::QuestionSessionId,
+    pub sequence: u64,
+    pub execution_id: ExecutionId,
+    pub execution_attempt_id: ExecutionAttemptId,
+    pub continuation_revision: u32,
+    pub operation_type: String,
+    pub request_digest: [u8; 32],
+    pub state: QuestionSessionOperationState,
+    pub result_digest: Option<[u8; 32]>,
+    pub issued_at: Timestamp,
+    pub completed_at: Option<Timestamp>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QuestionSessionOperationIssueOutcome {
+    Issued(QuestionSessionOperation),
+    Duplicate(QuestionSessionOperation),
+    Conflict,
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub struct QuestionSessionOperationIssueRequest {
+    pub execution_id: ExecutionId,
+    pub execution_attempt_id: ExecutionAttemptId,
+    pub expected_continuation_revision: u32,
+    pub operation_type: String,
+    pub request_digest: [u8; 32],
+    pub issued_at: Timestamp,
+    pub correlation_id: String,
+}
+
+#[derive(Debug)]
+pub struct QuestionSessionOperationAcceptRequest<'a> {
+    pub operation: &'a QuestionSessionOperation,
+    pub next_continuation_type: &'a str,
+    pub next_phase: &'a str,
+    pub replacement: SecretValue,
+    pub result_digest: [u8; 32],
+    pub accepted_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QuestionSessionOperationFinishOutcome {
+    Accepted {
+        operation: QuestionSessionOperation,
+        continuation: QuestionSessionContinuation,
+    },
+    Finished(QuestionSessionOperation),
+    Duplicate(QuestionSessionOperation),
+    Conflict,
+    Unavailable,
+}
+
+/// Encrypted provider continuation and per-mutation ambiguity ledger. The
+/// implementation is permanently Provider-scoped at composition time.
+#[async_trait]
+pub trait QuestionSessionArtifactRepository: Send + Sync {
+    async fn attach_question_session_artifact(
+        &self,
+        request: QuestionSessionArtifactAttachRequest<'_>,
+    ) -> Result<QuestionSessionContinuation, SecretStoreError>;
+
+    async fn resolve_question_session_continuation(
+        &self,
+        execution_id: ExecutionId,
+        access: &SecretAccess,
+    ) -> Result<Option<ResolvedQuestionSessionContinuation>, SecretStoreError>;
+
+    async fn issue_question_session_operation(
+        &self,
+        request: QuestionSessionOperationIssueRequest,
+    ) -> Result<QuestionSessionOperationIssueOutcome, SecretStoreError>;
+
+    async fn accept_question_session_operation(
+        &self,
+        request: QuestionSessionOperationAcceptRequest<'_>,
+    ) -> Result<QuestionSessionOperationFinishOutcome, SecretStoreError>;
+
+    async fn finish_question_session_operation(
+        &self,
+        operation: &QuestionSessionOperation,
+        terminal_state: QuestionSessionOperationState,
+        result_digest: Option<[u8; 32]>,
+        completed_at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<QuestionSessionOperationFinishOutcome, SecretStoreError>;
 }
 
 /// One immutable candidate returned by a specific `AnswerSource` and bound to a

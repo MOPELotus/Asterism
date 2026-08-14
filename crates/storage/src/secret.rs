@@ -64,7 +64,7 @@ impl SecretKeyring {
         })
     }
 
-    fn active(&self) -> (&str, &SecretKey) {
+    pub(crate) fn active(&self) -> (&str, &SecretKey) {
         (
             &self.active_key_id,
             self.keys
@@ -73,7 +73,7 @@ impl SecretKeyring {
         )
     }
 
-    fn get(&self, key_id: &str) -> Result<&SecretKey, SecretStoreError> {
+    pub(crate) fn get(&self, key_id: &str) -> Result<&SecretKey, SecretStoreError> {
         self.keys
             .get(key_id)
             .ok_or(SecretStoreError::KeyUnavailable)
@@ -1426,7 +1426,7 @@ async fn ensure_account_binding(
     Ok(())
 }
 
-async fn insert_secret_blob(
+pub(crate) async fn insert_secret_blob(
     transaction: &mut Transaction<'_, Sqlite>,
     secret: &SecretRef,
     nonce: &[u8],
@@ -1612,18 +1612,18 @@ fn map_credential_write_error(error: &sqlx::Error) -> SecretStoreError {
     }
 }
 
-struct StoredSecret {
-    owner_user_id: UserId,
-    purpose: SecretPurpose,
-    key_id: String,
-    nonce: Vec<u8>,
-    encrypted_data: Vec<u8>,
-    version: u32,
-    created_at: Timestamp,
-    updated_at: Timestamp,
+pub(crate) struct StoredSecret {
+    pub(crate) owner_user_id: UserId,
+    pub(crate) purpose: SecretPurpose,
+    pub(crate) key_id: String,
+    pub(crate) nonce: Vec<u8>,
+    pub(crate) encrypted_data: Vec<u8>,
+    pub(crate) version: u32,
+    pub(crate) created_at: Timestamp,
+    pub(crate) updated_at: Timestamp,
 }
 
-async fn fetch_secret(
+pub(crate) async fn fetch_secret(
     transaction: &mut Transaction<'_, Sqlite>,
     secret_id: SecretId,
 ) -> Result<StoredSecret, SecretStoreError> {
@@ -1670,7 +1670,7 @@ fn verify_reference(secret: &SecretRef, row: &StoredSecret) -> Result<(), Secret
     Ok(())
 }
 
-fn encrypt(
+pub(crate) fn encrypt(
     key: &SecretKey,
     secret: &SecretRef,
     plaintext: &[u8],
@@ -1691,7 +1691,7 @@ fn encrypt(
     Ok((nonce.to_vec(), encrypted))
 }
 
-fn decrypt(
+pub(crate) fn decrypt(
     key: &SecretKey,
     secret: &SecretRef,
     nonce: &[u8],
@@ -1724,7 +1724,7 @@ fn associated_data(secret: &SecretRef) -> Vec<u8> {
     .into_bytes()
 }
 
-async fn insert_secret_audit(
+pub(crate) async fn insert_secret_audit(
     transaction: &mut Transaction<'_, Sqlite>,
     access: &SecretAccess,
     action: &str,
@@ -1773,7 +1773,10 @@ fn secret_audit_actor(actor: &SecretActor) -> Option<AuditActor> {
     }
 }
 
-fn authorize(owner_user_id: UserId, access: &SecretAccess) -> Result<(), SecretStoreError> {
+pub(crate) fn authorize(
+    owner_user_id: UserId,
+    access: &SecretAccess,
+) -> Result<(), SecretStoreError> {
     if access.authorizes(owner_user_id) {
         Ok(())
     } else {
@@ -1781,7 +1784,7 @@ fn authorize(owner_user_id: UserId, access: &SecretAccess) -> Result<(), SecretS
     }
 }
 
-fn validate_secret(value: &SecretValue) -> Result<(), SecretStoreError> {
+pub(crate) fn validate_secret(value: &SecretValue) -> Result<(), SecretStoreError> {
     let length = value.expose_secret().len();
     if length == 0 || length > MAX_SECRET_BYTES {
         Err(SecretStoreError::InvalidValue)

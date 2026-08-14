@@ -422,6 +422,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror",
  "tokio",
