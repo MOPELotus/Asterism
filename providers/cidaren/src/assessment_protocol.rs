@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fmt};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTaskDetail};
 use serde_json::{Number, Value, json};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const START_VERSION: &str = "2.6.1.240122";
 const VERIFY_VERSION: &str = "2.6.1.231204";
@@ -349,7 +349,7 @@ pub fn build_verify_answer_request(
     let sign = format!("{:x}", md5::compute(signature_input.as_bytes()));
     mutation_request(
         binding.endpoint("VerifyAnswer"),
-        &json!({
+        json!({
             "answer": answer.json_value(),
             "topic_code": topic_code,
             "timestamp": timestamp_millis,
@@ -419,7 +419,7 @@ fn build_advance_request(
     let sign = format!("{:x}", md5::compute(signature_input.as_bytes()));
     mutation_request(
         binding.endpoint(operation),
-        &json!({
+        json!({
             "it_font_size": 42,
             "it_img_w": 804,
             "opt_font_c": "#000000",
@@ -462,7 +462,7 @@ pub fn build_submit_chose_word_request(
     let sign = format!("{:x}", md5::compute(signature_input.as_bytes()));
     mutation_request(
         binding.endpoint("SubmitChoseWord"),
-        &json!({
+        json!({
             "task_id": binding.task_id,
             "word_map": word_map,
             "chose_err_item": 2,
@@ -477,16 +477,26 @@ pub fn build_submit_chose_word_request(
 
 fn mutation_request(
     path: String,
-    value: &Value,
+    mut value: Value,
     authorization: CidarenMutationAuthorization,
 ) -> ProviderResult<CidarenMutationRequest> {
-    let body = serde_json::to_vec(&value)
-        .map_err(|_| invalid_input("Cidaren mutation body cannot be encoded"))?;
+    let body = serde_json::to_vec(&value);
+    zeroize_json(&mut value);
+    let body = body.map_err(|_| invalid_input("Cidaren mutation body cannot be encoded"))?;
     Ok(CidarenMutationRequest {
         path,
         body: Zeroizing::new(body),
         authorization,
     })
+}
+
+fn zeroize_json(value: &mut Value) {
+    match value {
+        Value::String(value) => value.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_json),
+        Value::Object(values) => values.values_mut().for_each(zeroize_json),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn request_digest_prefix(method: &[u8], path: &[u8], authorization: &[u8]) -> Sha256 {

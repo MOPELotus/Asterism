@@ -207,6 +207,9 @@ placeholder identities, result codes, status values and pagination shape.
   alter Question fingerprints nor drive the local mutation position.
 - Request-vector tests freeze `StartAnswer`, `VerifyAnswer`,
   `SubmitAnswerAndSave`, `SkipAnswer` and `SubmitChoseWord` field/sign order.
+- Mutation serialization consumes and recursively clears its temporary JSON
+  tree, including copied answer, topic-code and word-map values, before keeping
+  only the zeroizing serialized request body.
 - Prepared-request tests prove equal timestamp/path/query/body inputs retain
   one stable durable digest, while timestamp or answer changes produce another
   digest; Provider transport no longer chooses mutation timestamps after the
