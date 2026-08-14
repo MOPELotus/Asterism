@@ -178,6 +178,8 @@ placeholder identities, result codes, status values and pagination shape.
 - Parsed Capture result envelopes cannot be cloned. Consuming one moves its
   token and crypto JSON directly into the zeroizing snapshot while replacing
   the source event with an empty value before its own Drop cleanup.
+- Capture JSON-object shape checks recursively clear their temporary parsed
+  value, including the optional unused browser session, before returning.
 - Encrypted pre/post-Question wire decoders move validated one-time fields
   into runtime artifacts instead of cloning them. Parser restoration wraps
   topic codes and binding strings in zeroizing owners before its first

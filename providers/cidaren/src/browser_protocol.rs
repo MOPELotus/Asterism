@@ -515,12 +515,27 @@ fn validate_capture_values(
 }
 
 fn valid_json_object(value: &str) -> bool {
-    value.len() <= MAX_CAPTURE_VALUE_BYTES
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
-        && serde_json::from_str::<serde_json::Value>(value)
-            .ok()
-            .is_some_and(|value| value.is_object())
+    if value.len() > MAX_CAPTURE_VALUE_BYTES
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let Ok(mut document) = serde_json::from_str::<serde_json::Value>(value) else {
+        return false;
+    };
+    let is_object = document.is_object();
+    zeroize_json(&mut document);
+    is_object
+}
+
+fn zeroize_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(value) => value.zeroize(),
+        serde_json::Value::Array(values) => values.iter_mut().for_each(zeroize_json),
+        serde_json::Value::Object(values) => values.values_mut().for_each(zeroize_json),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
 }
 
 fn valid_token(value: &str, maximum: usize) -> bool {
