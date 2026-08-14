@@ -1,6 +1,8 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{SubmissionDraft, SubmissionDraftId, SubmissionReceipt, Timestamp};
+use asterism_domain::{
+    SubmissionDraft, SubmissionDraftId, SubmissionReceipt, SubmissionScore, Timestamp,
+};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, SubmissionBuildCapability,
     TaskDetailCapability,
@@ -17,7 +19,9 @@ use crate::{
     encrypted::ZeroizingJsonValue,
     metadata::development_metadata,
     submission_execute::{UaiSubmissionQuestionPlan, valid_submission_version},
-    submission_verify::{bound_verification_state, parse_remote_question},
+    submission_verify::{
+        bound_verification_state, parse_remote_question, verified_submission_score,
+    },
 };
 
 const MAX_COMPOUND_ORAL_BODY_BYTES: usize = 4 * 1_024 * 1_024;
@@ -211,6 +215,7 @@ pub struct UaiCompoundOralVerification {
     remote_task_id: String,
     oral_instance_id: String,
     submission_version: String,
+    score: Option<SubmissionScore>,
     verified_at: Timestamp,
 }
 
@@ -231,6 +236,10 @@ impl UaiCompoundOralVerification {
         &self.submission_version
     }
 
+    pub const fn score(&self) -> Option<SubmissionScore> {
+        self.score
+    }
+
     pub const fn verified_at(&self) -> Timestamp {
         self.verified_at
     }
@@ -248,6 +257,7 @@ impl fmt::Debug for UaiCompoundOralVerification {
             .field("remote_task_id", &self.remote_task_id)
             .field("oral_instance_id", &"[REMOTE]")
             .field("submission_version", &self.submission_version)
+            .field("score", &self.score)
             .field("verified_at", &self.verified_at)
             .finish()
     }
@@ -738,6 +748,7 @@ pub fn parse_compound_oral_verification(
         invalid_response("UAI compound oral verification response is not valid JSON")
     })?);
     let state = bound_verification_state(response.as_value(), submission.group_id(), version)?;
+    let score = verified_submission_score(state)?;
     let question_data = state
         .get("quesData")
         .and_then(Value::as_str)
@@ -763,6 +774,7 @@ pub fn parse_compound_oral_verification(
         remote_task_id: submission.remote_task_id.clone(),
         oral_instance_id: submission.oral_instance_id.clone(),
         submission_version: version.to_owned(),
+        score,
         verified_at: Utc::now(),
     })
 }
@@ -1079,6 +1091,13 @@ mod tests {
         let verified = parse_compound_oral_verification(&document, &submission, &receipt).unwrap();
         assert_eq!(verified.ordinary_draft_id(), draft.id);
         assert_eq!(verified.oral_instance_id(), "6001");
+        assert_eq!(
+            verified.score(),
+            Some(SubmissionScore {
+                earned_milli_points: 88_500,
+                possible_milli_points: 100_000,
+            })
+        );
         assert!(verified.requires_fresh_progress_read());
 
         let changed_oral = json!({
@@ -1249,8 +1268,12 @@ mod tests {
                     "__EXTEND_DATA__": {"__SUBMIT_INFO__": {
                         "course_id":"course-instance-1",
                         "group_id":"group-oral",
-                        "version":"compound-oral-v1"
-                    }}
+                        "version":"compound-oral-v1",
+                        "state":{"score_avg":88.5}
+                    }, "__SUMMARY__": {"answerList": {
+                        "0":{"questionType":1},
+                        "1":{"questionType":2}
+                    }}}
                 }
             }
         })

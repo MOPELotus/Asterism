@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{SubmissionReceipt, Timestamp};
+use asterism_domain::{SubmissionReceipt, SubmissionScore, Timestamp};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, TaskDetailCapability,
 };
@@ -11,8 +11,9 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    encrypted::ZeroizingJsonValue, submission_execute::valid_submission_version,
-    submission_verify::bound_verification_state,
+    encrypted::ZeroizingJsonValue,
+    submission_execute::valid_submission_version,
+    submission_verify::{bound_verification_state, verified_submission_score},
 };
 
 const MAX_UPLOAD_GRANT_RESPONSE_BYTES: usize = 64 * 1_024;
@@ -453,6 +454,7 @@ pub struct UaiUploadVerification {
     remote_task_id: String,
     artifact_digest: String,
     submission_version: String,
+    score: Option<SubmissionScore>,
     verified_at: Timestamp,
 }
 
@@ -467,6 +469,10 @@ impl UaiUploadVerification {
 
     pub fn submission_version(&self) -> &str {
         &self.submission_version
+    }
+
+    pub const fn score(&self) -> Option<SubmissionScore> {
+        self.score
     }
 
     pub const fn verified_at(&self) -> Timestamp {
@@ -485,6 +491,7 @@ impl fmt::Debug for UaiUploadVerification {
             .field("remote_task_id", &self.remote_task_id)
             .field("artifact_digest", &self.artifact_digest)
             .field("submission_version", &self.submission_version)
+            .field("score", &self.score)
             .field("verified_at", &self.verified_at)
             .finish()
     }
@@ -1030,11 +1037,13 @@ pub fn parse_upload_verification(
             .map_err(|_| invalid_response("UAI upload verification response is not valid JSON"))?,
     );
     let state = bound_verification_state(response.as_value(), submission.group_id(), version)?;
+    let score = verified_submission_score(state)?;
     validate_upload_question_data(state, submission.expose_file_key())?;
     Ok(UaiUploadVerification {
         remote_task_id: submission.remote_task_id.clone(),
         artifact_digest: submission.artifact_digest.clone(),
         submission_version: version.to_owned(),
+        score,
         verified_at: Utc::now(),
     })
 }
@@ -1452,6 +1461,7 @@ mod tests {
         assert_eq!(verified.remote_task_id(), submission.remote_task_id());
         assert_eq!(verified.artifact_digest(), submission.artifact_digest());
         assert_eq!(verified.submission_version(), "upload-v1");
+        assert_eq!(verified.score(), None);
         assert!(verified.requires_fresh_progress_read());
         assert!(!format!("{verified:?}").contains(submission.expose_file_key()));
 

@@ -41,6 +41,14 @@ finish progress, seconds, score and required state; Asterism therefore keeps a
 dedicated Provider-private snapshot instead of collapsing those aggregates
 into Task progress. Shared exposure remains a Core contract item.
 
+After a successful mutation, the MIT donor also reads the exact
+receipt-versioned user-module, treats summary `questionType=1` or `3` as a
+scored task and pauses its runner when the returned average is zero. Asterism
+keeps the useful protocol fact without coupling it to that GUI policy: the
+same Course/Group/version-bound verification readback supplies an optional
+fixed-point `score_avg`, including explicit zero, while receipts alone never
+carry verified score.
+
 The MIT donor separately calls `courseStudyStrategy/detail` with the fresh
 CourseResource strategy ID, then uses the returned per-Unit `requiredTask`
 lists as its execution selection set. The same response evidences Unit and

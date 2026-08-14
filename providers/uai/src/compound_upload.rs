@@ -1,6 +1,8 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{SubmissionDraft, SubmissionDraftId, SubmissionReceipt, Timestamp};
+use asterism_domain::{
+    SubmissionDraft, SubmissionDraftId, SubmissionReceipt, SubmissionScore, Timestamp,
+};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, SubmissionBuildCapability,
     TaskDetailCapability,
@@ -16,7 +18,9 @@ use crate::{
     encrypted::ZeroizingJsonValue,
     metadata::development_metadata,
     submission_execute::{UaiSubmissionQuestionPlan, valid_submission_version},
-    submission_verify::{bound_verification_state, parse_remote_question},
+    submission_verify::{
+        bound_verification_state, parse_remote_question, verified_submission_score,
+    },
     upload::validate_upload_readback_question,
 };
 
@@ -219,6 +223,7 @@ pub struct UaiCompoundUploadVerification {
     remote_task_id: String,
     artifact_digest: String,
     submission_version: String,
+    score: Option<SubmissionScore>,
     verified_at: Timestamp,
 }
 
@@ -239,6 +244,10 @@ impl UaiCompoundUploadVerification {
         &self.submission_version
     }
 
+    pub const fn score(&self) -> Option<SubmissionScore> {
+        self.score
+    }
+
     pub const fn verified_at(&self) -> Timestamp {
         self.verified_at
     }
@@ -256,6 +265,7 @@ impl fmt::Debug for UaiCompoundUploadVerification {
             .field("remote_task_id", &self.remote_task_id)
             .field("artifact_digest", &self.artifact_digest)
             .field("submission_version", &self.submission_version)
+            .field("score", &self.score)
             .field("verified_at", &self.verified_at)
             .finish()
     }
@@ -598,6 +608,7 @@ pub fn parse_compound_upload_verification(
         invalid_response("UAI compound upload verification response is not valid JSON")
     })?);
     let state = bound_verification_state(response.as_value(), submission.group_id(), version)?;
+    let score = verified_submission_score(state)?;
     let question_data = state
         .get("quesData")
         .and_then(Value::as_str)
@@ -619,6 +630,7 @@ pub fn parse_compound_upload_verification(
         remote_task_id: submission.remote_task_id.clone(),
         artifact_digest: submission.artifact_digest.clone(),
         submission_version: version.to_owned(),
+        score,
         verified_at: Utc::now(),
     })
 }
@@ -768,6 +780,7 @@ mod tests {
             parse_compound_upload_verification(&document, &submission, &receipt).unwrap();
         assert_eq!(verified.ordinary_draft_id(), draft.id);
         assert_eq!(verified.artifact_digest(), uploaded.artifact_digest());
+        assert_eq!(verified.score(), None);
         assert!(verified.requires_fresh_progress_read());
 
         assert!(

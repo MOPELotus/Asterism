@@ -520,8 +520,13 @@ bind Group and both version fields, contain the complete exact ordered native
 Question/module set, keep every row in submitted state, mark every answer child
 done, and reproduce every immutable draft answer exactly. Only then are all
 Questions Confirmed; a missing, extra, duplicate, reordered or changed row
-fails the whole verification. No score, progress or Task-completion state is
-inferred. With no receipt the result is
+fails the whole verification. The same readback may expose a score only when
+its bounded `__SUMMARY__.answerList` contains the MIT donor's counted numeric
+`questionType=1|3`; in that case `__SUBMIT_INFO__.state.score_avg` must be a
+valid decimal `0..=100` and is converted to fixed-point thousandths. A genuine
+zero remains an explicit score for Core policy/alerting, while an absent or
+entirely uncounted summary yields no score fact. Progress and Task completion
+are never inferred from this value. With no receipt the result is
 Inconclusive and no version route is guessed or read.
 Unknown or structurally ambiguous types still fail closed, but this is a drift
 guard rather than a policy exclusion. Discussion, exit-ticket, oral-empty and

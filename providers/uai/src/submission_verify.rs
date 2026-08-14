@@ -2,8 +2,8 @@ use std::{fmt, sync::Arc};
 
 use asterism_domain::{
     SubmissionDraft, SubmissionQuestionVerification, SubmissionQuestionVerificationStatus,
-    SubmissionReceipt, SubmissionVerificationSnapshot, SubmissionVerificationStatus,
-    TaskCapability,
+    SubmissionReceipt, SubmissionScore, SubmissionVerificationSnapshot,
+    SubmissionVerificationStatus, TaskCapability,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
@@ -26,6 +26,7 @@ const MAX_NESTED_ANSWER_BYTES: usize = 1_024 * 1_024;
 const MAX_NESTED_CONTEXT_BYTES: usize = 64 * 1_024;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
+const MAX_VERIFICATION_SCORE_ENTRIES: usize = 5_000;
 
 /// Redacted ownership wrapper for one bounded fresh UAI user-module response.
 pub struct UaiVerificationDocument(String);
@@ -206,11 +207,12 @@ pub fn parse_verification_snapshot(
         })?);
     let state = bound_verification_state(response.as_value(), expected_group_id, expected_version)?;
     parse_remote_questions(state, plan, draft.items.len())?;
+    let score = verified_submission_score(state)?;
 
     let snapshot = SubmissionVerificationSnapshot {
         status: SubmissionVerificationStatus::Confirmed,
         remote_state: None,
-        score: None,
+        score,
         progress_percent: None,
         questions: draft
             .items
@@ -276,6 +278,98 @@ pub(crate) fn bound_verification_state<'a>(
         ));
     }
     Ok(state)
+}
+
+pub(crate) fn verified_submission_score(
+    state: &serde_json::Map<String, Value>,
+) -> ProviderResult<Option<SubmissionScore>> {
+    let extend = state
+        .get("__EXTEND_DATA__")
+        .and_then(Value::as_object)
+        .ok_or_else(|| protocol_drift("UAI user-module has no extended verification state"))?;
+    let Some(summary) = extend.get("__SUMMARY__") else {
+        return Ok(None);
+    };
+    if summary.is_null() {
+        return Ok(None);
+    }
+    let answer_list = summary
+        .as_object()
+        .and_then(|summary| summary.get("answerList"))
+        .and_then(Value::as_object)
+        .filter(|answers| answers.len() <= MAX_VERIFICATION_SCORE_ENTRIES)
+        .ok_or_else(|| protocol_drift("UAI user-module score summary is invalid or oversized"))?;
+    let mut counted = false;
+    for answer in answer_list.values() {
+        let question_type = answer
+            .as_object()
+            .and_then(|answer| answer.get("questionType"))
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= 32)
+            .ok_or_else(|| protocol_drift("UAI user-module score entry has no bounded type"))?;
+        counted |= matches!(question_type, 1 | 3);
+    }
+    if !counted {
+        return Ok(None);
+    }
+    let score = extend
+        .get("__SUBMIT_INFO__")
+        .and_then(Value::as_object)
+        .and_then(|submit| submit.get("state"))
+        .and_then(Value::as_object)
+        .and_then(|state| state.get("score_avg"))
+        .ok_or_else(|| protocol_drift("UAI scored user-module has no average score"))?;
+    let encoded = match score {
+        Value::Number(value) => value.to_string(),
+        Value::String(value)
+            if !value.is_empty()
+                && value.len() <= 32
+                && value.trim() == value
+                && value.is_ascii() =>
+        {
+            value.clone()
+        }
+        _ => return Err(protocol_drift("UAI user-module average score is invalid")),
+    };
+    let score = SubmissionScore {
+        earned_milli_points: decimal_milli_points(&encoded)?,
+        possible_milli_points: 100_000,
+    };
+    score
+        .validate()
+        .map_err(|_| protocol_drift("UAI user-module average score is out of range"))?;
+    Ok(Some(score))
+}
+
+fn decimal_milli_points(encoded: &str) -> ProviderResult<u64> {
+    let (whole, fractional) = encoded.split_once('.').map_or((encoded, ""), |parts| parts);
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(protocol_drift("UAI user-module average score is invalid"));
+    }
+    let whole = whole
+        .parse::<u64>()
+        .ok()
+        .filter(|whole| *whole <= 100)
+        .ok_or_else(|| protocol_drift("UAI user-module average score is out of range"))?;
+    if whole == 100 && fractional.bytes().any(|byte| byte != b'0') {
+        return Err(protocol_drift(
+            "UAI user-module average score is out of range",
+        ));
+    }
+    let mut digits = fractional.bytes();
+    let hundreds = digits.next().map_or(0, |byte| u64::from(byte - b'0'));
+    let tens = digits.next().map_or(0, |byte| u64::from(byte - b'0'));
+    let units = digits.next().map_or(0, |byte| u64::from(byte - b'0'));
+    let rounds_up = digits.next().is_some_and(|byte| byte >= b'5');
+    let fractional_milli_points = hundreds * 100 + tens * 10 + units + u64::from(rounds_up);
+    whole
+        .checked_mul(1_000)
+        .and_then(|whole| whole.checked_add(fractional_milli_points))
+        .filter(|score| *score <= 100_000)
+        .ok_or_else(|| protocol_drift("UAI user-module average score is out of range"))
 }
 
 fn parse_remote_questions(
@@ -625,6 +719,8 @@ mod tests {
 
     const VERIFIED: &str =
         include_str!("../../../fixtures/providers/uai/submissions/verified.json");
+    const SCORED_VERIFIED: &str =
+        include_str!("../../../fixtures/providers/uai/submissions/verified-scored.json");
     const MIXED_VERIFIED: &str =
         include_str!("../../../fixtures/providers/uai/submissions/verified-mixed-simple.json");
     const CONTENT: &str =
@@ -764,6 +860,67 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_counted_user_module_exposes_fixed_point_score() {
+        let draft = draft().await;
+        let plan = UaiSubmissionPlan::from_draft(&draft, &["multichoice".to_owned()]).unwrap();
+        let snapshot = parse_verification_snapshot(
+            SCORED_VERIFIED,
+            "group-1",
+            "submit-version-42",
+            &plan,
+            &draft,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.score,
+            Some(SubmissionScore {
+                earned_milli_points: 37_500,
+                possible_milli_points: 100_000,
+            })
+        );
+
+        let mut zero_score: Value = serde_json::from_str(SCORED_VERIFIED).unwrap();
+        zero_score["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]["state"]["score_avg"] =
+            serde_json::json!(0);
+        let snapshot = parse_verification_snapshot(
+            &serde_json::to_string(&zero_score).unwrap(),
+            "group-1",
+            "submit-version-42",
+            &plan,
+            &draft,
+        )
+        .unwrap();
+        assert_eq!(snapshot.score.unwrap().earned_milli_points, 0);
+
+        let mut uncounted = zero_score.clone();
+        uncounted["data"]["state"]["__EXTEND_DATA__"]["__SUMMARY__"]["answerList"]["0"]["questionType"] =
+            serde_json::json!(2);
+        let snapshot = parse_verification_snapshot(
+            &serde_json::to_string(&uncounted).unwrap(),
+            "group-1",
+            "submit-version-42",
+            &plan,
+            &draft,
+        )
+        .unwrap();
+        assert_eq!(snapshot.score, None);
+
+        let mut invalid = zero_score;
+        invalid["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]["state"]["score_avg"] =
+            serde_json::json!(100.001);
+        assert!(
+            parse_verification_snapshot(
+                &serde_json::to_string(&invalid).unwrap(),
+                "group-1",
+                "submit-version-42",
+                &plan,
+                &draft,
+            )
+            .is_err()
         );
     }
 
