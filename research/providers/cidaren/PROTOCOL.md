@@ -640,7 +640,13 @@ readback stays Pending even after a terminal acknowledgement.
 `AnswerResolve` and `SubmissionVerify` are independent public Provider
 capabilities. Answer resolution freshly binds the Task's Course/unit inventory,
 loads only the evidence needed by each normalized Question and returns bounded
-`AnswerCandidate` values without issuing assessment mutations. Submission
+`AnswerCandidate` values without issuing assessment mutations. Through the
+session-aware Core hook it first requires one current Question and the exact
+`cidaren.question-attempt.v2` type, initial phase and revision, then verifies
+the decrypted digest plus local/remote Task, Question ID, position and full
+content fingerprint before any evidence route is called. A missing, rotated or
+foreign continuation fails closed rather than resolving an answer detached
+from its later mutation state. Submission
 verification recomputes the immutable preview, rebinds the Task and reads
 completion/progress/score without replaying any mutation. The public
 mutation-backed `QuestionInventory` adapter is registered and fixture-covered;

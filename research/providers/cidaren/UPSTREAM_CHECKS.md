@@ -416,6 +416,15 @@ consumes an owned, bounded and Debug-redacted raw document so the token/crypto
 JSON transport copy is zeroized after validation, hashing or any error path.
 All 138 Cidaren tests and all-target strict clippy passed.
 
+After Core added atomic read-only Question artifact materialization and a
+session-aware AnswerResolve hook, Cidaren bound that hook to its existing
+`cidaren.question-attempt.v2` artifact instead of ignoring the decrypted
+continuation. The Provider requires one initial current Question at revision
+1, validates type/phase/digest and repeats every Task/Question/fingerprint
+check before loading answer evidence. No donor revision or protocol operation
+changed; this closes a shared-integration binding gap. All 139 Cidaren tests
+and all-target strict clippy passed.
+
 ## Check procedure
 
 For the next checkpoint:

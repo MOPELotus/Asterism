@@ -3,13 +3,15 @@ use std::{fmt, sync::Arc};
 use asterism_domain::{AnswerCandidate, Question};
 use asterism_provider_api::{
     AnswerResolveCapability, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, TaskDetailCapability,
+    ProviderMetadata, ProviderResult, ResolvedProviderQuestionSessionContinuation,
+    TaskDetailCapability,
 };
 use async_trait::async_trait;
 
 use crate::{
-    CidarenAnswerEvidenceTransport, load_answer_evidence, metadata::development_metadata,
-    resolve_answer_candidate,
+    CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_QUESTION_ARTIFACT_TYPE,
+    CidarenAnswerEvidenceTransport, CidarenQuestionArtifact, load_answer_evidence,
+    metadata::development_metadata, resolve_answer_candidate,
 };
 
 /// Provider-native answer resolver for one fresh Cidaren Task.
@@ -39,6 +41,34 @@ impl CidarenAnswerResolve {
             transport,
         })
     }
+
+    async fn resolve_bound_answers(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        questions: &[Question],
+    ) -> ProviderResult<Vec<AnswerCandidate>> {
+        validate_context(context, &self.metadata)?;
+        if questions.is_empty() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Cidaren answer resolution requires at least one Question",
+            ));
+        }
+        let detail = self.details.task_detail(context, remote_task_id).await?;
+        validate_question_task_bindings(questions, remote_task_id)?;
+        let binding = self
+            .transport
+            .bind_answer_evidence(context, remote_task_id, &detail)
+            .await?;
+        let mut candidates = Vec::with_capacity(questions.len());
+        for question in questions {
+            let evidence =
+                load_answer_evidence(self.transport.as_ref(), context, &binding, question).await?;
+            candidates.push(resolve_answer_candidate(question, &evidence)?);
+        }
+        Ok(candidates)
+    }
 }
 
 impl fmt::Debug for CidarenAnswerResolve {
@@ -66,27 +96,63 @@ impl AnswerResolveCapability for CidarenAnswerResolve {
         remote_task_id: &str,
         questions: &[Question],
     ) -> ProviderResult<Vec<AnswerCandidate>> {
-        validate_context(context, &self.metadata)?;
-        if questions.is_empty() {
-            return Err(ProviderError::new(
-                ProviderErrorKind::InvalidResponse,
-                "Cidaren answer resolution requires at least one Question",
-            ));
-        }
-        let detail = self.details.task_detail(context, remote_task_id).await?;
-        validate_question_task_bindings(questions, remote_task_id)?;
-        let binding = self
-            .transport
-            .bind_answer_evidence(context, remote_task_id, &detail)
-            .await?;
-        let mut candidates = Vec::with_capacity(questions.len());
-        for question in questions {
-            let evidence =
-                load_answer_evidence(self.transport.as_ref(), context, &binding, question).await?;
-            candidates.push(resolve_answer_candidate(question, &evidence)?);
-        }
-        Ok(candidates)
+        self.resolve_bound_answers(context, remote_task_id, questions)
+            .await
     }
+
+    async fn resolve_answers_with_session(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        questions: &[Question],
+        continuation: Option<ResolvedProviderQuestionSessionContinuation<'_>>,
+    ) -> ProviderResult<Vec<AnswerCandidate>> {
+        validate_context(context, &self.metadata)?;
+        validate_question_session_continuation(remote_task_id, questions, continuation)?;
+        self.resolve_bound_answers(context, remote_task_id, questions)
+            .await
+    }
+}
+
+fn validate_question_session_continuation(
+    remote_task_id: &str,
+    questions: &[Question],
+    continuation: Option<ResolvedProviderQuestionSessionContinuation<'_>>,
+) -> ProviderResult<()> {
+    let continuation = continuation.ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Cidaren answer resolution requires its encrypted Question session",
+        )
+    })?;
+    let [question] = questions else {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Cidaren Question session must contain exactly one current Question",
+        ));
+    };
+    if continuation.continuation_type != CIDAREN_QUESTION_ARTIFACT_TYPE
+        || continuation.phase != CIDAREN_QUESTION_ARTIFACT_PHASE
+        || continuation.revision != 1
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "Cidaren Question session metadata is stale or foreign",
+        ));
+    }
+    let artifact = CidarenQuestionArtifact::decode_bound(
+        continuation.value,
+        continuation.continuation_digest,
+        remote_task_id,
+        question,
+    )?;
+    if artifact.verified_steps() != 0 {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "Cidaren answer resolution received an already advanced Question session",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_question_task_bindings(
@@ -132,7 +198,9 @@ fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> P
 #[cfg(test)]
 mod tests {
     use asterism_domain::{QuestionId, QuestionKind, QuestionOption, TaskId};
+    use asterism_secrets::SecretValue;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
 
     use super::*;
 
@@ -178,6 +246,52 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[test]
+    fn session_aware_resolution_rebinds_the_encrypted_current_question() {
+        let task_id = TaskId::new();
+        let question = question(task_id, "class-task:2002");
+        let fingerprint = question.content_fingerprint().unwrap();
+        let value = SecretValue::new(
+            serde_json::to_vec(&json!({
+                "schema": CIDAREN_QUESTION_ARTIFACT_TYPE,
+                "task_id": task_id.to_string(),
+                "remote_task_id": "class-task:2002",
+                "remote_question_id": "question:synthetic",
+                "position": 1,
+                "question_fingerprint": fingerprint.to_string(),
+                "topic_code": "synthetic-topic-code",
+                "verified_steps": 0
+            }))
+            .unwrap(),
+        );
+        let digest = Sha256::digest(value.expose_secret()).into();
+        let continuation = |phase| ResolvedProviderQuestionSessionContinuation {
+            continuation_type: CIDAREN_QUESTION_ARTIFACT_TYPE,
+            continuation_digest: digest,
+            phase,
+            revision: 1,
+            value: &value,
+        };
+        assert!(
+            validate_question_session_continuation(
+                "class-task:2002",
+                std::slice::from_ref(&question),
+                Some(continuation(CIDAREN_QUESTION_ARTIFACT_PHASE)),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_question_session_continuation(
+                "class-task:2002",
+                &[question],
+                Some(continuation("cidaren.ready-to-verify")),
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
         );
     }
 }
