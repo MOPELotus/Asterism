@@ -610,7 +610,13 @@ The grant remains tied to the same intent/artifact and a swapped artifact fails
 before multipart emission. Token and artifact bytes stay in zeroizing owners,
 audio/mpeg artifacts are bounded to 64 MiB, the multipart request has fixed
 fields for the audited Qiniu origin, and the object-store response must repeat
-the granted file key. A successful response becomes a strong uploaded-artifact
+the granted file key. Because that request is fully determined before dispatch,
+the Provider hashes its fixed POST origin, deterministic content type and full
+zeroizing multipart body (including token, key and artifact bytes) into a
+stable request digest. A changed token or any body byte changes the digest. CMS
+grant and final Group submit include freshly resolved account/Course-instance
+material, so their semantic intent fingerprints are deliberately not presented
+as exact network-request digests. A successful response becomes a strong uploaded-artifact
 owner retaining remote Task, Task fingerprint, Course/Unit/Group, positional
 upload module, exact key, artifact digest and intent fingerprint; its route
 data is redacted in debug and zeroized on drop. It also preserves the donor's

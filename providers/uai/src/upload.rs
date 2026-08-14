@@ -24,6 +24,7 @@ const MAX_UPLOAD_SUBMISSION_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_UPLOAD_VERIFICATION_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_UPLOAD_NESTED_ANSWER_BYTES: usize = 1_024 * 1_024;
 const MINIMAL_MP3_BYTES: usize = 4_096;
+const QINIU_UPLOAD_ROUTE: &str = "https://upload-z1.qiniup.com/";
 
 /// Provider-private boundary for the audited grant, object-store and final
 /// single-upload mutation stages. Shared Core still owns the durable
@@ -604,6 +605,21 @@ impl UaiMultipartUpload {
 
     pub fn expose_body(&self) -> &[u8] {
         self.body.as_slice()
+    }
+
+    /// Exact pre-dispatch identity for the fixed Qiniu object-upload request.
+    /// It includes method, route, deterministic content type and the complete
+    /// multipart body (token, key and artifact bytes) without exposing them.
+    pub fn request_digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"asterism:uai:qiniu-upload-request:v1\0");
+        digest.update(b"POST\0");
+        digest.update(QINIU_UPLOAD_ROUTE.as_bytes());
+        digest.update(b"\0content-type\0");
+        digest.update(self.content_type.as_bytes());
+        digest.update(b"\0body\0");
+        digest.update(self.body.as_slice());
+        digest.finalize().into()
     }
 }
 
@@ -1257,6 +1273,9 @@ mod tests {
         assert_eq!(artifact.expose_bytes().len(), MINIMAL_MP3_BYTES);
         assert_eq!(&artifact.expose_bytes()[..4], &[0xff, 0xfb, 0x90, 0x00]);
         let multipart = build_upload_multipart(&grant, &artifact).unwrap();
+        let request_digest = multipart.request_digest();
+        assert_ne!(request_digest, [0; 32]);
+        assert_eq!(multipart.request_digest(), request_digest);
         assert!(
             multipart
                 .content_type()
@@ -1272,6 +1291,17 @@ mod tests {
                 .any(|window| window == grant.file_key().as_bytes())
         );
         assert!(!format!("{multipart:?}").contains("secret-upload-token"));
+        let rotated_grant = parse_upload_grant(
+            r#"{"code":200,"upToken":"rotated-upload-token","fileKey":"course/42/nothing.mp3"}"#,
+            &intent,
+        )
+        .unwrap();
+        assert_ne!(
+            build_upload_multipart(&rotated_grant, &artifact)
+                .unwrap()
+                .request_digest(),
+            request_digest
+        );
 
         let foreign_artifact = UaiUploadArtifact::try_new(
             "different.mp3",
