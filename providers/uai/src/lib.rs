@@ -13,6 +13,7 @@ mod answer;
 mod authentication;
 mod browser_batch;
 mod browser_bridge;
+mod browser_cursor;
 mod compound_oral;
 mod compound_upload;
 mod course_inventory;
@@ -69,6 +70,7 @@ pub use browser_bridge::{
     UaiMenuDiscoveryStrategy, browser_event_exchange_digest, browser_residence_exchange_digest,
     browser_start_url_from_detail, parse_browser_event, parse_browser_residence_result,
 };
+pub use browser_cursor::{UaiBrowserCursorStage, UaiBrowserResidenceCursor};
 pub use compound_oral::{
     UaiCompoundOralPreparation, UaiCompoundOralSubmission, UaiCompoundOralSubmissionRequest,
     UaiCompoundOralTransport, UaiCompoundOralVerification, build_compound_oral_submission_request,

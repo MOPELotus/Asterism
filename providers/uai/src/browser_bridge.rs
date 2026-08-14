@@ -799,7 +799,7 @@ impl UaiBrowserPageEntry {
         })
     }
 
-    fn validate_for_binding(
+    pub(crate) fn validate_for_binding(
         &self,
         plan: &UaiBrowserResidencePlan,
         binding: &UaiBrowserSessionBinding,
