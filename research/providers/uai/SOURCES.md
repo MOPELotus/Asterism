@@ -100,9 +100,10 @@ runner classifies fresh progress leaves with `tab_type=text|video` as mark-seen
 resources and sends the exact empty `submitType=2` body. The MIT donor's
 single-type builder independently emits that same body. The Apache donor agrees
 on the five preset `base` labels but its active generic builder inserts
-`instanceId=0` placeholder question rows, so that path is recorded as drift and
-is not body evidence. Asterism uses the five labels only to identify scan-time
-candidates and requires a fresh exact text/video progress leaf before mutation.
+`instanceId=0` placeholder question rows. Asterism retains that as a separate
+placeholder wire mode instead of treating it as evidence against the marker,
+uses the five labels only to identify scan-time candidates, and requires a
+fresh exact text/video progress leaf before mutation.
 The same current progress model exposes per-leaf `required`, `min_score_pct`,
 `start_time`, `end_time` and `statistic_mode_out`; Asterism retains those facts
 for Task selection and applies the donor time-window rule to every native
@@ -170,6 +171,15 @@ the generic builder's `instanceId=0`, one empty child, courseAnswer map and
 `discussion` judge under `submitType=1`. Asterism retains both behind a frozen
 versioned runtime choice and replaces the donor's captured judge Course version
 with the current independently refreshed publish version.
+
+The Apache runner separately declares `SUBJECTIVE_TYPES={"short_answer"}` and,
+when `SUBJECTIVE_ALLOW_EMPTY` is enabled, invokes its generic simple submit
+builder with an empty answer list. That produces one `instanceId=0` empty child
+and a hyphenated `short-answer` judge for each declared Question. Asterism maps
+this evidence to an independently authorized subjective-empty ResourceExecution
+while retaining the same Task's ordinary question, answer, submission and
+receipt-versioned verification capabilities. The captured Course judge version
+is replaced by the current independently refreshed publish version.
 
 The same Apache runner recognizes the exact compound family
 `basic-scoop-content,oral-sentence`, reads one encrypted standard-answer array

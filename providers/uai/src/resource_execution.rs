@@ -72,6 +72,31 @@ pub struct UaiDiscussionEmptySubmission {
     course_publish_version: u64,
 }
 
+/// Immutable Apache-donor placeholder shape for one direct subjective empty
+/// execution. The Task family remains exact `short_answer`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UaiSubjectiveEmptySubmission {
+    question_count: u32,
+    course_publish_version: u64,
+}
+
+impl UaiSubjectiveEmptySubmission {
+    const fn new(question_count: u32, course_publish_version: u64) -> Self {
+        Self {
+            question_count,
+            course_publish_version,
+        }
+    }
+
+    pub const fn question_count(self) -> u32 {
+        self.question_count
+    }
+
+    pub const fn course_publish_version(self) -> u64 {
+        self.course_publish_version
+    }
+}
+
 impl UaiDiscussionEmptySubmission {
     const fn new(question_count: u32, course_publish_version: u64) -> Self {
         Self {
@@ -159,6 +184,17 @@ pub trait UaiPresetCompletionTransport: Send + Sync {
         submission: UaiDiscussionEmptySubmission,
     ) -> ProviderResult<UaiPresetCompletionResult>;
 
+    /// Completes one exact `short_answer` Group with Apache donor's empty
+    /// placeholder body, independently from ordinary answer submission.
+    async fn complete_subjective_empty(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        submission: UaiSubjectiveEmptySubmission,
+    ) -> ProviderResult<UaiPresetCompletionResult>;
+
     /// Submits the donor-configured empty-answer shape for one exact oral
     /// Group. This is intentionally distinct from no-Question completion.
     async fn complete_oral_empty(
@@ -178,6 +214,9 @@ enum EmptyCompletionKind {
     ExitTicket,
     Discussion {
         mode: DiscussionEmptyMode,
+        question_count: u32,
+    },
+    SubjectiveEmpty {
         question_count: u32,
     },
     Oral {
@@ -223,6 +262,7 @@ impl EmptyCompletionKind {
                 mode: DiscussionEmptyMode::Placeholder,
                 ..
             } => "discussion_empty_placeholder",
+            Self::SubjectiveEmpty { .. } => "subjective_empty",
             Self::Oral { .. } => "oral_empty",
         }
     }
@@ -242,6 +282,9 @@ impl EmptyCompletionKind {
                 mode: DiscussionEmptyMode::Placeholder,
                 ..
             } => "讨论任务已通过新鲜详情校验，准备提交 donor 定义的占位空答案",
+            Self::SubjectiveEmpty { .. } => {
+                "主观题已通过新鲜详情校验，准备提交 Apache donor 定义的空答案"
+            }
             Self::Oral { .. } => "口语任务已通过新鲜详情校验，准备核验并提交 donor 定义的空答案",
         }
     }
@@ -309,6 +352,48 @@ impl UaiResourceExecution {
         })
     }
 
+    async fn submit_subjective_empty(
+        &self,
+        context: &ProviderContext,
+        identity: &GroupIdentity,
+        question_count: u32,
+        course_publish_version: Option<u64>,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let course_publish_version = course_publish_version.ok_or_else(|| {
+            remote_changed("UAI subjective placeholder lost its fresh Course publish version")
+        })?;
+        self.transport
+            .complete_subjective_empty(
+                context,
+                &identity.course_resource,
+                &identity.unit,
+                &identity.group,
+                UaiSubjectiveEmptySubmission::new(question_count, course_publish_version),
+            )
+            .await
+    }
+
+    async fn submit_discussion_placeholder(
+        &self,
+        context: &ProviderContext,
+        identity: &GroupIdentity,
+        question_count: u32,
+        course_publish_version: Option<u64>,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let course_publish_version = course_publish_version.ok_or_else(|| {
+            remote_changed("UAI discussion placeholder lost its fresh Course publish version")
+        })?;
+        self.transport
+            .complete_discussion_empty_placeholder(
+                context,
+                &identity.course_resource,
+                &identity.unit,
+                &identity.group,
+                UaiDiscussionEmptySubmission::new(question_count, course_publish_version),
+            )
+            .await
+    }
+
     async fn submit_empty_completion(
         &self,
         context: &ProviderContext,
@@ -367,23 +452,24 @@ impl UaiResourceExecution {
             EmptyCompletionKind::Discussion {
                 mode: DiscussionEmptyMode::Placeholder,
                 question_count,
-            } => self
-                .transport
-                .complete_discussion_empty_placeholder(
+            } => {
+                self.submit_discussion_placeholder(
                     context,
-                    &identity.course_resource,
-                    &identity.unit,
-                    &identity.group,
-                    UaiDiscussionEmptySubmission::new(
-                        question_count,
-                        placeholder_course_publish_version.ok_or_else(|| {
-                            remote_changed(
-                                "UAI discussion placeholder lost its fresh Course publish version",
-                            )
-                        })?,
-                    ),
+                    identity,
+                    question_count,
+                    placeholder_course_publish_version,
                 )
-                .await,
+                .await
+            }
+            EmptyCompletionKind::SubjectiveEmpty { question_count } => {
+                self.submit_subjective_empty(
+                    context,
+                    identity,
+                    question_count,
+                    placeholder_course_publish_version,
+                )
+                .await
+            }
             EmptyCompletionKind::Oral {
                 task_type,
                 question_count,
@@ -610,6 +696,10 @@ fn empty_completion_kind(
             mode: DiscussionEmptyMode::Marker,
             question_count: 1,
         })
+    } else if task_types == ["short_answer"] {
+        question_count
+            .filter(|question_count| (1..=128).contains(question_count))
+            .map(|question_count| EmptyCompletionKind::SubjectiveEmpty { question_count })
     } else {
         let task_type = match task_types {
             [task_type] if task_type == "oral-sentence" => OralTaskType::Sentence,
@@ -644,10 +734,6 @@ fn validate_fresh_empty_completion_detail(
             .task
             .capabilities
             .contains(&TaskCapability::ProgressRead)
-        || detail
-            .task
-            .capabilities
-            .contains(&TaskCapability::SubmissionExecute)
     {
         return Err(unsupported(
             "UAI fresh Group does not advertise verified empty completion",
@@ -690,9 +776,32 @@ fn validate_fresh_empty_completion_detail(
         .get("question_count")
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| u32::try_from(value).ok());
-    empty_completion_kind(&task_types, question_count).ok_or_else(|| {
+    let completion_kind = empty_completion_kind(&task_types, question_count).ok_or_else(|| {
         unsupported("UAI fresh Group is not an audited marker/placeholder completion family")
-    })
+    })?;
+    let has_submission = detail
+        .task
+        .capabilities
+        .contains(&TaskCapability::SubmissionExecute);
+    let has_submission_verify = detail
+        .task
+        .capabilities
+        .contains(&TaskCapability::SubmissionVerify);
+    match completion_kind {
+        EmptyCompletionKind::SubjectiveEmpty { .. } if has_submission && has_submission_verify => {}
+        EmptyCompletionKind::SubjectiveEmpty { .. } => {
+            return Err(unsupported(
+                "UAI subjective empty execution lost ordinary submission capabilities",
+            ));
+        }
+        _ if has_submission || has_submission_verify => {
+            return Err(unsupported(
+                "UAI non-subjective empty execution overlaps ordinary submission",
+            ));
+        }
+        _ => {}
+    }
+    Ok(completion_kind)
 }
 
 fn empty_answer_course_publish_version(
@@ -706,6 +815,7 @@ fn empty_answer_course_publish_version(
                 mode: DiscussionEmptyMode::Placeholder,
                 ..
             }
+            | EmptyCompletionKind::SubjectiveEmpty { .. }
     ) {
         return Ok(None);
     }
@@ -893,6 +1003,18 @@ mod tests {
                 "task_types": self.task_types,
                 "question_count": 1,
             });
+            let mut capabilities = vec![
+                TaskCapability::ProgressRead,
+                TaskCapability::DurationRead,
+                TaskCapability::ResourceExecution,
+                TaskCapability::ExecutionVerify,
+            ];
+            if self.task_types == ["short_answer"] {
+                capabilities.extend([
+                    TaskCapability::SubmissionExecute,
+                    TaskCapability::SubmissionVerify,
+                ]);
+            }
             Ok(RemoteTaskDetail {
                 task: RemoteTask {
                     remote_id: remote_task_id.to_owned(),
@@ -904,12 +1026,7 @@ mod tests {
                     opens_at: None,
                     due_at: None,
                     closes_at: None,
-                    capabilities: vec![
-                        TaskCapability::ProgressRead,
-                        TaskCapability::DurationRead,
-                        TaskCapability::ResourceExecution,
-                        TaskCapability::ExecutionVerify,
-                    ],
+                    capabilities,
                     fingerprint: "v1:synthetic".to_owned(),
                     normalized: normalized.clone(),
                     raw_sanitized: serde_json::json!({"schema": "uai.group-task.raw.v1"}),
@@ -1101,6 +1218,36 @@ mod tests {
                 unit_id.to_owned(),
                 group_id.to_owned(),
                 "discussion_empty_placeholder",
+            ));
+            if self.fail {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "synthetic ambiguous mutation failure",
+                ));
+            }
+            Ok(UaiPresetCompletionResult::Submitted(SubmissionReceipt {
+                remote_status: "accepted".to_owned(),
+                message_sanitized: Some("accepted for verification".to_owned()),
+                provider_trace_id: Some("submit-version-42".to_owned()),
+                received_at: Utc::now(),
+            }))
+        }
+
+        async fn complete_subjective_empty(
+            &self,
+            _context: &ProviderContext,
+            course_resource_id: &str,
+            unit_id: &str,
+            group_id: &str,
+            submission: UaiSubjectiveEmptySubmission,
+        ) -> ProviderResult<UaiPresetCompletionResult> {
+            assert_eq!(submission.question_count(), 1);
+            assert_eq!(submission.course_publish_version(), 123_290);
+            self.calls.lock().unwrap().push((
+                course_resource_id.to_owned(),
+                unit_id.to_owned(),
+                group_id.to_owned(),
+                "subjective_empty",
             ));
             if self.fail {
                 return Err(ProviderError::new(
@@ -1458,6 +1605,37 @@ mod tests {
                 "unit-1".to_owned(),
                 "group-1".to_owned(),
                 "discussion_empty_placeholder",
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn donor_subjective_empty_keeps_ordinary_submission_as_a_separate_capability() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = UaiResourceExecution::try_new(
+            Arc::new(FixtureDetail {
+                task_types: vec!["short_answer".to_owned()],
+            }),
+            fixture_progress(RemoteState::Completed),
+            transport.clone(),
+        )
+        .unwrap();
+        let outcome = execution
+            .execute(&context(), &request(), &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.result_sanitized["resource_kind"],
+            "subjective_empty"
+        );
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            &[(
+                "2001".to_owned(),
+                "unit-1".to_owned(),
+                "group-1".to_owned(),
+                "subjective_empty",
             )]
         );
     }

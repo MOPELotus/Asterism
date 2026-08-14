@@ -29,10 +29,11 @@ use crate::{
     UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiOralEmptySubmission,
     UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiPresetEmptySubmission,
     UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
-    UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
-    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
-    UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification,
-    UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
+    UaiSessionResolver, UaiSubjectiveEmptySubmission, UaiSubmissionPlan,
+    UaiSubmissionResponseDocument, UaiSubmissionTransport, UaiTaskInventoryDocuments,
+    UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent,
+    UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification, UaiUploadedArtifact,
+    UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_compound_oral_submission_body, build_compound_upload_submission_body,
     build_discussion_reply_page_request, build_discussion_reply_request,
@@ -80,6 +81,7 @@ enum EmptyCompletionPreflight {
     ExitTicket,
     Oral,
     Discussion,
+    Subjective,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +89,7 @@ enum EmptyAnswerSubmission<'a> {
     Preset(&'a UaiPresetEmptySubmission),
     Oral(UaiOralEmptySubmission<'a>),
     Discussion(UaiDiscussionEmptySubmission),
+    Subjective(UaiSubjectiveEmptySubmission),
 }
 
 /// Native, non-redirecting UAI read and submission transport.
@@ -695,6 +698,25 @@ impl NativeUaiInventoryTransport {
             group_id,
             EmptyCompletionPreflight::Discussion,
             Some(EmptyAnswerSubmission::Discussion(submission)),
+        )
+        .await
+    }
+
+    async fn complete_subjective_empty_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        submission: UaiSubjectiveEmptySubmission,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        self.complete_empty_with_session(
+            session,
+            course_resource_id,
+            unit_id,
+            group_id,
+            EmptyCompletionPreflight::Subjective,
+            Some(EmptyAnswerSubmission::Subjective(submission)),
         )
         .await
     }
@@ -1767,6 +1789,40 @@ impl UaiPresetCompletionTransport for NativeUaiInventoryTransport {
         }
     }
 
+    async fn complete_subjective_empty(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        submission: UaiSubjectiveEmptySubmission,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .complete_subjective_empty_with_session(
+                &session,
+                course_resource_id,
+                unit_id,
+                group_id,
+                submission,
+            )
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.complete_subjective_empty_with_session(
+                    &session,
+                    course_resource_id,
+                    unit_id,
+                    group_id,
+                    submission,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+
     async fn complete_oral_empty(
         &self,
         context: &ProviderContext,
@@ -2646,6 +2702,16 @@ fn build_empty_completion_body(
                 submission.course_publish_version(),
             )?
         }
+        Some(EmptyAnswerSubmission::Subjective(submission)) => {
+            build_empty_placeholder_submission_body(
+                course_instance_id,
+                open_id,
+                group_id,
+                "short_answer",
+                submission.question_count(),
+                submission.course_publish_version(),
+            )?
+        }
         None => build_preset_submission_body(course_instance_id, open_id, group_id)?,
     };
     Ok(Zeroizing::new(body))
@@ -2900,7 +2966,8 @@ fn validate_empty_completion_progress_target_at(
         EmptyCompletionPreflight::Preset => matches!(snapshot.tab_type(), Some("text" | "video")),
         EmptyCompletionPreflight::ExitTicket
         | EmptyCompletionPreflight::Oral
-        | EmptyCompletionPreflight::Discussion => snapshot.tab_type() == Some("task"),
+        | EmptyCompletionPreflight::Discussion
+        | EmptyCompletionPreflight::Subjective => snapshot.tab_type() == Some("task"),
     };
     if !tab_type_matches {
         return Err(ProviderError::new(
@@ -2917,6 +2984,9 @@ fn validate_empty_completion_progress_target_at(
                 }
                 EmptyCompletionPreflight::Discussion => {
                     "UAI discussion completion requires a fresh task progress leaf"
+                }
+                EmptyCompletionPreflight::Subjective => {
+                    "UAI subjective empty submission requires a fresh task progress leaf"
                 }
             },
         ));
@@ -3478,6 +3548,22 @@ mod tests {
         assert_eq!(judges[0]["question_type"], "vocabulary");
         assert_eq!(judges[1]["question_type"], "input");
         assert_eq!(judges[2]["question_type"], "input");
+
+        let subjective = build_empty_placeholder_submission_body(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-1",
+            "short_answer",
+            2,
+            456_789,
+        )
+        .unwrap();
+        let subjective: serde_json::Value = serde_json::from_str(&subjective).unwrap();
+        let judges: serde_json::Value =
+            serde_json::from_str(subjective["thirdPartyJudges"].as_str().unwrap()).unwrap();
+        assert_eq!(judges.as_array().unwrap().len(), 2);
+        assert_eq!(judges[0]["question_type"], "short-answer");
+        assert_eq!(judges[1]["versions"]["course"], 456_789);
     }
 
     #[test]
@@ -3544,6 +3630,33 @@ mod tests {
             )
             .unwrap()
         );
+        let before_window = chrono::DateTime::from_timestamp(1_784_678_400, 0).unwrap();
+        assert!(
+            validate_empty_completion_progress_target_at(
+                &task,
+                "unit-1",
+                "group-1",
+                EmptyCompletionPreflight::ExitTicket,
+                before_window,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn answer_family_empty_preflight_requires_fresh_task_leaf() {
+        let within_window = chrono::DateTime::from_timestamp(1_786_752_000, 0).unwrap();
+        let task = PROGRESS.replacen("\"tab_type\": \"text\"", "\"tab_type\": \"task\"", 1);
+        assert!(
+            validate_empty_completion_progress_target_at(
+                &task,
+                "unit-1",
+                "group-1",
+                EmptyCompletionPreflight::Subjective,
+                within_window,
+            )
+            .unwrap()
+        );
         assert!(
             validate_empty_completion_progress_target_at(
                 &task,
@@ -3563,17 +3676,6 @@ mod tests {
                 within_window,
             )
             .unwrap()
-        );
-        let before_window = chrono::DateTime::from_timestamp(1_784_678_400, 0).unwrap();
-        assert!(
-            validate_empty_completion_progress_target_at(
-                &task,
-                "unit-1",
-                "group-1",
-                EmptyCompletionPreflight::ExitTicket,
-                before_window,
-            )
-            .is_err()
         );
     }
 

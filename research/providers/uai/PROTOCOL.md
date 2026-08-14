@@ -563,11 +563,15 @@ read-only verifier without replaying the mutation.
 
 Asterism registers ResourceExecution for a non-empty set containing those five
 audited labels and, independently, for exact `exit-ticket`, exact single
-`discussion`, `oral-sentence`, `video-dub` and `oral-personal-state`; every
-such Task is marked with ExecutionVerify plus ProgressRead. Before mutation
+`discussion`, exact `short_answer`, `oral-sentence`, `video-dub` and
+`oral-personal-state`; every such Task is marked with ExecutionVerify plus
+ProgressRead. Exact `short_answer` also retains QuestionInventory/QuestionParse,
+AnswerResolve, SubmissionBuild, SubmissionExecute and SubmissionVerify: choosing
+the Apache donor's `SUBJECTIVE_ALLOW_EMPTY` ResourceExecution is a separate
+authorization, not an implicit fallback from normal answer submission. Before mutation
 the native transport refreshes Course detail and the exact Unit progress
 document, requires the exact Group leaf and `tab_type=text|video` for a preset
-or `tab_type=task` for exit-ticket/discussion/oral, requires the fresh donor
+or `tab_type=task` for exit-ticket/discussion/subjective/oral, requires the fresh donor
 availability window to contain the current time, and skips the POST if all
 three completion flags are already `1`. Preset freezes the resolved runtime
 mode: `marker` sends the MIT/current-donor no-Question `submitType=2` body,
@@ -594,6 +598,19 @@ two-mutation family. Upload and mixed/compound modes do not inherit it;
 exit-ticket and each oral family are likewise separately classified, and the
 other audited known families remain required dedicated capabilities rather
 than exclusions.
+
+The Apache donor's `SUBJECTIVE_TYPES={"short_answer"}` branch and
+`SUBJECTIVE_ALLOW_EMPTY` setting call the same generic simple builder with an
+empty answer list. Asterism therefore maps only an exact homogeneous
+`short_answer` Group with a bounded positive Question count to a dedicated
+subjective-empty ResourceExecution. The native body repeats one
+`instanceId=0` empty child and `short-answer` judge per declared Question, uses
+the fresh positive Course publish version, and runs only after the same exact
+incomplete available `tab_type=task` preflight. The accepted submit version is
+an acknowledgement, while fresh exact Group progress remains the sole
+ExecutionVerify authority. This path neither reads nor overwrites an immutable
+normal Submission Draft and cannot be selected merely because answer resolution
+failed.
 
 ## Additional donor capability families
 

@@ -119,6 +119,7 @@ pub use question_artifact::{
 pub use resource_execution::{
     UaiDiscussionEmptySubmission, UaiOralEmptySubmission, UaiPresetCompletionResult,
     UaiPresetCompletionTransport, UaiPresetEmptySubmission, UaiResourceExecution,
+    UaiSubjectiveEmptySubmission,
 };
 pub use stored_session::StoredUaiSessionResolver;
 pub use submission_build::UaiSubmissionBuild;

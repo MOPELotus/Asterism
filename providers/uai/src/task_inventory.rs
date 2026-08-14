@@ -855,24 +855,39 @@ mod tests {
     fn only_audited_empty_completion_groups_advertise_verified_resource_execution() {
         let course = parse_course_inventory(COURSES).unwrap().remove(0);
         let context = parse_course_context(&course, DETAIL).unwrap();
-        let tasks = parse_task_inventory(&course, &context, TREE).unwrap();
+        let initial_tasks = parse_task_inventory(&course, &context, TREE).unwrap();
         assert!(
-            tasks[0]
+            initial_tasks[0]
                 .capabilities
                 .contains(&TaskCapability::ResourceExecution)
         );
         assert!(
-            tasks[0]
+            initial_tasks[0]
                 .capabilities
                 .contains(&TaskCapability::ExecutionVerify)
         );
+
+        let subjective = TREE
+            .replace("rich-text-read", "short_answer")
+            .replace("vocabulary,input", "single-choice");
+        let tasks = parse_task_inventory(&course, &context, &subjective).unwrap();
         assert!(
-            tasks[1]
+            tasks[0]
                 .capabilities
                 .contains(&TaskCapability::ResourceExecution)
         );
         assert!(
-            tasks[1]
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::SubmissionExecute)
+        );
+        assert!(
+            initial_tasks[1]
+                .capabilities
+                .contains(&TaskCapability::ResourceExecution)
+        );
+        assert!(
+            initial_tasks[1]
                 .capabilities
                 .contains(&TaskCapability::ExecutionVerify)
         );
