@@ -5,14 +5,16 @@ use std::{
 
 use asterism_domain::{
     NormalizedAnswer, QuestionKind, RemoteState, SubmissionDraft, SubmissionQuestionVerification,
-    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionVerificationSnapshot,
-    SubmissionVerificationStatus,
+    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionScore,
+    SubmissionVerificationSnapshot, SubmissionVerificationStatus,
 };
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use chrono::Utc;
 use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
+
+use crate::inventory::parse_exam_detail_facts;
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 640;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
@@ -546,15 +548,21 @@ pub fn parse_exam_verification_snapshot(
     }
     let html = Html::parse_document(document.as_str());
     reject_login_or_challenge(&html)?;
+    let score = parse_exam_detail_facts(document.as_str())?
+        .score_milli_points()
+        .map(|earned_milli_points| SubmissionScore {
+            earned_milli_points,
+            possible_milli_points: 100_000,
+        });
     let Some(remote_answers) = parse_exam_result_answers(&html)? else {
-        return inconclusive_snapshot(draft, RemoteState::Completed);
+        return exam_inconclusive_snapshot(draft, score);
     };
     if remote_answers.len() != plan.len()
         || draft.items.iter().enumerate().any(|(index, item)| {
             item.question.position != u32::try_from(index + 1).unwrap_or(u32::MAX)
         })
     {
-        return inconclusive_snapshot(draft, RemoteState::Completed);
+        return exam_inconclusive_snapshot(draft, score);
     }
     let planned = plan.answers().collect::<Vec<_>>();
     if remote_answers
@@ -564,7 +572,7 @@ pub fn parse_exam_verification_snapshot(
             actual.remote_id != *remote_id || actual.type_code != *type_code
         })
     {
-        return inconclusive_snapshot(draft, RemoteState::Completed);
+        return exam_inconclusive_snapshot(draft, score);
     }
     let questions = remote_answers
         .iter()
@@ -592,11 +600,20 @@ pub fn parse_exam_verification_snapshot(
     validate_snapshot(SubmissionVerificationSnapshot {
         status,
         remote_state: Some(RemoteState::Completed),
-        score: None,
+        score,
         progress_percent: Some(100),
         questions,
         verified_at: Utc::now(),
     })
+}
+
+fn exam_inconclusive_snapshot(
+    draft: &SubmissionDraft,
+    score: Option<SubmissionScore>,
+) -> ProviderResult<SubmissionVerificationSnapshot> {
+    let mut snapshot = inconclusive_snapshot(draft, RemoteState::Completed)?;
+    snapshot.score = score;
+    validate_snapshot(snapshot)
 }
 
 struct ExamRemoteAnswer {
@@ -1277,6 +1294,13 @@ mod tests {
         let result = ChaoxingExamVerificationDocument::try_new(EXAM_RESULT.to_owned()).unwrap();
         let snapshot = parse_exam_verification_snapshot(&result, &plan, &draft).unwrap();
         assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert_eq!(
+            snapshot.score,
+            Some(SubmissionScore {
+                earned_milli_points: 82_500,
+                possible_milli_points: 100_000,
+            })
+        );
         assert!(snapshot.questions.iter().all(|question| {
             question.status == SubmissionQuestionVerificationStatus::Confirmed
         }));
@@ -1296,6 +1320,25 @@ mod tests {
                 SubmissionQuestionVerificationStatus::Rejected,
             ]
         );
+        assert_eq!(snapshot.score.unwrap().earned_milli_points, 82_500);
+
+        for (replacement, expected) in [("0", 0), ("99.999", 99_999)] {
+            let result = ChaoxingExamVerificationDocument::try_new(EXAM_RESULT.replacen(
+                "82.5",
+                replacement,
+                1,
+            ))
+            .unwrap();
+            let snapshot = parse_exam_verification_snapshot(&result, &plan, &draft).unwrap();
+            assert_eq!(snapshot.score.unwrap().earned_milli_points, expected);
+        }
+
+        let no_score =
+            EXAM_RESULT.replacen(r#"<p class="exam-score">考试成绩：82.5 分</p>"#, "", 1);
+        let no_score = ChaoxingExamVerificationDocument::try_new(no_score).unwrap();
+        let snapshot = parse_exam_verification_snapshot(&no_score, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert_eq!(snapshot.score, None);
     }
 
     #[tokio::test]
@@ -1321,6 +1364,7 @@ mod tests {
             let result = ChaoxingExamVerificationDocument::try_new(document).unwrap();
             let snapshot = parse_exam_verification_snapshot(&result, &plan, &draft).unwrap();
             assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
+            assert_eq!(snapshot.score.unwrap().earned_milli_points, 82_500);
             assert!(snapshot.questions.iter().all(|question| {
                 question.status == SubmissionQuestionVerificationStatus::Unverified
             }));

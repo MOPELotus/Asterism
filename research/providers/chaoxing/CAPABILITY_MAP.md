@@ -17,7 +17,7 @@ source modules even when their assessments share field names or HTML shapes.
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
 | SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts. Exam has a separate value-free preview and durable one-operation-at-a-time native chain: donor signature and request digest are frozen before dispatch, each accepted answer save advances one cursor and rotates `enc`/timing state, and the final submit yields only a Receipt. No Exam mutation is routed through Work payloads or replayed after ambiguity |
-| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards; Exam uses Completed only for task recovery, then confirms per-Question facts solely from a strictly bound fresh result with exact Draft ID/order/type/value evidence |
+| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards; Exam uses Completed only for task recovery, confirms Questions solely from exact Draft ID/order/type/value result evidence, and projects the independent bounded result score as fixed thousandths |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
 | BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
 
@@ -175,8 +175,10 @@ policy and remains independently guarded.
   bound preview result whose complete IDs, DOM order, `exam_mobile` types and
   visible values match the immutable Draft. Missing/extra/unsupported evidence
   is Inconclusive, duplicates fail closed, and only a fully bound value mismatch
-  is Rejected. An ambiguous temporary save stays locked, while an ambiguous
-  final submit may be recovered only from a fresh Completed list state.
+  is Rejected. The same fresh result's optional 0-100 score is carried as exact
+  thousandths on any verification status but never participates in the answer
+  decision. An ambiguous temporary save stays locked, while an ambiguous final
+  submit may be recovered only from a fresh Completed list state.
 
 ## Completion boundary
 

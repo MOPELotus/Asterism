@@ -105,7 +105,9 @@ until a fresh exact Exam list row reports Completed. `detail-result.html` adds
 two ordered synthetic result Questions with exact IDs, type 0/3 inputs and
 visible `我的答案` values. Tests prove exact confirmation, value rejection and
 Inconclusive handling for missing, extra, unsupported or drifted binding facts;
-duplicate IDs fail closed. Unknown compatible JSON extensions are ignored, but
+duplicate IDs fail closed. The synthetic result score additionally proves exact
+fixed-point projection for 0, 82.5 and 99.999 plus `None` when absent, without
+changing answer status. Unknown compatible JSON extensions are ignored, but
 malformed state, rejection, identity drift and timing regression fail closed.
 All IDs, signatures and crypto-looking values are synthetic placeholders.
 
@@ -185,4 +187,5 @@ every fixture before staging it.
   imply per-Question answer verification. Exact result confirmation requires
   the immutable Draft's full ID/order/type/value set; missing, extra or type-2
   evidence is Inconclusive, duplicates fail closed, and hidden inputs/CSS are
-  ignored.
+  ignored. Optional result scores retain exact thousandths on every answer
+  status and never become answer-consistency evidence.

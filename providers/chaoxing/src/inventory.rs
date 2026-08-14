@@ -21,8 +21,19 @@ pub(crate) struct ChaoxingParsedInventoryTask {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ChaoxingExamFacts {
-    score: Option<f64>,
+    score_milli_points: Option<u32>,
     retake_available: bool,
+}
+
+impl ChaoxingExamFacts {
+    pub(crate) fn score(self) -> Option<f64> {
+        self.score_milli_points
+            .map(|score| f64::from(score) / 1_000.0)
+    }
+
+    pub(crate) fn score_milli_points(self) -> Option<u64> {
+        self.score_milli_points.map(u64::from)
+    }
 }
 
 impl ChaoxingParsedInventoryTask {
@@ -290,7 +301,7 @@ fn parse_exam_list_facts(
         return Ok(None);
     }
     Ok(Some(ChaoxingExamFacts {
-        score: extract_exam_score(row)?,
+        score_milli_points: extract_exam_score_milli(row)?,
         retake_available: exam_retake_available(row),
     }))
 }
@@ -302,7 +313,7 @@ fn insert_exam_list_facts(value: &mut Value, facts: Option<ChaoxingExamFacts>) {
     let object = value
         .as_object_mut()
         .expect("Chaoxing inventory facts are an object");
-    object.insert("score".to_owned(), json!(facts.score));
+    object.insert("score".to_owned(), json!(facts.score()));
     object.insert("retake_available".to_owned(), json!(facts.retake_available));
 }
 
@@ -334,11 +345,14 @@ pub(crate) fn parse_exam_detail_facts(html: &str) -> ProviderResult<ChaoxingExam
         let document = Html::parse_document(&visible);
         let root = document.root_element();
         let facts = ChaoxingExamFacts {
-            score: extract_exam_score(root)?,
+            score_milli_points: extract_exam_score_milli(root)?,
             retake_available: exam_retake_available(root),
         };
         let text = normalize_evidence(&root.text().collect::<Vec<_>>().join(" "));
-        if facts.score.is_none() && !facts.retake_available && !text.contains("我的答案") {
+        if facts.score_milli_points.is_none()
+            && !facts.retake_available
+            && !text.contains("我的答案")
+        {
             return Err(protocol_drift(
                 "Chaoxing Exam detail response contains no result facts",
             ));
@@ -366,7 +380,8 @@ pub(crate) fn apply_exam_detail_facts(
         )
     })?;
     let list_score = normalized_score(normalized.get("score"))?;
-    if list_score.is_some() && facts.score.is_some() && list_score != facts.score {
+    let detail_score = facts.score();
+    if list_score.is_some() && detail_score.is_some() && list_score != detail_score {
         return Err(protocol_drift(
             "Chaoxing Exam list and detail scores disagree",
         ));
@@ -375,11 +390,11 @@ pub(crate) fn apply_exam_detail_facts(
         .get("retake_available")
         .and_then(Value::as_bool)
         .ok_or_else(|| protocol_drift("Chaoxing Exam task has no retake fact"))?;
-    let score = facts.score.or(list_score);
+    let score = detail_score.or(list_score);
     let retake_available = list_retake || facts.retake_available;
     normalized.insert("score".to_owned(), json!(score));
     normalized.insert("retake_available".to_owned(), json!(retake_available));
-    normalized.insert("detail_score".to_owned(), json!(facts.score));
+    normalized.insert("detail_score".to_owned(), json!(detail_score));
     normalized.insert(
         "detail_retake_available".to_owned(),
         json!(facts.retake_available),
@@ -392,7 +407,7 @@ pub(crate) fn apply_exam_detail_facts(
     })?;
     raw.insert("score".to_owned(), json!(score));
     raw.insert("retake_available".to_owned(), json!(retake_available));
-    raw.insert("detail_score".to_owned(), json!(facts.score));
+    raw.insert("detail_score".to_owned(), json!(detail_score));
     raw.insert(
         "detail_retake_available".to_owned(),
         json!(facts.retake_available),
@@ -568,7 +583,7 @@ fn extract_time_text(row: ElementRef<'_>) -> Option<String> {
     })
 }
 
-fn extract_exam_score(row: ElementRef<'_>) -> ProviderResult<Option<f64>> {
+fn extract_exam_score_milli(row: ElementRef<'_>) -> ProviderResult<Option<u32>> {
     let score_selector = selector(".exam-score, .score, [data-score]");
     let mut candidates = Vec::new();
     if let Some(value) = row.value().attr("data-score") {
@@ -602,7 +617,7 @@ fn extract_exam_score(row: ElementRef<'_>) -> ProviderResult<Option<f64>> {
             "Chaoxing Exam row contains conflicting score facts",
         ));
     }
-    Ok(Some(f64::from(score) / 1_000.0))
+    Ok(Some(score))
 }
 
 fn collect_score_candidates(
@@ -1029,7 +1044,8 @@ mod tests {
     #[test]
     fn exam_detail_facts_merge_without_changing_state_or_capabilities() {
         let facts = parse_exam_detail_facts(EXAM_DETAIL).unwrap();
-        assert_eq!(facts.score, Some(82.5));
+        assert_eq!(facts.score(), Some(82.5));
+        assert_eq!(facts.score_milli_points(), Some(82_500));
         assert!(facts.retake_available);
 
         let mut task = parse_exam_inventory(EXAM_MIXED, &scope())

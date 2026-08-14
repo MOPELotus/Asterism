@@ -486,6 +486,7 @@ async fn exam_session_rotates_saves_then_verifies_the_terminal_inventory() {
         snapshot.remote_state,
         Some(asterism_domain::RemoteState::Completed)
     );
+    assert_eq!(snapshot.score.unwrap().earned_milli_points, 82_500);
     assert!(
         snapshot
             .questions

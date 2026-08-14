@@ -377,6 +377,11 @@ type 2 result text or absent visible answers produce `Inconclusive` with
 `Unverified` Questions; duplicates fail closed. Only a fully bound value
 mismatch is `Rejected`, and matching Questions can remain individually
 `Confirmed`. Hidden inputs, CSS, score and list state are never answer evidence.
+When the same fresh result exposes a bounded decimal score, the parser retains
+its original thousandths-of-a-point integer and projects it independently as a
+0-100 `SubmissionScore`; 0 and three-place fractional scores remain exact, and
+missing score remains `None`. Confirmed, Rejected and Inconclusive answer
+snapshots may all carry this independent score fact.
 An ambiguous final submit may be recovered as accepted only when that same
 fresh exact row is already Completed, after which this independent result
 verification still runs. Synthetic fixtures and Provider integration tests
