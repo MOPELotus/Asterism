@@ -185,6 +185,10 @@ placeholder identities, result codes, status values and pagination shape.
   alter Question fingerprints nor drive the local mutation position.
 - Request-vector tests freeze `StartAnswer`, `VerifyAnswer`,
   `SubmitAnswerAndSave`, `SkipAnswer` and `SubmitChoseWord` field/sign order.
+- Prepared-request tests prove equal timestamp/path/query/body inputs retain
+  one stable durable digest, while timestamp or answer changes produce another
+  digest; Provider transport no longer chooses mutation timestamps after the
+  operation has entered `Issued`.
 - Native-boundary tests cover both `ClassTask` and `StudyTask` route families,
   preserve the donor's read/submit `Authorization-v` split for every mutation,
   and reject any operation outside the audited five-operation allowlist.

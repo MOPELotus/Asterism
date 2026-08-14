@@ -1,7 +1,4 @@
-use crate::{
-    CidarenAssessmentBinding, CidarenAssessmentResponse, CidarenWireAnswer,
-    CidarenWordSelectionPlan,
-};
+use crate::{CidarenAssessmentResponse, CidarenMutationRequest, CidarenStartAnswerRequest};
 use asterism_provider_api::{ProviderContext, ProviderResult};
 use async_trait::async_trait;
 
@@ -17,37 +14,30 @@ pub trait CidarenAssessmentTransport: Send + Sync {
     async fn start_answer(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
+        request: &CidarenStartAnswerRequest,
     ) -> ProviderResult<CidarenAssessmentResponse>;
 
     async fn verify_answer(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
-        topic_code: &str,
-        answer: &CidarenWireAnswer,
+        request: &CidarenMutationRequest,
     ) -> ProviderResult<CidarenAssessmentResponse>;
 
     async fn submit_answer_and_save(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
-        topic_code: &str,
-        time_spent_millis: u64,
+        request: &CidarenMutationRequest,
     ) -> ProviderResult<CidarenAssessmentResponse>;
 
     async fn skip_answer(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
-        topic_code: &str,
-        time_spent_millis: u64,
+        request: &CidarenMutationRequest,
     ) -> ProviderResult<CidarenAssessmentResponse>;
 
     async fn submit_chose_word(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
-        plan: &CidarenWordSelectionPlan,
+        request: &CidarenMutationRequest,
     ) -> ProviderResult<CidarenAssessmentResponse>;
 }

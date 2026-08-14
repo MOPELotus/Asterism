@@ -524,6 +524,13 @@ commands expose those distinct, stable pre-execution delays so Core can durably
 record the one-shot command before scheduling it. Range choices are stable for
 one bound step so crash recovery cannot silently choose a different mutation
 payload or residence time; Provider mutation code never sleeps internally.
+Core also supplies the frozen issue time before the flow enters `Issued`.
+The Provider constructs the complete path/query or path/body/signature at that
+point and exposes a versioned operation type plus SHA-256 request digest for the
+durable ledger. Native transport accepts only this prepared request and no
+longer calls the wall clock while assembling assessment mutations, so the
+persisted intent identifies the exact credential-free request that can reach
+the platform.
 
 `StartAnswer` is a non-idempotent remote attempt mutation, not a harmless
 Question read. The Provider request and parser layers are implemented, while

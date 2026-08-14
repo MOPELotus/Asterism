@@ -5,7 +5,7 @@ use std::{
 };
 
 use asterism_domain::{
-    NormalizedAnswer, Question, QuestionKind, SelectedAnswer, SubmissionReceipt, TaskId,
+    NormalizedAnswer, Question, QuestionKind, SelectedAnswer, SubmissionReceipt, TaskId, Timestamp,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteTaskDetail,
@@ -16,9 +16,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     CidarenAssessmentBinding, CidarenAssessmentReceiptKind, CidarenAssessmentResponse,
-    CidarenAssessmentTransport, CidarenAttemptProgress, CidarenRuntimeSettings, CidarenWireAnswer,
-    CidarenWordSelectionPlan, ParsedCidarenAttemptQuestion, ParsedCidarenAttemptStep,
-    ParsedCidarenReadingCard, parse_attempt_step,
+    CidarenAssessmentTransport, CidarenAttemptProgress, CidarenMutationRequest,
+    CidarenRuntimeSettings, CidarenStartAnswerRequest, CidarenWireAnswer, CidarenWordSelectionPlan,
+    ParsedCidarenAttemptQuestion, ParsedCidarenAttemptStep, ParsedCidarenReadingCard,
+    build_skip_answer_request, build_start_answer_request, build_submit_answer_and_save_request,
+    build_submit_chose_word_request, build_verify_answer_request, parse_attempt_step,
 };
 
 const MAX_CORRELATION_ID_BYTES: usize = 512;
@@ -32,6 +34,18 @@ pub enum CidarenAttemptOperation {
     VerifyAnswer,
     SubmitAnswerAndSave,
     SkipAnswer,
+}
+
+impl CidarenAttemptOperation {
+    pub const fn operation_type(self) -> &'static str {
+        match self {
+            Self::SubmitChoseWord => "cidaren.submit-chose-word.v1",
+            Self::StartAnswer => "cidaren.start-answer.v1",
+            Self::VerifyAnswer => "cidaren.verify-answer.v1",
+            Self::SubmitAnswerAndSave => "cidaren.submit-answer-and-save.v1",
+            Self::SkipAnswer => "cidaren.skip-answer.v1",
+        }
+    }
 }
 
 /// Sanitized current state of the Provider-private attempt machine.
@@ -117,26 +131,28 @@ pub struct CidarenIssuedCommand {
     context_binding: [u8; 32],
     flow_binding: [u8; 32],
     operation: CidarenAttemptOperation,
-    binding: CidarenAssessmentBinding,
     action: CidarenIssuedAction,
     delay_before_execute_seconds: u64,
 }
 
 enum CidarenIssuedAction {
-    SubmitChoseWord(CidarenWordSelectionPlan),
-    StartAnswer,
-    VerifyAnswer {
-        topic_code: Zeroizing<String>,
-        answer: CidarenWireAnswer,
-    },
-    SubmitAnswerAndSave {
-        topic_code: Zeroizing<String>,
-        time_spent_millis: u64,
-    },
-    SkipAnswer {
-        topic_code: Zeroizing<String>,
-        time_spent_millis: u64,
-    },
+    SubmitChoseWord(CidarenMutationRequest),
+    StartAnswer(CidarenStartAnswerRequest),
+    VerifyAnswer(CidarenMutationRequest),
+    SubmitAnswerAndSave(CidarenMutationRequest),
+    SkipAnswer(CidarenMutationRequest),
+}
+
+impl CidarenIssuedAction {
+    fn request_digest(&self) -> [u8; 32] {
+        match self {
+            Self::StartAnswer(request) => request.request_digest(),
+            Self::SubmitChoseWord(request)
+            | Self::VerifyAnswer(request)
+            | Self::SubmitAnswerAndSave(request)
+            | Self::SkipAnswer(request) => request.request_digest(),
+        }
+    }
 }
 
 /// Successful transport result bound to exactly one flow and operation.
@@ -275,7 +291,11 @@ impl CidarenAttemptFlow {
     /// # Errors
     ///
     /// Returns a typed error unless a fresh word-selection plan is ready.
-    pub fn issue_word_selection(&mut self) -> ProviderResult<CidarenIssuedCommand> {
+    pub fn issue_word_selection(
+        &mut self,
+        request_at: Timestamp,
+    ) -> ProviderResult<CidarenIssuedCommand> {
+        let timestamp_millis = request_timestamp_millis(request_at)?;
         let phase = self.take_phase();
         let CidarenAttemptPhase::ReadyToSelectWords(plan) = phase else {
             self.phase = Some(phase);
@@ -283,10 +303,19 @@ impl CidarenAttemptFlow {
                 "Cidaren word selection cannot be issued in the current state",
             ));
         };
+        let request =
+            match build_submit_chose_word_request(&self.binding, plan.word_map(), timestamp_millis)
+            {
+                Ok(request) => request,
+                Err(error) => {
+                    self.phase = Some(CidarenAttemptPhase::ReadyToSelectWords(plan));
+                    return Err(error);
+                }
+            };
         self.issue(
             CidarenAttemptOperation::SubmitChoseWord,
             CidarenAttemptContinuation::SelectWords,
-            CidarenIssuedAction::SubmitChoseWord(plan),
+            CidarenIssuedAction::SubmitChoseWord(request),
             0,
         )
     }
@@ -296,7 +325,8 @@ impl CidarenAttemptFlow {
     /// # Errors
     ///
     /// Returns a typed error unless word selection is complete and start is ready.
-    pub fn issue_start(&mut self) -> ProviderResult<CidarenIssuedCommand> {
+    pub fn issue_start(&mut self, request_at: Timestamp) -> ProviderResult<CidarenIssuedCommand> {
+        let timestamp_millis = request_timestamp_millis(request_at)?;
         let phase = self.take_phase();
         if !matches!(phase, CidarenAttemptPhase::ReadyToStart) {
             self.phase = Some(phase);
@@ -304,10 +334,11 @@ impl CidarenAttemptFlow {
                 "Cidaren StartAnswer cannot be issued in the current state",
             ));
         }
+        let request = build_start_answer_request(&self.binding, timestamp_millis);
         self.issue(
             CidarenAttemptOperation::StartAnswer,
             CidarenAttemptContinuation::Start,
-            CidarenIssuedAction::StartAnswer,
+            CidarenIssuedAction::StartAnswer(request),
             0,
         )
     }
@@ -323,8 +354,10 @@ impl CidarenAttemptFlow {
     pub fn issue_selected_answer(
         &mut self,
         selected: &SelectedAnswer,
+        request_at: Timestamp,
     ) -> ProviderResult<CidarenIssuedCommand> {
-        let (topic_code, answers) = match self.phase() {
+        let timestamp_millis = request_timestamp_millis(request_at)?;
+        let (topic_code, mut answers) = match self.phase() {
             CidarenAttemptPhase::CurrentQuestion(current) => (
                 Zeroizing::new(current.parsed.topic_code().to_owned()),
                 wire_answers(&current.question, selected)?,
@@ -335,8 +368,18 @@ impl CidarenAttemptFlow {
                 ));
             }
         };
+        let answer = answers
+            .pop_front()
+            .ok_or_else(|| invalid_state("Cidaren normalized answer has no Verify step"))?;
+        let request =
+            build_verify_answer_request(&self.binding, &topic_code, &answer, timestamp_millis)?;
         let _current = self.take_phase();
-        self.issue_verify(topic_code, answers)
+        self.issue(
+            CidarenAttemptOperation::VerifyAnswer,
+            CidarenAttemptContinuation::Verify { remaining: answers },
+            CidarenIssuedAction::VerifyAnswer(request),
+            0,
+        )
     }
 
     /// Issues the next matching relation only after the preceding response has
@@ -345,11 +388,15 @@ impl CidarenAttemptFlow {
     /// # Errors
     ///
     /// Returns a typed error unless another sequential relation is ready.
-    pub fn issue_next_verify(&mut self) -> ProviderResult<CidarenIssuedCommand> {
+    pub fn issue_next_verify(
+        &mut self,
+        request_at: Timestamp,
+    ) -> ProviderResult<CidarenIssuedCommand> {
+        let timestamp_millis = request_timestamp_millis(request_at)?;
         let phase = self.take_phase();
         let CidarenAttemptPhase::ReadyToVerify {
             topic_code,
-            remaining,
+            mut remaining,
         } = phase
         else {
             self.phase = Some(phase);
@@ -357,7 +404,37 @@ impl CidarenAttemptFlow {
                 "Cidaren has no sequential VerifyAnswer step ready",
             ));
         };
-        self.issue_verify(topic_code, remaining)
+        let Some(answer) = remaining.pop_front() else {
+            self.phase = Some(CidarenAttemptPhase::ReadyToVerify {
+                topic_code,
+                remaining,
+            });
+            return Err(invalid_state(
+                "Cidaren normalized answer has no Verify step",
+            ));
+        };
+        let request = match build_verify_answer_request(
+            &self.binding,
+            &topic_code,
+            &answer,
+            timestamp_millis,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                remaining.push_front(answer);
+                self.phase = Some(CidarenAttemptPhase::ReadyToVerify {
+                    topic_code,
+                    remaining,
+                });
+                return Err(error);
+            }
+        };
+        self.issue(
+            CidarenAttemptOperation::VerifyAnswer,
+            CidarenAttemptContinuation::Verify { remaining },
+            CidarenIssuedAction::VerifyAnswer(request),
+            0,
+        )
     }
 
     /// Issues `SubmitAnswerAndSave` for a verified Question or reading card.
@@ -371,35 +448,52 @@ impl CidarenAttemptFlow {
     pub fn issue_advance(
         &mut self,
         settings: &CidarenRuntimeSettings,
+        request_at: Timestamp,
     ) -> ProviderResult<CidarenIssuedCommand> {
+        let timestamp_millis = request_timestamp_millis(request_at)?;
         let phase = self.take_phase();
         let delay_entropy = step_entropy(self.flow_binding, self.position, b"advance-delay");
-        let (topic_code, delay_before_execute_seconds) = match phase {
+        let (topic_code, delay_before_execute_seconds) = match &phase {
             CidarenAttemptPhase::ReadyToAdvance { topic_code } => (
-                topic_code,
+                topic_code.as_str(),
                 settings.verified_advance_delay_seconds(&delay_entropy),
             ),
             CidarenAttemptPhase::CurrentReadingCard(card) => (
-                Zeroizing::new(card.topic_code().to_owned()),
+                card.topic_code(),
                 settings.reading_advance_delay_seconds(&delay_entropy),
             ),
-            other => {
-                self.phase = Some(other);
+            _ => {
+                self.phase = Some(phase);
                 return Err(invalid_state("Cidaren SubmitAnswerAndSave is not ready"));
             }
         };
-        let next_position = next_position(self.position)?;
+        let next_position = match next_position(self.position) {
+            Ok(position) => position,
+            Err(error) => {
+                self.phase = Some(phase);
+                return Err(error);
+            }
+        };
         let entropy = step_entropy(self.flow_binding, self.position, b"advance");
         let time_spent_millis = settings.reported_answer_time_millis(&entropy);
+        let request = match build_submit_answer_and_save_request(
+            &self.binding,
+            topic_code,
+            time_spent_millis,
+            timestamp_millis,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                self.phase = Some(phase);
+                return Err(error);
+            }
+        };
         self.issue(
             CidarenAttemptOperation::SubmitAnswerAndSave,
             CidarenAttemptContinuation::NextStep {
                 position: next_position,
             },
-            CidarenIssuedAction::SubmitAnswerAndSave {
-                topic_code,
-                time_spent_millis,
-            },
+            CidarenIssuedAction::SubmitAnswerAndSave(request),
             delay_before_execute_seconds,
         )
     }
@@ -414,24 +508,28 @@ impl CidarenAttemptFlow {
     pub fn issue_skip(
         &mut self,
         settings: &CidarenRuntimeSettings,
+        request_at: Timestamp,
     ) -> ProviderResult<CidarenIssuedCommand> {
-        let phase = self.take_phase();
-        let CidarenAttemptPhase::CurrentQuestion(current) = phase else {
-            self.phase = Some(phase);
+        let timestamp_millis = request_timestamp_millis(request_at)?;
+        let CidarenAttemptPhase::CurrentQuestion(current) = self.phase() else {
             return Err(invalid_state(
                 "Cidaren SkipAnswer requires the current Question",
             ));
         };
         let next_position = next_position(self.position)?;
+        let request = build_skip_answer_request(
+            &self.binding,
+            current.parsed.topic_code(),
+            settings.skip_reported_time_millis(),
+            timestamp_millis,
+        )?;
+        let _current = self.take_phase();
         self.issue(
             CidarenAttemptOperation::SkipAnswer,
             CidarenAttemptContinuation::NextStep {
                 position: next_position,
             },
-            CidarenIssuedAction::SkipAnswer {
-                topic_code: Zeroizing::new(current.parsed.topic_code().to_owned()),
-                time_spent_millis: settings.skip_reported_time_millis(),
-            },
+            CidarenIssuedAction::SkipAnswer(request),
             0,
         )
     }
@@ -531,22 +629,6 @@ impl CidarenAttemptFlow {
         Ok(())
     }
 
-    fn issue_verify(
-        &mut self,
-        topic_code: Zeroizing<String>,
-        mut answers: VecDeque<CidarenWireAnswer>,
-    ) -> ProviderResult<CidarenIssuedCommand> {
-        let answer = answers
-            .pop_front()
-            .ok_or_else(|| invalid_state("Cidaren normalized answer has no Verify step"))?;
-        self.issue(
-            CidarenAttemptOperation::VerifyAnswer,
-            CidarenAttemptContinuation::Verify { remaining: answers },
-            CidarenIssuedAction::VerifyAnswer { topic_code, answer },
-            0,
-        )
-    }
-
     fn issue(
         &mut self,
         operation: CidarenAttemptOperation,
@@ -567,7 +649,6 @@ impl CidarenAttemptFlow {
             context_binding: self.context_binding,
             flow_binding: self.flow_binding,
             operation,
-            binding: self.binding.clone(),
             action,
             delay_before_execute_seconds,
         })
@@ -721,6 +802,17 @@ impl CidarenIssuedCommand {
         self.operation
     }
 
+    /// Stable Provider operation label for Core's durable operation ledger.
+    pub const fn operation_type(&self) -> &'static str {
+        self.operation.operation_type()
+    }
+
+    /// Digest of the exact credential-free path/query or path/body/signature
+    /// already frozen into this one-shot command.
+    pub fn request_digest(&self) -> [u8; 32] {
+        self.action.request_digest()
+    }
+
     /// Returns the stable donor-observed residence time which Core must
     /// schedule after durably recording this issued command and before
     /// executing its one-shot mutation.
@@ -748,34 +840,20 @@ impl CidarenIssuedCommand {
             ));
         }
         let response = match &self.action {
-            CidarenIssuedAction::SubmitChoseWord(plan) => {
-                transport
-                    .submit_chose_word(context, &self.binding, plan)
-                    .await
+            CidarenIssuedAction::SubmitChoseWord(request) => {
+                transport.submit_chose_word(context, request).await
             }
-            CidarenIssuedAction::StartAnswer => {
-                transport.start_answer(context, &self.binding).await
+            CidarenIssuedAction::StartAnswer(request) => {
+                transport.start_answer(context, request).await
             }
-            CidarenIssuedAction::VerifyAnswer { topic_code, answer } => {
-                transport
-                    .verify_answer(context, &self.binding, topic_code, answer)
-                    .await
+            CidarenIssuedAction::VerifyAnswer(request) => {
+                transport.verify_answer(context, request).await
             }
-            CidarenIssuedAction::SubmitAnswerAndSave {
-                topic_code,
-                time_spent_millis,
-            } => {
-                transport
-                    .submit_answer_and_save(context, &self.binding, topic_code, *time_spent_millis)
-                    .await
+            CidarenIssuedAction::SubmitAnswerAndSave(request) => {
+                transport.submit_answer_and_save(context, request).await
             }
-            CidarenIssuedAction::SkipAnswer {
-                topic_code,
-                time_spent_millis,
-            } => {
-                transport
-                    .skip_answer(context, &self.binding, topic_code, *time_spent_millis)
-                    .await
+            CidarenIssuedAction::SkipAnswer(request) => {
+                transport.skip_answer(context, request).await
             }
         }?;
         Ok(CidarenIssuedOutcome {
@@ -984,6 +1062,15 @@ fn step_entropy(flow_binding: [u8; 32], position: u32, operation: &[u8]) -> [u8;
         .into()
 }
 
+fn request_timestamp_millis(request_at: Timestamp) -> ProviderResult<u64> {
+    u64::try_from(request_at.timestamp_millis()).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Cidaren issued request timestamp is outside the supported range",
+        )
+    })
+}
+
 fn next_position(position: u32) -> ProviderResult<u32> {
     position
         .checked_add(1)
@@ -1036,7 +1123,7 @@ mod tests {
         async fn start_answer(
             &self,
             _context: &ProviderContext,
-            _binding: &CidarenAssessmentBinding,
+            _request: &CidarenStartAnswerRequest,
         ) -> ProviderResult<CidarenAssessmentResponse> {
             self.respond(CidarenAttemptOperation::StartAnswer)
         }
@@ -1044,9 +1131,7 @@ mod tests {
         async fn verify_answer(
             &self,
             _context: &ProviderContext,
-            _binding: &CidarenAssessmentBinding,
-            _topic_code: &str,
-            _answer: &CidarenWireAnswer,
+            _request: &CidarenMutationRequest,
         ) -> ProviderResult<CidarenAssessmentResponse> {
             self.respond(CidarenAttemptOperation::VerifyAnswer)
         }
@@ -1054,9 +1139,7 @@ mod tests {
         async fn submit_answer_and_save(
             &self,
             _context: &ProviderContext,
-            _binding: &CidarenAssessmentBinding,
-            _topic_code: &str,
-            _time_spent_millis: u64,
+            _request: &CidarenMutationRequest,
         ) -> ProviderResult<CidarenAssessmentResponse> {
             self.respond(CidarenAttemptOperation::SubmitAnswerAndSave)
         }
@@ -1064,9 +1147,7 @@ mod tests {
         async fn skip_answer(
             &self,
             _context: &ProviderContext,
-            _binding: &CidarenAssessmentBinding,
-            _topic_code: &str,
-            _time_spent_millis: u64,
+            _request: &CidarenMutationRequest,
         ) -> ProviderResult<CidarenAssessmentResponse> {
             self.respond(CidarenAttemptOperation::SkipAnswer)
         }
@@ -1074,8 +1155,7 @@ mod tests {
         async fn submit_chose_word(
             &self,
             _context: &ProviderContext,
-            _binding: &CidarenAssessmentBinding,
-            _plan: &CidarenWordSelectionPlan,
+            _request: &CidarenMutationRequest,
         ) -> ProviderResult<CidarenAssessmentResponse> {
             self.respond(CidarenAttemptOperation::SubmitChoseWord)
         }
@@ -1093,6 +1173,10 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| invalid_response("fixture response exhausted"))
         }
+    }
+
+    fn request_at() -> Timestamp {
+        Utc.with_ymd_and_hms(2026, 8, 14, 0, 0, 0).unwrap()
     }
 
     #[tokio::test]
@@ -1115,8 +1199,10 @@ mod tests {
         )
         .unwrap();
 
-        let command = flow.issue_start().unwrap();
+        let command = flow.issue_start(request_at()).unwrap();
         assert_eq!(command.delay_before_execute_seconds(), 0);
+        assert_eq!(command.operation_type(), "cidaren.start-answer.v1");
+        assert_ne!(command.request_digest(), [0; 32]);
         assert_eq!(
             flow.status(),
             CidarenAttemptFlowStatus::Issued(CidarenAttemptOperation::StartAnswer)
@@ -1134,13 +1220,13 @@ mod tests {
             source: AnswerSource::ProviderNative,
             confidence: None,
         };
-        let command = flow.issue_selected_answer(&selected).unwrap();
+        let command = flow.issue_selected_answer(&selected, request_at()).unwrap();
         assert_eq!(command.delay_before_execute_seconds(), 0);
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToAdvance);
 
-        let command = flow.issue_advance(&settings()).unwrap();
+        let command = flow.issue_advance(&settings(), request_at()).unwrap();
         assert!((1..=2).contains(&command.delay_before_execute_seconds()));
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
@@ -1182,7 +1268,7 @@ mod tests {
         )
         .unwrap();
         let outcome = flow
-            .issue_start()
+            .issue_start(request_at())
             .unwrap()
             .execute(transport.clone(), &context)
             .await
@@ -1206,7 +1292,7 @@ mod tests {
             confidence: None,
         };
         let outcome = flow
-            .issue_selected_answer(&selected)
+            .issue_selected_answer(&selected, request_at())
             .unwrap()
             .execute(transport.clone(), &context)
             .await
@@ -1214,7 +1300,7 @@ mod tests {
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToVerify);
         let outcome = flow
-            .issue_next_verify()
+            .issue_next_verify(request_at())
             .unwrap()
             .execute(transport.clone(), &context)
             .await
@@ -1242,14 +1328,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let command = flow.issue_start().unwrap();
+        let command = flow.issue_start(request_at()).unwrap();
         drop(command);
         flow.mark_ambiguous().unwrap();
         assert_eq!(
             flow.status(),
             CidarenAttemptFlowStatus::Ambiguous(CidarenAttemptOperation::StartAnswer)
         );
-        assert!(flow.issue_start().is_err());
+        assert!(flow.issue_start(request_at()).is_err());
     }
 
     #[test]
@@ -1263,7 +1349,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let command = flow.issue_start().unwrap();
+        let command = flow.issue_start(request_at()).unwrap();
         let received_at = Utc.with_ymd_and_hms(2026, 8, 14, 1, 2, 3).unwrap();
         let outcome = CidarenIssuedOutcome {
             flow_binding: flow.flow_binding,
@@ -1296,9 +1382,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToSelectWords);
-        assert!(flow.issue_start().is_err());
+        assert!(flow.issue_start(request_at()).is_err());
         let outcome = flow
-            .issue_word_selection()
+            .issue_word_selection(request_at())
             .unwrap()
             .execute(transport.clone(), &context)
             .await
@@ -1330,7 +1416,7 @@ mod tests {
         )
         .unwrap();
         let outcome = flow
-            .issue_word_selection()
+            .issue_word_selection(request_at())
             .unwrap()
             .execute(transport.clone(), &context)
             .await
@@ -1342,7 +1428,7 @@ mod tests {
             CidarenAttemptFlowStatus::Receipt(CidarenAssessmentReceiptKind::Completed)
         );
         assert!(flow.completion_receipt().is_ok());
-        assert!(flow.issue_start().is_err());
+        assert!(flow.issue_start(request_at()).is_err());
         assert_eq!(
             *transport.operations.lock().unwrap(),
             [CidarenAttemptOperation::SubmitChoseWord]
@@ -1368,7 +1454,7 @@ mod tests {
         )
         .unwrap();
         let outcome = flow
-            .issue_word_selection()
+            .issue_word_selection(request_at())
             .unwrap()
             .execute(transport, &context)
             .await
@@ -1378,7 +1464,7 @@ mod tests {
             flow.status(),
             CidarenAttemptFlowStatus::Receipt(CidarenAssessmentReceiptKind::WordSelectionRequired)
         );
-        assert!(flow.issue_start().is_err());
+        assert!(flow.issue_start(request_at()).is_err());
 
         let (_, fresh_plan) = word_selection_plan();
         flow.supply_word_selection(&detail, fresh_plan).unwrap();
@@ -1405,7 +1491,7 @@ mod tests {
         )
         .unwrap();
         let outcome = flow
-            .issue_start()
+            .issue_start(request_at())
             .unwrap()
             .execute(transport.clone(), &context)
             .await
@@ -1415,13 +1501,13 @@ mod tests {
         let remote_progress = flow.current_remote_progress().unwrap();
         assert_eq!(remote_progress.completed(), 0);
         assert_eq!(remote_progress.total(), 2);
-        let command = flow.issue_advance(&settings()).unwrap();
+        let command = flow.issue_advance(&settings(), request_at()).unwrap();
         assert!((1..=3).contains(&command.delay_before_execute_seconds()));
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.current_question().unwrap().position, 2);
         assert_eq!(flow.inter_step_delay_seconds(&settings()), 2);
-        let command = flow.issue_skip(&settings()).unwrap();
+        let command = flow.issue_skip(&settings(), request_at()).unwrap();
         assert_eq!(command.delay_before_execute_seconds(), 0);
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
@@ -1459,7 +1545,7 @@ mod tests {
         )
         .unwrap();
         let outcome = flow
-            .issue_start()
+            .issue_start(request_at())
             .unwrap()
             .execute(transport.clone(), &context)
             .await
@@ -1471,7 +1557,7 @@ mod tests {
         );
 
         let outcome = flow
-            .issue_skip(&settings())
+            .issue_skip(&settings(), request_at())
             .unwrap()
             .execute(transport.clone(), &context)
             .await
@@ -1508,7 +1594,7 @@ mod tests {
         )
         .unwrap();
         let outcome = flow
-            .issue_start()
+            .issue_start(request_at())
             .unwrap()
             .execute(transport, &context)
             .await
@@ -1518,7 +1604,7 @@ mod tests {
             flow.status(),
             CidarenAttemptFlowStatus::FailedClosed(CidarenAttemptOperation::StartAnswer)
         );
-        assert!(flow.issue_start().is_err());
+        assert!(flow.issue_start(request_at()).is_err());
     }
 
     #[test]

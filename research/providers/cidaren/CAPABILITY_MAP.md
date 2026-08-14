@@ -119,6 +119,11 @@ The current checkpoint (not a completion boundary):
     and complete Question content fingerprint. The plaintext is intended only
     for Core's encrypted QuestionSession continuation store and never enters a
     normalized Question, immutable Draft or diagnostic output.
+29. freezes every assessment mutation's timestamp, path, ordered query or
+    serialized signed body before the Provider-private flow enters `Issued`;
+    the command exposes a stable `cidaren.*.v1` operation type and framed
+    SHA-256 request digest for Core's operation ledger, while Native transport
+    can only send the already prepared request.
 
 The remaining work is durable shared QuestionSession/Attempt registration for
 QuestionInventory/QuestionParse and SubmissionExecute, shared execution for

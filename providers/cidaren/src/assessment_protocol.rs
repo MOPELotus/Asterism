@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, fmt};
 
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTaskDetail};
 use serde_json::{Number, Value, json};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 const START_VERSION: &str = "2.6.1.240122";
@@ -150,6 +151,18 @@ pub struct CidarenStartAnswerRequest {
     pub query: Vec<(String, String)>,
 }
 
+impl CidarenStartAnswerRequest {
+    /// Hashes the exact credential-free GET request semantics in query order.
+    pub fn request_digest(&self) -> [u8; 32] {
+        let mut hasher = request_digest_prefix(b"GET", self.path.as_bytes(), b"read");
+        for (key, value) in &self.query {
+            digest_frame(&mut hasher, key.as_bytes());
+            digest_frame(&mut hasher, value.as_bytes());
+        }
+        hasher.finalize().into()
+    }
+}
+
 /// Builds the non-replayable `StartAnswer` request after fresh Task rebinding.
 /// The caller must persist an attempt before issuing this request and must not
 /// automatically replay it after an ambiguous network outcome.
@@ -274,6 +287,18 @@ impl CidarenMutationRequest {
     pub(crate) const fn authorization(&self) -> CidarenMutationAuthorization {
         self.authorization
     }
+
+    /// Hashes the exact credential-free POST path, authorization family and
+    /// serialized body which the native transport will send.
+    pub fn request_digest(&self) -> [u8; 32] {
+        let mut hasher = request_digest_prefix(
+            b"POST",
+            self.path.as_bytes(),
+            self.authorization.digest_label(),
+        );
+        digest_frame(&mut hasher, self.body.as_slice());
+        hasher.finalize().into()
+    }
 }
 
 impl fmt::Debug for CidarenMutationRequest {
@@ -291,6 +316,15 @@ impl fmt::Debug for CidarenMutationRequest {
 pub(crate) enum CidarenMutationAuthorization {
     Read,
     Submit,
+}
+
+impl CidarenMutationAuthorization {
+    const fn digest_label(self) -> &'static [u8] {
+        match self {
+            Self::Read => b"read",
+            Self::Submit => b"submit",
+        }
+    }
 }
 
 /// Builds one `VerifyAnswer` mutation. Matching questions call this only for
@@ -455,6 +489,20 @@ fn mutation_request(
     })
 }
 
+fn request_digest_prefix(method: &[u8], path: &[u8], authorization: &[u8]) -> Sha256 {
+    let mut hasher = Sha256::new();
+    digest_frame(&mut hasher, b"cidaren.assessment-request.v1");
+    digest_frame(&mut hasher, method);
+    digest_frame(&mut hasher, path);
+    digest_frame(&mut hasher, authorization);
+    hasher
+}
+
+fn digest_frame(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(value);
+}
+
 fn validate_word_map(value: &Value) -> ProviderResult<()> {
     let mut words = Vec::new();
     match value {
@@ -611,6 +659,40 @@ mod tests {
                 .unwrap();
         assert_eq!(skip.path(), "ClassTask/SkipAnswer");
         assert!(!format!("{skip:?}").contains("synthetic-topic"));
+    }
+
+    #[test]
+    fn request_digests_bind_exact_frozen_transport_semantics() {
+        let binding = class_binding();
+        let start = build_start_answer_request(&binding, 1_710_000_000_000);
+        let same_start = build_start_answer_request(&binding, 1_710_000_000_000);
+        let later_start = build_start_answer_request(&binding, 1_710_000_000_001);
+        assert_eq!(start.request_digest(), same_start.request_digest());
+        assert_ne!(start.request_digest(), later_start.request_digest());
+
+        let first = build_verify_answer_request(
+            &binding,
+            "synthetic-topic",
+            &CidarenWireAnswer::from_option_id("n:1").unwrap(),
+            1_710_000_000_000,
+        )
+        .unwrap();
+        let same = build_verify_answer_request(
+            &binding,
+            "synthetic-topic",
+            &CidarenWireAnswer::from_option_id("n:1").unwrap(),
+            1_710_000_000_000,
+        )
+        .unwrap();
+        let changed_answer = build_verify_answer_request(
+            &binding,
+            "synthetic-topic",
+            &CidarenWireAnswer::from_option_id("n:2").unwrap(),
+            1_710_000_000_000,
+        )
+        .unwrap();
+        assert_eq!(first.request_digest(), same.request_digest());
+        assert_ne!(first.request_digest(), changed_answer.request_digest());
     }
 
     #[test]

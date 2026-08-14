@@ -24,19 +24,17 @@ use crate::oauth_exchange::{
     CidarenOauthLoginRequest, LOGIN_VERSION,
 };
 use crate::{
-    CidarenAnswerEvidenceBinding, CidarenAnswerEvidenceTransport, CidarenAssessmentBinding,
-    CidarenAssessmentResponse, CidarenAssessmentTransport, CidarenAuthenticationTransport,
-    CidarenClassTaskPageDocument, CidarenClassTaskTransport, CidarenMutationRequest,
-    CidarenSessionResolver, CidarenStartAnswerRequest, CidarenStudyTaskDocument,
-    CidarenStudyTaskTransport, CidarenTaskScoreTransport, CidarenTokenSession, CidarenWireAnswer,
-    CidarenWordEvidence, CidarenWordInfoRequest, CidarenWordInventory, CidarenWordInventoryRequest,
-    CidarenWordLookup, CidarenWordPrototypeRequest, CidarenWordSelectionPlan,
+    CidarenAnswerEvidenceBinding, CidarenAnswerEvidenceTransport, CidarenAssessmentResponse,
+    CidarenAssessmentTransport, CidarenAuthenticationTransport, CidarenClassTaskPageDocument,
+    CidarenClassTaskTransport, CidarenMutationRequest, CidarenSessionResolver,
+    CidarenStartAnswerRequest, CidarenStudyTaskDocument, CidarenStudyTaskTransport,
+    CidarenTaskScoreTransport, CidarenTokenSession, CidarenWordEvidence, CidarenWordInfoRequest,
+    CidarenWordInventory, CidarenWordInventoryRequest, CidarenWordLookup,
+    CidarenWordPrototypeRequest,
     answer_evidence_protocol::fresh_course_id,
     assessment_protocol::CidarenMutationAuthorization,
     authentication::selected_course_id,
-    build_skip_answer_request, build_start_answer_request, build_submit_answer_and_save_request,
-    build_submit_chose_word_request, build_verify_answer_request, build_word_info_request,
-    build_word_inventory_request, build_word_prototype_request,
+    build_word_info_request, build_word_inventory_request, build_word_prototype_request,
     class_tasks::class_task_total,
     classify_token_validation_response, parse_assessment_response, parse_course_page_response,
     parse_study_task_info_response, parse_word_info_response, parse_word_prototype_response,
@@ -387,74 +385,50 @@ impl CidarenAssessmentTransport for NativeCidarenTransport {
     async fn start_answer(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
+        request: &CidarenStartAnswerRequest,
     ) -> ProviderResult<CidarenAssessmentResponse> {
         let session = self.sessions.resolve_session(context).await?;
-        let request = build_start_answer_request(binding, current_timestamp_millis()?);
-        let request = native_start_answer_request(&self.client, &session, &request)?;
+        let request = native_start_answer_request(&self.client, &session, request)?;
         self.send_assessment_request(&session, request).await
     }
 
     async fn verify_answer(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
-        topic_code: &str,
-        answer: &CidarenWireAnswer,
+        request: &CidarenMutationRequest,
     ) -> ProviderResult<CidarenAssessmentResponse> {
         let session = self.sessions.resolve_session(context).await?;
-        let request =
-            build_verify_answer_request(binding, topic_code, answer, current_timestamp_millis()?)?;
-        let request = native_mutation_request(&self.client, &session, &request)?;
+        let request = native_mutation_request(&self.client, &session, request)?;
         self.send_assessment_request(&session, request).await
     }
 
     async fn submit_answer_and_save(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
-        topic_code: &str,
-        time_spent_millis: u64,
+        request: &CidarenMutationRequest,
     ) -> ProviderResult<CidarenAssessmentResponse> {
         let session = self.sessions.resolve_session(context).await?;
-        let request = build_submit_answer_and_save_request(
-            binding,
-            topic_code,
-            time_spent_millis,
-            current_timestamp_millis()?,
-        )?;
-        let request = native_mutation_request(&self.client, &session, &request)?;
+        let request = native_mutation_request(&self.client, &session, request)?;
         self.send_assessment_request(&session, request).await
     }
 
     async fn skip_answer(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
-        topic_code: &str,
-        time_spent_millis: u64,
+        request: &CidarenMutationRequest,
     ) -> ProviderResult<CidarenAssessmentResponse> {
         let session = self.sessions.resolve_session(context).await?;
-        let request = build_skip_answer_request(
-            binding,
-            topic_code,
-            time_spent_millis,
-            current_timestamp_millis()?,
-        )?;
-        let request = native_mutation_request(&self.client, &session, &request)?;
+        let request = native_mutation_request(&self.client, &session, request)?;
         self.send_assessment_request(&session, request).await
     }
 
     async fn submit_chose_word(
         &self,
         context: &ProviderContext,
-        binding: &CidarenAssessmentBinding,
-        plan: &CidarenWordSelectionPlan,
+        request: &CidarenMutationRequest,
     ) -> ProviderResult<CidarenAssessmentResponse> {
         let session = self.sessions.resolve_session(context).await?;
-        let request =
-            build_submit_chose_word_request(binding, plan.word_map(), current_timestamp_millis()?)?;
-        let request = native_mutation_request(&self.client, &session, &request)?;
+        let request = native_mutation_request(&self.client, &session, request)?;
         self.send_word_selection_request(request).await
     }
 }
@@ -1076,6 +1050,11 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+    use crate::{
+        CidarenAssessmentBinding, CidarenWireAnswer, build_skip_answer_request,
+        build_start_answer_request, build_submit_answer_and_save_request,
+        build_submit_chose_word_request, build_verify_answer_request,
+    };
 
     #[derive(Debug)]
     struct FixtureSessions;
