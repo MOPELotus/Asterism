@@ -383,18 +383,32 @@ impl UaiBrowserResidenceExchangeCompleted {
 /// Owned bounded intermediate `BrowserBridge` event. Session nonce, opaque
 /// handles and page labels remain redacted and zeroized until typed parsing
 /// finishes.
-pub struct UaiBrowserEventDocument(Zeroizing<String>);
+pub struct UaiBrowserEventDocument(SecretValue);
 
 impl UaiBrowserEventDocument {
     /// # Errors
     ///
     /// Rejects an empty or oversized helper event before parsing.
     pub fn try_new(document: String) -> ProviderResult<Self> {
-        let document = Zeroizing::new(document);
-        if document.is_empty() || document.len() > MAX_BROWSER_MESSAGE_BYTES {
+        Self::try_from_secret_value(SecretValue::new(document.into_bytes()))
+    }
+
+    /// Consumes Core's decrypted raw result without copying it into an
+    /// ordinary plaintext `String`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized or non-UTF-8 helper bytes. The owned secret is
+    /// zeroized on every error and when the accepted document is dropped.
+    pub fn try_from_secret_value(document: SecretValue) -> ProviderResult<Self> {
+        let bytes = document.expose_secret();
+        if bytes.is_empty()
+            || bytes.len() > MAX_BROWSER_MESSAGE_BYTES
+            || std::str::from_utf8(bytes).is_err()
+        {
             return Err(ProviderError::new(
                 ProviderErrorKind::InvalidResponse,
-                "UAI BrowserBridge event is empty or oversized",
+                "UAI BrowserBridge event is empty, oversized or not UTF-8",
             ));
         }
         Ok(Self(document))
@@ -404,7 +418,7 @@ impl UaiBrowserEventDocument {
     ///
     /// Returns a typed error if the owned document violates exchange bounds.
     pub fn exchange_digest(&self) -> ProviderResult<[u8; 32]> {
-        browser_event_exchange_digest(self.0.as_str())
+        browser_event_exchange_digest(self.as_str()?)
     }
 
     /// # Errors
@@ -417,7 +431,16 @@ impl UaiBrowserEventDocument {
         command: &UaiBrowserCommandEnvelope,
         observed_origin: &str,
     ) -> ProviderResult<UaiBrowserEventEnvelope> {
-        parse_browser_event(self.0.as_str(), plan, command, observed_origin)
+        parse_browser_event(self.as_str()?, plan, command, observed_origin)
+    }
+
+    fn as_str(&self) -> ProviderResult<&str> {
+        std::str::from_utf8(self.0.expose_secret()).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge event lost its validated UTF-8 encoding",
+            )
+        })
     }
 }
 
@@ -425,7 +448,7 @@ impl fmt::Debug for UaiBrowserEventDocument {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UaiBrowserEventDocument")
-            .field("bytes", &self.0.len())
+            .field("bytes", &self.0.expose_secret().len())
             .field("contents", &"[REDACTED]")
             .finish()
     }
@@ -433,18 +456,32 @@ impl fmt::Debug for UaiBrowserEventDocument {
 
 /// Owned bounded terminal `BrowserBridge` residence result. It remains an
 /// observation requiring independent fresh duration readback.
-pub struct UaiBrowserResidenceResultDocument(Zeroizing<String>);
+pub struct UaiBrowserResidenceResultDocument(SecretValue);
 
 impl UaiBrowserResidenceResultDocument {
     /// # Errors
     ///
     /// Rejects an empty or oversized terminal helper result before parsing.
     pub fn try_new(document: String) -> ProviderResult<Self> {
-        let document = Zeroizing::new(document);
-        if document.is_empty() || document.len() > MAX_BROWSER_RESULT_BYTES {
+        Self::try_from_secret_value(SecretValue::new(document.into_bytes()))
+    }
+
+    /// Consumes Core's decrypted terminal result without creating an ordinary
+    /// plaintext `String` copy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized or non-UTF-8 result bytes. The owned secret is
+    /// zeroized on every error and when the accepted document is dropped.
+    pub fn try_from_secret_value(document: SecretValue) -> ProviderResult<Self> {
+        let bytes = document.expose_secret();
+        if bytes.is_empty()
+            || bytes.len() > MAX_BROWSER_RESULT_BYTES
+            || std::str::from_utf8(bytes).is_err()
+        {
             return Err(ProviderError::new(
                 ProviderErrorKind::InvalidResponse,
-                "UAI BrowserBridge result is empty or oversized",
+                "UAI BrowserBridge result is empty, oversized or not UTF-8",
             ));
         }
         Ok(Self(document))
@@ -454,7 +491,7 @@ impl UaiBrowserResidenceResultDocument {
     ///
     /// Returns a typed error if the owned document violates exchange bounds.
     pub fn exchange_digest(&self) -> ProviderResult<[u8; 32]> {
-        browser_residence_exchange_digest(self.0.as_str())
+        browser_residence_exchange_digest(self.as_str()?)
     }
 
     /// # Errors
@@ -467,7 +504,16 @@ impl UaiBrowserResidenceResultDocument {
         command: &UaiBrowserCommandEnvelope,
         observed_origin: &str,
     ) -> ProviderResult<UaiBrowserResidenceResult> {
-        parse_browser_residence_result(self.0.as_str(), plan, command, observed_origin)
+        parse_browser_residence_result(self.as_str()?, plan, command, observed_origin)
+    }
+
+    fn as_str(&self) -> ProviderResult<&str> {
+        std::str::from_utf8(self.0.expose_secret()).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge result lost its validated UTF-8 encoding",
+            )
+        })
     }
 }
 
@@ -475,7 +521,7 @@ impl fmt::Debug for UaiBrowserResidenceResultDocument {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UaiBrowserResidenceResultDocument")
-            .field("bytes", &self.0.len())
+            .field("bytes", &self.0.expose_secret().len())
             .field("contents", &"[REDACTED]")
             .finish()
     }
@@ -3164,7 +3210,10 @@ mod tests {
             "last_label": "Unit 1 / Section 2 / Micro 3",
         })
         .to_string();
-        let owned = UaiBrowserResidenceResultDocument::try_new(document.clone()).unwrap();
+        let owned = UaiBrowserResidenceResultDocument::try_from_secret_value(SecretValue::new(
+            document.clone().into_bytes(),
+        ))
+        .unwrap();
         let debug = format!("{owned:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("nonce-42") && !debug.contains("Unit 1"));
@@ -3188,6 +3237,10 @@ mod tests {
         assert!(UaiBrowserResidenceResultDocument::try_new(String::new()).is_err());
         assert!(
             UaiBrowserResidenceResultDocument::try_new("x".repeat(MAX_BROWSER_RESULT_BYTES + 1))
+                .is_err()
+        );
+        assert!(
+            UaiBrowserResidenceResultDocument::try_from_secret_value(SecretValue::new(vec![0xff]))
                 .is_err()
         );
         assert!(result.requires_fresh_duration_read());
@@ -3292,7 +3345,10 @@ mod tests {
             "event": { "kind": "pong" },
         })
         .to_string();
-        let owned = UaiBrowserEventDocument::try_new(pong_document.clone()).unwrap();
+        let owned = UaiBrowserEventDocument::try_from_secret_value(SecretValue::new(
+            pong_document.clone().into_bytes(),
+        ))
+        .unwrap();
         assert!(owned.parse_for_command(&plan, &ping, IPUB_ORIGIN).is_ok());
         let debug = format!("{owned:?}");
         assert!(debug.contains("[REDACTED]"));
@@ -3306,6 +3362,9 @@ mod tests {
         assert!(UaiBrowserEventDocument::try_new(String::new()).is_err());
         assert!(
             UaiBrowserEventDocument::try_new("x".repeat(MAX_BROWSER_MESSAGE_BYTES + 1)).is_err()
+        );
+        assert!(
+            UaiBrowserEventDocument::try_from_secret_value(SecretValue::new(vec![0xff])).is_err()
         );
         assert!(browser_event_exchange_digest("").is_err());
         assert!(

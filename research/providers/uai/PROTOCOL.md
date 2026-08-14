@@ -403,7 +403,12 @@ transport-observed result origin before completing the cloned exchange. Raw
 intermediate events and terminal residence results therefore enter separate
 bounded zeroizing owners; each redacts its nonce/handles/labels, hashes the
 exact raw helper document and only then exposes typed parsing against the
-restored command. Both completion paths fresh-rebind the exact Task and frozen
+restored command. Core's decrypted result-inbox `SecretValue` now moves
+directly into those owners: bounds and UTF-8 are checked over the borrowed
+secret bytes, and digest/parse borrow the same zeroizing buffer without an
+ordinary plaintext `String` copy. Existing in-memory String callers transfer
+their allocation through `into_bytes` into the same secret owner. Both
+completion paths fresh-rebind the exact Task and frozen
 runtime settings. Intermediate events complete as `uai.browser.event`; only a
 valid `ResidenceTarget` can complete as `uai.browser.residence.result`, and
 that terminal receipt still requires independent fresh DurationRead. Either
