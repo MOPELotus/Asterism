@@ -275,12 +275,15 @@ owns this normalization.
 Master-owned runtime settings expose platform defaults and account/task
 overrides for fixed or donor-observed bounded-random report seconds, heartbeat
 interval and wire mode. One-second granularity is accepted within the bounded
-1–7,200 second report range, while heartbeat cadence is restricted to the two
+1–19,800 second report range, while heartbeat cadence is restricted to the two
 audited values: current Fanyuchang's `client_counter` requires 1 second and
 YZBRH `preserve_fresh` plus Auto `implicit_server` require 60 seconds. The
 schema exposes only `{1,60}` and the runtime binds each value to its exact wire
 mode instead of advertising unevidenced 2–59 or 61–90 second variants.
-Conservative defaults remain 600 and 60 seconds. Random duration selection is
+Auto's current UI accepts a 1–300 minute aggregate with a 0–30 minute random
+offset, so its frozen `max(1, configured + offset)` budget can assign the full
+evidenced 330 minutes to one visible SCO. Conservative defaults remain 600 and
+60 seconds. Random duration selection is
 derived from Core's immutable Execution identity plus the bound Task and remote
 identity: retry/recovery reproduce the same value, while a later Execution can
 sample another value.
@@ -409,7 +412,7 @@ orchestration semantics are:
 | YZBRH completion | one Unit or every Unit; hidden SCOs and any SCO whose raw completion does not contain the donor's `未` marker are skipped | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | sequential SCO mutations |
 | YZBRH duration | one Unit or every Unit; every returned SCO is retained, including hidden and completed rows | fixed seconds or one inclusive uniform-range duration sampled independently for each selected SCO | all SCO coroutines share one wall-clock heartbeat window |
 | Auto_WeLearn completion | one or several Units; hidden SCOs and any SCO outside the raw `iscomplete` contains `未` branch are skipped | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | Units and SCOs are processed sequentially |
-| Auto_WeLearn duration | one or several Units; all visible SCOs are first collected into one membership set | sample `actual_minutes = max(1, configured_minutes + uniform(-range,+range))` once, then give every child `floor(actual_minutes * 60 / child_count)` seconds; the remainder is deliberately discarded | bounded thread pool, configured from 1 through 100 |
+| Auto_WeLearn duration | one or several Units; all visible SCOs are first collected into one membership set | sample `actual_minutes = max(1, configured_minutes + uniform(-range,+range))` once from configured 1–300 and offset 0–30 minute UI bounds, then give every child `floor(actual_minutes * 60 / child_count)` seconds; the remainder is deliberately discarded | bounded thread pool, configured from 1 through 100 |
 
 These are orchestration semantics over the already implemented native SCO
 operations, not new WELearn endpoints. In particular, Auto's minutes value is

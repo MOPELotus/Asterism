@@ -43,7 +43,7 @@ const RESOURCE_COMPLETION_SAVE_ONLY: &str = "save_only";
 const RESOURCE_MUTATION_CURRENT_FULL_SIMPLE: &str = "current_full_simple_referer";
 const RESOURCE_MUTATION_LEGACY_MINIMAL_TASK: &str = "legacy_minimal_task_referer";
 pub(crate) const MIN_DURATION_REPORT_SECONDS: u64 = 1;
-pub(crate) const MAX_DURATION_REPORT_SECONDS: u64 = 7_200;
+pub(crate) const MAX_DURATION_REPORT_SECONDS: u64 = 19_800;
 pub(crate) const MIN_DURATION_HEARTBEAT_SECONDS: u64 = 1;
 pub(crate) const MAX_DURATION_HEARTBEAT_SECONDS: u64 = 60;
 pub(crate) const LEGACY_DURATION_REQUEST_INTERVAL_SECONDS: u64 = 2;
@@ -435,7 +435,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 14,
+        version: 15,
         definitions: vec![
             ProviderSettingDefinition {
                 key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
@@ -870,6 +870,38 @@ mod tests {
                 resource_mutation_profile:
                     WellearnResourceMutationProfile::CurrentFullSimpleReferer,
             }
+        );
+    }
+
+    #[test]
+    fn auto_single_child_maximum_duration_is_expressible() {
+        let schema = runtime_settings_schema();
+        let task = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: BTreeMap::from([(
+                DURATION_REPORT_SECONDS_KEY.to_owned(),
+                ProviderSettingValue::DurationSeconds(19_800),
+            )]),
+        };
+        let resolved = schema.resolve(None, None, Some(&task)).unwrap();
+        assert_eq!(
+            WellearnRuntimeSettings::resolve(&resolved)
+                .unwrap()
+                .duration_report,
+            WellearnDurationTarget::Fixed(19_800)
+        );
+
+        let oversized = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: BTreeMap::from([(
+                DURATION_REPORT_SECONDS_KEY.to_owned(),
+                ProviderSettingValue::DurationSeconds(19_801),
+            )]),
+        };
+        assert!(
+            schema
+                .validate_patch(ProviderSettingScope::Task, &oversized)
+                .is_err()
         );
     }
 

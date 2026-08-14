@@ -49,6 +49,7 @@ pub enum WellearnBatchUnitSelection {
 }
 
 const MAX_BATCH_TASKS: usize = 8_192;
+const MAX_AUTO_DURATION_MINUTES: u64 = 330;
 
 impl WellearnBatchFlow {
     pub const fn dispatch(self) -> WellearnBatchDispatch {
@@ -345,7 +346,7 @@ pub fn build_selected_batch_plan(
     let (aggregate_duration_seconds, discarded_remainder_seconds) =
         if flow == WellearnBatchFlow::AutoDuration {
             let minutes = auto_duration_minutes.expect("validated above");
-            if minutes == 0 || minutes > 7_200 {
+            if minutes == 0 || minutes > MAX_AUTO_DURATION_MINUTES {
                 return Err(ProviderError::new(
                     ProviderErrorKind::InvalidResponse,
                     "WELearn Auto duration is outside the bounded aggregate limit",
@@ -734,6 +735,27 @@ mod tests {
             plan.entries
                 .iter()
                 .all(|entry| entry.target_seconds == Some(0))
+        );
+    }
+
+    #[test]
+    fn auto_duration_bounds_match_the_current_ui_sample_range() {
+        let task = tasks().remove(0);
+        let plan = build_batch_plan(
+            std::slice::from_ref(&task),
+            WellearnBatchFlow::AutoDuration,
+            Some(330),
+        )
+        .unwrap();
+        assert_eq!(plan.aggregate_duration_seconds, Some(19_800));
+        assert_eq!(plan.entries[0].target_seconds, Some(19_800));
+        assert!(
+            build_batch_plan(
+                std::slice::from_ref(&task),
+                WellearnBatchFlow::AutoDuration,
+                Some(331),
+            )
+            .is_err()
         );
     }
 
