@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, Execution, NormalizedAnswer,
@@ -11,14 +11,14 @@ use asterism_engine::{
     ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
     ImportLocalAnswerCandidatesCommand, LocalAnswerCacheError, LocalAnswerCacheService,
     ManualAnswerCandidateError, ManualAnswerCandidateService, ProviderAnswerResolveError,
-    ProviderAnswerResolveService, ProviderQuestionReadError, ProviderQuestionReadService,
-    ProviderTaskBrowserSessionError, ProviderTaskBrowserSessionService, ProviderTaskDetailError,
-    ProviderTaskDetailService, ProviderTaskDurationError, ProviderTaskDurationService,
-    ProviderTaskProgressError, ProviderTaskProgressService, ReadTaskBrowserSessionCommand,
-    ReadTaskDetailCommand, ReadTaskDurationCommand, ReadTaskProgressCommand,
-    ReadTaskQuestionsCommand, ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand,
-    SubmissionDraftBuildError, SubmissionDraftBuildService, TaskLifecycleCommand,
-    TaskLifecycleError, TaskLifecycleService,
+    ProviderAnswerResolveService, ProviderQuestionReadError, ProviderQuestionReadResult,
+    ProviderQuestionReadService, ProviderTaskBrowserSessionError,
+    ProviderTaskBrowserSessionService, ProviderTaskDetailError, ProviderTaskDetailService,
+    ProviderTaskDurationError, ProviderTaskDurationService, ProviderTaskProgressError,
+    ProviderTaskProgressService, ReadTaskBrowserSessionCommand, ReadTaskDetailCommand,
+    ReadTaskDurationCommand, ReadTaskProgressCommand, ReadTaskQuestionsCommand,
+    ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand, SubmissionDraftBuildError,
+    SubmissionDraftBuildService, TaskLifecycleCommand, TaskLifecycleError, TaskLifecycleService,
 };
 use asterism_provider_api::{
     BrowserSessionSpec, ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail,
@@ -26,8 +26,9 @@ use asterism_provider_api::{
 use asterism_storage::{
     AnswerCandidateRepository, QuestionSnapshotRepository, SqliteExecutionRepository,
     SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
-    SqliteQuestionSnapshotRepository, SqliteTaskLifecycleRepository, SqliteTaskQueryRepository,
-    SubmissionDraftRepository, SubmissionResultRepository, TaskQueryRepository,
+    SqliteQuestionReadAttemptRepository, SqliteQuestionSnapshotRepository,
+    SqliteTaskLifecycleRepository, SqliteTaskQueryRepository, SubmissionDraftRepository,
+    SubmissionResultRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -243,30 +244,54 @@ pub(super) async fn get_task_questions(
     let task_id = TaskId::from_str(&task_id)
         .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
     let correlation_id = required_header(&headers, "x-request-id", 128)?;
-    let result = ProviderQuestionReadService::new(
-        state.providers,
+    let mut service = ProviderQuestionReadService::new(
+        state.providers.clone(),
         SqliteTaskQueryRepository::new(state.database.clone()),
         SqliteProviderAccountRepository::new(state.database.clone()),
-        SqliteQuestionSnapshotRepository::new(state.database),
-    )
-    .read(ReadTaskQuestionsCommand {
-        owner_id,
-        task_id,
-        correlation_id: correlation_id.to_owned(),
-    })
-    .await
-    .map_err(map_task_questions_error)?;
-    Ok(crate::auth::no_store(
-        Json(TaskQuestionsResponse {
-            snapshot_id: result.snapshot_id,
-            task_id: result.task_id,
-            provider_id: result.provider_id,
-            provider_version: result.provider_version,
-            captured_at: result.captured_at,
-            questions: result.questions,
+        SqliteQuestionSnapshotRepository::new(state.database.clone()),
+    );
+    if let Some(secret_store) = state.secret_store.clone() {
+        service = service.with_durable_flow(
+            Arc::new(SqliteProviderRuntimeSettingsRepository::new(
+                state.database.clone(),
+            )),
+            Arc::new(SqliteQuestionReadAttemptRepository::new(
+                state.database.clone(),
+            )),
+            Arc::new(secret_store),
+        );
+    }
+    let result = service
+        .read(ReadTaskQuestionsCommand {
+            owner_id,
+            task_id,
+            correlation_id: correlation_id.to_owned(),
         })
-        .into_response(),
-    ))
+        .await
+        .map_err(map_task_questions_error)?;
+    match result {
+        ProviderQuestionReadResult::Questions {
+            snapshot_id,
+            task_id,
+            provider_id,
+            provider_version,
+            captured_at,
+            questions,
+        } => Ok(crate::auth::no_store(
+            Json(TaskQuestionsResponse {
+                snapshot_id,
+                task_id,
+                provider_id,
+                provider_version,
+                captured_at,
+                questions,
+            })
+            .into_response(),
+        )),
+        ProviderQuestionReadResult::Completed { .. } => Ok(crate::auth::no_store(
+            StatusCode::NO_CONTENT.into_response(),
+        )),
+    }
 }
 
 pub(super) async fn get_task_question_snapshot(
@@ -1178,6 +1203,27 @@ fn map_task_questions_error(error: ProviderQuestionReadError) -> ApiError {
                 "the Provider returned inconsistent task Questions",
             )
         }
+        ProviderQuestionReadError::DurableStateUnavailable
+        | ProviderQuestionReadError::RuntimeSettingsInvalid => ApiError::service_unavailable(
+            "question_read_runtime_unavailable",
+            "durable Provider Question reading is not configured",
+        ),
+        ProviderQuestionReadError::AmbiguousAttempt(_) => ApiError::conflict(
+            "question_read_ambiguous",
+            "the last remote Question operation has an ambiguous outcome and cannot be replayed",
+        ),
+        ProviderQuestionReadError::ConcurrentAttempt(_) => ApiError::conflict(
+            "question_read_in_progress",
+            "another Question read operation is already in progress",
+        ),
+        ProviderQuestionReadError::StateConflict => ApiError::conflict(
+            "question_read_state_conflict",
+            "the durable Question read state changed concurrently",
+        ),
+        ProviderQuestionReadError::OperationLimitExceeded => ApiError::bad_gateway(
+            "question_read_operation_limit",
+            "the Provider Question flow exceeded its bounded operation count",
+        ),
         ProviderQuestionReadError::Assessment(_) => ApiError::conflict(
             "formal_assessment_blocked",
             "formal assessment Question reading is disabled by Core policy",
@@ -1220,6 +1266,7 @@ fn map_task_questions_error(error: ProviderQuestionReadError) -> ApiError {
             ProviderErrorKind::Internal => ApiError::internal(provider_error),
         },
         ProviderQuestionReadError::Storage(error) => ApiError::internal(error),
+        ProviderQuestionReadError::Secret(error) => ApiError::internal(error),
     }
 }
 

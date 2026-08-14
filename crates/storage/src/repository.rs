@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use asterism_auth::TokenDigest;
 use asterism_domain::{
@@ -347,6 +347,12 @@ pub trait QuestionReadContinuationRepository: Send + Sync {
         completed_at: Timestamp,
         access: &SecretAccess,
     ) -> Result<QuestionReadOperationFinishOutcome, SecretStoreError>;
+}
+
+/// Creates a Provider-scoped continuation boundary from a Provider identity
+/// selected through Core-owned account binding.
+pub trait QuestionReadContinuationRepositoryFactory: Send + Sync {
+    fn for_provider(&self, provider_id: ProviderId) -> Arc<dyn QuestionReadContinuationRepository>;
 }
 
 /// Result of atomically claiming the Question session selected by one

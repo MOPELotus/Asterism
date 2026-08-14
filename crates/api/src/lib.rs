@@ -1684,16 +1684,17 @@ fn task_duration_path() -> Value {
 fn task_questions_path() -> Value {
     json!({"get": {
         "operationId": "getTaskQuestions",
-        "description": "Discovers, validates and atomically persists one fresh complete Question snapshot; no partial set is returned or stored.",
+        "description": "Runs the Provider Question flow with durable non-idempotent operation tracking, then atomically persists one fresh complete Question snapshot; no partial set is returned or stored.",
         "security": [{"cookieAuth": []}, {"bearerAuth": []}],
         "parameters": [
             {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
         ],
         "responses": {
             "200": {"description": "Fresh bounded, sanitized and deterministically ordered Provider Questions with immutable snapshot identity"},
+            "204": {"description": "Provider definitively reported completion before yielding a Question"},
             "400": {"description": "Invalid Task or request ID"},
             "404": {"description": "Task not found"},
-            "409": {"description": "Task/Provider capability, account, policy, user action, or remote binding conflict"},
+            "409": {"description": "Task/Provider capability, account, durable attempt, user action, or remote binding conflict"},
             "429": {"description": "Provider rate limited"},
             "502": {"description": "Provider returned inconsistent Questions"},
             "503": {"description": "Provider temporarily unavailable"}

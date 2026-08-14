@@ -24,6 +24,7 @@ use chacha20poly1305::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
+use crate::QuestionReadContinuationRepositoryFactory;
 use crate::{
     AuthBootstrapCredentialCommit, AuthBootstrapCredentialCommitOutcome,
     AuthBootstrapCredentialCommitRequest, AuthBootstrapCredentialRepository,
@@ -210,6 +211,15 @@ impl SqliteSecretStore {
             .into_iter()
             .map(|prepared| prepared.credential)
             .collect())
+    }
+}
+
+impl QuestionReadContinuationRepositoryFactory for SqliteSecretStore {
+    fn for_provider(
+        &self,
+        provider_id: ProviderId,
+    ) -> Arc<dyn crate::QuestionReadContinuationRepository> {
+        Arc::new(self.question_read_continuations(provider_id))
     }
 }
 
