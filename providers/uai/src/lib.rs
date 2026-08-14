@@ -63,14 +63,14 @@ pub use browser_bridge::{
     browser_start_url_from_detail, parse_browser_event, parse_browser_residence_result,
 };
 pub use compound_oral::{
-    UaiCompoundOralPreparation, UaiCompoundOralSubmission, UaiCompoundOralTransport,
-    UaiCompoundOralVerification, build_compound_oral_submission_body,
+    UaiCompoundOralPreparation, UaiCompoundOralSubmission, UaiCompoundOralSubmissionRequest,
+    UaiCompoundOralTransport, UaiCompoundOralVerification, build_compound_oral_submission_request,
     parse_compound_oral_verification,
 };
 pub use compound_upload::{
-    UaiCompoundUploadPreparation, UaiCompoundUploadSubmission, UaiCompoundUploadTransport,
-    UaiCompoundUploadVerification, build_compound_upload_submission_body,
-    parse_compound_upload_verification,
+    UaiCompoundUploadPreparation, UaiCompoundUploadSubmission, UaiCompoundUploadSubmissionRequest,
+    UaiCompoundUploadTransport, UaiCompoundUploadVerification,
+    build_compound_upload_submission_request, parse_compound_upload_verification,
 };
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
 pub use course_policy::{

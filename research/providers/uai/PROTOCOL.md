@@ -716,9 +716,12 @@ The Provider-private compound preparation accepts exactly one already validated
 ordinary `multichoice` sub-draft plus one Task-bound uploaded artifact, then
 re-reads the full Task and requires exact ordered
 `multichoice,multiFileUpload`, upload position 2, the unchanged Task
-fingerprint/hierarchy and a current publish version. Native HTTP emits both
-answers in one request after the same fresh incomplete/available task-leaf
-preflight. Receipt-versioned readback must contain exactly the immutable choice
+fingerprint/hierarchy and a current publish version. After the same fresh
+incomplete/available task-leaf and account rebind, Native HTTP materializes one
+zeroizing request owner whose digest binds the exact POST URL, content type and
+complete choice-plus-key body. The semantic plan fingerprint remains separate,
+and the sender consumes the same owner rather than rebuilding its wire bytes.
+Receipt-versioned readback must contain exactly the immutable choice
 answer followed by module `0` with the exact object key; reversed, extra or
 changed modules fail closed. The shared artifact lifecycle, durable attempt and
 one compound Draft that owns both slots remain active Core integration work. A
@@ -744,9 +747,13 @@ donor relies on Python-specific object stringification rather than a stable
 wire encoding.
 
 The native mutation re-resolves Course instance and the exact incomplete,
-available `tab_type=task` leaf, then emits the matching answer followed by the
-frozen oral slot in one `submitType=1` POST. Every judge uses the fresh Course
-publish version and the oral judge retains exact `oral-sentence` labels. An
+available `tab_type=task` leaf, then materializes one zeroizing request owner
+containing the matching answer followed by the frozen oral slot in one
+`submitType=1` POST. Its request digest binds exact POST URL, content type,
+fresh Course instance, account openid and complete body independently from the
+semantic plan fingerprint; Native HTTP sends those same owned bytes. Every
+judge uses the fresh Course publish version and the oral judge retains exact
+`oral-sentence` labels. An
 accepted version is only a receipt. Verification reads exactly that version
 and requires the complete ordered two-module user-module state, exact ordinary
 answer equality, the same oral instance, and every exact scalar-empty,

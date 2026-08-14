@@ -35,7 +35,7 @@ use crate::{
     UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification, UaiUploadedArtifact,
     UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
-    build_compound_oral_submission_body, build_compound_upload_submission_body,
+    build_compound_oral_submission_request, build_compound_upload_submission_request,
     build_discussion_reply_page_request, build_discussion_reply_request,
     build_discussion_topic_request, build_upload_grant_request, build_upload_multipart,
     build_upload_submission_request,
@@ -1221,7 +1221,7 @@ impl NativeUaiInventoryTransport {
             &group_id,
             Utc::now(),
         )?;
-        let body = build_compound_upload_submission_body(
+        let request = build_compound_upload_submission_request(
             submission,
             route.course_instance_id(),
             session.expose_open_id(),
@@ -1237,12 +1237,12 @@ impl NativeUaiInventoryTransport {
         annotator_header.set_sensitive(true);
         let response = self
             .client
-            .post(submission_url()?)
+            .post(request.expose_url())
             .header(ACCEPT, "application/json")
-            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(CONTENT_TYPE, request.content_type())
             .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
-            .body(body.as_bytes().to_vec())
+            .body(request.expose_body().as_bytes().to_vec())
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
@@ -1321,7 +1321,7 @@ impl NativeUaiInventoryTransport {
             &group_id,
             Utc::now(),
         )?;
-        let body = build_compound_oral_submission_body(
+        let request = build_compound_oral_submission_request(
             submission,
             route.course_instance_id(),
             session.expose_open_id(),
@@ -1337,12 +1337,12 @@ impl NativeUaiInventoryTransport {
         annotator_header.set_sensitive(true);
         let response = self
             .client
-            .post(submission_url()?)
+            .post(request.expose_url())
             .header(ACCEPT, "application/json")
-            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(CONTENT_TYPE, request.content_type())
             .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
-            .body(body.as_bytes().to_vec())
+            .body(request.expose_body().as_bytes().to_vec())
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;

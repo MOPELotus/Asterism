@@ -9,6 +9,7 @@ use asterism_provider_api::{
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use reqwest::Url;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -27,6 +28,9 @@ use crate::{
 const MAX_COMPOUND_SUBMISSION_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_COMPOUND_VERIFICATION_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_NESTED_QUESTION_DATA_BYTES: usize = 4 * 1_024 * 1_024;
+const UAI_COMPOUND_UPLOAD_SUBMISSION_ROUTE: &str =
+    "https://ucontent.unipus.cn/course/api/v3/newExploration/submit";
+const UAI_COMPOUND_UPLOAD_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 
 /// Provider-private transport for the donor's atomic
 /// `multichoice,multiFileUpload` Group mutation. Shared Core still owns the
@@ -215,6 +219,51 @@ impl Drop for UaiCompoundUploadSubmission {
     }
 }
 
+/// Complete zeroizing request for one atomic choice-plus-upload mutation.
+pub struct UaiCompoundUploadSubmissionRequest {
+    url: Zeroizing<String>,
+    content_type: &'static str,
+    body: Zeroizing<String>,
+    request_digest: [u8; 32],
+}
+
+impl UaiCompoundUploadSubmissionRequest {
+    /// Exact pre-dispatch identity over method, route, content type and body.
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    pub(crate) fn expose_url(&self) -> &str {
+        self.url.as_str()
+    }
+
+    pub(crate) const fn content_type(&self) -> &'static str {
+        self.content_type
+    }
+
+    pub(crate) fn expose_body(&self) -> &str {
+        self.body.as_str()
+    }
+}
+
+impl fmt::Debug for UaiCompoundUploadSubmissionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiCompoundUploadSubmissionRequest")
+            .field("url", &"[ROUTE]")
+            .field("content_type", &self.content_type)
+            .field("body", &"[REDACTED]")
+            .field("request_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+impl Drop for UaiCompoundUploadSubmissionRequest {
+    fn drop(&mut self) {
+        self.request_digest.zeroize();
+    }
+}
+
 /// Receipt-versioned confirmation that both the ordinary selected answer and
 /// uploaded object key persisted in their exact original order. Fresh Group
 /// progress remains the independent completion authority.
@@ -389,7 +438,7 @@ fn build_compound_upload_submission(
 /// # Errors
 ///
 /// Rejects unsafe route identities, lost module bindings or an oversized body.
-pub fn build_compound_upload_submission_body(
+fn build_compound_upload_submission_body(
     submission: &UaiCompoundUploadSubmission,
     course_instance_id: &str,
     open_id: &str,
@@ -455,6 +504,37 @@ pub fn build_compound_upload_submission_body(
         ));
     }
     Ok(encoded)
+}
+
+/// Materializes the exact atomic upload request only after fresh route and
+/// account rebinding.
+///
+/// # Errors
+///
+/// Rejects an invalid fixed route or any body/identity failure from the
+/// compound submission builder.
+pub fn build_compound_upload_submission_request(
+    submission: &UaiCompoundUploadSubmission,
+    course_instance_id: &str,
+    open_id: &str,
+) -> ProviderResult<UaiCompoundUploadSubmissionRequest> {
+    let body = build_compound_upload_submission_body(submission, course_instance_id, open_id)?;
+    let url = Url::parse(UAI_COMPOUND_UPLOAD_SUBMISSION_ROUTE)
+        .map_err(|_| invalid_response("UAI compound upload submission route is invalid"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:compound-upload-request:v1\0");
+    digest.update(b"POST\0");
+    digest.update(url.as_str().as_bytes());
+    digest.update(b"\0content-type\0");
+    digest.update(UAI_COMPOUND_UPLOAD_CONTENT_TYPE.as_bytes());
+    digest.update(b"\0body\0");
+    digest.update(body.as_bytes());
+    Ok(UaiCompoundUploadSubmissionRequest {
+        url: Zeroizing::new(url.into()),
+        content_type: UAI_COMPOUND_UPLOAD_CONTENT_TYPE,
+        body,
+        request_digest: digest.finalize().into(),
+    })
 }
 
 fn push_ordinary_question(
@@ -709,6 +789,68 @@ mod tests {
         assert_eq!(judges[0]["question_type"], "basic");
         assert_eq!(judges[1]["question_type"], "multiFileUpload");
         assert_eq!(judges[1]["versions"]["course"], 123_290);
+    }
+
+    #[test]
+    fn atomic_upload_request_digest_binds_route_account_and_complete_body() {
+        let uploaded = UaiUploadedArtifact::fixture(2);
+        let draft = ordinary_draft();
+        let submission = build_compound_upload_submission(
+            &detail(&["multichoice", "multiFileUpload"]),
+            &draft,
+            &uploaded,
+        )
+        .unwrap();
+        let request =
+            build_compound_upload_submission_request(&submission, "course-instance-1", "openid-1")
+                .unwrap();
+        let duplicate =
+            build_compound_upload_submission_request(&submission, "course-instance-1", "openid-1")
+                .unwrap();
+        assert_ne!(request.request_digest(), [0; 32]);
+        assert_eq!(request.request_digest(), duplicate.request_digest());
+        assert_ne!(
+            request.request_digest(),
+            build_compound_upload_submission_request(&submission, "course-instance-2", "openid-1",)
+                .unwrap()
+                .request_digest()
+        );
+        assert_ne!(
+            request.request_digest(),
+            build_compound_upload_submission_request(&submission, "course-instance-1", "openid-2",)
+                .unwrap()
+                .request_digest()
+        );
+        let debug = format!("{request:?}");
+        assert!(debug.contains("[ROUTE]") && debug.contains("[REDACTED]"));
+        assert!(!debug.contains(uploaded.file_key()) && !debug.contains("openid-1"));
+    }
+
+    #[test]
+    fn atomic_upload_request_digest_changes_with_the_selected_answer() {
+        let uploaded = UaiUploadedArtifact::fixture(2);
+        let first = build_compound_upload_submission(
+            &detail(&["multichoice", "multiFileUpload"]),
+            &ordinary_draft(),
+            &uploaded,
+        )
+        .unwrap();
+        let mut changed_draft = ordinary_draft();
+        changed_draft.items[0].selected.answer = NormalizedAnswer::Selections(vec!["B".to_owned()]);
+        changed_draft.validate().unwrap();
+        let changed = build_compound_upload_submission(
+            &detail(&["multichoice", "multiFileUpload"]),
+            &changed_draft,
+            &uploaded,
+        )
+        .unwrap();
+        let first =
+            build_compound_upload_submission_request(&first, "course-instance-1", "openid-1")
+                .unwrap();
+        let changed =
+            build_compound_upload_submission_request(&changed, "course-instance-1", "openid-1")
+                .unwrap();
+        assert_ne!(first.request_digest(), changed.request_digest());
     }
 
     #[test]
