@@ -15,6 +15,7 @@ pub const MAX_QUESTION_READ_ATTEMPT_TTL_SECONDS: i64 = 30 * 60;
 pub enum QuestionReadAttemptState {
     Active,
     Ambiguous,
+    Completed,
     Materialized,
     Rejected,
     Cancelled,
@@ -160,6 +161,34 @@ impl QuestionReadAttempt {
         Ok(())
     }
 
+    /// Records a definite successful terminal response when the Provider says
+    /// the remote attempt is already complete before yielding any Question.
+    ///
+    /// # Errors
+    ///
+    /// Rejects terminal attempts, zero response digests, or timestamp
+    /// regression.
+    pub fn complete(
+        &mut self,
+        response_digest: [u8; 32],
+        at: Timestamp,
+    ) -> Result<(), QuestionReadAttemptError> {
+        self.require_timestamp(at)?;
+        if !matches!(
+            self.state,
+            QuestionReadAttemptState::Active | QuestionReadAttemptState::Ambiguous
+        ) {
+            return Err(QuestionReadAttemptError::InvalidTransition);
+        }
+        if response_digest == [0; 32] {
+            return Err(QuestionReadAttemptError::InvalidResponseDigest);
+        }
+        self.advance(QuestionReadAttemptState::Completed, at)?;
+        self.response_digest = Some(response_digest);
+        self.completed_at = Some(at);
+        Ok(())
+    }
+
     /// Cancels an active flow before another request is issued.
     ///
     /// # Errors
@@ -238,7 +267,10 @@ impl QuestionReadAttempt {
             (QuestionReadAttemptState::Ambiguous, Some(completed_at)) => {
                 unbound && self.updated_at == completed_at
             }
-            (QuestionReadAttemptState::Rejected, Some(completed_at)) => {
+            (
+                QuestionReadAttemptState::Completed | QuestionReadAttemptState::Rejected,
+                Some(completed_at),
+            ) => {
                 self.question_snapshot_id.is_none()
                     && self.question_session_id.is_none()
                     && self.response_digest.is_some()
@@ -373,6 +405,20 @@ mod tests {
                 now + Duration::seconds(3),
             )
             .unwrap();
+        attempt.validate().unwrap();
+    }
+
+    #[test]
+    fn definite_completion_before_first_question_is_terminal_without_snapshot() {
+        let now = Utc::now();
+        let mut attempt = attempt(now);
+        attempt
+            .complete([5; 32], now + Duration::seconds(1))
+            .unwrap();
+        assert_eq!(attempt.state, QuestionReadAttemptState::Completed);
+        assert_eq!(attempt.response_digest, Some([5; 32]));
+        assert!(attempt.question_snapshot_id.is_none());
+        assert!(attempt.question_session_id.is_none());
         attempt.validate().unwrap();
     }
 

@@ -188,6 +188,10 @@ fn replay_transition(
     let result = match target.state {
         QuestionReadAttemptState::Active => current.advance_active(target.updated_at),
         QuestionReadAttemptState::Ambiguous => current.mark_ambiguous(target.updated_at),
+        QuestionReadAttemptState::Completed => current.complete(
+            target.response_digest.ok_or_else(invalid_target)?,
+            target.updated_at,
+        ),
         QuestionReadAttemptState::Materialized => current.materialize(
             target.question_snapshot_id.ok_or_else(invalid_target)?,
             target.question_session_id.ok_or_else(invalid_target)?,
@@ -385,6 +389,7 @@ fn state_name(state: QuestionReadAttemptState) -> &'static str {
     match state {
         QuestionReadAttemptState::Active => "active",
         QuestionReadAttemptState::Ambiguous => "ambiguous",
+        QuestionReadAttemptState::Completed => "completed",
         QuestionReadAttemptState::Materialized => "materialized",
         QuestionReadAttemptState::Rejected => "rejected",
         QuestionReadAttemptState::Cancelled => "cancelled",
@@ -396,6 +401,7 @@ fn decode_state(value: &str) -> Result<QuestionReadAttemptState, StorageError> {
     match value {
         "active" => Ok(QuestionReadAttemptState::Active),
         "ambiguous" => Ok(QuestionReadAttemptState::Ambiguous),
+        "completed" => Ok(QuestionReadAttemptState::Completed),
         "materialized" => Ok(QuestionReadAttemptState::Materialized),
         "rejected" => Ok(QuestionReadAttemptState::Rejected),
         "cancelled" => Ok(QuestionReadAttemptState::Cancelled),
@@ -410,6 +416,7 @@ fn action_name(state: QuestionReadAttemptState) -> &'static str {
     match state {
         QuestionReadAttemptState::Active => "question_read_attempt_advanced",
         QuestionReadAttemptState::Ambiguous => "question_read_attempt_ambiguous",
+        QuestionReadAttemptState::Completed => "question_read_attempt_completed",
         QuestionReadAttemptState::Materialized => "question_read_attempt_materialized",
         QuestionReadAttemptState::Rejected => "question_read_attempt_rejected",
         QuestionReadAttemptState::Cancelled => "question_read_attempt_cancelled",

@@ -6,7 +6,9 @@ use asterism_domain::{
     SessionKind, SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
     SubmissionVerificationSnapshot, TaskCapability, TaskId, Timestamp, WaitingUserState,
 };
-use asterism_secrets::{CredentialBundle, CredentialField, SecretPurpose, SecretString};
+use asterism_secrets::{
+    CredentialBundle, CredentialField, SecretPurpose, SecretString, SecretValue,
+};
 use async_trait::async_trait;
 use http::Uri;
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,20 @@ const MAX_CAPTURE_ORIGINS: usize = 8;
 const MAX_CAPTURE_OUTPUTS: usize = 16;
 const MAX_CAPTURE_SOURCES: usize = 8;
 const MAX_CAPTURE_JSON_FIELDS: usize = 16;
+const MAX_QUESTION_READ_LABEL_BYTES: usize = 96;
+const MAX_QUESTION_READ_ITEMS: usize = 5_000;
+const MAX_QUESTION_READ_TTL_SECONDS: u64 = 24 * 60 * 60;
+
+fn valid_provider_label(provider_id: &ProviderId, value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_QUESTION_READ_LABEL_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+        && value
+            .strip_prefix(provider_id.as_str())
+            .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
+}
 
 #[derive(Clone, Debug)]
 pub struct ProviderContext {
@@ -669,6 +685,295 @@ pub trait DurationReadCapability: ProviderIdentity {
     ) -> ProviderResult<RemoteDuration>;
 }
 
+/// Provider-private encrypted state handed directly to Core's durable
+/// pre-Question continuation store. The plaintext is redacted and zeroized by
+/// `SecretValue`; only its bounded type, digest, phase, and expiry cross the
+/// public contract.
+pub struct ProviderQuestionReadContinuation {
+    continuation_type: String,
+    continuation_digest: [u8; 32],
+    phase: String,
+    value: SecretValue,
+    ttl_seconds: u64,
+}
+
+impl ProviderQuestionReadContinuation {
+    /// Creates a bounded Provider-scoped continuation and derives the digest
+    /// from the exact plaintext bytes Core will encrypt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, foreign, or malformed labels and TTLs.
+    pub fn try_new(
+        provider_id: &ProviderId,
+        continuation_type: impl Into<String>,
+        phase: impl Into<String>,
+        value: SecretValue,
+        ttl_seconds: u64,
+    ) -> ProviderResult<Self> {
+        let continuation_type = continuation_type.into();
+        let phase = phase.into();
+        if !valid_provider_label(provider_id, &continuation_type)
+            || !valid_provider_label(provider_id, &phase)
+            || value.expose_secret().is_empty()
+            || ttl_seconds == 0
+            || ttl_seconds > MAX_QUESTION_READ_TTL_SECONDS
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider Question continuation metadata is invalid",
+            ));
+        }
+        let continuation_digest = Sha256::digest(value.expose_secret()).into();
+        Ok(Self {
+            continuation_type,
+            continuation_digest,
+            phase,
+            value,
+            ttl_seconds,
+        })
+    }
+
+    pub fn continuation_type(&self) -> &str {
+        &self.continuation_type
+    }
+
+    pub const fn continuation_digest(&self) -> [u8; 32] {
+        self.continuation_digest
+    }
+
+    pub fn phase(&self) -> &str {
+        &self.phase
+    }
+
+    pub const fn ttl_seconds(&self) -> u64 {
+        self.ttl_seconds
+    }
+
+    pub fn into_parts(self) -> (String, [u8; 32], String, SecretValue, u64) {
+        (
+            self.continuation_type,
+            self.continuation_digest,
+            self.phase,
+            self.value,
+            self.ttl_seconds,
+        )
+    }
+}
+
+impl fmt::Debug for ProviderQuestionReadContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderQuestionReadContinuation")
+            .field("continuation_type", &self.continuation_type)
+            .field("continuation_digest", &self.continuation_digest)
+            .field("phase", &self.phase)
+            .field("value", &"[REDACTED]")
+            .field("ttl_seconds", &self.ttl_seconds)
+            .finish()
+    }
+}
+
+/// Borrowed, already authenticated continuation resolved by Core for one
+/// owner/account/Task-bound attempt.
+pub struct ResolvedProviderQuestionReadContinuation<'a> {
+    pub continuation_type: &'a str,
+    pub continuation_digest: [u8; 32],
+    pub phase: &'a str,
+    pub revision: u32,
+    pub value: &'a SecretValue,
+}
+
+impl fmt::Debug for ResolvedProviderQuestionReadContinuation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedProviderQuestionReadContinuation")
+            .field("continuation_type", &self.continuation_type)
+            .field("continuation_digest", &self.continuation_digest)
+            .field("phase", &self.phase)
+            .field("revision", &self.revision)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Exact last issued request retained for fresh, read-only ambiguity recovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmbiguousProviderQuestionReadOperation {
+    pub continuation_revision: u32,
+    pub operation_type: String,
+    pub request_digest: [u8; 32],
+    pub issued_at: Timestamp,
+    pub ambiguous_at: Timestamp,
+}
+
+/// One real immutable Question set and the encrypted Provider material needed
+/// to continue or submit it. Core persists the snapshot, `QuestionSession`, and
+/// artifact atomically with the accepted pre-Question operation.
+pub struct ProviderQuestionMaterialization {
+    questions: Vec<Question>,
+    artifact: ProviderQuestionReadContinuation,
+    response_digest: [u8; 32],
+    received_at: Timestamp,
+}
+
+impl ProviderQuestionMaterialization {
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, invalid, duplicate-position, or zero-digest
+    /// materializations.
+    pub fn try_new(
+        questions: Vec<Question>,
+        artifact: ProviderQuestionReadContinuation,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+    ) -> ProviderResult<Self> {
+        let mut positions = std::collections::BTreeSet::new();
+        let mut remote_ids = std::collections::BTreeSet::new();
+        if questions.is_empty()
+            || questions.len() > MAX_QUESTION_READ_ITEMS
+            || response_digest == [0; 32]
+            || questions.iter().any(|question| {
+                question.validate().is_err()
+                    || !positions.insert(question.position)
+                    || question
+                        .remote_question_id
+                        .as_ref()
+                        .is_some_and(|remote_id| !remote_ids.insert(remote_id.as_str()))
+            })
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider Question materialization is invalid",
+            ));
+        }
+        Ok(Self {
+            questions,
+            artifact,
+            response_digest,
+            received_at,
+        })
+    }
+
+    pub fn questions(&self) -> &[Question] {
+        &self.questions
+    }
+
+    pub fn artifact(&self) -> &ProviderQuestionReadContinuation {
+        &self.artifact
+    }
+
+    pub const fn response_digest(&self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    pub const fn received_at(&self) -> Timestamp {
+        self.received_at
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<Question>,
+        ProviderQuestionReadContinuation,
+        [u8; 32],
+        Timestamp,
+    ) {
+        (
+            self.questions,
+            self.artifact,
+            self.response_digest,
+            self.received_at,
+        )
+    }
+}
+
+impl fmt::Debug for ProviderQuestionMaterialization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderQuestionMaterialization")
+            .field("question_count", &self.questions.len())
+            .field("artifact", &self.artifact)
+            .field("response_digest", &self.response_digest)
+            .field("received_at", &self.received_at)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum ProviderQuestionReadStepOutcome {
+    Continue {
+        continuation: ProviderQuestionReadContinuation,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+    },
+    Materialize(ProviderQuestionMaterialization),
+    Completed {
+        receipt: SubmissionReceipt,
+        response_digest: [u8; 32],
+    },
+}
+
+impl ProviderQuestionReadStepOutcome {
+    /// # Errors
+    ///
+    /// Rejects a continuation outcome without an exact raw response digest.
+    pub fn continuing(
+        continuation: ProviderQuestionReadContinuation,
+        response_digest: [u8; 32],
+        received_at: Timestamp,
+    ) -> ProviderResult<Self> {
+        if response_digest == [0; 32] {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider Question continuation response digest is empty",
+            ));
+        }
+        Ok(Self::Continue {
+            continuation,
+            response_digest,
+            received_at,
+        })
+    }
+
+    /// Creates a definite successful terminal result for a Provider that
+    /// reports completion before yielding any real Question.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid receipts or a missing raw response digest.
+    pub fn completed(
+        receipt: SubmissionReceipt,
+        response_digest: [u8; 32],
+    ) -> ProviderResult<Self> {
+        if response_digest == [0; 32] || receipt.validate().is_err() {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider pre-Question completion receipt is invalid",
+            ));
+        }
+        Ok(Self::Completed {
+            receipt,
+            response_digest,
+        })
+    }
+}
+
+/// One opaque, in-memory Provider command whose exact identity is exposed to
+/// Core before any remote mutation can occur. Implementations consume the
+/// command on execute, preventing accidental in-process replay.
+#[async_trait]
+pub trait PreparedProviderQuestionReadOperation: fmt::Debug + Send {
+    fn operation_type(&self) -> &str;
+    fn request_digest(&self) -> [u8; 32];
+    fn delay_before_execute_seconds(&self) -> u64;
+
+    async fn execute(
+        self: Box<Self>,
+        context: &ProviderContext,
+    ) -> ProviderResult<ProviderQuestionReadStepOutcome>;
+}
+
 #[async_trait]
 pub trait QuestionInventoryCapability: ProviderIdentity {
     async fn list_question_refs(
@@ -676,6 +981,49 @@ pub trait QuestionInventoryCapability: ProviderIdentity {
         context: &ProviderContext,
         remote_task_id: &str,
     ) -> ProviderResult<Vec<RemoteQuestionRef>>;
+
+    /// Produces the initial encrypted state for Providers whose first real
+    /// Question requires one or more non-idempotent operations. `None` selects
+    /// the ordinary read-only inventory/parse pipeline.
+    async fn prepare_question_read_attempt(
+        &self,
+        _context: &ProviderContext,
+        _task_id: TaskId,
+        _remote_task_id: &str,
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderQuestionReadContinuation>> {
+        Ok(None)
+    }
+
+    /// Rebinds one encrypted phase to fresh account/Task state and freezes the
+    /// exact next command. Core records its identity before calling `execute`.
+    async fn prepare_question_read_operation(
+        &self,
+        _context: &ProviderContext,
+        _task_id: TaskId,
+        _remote_task_id: &str,
+        _continuation: ResolvedProviderQuestionReadContinuation<'_>,
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Box<dyn PreparedProviderQuestionReadOperation>> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not implement a pre-Question operation flow",
+        ))
+    }
+
+    /// Performs only fresh readback for an ambiguous operation. Returning
+    /// `None` keeps the attempt locked for manual/live recovery.
+    async fn recover_ambiguous_question_read_operation(
+        &self,
+        _context: &ProviderContext,
+        _task_id: TaskId,
+        _remote_task_id: &str,
+        _continuation: ResolvedProviderQuestionReadContinuation<'_>,
+        _operation: &AmbiguousProviderQuestionReadOperation,
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderQuestionReadStepOutcome>> {
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -687,6 +1035,103 @@ pub trait QuestionParseCapability: ProviderIdentity {
         remote_task_id: &str,
         question: &RemoteQuestionRef,
     ) -> ProviderResult<Question>;
+}
+
+#[cfg(test)]
+mod question_read_flow_tests {
+    use asterism_domain::{QuestionId, QuestionKind};
+
+    use super::*;
+
+    #[test]
+    fn continuation_is_provider_scoped_digest_bound_and_debug_redacted() {
+        let provider_id = ProviderId::new("cidaren").unwrap();
+        let continuation = ProviderQuestionReadContinuation::try_new(
+            &provider_id,
+            "cidaren.pre-question.v1",
+            "cidaren.ready-to-start",
+            SecretValue::new(b"one-time-topic-code".to_vec()),
+            300,
+        )
+        .unwrap();
+        let expected_digest: [u8; 32] = Sha256::digest(b"one-time-topic-code").into();
+        assert_eq!(continuation.continuation_digest(), expected_digest);
+        let debug = format!("{continuation:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("one-time-topic-code"));
+        assert!(
+            ProviderQuestionReadContinuation::try_new(
+                &provider_id,
+                "uai.question.v1",
+                "cidaren.ready",
+                SecretValue::new(vec![1]),
+                300,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn materialization_requires_real_unique_questions_and_response_digest() {
+        let provider_id = ProviderId::new("chaoxing").unwrap();
+        let question = Question {
+            id: QuestionId::new(),
+            task_id: TaskId::new(),
+            remote_question_id: Some("exam-question-1".to_owned()),
+            kind: QuestionKind::SingleChoice,
+            stem: "Bounded stem".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({}),
+            position: 1,
+        };
+        let artifact = || {
+            ProviderQuestionReadContinuation::try_new(
+                &provider_id,
+                "chaoxing.exam-attempt.v1",
+                "chaoxing.questions-ready",
+                SecretValue::new(b"exam-state".to_vec()),
+                600,
+            )
+            .unwrap()
+        };
+        assert!(
+            ProviderQuestionMaterialization::try_new(
+                vec![question.clone()],
+                artifact(),
+                [7; 32],
+                chrono::Utc::now(),
+            )
+            .is_ok()
+        );
+        assert!(
+            ProviderQuestionMaterialization::try_new(
+                vec![question.clone(), question],
+                artifact(),
+                [7; 32],
+                chrono::Utc::now(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn completion_before_first_question_keeps_receipt_distinct_from_materialization() {
+        let received_at = chrono::Utc::now();
+        let receipt = SubmissionReceipt {
+            remote_status: "completed".to_owned(),
+            message_sanitized: Some("already complete".to_owned()),
+            provider_trace_id: None,
+            received_at,
+        };
+        assert!(matches!(
+            ProviderQuestionReadStepOutcome::completed(receipt, [9; 32]).unwrap(),
+            ProviderQuestionReadStepOutcome::Completed {
+                response_digest,
+                ..
+            } if response_digest == [9; 32]
+        ));
+    }
 }
 
 /// Provider-native answer lookup kept separate from question parsing, draft

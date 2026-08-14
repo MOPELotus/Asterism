@@ -6,7 +6,7 @@ CREATE TABLE question_read_attempts_v2 (
     provider_id TEXT NOT NULL,
     provider_version TEXT NOT NULL,
     state TEXT NOT NULL CHECK (
-        state IN ('active', 'ambiguous', 'materialized', 'rejected', 'cancelled', 'expired')
+        state IN ('active', 'ambiguous', 'completed', 'materialized', 'rejected', 'cancelled', 'expired')
     ),
     question_snapshot_id TEXT UNIQUE,
     question_session_id TEXT UNIQUE REFERENCES question_sessions(id) ON DELETE RESTRICT,
@@ -34,6 +34,9 @@ CREATE TABLE question_read_attempts_v2 (
             AND response_digest IS NULL AND completed_at IS NOT NULL
             AND updated_at = completed_at)
         OR (state = 'rejected' AND question_snapshot_id IS NULL AND question_session_id IS NULL
+            AND response_digest IS NOT NULL AND completed_at IS NOT NULL
+            AND updated_at = completed_at)
+        OR (state = 'completed' AND question_snapshot_id IS NULL AND question_session_id IS NULL
             AND response_digest IS NOT NULL AND completed_at IS NOT NULL
             AND updated_at = completed_at)
         OR (state = 'materialized' AND question_snapshot_id IS NOT NULL

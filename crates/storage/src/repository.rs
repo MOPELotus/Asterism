@@ -304,6 +304,8 @@ pub trait QuestionReadContinuationRepository: Send + Sync {
         request: QuestionReadOperationAcceptRequest<'_>,
     ) -> Result<QuestionReadOperationFinishOutcome, SecretStoreError>;
 
+    /// `Accepted` records a definite completed-before-first-Question
+    /// response; continuing responses use `accept_question_read_operation`.
     async fn finish_question_read_operation(
         &self,
         operation: &QuestionReadOperation,

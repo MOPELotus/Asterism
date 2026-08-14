@@ -433,10 +433,14 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
     ) -> Result<QuestionReadOperationFinishOutcome, SecretStoreError> {
         if !matches!(
             terminal_state,
-            QuestionReadOperationState::Rejected | QuestionReadOperationState::Ambiguous
+            QuestionReadOperationState::Accepted
+                | QuestionReadOperationState::Rejected
+                | QuestionReadOperationState::Ambiguous
         ) || completed_at < operation.issued_at
-            || (terminal_state == QuestionReadOperationState::Rejected
-                && result_digest.is_none_or(|digest| digest == [0; 32]))
+            || (matches!(
+                terminal_state,
+                QuestionReadOperationState::Accepted | QuestionReadOperationState::Rejected
+            ) && result_digest.is_none_or(|digest| digest == [0; 32]))
             || (terminal_state == QuestionReadOperationState::Ambiguous && result_digest.is_some())
         {
             return Err(SecretStoreError::InvalidValue);
@@ -472,14 +476,16 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
         }
         let mut attempt = binding.attempt;
         match terminal_state {
+            QuestionReadOperationState::Accepted => attempt.complete(
+                result_digest.ok_or(SecretStoreError::InvalidValue)?,
+                completed_at,
+            ),
             QuestionReadOperationState::Rejected => attempt.reject(
                 result_digest.ok_or(SecretStoreError::InvalidValue)?,
                 completed_at,
             ),
             QuestionReadOperationState::Ambiguous => attempt.mark_ambiguous(completed_at),
-            QuestionReadOperationState::Issued | QuestionReadOperationState::Accepted => {
-                unreachable!()
-            }
+            QuestionReadOperationState::Issued => unreachable!(),
         }
         .map_err(|_| SecretStoreError::VersionConflict)?;
         update_attempt(&mut transaction, &attempt, operation.continuation_revision).await?;
@@ -492,11 +498,10 @@ impl QuestionReadContinuationRepository for SqliteQuestionReadContinuationReposi
             &mut transaction,
             access,
             match terminal_state {
+                QuestionReadOperationState::Accepted => "question_read_operation_completed",
                 QuestionReadOperationState::Rejected => "question_read_operation_rejected",
                 QuestionReadOperationState::Ambiguous => "question_read_operation_ambiguous",
-                QuestionReadOperationState::Issued | QuestionReadOperationState::Accepted => {
-                    unreachable!()
-                }
+                QuestionReadOperationState::Issued => unreachable!(),
             },
             &finished,
         )
@@ -992,6 +997,7 @@ fn decode_attempt_state(value: &str) -> Result<QuestionReadAttemptState, SecretS
     match value {
         "active" => Ok(QuestionReadAttemptState::Active),
         "ambiguous" => Ok(QuestionReadAttemptState::Ambiguous),
+        "completed" => Ok(QuestionReadAttemptState::Completed),
         "materialized" => Ok(QuestionReadAttemptState::Materialized),
         "rejected" => Ok(QuestionReadAttemptState::Rejected),
         "cancelled" => Ok(QuestionReadAttemptState::Cancelled),
@@ -1004,6 +1010,7 @@ fn attempt_state_name(state: QuestionReadAttemptState) -> &'static str {
     match state {
         QuestionReadAttemptState::Active => "active",
         QuestionReadAttemptState::Ambiguous => "ambiguous",
+        QuestionReadAttemptState::Completed => "completed",
         QuestionReadAttemptState::Materialized => "materialized",
         QuestionReadAttemptState::Rejected => "rejected",
         QuestionReadAttemptState::Cancelled => "cancelled",
@@ -1273,6 +1280,56 @@ mod tests {
                 )
                 .await,
             Err(SecretStoreError::AuthenticationFailed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn definite_completion_accepts_operation_without_creating_a_question() {
+        let fixture = Fixture::new().await;
+        let attempt = fixture.attempt(b"cidaren-ready-to-start").await;
+        let QuestionReadOperationIssueOutcome::Issued(operation) = fixture
+            .continuations
+            .issue_question_read_operation(QuestionReadOperationIssueRequest {
+                attempt_id: attempt.id,
+                expected_continuation_revision: 1,
+                operation_type: "cidaren.start-answer.v1".to_owned(),
+                request_digest: [6; 32],
+                issued_at: fixture.now + Duration::seconds(1),
+                access: &fixture.access("complete-issue"),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected an issued operation");
+        };
+        let result = fixture
+            .continuations
+            .finish_question_read_operation(
+                &operation,
+                QuestionReadOperationState::Accepted,
+                Some([7; 32]),
+                fixture.now + Duration::seconds(2),
+                &fixture.access("complete-accept"),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            QuestionReadOperationFinishOutcome::Finished { operation, attempt }
+                if operation.state == QuestionReadOperationState::Accepted
+                    && attempt.state == QuestionReadAttemptState::Completed
+                    && attempt.question_snapshot_id.is_none()
+                    && attempt.question_session_id.is_none()
+        ));
+        assert!(matches!(
+            fixture
+                .continuations
+                .resolve_question_read_continuation(
+                    attempt.id,
+                    &fixture.access("complete-resolve"),
+                )
+                .await,
+            Err(SecretStoreError::VersionConflict)
         ));
     }
 
