@@ -3862,3 +3862,22 @@ Core slice must atomically complete the current exchange while either storing
 the next encrypted command/state or terminating the session with independently
 verified progress; only after that transaction exists can the daemon invoke
 UAI's persisted cursor-result adapter.
+
+## Two-hundred-and-fourteenth Phase 0 slice
+
+Storage now consumes a claimed BrowserBridge workflow result through one
+immediate transaction. It rechecks the Provider-scoped owner, account and Task
+binding, the still-issued command identity, the exact stored result metadata,
+the live worker lease and the session runtime binding before changing durable
+state. An intermediate result completes the current exchange and stores the
+contiguous next command plus optional runtime sidecar as encrypted secret blobs
+in that same transaction. A terminal result completes the exchange, records
+the independently verified progress and completes the helper session while
+revoking both helper tokens.
+
+Migration 051 adds `processed_at` as an explicit successful consumption marker.
+Pending, retry, expired-lease and attempt-budget queries exclude processed
+results, preventing a successful final-budget callback from later being
+recovered as dead letter. The worker claim is cleared only inside the successful
+transition transaction; a wrong or expired claim leaves the exchange, next
+command and session untouched.

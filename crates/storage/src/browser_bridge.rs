@@ -82,7 +82,7 @@ async fn dead_letter_result_in_transaction(
          SET processing_state = 'dead_letter', claimed_by = NULL, claim_expires_at = NULL, \
              next_attempt_at = NULL, last_error_kind = ? \
          WHERE session_id = ? AND sequence = ? AND processing_state = 'processing' \
-           AND claimed_by = ?",
+           AND claimed_by = ? AND processed_at IS NULL",
     )
     .bind(error_kind)
     .bind(session_id.to_string())
@@ -237,7 +237,8 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
             .push(" AND session.provider_id = ")
             .push_bind(provider_id.as_str())
             .push(
-                " AND exchange.state = 'issued' AND result.attempt_count < 32 \
+                " AND exchange.state = 'issued' AND result.processed_at IS NULL \
+                    AND result.attempt_count < 32 \
                     AND (result.processing_state = 'pending' \
                     OR (result.processing_state = 'retry' AND result.next_attempt_at <= ",
             )
@@ -294,7 +295,8 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
              FROM browser_bridge_result_artifacts AS result \
              JOIN browser_bridge_sessions AS session ON session.id = result.session_id \
              WHERE result.processing_state = 'processing' AND result.attempt_count >= 32 \
-               AND result.claim_expires_at <= ? AND session.provider_id = ? \
+               AND result.processed_at IS NULL AND result.claim_expires_at <= ? \
+               AND session.provider_id = ? \
                AND session.state_json = ? AND session.expires_at > ? \
              ORDER BY result.claim_expires_at, result.session_id, result.sequence LIMIT 100",
         )
@@ -345,7 +347,8 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
             .push(" AND session.provider_id = ")
             .push_bind(provider_id.as_str())
             .push(
-                " AND exchange.state = 'issued' AND result.attempt_count < 32 \
+                " AND exchange.state = 'issued' AND result.processed_at IS NULL \
+                    AND result.attempt_count < 32 \
                     AND (result.processing_state = 'pending' \
                     OR (result.processing_state = 'retry' AND result.next_attempt_at <= ",
             )
@@ -371,7 +374,8 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
                  SET processing_state = 'processing', attempt_count = attempt_count + 1, \
                      claimed_by = ?, claim_expires_at = ?, next_attempt_at = NULL, \
                      last_error_kind = NULL \
-                 WHERE session_id = ? AND sequence = ? AND attempt_count < 32 AND ( \
+                 WHERE session_id = ? AND sequence = ? AND attempt_count < 32 \
+                   AND processed_at IS NULL AND ( \
                      processing_state = 'pending' \
                      OR (processing_state = 'retry' AND next_attempt_at <= ?) \
                      OR (processing_state = 'processing' AND claim_expires_at <= ?))",
@@ -421,7 +425,7 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
                  SET processing_state = 'retry', claimed_by = NULL, claim_expires_at = NULL, \
                      next_attempt_at = ?, last_error_kind = ? \
                  WHERE session_id = ? AND sequence = ? AND processing_state = 'processing' \
-                   AND claimed_by = ?",
+                   AND claimed_by = ? AND processed_at IS NULL",
             )
             .bind(encode_timestamp(retry_at))
             .bind(request.error_kind)

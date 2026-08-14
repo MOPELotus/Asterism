@@ -2,7 +2,12 @@ use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AuditRecordId, BrowserBridgeExchangeState, BrowserBridgeResultArtifactMetadata,
-    BrowserBridgeRuntimeStateMetadata, ProviderId, SecretId,
+    BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession, BrowserBridgeSessionState, ProviderId,
+    SecretId,
+};
+use asterism_provider_api::{
+    BrowserBridgeWorkflowNextCommand, BrowserBridgeWorkflowResult,
+    BrowserBridgeWorkflowRuntimeState, RemoteProgress,
 };
 use asterism_secrets::{
     SecretAccess, SecretActor, SecretPurpose, SecretRef, SecretStoreError, SecretValue,
@@ -17,7 +22,8 @@ use crate::{
     BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandIssueRequest,
     BrowserBridgeCommandResolveRequest, BrowserBridgeExchangeRecord,
     BrowserBridgeResultArtifactRecord, BrowserBridgeResultReceiveRequest,
-    BrowserBridgeResultResolveRequest, Database, DispatchedBrowserBridgeCommand,
+    BrowserBridgeResultResolveRequest, BrowserBridgeWorkflowCommitOutcome,
+    BrowserBridgeWorkflowCommitRequest, Database, DispatchedBrowserBridgeCommand,
     ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, ResolvedBrowserBridgeRuntimeState,
     SecretKeyring,
     browser_bridge::{
@@ -715,6 +721,424 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
             result_artifact: SecretValue::new(plaintext),
         }))
     }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the immediate transaction keeps claim consumption, exchange completion, next issuance and terminal session state inseparable"
+    )]
+    async fn commit_browser_bridge_workflow_result(
+        &self,
+        request: BrowserBridgeWorkflowCommitRequest<'_>,
+    ) -> Result<BrowserBridgeWorkflowCommitOutcome, SecretStoreError> {
+        validate_worker_id(request.worker_id)?;
+        let (completed, next, terminal_progress) = match request.transition {
+            BrowserBridgeWorkflowResult::Intermediate {
+                completed_exchange,
+                next,
+            } => (completed_exchange, Some(*next), None),
+            BrowserBridgeWorkflowResult::ExecutionTerminal {
+                completed_exchange,
+                verified_progress,
+            } => (completed_exchange, None, Some(verified_progress)),
+        };
+        validate_completed_exchange(&completed)?;
+        let completed_at = completed
+            .completed_at
+            .ok_or(SecretStoreError::InvalidValue)?;
+        if request.committed_at < completed_at {
+            return Err(SecretStoreError::InvalidValue);
+        }
+        if let Some(progress) = &terminal_progress
+            && (progress.updated_at < completed_at
+                || progress.updated_at > request.committed_at
+                || progress.percent.is_some_and(|percent| percent > 100))
+        {
+            return Err(SecretStoreError::InvalidValue);
+        }
+        if let Some(next) = &next {
+            validate_next_exchange(&completed, next, request.committed_at)?;
+        }
+
+        let sequence =
+            i64::try_from(completed.sequence).map_err(|_| SecretStoreError::InvalidValue)?;
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let Some(session) = find_claimed_session_for_exchange(
+            &mut transaction,
+            completed.session_id,
+            request.committed_at,
+        )
+        .await
+        .map_err(storage_error)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeWorkflowCommitOutcome::BindingConflict);
+        };
+        authorize_scoped(
+            session.owner_user_id,
+            &session.provider_id,
+            &self.provider_id,
+            request.access,
+        )?;
+        if session.owner_user_id != request.owner_user_id
+            || session.provider_account_id != request.provider_account_id
+            || session.task_id != request.task_id
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeWorkflowCommitOutcome::BindingConflict);
+        }
+        let Some(existing) = fetch_exchange(&mut transaction, completed.session_id, sequence)
+            .await
+            .map_err(storage_error)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeWorkflowCommitOutcome::SequenceConflict);
+        };
+        if existing.state != BrowserBridgeExchangeState::Issued
+            || existing.command_type != completed.command_type
+            || existing.command_digest != completed.command_digest
+            || existing.issued_at != completed.issued_at
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeWorkflowCommitOutcome::SequenceConflict);
+        }
+        if next.is_some() {
+            let latest_sequence: Option<i64> = sqlx::query_scalar(
+                "SELECT MAX(sequence) FROM browser_bridge_exchanges WHERE session_id = ?",
+            )
+            .bind(completed.session_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+            if latest_sequence != Some(sequence) {
+                transaction.rollback().await.map_err(storage_error)?;
+                return Ok(BrowserBridgeWorkflowCommitOutcome::SequenceConflict);
+            }
+        }
+        let result_claim_matches: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM browser_bridge_result_artifacts \
+             WHERE session_id = ? AND sequence = ? AND result_type = ? AND result_digest = ? \
+               AND received_at = ? AND processing_state = 'processing' \
+               AND claimed_by = ? AND claim_expires_at >= ? AND processed_at IS NULL)",
+        )
+        .bind(completed.session_id.to_string())
+        .bind(sequence)
+        .bind(completed.result_type.as_deref())
+        .bind(completed.result_digest.map(|value| value.to_vec()))
+        .bind(encode_timestamp(completed_at))
+        .bind(request.worker_id)
+        .bind(encode_timestamp(request.committed_at))
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if result_claim_matches != 1 {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeWorkflowCommitOutcome::ClaimConflict);
+        }
+        let updated = sqlx::query(
+            "UPDATE browser_bridge_exchanges SET result_type = ?, result_digest = ?, \
+             state = 'completed', completed_at = ? WHERE session_id = ? AND sequence = ? \
+               AND state = 'issued' AND command_type = ? AND command_digest = ? AND issued_at = ?",
+        )
+        .bind(completed.result_type.as_deref())
+        .bind(completed.result_digest.map(|value| value.to_vec()))
+        .bind(encode_timestamp(completed_at))
+        .bind(completed.session_id.to_string())
+        .bind(sequence)
+        .bind(&completed.command_type)
+        .bind(completed.command_digest.as_slice())
+        .bind(encode_timestamp(completed.issued_at))
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if updated.rows_affected() != 1 {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeWorkflowCommitOutcome::SequenceConflict);
+        }
+        let processed = sqlx::query(
+            "UPDATE browser_bridge_result_artifacts SET processed_at = ?, claimed_by = NULL, \
+             claim_expires_at = NULL, next_attempt_at = NULL, last_error_kind = NULL \
+             WHERE session_id = ? AND sequence = ? AND processing_state = 'processing' \
+               AND claimed_by = ? AND processed_at IS NULL",
+        )
+        .bind(encode_timestamp(request.committed_at))
+        .bind(completed.session_id.to_string())
+        .bind(sequence)
+        .bind(request.worker_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if processed.rows_affected() != 1 {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeWorkflowCommitOutcome::ClaimConflict);
+        }
+
+        insert_exchange_audit(
+            &mut transaction,
+            &request.access.correlation_id,
+            &session,
+            &completed,
+            "workflow_result_consumed",
+        )
+        .await
+        .map_err(storage_error)?;
+        if let Some(next) = next {
+            let next_exchange = next.exchange.clone();
+            insert_next_workflow_command(
+                &mut transaction,
+                &self.keyring,
+                &session,
+                next.exchange,
+                next.command_artifact,
+                next.runtime_state,
+                request.access,
+            )
+            .await?;
+            transaction.commit().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeWorkflowCommitOutcome::IntermediateCommitted {
+                completed_exchange: completed,
+                next_exchange,
+            });
+        }
+
+        let mut completed_session = session;
+        completed_session
+            .complete(request.committed_at)
+            .map_err(|_| SecretStoreError::VersionConflict)?;
+        let session_updated = sqlx::query(
+            "UPDATE browser_bridge_sessions SET state_json = ?, pairing_token_hash = NULL, \
+             access_token_hash = NULL, revision = ?, updated_at = ? WHERE id = ? \
+               AND state_json = ? AND revision = ? AND pairing_token_hash IS NULL \
+               AND access_token_hash IS NOT NULL",
+        )
+        .bind(serde_json::to_string(&completed_session.state).map_err(storage_error)?)
+        .bind(i64::from(completed_session.revision))
+        .bind(encode_timestamp(completed_session.updated_at))
+        .bind(completed_session.id.to_string())
+        .bind(serde_json::to_string(&BrowserBridgeSessionState::Claimed).map_err(storage_error)?)
+        .bind(i64::from(completed_session.revision.saturating_sub(1)))
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if session_updated.rows_affected() != 1 {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeWorkflowCommitOutcome::BindingConflict);
+        }
+        insert_workflow_terminal_audit(
+            &mut transaction,
+            &completed_session,
+            terminal_progress
+                .as_ref()
+                .ok_or(SecretStoreError::InvalidValue)?,
+            request.access,
+        )
+        .await?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(
+            BrowserBridgeWorkflowCommitOutcome::ExecutionTerminalCommitted {
+                session: completed_session,
+                completed_exchange: completed,
+            },
+        )
+    }
+}
+
+fn validate_worker_id(worker_id: &str) -> Result<(), SecretStoreError> {
+    if worker_id.is_empty()
+        || worker_id.len() > 128
+        || worker_id.trim() != worker_id
+        || worker_id.chars().any(char::is_control)
+    {
+        Err(SecretStoreError::InvalidValue)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_completed_exchange(
+    exchange: &asterism_domain::BrowserBridgeExchange,
+) -> Result<(), SecretStoreError> {
+    exchange
+        .validate()
+        .map_err(|_| SecretStoreError::InvalidValue)?;
+    if exchange.state != BrowserBridgeExchangeState::Completed
+        || exchange.result_type.is_none()
+        || exchange.result_digest.is_none()
+        || exchange.completed_at.is_none()
+    {
+        Err(SecretStoreError::InvalidValue)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_next_exchange(
+    completed: &asterism_domain::BrowserBridgeExchange,
+    next: &BrowserBridgeWorkflowNextCommand,
+    committed_at: asterism_domain::Timestamp,
+) -> Result<(), SecretStoreError> {
+    next.exchange
+        .validate()
+        .map_err(|_| SecretStoreError::InvalidValue)?;
+    validate_secret(&next.command_artifact)?;
+    if next.exchange.state != BrowserBridgeExchangeState::Issued
+        || next.exchange.session_id != completed.session_id
+        || next.exchange.sequence != completed.sequence.checked_add(1).unwrap_or(0)
+        || next.exchange.issued_at < completed.completed_at.unwrap_or(completed.issued_at)
+        || next.exchange.issued_at > committed_at
+        || digest(next.command_artifact.expose_secret()) != next.exchange.command_digest
+    {
+        return Err(SecretStoreError::InvalidValue);
+    }
+    if let Some(runtime_state) = &next.runtime_state {
+        validate_runtime_state(&next.exchange, runtime_state)?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_state(
+    exchange: &asterism_domain::BrowserBridgeExchange,
+    runtime_state: &BrowserBridgeWorkflowRuntimeState,
+) -> Result<(), SecretStoreError> {
+    runtime_state
+        .metadata
+        .validate()
+        .map_err(|_| SecretStoreError::InvalidValue)?;
+    validate_secret(&runtime_state.artifact)?;
+    if runtime_state.metadata.session_id != exchange.session_id
+        || runtime_state.metadata.sequence != exchange.sequence
+        || runtime_state.metadata.stored_at != exchange.issued_at
+        || digest(runtime_state.artifact.expose_secret()) != runtime_state.metadata.state_digest
+    {
+        Err(SecretStoreError::InvalidValue)
+    } else {
+        Ok(())
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all exact command and session bindings are required at the transaction boundary"
+)]
+async fn insert_next_workflow_command(
+    transaction: &mut Transaction<'_, Sqlite>,
+    keyring: &SecretKeyring,
+    session: &BrowserBridgeSession,
+    exchange: asterism_domain::BrowserBridgeExchange,
+    command_artifact: SecretValue,
+    runtime_state: Option<BrowserBridgeWorkflowRuntimeState>,
+    access: &SecretAccess,
+) -> Result<(), SecretStoreError> {
+    let (key_id, key) = keyring.active();
+    let command_secret = SecretRef {
+        id: SecretId::new(),
+        owner_user_id: session.owner_user_id,
+        purpose: SecretPurpose::BrowserJobCredential,
+        version: 1,
+        key_id: key_id.to_owned(),
+        created_at: exchange.issued_at,
+        updated_at: exchange.issued_at,
+    };
+    let (nonce, encrypted_data) = encrypt(key, &command_secret, command_artifact.expose_secret())?;
+    insert_secret_blob(transaction, &command_secret, &nonce, &encrypted_data).await?;
+    sqlx::query(
+        "INSERT INTO browser_bridge_exchanges \
+         (session_id, sequence, command_type, command_digest, state, issued_at, \
+          command_secret_blob_id) VALUES (?, ?, ?, ?, 'issued', ?, ?)",
+    )
+    .bind(exchange.session_id.to_string())
+    .bind(i64::try_from(exchange.sequence).map_err(|_| SecretStoreError::InvalidValue)?)
+    .bind(&exchange.command_type)
+    .bind(exchange.command_digest.as_slice())
+    .bind(encode_timestamp(exchange.issued_at))
+    .bind(command_secret.id.to_string())
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if let Some(runtime_state) = runtime_state {
+        let runtime_secret = SecretRef {
+            id: SecretId::new(),
+            owner_user_id: session.owner_user_id,
+            purpose: SecretPurpose::BrowserJobCredential,
+            version: 1,
+            key_id: key_id.to_owned(),
+            created_at: runtime_state.metadata.stored_at,
+            updated_at: runtime_state.metadata.stored_at,
+        };
+        let (runtime_nonce, runtime_encrypted_data) =
+            encrypt(key, &runtime_secret, runtime_state.artifact.expose_secret())?;
+        insert_secret_blob(
+            transaction,
+            &runtime_secret,
+            &runtime_nonce,
+            &runtime_encrypted_data,
+        )
+        .await?;
+        insert_runtime_state(transaction, &runtime_state.metadata, runtime_secret.id).await?;
+        insert_secret_audit(
+            transaction,
+            access,
+            "browser_bridge_runtime_state_stored",
+            &runtime_secret,
+        )
+        .await
+        .map_err(storage_error)?;
+    }
+    insert_secret_audit(
+        transaction,
+        access,
+        "browser_bridge_command_stored",
+        &command_secret,
+    )
+    .await
+    .map_err(storage_error)?;
+    insert_exchange_audit(
+        transaction,
+        &access.correlation_id,
+        session,
+        &exchange,
+        "issued",
+    )
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+async fn insert_workflow_terminal_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &BrowserBridgeSession,
+    progress: &RemoteProgress,
+    access: &SecretAccess,
+) -> Result<(), SecretStoreError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'browser_bridge', ?, 'browser_bridge_workflow_completed', \
+          'browser_bridge_session', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(session.updated_at))
+    .bind(session.id.to_string())
+    .bind(session.id.to_string())
+    .bind(&access.correlation_id)
+    .bind(
+        serde_json::json!({
+            "remote_state": progress.remote_state,
+            "percent": progress.percent,
+            "duration_seconds": progress.duration_seconds,
+            "verified_at": progress.updated_at,
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
 }
 
 async fn fetch_result_metadata(
@@ -1033,7 +1457,7 @@ mod tests {
     use asterism_domain::{
         AuditActor, AuthMethod, AuthState, BrowserBridgeExchange, BrowserBridgeRuntimeBinding,
         BrowserBridgeSession, BrowserBridgeSessionCreate, BrowserBridgeSessionState,
-        ProviderAccountId, Role, SessionKind, TaskId, UserId,
+        ProviderAccountId, RemoteState, Role, SessionKind, TaskId, UserId,
     };
     use asterism_provider_api::BrowserSessionSpec;
     use asterism_secrets::{
@@ -2086,6 +2510,307 @@ mod tests {
             BrowserBridgeSessionState::Claimed
         );
         assert_eq!(credential_count, 0);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end fixture proves both atomic workflow dispositions and durable claim consumption"
+    )]
+    async fn claimed_workflow_results_advance_then_terminate_atomically() {
+        let fixture = fixture().await;
+        let now = Utc::now() - Duration::seconds(15);
+        let (session, access_digest) = fixture.claimed_session(now).await;
+        let access = Fixture::access();
+        let command_one = br#"{"kind":"browser-step","ordinal":1}"#;
+        let issued_one = BrowserBridgeExchange::issue(
+            session.id,
+            1,
+            "uai.browser.command".to_owned(),
+            digest(command_one),
+            now + Duration::seconds(3),
+        )
+        .unwrap();
+        fixture
+            .command_repository
+            .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
+                exchange: &issued_one,
+                command_artifact: SecretValue::new(command_one.to_vec()),
+                runtime_state: None,
+                access: &access,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .dispatch_command(
+                    &session,
+                    1,
+                    &access_digest,
+                    &access,
+                    now + Duration::seconds(4),
+                )
+                .await,
+            BrowserBridgeCommandDispatchRecord::Dispatched(_)
+        ));
+        let result_one_bytes = br#"{"kind":"cursor","done":false}"#;
+        let result_one = BrowserBridgeResultArtifactMetadata {
+            session_id: session.id,
+            sequence: 1,
+            result_type: "uai.browser.event".to_owned(),
+            result_digest: digest(result_one_bytes),
+            received_at: now + Duration::seconds(5),
+        };
+        fixture
+            .command_repository
+            .receive_browser_bridge_result(BrowserBridgeResultReceiveRequest {
+                metadata: &result_one,
+                result_artifact: SecretValue::new(result_one_bytes.to_vec()),
+                access_token_digest: &access_digest,
+                access: &access,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .session_repository
+                .claim_pending_browser_bridge_results(
+                    now + Duration::seconds(6),
+                    &fixture.provider,
+                    &["uai.browser.event"],
+                    1,
+                    "workflow-worker-1",
+                    now + Duration::seconds(30),
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut completed_one = issued_one.clone();
+        completed_one
+            .complete(
+                result_one.result_type.clone(),
+                result_one.result_digest,
+                result_one.received_at,
+            )
+            .unwrap();
+        let command_two = br#"{"kind":"browser-step","ordinal":2}"#;
+        let issued_two = BrowserBridgeExchange::issue(
+            session.id,
+            2,
+            "uai.browser.command".to_owned(),
+            digest(command_two),
+            now + Duration::seconds(7),
+        )
+        .unwrap();
+        let runtime_two = br#"{"cursor":"opaque-two"}"#;
+        let runtime_two_metadata = BrowserBridgeRuntimeStateMetadata {
+            session_id: session.id,
+            sequence: 2,
+            state_type: "uai.browser.cursor.v4".to_owned(),
+            state_digest: digest(runtime_two),
+            stored_at: issued_two.issued_at,
+        };
+        let wrong_worker_transition = BrowserBridgeWorkflowResult::try_intermediate(
+            completed_one.clone(),
+            BrowserBridgeWorkflowNextCommand {
+                exchange: issued_two.clone(),
+                command_artifact: SecretValue::new(command_two.to_vec()),
+                runtime_state: Some(BrowserBridgeWorkflowRuntimeState {
+                    metadata: runtime_two_metadata.clone(),
+                    artifact: SecretValue::new(runtime_two.to_vec()),
+                }),
+            },
+            &issued_one,
+            &result_one,
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture
+                .command_repository
+                .commit_browser_bridge_workflow_result(BrowserBridgeWorkflowCommitRequest {
+                    owner_user_id: fixture.owner,
+                    provider_account_id: fixture.account,
+                    task_id: fixture.task,
+                    transition: wrong_worker_transition,
+                    worker_id: "foreign-worker",
+                    committed_at: now + Duration::seconds(8),
+                    access: &access,
+                })
+                .await
+                .unwrap(),
+            BrowserBridgeWorkflowCommitOutcome::ClaimConflict
+        ));
+        let unchanged: (String, i64) = sqlx::query_as(
+            "SELECT state, (SELECT COUNT(*) FROM browser_bridge_exchanges \
+             WHERE session_id = ?) FROM browser_bridge_exchanges \
+             WHERE session_id = ? AND sequence = 1",
+        )
+        .bind(session.id.to_string())
+        .bind(session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(unchanged, ("issued".to_owned(), 1));
+        let intermediate = BrowserBridgeWorkflowResult::try_intermediate(
+            completed_one.clone(),
+            BrowserBridgeWorkflowNextCommand {
+                exchange: issued_two.clone(),
+                command_artifact: SecretValue::new(command_two.to_vec()),
+                runtime_state: Some(BrowserBridgeWorkflowRuntimeState {
+                    metadata: runtime_two_metadata.clone(),
+                    artifact: SecretValue::new(runtime_two.to_vec()),
+                }),
+            },
+            &issued_one,
+            &result_one,
+        )
+        .unwrap();
+        let advanced = fixture
+            .command_repository
+            .commit_browser_bridge_workflow_result(BrowserBridgeWorkflowCommitRequest {
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                task_id: fixture.task,
+                transition: intermediate,
+                worker_id: "workflow-worker-1",
+                committed_at: now + Duration::seconds(8),
+                access: &access,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            advanced,
+            BrowserBridgeWorkflowCommitOutcome::IntermediateCommitted {
+                completed_exchange,
+                next_exchange,
+            } if completed_exchange == completed_one && next_exchange == issued_two
+        ));
+        let first_processing: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT processed_at, claimed_by FROM browser_bridge_result_artifacts \
+             WHERE session_id = ? AND sequence = 1",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert!(first_processing.0.is_some());
+        assert!(first_processing.1.is_none());
+        let resolved_two = fixture
+            .command_repository
+            .resolve_browser_bridge_command(fixture.resolve_request(&session, 2, &access))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_two.command_artifact.expose_secret(), command_two);
+        let resolved_runtime = resolved_two.runtime_state.unwrap();
+        assert_eq!(resolved_runtime.metadata, runtime_two_metadata);
+        assert_eq!(resolved_runtime.state_artifact.expose_secret(), runtime_two);
+
+        assert!(matches!(
+            fixture
+                .dispatch_command(
+                    &session,
+                    2,
+                    &access_digest,
+                    &access,
+                    now + Duration::seconds(9),
+                )
+                .await,
+            BrowserBridgeCommandDispatchRecord::Dispatched(_)
+        ));
+        let result_two_bytes = br#"{"kind":"residence","done":true}"#;
+        let result_two = BrowserBridgeResultArtifactMetadata {
+            session_id: session.id,
+            sequence: 2,
+            result_type: "uai.browser.residence".to_owned(),
+            result_digest: digest(result_two_bytes),
+            received_at: now + Duration::seconds(10),
+        };
+        fixture
+            .command_repository
+            .receive_browser_bridge_result(BrowserBridgeResultReceiveRequest {
+                metadata: &result_two,
+                result_artifact: SecretValue::new(result_two_bytes.to_vec()),
+                access_token_digest: &access_digest,
+                access: &access,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .session_repository
+                .claim_pending_browser_bridge_results(
+                    now + Duration::seconds(11),
+                    &fixture.provider,
+                    &["uai.browser.residence"],
+                    1,
+                    "workflow-worker-2",
+                    now + Duration::seconds(40),
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut completed_two = issued_two.clone();
+        completed_two
+            .complete(
+                result_two.result_type.clone(),
+                result_two.result_digest,
+                result_two.received_at,
+            )
+            .unwrap();
+        let terminal = BrowserBridgeWorkflowResult::try_execution_terminal(
+            completed_two.clone(),
+            RemoteProgress {
+                remote_state: RemoteState::InProgress,
+                percent: Some(75),
+                duration_seconds: Some(1_200),
+                updated_at: now + Duration::seconds(12),
+            },
+            &issued_two,
+            &result_two,
+        )
+        .unwrap();
+        let terminated = fixture
+            .command_repository
+            .commit_browser_bridge_workflow_result(BrowserBridgeWorkflowCommitRequest {
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                task_id: fixture.task,
+                transition: terminal,
+                worker_id: "workflow-worker-2",
+                committed_at: now + Duration::seconds(13),
+                access: &access,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            terminated,
+            BrowserBridgeWorkflowCommitOutcome::ExecutionTerminalCommitted {
+                session: completed_session,
+                completed_exchange,
+            } if completed_session.state == BrowserBridgeSessionState::Completed
+                && completed_exchange == completed_two
+        ));
+        let persisted: (String, Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+            "SELECT session.state_json, session.access_token_hash, result.processed_at \
+             FROM browser_bridge_sessions AS session \
+             JOIN browser_bridge_result_artifacts AS result ON result.session_id = session.id \
+             WHERE session.id = ? AND result.sequence = 2",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<BrowserBridgeSessionState>(&persisted.0).unwrap(),
+            BrowserBridgeSessionState::Completed
+        );
+        assert!(persisted.1.is_none());
+        assert!(persisted.2.is_some());
     }
 
     struct Fixture {

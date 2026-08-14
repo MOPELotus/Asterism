@@ -18,9 +18,9 @@ use asterism_domain::{
     Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
-    BrowserSessionSpec, ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource,
-    ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema, ProviderSettingScope,
-    ResolvedProviderRuntimeSettings,
+    BrowserBridgeWorkflowResult, BrowserSessionSpec, ProviderExecutionPlanArtifact,
+    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
+    ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
@@ -1240,6 +1240,39 @@ pub trait BrowserBridgeCommandArtifactRepository: Send + Sync {
         &self,
         request: BrowserBridgeResultResolveRequest<'_>,
     ) -> Result<Option<ResolvedBrowserBridgeResult>, SecretStoreError>;
+
+    /// Atomically consumes one claimed result and either stores the exact next
+    /// command or terminates the helper session after verified readback.
+    async fn commit_browser_bridge_workflow_result(
+        &self,
+        request: BrowserBridgeWorkflowCommitRequest<'_>,
+    ) -> Result<BrowserBridgeWorkflowCommitOutcome, SecretStoreError>;
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeWorkflowCommitRequest<'a> {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub task_id: TaskId,
+    pub transition: BrowserBridgeWorkflowResult,
+    pub worker_id: &'a str,
+    pub committed_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub enum BrowserBridgeWorkflowCommitOutcome {
+    IntermediateCommitted {
+        completed_exchange: BrowserBridgeExchange,
+        next_exchange: BrowserBridgeExchange,
+    },
+    ExecutionTerminalCommitted {
+        session: BrowserBridgeSession,
+        completed_exchange: BrowserBridgeExchange,
+    },
+    BindingConflict,
+    SequenceConflict,
+    ClaimConflict,
 }
 
 #[derive(Debug)]

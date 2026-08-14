@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 50);
+        assert_eq!(migration_count, 51);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -175,6 +175,16 @@ mod tests {
             .map(|row| row.get::<String, _>("name"))
             .collect::<Vec<_>>();
         assert_eq!(dispatch_names, ["session_id", "sequence", "dispatched_at"]);
+
+        let result_columns = sqlx::query("PRAGMA table_info(browser_bridge_result_artifacts)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        assert!(
+            result_columns
+                .iter()
+                .any(|row| row.get::<String, _>("name") == "processed_at")
+        );
 
         let question_sessions: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema \
