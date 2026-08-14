@@ -158,6 +158,12 @@ its exact 12-container/four-family Menu hierarchy and text fallbacks, Tab/Task
 active tests, centered-scroll mouse-event order, popup selectors and 1-second
 video poll/30-minute ceiling; no incremental donor delta was present.
 
+The same four default branches and complete tag refs were queried at the
+disposition-bound persisted cursor-result checkpoint on 2026-08-14. Apache
+`bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and current Rust
+`40ead69c7dabf` remained unchanged, so strict result/session/digest/stage
+adaptation introduced no donor protocol or capability delta.
+
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
 `https://ucontent.unipus.cn/_explorationpc_default/pc.html` as the browser

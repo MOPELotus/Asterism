@@ -136,7 +136,14 @@ checkpoint, not a Provider completion boundary. It:
     into a closed action-specific DOM recipe: exact four-family Menu hierarchy,
     scoped Tab/Task active tests, projected-handle-only click flow, bounded
     popup/video residence or DOM-free Ping. Recipe fields are private,
-    compile-time-only, exactly revalidated and Debug-redacted. The same
+    compile-time-only, exactly revalidated and Debug-redacted. A consuming
+    cursor-result adapter now binds exact Intermediate/ExecutionTerminal type,
+    Core session/sequence/time/result digest, both persisted artifact digests,
+    fresh Task/settings/batch and recovered cursor stage. Intermediate yields
+    only one immutable next transition; ExecutionTerminal yields only a
+    completed exchange plus non-resumable checkpoint requiring fresh
+    DurationRead. Shared execution-terminal callback/orchestration is the
+    remaining exact Core Gap. The same
     projection accepts only
     action-matched bounded typed observations, reconstructs every binding and
     opaque handle itself and emits the existing zeroizing event/residence

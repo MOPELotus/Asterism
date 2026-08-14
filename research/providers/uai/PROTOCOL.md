@@ -512,6 +512,31 @@ valid `ResidenceTarget` can complete as `uai.browser.residence.result`, and
 that terminal receipt still requires independent fresh DurationRead. Either
 digest remains replay/correlation metadata, not acceptance evidence.
 
+The declared shared result disposition now has one consuming Provider-private
+adapter instead of leaving callers to choose those two parsers and cursor
+transitions independently. It first maps only exact `uai.browser.event` to
+`Intermediate` and exact `uai.browser.residence.result` to
+`ExecutionTerminal`; unknown, command, credential or near-match types fail
+before fresh reads. The selected inbox must match the issued exchange's Core
+session, sequence, receive time and exact secret-byte digest. Only then does
+UAI fresh-rebuild the Task/settings Browser plan, digest-decode the persisted
+command, digest-decode and batch/plan/command-rebind the independent cursor,
+parse the typed document against the independently observed origin and compare
+the recovered cursor stage.
+
+An Intermediate result can invoke only the transition associated with
+`ScanningMenu`, `ClickingMenu`, `ScanningTabs`, `ClickingTab`, `ScanningTasks`
+or `ClickingTask`; the consumed parsed event is reduced to the completed Core
+exchange plus one immutable next cursor/command. A residence result must bind
+the `Residing` stage and full leaf accounting. Its consumed parsed result is
+reduced to the completed Core exchange plus a non-resumable immutable
+`UaiBrowserResidenceCheckpoint`; there is no next command and fresh
+DurationRead remains explicit. Debug for the classifier and both adaptations
+is redacted. Shared `BrowserBridgeCapability` currently exposes a completion
+hook only for `CredentialTerminal`, and Engine has no Provider callback for
+`ExecutionTerminal`; persisting/orchestrating these Provider outcomes is the
+exact remaining Core Gap rather than authority for UAI to modify shared code.
+
 The accumulated residence cursor is a separate encrypted artifact from the
 issued command and raw result owners. It contains the bounded snapshots,
 counts, remaining active budget and prior-result authority needed to construct

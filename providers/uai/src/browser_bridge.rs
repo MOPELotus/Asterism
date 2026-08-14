@@ -17,7 +17,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     UaiCourseResidenceBatchPlan,
-    browser_cursor::{EncodedUaiBrowserCursorArtifact, UaiBrowserResidenceCursor},
+    browser_cursor::{
+        EncodedUaiBrowserCursorArtifact, UaiBrowserCursorAdvance, UaiBrowserCursorStage,
+        UaiBrowserResidenceCheckpoint, UaiBrowserResidenceCursor,
+    },
     metadata::development_metadata,
     runtime_settings::{BROWSER_PLAY_VIDEO_KEY, BROWSER_RESIDENCE_SECONDS_KEY},
 };
@@ -122,6 +125,16 @@ pub const UAI_BROWSER_EVENT_TYPE: &str = "uai.browser.event";
 pub const UAI_BROWSER_RESIDENCE_RESULT_TYPE: &str = "uai.browser.residence.result";
 /// Stable Core runtime-state type for the encrypted accumulated cursor.
 pub const UAI_BROWSER_CURSOR_STATE_TYPE: &str = "uai.browser.cursor.v4";
+
+fn uai_browser_result_disposition(result_type: &str) -> Option<BrowserBridgeResultDisposition> {
+    match result_type {
+        UAI_BROWSER_EVENT_TYPE => Some(BrowserBridgeResultDisposition::Intermediate),
+        UAI_BROWSER_RESIDENCE_RESULT_TYPE => {
+            Some(BrowserBridgeResultDisposition::ExecutionTerminal)
+        }
+        _ => None,
+    }
+}
 
 /// Encrypted-at-rest UAI command material required to validate a browser
 /// result after process recovery. Only the digest belongs in the ordinary
@@ -432,6 +445,96 @@ impl UaiBrowserResidenceExchangeCompleted {
     }
 }
 
+/// One fully consumed intermediate cursor result.
+///
+/// The parsed event has already advanced the exact recovered stage. Only the
+/// completed durable exchange and immutable next cursor/command remain.
+pub struct UaiBrowserIntermediateResult {
+    completed_exchange: BrowserBridgeExchange,
+    advance: UaiBrowserCursorAdvance,
+}
+
+impl UaiBrowserIntermediateResult {
+    pub const fn completed_exchange(&self) -> &BrowserBridgeExchange {
+        &self.completed_exchange
+    }
+
+    pub const fn advance(&self) -> &UaiBrowserCursorAdvance {
+        &self.advance
+    }
+
+    pub fn into_parts(self) -> (BrowserBridgeExchange, UaiBrowserCursorAdvance) {
+        (self.completed_exchange, self.advance)
+    }
+}
+
+impl fmt::Debug for UaiBrowserIntermediateResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserIntermediateResult")
+            .field("completed_exchange", &"[REDACTED]")
+            .field("advance", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Immutable execution-terminal adaptation of one completed residence leaf.
+///
+/// It carries no resumable cursor and cannot authorize another browser
+/// command. Fresh duration readback remains mandatory through the checkpoint.
+pub struct UaiBrowserExecutionTerminal {
+    completed_exchange: BrowserBridgeExchange,
+    checkpoint: UaiBrowserResidenceCheckpoint,
+}
+
+impl UaiBrowserExecutionTerminal {
+    pub const fn completed_exchange(&self) -> &BrowserBridgeExchange {
+        &self.completed_exchange
+    }
+
+    pub const fn checkpoint(&self) -> &UaiBrowserResidenceCheckpoint {
+        &self.checkpoint
+    }
+
+    pub fn into_parts(self) -> (BrowserBridgeExchange, UaiBrowserResidenceCheckpoint) {
+        (self.completed_exchange, self.checkpoint)
+    }
+}
+
+impl fmt::Debug for UaiBrowserExecutionTerminal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserExecutionTerminal")
+            .field("completed_exchange", &"[REDACTED]")
+            .field("checkpoint", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Stage-bound result of consuming one persisted cursor exchange.
+pub enum UaiBrowserCursorResult {
+    Intermediate(Box<UaiBrowserIntermediateResult>),
+    ExecutionTerminal(Box<UaiBrowserExecutionTerminal>),
+}
+
+impl UaiBrowserCursorResult {
+    pub const fn disposition(&self) -> BrowserBridgeResultDisposition {
+        match self {
+            Self::Intermediate(_) => BrowserBridgeResultDisposition::Intermediate,
+            Self::ExecutionTerminal(_) => BrowserBridgeResultDisposition::ExecutionTerminal,
+        }
+    }
+}
+
+impl fmt::Debug for UaiBrowserCursorResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Intermediate(_) => formatter.write_str("Intermediate([REDACTED])"),
+            Self::ExecutionTerminal(_) => formatter.write_str("ExecutionTerminal([REDACTED])"),
+        }
+    }
+}
+
 /// Owned bounded intermediate `BrowserBridge` event. Session nonce, opaque
 /// handles and page labels remain redacted and zeroized until typed parsing
 /// finishes.
@@ -659,6 +762,65 @@ impl UaiBrowserResidenceInbox {
         BrowserBridgeResultArtifactMetadata,
     ) {
         (self.document, self.metadata)
+    }
+}
+
+/// Strict disposition-classified Core result owner for one issued UAI exchange.
+pub enum UaiBrowserResultInbox {
+    Intermediate(UaiBrowserEventInbox),
+    ExecutionTerminal(UaiBrowserResidenceInbox),
+}
+
+impl UaiBrowserResultInbox {
+    /// Consumes Core result bytes into the one exact bounded UAI parser owner
+    /// selected by the Provider result disposition.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown/credential result type or any foreign
+    /// session/sequence/time/digest binding before a fresh Provider read.
+    pub fn try_new(
+        issued_exchange: &BrowserBridgeExchange,
+        metadata: BrowserBridgeResultArtifactMetadata,
+        result_artifact: SecretValue,
+    ) -> ProviderResult<Self> {
+        match uai_browser_result_disposition(&metadata.result_type) {
+            Some(BrowserBridgeResultDisposition::Intermediate) => Ok(Self::Intermediate(
+                UaiBrowserEventInbox::try_new(issued_exchange, metadata, result_artifact)?,
+            )),
+            Some(BrowserBridgeResultDisposition::ExecutionTerminal) => Ok(Self::ExecutionTerminal(
+                UaiBrowserResidenceInbox::try_new(issued_exchange, metadata, result_artifact)?,
+            )),
+            Some(BrowserBridgeResultDisposition::CredentialTerminal) | None => {
+                Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "UAI BrowserBridge result type is not an audited cursor result",
+                ))
+            }
+        }
+    }
+
+    pub const fn disposition(&self) -> BrowserBridgeResultDisposition {
+        match self {
+            Self::Intermediate(_) => BrowserBridgeResultDisposition::Intermediate,
+            Self::ExecutionTerminal(_) => BrowserBridgeResultDisposition::ExecutionTerminal,
+        }
+    }
+
+    pub const fn metadata(&self) -> &BrowserBridgeResultArtifactMetadata {
+        match self {
+            Self::Intermediate(inbox) => inbox.metadata(),
+            Self::ExecutionTerminal(inbox) => inbox.metadata(),
+        }
+    }
+}
+
+impl fmt::Debug for UaiBrowserResultInbox {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Intermediate(_) => formatter.write_str("Intermediate([REDACTED])"),
+            Self::ExecutionTerminal(_) => formatter.write_str("ExecutionTerminal([REDACTED])"),
+        }
     }
 }
 
@@ -4103,6 +4265,101 @@ impl UaiBrowserBridge {
         .await
     }
 
+    /// Consumes one persisted cursor exchange and its Core result inbox into
+    /// either an immutable next cursor or a non-resumable execution terminal.
+    ///
+    /// Classification and result digest binding happen before fresh reads.
+    /// The command and cursor artifacts are then rebound to the fresh Task,
+    /// settings and Course batch before typed parsing and exact stage advance.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown result types, foreign result metadata, changed command
+    /// or cursor bytes, stale Task/settings/batch facts, an action-mismatched
+    /// document or a result disposition incompatible with the recovered stage.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "fresh Task/settings/batch, persisted artifacts, Core inbox and observed origin are independent result authorities"
+    )]
+    pub async fn complete_persisted_cursor_result(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        batch: &UaiCourseResidenceBatchPlan,
+        recovery: UaiBrowserCursorPersistenceRecovery,
+        metadata: BrowserBridgeResultArtifactMetadata,
+        result_artifact: SecretValue,
+        observed_origin: &str,
+    ) -> ProviderResult<UaiBrowserCursorResult> {
+        let UaiBrowserCursorPersistenceRecovery {
+            exchange,
+            command_artifact,
+            cursor_state_metadata,
+            cursor_state_artifact,
+        } = recovery;
+        let inbox = UaiBrowserResultInbox::try_new(&exchange, metadata, result_artifact)?;
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        let command = UaiBrowserCommandEnvelope::decode_artifact_for_exchange(
+            &command_artifact,
+            exchange.command_digest,
+            &plan,
+            exchange.session_id,
+            exchange.sequence,
+        )?;
+        let cursor = UaiBrowserResidenceCursor::decode_artifact_bound(
+            &cursor_state_artifact,
+            cursor_state_metadata.state_digest,
+            batch,
+            &plan,
+            &command,
+        )?;
+
+        match inbox {
+            UaiBrowserResultInbox::Intermediate(inbox) => {
+                let (document, metadata) = inbox.into_parts();
+                let completed = complete_event_exchange_inner(
+                    &plan,
+                    &command,
+                    &exchange,
+                    &document,
+                    observed_origin,
+                    metadata.received_at,
+                )?;
+                let advance =
+                    advance_cursor_after_intermediate(&cursor, batch, &plan, &command, &completed)?;
+                let (_, completed_exchange) = completed.into_parts();
+                Ok(UaiBrowserCursorResult::Intermediate(Box::new(
+                    UaiBrowserIntermediateResult {
+                        completed_exchange,
+                        advance,
+                    },
+                )))
+            }
+            UaiBrowserResultInbox::ExecutionTerminal(inbox) => {
+                let (document, metadata) = inbox.into_parts();
+                let completed = complete_residence_exchange_inner(
+                    &plan,
+                    &command,
+                    &exchange,
+                    &document,
+                    observed_origin,
+                    metadata.received_at,
+                )?;
+                let checkpoint = cursor.complete_residence(batch, &plan, &command, &completed)?;
+                let (_, completed_exchange) = completed.into_parts();
+                Ok(UaiBrowserCursorResult::ExecutionTerminal(Box::new(
+                    UaiBrowserExecutionTerminal {
+                        completed_exchange,
+                        checkpoint,
+                    },
+                )))
+            }
+        }
+    }
+
     /// Freshly validates an intermediate event for an in-memory issued
     /// command and completes its exact durable exchange row.
     ///
@@ -4346,6 +4603,41 @@ fn validate_result_inbox(
     Ok(())
 }
 
+fn advance_cursor_after_intermediate(
+    cursor: &UaiBrowserResidenceCursor,
+    batch: &UaiCourseResidenceBatchPlan,
+    plan: &UaiBrowserResidencePlan,
+    command: &UaiBrowserCommandEnvelope,
+    completed: &UaiBrowserEventExchangeCompleted,
+) -> ProviderResult<UaiBrowserCursorAdvance> {
+    match cursor.stage() {
+        UaiBrowserCursorStage::ScanningMenu => {
+            cursor.advance_menu_list(batch, plan, command, completed)
+        }
+        UaiBrowserCursorStage::ClickingMenu => {
+            cursor.advance_menu_click(batch, plan, command, completed)
+        }
+        UaiBrowserCursorStage::ScanningTabs => {
+            cursor.advance_tab_list(batch, plan, command, completed)
+        }
+        UaiBrowserCursorStage::ClickingTab => {
+            cursor.advance_tab_click(batch, plan, command, completed)
+        }
+        UaiBrowserCursorStage::ScanningTasks => {
+            cursor.advance_task_list(batch, plan, command, completed)
+        }
+        UaiBrowserCursorStage::ClickingTask => {
+            cursor.advance_task_click(batch, plan, command, completed)
+        }
+        UaiBrowserCursorStage::Residing | UaiBrowserCursorStage::ControllingResidence => {
+            Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI intermediate result cannot complete the recovered cursor stage",
+            ))
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the resolved command and independently observed event retain separate exchange bindings"
@@ -4519,13 +4811,7 @@ impl BrowserBridgeCapability for UaiBrowserBridge {
         &self,
         result_type: &str,
     ) -> Option<BrowserBridgeResultDisposition> {
-        match result_type {
-            UAI_BROWSER_EVENT_TYPE => Some(BrowserBridgeResultDisposition::Intermediate),
-            UAI_BROWSER_RESIDENCE_RESULT_TYPE => {
-                Some(BrowserBridgeResultDisposition::ExecutionTerminal)
-            }
-            _ => None,
-        }
+        uai_browser_result_disposition(result_type)
     }
 }
 
@@ -4779,6 +5065,79 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn result_inbox_classification_binds_exact_disposition_session_and_digest() {
+        let session_id = BrowserBridgeSessionId::new();
+        let issued_at = chrono::Utc::now();
+        let exchange = BrowserBridgeExchange::issue(
+            session_id,
+            4,
+            UAI_BROWSER_COMMAND_TYPE.to_owned(),
+            [7; 32],
+            issued_at,
+        )
+        .unwrap();
+        let bytes = b"{}";
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        let metadata = |result_type: &str| BrowserBridgeResultArtifactMetadata {
+            session_id,
+            sequence: 4,
+            result_type: result_type.to_owned(),
+            result_digest: digest,
+            received_at: issued_at + chrono::Duration::seconds(1),
+        };
+
+        let event = UaiBrowserResultInbox::try_new(
+            &exchange,
+            metadata(UAI_BROWSER_EVENT_TYPE),
+            SecretValue::new(bytes.to_vec()),
+        )
+        .unwrap();
+        assert_eq!(
+            event.disposition(),
+            BrowserBridgeResultDisposition::Intermediate
+        );
+        assert!(format!("{event:?}").contains("[REDACTED]"));
+        let terminal = UaiBrowserResultInbox::try_new(
+            &exchange,
+            metadata(UAI_BROWSER_RESIDENCE_RESULT_TYPE),
+            SecretValue::new(bytes.to_vec()),
+        )
+        .unwrap();
+        assert_eq!(
+            terminal.disposition(),
+            BrowserBridgeResultDisposition::ExecutionTerminal
+        );
+        assert!(format!("{terminal:?}").contains("[REDACTED]"));
+
+        let mut foreign_session = metadata(UAI_BROWSER_EVENT_TYPE);
+        foreign_session.session_id = BrowserBridgeSessionId::new();
+        let mut wrong_digest = metadata(UAI_BROWSER_RESIDENCE_RESULT_TYPE);
+        wrong_digest.result_digest = [9; 32];
+        for invalid in [foreign_session, wrong_digest] {
+            assert_eq!(
+                UaiBrowserResultInbox::try_new(
+                    &exchange,
+                    invalid,
+                    SecretValue::new(bytes.to_vec()),
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
+        assert_eq!(
+            UaiBrowserResultInbox::try_new(
+                &exchange,
+                metadata(UAI_BROWSER_COMMAND_TYPE),
+                SecretValue::new(bytes.to_vec()),
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
     }
 
     #[tokio::test]
@@ -7271,6 +7630,195 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn persisted_cursor_result_adapts_intermediate_to_one_exact_next_stage() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let (batch, plan, command, cursor) = initial_residence_cursor(&session_nonce);
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, &session_nonce, UCONTENT_ORIGIN, "frame-1")
+                .unwrap();
+        let entry = UaiBrowserMenuEntry::try_new(
+            &plan,
+            &binding,
+            0,
+            "Unit Z".to_owned(),
+            "Section Z".to_owned(),
+            "Micro Z".to_owned(),
+        )
+        .unwrap();
+        let issued_at = chrono::Utc::now();
+        let issued = bridge
+            .issue_cursor_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                session_id,
+                &cursor,
+                command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let event = serde_json::to_string(&UaiBrowserEventEnvelope {
+            version: UAI_BROWSER_PLAN_VERSION,
+            session_nonce,
+            origin: UCONTENT_ORIGIN.to_owned(),
+            frame_id: "frame-1".to_owned(),
+            remote_task_id: "group:2001:unit-z:group-z".to_owned(),
+            reply_to_sequence: 1,
+            event: UaiBrowserEvent::MenuList {
+                entries: vec![entry],
+            },
+        })
+        .unwrap();
+        let received_at = issued_at + chrono::Duration::seconds(1);
+        let metadata = BrowserBridgeResultArtifactMetadata {
+            session_id,
+            sequence: 1,
+            result_type: UAI_BROWSER_EVENT_TYPE.to_owned(),
+            result_digest: browser_event_exchange_digest(&event).unwrap(),
+            received_at,
+        };
+        let recovery = persistence_recovery(issued);
+        let result = bridge
+            .complete_persisted_cursor_result(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                recovery,
+                metadata,
+                SecretValue::new(event.into_bytes()),
+                UCONTENT_ORIGIN,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.disposition(),
+            BrowserBridgeResultDisposition::Intermediate
+        );
+        let UaiBrowserCursorResult::Intermediate(result) = result else {
+            panic!("expected intermediate cursor result");
+        };
+        assert_eq!(
+            result.completed_exchange().state,
+            BrowserBridgeExchangeState::Completed
+        );
+        assert_eq!(
+            result.completed_exchange().result_type.as_deref(),
+            Some(UAI_BROWSER_EVENT_TYPE)
+        );
+        assert_eq!(
+            result.advance().cursor().stage(),
+            UaiBrowserCursorStage::ClickingMenu
+        );
+        assert!(matches!(
+            result.advance().command().command,
+            UaiBrowserCommand::ClickMenu { .. }
+        ));
+        assert_eq!(result.advance().command().sequence, 2);
+        assert!(format!("{result:?}").contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn persisted_cursor_result_adapts_residence_to_immutable_execution_terminal() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let (batch, _plan, command, cursor) = residing_cursor(session_id);
+        let task_handle = match &command.command {
+            UaiBrowserCommand::ResidenceTarget { task_handle, .. } => task_handle.clone(),
+            other => panic!("expected residence target, got {other:?}"),
+        };
+        let issued_at = chrono::Utc::now();
+        let issued = bridge
+            .issue_cursor_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                session_id,
+                &cursor,
+                command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let result_document = serde_json::json!({
+            "version": UAI_BROWSER_PLAN_VERSION,
+            "session_nonce": session_nonce,
+            "origin": UCONTENT_ORIGIN,
+            "frame_id": "frame-1",
+            "remote_task_id": "group:2001:unit-z:group-z",
+            "reply_to_sequence": 7,
+            "target_task_handle": task_handle,
+            "planned_residence_seconds": 100,
+            "observed_active_seconds": 100,
+            "processed_micros": 1,
+            "processed_tabs": 1,
+            "processed_tasks": 1,
+            "video_seconds": 0,
+            "cancelled": false,
+            "last_label": "Task Z",
+        })
+        .to_string();
+        let received_at = issued_at + chrono::Duration::seconds(100);
+        let result_digest = browser_residence_exchange_digest(&result_document).unwrap();
+        let metadata = BrowserBridgeResultArtifactMetadata {
+            session_id,
+            sequence: 7,
+            result_type: UAI_BROWSER_RESIDENCE_RESULT_TYPE.to_owned(),
+            result_digest,
+            received_at,
+        };
+        let recovery = persistence_recovery(issued);
+        let result = bridge
+            .complete_persisted_cursor_result(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                recovery,
+                metadata,
+                SecretValue::new(result_document.into_bytes()),
+                UCONTENT_ORIGIN,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.disposition(),
+            BrowserBridgeResultDisposition::ExecutionTerminal
+        );
+        let UaiBrowserCursorResult::ExecutionTerminal(terminal) = result else {
+            panic!("expected execution-terminal cursor result");
+        };
+        assert_eq!(
+            terminal.completed_exchange().state,
+            BrowserBridgeExchangeState::Completed
+        );
+        assert_eq!(
+            terminal.completed_exchange().result_type.as_deref(),
+            Some(UAI_BROWSER_RESIDENCE_RESULT_TYPE)
+        );
+        assert_eq!(
+            terminal.completed_exchange().result_digest,
+            Some(result_digest)
+        );
+        assert_eq!(terminal.checkpoint().completed_command_sequence(), 7);
+        assert_eq!(terminal.checkpoint().result_digest(), result_digest);
+        assert_eq!(terminal.checkpoint().completed_at(), received_at);
+        assert_eq!(terminal.checkpoint().remaining_active_seconds(), 1_100);
+        assert!(terminal.checkpoint().requires_fresh_duration_read());
+        assert!(format!("{terminal:?}").contains("[REDACTED]"));
+    }
+
     async fn assert_fresh_duration_readback(
         context: &ProviderContext,
         batch: &UaiCourseResidenceBatchPlan,
@@ -7791,6 +8339,21 @@ mod tests {
             ]),
         };
         schema.resolve(None, None, Some(&patch)).unwrap()
+    }
+
+    fn persistence_recovery(
+        issued: UaiBrowserCursorExchangeIssued,
+    ) -> UaiBrowserCursorPersistenceRecovery {
+        let handoff = issued.into_persistence_handoff().unwrap();
+        let (_, exchange, command_artifact, cursor_metadata, cursor_artifact) =
+            handoff.into_parts();
+        UaiBrowserCursorPersistenceRecovery::try_new(
+            exchange,
+            command_artifact,
+            cursor_metadata,
+            cursor_artifact,
+        )
+        .unwrap()
     }
 
     fn browser_bridge() -> UaiBrowserBridge {
