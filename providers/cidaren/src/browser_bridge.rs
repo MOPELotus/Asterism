@@ -51,6 +51,20 @@ impl CidarenCaptureExchangeIssued {
     pub const fn command_artifact(&self) -> &EncodedCidarenBrowserCommandArtifact {
         &self.command_artifact
     }
+
+    /// Transfers the typed helper payload, encrypted recovery material and
+    /// exact ledger row as one ownership boundary. Core can persist the
+    /// artifact/exchange before dispatching the command without serializing a
+    /// second, potentially different payload.
+    pub fn into_parts(
+        self,
+    ) -> (
+        CidarenBrowserCommandEnvelope,
+        EncodedCidarenBrowserCommandArtifact,
+        BrowserBridgeExchange,
+    ) {
+        (self.command, self.command_artifact, self.exchange)
+    }
 }
 
 /// One Provider-validated Capture snapshot and its terminal Core metadata.
@@ -71,6 +85,13 @@ impl CidarenCaptureExchangeCompleted {
 
     pub fn into_snapshot(self) -> CidarenCaptureSnapshot {
         self.snapshot
+    }
+
+    /// Transfers the zeroizing credential material together with the exact
+    /// completed ledger metadata so acceptance cannot silently discard either
+    /// half of the result.
+    pub fn into_parts(self) -> (CidarenCaptureSnapshot, BrowserBridgeExchange) {
+        (self.snapshot, self.exchange)
     }
 }
 
@@ -677,6 +698,18 @@ mod tests {
             completed.exchange().result_type.as_deref(),
             Some(crate::CidarenBrowserEventEnvelope::exchange_type())
         );
+        let (snapshot, completed_exchange) = completed.into_parts();
+        assert_eq!(snapshot.user_token(), Some("synthetic-user-token"));
+        assert_eq!(
+            completed_exchange.state,
+            BrowserBridgeExchangeState::Completed
+        );
+        let (command, command_artifact, issued_exchange) = issued.into_parts();
+        assert_eq!(
+            command.exchange_digest().unwrap(),
+            command_artifact.digest()
+        );
+        assert_eq!(issued_exchange.command_digest, command_artifact.digest());
     }
 
     #[tokio::test]

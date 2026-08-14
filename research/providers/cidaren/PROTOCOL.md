@@ -162,7 +162,10 @@ persisted before dispatch. The Provider now supplies that exact input as
 `EncodedCidarenBrowserCommandArtifact`: its zeroizing `SecretValue` contains
 the validated canonical command JSON and its digest is reused by the ordinary
 exchange row. Decode rechecks the digest plus BrowserSession ID, Task,
-sequence and selected Capture recipe before returning the typed command.
+sequence and selected Capture recipe before returning the typed command. The
+issued wrapper can be consumed only into command + artifact + exchange, while
+the completed wrapper yields snapshot + terminal exchange, so future Core
+wiring need not discard durable metadata to obtain helper or credential data.
 The high-level Provider adapter accepts the raw result only as an owned,
 bounded `CidarenBrowserResultDocument`. Its contents are unavailable through
 Debug or the public API, and the consumed transport buffer is zeroized after

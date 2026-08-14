@@ -181,7 +181,9 @@ The current checkpoint (not a completion boundary):
 38. encodes each typed Capture command into a zeroizing encrypted-at-rest
     artifact whose digest is the exchange command digest. Recovery decodes it
     only after exact digest, BrowserSession, Task, sequence and recipe rebinding;
-    helper-echoed result fields never reconstruct command authority.
+    helper-echoed result fields never reconstruct command authority. Issued
+    and completed wrappers expose consuming all-or-nothing ownership handoffs,
+    keeping command/artifact/exchange and snapshot/exchange paired.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now
