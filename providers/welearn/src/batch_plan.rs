@@ -2,9 +2,11 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::{RemoteState, TaskCapability};
-use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTask};
+use asterism_provider_api::{
+    ProviderError, ProviderErrorKind, ProviderResult, RemoteTask, RemoteTaskDetail,
+};
 
-use crate::WellearnUnitObservation;
+use crate::{WellearnUnitObservation, task_detail::validate_fresh_execution_detail};
 
 /// Audited donor batch flow. This is a pure membership/target boundary; it
 /// does not create or schedule Core executions.
@@ -69,6 +71,7 @@ pub enum WellearnBatchUnitSelection {
 
 const MAX_BATCH_TASKS: usize = 8_192;
 const MAX_AUTO_DURATION_MINUTES: u64 = 330;
+const MAX_BATCH_ID_COMPONENT_BYTES: usize = 128;
 
 impl WellearnBatchFlow {
     pub const fn dispatch(self) -> WellearnBatchDispatch {
@@ -207,6 +210,178 @@ pub struct WellearnBatchPlan {
     pub entries: Vec<WellearnBatchEntry>,
     pub aggregate_duration_seconds: Option<u64>,
     pub discarded_remainder_seconds: u64,
+}
+
+/// Rebinds one immutable batch child to a complete fresh Task detail without
+/// changing membership, dispatch order or any frozen target.
+///
+/// Response-order SCO movement is allowed because the stable Course/SCO and
+/// selected Unit identities still bind the same child; the persisted plan
+/// remains authoritative for dispatch order. Completion flows also allow a
+/// fresh Completed observation so their single-Task preflight can verify an
+/// externally completed child without replaying a mutation.
+///
+/// # Errors
+///
+/// Returns a typed error when the entry ordinal or frozen identity is invalid,
+/// the fresh detail no longer binds the same Course/SCO/Unit, required
+/// capabilities disappear, or the child is no longer eligible for the frozen
+/// donor flow.
+pub fn validate_fresh_batch_entry(
+    plan: &WellearnBatchPlan,
+    entry_index: usize,
+    fresh_detail: &RemoteTaskDetail,
+) -> ProviderResult<()> {
+    let entry = plan.entries.get(entry_index).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "WELearn batch entry ordinal is outside the frozen plan",
+        )
+    })?;
+    let (course_id, sco_id) = split_batch_identity(
+        plan.course_remote_id.as_str(),
+        entry.remote_task_id.as_str(),
+    )?;
+    validate_fresh_execution_detail(
+        fresh_detail,
+        entry.remote_task_id.as_str(),
+        course_id,
+        sco_id,
+        plan.flow.required_capabilities(),
+    )?;
+
+    let fresh = &fresh_detail.task;
+    let observation = fresh_batch_observation(fresh)?;
+    if observation.course_id != course_id
+        || observation.sco_id != sco_id
+        || observation.unit_index != entry.unit_index
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "WELearn batch child Course, SCO or Unit binding changed",
+        ));
+    }
+
+    let mut selected_units = plan
+        .selected_units
+        .iter()
+        .filter(|unit| unit.index == entry.unit_index);
+    let selected_unit = selected_units.next().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "WELearn batch child references an unselected Unit",
+        )
+    })?;
+    if selected_units.next().is_some() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "WELearn frozen batch contains duplicate selected Units",
+        ));
+    }
+    if observation.unit_title != selected_unit.title
+        || observation.unit_code != selected_unit.code.as_deref()
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "WELearn selected Unit identity changed before batch child execution",
+        ));
+    }
+
+    if observation.visible
+        != (observation.unit_visible && observation.sco_visible.unwrap_or(observation.unit_visible))
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "WELearn fresh batch child visibility observations are inconsistent",
+        ));
+    }
+    if plan.flow.requires_raw_sco_visibility() && observation.sco_visible == Some(false) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "WELearn batch child is no longer eligible under donor SCO visibility rules",
+        ));
+    }
+    if plan.flow.requires_pending_completion()
+        && !matches!(
+            observation.completion,
+            RemoteState::Pending | RemoteState::Completed
+        )
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "WELearn batch child is no longer pending or already completed",
+        ));
+    }
+    Ok(())
+}
+
+struct FreshBatchObservation<'a> {
+    course_id: &'a str,
+    sco_id: &'a str,
+    unit_index: u32,
+    unit_title: &'a str,
+    unit_code: Option<&'a str>,
+    unit_visible: bool,
+    sco_visible: Option<bool>,
+    visible: bool,
+    completion: RemoteState,
+}
+
+fn fresh_batch_observation(task: &RemoteTask) -> ProviderResult<FreshBatchObservation<'_>> {
+    let normalized = task.normalized.as_object().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "WELearn fresh batch child has an invalid SCO observation",
+        )
+    })?;
+    let unit_code = match normalized.get("unit_code") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.as_str()),
+        _ => return Err(incomplete_fresh_batch_observation()),
+    };
+    let observation = FreshBatchObservation {
+        course_id: normalized
+            .get("course_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(incomplete_fresh_batch_observation)?,
+        sco_id: normalized
+            .get("sco_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(incomplete_fresh_batch_observation)?,
+        unit_index: normalized_u32(task, "unit_index")
+            .ok_or_else(incomplete_fresh_batch_observation)?,
+        unit_title: normalized
+            .get("unit_title")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(incomplete_fresh_batch_observation)?,
+        unit_code,
+        unit_visible: normalized_bool(task, "unit_visible")
+            .ok_or_else(incomplete_fresh_batch_observation)?,
+        sco_visible: normalized
+            .get("sco_visible")
+            .and_then(serde_json::Value::as_bool),
+        visible: normalized_bool(task, "visible").ok_or_else(incomplete_fresh_batch_observation)?,
+        completion: normalized_completion(task).ok_or_else(incomplete_fresh_batch_observation)?,
+    };
+    if normalized.get("schema").and_then(serde_json::Value::as_str) != Some("welearn.sco.v2")
+        || normalized_usize(task, "sco_index").is_none()
+        || !has_valid_optional_bool(task, "sco_visible")
+        || !valid_batch_id_component(observation.course_id)
+        || !valid_batch_id_component(observation.sco_id)
+        || observation.unit_title.is_empty()
+        || observation.unit_title.len() > 512
+        || observation.unit_title.chars().any(char::is_control)
+    {
+        return Err(incomplete_fresh_batch_observation());
+    }
+    Ok(observation)
+}
+
+fn incomplete_fresh_batch_observation() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        "WELearn fresh batch child has an incomplete SCO observation",
+    )
 }
 
 /// Builds the exact audited donor membership rule from a fresh inventory.
@@ -650,6 +825,39 @@ fn compare_selected_task_order(
         .then_with(|| left.remote_id.cmp(&right.remote_id))
 }
 
+fn split_batch_identity<'a>(
+    course_remote_id: &'a str,
+    remote_task_id: &'a str,
+) -> ProviderResult<(&'a str, &'a str)> {
+    let course_id = course_remote_id
+        .strip_prefix("course:")
+        .filter(|value| valid_batch_id_component(value))
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn frozen batch Course identity is invalid",
+            )
+        })?;
+    let prefix = format!("sco:{course_id}:");
+    let sco_id = remote_task_id
+        .strip_prefix(prefix.as_str())
+        .filter(|value| valid_batch_id_component(value))
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn frozen batch SCO identity is invalid",
+            )
+        })?;
+    Ok((course_id, sco_id))
+}
+
+fn valid_batch_id_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_BATCH_ID_COMPONENT_BYTES
+        && !value.contains(':')
+        && !value.chars().any(char::is_control)
+}
+
 fn normalized_bool(task: &RemoteTask, key: &str) -> Option<bool> {
     task.normalized
         .get(key)
@@ -737,6 +945,17 @@ mod tests {
 
     fn units() -> Vec<WellearnUnitObservation> {
         parse_unit_inventory(UNITS).unwrap()
+    }
+
+    fn detail(task: RemoteTask) -> RemoteTaskDetail {
+        let normalized = task.normalized.clone();
+        RemoteTaskDetail {
+            task,
+            normalized_detail: serde_json::json!({
+                "schema": "welearn.sco-task-detail.v2",
+                "task": normalized,
+            }),
+        }
     }
 
     #[test]
@@ -995,6 +1214,55 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn fresh_batch_rebind_keeps_frozen_order_and_accepts_completed_preflight() {
+        let tasks = pending_tasks();
+        let plan = build_batch_plan(&tasks, WellearnBatchFlow::AutoCompletion, None).unwrap();
+        let mut fresh = tasks[1].clone();
+        fresh.normalized["sco_index"] = serde_json::json!(99);
+        fresh.remote_state = RemoteState::Completed;
+        fresh.normalized["completion_observation"] = serde_json::json!("completed");
+
+        validate_fresh_batch_entry(&plan, 0, &detail(fresh)).unwrap();
+        assert_eq!(plan.entries[0].sco_index, 1);
+        assert_eq!(plan.entries[0].completion, RemoteState::Pending);
+    }
+
+    #[test]
+    fn fresh_batch_rebind_rejects_unit_identity_and_flow_eligibility_drift() {
+        let tasks = pending_tasks();
+        let plan = build_batch_plan(&tasks, WellearnBatchFlow::AutoCompletion, None).unwrap();
+
+        let mut changed_unit = tasks[1].clone();
+        changed_unit.normalized["unit_title"] = serde_json::json!("Replacement Unit");
+        let error = validate_fresh_batch_entry(&plan, 0, &detail(changed_unit)).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+
+        let mut hidden_leaf = tasks[1].clone();
+        hidden_leaf.normalized["sco_visible"] = serde_json::json!(false);
+        hidden_leaf.normalized["visible"] = serde_json::json!(false);
+        let error = validate_fresh_batch_entry(&plan, 0, &detail(hidden_leaf)).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+
+        let mut unknown_completion = tasks[1].clone();
+        unknown_completion.remote_state = RemoteState::Unknown;
+        unknown_completion.normalized["completion_observation"] = serde_json::json!("unknown");
+        let error = validate_fresh_batch_entry(&plan, 0, &detail(unknown_completion)).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+    }
+
+    #[test]
+    fn fresh_batch_rebind_preserves_donor_specific_hidden_sco_behavior() {
+        let tasks = tasks();
+        let plan = build_batch_plan(&tasks, WellearnBatchFlow::FanyuchangCompletion, None).unwrap();
+        let mut fresh = tasks[0].clone();
+        fresh.remote_state = RemoteState::NotOpen;
+        fresh.normalized["sco_visible"] = serde_json::json!(false);
+        fresh.normalized["visible"] = serde_json::json!(false);
+
+        validate_fresh_batch_entry(&plan, 0, &detail(fresh)).unwrap();
     }
 
     #[test]

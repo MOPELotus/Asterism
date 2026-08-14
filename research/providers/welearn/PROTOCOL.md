@@ -500,6 +500,17 @@ remainder and the one sampled aggregate budget are frozen attempt facts; a
 rescan that adds, removes or changes visibility of SCOs must not redistribute
 an already scheduled batch.
 
+Before one persisted child executes, Core must obtain a complete fresh
+`TaskDetail` and call `validate_fresh_batch_entry` with the frozen child
+ordinal. The Provider rebinds the exact Course/SCO and selected Unit identity,
+rechecks required capabilities and the current flow's raw-SCO visibility and
+pending-completion rules, and never mutates the plan. A changed SCO response
+ordinal does not reorder the frozen dispatch. A fresh Completed observation is
+allowed through for completion children so the existing single-Task preflight
+can prove the exact frozen score tuple without replaying a mutation; other
+newly ineligible states fail as `RemoteChanged`. Core still owns durable plan
+authority and must not accept caller-supplied rebind facts as a substitute.
+
 ## Sanitization and routing
 
 - `uid`, `classid`, redirect state, PKCE material and Cookies are route/session

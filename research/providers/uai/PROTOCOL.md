@@ -342,15 +342,21 @@ session nonce and opaque handles remain outside ordinary Domain storage. Before
 dispatch, the exact bounded command can be moved into a redacted `SecretValue`
 artifact whose digest is the ledger command digest. After process recovery the
 Provider decodes that artifact only when its bytes still match the issued
-digest and its fresh plan, nonce, origin, frame, Task and sequence all match;
-the command payload cannot be reconstructed from digest-only state or replaced
-by a helper. The Provider must still parse and validate the exact command and
-transport-observed result origin before Core records a terminal result. Raw
+digest, its fresh plan remains valid, and its Core session, Task and sequence
+match. Issuance returns the typed dispatch command, encrypted artifact and
+Core exchange together, preventing a caller from persisting metadata for a
+different payload. On recovery, origin and frame are restored from the
+digest-bound artifact and validated against the fresh plan; they are not
+selected by helper output. The Provider still compares the independent
+transport-observed result origin before completing the cloned exchange. Raw
 intermediate events and terminal residence results therefore enter separate
 bounded zeroizing owners; each redacts its nonce/handles/labels, hashes the
 exact raw helper document and only then exposes typed parsing against the
-restored command. Either digest remains replay/correlation metadata, not
-acceptance evidence.
+restored command. Both completion paths fresh-rebind the exact Task and frozen
+runtime settings. Intermediate events complete as `uai.browser.event`; only a
+valid `ResidenceTarget` can complete as `uai.browser.residence.result`, and
+that terminal receipt still requires independent fresh DurationRead. Either
+digest remains replay/correlation metadata, not acceptance evidence.
 
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.

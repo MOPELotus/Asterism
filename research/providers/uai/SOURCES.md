@@ -92,6 +92,10 @@ The same four default branches and complete tag refs were refreshed after the
 recoverable Browser residence command-artifact and owned-result checkpoint on
 2026-08-14. All recorded revisions and tags remained unchanged, so no
 incremental donor delta was present.
+The four remote default branches and complete tag refs were queried again at
+the persisted Browser exchange recovery checkpoint on 2026-08-14. Apache
+`bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and current Rust
+`40ead69c7dabf` remained current, with no new tag or protocol/capability delta.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends

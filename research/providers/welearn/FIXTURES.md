@@ -183,6 +183,10 @@ only structural field names, response codes and bounded placeholder shapes.
 - Batch tests mark Fanyuchang duration and modular Auto duration as
   `AtomicDurationCompletion`, require both child capabilities and keep YZBRH/
   Auto single-file singleton duration separate.
+- Batch child rebind tests use a complete fresh TaskDetail, preserve frozen
+  dispatch when a SCO response ordinal moves, allow an already-completed child
+  to enter no-replay preflight, reject selected-Unit drift, and re-apply only
+  the visibility rule used by the selected donor flow.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

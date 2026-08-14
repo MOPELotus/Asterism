@@ -1,6 +1,9 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::TaskCapability;
+use asterism_domain::{
+    BrowserBridgeExchange, BrowserBridgeExchangeState, BrowserBridgeSessionId, TaskCapability,
+    Timestamp,
+};
 use asterism_provider_api::{
     BrowserBridgeCapability, BrowserSessionSpec, ProviderContext, ProviderError, ProviderErrorKind,
     ProviderIdentity, ProviderMetadata, ProviderResult, RemoteTaskDetail, TaskDetailCapability,
@@ -66,6 +69,89 @@ impl fmt::Debug for EncodedUaiBrowserCommandArtifact {
             .field("value", &"[REDACTED]")
             .field("digest", &self.digest)
             .finish()
+    }
+}
+
+/// One exact UAI helper command paired with Core's durable issued metadata.
+///
+/// The encrypted artifact and exchange are created from the same validated
+/// command, so Core can persist them before dispatch without independently
+/// rebuilding Provider-private browser state.
+#[derive(Debug)]
+pub struct UaiBrowserExchangeIssued {
+    command: UaiBrowserCommandEnvelope,
+    command_artifact: EncodedUaiBrowserCommandArtifact,
+    exchange: BrowserBridgeExchange,
+}
+
+impl UaiBrowserExchangeIssued {
+    pub const fn command(&self) -> &UaiBrowserCommandEnvelope {
+        &self.command
+    }
+
+    pub const fn command_artifact(&self) -> &EncodedUaiBrowserCommandArtifact {
+        &self.command_artifact
+    }
+
+    pub const fn exchange(&self) -> &BrowserBridgeExchange {
+        &self.exchange
+    }
+
+    /// Transfers the dispatch command, encrypted recovery material and exact
+    /// ledger metadata as a single issuance boundary.
+    pub fn into_parts(
+        self,
+    ) -> (
+        UaiBrowserCommandEnvelope,
+        EncodedUaiBrowserCommandArtifact,
+        BrowserBridgeExchange,
+    ) {
+        (self.command, self.command_artifact, self.exchange)
+    }
+}
+
+/// One validated intermediate helper event and its terminal exchange row.
+#[derive(Debug)]
+pub struct UaiBrowserEventExchangeCompleted {
+    event: UaiBrowserEventEnvelope,
+    exchange: BrowserBridgeExchange,
+}
+
+impl UaiBrowserEventExchangeCompleted {
+    pub const fn event(&self) -> &UaiBrowserEventEnvelope {
+        &self.event
+    }
+
+    pub const fn exchange(&self) -> &BrowserBridgeExchange {
+        &self.exchange
+    }
+
+    pub fn into_parts(self) -> (UaiBrowserEventEnvelope, BrowserBridgeExchange) {
+        (self.event, self.exchange)
+    }
+}
+
+/// One validated terminal residence observation and its completed exchange.
+///
+/// The observation still requires an independent fresh `DurationRead`; the
+/// completed exchange proves only which issued command produced these bytes.
+#[derive(Debug)]
+pub struct UaiBrowserResidenceExchangeCompleted {
+    result: UaiBrowserResidenceResult,
+    exchange: BrowserBridgeExchange,
+}
+
+impl UaiBrowserResidenceExchangeCompleted {
+    pub const fn result(&self) -> &UaiBrowserResidenceResult {
+        &self.result
+    }
+
+    pub const fn exchange(&self) -> &BrowserBridgeExchange {
+        &self.exchange
+    }
+
+    pub fn into_parts(self) -> (UaiBrowserResidenceResult, BrowserBridgeExchange) {
+        (self.result, self.exchange)
     }
 }
 
@@ -843,6 +929,63 @@ impl UaiBrowserCommandEnvelope {
             expected_frame_id,
             expected_origin,
         )?;
+        let command = Self::decode_artifact(value, expected_digest, plan)?;
+        if command.session_nonce != expected_session_nonce
+            || command.origin != expected_origin
+            || command.frame_id != expected_frame_id
+            || command.remote_task_id != plan.target_remote_task_id
+            || command.sequence != expected_sequence
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI BrowserBridge command artifact binding is stale or foreign",
+            ));
+        }
+        Ok(command)
+    }
+
+    /// Resolves the exact command owned by one persisted Core exchange.
+    ///
+    /// Origin and frame remain Provider-artifact facts rather than helper
+    /// input. The fresh plan validates their allowlist and shape; the actual
+    /// transport origin is independently compared when a result is parsed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for digest/schema drift, a foreign fresh plan,
+    /// session or Task, or a sequence outside the Provider wire boundary.
+    pub fn decode_artifact_for_exchange(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+        plan: &UaiBrowserResidencePlan,
+        expected_session_id: BrowserBridgeSessionId,
+        expected_sequence: u64,
+    ) -> ProviderResult<Self> {
+        let expected_sequence = u32::try_from(expected_sequence).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI recovered BrowserBridge sequence exceeds the Provider boundary",
+            )
+        })?;
+        let command = Self::decode_artifact(value, expected_digest, plan)?;
+        if command.session_nonce != expected_session_id.to_string()
+            || command.remote_task_id != plan.target_remote_task_id
+            || command.sequence != expected_sequence
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI BrowserBridge command artifact is foreign to its persisted exchange",
+            ));
+        }
+        Ok(command)
+    }
+
+    fn decode_artifact(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+        plan: &UaiBrowserResidencePlan,
+    ) -> ProviderResult<Self> {
+        plan.validate()?;
         let bytes = value.expose_secret();
         if bytes.is_empty() || bytes.len() > MAX_BROWSER_COMMAND_BYTES {
             return Err(ProviderError::new(
@@ -864,17 +1007,6 @@ impl UaiBrowserCommandEnvelope {
             )
         })?;
         command.validate_for_plan(plan)?;
-        if command.session_nonce != expected_session_nonce
-            || command.origin != expected_origin
-            || command.frame_id != expected_frame_id
-            || command.remote_task_id != plan.target_remote_task_id
-            || command.sequence != expected_sequence
-        {
-            return Err(ProviderError::new(
-                ProviderErrorKind::RemoteChanged,
-                "UAI BrowserBridge command artifact binding is stale or foreign",
-            ));
-        }
         Ok(command)
     }
 
@@ -1846,6 +1978,287 @@ impl UaiBrowserBridge {
         }
         residence_plan_from_detail(&detail, settings)
     }
+
+    /// Freshly rebinds a Task and pairs one exact typed command with the
+    /// durable exchange metadata Core must persist before helper dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the command is foreign to the fresh plan or
+    /// Core session, or its sequence cannot be represented durably.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Task, settings, Core session, Provider command and issue time are independent bindings"
+    )]
+    pub async fn issue_command_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        session_id: BrowserBridgeSessionId,
+        command: UaiBrowserCommandEnvelope,
+        issued_at: Timestamp,
+    ) -> ProviderResult<UaiBrowserExchangeIssued> {
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        command.validate_for_plan(&plan)?;
+        if command.session_nonce != session_id.to_string()
+            || command.remote_task_id != remote_task_id
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI BrowserBridge command is foreign to the durable Core session",
+            ));
+        }
+        let sequence = u64::from(command.sequence);
+        let command_artifact = command.encode_artifact(&plan)?;
+        let exchange = BrowserBridgeExchange::issue(
+            session_id,
+            sequence,
+            UaiBrowserCommandEnvelope::exchange_type().to_owned(),
+            command_artifact.digest(),
+            issued_at,
+        )
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "UAI command cannot be represented by the durable BrowserBridge exchange",
+            )
+        })?;
+        Ok(UaiBrowserExchangeIssued {
+            command,
+            command_artifact,
+            exchange,
+        })
+    }
+
+    /// Freshly validates an intermediate event for an in-memory issued
+    /// command and completes its exact durable exchange row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale Task/settings, foreign helper output or
+    /// invalid terminal exchange metadata.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "fresh Provider settings and the independently observed helper result remain separate bindings"
+    )]
+    pub async fn complete_event_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        issued: &UaiBrowserExchangeIssued,
+        document: UaiBrowserEventDocument,
+        observed_origin: &str,
+        completed_at: Timestamp,
+    ) -> ProviderResult<UaiBrowserEventExchangeCompleted> {
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        complete_event_exchange_inner(
+            &plan,
+            issued.command(),
+            issued.exchange(),
+            &document,
+            observed_origin,
+            completed_at,
+        )
+    }
+
+    /// Restores the command selected by a persisted exchange and completes an
+    /// intermediate event without trusting helper-echoed command material.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a non-issued/foreign exchange, encrypted
+    /// artifact drift, stale Task/settings or invalid helper output.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the persisted exchange, encrypted artifact and independently observed helper result are recovery authorities"
+    )]
+    pub async fn complete_recovered_event_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        issued_exchange: &BrowserBridgeExchange,
+        command_artifact: &SecretValue,
+        document: UaiBrowserEventDocument,
+        observed_origin: &str,
+        completed_at: Timestamp,
+    ) -> ProviderResult<UaiBrowserEventExchangeCompleted> {
+        validate_issued_exchange(issued_exchange)?;
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        let command = UaiBrowserCommandEnvelope::decode_artifact_for_exchange(
+            command_artifact,
+            issued_exchange.command_digest,
+            &plan,
+            issued_exchange.session_id,
+            issued_exchange.sequence,
+        )?;
+        complete_event_exchange_inner(
+            &plan,
+            &command,
+            issued_exchange,
+            &document,
+            observed_origin,
+            completed_at,
+        )
+    }
+
+    /// Freshly validates a terminal residence observation and completes its
+    /// exact issued exchange. The result still requires fresh duration readback.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale Task/settings, a non-residence command,
+    /// foreign helper output or invalid terminal exchange metadata.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "fresh Provider settings and the independently observed terminal result remain separate bindings"
+    )]
+    pub async fn complete_residence_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        issued: &UaiBrowserExchangeIssued,
+        document: UaiBrowserResidenceResultDocument,
+        observed_origin: &str,
+        completed_at: Timestamp,
+    ) -> ProviderResult<UaiBrowserResidenceExchangeCompleted> {
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        complete_residence_exchange_inner(
+            &plan,
+            issued.command(),
+            issued.exchange(),
+            &document,
+            observed_origin,
+            completed_at,
+        )
+    }
+
+    /// Restores a residence command from Core's encrypted artifact repository
+    /// and binds the terminal observation to that command and fresh Task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a non-issued/foreign exchange, encrypted
+    /// artifact drift, stale Task/settings or invalid helper output.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the persisted exchange, encrypted artifact and independently observed terminal result are recovery authorities"
+    )]
+    pub async fn complete_recovered_residence_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        issued_exchange: &BrowserBridgeExchange,
+        command_artifact: &SecretValue,
+        document: UaiBrowserResidenceResultDocument,
+        observed_origin: &str,
+        completed_at: Timestamp,
+    ) -> ProviderResult<UaiBrowserResidenceExchangeCompleted> {
+        validate_issued_exchange(issued_exchange)?;
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        let command = UaiBrowserCommandEnvelope::decode_artifact_for_exchange(
+            command_artifact,
+            issued_exchange.command_digest,
+            &plan,
+            issued_exchange.session_id,
+            issued_exchange.sequence,
+        )?;
+        complete_residence_exchange_inner(
+            &plan,
+            &command,
+            issued_exchange,
+            &document,
+            observed_origin,
+            completed_at,
+        )
+    }
+}
+
+fn validate_issued_exchange(exchange: &BrowserBridgeExchange) -> ProviderResult<()> {
+    if exchange.validate().is_err()
+        || exchange.state != BrowserBridgeExchangeState::Issued
+        || exchange.command_type != UaiBrowserCommandEnvelope::exchange_type()
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "UAI recovered BrowserBridge exchange is stale or foreign",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resolved command and independently observed event retain separate exchange bindings"
+)]
+fn complete_event_exchange_inner(
+    plan: &UaiBrowserResidencePlan,
+    command: &UaiBrowserCommandEnvelope,
+    issued_exchange: &BrowserBridgeExchange,
+    document: &UaiBrowserEventDocument,
+    observed_origin: &str,
+    completed_at: Timestamp,
+) -> ProviderResult<UaiBrowserEventExchangeCompleted> {
+    let result_digest = document.exchange_digest()?;
+    let event = document.parse_for_command(plan, command, observed_origin)?;
+    let mut exchange = issued_exchange.clone();
+    exchange
+        .complete(
+            UaiBrowserEventEnvelope::exchange_type().to_owned(),
+            result_digest,
+            completed_at,
+        )
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "UAI event cannot complete the durable BrowserBridge exchange",
+            )
+        })?;
+    Ok(UaiBrowserEventExchangeCompleted { event, exchange })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resolved command and independently observed result retain separate exchange bindings"
+)]
+fn complete_residence_exchange_inner(
+    plan: &UaiBrowserResidencePlan,
+    command: &UaiBrowserCommandEnvelope,
+    issued_exchange: &BrowserBridgeExchange,
+    document: &UaiBrowserResidenceResultDocument,
+    observed_origin: &str,
+    completed_at: Timestamp,
+) -> ProviderResult<UaiBrowserResidenceExchangeCompleted> {
+    let result_digest = document.exchange_digest()?;
+    let result = document.parse_for_command(plan, command, observed_origin)?;
+    let mut exchange = issued_exchange.clone();
+    exchange
+        .complete(
+            UaiBrowserResidenceResult::exchange_type().to_owned(),
+            result_digest,
+            completed_at,
+        )
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "UAI residence result cannot complete the durable BrowserBridge exchange",
+            )
+        })?;
+    Ok(UaiBrowserResidenceExchangeCompleted { result, exchange })
 }
 
 fn residence_plan_from_detail(
@@ -2482,6 +2895,201 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn issued_event_exchange_recovers_only_the_persisted_command() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let plan = residence_plan(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &session_nonce,
+            UCONTENT_ORIGIN,
+            "content-frame",
+        )
+        .unwrap();
+        let command = UaiBrowserCommandEnvelope::ping(&plan, &binding, 7).unwrap();
+        let issued_at = chrono::Utc::now();
+        let issued = bridge
+            .issue_command_exchange(
+                &context,
+                "group:2001:unit-1:group-1",
+                &settings,
+                session_id,
+                command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(issued.exchange().state, BrowserBridgeExchangeState::Issued);
+        assert_eq!(issued.exchange().sequence, 7);
+        assert_eq!(
+            issued.exchange().command_digest,
+            issued.command_artifact().digest()
+        );
+
+        let event_fixture = include_str!("../../../fixtures/providers/uai/browser/pong-event.json")
+            .replace("{{session_nonce}}", &session_nonce);
+        let in_memory = bridge
+            .complete_event_exchange(
+                &context,
+                "group:2001:unit-1:group-1",
+                &settings,
+                &issued,
+                UaiBrowserEventDocument::try_new(event_fixture.clone()).unwrap(),
+                UCONTENT_ORIGIN,
+                issued_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(in_memory.event().event, UaiBrowserEvent::Pong));
+        assert_eq!(
+            in_memory.exchange().result_type.as_deref(),
+            Some(UAI_BROWSER_EVENT_TYPE)
+        );
+
+        let (_dispatched, artifact, exchange) = issued.into_parts();
+        let artifact = artifact.into_secret_value();
+        let recovered = bridge
+            .complete_recovered_event_exchange(
+                &context,
+                "group:2001:unit-1:group-1",
+                &settings,
+                &exchange,
+                &artifact,
+                UaiBrowserEventDocument::try_new(event_fixture).unwrap(),
+                UCONTENT_ORIGIN,
+                issued_at + chrono::Duration::seconds(2),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(recovered.event().event, UaiBrowserEvent::Pong));
+        assert_eq!(
+            recovered.exchange().state,
+            BrowserBridgeExchangeState::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_event_cannot_select_a_different_persisted_command() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let plan = residence_plan(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &session_nonce,
+            UCONTENT_ORIGIN,
+            "content-frame",
+        )
+        .unwrap();
+        let issued_at = chrono::Utc::now();
+        let scan = UaiBrowserCommandEnvelope::scan_menu(&plan, &binding, 8).unwrap();
+        let foreign = bridge
+            .issue_command_exchange(
+                &context,
+                "group:2001:unit-1:group-1",
+                &settings,
+                session_id,
+                scan,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let (_, foreign_artifact, foreign_exchange) = foreign.into_parts();
+        let wrong_event = include_str!("../../../fixtures/providers/uai/browser/pong-event.json")
+            .replace("{{session_nonce}}", &session_nonce)
+            .replace("\"reply_to_sequence\": 7", "\"reply_to_sequence\": 8");
+        assert_eq!(
+            bridge
+                .complete_recovered_event_exchange(
+                    &context,
+                    "group:2001:unit-1:group-1",
+                    &settings,
+                    &foreign_exchange,
+                    &foreign_artifact.into_secret_value(),
+                    UaiBrowserEventDocument::try_new(wrong_event).unwrap(),
+                    UCONTENT_ORIGIN,
+                    issued_at + chrono::Duration::seconds(1),
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_residence_exchange_binds_terminal_result_and_stays_verify_only() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let plan = residence_plan(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, &session_nonce, UCONTENT_ORIGIN, "top-frame")
+                .unwrap();
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            "Read the passage".to_owned(),
+            true,
+        )
+        .unwrap();
+        let target = plan.select_target_task_entry(&binding, &[task]).unwrap();
+        let command =
+            UaiBrowserCommandEnvelope::residence_target(&plan, &binding, 9, &target).unwrap();
+        let issued_at = chrono::Utc::now();
+        let issued = bridge
+            .issue_command_exchange(
+                &context,
+                "group:2001:unit-1:group-1",
+                &settings,
+                session_id,
+                command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let (_, artifact, exchange) = issued.into_parts();
+        let fixture =
+            include_str!("../../../fixtures/providers/uai/browser/residence-target-result.json")
+                .replace("{{session_nonce}}", &session_nonce)
+                .replace("{{target_task_handle}}", &target.entry().handle);
+        let document = UaiBrowserResidenceResultDocument::try_new(fixture).unwrap();
+        let result_digest = document.exchange_digest().unwrap();
+        let completed = bridge
+            .complete_recovered_residence_exchange(
+                &context,
+                "group:2001:unit-1:group-1",
+                &settings,
+                &exchange,
+                &artifact.into_secret_value(),
+                document,
+                UCONTENT_ORIGIN,
+                issued_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+        assert!(completed.result().requires_fresh_duration_read());
+        assert_eq!(
+            completed.exchange().state,
+            BrowserBridgeExchangeState::Completed
+        );
+        assert_eq!(
+            completed.exchange().result_type.as_deref(),
+            Some(UAI_BROWSER_RESIDENCE_RESULT_TYPE)
+        );
+        assert_eq!(completed.exchange().result_digest, Some(result_digest));
+    }
+
     #[test]
     fn residence_controls_preserve_target_budget_and_bound_restart() {
         let plan = residence_plan(false);
@@ -2676,6 +3284,17 @@ mod tests {
     }
 
     fn residence_plan(play_video: bool) -> UaiBrowserResidencePlan {
+        let settings = browser_runtime_settings(play_video);
+        residence_plan_from_detail(
+            &fixture_remote_detail("group:2001:unit-1:group-1", true),
+            &settings,
+        )
+        .unwrap()
+    }
+
+    fn browser_runtime_settings(
+        play_video: bool,
+    ) -> asterism_provider_api::ResolvedProviderRuntimeSettings {
         let schema = crate::runtime_settings::runtime_settings_schema();
         let patch = asterism_provider_api::ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
@@ -2690,11 +3309,14 @@ mod tests {
                 ),
             ]),
         };
-        let settings = schema.resolve(None, None, Some(&patch)).unwrap();
-        residence_plan_from_detail(
-            &fixture_remote_detail("group:2001:unit-1:group-1", true),
-            &settings,
-        )
+        schema.resolve(None, None, Some(&patch)).unwrap()
+    }
+
+    fn browser_bridge() -> UaiBrowserBridge {
+        UaiBrowserBridge::try_new(Arc::new(FixtureDetail {
+            metadata: development_metadata().unwrap(),
+            advertised: true,
+        }))
         .unwrap()
     }
 
