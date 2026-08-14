@@ -11,8 +11,8 @@ use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use crate::auth_session::{decode_timestamp, encode_timestamp};
 use crate::{
     AnswerBootstrapHarvestCheckpoint, AnswerBootstrapHarvestCompletion,
-    AnswerBootstrapHarvestFailure, AnswerBootstrapHarvestRepository, ClaimedAnswerBootstrapHarvest,
-    Database, StorageError,
+    AnswerBootstrapHarvestFailure, AnswerBootstrapHarvestRepository, AnswerBootstrapHarvestYield,
+    ClaimedAnswerBootstrapHarvest, Database, StorageError,
 };
 
 const INITIAL_GENERATION: u32 = 1;
@@ -204,6 +204,44 @@ impl AnswerBootstrapHarvestRepository for SqliteAnswerBootstrapHarvestRepository
             request.worker_id,
             "completed",
             None,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(harvest)
+    }
+
+    async fn yield_answer_bootstrap_harvest(
+        &self,
+        request: AnswerBootstrapHarvestYield<'_>,
+    ) -> Result<AnswerBootstrapHarvest, StorageError> {
+        if request.run_at <= request.at {
+            return Err(invalid_harvest());
+        }
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let mut harvest = fetch_live_claim(
+            &mut transaction,
+            request.harvest_id,
+            request.schedule_id,
+            request.worker_id,
+            request.at,
+        )
+        .await?;
+        validate_progress(
+            &harvest,
+            request.scanned_task_count,
+            request.total_task_count,
+        )?;
+        harvest.scanned_task_count = request.scanned_task_count;
+        harvest.total_task_count = request.total_task_count;
+        harvest.watermark_sanitized = request.watermark_sanitized.clone();
+        harvest.state = AnswerBootstrapHarvestState::Paused;
+        harvest.updated_at = request.at;
+        harvest.validate().map_err(|_| invalid_harvest())?;
+        persist_yielded_harvest(
+            &mut transaction,
+            &harvest,
+            request.worker_id,
+            request.run_at,
         )
         .await?;
         transaction.commit().await?;
@@ -457,6 +495,45 @@ async fn persist_paused_harvest(
     )
     .bind(encode_timestamp(retry_at))
     .bind(error_sanitized)
+    .bind(encode_timestamp(harvest.updated_at))
+    .bind(harvest.schedule_id.to_string())
+    .bind(worker_id)
+    .execute(&mut **transaction)
+    .await?;
+    if changed.rows_affected() != 1 {
+        return Err(StorageError::SchedulerClaimLost);
+    }
+    Ok(())
+}
+
+async fn persist_yielded_harvest(
+    transaction: &mut Transaction<'_, Sqlite>,
+    harvest: &AnswerBootstrapHarvest,
+    worker_id: &str,
+    run_at: Timestamp,
+) -> Result<(), StorageError> {
+    let changed = sqlx::query(
+        "UPDATE answer_bootstrap_harvests SET state = 'paused', scanned_task_count = ?, \
+                total_task_count = ?, watermark_sanitized_json = ?, updated_at = ? \
+         WHERE id = ? AND schedule_id = ? AND state = 'running'",
+    )
+    .bind(i64::from(harvest.scanned_task_count))
+    .bind(harvest.total_task_count.map(i64::from))
+    .bind(serde_json::to_string(&harvest.watermark_sanitized)?)
+    .bind(encode_timestamp(harvest.updated_at))
+    .bind(harvest.id.to_string())
+    .bind(harvest.schedule_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    if changed.rows_affected() != 1 {
+        return Err(invalid_harvest());
+    }
+    let changed = sqlx::query(
+        "UPDATE scheduled_jobs SET state = 'pending', run_at = ?, worker_id = NULL, \
+                lease_expires_at = NULL, last_error_sanitized = NULL, updated_at = ? \
+         WHERE id = ? AND state = 'claimed' AND worker_id = ?",
+    )
+    .bind(encode_timestamp(run_at))
     .bind(encode_timestamp(harvest.updated_at))
     .bind(harvest.schedule_id.to_string())
     .bind(worker_id)
@@ -921,6 +998,60 @@ mod tests {
         assert_eq!(completed.state, AnswerBootstrapHarvestState::Completed);
         assert_eq!(completed.scanned_task_count, 2);
         assert_eq!(fixture.harvest().await, completed);
+    }
+
+    #[tokio::test]
+    async fn successful_page_yield_persists_cursor_without_consuming_retry_budget() {
+        let fixture = Fixture::initialized().await;
+        let repository = fixture.repository();
+        let claimed_at = fixture.now + Duration::seconds(1);
+        let claimed = fixture
+            .claim(
+                "page-worker-a",
+                claimed_at,
+                claimed_at + Duration::minutes(1),
+            )
+            .await;
+        let next_run = claimed_at + Duration::seconds(5);
+        let watermark = serde_json::json!({"version": 1, "cursor": {"page": 2}});
+        let yielded = repository
+            .yield_answer_bootstrap_harvest(AnswerBootstrapHarvestYield {
+                harvest_id: fixture.harvest_id,
+                schedule_id: claimed.harvest.schedule_id,
+                worker_id: "page-worker-a",
+                scanned_task_count: 2,
+                total_task_count: None,
+                watermark_sanitized: &watermark,
+                run_at: next_run,
+                at: claimed_at + Duration::seconds(1),
+            })
+            .await
+            .unwrap();
+        assert_eq!(yielded.state, AnswerBootstrapHarvestState::Paused);
+        assert_eq!(yielded.scanned_task_count, 2);
+        assert_eq!(yielded.watermark_sanitized, watermark);
+        assert!(
+            repository
+                .claim_due_answer_bootstrap_harvests(
+                    "page-worker-b",
+                    next_run - Duration::milliseconds(1),
+                    next_run + Duration::minutes(1),
+                    1,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let attempts: i64 = sqlx::query_scalar("SELECT attempts FROM scheduled_jobs")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+        assert_eq!(attempts, 0);
+        let reclaimed = fixture
+            .claim("page-worker-b", next_run, next_run + Duration::minutes(1))
+            .await;
+        assert_eq!(reclaimed.harvest.scanned_task_count, 2);
+        assert_eq!(reclaimed.harvest.watermark_sanitized, watermark);
     }
 
     #[tokio::test]

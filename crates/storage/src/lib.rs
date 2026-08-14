@@ -54,12 +54,12 @@ pub use question_session::SqliteQuestionSessionRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
     AnswerBootstrapHarvestCheckpoint, AnswerBootstrapHarvestCompletion,
-    AnswerBootstrapHarvestFailure, AnswerBootstrapHarvestRepository, AnswerCacheRepository,
-    AnswerCandidateRecord, AnswerCandidateRepository, AnswerEvidenceProjectionState,
-    AnswerEvidenceRecord, AnswerEvidenceRecordOutcome, AnswerEvidenceRepository,
-    AnswerHistoryImportRecord, AnswerHistoryIngestOutcome, AnswerHistoryIngestRequest,
-    AnswerHistoryIngestionRepository, AuditFilter, AuditPage, AuditQueryRepository,
-    AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
+    AnswerBootstrapHarvestFailure, AnswerBootstrapHarvestRepository, AnswerBootstrapHarvestYield,
+    AnswerCacheRepository, AnswerCandidateRecord, AnswerCandidateRepository,
+    AnswerEvidenceProjectionState, AnswerEvidenceRecord, AnswerEvidenceRecordOutcome,
+    AnswerEvidenceRepository, AnswerHistoryImportRecord, AnswerHistoryIngestOutcome,
+    AnswerHistoryIngestRequest, AnswerHistoryIngestionRepository, AuditFilter, AuditPage,
+    AuditQueryRepository, AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, BrowserBridgeCommandArtifactRepository,

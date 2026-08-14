@@ -105,6 +105,11 @@ pub trait AnswerBootstrapHarvestRepository: Send + Sync {
         request: AnswerBootstrapHarvestCheckpoint<'_>,
     ) -> Result<AnswerBootstrapHarvest, StorageError>;
 
+    async fn yield_answer_bootstrap_harvest(
+        &self,
+        request: AnswerBootstrapHarvestYield<'_>,
+    ) -> Result<AnswerBootstrapHarvest, StorageError>;
+
     async fn complete_answer_bootstrap_harvest(
         &self,
         request: AnswerBootstrapHarvestCompletion<'_>,
@@ -142,6 +147,18 @@ pub struct AnswerBootstrapHarvestCompletion<'a> {
     pub scanned_task_count: u32,
     pub total_task_count: u32,
     pub watermark_sanitized: &'a serde_json::Value,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnswerBootstrapHarvestYield<'a> {
+    pub harvest_id: asterism_domain::AnswerBootstrapHarvestId,
+    pub schedule_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub scanned_task_count: u32,
+    pub total_task_count: Option<u32>,
+    pub watermark_sanitized: &'a serde_json::Value,
+    pub run_at: Timestamp,
     pub at: Timestamp,
 }
 
