@@ -139,7 +139,9 @@ scope whenever donor or sanitized live evidence establishes their protocol.
 Provider settings encode Auto modular's implicit phase plus fixed score 0,
 selected-score/save-only and zero-time final tuple, and current Fanyuchang's
 client-counter plus fresh-time set/save tuple. `WellearnBatchExecutionShape`
-marks both as atomic duration-completion children. Current singleton mutation
+marks both as atomic duration-completion children, while
+`WellearnAtomicCompletionProfile` freezes Fanyuchang's single score-100
+fresh-time set/save versus Auto's score-0 zero-time save-only final. Current singleton mutation
 authority deliberately does not execute either exact combined flow until Core
 can persist, authorize and recover it without inserting a bare save or second
 start.

@@ -49,6 +49,15 @@ pub enum WellearnBatchExecutionShape {
     AtomicDurationCompletion,
 }
 
+/// Exact final completion mutation attached to an atomic duration child.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WellearnAtomicCompletionProfile {
+    /// Current Fanyuchang carries fresh time into CMI, then saves score 100 once.
+    FanyuchangFreshSetSave100,
+    /// Modular Auto omits `setscoinfo` and saves completed/progress 100/score 0.
+    AutoZeroTimeSaveOnly0,
+}
+
 /// Unit selection shape frozen before donor-specific SCO filtering. Explicit
 /// indices preserve the caller's order, which current Fanyuchang accepts for
 /// comma-separated multi-Unit selections.
@@ -118,6 +127,20 @@ impl WellearnBatchFlow {
         }
     }
 
+    pub const fn atomic_completion_profile(self) -> Option<WellearnAtomicCompletionProfile> {
+        match self {
+            Self::FanyuchangDuration => {
+                Some(WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100)
+            }
+            Self::AutoDuration => Some(WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0),
+            Self::FanyuchangCompletion
+            | Self::YzbrhCompletion
+            | Self::YzbrhDuration
+            | Self::AutoCompletion
+            | Self::AutoLegacyDuration => None,
+        }
+    }
+
     const fn required_capabilities(self) -> &'static [TaskCapability] {
         match self.execution_shape() {
             WellearnBatchExecutionShape::ResourceExecution => &[TaskCapability::ResourceExecution],
@@ -178,6 +201,7 @@ pub struct WellearnBatchPlan {
     pub dispatch: WellearnBatchDispatch,
     pub target_strategy: WellearnBatchTargetStrategy,
     pub execution_shape: WellearnBatchExecutionShape,
+    pub atomic_completion_profile: Option<WellearnAtomicCompletionProfile>,
     pub selection: WellearnBatchUnitSelection,
     pub selected_units: Vec<WellearnUnitObservation>,
     pub entries: Vec<WellearnBatchEntry>,
@@ -449,6 +473,7 @@ pub fn build_selected_batch_plan(
         dispatch: flow.dispatch(),
         target_strategy: flow.target_strategy(),
         execution_shape: flow.execution_shape(),
+        atomic_completion_profile: flow.atomic_completion_profile(),
         selection,
         selected_units,
         entries,
@@ -1124,6 +1149,18 @@ mod tests {
         assert_eq!(
             WellearnBatchFlow::AutoDuration.execution_shape(),
             WellearnBatchExecutionShape::AtomicDurationCompletion
+        );
+        assert_eq!(
+            WellearnBatchFlow::FanyuchangDuration.atomic_completion_profile(),
+            Some(WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100)
+        );
+        assert_eq!(
+            WellearnBatchFlow::AutoDuration.atomic_completion_profile(),
+            Some(WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0)
+        );
+        assert_eq!(
+            WellearnBatchFlow::YzbrhDuration.atomic_completion_profile(),
+            None
         );
     }
 

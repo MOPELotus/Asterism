@@ -471,6 +471,12 @@ flow. This is not permission for the Provider to perform the later capability
 inside a singleton step; the shared durable layer must authorize and recover
 the atomic shape explicitly.
 
+Atomic children also freeze one exact final profile. Fanyuchang duration uses
+fresh-time plain CMI `setscoinfo` and one score-100 completion save; it does not
+reuse the standalone completion flow's selected-score then second-100 save.
+Modular Auto uses no CMI set and one zero-time score-0 completion save. These
+facts are `FanyuchangFreshSetSave100` and `AutoZeroTimeSaveOnly0`, respectively.
+
 `WellearnBatchPlan.target_strategy` records the corresponding target boundary:
 Fanyuchang, YZBRH and Auto completion resolve score or duration targets per
 child from their fixed or independent random settings, while Auto duration
