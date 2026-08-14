@@ -340,62 +340,8 @@ impl AnswerCandidateRepository for SqliteQuestionSnapshotRepository {
         &self,
         candidates: &[AnswerCandidateRecord],
     ) -> Result<(), StorageError> {
-        let encoded = validate_and_encode_candidates(candidates)?;
         let mut transaction = self.database.pool().begin().await?;
-        let question_ids = sqlx::query_scalar::<_, String>(
-            "SELECT question_id FROM question_snapshot_items WHERE snapshot_id = ?",
-        )
-        .bind(encoded.snapshot_id.to_string())
-        .fetch_all(&mut *transaction)
-        .await?
-        .into_iter()
-        .map(|value| parse_id::<QuestionId>(&value))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-        if encoded
-            .candidates
-            .iter()
-            .any(|candidate| !question_ids.contains(&candidate.question_id))
-        {
-            return Err(invalid_candidates());
-        }
-
-        let totals = sqlx::query(
-            "SELECT COUNT(*) AS candidate_count, \
-                    COALESCE(SUM(length(CAST(candidate_json AS BLOB))), 0) AS total_bytes \
-             FROM answer_candidates WHERE question_snapshot_id = ?",
-        )
-        .bind(encoded.snapshot_id.to_string())
-        .fetch_one(&mut *transaction)
-        .await?;
-        let existing_count = usize::try_from(totals.try_get::<i64, _>("candidate_count")?)
-            .map_err(|_| invalid_candidates())?;
-        let existing_bytes = usize::try_from(totals.try_get::<i64, _>("total_bytes")?)
-            .map_err(|_| invalid_candidates())?;
-        if existing_count
-            .checked_add(encoded.candidates.len())
-            .is_none_or(|count| count > MAX_CANDIDATES_PER_SNAPSHOT)
-            || existing_bytes
-                .checked_add(encoded.total_bytes)
-                .is_none_or(|bytes| bytes > MAX_ANSWER_CANDIDATE_BYTES)
-        {
-            return Err(invalid_candidates());
-        }
-
-        for candidate in encoded.candidates {
-            sqlx::query(
-                "INSERT INTO answer_candidates \
-                 (id, question_snapshot_id, question_id, source, candidate_json, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
-            )
-            .bind(candidate.id.to_string())
-            .bind(encoded.snapshot_id.to_string())
-            .bind(candidate.question_id.to_string())
-            .bind(encode_answer_source(candidate.source))
-            .bind(candidate.json)
-            .bind(encode_timestamp(candidate.created_at))
-            .execute(&mut *transaction)
-            .await?;
-        }
+        save_answer_candidate_batch_in_transaction(&mut transaction, candidates).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -450,6 +396,68 @@ impl AnswerCandidateRepository for SqliteQuestionSnapshotRepository {
         }
         Ok(records)
     }
+}
+
+pub(crate) async fn save_answer_candidate_batch_in_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    candidates: &[AnswerCandidateRecord],
+) -> Result<(), StorageError> {
+    let encoded = validate_and_encode_candidates(candidates)?;
+    let question_ids = sqlx::query_scalar::<_, String>(
+        "SELECT question_id FROM question_snapshot_items WHERE snapshot_id = ?",
+    )
+    .bind(encoded.snapshot_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?
+    .into_iter()
+    .map(|value| parse_id::<QuestionId>(&value))
+    .collect::<Result<BTreeSet<_>, _>>()?;
+    if encoded
+        .candidates
+        .iter()
+        .any(|candidate| !question_ids.contains(&candidate.question_id))
+    {
+        return Err(invalid_candidates());
+    }
+
+    let totals = sqlx::query(
+        "SELECT COUNT(*) AS candidate_count, \
+                COALESCE(SUM(length(CAST(candidate_json AS BLOB))), 0) AS total_bytes \
+         FROM answer_candidates WHERE question_snapshot_id = ?",
+    )
+    .bind(encoded.snapshot_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let existing_count = usize::try_from(totals.try_get::<i64, _>("candidate_count")?)
+        .map_err(|_| invalid_candidates())?;
+    let existing_bytes = usize::try_from(totals.try_get::<i64, _>("total_bytes")?)
+        .map_err(|_| invalid_candidates())?;
+    if existing_count
+        .checked_add(encoded.candidates.len())
+        .is_none_or(|count| count > MAX_CANDIDATES_PER_SNAPSHOT)
+        || existing_bytes
+            .checked_add(encoded.total_bytes)
+            .is_none_or(|bytes| bytes > MAX_ANSWER_CANDIDATE_BYTES)
+    {
+        return Err(invalid_candidates());
+    }
+
+    for candidate in encoded.candidates {
+        sqlx::query(
+            "INSERT INTO answer_candidates \
+             (id, question_snapshot_id, question_id, source, candidate_json, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(candidate.id.to_string())
+        .bind(encoded.snapshot_id.to_string())
+        .bind(candidate.question_id.to_string())
+        .bind(encode_answer_source(candidate.source))
+        .bind(candidate.json)
+        .bind(encode_timestamp(candidate.created_at))
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
 }
 
 #[async_trait]

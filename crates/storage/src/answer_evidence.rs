@@ -35,49 +35,10 @@ impl AnswerEvidenceRepository for SqliteAnswerEvidenceRepository {
         &self,
         evidence: &PrivateAnswerEvidence,
     ) -> Result<AnswerEvidenceRecordOutcome, StorageError> {
-        evidence
-            .validate()
-            .map_err(|error| invalid_evidence(error.to_string()))?;
-        let encoded = EncodedPrivateEvidence::new(evidence)?;
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
-
-        validate_private_bindings(&mut transaction, evidence).await?;
-        if let Some(record) = find_record_by_digest(&mut transaction, &encoded.digest).await? {
-            transaction.commit().await?;
-            return Ok(AnswerEvidenceRecordOutcome::Duplicate(record));
-        }
-
-        insert_private_evidence(&mut transaction, evidence, &encoded).await?;
-        let record = match evidence.projection {
-            CorpusProjectionEligibility::Exact => {
-                let (question, answer) = evidence
-                    .global_projection()
-                    .map_err(|error| invalid_evidence(error.to_string()))?;
-                let corpus_entry_id =
-                    project_global_evidence(&mut transaction, evidence, &question, &answer).await?;
-                sqlx::query(
-                    "INSERT INTO global_answer_corpus_projections \
-                     (private_evidence_id, corpus_entry_id, projected_at) VALUES (?, ?, ?)",
-                )
-                .bind(evidence.id.to_string())
-                .bind(corpus_entry_id.to_string())
-                .bind(encode_timestamp(evidence.verified_at))
-                .execute(&mut *transaction)
-                .await?;
-                AnswerEvidenceRecord {
-                    private_evidence_id: evidence.id,
-                    corpus_entry_id: Some(corpus_entry_id),
-                    projection_state: AnswerEvidenceProjectionState::Projected,
-                }
-            }
-            CorpusProjectionEligibility::Unmatched(reason) => AnswerEvidenceRecord {
-                private_evidence_id: evidence.id,
-                corpus_entry_id: None,
-                projection_state: AnswerEvidenceProjectionState::Unmatched(reason),
-            },
-        };
+        let outcome = record_answer_evidence_in_transaction(&mut transaction, evidence).await?;
         transaction.commit().await?;
-        Ok(AnswerEvidenceRecordOutcome::Inserted(record))
+        Ok(outcome)
     }
 
     async fn list_global_answer_corpus_evidence(
@@ -105,6 +66,51 @@ impl AnswerEvidenceRepository for SqliteAnswerEvidenceRepository {
         }
         rows.iter().map(decode_global_evidence).collect()
     }
+}
+
+pub(crate) async fn record_answer_evidence_in_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    evidence: &PrivateAnswerEvidence,
+) -> Result<AnswerEvidenceRecordOutcome, StorageError> {
+    evidence
+        .validate()
+        .map_err(|error| invalid_evidence(error.to_string()))?;
+    let encoded = EncodedPrivateEvidence::new(evidence)?;
+    validate_private_bindings(transaction, evidence).await?;
+    if let Some(record) = find_record_by_digest(transaction, &encoded.digest).await? {
+        return Ok(AnswerEvidenceRecordOutcome::Duplicate(record));
+    }
+
+    insert_private_evidence(transaction, evidence, &encoded).await?;
+    let record = match evidence.projection {
+        CorpusProjectionEligibility::Exact => {
+            let (question, answer) = evidence
+                .global_projection()
+                .map_err(|error| invalid_evidence(error.to_string()))?;
+            let corpus_entry_id =
+                project_global_evidence(transaction, evidence, &question, &answer).await?;
+            sqlx::query(
+                "INSERT INTO global_answer_corpus_projections \
+                 (private_evidence_id, corpus_entry_id, projected_at) VALUES (?, ?, ?)",
+            )
+            .bind(evidence.id.to_string())
+            .bind(corpus_entry_id.to_string())
+            .bind(encode_timestamp(evidence.verified_at))
+            .execute(&mut **transaction)
+            .await?;
+            AnswerEvidenceRecord {
+                private_evidence_id: evidence.id,
+                corpus_entry_id: Some(corpus_entry_id),
+                projection_state: AnswerEvidenceProjectionState::Projected,
+            }
+        }
+        CorpusProjectionEligibility::Unmatched(reason) => AnswerEvidenceRecord {
+            private_evidence_id: evidence.id,
+            corpus_entry_id: None,
+            projection_state: AnswerEvidenceProjectionState::Unmatched(reason),
+        },
+    };
+    Ok(AnswerEvidenceRecordOutcome::Inserted(record))
 }
 
 struct EncodedPrivateEvidence {

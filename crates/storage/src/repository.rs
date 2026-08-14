@@ -773,6 +773,40 @@ pub trait AnswerCandidateRepository: Send + Sync {
     ) -> Result<Vec<AnswerCandidateRecord>, StorageError>;
 }
 
+#[derive(Clone, Debug)]
+pub struct AnswerHistoryIngestRequest<'a> {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub provider_attempt_digest: [u8; 32],
+    pub result_digest: [u8; 32],
+    pub snapshot: &'a QuestionSnapshot,
+    pub candidates: &'a [AnswerCandidateRecord],
+    pub evidence: &'a [PrivateAnswerEvidence],
+    pub imported_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnswerHistoryImportRecord {
+    pub import_id: asterism_domain::AnswerHistoryImportId,
+    pub question_snapshot_id: QuestionSnapshotId,
+    pub candidate_count: u32,
+    pub evidence_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AnswerHistoryIngestOutcome {
+    Inserted(AnswerHistoryImportRecord),
+    Duplicate(AnswerHistoryImportRecord),
+}
+
+#[async_trait]
+pub trait AnswerHistoryIngestionRepository: Send + Sync {
+    async fn ingest_answer_history_task(
+        &self,
+        request: AnswerHistoryIngestRequest<'_>,
+    ) -> Result<AnswerHistoryIngestOutcome, StorageError>;
+}
+
 /// Read boundary for conservative `LocalCache` imports. Implementations must
 /// exclude the target snapshot, later snapshots, copied `LocalCache` candidates,
 /// foreign owners/tasks, and ambiguous fingerprints on either side.

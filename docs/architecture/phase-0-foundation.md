@@ -4061,3 +4061,27 @@ bootstrap job into a false empty success. The generic scheduler also cannot
 claim these jobs outside their atomic harvest lifecycle. The next Provider
 slice may advertise the capability only where audited result/history protocol
 evidence can produce bounded pages and exact Task evidence.
+
+## Two-hundred-and-twenty-fifth Phase 0 slice
+
+Historical result ingestion now has one atomic Storage boundary for the fresh
+Question snapshot, answer candidates, owner-private evidence, identity-free
+Corpus projections and a durable import ledger. A history worker therefore
+cannot persist half of a result when a late candidate/evidence binding check or
+database write fails. The bootstrap harvest remains read-only: this boundary
+records evidence already obtained from the Provider and creates no local or
+remote execution Attempt.
+
+Each ledger row is uniquely bound to Provider account, local Task, Provider
+Attempt digest and result digest. It also freezes a canonical semantic content
+digest that deliberately excludes newly generated local UUIDs. Replaying the
+same remote result after a process failure returns the original import record
+without adding snapshots, candidates, private evidence or global corroboration
+counts; reusing the same remote identity with changed parsed Questions,
+answers, classifications or provenance fails closed as protocol drift.
+
+Harvest progress is checkpointed only after this transaction succeeds. If the
+process commits an import and crashes before advancing its watermark, the next
+claim can safely reread and reingest that exact Provider result, observe the
+ledger duplicate and then advance. Migration 057 persists this crash-recovery
+boundary without treating a duplicate import as new Answer Evidence.
