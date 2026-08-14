@@ -101,6 +101,11 @@ executor audit boundary. It confirms that `UAI_CMD` is iframe-side only, while
 the top page owns direct Tab/Task/residence/video actions, and freezes the four
 ordered iframe selectors plus its 30-second observer and 20×1.5-second retry
 window. This is a clarified protocol boundary, not a new upstream revision.
+The same source audit also confirms Course-level source-order
+`menuList.slice(startIdx)` membership, restart from a newly selected ordinal,
+fractional total/Micro/Tab/Task division and final-leaf `Math.round`. These
+unchanged behaviors are now frozen in the Provider-local Course residence
+batch fixture and plan; no new upstream revision or tag appeared.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "course_remote_id": "course-resource:2001",
+  "course_publish_version": 123290,
+  "total_residence_seconds": 1200,
+  "play_video": true,
+  "start_ordinal": 1,
+  "all_micro_ids": ["micro-z", "micro-a", "micro-m"],
+  "selected_micro_ids": ["micro-a", "micro-m"],
+  "selected_denominator": 2,
+  "rounded_tabs": 3,
+  "rounded_tasks": 7,
+  "rounded_leaf_seconds": 29,
+  "restart_ordinal": 2,
+  "restarted_denominator": 1
+}

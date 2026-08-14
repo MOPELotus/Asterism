@@ -292,6 +292,31 @@ frozen `5.2.14` donor supplies the following concrete action evidence:
   bounded labels plus an element handle, and exchange SCAN/CLICK/result events
   with the owning top-level page.
 
+The donor's outer unit is one Course run rather than one backend Group. It
+keeps the rendered menu in source order, applies `menuList.slice(startIdx)`,
+then computes `perStepTime = totalSeconds / remainingMicros`. Within each
+Micro it divides again by current Tab count and by each current Tab's Task
+count; JavaScript `Math.round` is applied only when the final wait begins. A
+restart keeps the same total budget but rebuilds remaining jobs from the newly
+selected menu ordinal.
+
+Asterism's Task parser therefore preserves bounded nested tree traversal order
+instead of sorting Groups by remote ID. The Provider-local immutable
+`UaiCourseResidenceBatchPlan` groups only contiguous Tasks with the same
+Unit/Section/Micro identity, freezes all ordered Group IDs/types/counts plus
+the Course publish version, and rejects a repeated non-contiguous Micro. A
+direct Group outside a named Micro becomes its own stable browser leaf. The
+plan freezes resolved total seconds/video behavior and retains the budget as
+an exact positive rational `totalSeconds / selectedMicros`; bounded runtime
+Tab/Task counts are applied before positive half-up rounding. It never creates
+an Execution or reports duration. Restart requires a target obtained from the
+same plan, binding both ordinal and Micro digest, and changes only start and
+plan digest while retaining the full membership digest and total budget.
+Fresh membership validation deliberately ignores progress/completion changes
+but rejects Course, publish-version, hierarchy, label, Group shape or order
+drift. Core still needs a durable Course batch owner and encrypted accumulated
+cursor/result recovery before this plan is executable.
+
 The donor's `ipub` iframe side alone receives wildcard `UAI_CMD`
 `SCAN`/`CLICK`/`PING`; the `ucontent` top page consumes its menu/click/PONG
 events and directly performs the main-page Menu/Tab/Task/residence/video DOM

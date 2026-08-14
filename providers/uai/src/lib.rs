@@ -11,6 +11,7 @@ mod aggregate_progress;
 mod annotator;
 mod answer;
 mod authentication;
+mod browser_batch;
 mod browser_bridge;
 mod compound_oral;
 mod compound_upload;
@@ -51,6 +52,10 @@ pub use answer::{
 pub use authentication::{
     UaiAuthentication, UaiAuthenticationTransport, UaiJwtSession, UaiSessionResolver,
     classify_password_login_response,
+};
+pub use browser_batch::{
+    UaiCourseResidenceBatchPlan, UaiCourseResidenceBudgetShare, UaiCourseResidenceMicro,
+    UaiCourseResidenceRestartTarget, UaiCourseResidenceTask, build_course_residence_batch_plan,
 };
 pub use browser_bridge::{
     EncodedUaiBrowserCommandArtifact, UAI_BROWSER_COMMAND_TYPE, UAI_BROWSER_EVENT_TYPE,

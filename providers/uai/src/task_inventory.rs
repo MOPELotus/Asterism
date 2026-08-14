@@ -59,7 +59,8 @@ pub fn parse_task_inventory(
     let tree = parse_task_tree(document)?;
     task_tree_unit_ids(&tree.units)?;
 
-    let mut tasks = BTreeMap::new();
+    let mut task_identities = BTreeSet::new();
+    let mut tasks = Vec::new();
     let mut node_count = 0_usize;
     let binding = CourseTreeBinding {
         course,
@@ -73,10 +74,11 @@ pub fn parse_task_inventory(
             &Hierarchy::default(),
             1,
             &mut node_count,
+            &mut task_identities,
             &mut tasks,
         )?;
     }
-    Ok(tasks.into_values().collect())
+    Ok(tasks)
 }
 
 pub(crate) fn parse_task_tree_unit_ids(document: &str) -> ProviderResult<BTreeSet<String>> {
@@ -332,7 +334,8 @@ fn visit_node(
     hierarchy: &Hierarchy,
     depth: usize,
     node_count: &mut usize,
-    tasks: &mut BTreeMap<String, RemoteTask>,
+    task_identities: &mut BTreeSet<String>,
+    tasks: &mut Vec<RemoteTask>,
 ) -> ProviderResult<()> {
     if depth > MAX_DEPTH {
         return Err(invalid_response("UAI Task tree exceeds the depth limit"));
@@ -379,11 +382,12 @@ fn visit_node(
         "node" => next.micro = Some(label),
         "group" => {
             let task = build_task(binding, object, hierarchy, &id, title)?;
-            if tasks.insert(task.remote_id.clone(), task).is_some() {
+            if !task_identities.insert(task.remote_id.clone()) {
                 return Err(protocol_drift(
                     "UAI Task tree contains a duplicate Group identity",
                 ));
             }
+            tasks.push(task);
         }
         "link" => {}
         _ => unreachable!("validated UAI node role"),
@@ -393,7 +397,15 @@ fn visit_node(
             .as_array()
             .ok_or_else(|| protocol_drift("UAI Task-tree children field is not an array"))?;
         for child in children {
-            visit_node(binding, child, &next, depth + 1, node_count, tasks)?;
+            visit_node(
+                binding,
+                child,
+                &next,
+                depth + 1,
+                node_count,
+                task_identities,
+                tasks,
+            )?;
         }
     }
     Ok(())
@@ -568,6 +580,8 @@ mod tests {
     const DETAIL: &str =
         include_str!("../../../fixtures/providers/uai/courses/resource-detail.json");
     const TREE: &str = include_str!("../../../fixtures/providers/uai/tasks/tree-mixed.json");
+    const BROWSER_ORDER_TREE: &str =
+        include_str!("../../../fixtures/providers/uai/tasks/tree-browser-order.json");
     const COURSE_PROGRESS: &str =
         include_str!("../../../fixtures/providers/uai/progress/course-mixed.json");
     const UNIT_PROGRESS: &str =
@@ -603,6 +617,25 @@ mod tests {
         let encoded = serde_json::to_string(&tasks).unwrap();
         assert!(!encoded.contains("must-be-dropped"));
         assert!(!encoded.contains(context.course_instance_id()));
+    }
+
+    #[test]
+    fn parser_preserves_source_tree_order_for_browser_course_membership() {
+        let course = parse_course_inventory(COURSES).unwrap().remove(0);
+        let context = parse_course_context(&course, DETAIL).unwrap();
+        let tasks = parse_task_inventory(&course, &context, BROWSER_ORDER_TREE).unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.remote_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "group:2001:unit-z:group-z",
+                "group:2001:unit-z:group-b",
+                "group:2001:unit-z:group-a",
+                "group:2001:unit-a:group-m",
+            ]
+        );
     }
 
     #[test]
