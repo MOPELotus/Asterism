@@ -224,6 +224,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Native-boundary tests cover both `ClassTask` and `StudyTask` route families,
   preserve the donor's read/submit `Authorization-v` split for every mutation,
   and reject any operation outside the audited five-operation allowlist.
+- The non-redirecting Native HTTP reader clears every body chunk already
+  accumulated before returning a mid-stream transport error or size failure;
+  no Provider layer performs an automatic assessment retry.
 - `SubmitChoseWord` accepts only its acknowledgement response family; the
   assessment-step parser still rejects missing decoded data.
 - Mode 73 parses as FillBlank only when its bounded answer count equals its

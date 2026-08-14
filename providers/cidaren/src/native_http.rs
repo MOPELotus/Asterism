@@ -877,11 +877,15 @@ async fn read_json_response(
         return Err(oversized_response(route));
     }
     let mut document = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| classify_reqwest_error(&error, route))?
-    {
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                document.zeroize();
+                return Err(classify_reqwest_error(&error, route));
+            }
+        };
         if document.len().saturating_add(chunk.len()) > maximum {
             document.zeroize();
             return Err(oversized_response(route));
