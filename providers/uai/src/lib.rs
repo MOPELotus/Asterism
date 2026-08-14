@@ -61,7 +61,8 @@ pub use browser_batch::{
 pub use browser_bridge::{
     EncodedUaiBrowserCommandArtifact, UAI_BROWSER_COMMAND_TYPE, UAI_BROWSER_EVENT_TYPE,
     UAI_BROWSER_RESIDENCE_RESULT_TYPE, UaiBrowserBridge, UaiBrowserCommand,
-    UaiBrowserCommandEnvelope, UaiBrowserEvent, UaiBrowserEventDocument, UaiBrowserEventEnvelope,
+    UaiBrowserCommandEnvelope, UaiBrowserCursorExchangeIssued, UaiBrowserCursorExchangeRecovered,
+    UaiBrowserEvent, UaiBrowserEventDocument, UaiBrowserEventEnvelope,
     UaiBrowserEventExchangeCompleted, UaiBrowserExchangeIssued, UaiBrowserMenuEntry,
     UaiBrowserMessageSecurity, UaiBrowserPageEntry, UaiBrowserPageScope,
     UaiBrowserResidenceControl, UaiBrowserResidenceExchangeCompleted, UaiBrowserResidencePlan,

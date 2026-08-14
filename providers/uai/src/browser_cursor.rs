@@ -316,10 +316,13 @@ impl UaiBrowserResidenceCursor {
             || self.next_command_digest != fresh_command_digest
             || self.current_micro_ordinal < batch.start().ordinal()
             || self.current_micro_identity_digest != micro.identity_digest()
-            || !micro
-                .tasks()
-                .iter()
-                .any(|task| task.remote_task_id() == plan.target_remote_task_id)
+            || micro.unit_title() != plan.target.unit
+            || micro.section_title() != plan.target.section.as_deref()
+            || micro.micro_title() != plan.target.micro
+            || !micro.tasks().iter().any(|task| {
+                task.remote_task_id() == plan.target_remote_task_id
+                    && task.title() == plan.target.task
+            })
             || command.remote_task_id != plan.target_remote_task_id
             || self.remaining_active_seconds > batch.total_residence_seconds()
             || self.observed_video_seconds > plan.max_video_seconds

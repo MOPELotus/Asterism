@@ -15,6 +15,8 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    UaiCourseResidenceBatchPlan,
+    browser_cursor::{EncodedUaiBrowserCursorArtifact, UaiBrowserResidenceCursor},
     metadata::development_metadata,
     runtime_settings::{BROWSER_PLAY_VIDEO_KEY, BROWSER_RESIDENCE_SECONDS_KEY},
 };
@@ -130,6 +132,72 @@ impl UaiBrowserExchangeIssued {
         BrowserBridgeExchange,
     ) {
         (self.command, self.command_artifact, self.exchange)
+    }
+}
+
+/// One exact accumulated cursor and command issued as a single persistence
+/// boundary.
+///
+/// The two encrypted artifacts remain independent because they have different
+/// lifecycles, but neither can be substituted without failing the cursor's
+/// exact next-command binding.
+#[derive(Debug)]
+pub struct UaiBrowserCursorExchangeIssued {
+    issued: UaiBrowserExchangeIssued,
+    cursor_artifact: EncodedUaiBrowserCursorArtifact,
+}
+
+impl UaiBrowserCursorExchangeIssued {
+    pub const fn command(&self) -> &UaiBrowserCommandEnvelope {
+        self.issued.command()
+    }
+
+    pub const fn command_artifact(&self) -> &EncodedUaiBrowserCommandArtifact {
+        self.issued.command_artifact()
+    }
+
+    pub const fn cursor_artifact(&self) -> &EncodedUaiBrowserCursorArtifact {
+        &self.cursor_artifact
+    }
+
+    pub const fn exchange(&self) -> &BrowserBridgeExchange {
+        self.issued.exchange()
+    }
+
+    /// Transfers the exact dispatch command, both encrypted artifacts and
+    /// durable exchange metadata without rebuilding any Provider state.
+    pub fn into_parts(
+        self,
+    ) -> (
+        UaiBrowserCommandEnvelope,
+        EncodedUaiBrowserCommandArtifact,
+        EncodedUaiBrowserCursorArtifact,
+        BrowserBridgeExchange,
+    ) {
+        let (command, command_artifact, exchange) = self.issued.into_parts();
+        (command, command_artifact, self.cursor_artifact, exchange)
+    }
+}
+
+/// One command and accumulated cursor restored from their independently
+/// encrypted artifacts and the same persisted exchange.
+#[derive(Debug)]
+pub struct UaiBrowserCursorExchangeRecovered {
+    command: UaiBrowserCommandEnvelope,
+    cursor: UaiBrowserResidenceCursor,
+}
+
+impl UaiBrowserCursorExchangeRecovered {
+    pub const fn command(&self) -> &UaiBrowserCommandEnvelope {
+        &self.command
+    }
+
+    pub const fn cursor(&self) -> &UaiBrowserResidenceCursor {
+        &self.cursor
+    }
+
+    pub fn into_parts(self) -> (UaiBrowserCommandEnvelope, UaiBrowserResidenceCursor) {
+        (self.command, self.cursor)
     }
 }
 
@@ -2044,35 +2112,90 @@ impl UaiBrowserBridge {
         let plan = self
             .residence_plan(context, remote_task_id, settings)
             .await?;
-        command.validate_for_plan(&plan)?;
-        if command.session_nonce != session_id.to_string()
-            || command.remote_task_id != remote_task_id
-        {
+        issue_command_exchange_inner(&plan, remote_task_id, session_id, command, issued_at)
+    }
+
+    /// Freshly rebinds one accumulated cursor and issues its exact next
+    /// command, returning both encrypted artifacts with one durable exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the Course batch, fresh Browser plan,
+    /// cursor, command or Core session does not describe the same next action.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the Course batch, fresh Task/settings, Core session and cursor are independent issuance bindings"
+    )]
+    pub async fn issue_cursor_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        batch: &UaiCourseResidenceBatchPlan,
+        session_id: BrowserBridgeSessionId,
+        cursor: &UaiBrowserResidenceCursor,
+        command: UaiBrowserCommandEnvelope,
+        issued_at: Timestamp,
+    ) -> ProviderResult<UaiBrowserCursorExchangeIssued> {
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        let cursor_artifact = cursor.encode_artifact(batch, &plan, &command)?;
+        let issued =
+            issue_command_exchange_inner(&plan, remote_task_id, session_id, command, issued_at)?;
+        if cursor.next_command_digest() != issued.command_artifact().digest() {
             return Err(ProviderError::new(
-                ProviderErrorKind::RemoteChanged,
-                "UAI BrowserBridge command is foreign to the durable Core session",
+                ProviderErrorKind::Internal,
+                "UAI accumulated cursor and issued command digests diverged",
             ));
         }
-        let sequence = u64::from(command.sequence);
-        let command_artifact = command.encode_artifact(&plan)?;
-        let exchange = BrowserBridgeExchange::issue(
-            session_id,
-            sequence,
-            UaiBrowserCommandEnvelope::exchange_type().to_owned(),
-            command_artifact.digest(),
-            issued_at,
-        )
-        .map_err(|_| {
-            ProviderError::new(
-                ProviderErrorKind::Internal,
-                "UAI command cannot be represented by the durable BrowserBridge exchange",
-            )
-        })?;
-        Ok(UaiBrowserExchangeIssued {
-            command,
-            command_artifact,
-            exchange,
+        Ok(UaiBrowserCursorExchangeIssued {
+            issued,
+            cursor_artifact,
         })
+    }
+
+    /// Restores both Provider-private artifacts selected by one persisted
+    /// exchange and freshly rebinds their Course, Task, plan and command.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a stale exchange, either changed artifact,
+    /// changed Course batch or Browser plan, or a cursor from another command.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the persisted exchange, two encrypted artifacts and fresh Course/Task authorities are independent recovery bindings"
+    )]
+    pub async fn recover_cursor_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        batch: &UaiCourseResidenceBatchPlan,
+        issued_exchange: &BrowserBridgeExchange,
+        command_artifact: &SecretValue,
+        cursor_artifact: &SecretValue,
+        expected_cursor_digest: [u8; 32],
+    ) -> ProviderResult<UaiBrowserCursorExchangeRecovered> {
+        validate_issued_exchange(issued_exchange)?;
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        let command = UaiBrowserCommandEnvelope::decode_artifact_for_exchange(
+            command_artifact,
+            issued_exchange.command_digest,
+            &plan,
+            issued_exchange.session_id,
+            issued_exchange.sequence,
+        )?;
+        let cursor = UaiBrowserResidenceCursor::decode_artifact_bound(
+            cursor_artifact,
+            expected_cursor_digest,
+            batch,
+            &plan,
+            &command,
+        )?;
+        Ok(UaiBrowserCursorExchangeRecovered { command, cursor })
     }
 
     /// Freshly validates an intermediate event for an in-memory issued
@@ -2228,6 +2351,42 @@ impl UaiBrowserBridge {
             completed_at,
         )
     }
+}
+
+fn issue_command_exchange_inner(
+    plan: &UaiBrowserResidencePlan,
+    remote_task_id: &str,
+    session_id: BrowserBridgeSessionId,
+    command: UaiBrowserCommandEnvelope,
+    issued_at: Timestamp,
+) -> ProviderResult<UaiBrowserExchangeIssued> {
+    command.validate_for_plan(plan)?;
+    if command.session_nonce != session_id.to_string() || command.remote_task_id != remote_task_id {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI BrowserBridge command is foreign to the durable Core session",
+        ));
+    }
+    let sequence = u64::from(command.sequence);
+    let command_artifact = command.encode_artifact(plan)?;
+    let exchange = BrowserBridgeExchange::issue(
+        session_id,
+        sequence,
+        UaiBrowserCommandEnvelope::exchange_type().to_owned(),
+        command_artifact.digest(),
+        issued_at,
+    )
+    .map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "UAI command cannot be represented by the durable BrowserBridge exchange",
+        )
+    })?;
+    Ok(UaiBrowserExchangeIssued {
+        command,
+        command_artifact,
+        exchange,
+    })
 }
 
 fn validate_issued_exchange(exchange: &BrowserBridgeExchange) -> ProviderResult<()> {
@@ -2464,13 +2623,46 @@ mod tests {
     }
 
     fn fixture_remote_detail(remote_task_id: &str, advertised: bool) -> RemoteTaskDetail {
+        let ordered_batch_target = remote_task_id == "group:2001:unit-z:group-z";
+        let (
+            unit_id,
+            unit_title,
+            section_id,
+            section_title,
+            micro_id,
+            micro_title,
+            group_id,
+            title,
+        ) = if ordered_batch_target {
+            (
+                "unit-z",
+                "Unit Z",
+                "section-z",
+                "Section Z",
+                "micro-z",
+                "Micro Z",
+                "group-z",
+                "Task Z",
+            )
+        } else {
+            (
+                "unit-1",
+                "Unit 1",
+                "section-1",
+                "Section 2",
+                "micro-1",
+                "Reading",
+                "group-1",
+                "Read the passage",
+            )
+        };
         let normalized = serde_json::json!({
             "schema": "uai.group-task.v1",
             "course_resource_id": "2001",
-            "unit": {"id": "unit-1", "title": "Unit 1"},
-            "section": {"id": "section-1", "title": "Section 2"},
-            "micro": {"id": "micro-1", "title": "Reading"},
-            "group_id": "group-1",
+            "unit": {"id": unit_id, "title": unit_title},
+            "section": {"id": section_id, "title": section_title},
+            "micro": {"id": micro_id, "title": micro_title},
+            "group_id": group_id,
             "task_types": ["rich-text-read"],
             "question_count": 1,
         });
@@ -2478,7 +2670,7 @@ mod tests {
             task: RemoteTask {
                 remote_id: remote_task_id.to_owned(),
                 course_remote_id: Some("course-resource:2001".to_owned()),
-                title: "Read the passage".to_owned(),
+                title: title.to_owned(),
                 source_type: SourceType::Resource,
                 assessment_class: AssessmentClass::Routine,
                 remote_state: RemoteState::Unknown,
@@ -2975,7 +3167,9 @@ mod tests {
         );
     }
 
-    fn initial_residence_cursor() -> (
+    fn initial_residence_cursor(
+        session_nonce: &str,
+    ) -> (
         crate::UaiCourseResidenceBatchPlan,
         UaiBrowserResidencePlan,
         UaiBrowserCommandEnvelope,
@@ -3005,7 +3199,7 @@ mod tests {
         };
         plan.validate().unwrap();
         let binding =
-            UaiBrowserSessionBinding::try_new(&plan, "nonce-cursor", UCONTENT_ORIGIN, "frame-1")
+            UaiBrowserSessionBinding::try_new(&plan, session_nonce, UCONTENT_ORIGIN, "frame-1")
                 .unwrap();
         let command = UaiBrowserCommandEnvelope::scan_menu(&plan, &binding, 1).unwrap();
         let cursor = crate::UaiBrowserResidenceCursor::begin(&batch, &plan, &command).unwrap();
@@ -3015,7 +3209,7 @@ mod tests {
 
     #[test]
     fn encrypted_accumulated_cursor_artifact_is_stable_redacted_and_recoverable() {
-        let (batch, plan, command, cursor) = initial_residence_cursor();
+        let (batch, plan, command, cursor) = initial_residence_cursor("nonce-cursor");
         let artifact = cursor.encode_artifact(&batch, &plan, &command).unwrap();
         let digest = artifact.digest();
         assert_eq!(
@@ -3043,7 +3237,7 @@ mod tests {
 
     #[test]
     fn encrypted_accumulated_cursor_rejects_batch_plan_command_and_schema_drift() {
-        let (batch, plan, command, cursor) = initial_residence_cursor();
+        let (batch, plan, command, cursor) = initial_residence_cursor("nonce-cursor");
         let artifact = cursor.encode_artifact(&batch, &plan, &command).unwrap();
         let digest = artifact.digest();
         let value = artifact.into_secret_value();
@@ -3137,6 +3331,147 @@ mod tests {
                 ProviderErrorKind::InvalidResponse
             );
         }
+    }
+
+    #[test]
+    fn accumulated_cursor_rejects_batch_and_browser_hierarchy_disagreement() {
+        let (batch, mut plan, _command, _cursor) = initial_residence_cursor("nonce-cursor");
+        plan.target.task = "Task A".to_owned();
+        plan.validate().unwrap();
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, "nonce-cursor", UCONTENT_ORIGIN, "frame-1")
+                .unwrap();
+        let command = UaiBrowserCommandEnvelope::scan_menu(&plan, &binding, 1).unwrap();
+        assert_eq!(
+            crate::UaiBrowserResidenceCursor::begin(&batch, &plan, &command)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn cursor_exchange_issuance_atomically_recovers_both_artifacts() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let (batch, _plan, command, cursor) = initial_residence_cursor(&session_nonce);
+        let issued_at = chrono::Utc::now();
+        let issued = bridge
+            .issue_cursor_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                session_id,
+                &cursor,
+                command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            issued.cursor_artifact().digest(),
+            cursor
+                .encode_artifact(&batch, &residence_plan_for_group_z(), issued.command())
+                .unwrap()
+                .digest()
+        );
+        assert_eq!(
+            issued.command_artifact().digest(),
+            cursor.next_command_digest()
+        );
+        assert_eq!(
+            issued.exchange().command_digest,
+            cursor.next_command_digest()
+        );
+        let debug = format!("{issued:?}");
+        assert!(debug.contains("[REDACTED]") && !debug.contains("Unit Z"));
+
+        let (dispatched, command_artifact, cursor_artifact, exchange) = issued.into_parts();
+        let cursor_digest = cursor_artifact.digest();
+        let recovered = bridge
+            .recover_cursor_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                &exchange,
+                &command_artifact.into_secret_value(),
+                &cursor_artifact.into_secret_value(),
+                cursor_digest,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.command(), &dispatched);
+        assert_eq!(recovered.cursor(), &cursor);
+    }
+
+    #[tokio::test]
+    async fn cursor_exchange_recovery_rejects_another_valid_issued_command() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let (batch, plan, command, cursor) = initial_residence_cursor(&session_nonce);
+        let issued_at = chrono::Utc::now();
+        let issued = bridge
+            .issue_cursor_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                session_id,
+                &cursor,
+                command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let (_, _, cursor_artifact, _) = issued.into_parts();
+        let cursor_digest = cursor_artifact.digest();
+
+        let foreign_binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &session_nonce,
+            UCONTENT_ORIGIN,
+            "foreign-frame",
+        )
+        .unwrap();
+        let foreign_command =
+            UaiBrowserCommandEnvelope::scan_menu(&plan, &foreign_binding, 1).unwrap();
+        let foreign = bridge
+            .issue_command_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                session_id,
+                foreign_command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let (_, foreign_command_artifact, foreign_exchange) = foreign.into_parts();
+        assert_eq!(
+            bridge
+                .recover_cursor_exchange(
+                    &context,
+                    "group:2001:unit-z:group-z",
+                    &settings,
+                    &batch,
+                    &foreign_exchange,
+                    &foreign_command_artifact.into_secret_value(),
+                    &cursor_artifact.into_secret_value(),
+                    cursor_digest,
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
     }
 
     #[tokio::test]
@@ -3531,6 +3866,15 @@ mod tests {
         let settings = browser_runtime_settings(play_video);
         residence_plan_from_detail(
             &fixture_remote_detail("group:2001:unit-1:group-1", true),
+            &settings,
+        )
+        .unwrap()
+    }
+
+    fn residence_plan_for_group_z() -> UaiBrowserResidencePlan {
+        let settings = browser_runtime_settings(false);
+        residence_plan_from_detail(
+            &fixture_remote_detail("group:2001:unit-z:group-z", true),
             &settings,
         )
         .unwrap()

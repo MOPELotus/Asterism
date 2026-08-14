@@ -408,6 +408,17 @@ digest; decode verifies those bytes before fresh batch, Browser plan and exact
 next-command rebinding, so neither another valid session command nor a changed
 runtime plan can inherit the cursor after recovery.
 
+Cursor-aware issuance now returns the typed dispatch command, its command
+artifact, the independent cursor artifact and the matching durable exchange
+as one Provider owner. The cursor also requires its fresh Unit/Section/Micro
+and Task titles to agree with the Course batch, not merely the Group ID. On
+recovery the persisted exchange first selects the exact command artifact, then
+the separately persisted cursor digest selects and rebinds the accumulated
+cursor. Even another valid command issued under the same Core session and
+sequence cannot be paired with that cursor. Core remains responsible for
+atomically persisting both encrypted artifacts and the cursor digest before
+dispatch.
+
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.
 
