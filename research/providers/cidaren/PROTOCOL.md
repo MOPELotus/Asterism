@@ -167,8 +167,10 @@ accepting caller-supplied type or digest metadata. The matching
 parses the typed result, hashes that exact bounded document and returns a
 terminal copy of the same exchange. The zeroizing snapshot stays separate for
 Capture credential commit. This closes command/record mismatch inside the
-Provider, but does not claim that the shared helper can yet dispatch the JSON
-or commit its returned credential material.
+Provider. The registered shared trait currently exposes only
+`browser_session_spec`, so Core still needs a bounded Provider-generic opaque
+command/result boundary before the helper can dispatch this JSON, accept the
+owned credential-bearing result and atomically commit its replacement.
 
 After the terminal exchange is accepted,
 `CidarenCaptureSnapshot::into_credential_replacement` consumes the zeroizing

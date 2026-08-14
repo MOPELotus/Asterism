@@ -446,7 +446,10 @@ transition contract. The three symbolic default branches, complete public tag
 refs and latest GitHub release metadata were refreshed again after that fix.
 Ularch remains on release `1.5.4` with the same asset size/digest, MOPELotus
 still has no release, and the historical donor remains on `v3.73` from
-2024-04-02; no revision, tag or release delta entered this checkpoint.
+2024-04-02. The complete Ularch issue listing was also refreshed; issue 112
+from 2026-07-06 remains the most recently updated item and no newer route,
+crypto, authentication or task behavior was reported. No revision, tag,
+release or issue-evidence delta entered this checkpoint.
 
 ## Check procedure
 
