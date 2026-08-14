@@ -29,6 +29,7 @@ const MAX_TABS_PER_MICRO: u32 = 64;
 const MAX_TASKS_PER_TAB: u32 = 128;
 const MAX_POPUP_CLICKS_PER_STAGE: u32 = 16;
 const MAX_DOM_POLL_MILLIS: u64 = 3_000;
+const VIDEO_POLL_MILLIS: u64 = 1_000;
 const MAX_VIDEO_SECONDS: u64 = 30 * 60;
 const MAX_BROWSER_RESULT_BYTES: usize = 64 * 1_024;
 const MAX_BROWSER_RESULT_LABEL_BYTES: usize = 512;
@@ -62,6 +63,54 @@ const POPUP_SELECTORS: [&str; 5] = [
     "button.ant-btn.ant-btn-default.ipublish-modal-footer-ok",
 ];
 const VIDEO_SELECTORS: [&str; 2] = ["video.vjs-tech", "video"];
+const MENU_CONTAINER_SELECTORS: [&str; 12] = [
+    ".pc-slider-menu-container.show .pc-slider-content-menu",
+    ".pc-slier-menu-container.show .pc-slider-content-menu",
+    ".pc-slider-menu-container .pc-slider-content-menu",
+    ".pc-slier-menu-container .pc-slider-content-menu",
+    "#part-menu-view .pc-slider-content-menu",
+    "#part-menu-view .ant-tree",
+    "#part-menu-view",
+    ".pc-slider-content-menu",
+    ".ant-tree",
+    "[role=\"tree\"]",
+    ".ant-menu",
+    ".menuRightTabContent",
+];
+const LEGACY_MENU_ROWS: [&str; 4] = [
+    ".pc-slider-menu-unit",
+    ".pc-slider-menu-section",
+    ".pc-slider-menu-micro",
+    ".pc-slider-menu-node",
+];
+const LEGACY_MENU_UNIT_TEXT: [&str; 1] = [".unit-label-item"];
+const LEGACY_MENU_SECTION_TEXT: [&str; 1] = ["span"];
+const LEGACY_MENU_MICRO_TEXT: [&str; 1] = [".pc-menu-node-name"];
+const LEGACY_MENU_LEAVES: [&str; 2] = [".pc-slider-menu-micro", ".pc-slider-menu-node"];
+const ANT_MENU_ROOTS: [&str; 2] = [".ant-tree", "[role=\"tree\"]"];
+const ANT_MENU_ROWS: [&str; 3] = [
+    "[role=\"treeitem\"]",
+    ".ant-tree-treenode",
+    ".ant-menu-item, .ant-menu-submenu-title",
+];
+const ANT_MENU_LEAVES: [&str; 2] = [".ant-tree-treenode-leaf-last", ".ant-tree-treenode-leaf"];
+const ARIA_MENU_ROOTS: [&str; 1] = ["ul[role=\"menu\"]"];
+const ARIA_MENU_ROWS: [&str; 1] = ["li[role=\"menuitem\"]"];
+const ARIA_MENU_TEXT: [&str; 1] = ["span"];
+const ARIA_MENU_LEAVES: [&str; 1] = ["li[role=\"menuitem\"]"];
+const ARIA_MENU_CLICKABLE: [&str; 1] = ["a[role=\"button\"]"];
+const U3_MENU_ROOTS: [&str; 1] = ["ul.menu--u3menu-3Xu4h"];
+const U3_MENU_ROWS: [&str; 1] = ["li.group.courseware"];
+const U3_MENU_UNIT_TEXT: [&str; 1] = ["li.unit .menu--nolinkText-1gzNf"];
+const U3_MENU_LEAVES: [&str; 1] = ["li.group.courseware span.name a"];
+const CLICKABLE_LEAF_FALLBACKS: [&str; 6] = [
+    ".pc-menu-node-name",
+    ".ant-tree-node-content-wrapper",
+    ".ant-menu-title-content",
+    "a[role=\"button\"]",
+    "a",
+    "span",
+];
 const HELPER_ALLOWED_ORIGINS: [&str; 2] = [UCONTENT_ORIGIN, IPUB_ORIGIN];
 
 /// Stable Core `BrowserBridge` exchange type for one typed UAI command.
@@ -1348,6 +1397,542 @@ impl fmt::Debug for UaiBrowserHelperAction {
     }
 }
 
+/// Audited rendered-text property, in donor fallback order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UaiBrowserHelperTextField {
+    Title,
+    InnerText,
+    TextContent,
+}
+
+/// Closed hierarchy algorithm for one audited UAI menu family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UaiBrowserHelperMenuHierarchyRule {
+    LegacyUnitSectionMicro,
+    AriaLevelThenVisibleIndent,
+    NestedRoleMenu,
+    U3UnitCourseware,
+}
+
+/// Closed leaf-selection algorithm for one audited UAI menu family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UaiBrowserHelperMenuLeafRule {
+    LegacyMicroOrNodeWithNodeSpanFirst,
+    AriaExpandedOrLeafClass,
+    NestedMenuTerminalItem,
+    U3CoursewareLink,
+}
+
+const EMPTY_SELECTORS: [&str; 0] = [];
+const EMPTY_TEXT_FIELDS: [UaiBrowserHelperTextField; 0] = [];
+const TITLE_THEN_INNER_TEXT: [UaiBrowserHelperTextField; 2] = [
+    UaiBrowserHelperTextField::Title,
+    UaiBrowserHelperTextField::InnerText,
+];
+const PICK_NAME_TEXT_FIELDS: [UaiBrowserHelperTextField; 3] = [
+    UaiBrowserHelperTextField::Title,
+    UaiBrowserHelperTextField::InnerText,
+    UaiBrowserHelperTextField::TextContent,
+];
+const TEXT_CONTENT_ONLY: [UaiBrowserHelperTextField; 1] = [UaiBrowserHelperTextField::TextContent];
+
+/// One immutable descriptor in the four-family UAI menu discovery recipe.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct UaiBrowserHelperMenuFamilyRecipe {
+    strategy: UaiMenuDiscoveryStrategy,
+    root_selectors: &'static [&'static str],
+    row_selectors: &'static [&'static str],
+    unit_text_selectors: &'static [&'static str],
+    section_text_selectors: &'static [&'static str],
+    micro_text_selectors: &'static [&'static str],
+    leaf_selectors: &'static [&'static str],
+    clickable_leaf_selectors: &'static [&'static str],
+    unit_text_fields: &'static [UaiBrowserHelperTextField],
+    section_text_fields: &'static [UaiBrowserHelperTextField],
+    micro_text_fields: &'static [UaiBrowserHelperTextField],
+    hierarchy_rule: UaiBrowserHelperMenuHierarchyRule,
+    leaf_rule: UaiBrowserHelperMenuLeafRule,
+}
+
+impl UaiBrowserHelperMenuFamilyRecipe {
+    pub const fn strategy(self) -> UaiMenuDiscoveryStrategy {
+        self.strategy
+    }
+
+    pub const fn root_selectors(self) -> &'static [&'static str] {
+        self.root_selectors
+    }
+
+    pub const fn row_selectors(self) -> &'static [&'static str] {
+        self.row_selectors
+    }
+
+    pub const fn unit_text_selectors(self) -> &'static [&'static str] {
+        self.unit_text_selectors
+    }
+
+    pub const fn section_text_selectors(self) -> &'static [&'static str] {
+        self.section_text_selectors
+    }
+
+    pub const fn micro_text_selectors(self) -> &'static [&'static str] {
+        self.micro_text_selectors
+    }
+
+    pub const fn leaf_selectors(self) -> &'static [&'static str] {
+        self.leaf_selectors
+    }
+
+    pub const fn clickable_leaf_selectors(self) -> &'static [&'static str] {
+        self.clickable_leaf_selectors
+    }
+
+    pub const fn unit_text_fields(self) -> &'static [UaiBrowserHelperTextField] {
+        self.unit_text_fields
+    }
+
+    pub const fn section_text_fields(self) -> &'static [UaiBrowserHelperTextField] {
+        self.section_text_fields
+    }
+
+    pub const fn micro_text_fields(self) -> &'static [UaiBrowserHelperTextField] {
+        self.micro_text_fields
+    }
+
+    pub const fn hierarchy_rule(self) -> UaiBrowserHelperMenuHierarchyRule {
+        self.hierarchy_rule
+    }
+
+    pub const fn leaf_rule(self) -> UaiBrowserHelperMenuLeafRule {
+        self.leaf_rule
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperMenuFamilyRecipe {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperMenuFamilyRecipe")
+            .field("strategy", &self.strategy)
+            .field("selectors", &"[REDACTED]")
+            .field("text_fields", &"[REDACTED]")
+            .field("hierarchy_rule", &self.hierarchy_rule)
+            .field("leaf_rule", &self.leaf_rule)
+            .finish_non_exhaustive()
+    }
+}
+
+const MENU_FAMILY_RECIPES: [UaiBrowserHelperMenuFamilyRecipe; 4] = [
+    UaiBrowserHelperMenuFamilyRecipe {
+        strategy: UaiMenuDiscoveryStrategy::LegacySlider,
+        root_selectors: &EMPTY_SELECTORS,
+        row_selectors: &LEGACY_MENU_ROWS,
+        unit_text_selectors: &LEGACY_MENU_UNIT_TEXT,
+        section_text_selectors: &LEGACY_MENU_SECTION_TEXT,
+        micro_text_selectors: &LEGACY_MENU_MICRO_TEXT,
+        leaf_selectors: &LEGACY_MENU_LEAVES,
+        clickable_leaf_selectors: &CLICKABLE_LEAF_FALLBACKS,
+        unit_text_fields: &TITLE_THEN_INNER_TEXT,
+        section_text_fields: &TITLE_THEN_INNER_TEXT,
+        micro_text_fields: &PICK_NAME_TEXT_FIELDS,
+        hierarchy_rule: UaiBrowserHelperMenuHierarchyRule::LegacyUnitSectionMicro,
+        leaf_rule: UaiBrowserHelperMenuLeafRule::LegacyMicroOrNodeWithNodeSpanFirst,
+    },
+    UaiBrowserHelperMenuFamilyRecipe {
+        strategy: UaiMenuDiscoveryStrategy::AntTree,
+        root_selectors: &ANT_MENU_ROOTS,
+        row_selectors: &ANT_MENU_ROWS,
+        unit_text_selectors: &EMPTY_SELECTORS,
+        section_text_selectors: &EMPTY_SELECTORS,
+        micro_text_selectors: &CLICKABLE_LEAF_FALLBACKS,
+        leaf_selectors: &ANT_MENU_LEAVES,
+        clickable_leaf_selectors: &CLICKABLE_LEAF_FALLBACKS,
+        unit_text_fields: &PICK_NAME_TEXT_FIELDS,
+        section_text_fields: &PICK_NAME_TEXT_FIELDS,
+        micro_text_fields: &PICK_NAME_TEXT_FIELDS,
+        hierarchy_rule: UaiBrowserHelperMenuHierarchyRule::AriaLevelThenVisibleIndent,
+        leaf_rule: UaiBrowserHelperMenuLeafRule::AriaExpandedOrLeafClass,
+    },
+    UaiBrowserHelperMenuFamilyRecipe {
+        strategy: UaiMenuDiscoveryStrategy::AriaMenu,
+        root_selectors: &ARIA_MENU_ROOTS,
+        row_selectors: &ARIA_MENU_ROWS,
+        unit_text_selectors: &ARIA_MENU_TEXT,
+        section_text_selectors: &ARIA_MENU_TEXT,
+        micro_text_selectors: &ARIA_MENU_TEXT,
+        leaf_selectors: &ARIA_MENU_LEAVES,
+        clickable_leaf_selectors: &ARIA_MENU_CLICKABLE,
+        unit_text_fields: &TEXT_CONTENT_ONLY,
+        section_text_fields: &TEXT_CONTENT_ONLY,
+        micro_text_fields: &TEXT_CONTENT_ONLY,
+        hierarchy_rule: UaiBrowserHelperMenuHierarchyRule::NestedRoleMenu,
+        leaf_rule: UaiBrowserHelperMenuLeafRule::NestedMenuTerminalItem,
+    },
+    UaiBrowserHelperMenuFamilyRecipe {
+        strategy: UaiMenuDiscoveryStrategy::U3Menu,
+        root_selectors: &U3_MENU_ROOTS,
+        row_selectors: &U3_MENU_ROWS,
+        unit_text_selectors: &U3_MENU_UNIT_TEXT,
+        section_text_selectors: &EMPTY_SELECTORS,
+        micro_text_selectors: &U3_MENU_LEAVES,
+        leaf_selectors: &U3_MENU_LEAVES,
+        clickable_leaf_selectors: &U3_MENU_LEAVES,
+        unit_text_fields: &PICK_NAME_TEXT_FIELDS,
+        section_text_fields: &EMPTY_TEXT_FIELDS,
+        micro_text_fields: &PICK_NAME_TEXT_FIELDS,
+        hierarchy_rule: UaiBrowserHelperMenuHierarchyRule::U3UnitCourseware,
+        leaf_rule: UaiBrowserHelperMenuLeafRule::U3CoursewareLink,
+    },
+];
+
+/// Capture-readable recipe for ordered Menu discovery only.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiBrowserHelperMenuRecipe {
+    container_selectors: &'static [&'static str],
+    families: [UaiBrowserHelperMenuFamilyRecipe; 4],
+    iframe_selectors: &'static [&'static str],
+    max_entries: u32,
+    iframe_scan_timeout_millis: u64,
+    iframe_scan_retry_millis: u64,
+    max_iframe_scan_retries: u32,
+}
+
+impl UaiBrowserHelperMenuRecipe {
+    pub const fn container_selectors(&self) -> &'static [&'static str] {
+        self.container_selectors
+    }
+
+    pub const fn families(&self) -> &[UaiBrowserHelperMenuFamilyRecipe; 4] {
+        &self.families
+    }
+
+    pub const fn iframe_selectors(&self) -> &'static [&'static str] {
+        self.iframe_selectors
+    }
+
+    pub const fn max_entries(&self) -> u32 {
+        self.max_entries
+    }
+
+    pub const fn iframe_scan_timeout_millis(&self) -> u64 {
+        self.iframe_scan_timeout_millis
+    }
+
+    pub const fn iframe_scan_retry_millis(&self) -> u64 {
+        self.iframe_scan_retry_millis
+    }
+
+    pub const fn max_iframe_scan_retries(&self) -> u32 {
+        self.max_iframe_scan_retries
+    }
+
+    fn validate(&self) -> ProviderResult<()> {
+        if self.container_selectors == MENU_CONTAINER_SELECTORS
+            && self.families == MENU_FAMILY_RECIPES
+            && self.iframe_selectors == IFRAME_SELECTORS
+            && self.max_entries == MAX_DISCOVERED_MICROS
+            && self.iframe_scan_timeout_millis == IFRAME_SCAN_TIMEOUT_MILLIS
+            && self.iframe_scan_retry_millis == IFRAME_SCAN_RETRY_MILLIS
+            && self.max_iframe_scan_retries == MAX_IFRAME_SCAN_RETRIES
+        {
+            Ok(())
+        } else {
+            Err(invalid_helper_recipe("UAI helper Menu DOM recipe drifted"))
+        }
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperMenuRecipe {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperMenuRecipe")
+            .field("dom", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Fixed active-state test interpreted by Capture for a rendered page row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UaiBrowserHelperPageActiveRule {
+    AriaSelectedTrue,
+    ClosestAntColumnHasActiveClass,
+    SelfHasActiveClass,
+    SelfHasTaskActiveClass,
+    SelfHasCurrentClass,
+}
+
+const TAB_ACTIVE_RULES: [UaiBrowserHelperPageActiveRule; 3] = [
+    UaiBrowserHelperPageActiveRule::AriaSelectedTrue,
+    UaiBrowserHelperPageActiveRule::ClosestAntColumnHasActiveClass,
+    UaiBrowserHelperPageActiveRule::SelfHasActiveClass,
+];
+const TASK_ACTIVE_RULES: [UaiBrowserHelperPageActiveRule; 3] = [
+    UaiBrowserHelperPageActiveRule::SelfHasActiveClass,
+    UaiBrowserHelperPageActiveRule::SelfHasTaskActiveClass,
+    UaiBrowserHelperPageActiveRule::SelfHasCurrentClass,
+];
+const TAB_TEXT_FIELDS: [&[UaiBrowserHelperTextField]; 2] =
+    [&TITLE_THEN_INNER_TEXT, &PICK_NAME_TEXT_FIELDS];
+const TASK_TEXT_FIELDS: [&[UaiBrowserHelperTextField]; 1] = [&TITLE_THEN_INNER_TEXT];
+
+/// Capture-readable recipe for one exact Tab or Task scan.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiBrowserHelperPageRecipe {
+    scope: UaiBrowserPageScope,
+    selectors: &'static [&'static str],
+    text_fields: &'static [&'static [UaiBrowserHelperTextField]],
+    active_rules: &'static [UaiBrowserHelperPageActiveRule],
+    max_entries: u32,
+}
+
+impl UaiBrowserHelperPageRecipe {
+    pub const fn scope(&self) -> UaiBrowserPageScope {
+        self.scope
+    }
+
+    pub const fn selectors(&self) -> &'static [&'static str] {
+        self.selectors
+    }
+
+    pub const fn text_fields(&self) -> &'static [&'static [UaiBrowserHelperTextField]] {
+        self.text_fields
+    }
+
+    pub const fn active_rules(&self) -> &'static [UaiBrowserHelperPageActiveRule] {
+        self.active_rules
+    }
+
+    pub const fn max_entries(&self) -> u32 {
+        self.max_entries
+    }
+
+    fn validate(&self) -> ProviderResult<()> {
+        let valid = match self.scope {
+            UaiBrowserPageScope::Tab => {
+                self.selectors == TAB_SELECTORS
+                    && self.text_fields == TAB_TEXT_FIELDS
+                    && self.active_rules == TAB_ACTIVE_RULES
+                    && self.max_entries == MAX_TABS_PER_MICRO
+            }
+            UaiBrowserPageScope::Task => {
+                self.selectors == TASK_SELECTORS
+                    && self.text_fields == TASK_TEXT_FIELDS
+                    && self.active_rules == TASK_ACTIVE_RULES
+                    && self.max_entries == MAX_TASKS_PER_TAB
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(invalid_helper_recipe("UAI helper Page DOM recipe drifted"))
+        }
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperPageRecipe {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperPageRecipe")
+            .field("scope", &self.scope)
+            .field("dom", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+/// The only three click target kinds accepted after command projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UaiBrowserHelperClickKind {
+    Menu,
+    Tab,
+    Task,
+}
+
+/// Fixed event sequence for one projected opaque handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UaiBrowserHelperClickStep {
+    ScrollIntoViewCentered,
+    MouseOver,
+    MouseDown,
+    MouseUp,
+    Click,
+}
+
+const CLICK_STEPS: [UaiBrowserHelperClickStep; 5] = [
+    UaiBrowserHelperClickStep::ScrollIntoViewCentered,
+    UaiBrowserHelperClickStep::MouseOver,
+    UaiBrowserHelperClickStep::MouseDown,
+    UaiBrowserHelperClickStep::MouseUp,
+    UaiBrowserHelperClickStep::Click,
+];
+
+/// Capture-readable click recipe retaining only a projected opaque handle.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiBrowserHelperClickRecipe {
+    kind: UaiBrowserHelperClickKind,
+    handle: String,
+    steps: [UaiBrowserHelperClickStep; 5],
+}
+
+impl UaiBrowserHelperClickRecipe {
+    pub const fn kind(&self) -> UaiBrowserHelperClickKind {
+        self.kind
+    }
+
+    pub fn handle(&self) -> &str {
+        &self.handle
+    }
+
+    pub const fn steps(&self) -> &[UaiBrowserHelperClickStep; 5] {
+        &self.steps
+    }
+
+    fn validate(&self) -> ProviderResult<()> {
+        let valid_handle = match self.kind {
+            UaiBrowserHelperClickKind::Menu => is_browser_menu_handle(&self.handle),
+            UaiBrowserHelperClickKind::Tab | UaiBrowserHelperClickKind::Task => {
+                is_browser_page_handle(&self.handle)
+            }
+        };
+        if valid_handle && self.steps == CLICK_STEPS {
+            Ok(())
+        } else {
+            Err(invalid_helper_recipe("UAI helper Click DOM recipe drifted"))
+        }
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperClickRecipe {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperClickRecipe")
+            .field("kind", &self.kind)
+            .field("handle", &"[REDACTED]")
+            .field("steps", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Capture-readable bounded residence recipe for the exact projected Task.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiBrowserHelperResidenceRecipe {
+    task_handle: String,
+    seconds: u64,
+    play_video: bool,
+    popup_selectors: &'static [&'static str],
+    video_selectors: &'static [&'static str],
+    dom_poll_millis: u64,
+    video_poll_millis: u64,
+    max_popup_clicks: u32,
+    max_video_seconds: u64,
+}
+
+impl UaiBrowserHelperResidenceRecipe {
+    pub fn task_handle(&self) -> &str {
+        &self.task_handle
+    }
+
+    pub const fn seconds(&self) -> u64 {
+        self.seconds
+    }
+
+    pub const fn play_video(&self) -> bool {
+        self.play_video
+    }
+
+    pub const fn popup_selectors(&self) -> &'static [&'static str] {
+        self.popup_selectors
+    }
+
+    pub const fn video_selectors(&self) -> &'static [&'static str] {
+        self.video_selectors
+    }
+
+    pub const fn dom_poll_millis(&self) -> u64 {
+        self.dom_poll_millis
+    }
+
+    pub const fn video_poll_millis(&self) -> u64 {
+        self.video_poll_millis
+    }
+
+    pub const fn max_popup_clicks(&self) -> u32 {
+        self.max_popup_clicks
+    }
+
+    pub const fn max_video_seconds(&self) -> u64 {
+        self.max_video_seconds
+    }
+
+    fn validate(&self) -> ProviderResult<()> {
+        if is_browser_page_handle(&self.task_handle)
+            && (1..=28_800).contains(&self.seconds)
+            && self.popup_selectors == POPUP_SELECTORS
+            && self.video_selectors == VIDEO_SELECTORS
+            && self.dom_poll_millis == MAX_DOM_POLL_MILLIS
+            && self.video_poll_millis == VIDEO_POLL_MILLIS
+            && self.max_popup_clicks == MAX_POPUP_CLICKS_PER_STAGE
+            && self.max_video_seconds == MAX_VIDEO_SECONDS
+        {
+            Ok(())
+        } else {
+            Err(invalid_helper_recipe(
+                "UAI helper Residence DOM recipe drifted",
+            ))
+        }
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperResidenceRecipe {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperResidenceRecipe")
+            .field("task_handle", &"[REDACTED]")
+            .field("dom", &"[REDACTED]")
+            .field("budget", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Closed, non-executing DOM recipe compiled from one validated projection.
+#[derive(Clone, Eq, PartialEq)]
+pub enum UaiBrowserHelperDomRecipe {
+    Menu(Box<UaiBrowserHelperMenuRecipe>),
+    ScanPage(UaiBrowserHelperPageRecipe),
+    Click(UaiBrowserHelperClickRecipe),
+    Residence(UaiBrowserHelperResidenceRecipe),
+    Ping,
+}
+
+impl UaiBrowserHelperDomRecipe {
+    /// Revalidates every selector, text rule, action binding and bound against
+    /// the compile-time donor profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol drift if any private recipe fact differs from the
+    /// audited constants or the projected handle/budget bounds.
+    pub fn validate(&self) -> ProviderResult<()> {
+        match self {
+            Self::Menu(recipe) => recipe.validate(),
+            Self::ScanPage(recipe) => recipe.validate(),
+            Self::Click(recipe) => recipe.validate(),
+            Self::Residence(recipe) => recipe.validate(),
+            Self::Ping => Ok(()),
+        }
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperDomRecipe {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Menu(_) => formatter.write_str("Menu([REDACTED])"),
+            Self::ScanPage(_) => formatter.write_str("ScanPage([REDACTED])"),
+            Self::Click(_) => formatter.write_str("Click([REDACTED])"),
+            Self::Residence(_) => formatter.write_str("Residence([REDACTED])"),
+            Self::Ping => formatter.write_str("Ping"),
+        }
+    }
+}
+
 /// Helper-safe projection of one exact Core-dispatched UAI command.
 ///
 /// Session nonce is verified and then discarded. Selector/script authority is
@@ -1462,6 +2047,97 @@ impl UaiBrowserHelperCommandProjection {
 
     pub const fn dom_profile(&self) -> UaiBrowserHelperDomProfile {
         UaiBrowserHelperDomProfile
+    }
+
+    /// Compiles the validated action and read-only donor profile into one
+    /// closed typed recipe. This function performs no DOM operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol drift if a compile-time recipe fact or projected
+    /// handle/budget no longer satisfies the audited bounds.
+    pub fn compile_dom_recipe(&self) -> ProviderResult<UaiBrowserHelperDomRecipe> {
+        let profile = self.dom_profile();
+        let recipe = match &self.action {
+            UaiBrowserHelperAction::ScanMenu => {
+                UaiBrowserHelperDomRecipe::Menu(Box::new(UaiBrowserHelperMenuRecipe {
+                    container_selectors: &MENU_CONTAINER_SELECTORS,
+                    families: MENU_FAMILY_RECIPES,
+                    iframe_selectors: profile.iframe_selectors(),
+                    max_entries: profile.max_discovered_micros(),
+                    iframe_scan_timeout_millis: profile.iframe_scan_timeout_millis(),
+                    iframe_scan_retry_millis: profile.iframe_scan_retry_millis(),
+                    max_iframe_scan_retries: profile.max_iframe_scan_retries(),
+                }))
+            }
+            UaiBrowserHelperAction::ScanPage { scope } => {
+                let (selectors, text_fields, active_rules, max_entries): (
+                    &'static [&'static str],
+                    &'static [&'static [UaiBrowserHelperTextField]],
+                    &'static [UaiBrowserHelperPageActiveRule],
+                    u32,
+                ) = match scope {
+                    UaiBrowserPageScope::Tab => (
+                        profile.tab_selectors(),
+                        &TAB_TEXT_FIELDS,
+                        &TAB_ACTIVE_RULES,
+                        profile.max_tabs_per_micro(),
+                    ),
+                    UaiBrowserPageScope::Task => (
+                        profile.task_selectors(),
+                        &TASK_TEXT_FIELDS,
+                        &TASK_ACTIVE_RULES,
+                        profile.max_tasks_per_tab(),
+                    ),
+                };
+                UaiBrowserHelperDomRecipe::ScanPage(UaiBrowserHelperPageRecipe {
+                    scope: *scope,
+                    selectors,
+                    text_fields,
+                    active_rules,
+                    max_entries,
+                })
+            }
+            UaiBrowserHelperAction::ClickMenu { handle } => {
+                UaiBrowserHelperDomRecipe::Click(UaiBrowserHelperClickRecipe {
+                    kind: UaiBrowserHelperClickKind::Menu,
+                    handle: handle.clone(),
+                    steps: CLICK_STEPS,
+                })
+            }
+            UaiBrowserHelperAction::ClickTab { handle } => {
+                UaiBrowserHelperDomRecipe::Click(UaiBrowserHelperClickRecipe {
+                    kind: UaiBrowserHelperClickKind::Tab,
+                    handle: handle.clone(),
+                    steps: CLICK_STEPS,
+                })
+            }
+            UaiBrowserHelperAction::ClickTask { handle } => {
+                UaiBrowserHelperDomRecipe::Click(UaiBrowserHelperClickRecipe {
+                    kind: UaiBrowserHelperClickKind::Task,
+                    handle: handle.clone(),
+                    steps: CLICK_STEPS,
+                })
+            }
+            UaiBrowserHelperAction::Residence {
+                task_handle,
+                seconds,
+                play_video,
+            } => UaiBrowserHelperDomRecipe::Residence(UaiBrowserHelperResidenceRecipe {
+                task_handle: task_handle.clone(),
+                seconds: *seconds,
+                play_video: *play_video,
+                popup_selectors: profile.popup_selectors(),
+                video_selectors: profile.video_selectors(),
+                dom_poll_millis: profile.dom_poll_millis(),
+                video_poll_millis: VIDEO_POLL_MILLIS,
+                max_popup_clicks: profile.max_popup_clicks_per_stage(),
+                max_video_seconds: profile.max_video_seconds(),
+            }),
+            UaiBrowserHelperAction::Ping => UaiBrowserHelperDomRecipe::Ping,
+        };
+        recipe.validate()?;
+        Ok(recipe)
     }
 
     /// Encodes one action-matched typed helper observation into the existing
@@ -2460,6 +3136,10 @@ fn helper_action_from_command(
 
 fn invalid_helper_dispatch(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::InvalidResponse, message)
+}
+
+fn invalid_helper_recipe(message: &'static str) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
 }
 
 fn helper_menu_entries(
@@ -4502,7 +5182,7 @@ mod tests {
     #[test]
     #[allow(
         clippy::too_many_lines,
-        reason = "one matrix proves all seven audited helper actions and every fixed DOM profile fact"
+        reason = "one matrix proves every audited helper action, both scan scopes and every fixed DOM profile fact"
     )]
     fn helper_projection_distinguishes_only_audited_actions_and_fixed_dom_profile() {
         let plan = residence_plan(true);
@@ -4584,6 +5264,13 @@ mod tests {
                 UaiBrowserCommandEnvelope::ping(&plan, &binding, 7).unwrap(),
                 UaiBrowserHelperAction::Ping,
             ),
+            (
+                UaiBrowserCommandEnvelope::scan_page(&plan, &binding, 8, UaiBrowserPageScope::Task)
+                    .unwrap(),
+                UaiBrowserHelperAction::ScanPage {
+                    scope: UaiBrowserPageScope::Task,
+                },
+            ),
         ];
 
         for (command, expected_action) in commands {
@@ -4614,6 +5301,145 @@ mod tests {
             | UaiBrowserHelperAction::ClickTask { handle } = &expected_action
             {
                 assert!(!debug.contains(handle));
+            }
+
+            let recipe = projected.compile_dom_recipe().unwrap();
+            recipe.validate().unwrap();
+            let recipe_debug = format!("{recipe:?}");
+            assert!(!recipe_debug.contains(".pc-"));
+            assert!(!recipe_debug.contains("video"));
+            match (&expected_action, &recipe) {
+                (UaiBrowserHelperAction::ScanMenu, UaiBrowserHelperDomRecipe::Menu(recipe)) => {
+                    assert_eq!(recipe.container_selectors(), MENU_CONTAINER_SELECTORS);
+                    assert_eq!(recipe.iframe_selectors(), IFRAME_SELECTORS);
+                    assert_eq!(recipe.max_entries(), 2_048);
+                    assert_eq!(recipe.iframe_scan_timeout_millis(), 30_000);
+                    assert_eq!(recipe.iframe_scan_retry_millis(), 1_500);
+                    assert_eq!(recipe.max_iframe_scan_retries(), 20);
+                    let families = recipe.families();
+                    assert_eq!(families.len(), 4);
+                    assert_eq!(families[0].row_selectors(), LEGACY_MENU_ROWS);
+                    assert_eq!(families[0].unit_text_fields(), TITLE_THEN_INNER_TEXT);
+                    assert_eq!(families[0].leaf_selectors(), LEGACY_MENU_LEAVES);
+                    assert_eq!(
+                        families[0].leaf_rule(),
+                        UaiBrowserHelperMenuLeafRule::LegacyMicroOrNodeWithNodeSpanFirst
+                    );
+                    assert_eq!(families[1].root_selectors(), ANT_MENU_ROOTS);
+                    assert_eq!(families[1].row_selectors(), ANT_MENU_ROWS);
+                    assert_eq!(families[1].leaf_selectors(), ANT_MENU_LEAVES);
+                    assert_eq!(
+                        families[1].hierarchy_rule(),
+                        UaiBrowserHelperMenuHierarchyRule::AriaLevelThenVisibleIndent
+                    );
+                    assert_eq!(families[2].root_selectors(), ARIA_MENU_ROOTS);
+                    assert_eq!(families[2].row_selectors(), ARIA_MENU_ROWS);
+                    assert_eq!(families[2].micro_text_fields(), TEXT_CONTENT_ONLY);
+                    assert_eq!(families[2].clickable_leaf_selectors(), ARIA_MENU_CLICKABLE);
+                    assert_eq!(families[3].root_selectors(), U3_MENU_ROOTS);
+                    assert_eq!(families[3].unit_text_selectors(), U3_MENU_UNIT_TEXT);
+                    assert_eq!(families[3].section_text_fields(), EMPTY_TEXT_FIELDS);
+                    assert_eq!(families[3].clickable_leaf_selectors(), U3_MENU_LEAVES);
+                }
+                (
+                    UaiBrowserHelperAction::ScanPage { scope },
+                    UaiBrowserHelperDomRecipe::ScanPage(recipe),
+                ) => {
+                    assert_eq!(recipe.scope(), *scope);
+                    let (selectors, fields, rules, max_entries) = match scope {
+                        UaiBrowserPageScope::Tab => (
+                            TAB_SELECTORS.as_slice(),
+                            TAB_TEXT_FIELDS.as_slice(),
+                            TAB_ACTIVE_RULES.as_slice(),
+                            64,
+                        ),
+                        UaiBrowserPageScope::Task => (
+                            TASK_SELECTORS.as_slice(),
+                            TASK_TEXT_FIELDS.as_slice(),
+                            TASK_ACTIVE_RULES.as_slice(),
+                            128,
+                        ),
+                    };
+                    assert_eq!(recipe.selectors(), selectors);
+                    assert_eq!(recipe.text_fields(), fields);
+                    assert_eq!(recipe.active_rules(), rules);
+                    assert_eq!(recipe.max_entries(), max_entries);
+                }
+                (
+                    UaiBrowserHelperAction::ClickMenu { handle },
+                    UaiBrowserHelperDomRecipe::Click(recipe),
+                ) => {
+                    assert_eq!(recipe.kind(), UaiBrowserHelperClickKind::Menu);
+                    assert_eq!(recipe.handle(), handle);
+                    assert_eq!(recipe.steps(), &CLICK_STEPS);
+                    assert!(!recipe_debug.contains(handle));
+                }
+                (
+                    UaiBrowserHelperAction::ClickTab { handle },
+                    UaiBrowserHelperDomRecipe::Click(recipe),
+                ) => {
+                    assert_eq!(recipe.kind(), UaiBrowserHelperClickKind::Tab);
+                    assert_eq!(recipe.handle(), handle);
+                    assert_eq!(recipe.steps(), &CLICK_STEPS);
+                    assert!(!recipe_debug.contains(handle));
+                }
+                (
+                    UaiBrowserHelperAction::ClickTask { handle },
+                    UaiBrowserHelperDomRecipe::Click(recipe),
+                ) => {
+                    assert_eq!(recipe.kind(), UaiBrowserHelperClickKind::Task);
+                    assert_eq!(recipe.handle(), handle);
+                    assert_eq!(recipe.steps(), &CLICK_STEPS);
+                    assert!(!recipe_debug.contains(handle));
+                }
+                (
+                    UaiBrowserHelperAction::Residence {
+                        task_handle,
+                        seconds,
+                        play_video,
+                    },
+                    UaiBrowserHelperDomRecipe::Residence(recipe),
+                ) => {
+                    assert_eq!(recipe.task_handle(), task_handle);
+                    assert_eq!(recipe.seconds(), *seconds);
+                    assert_eq!(recipe.play_video(), *play_video);
+                    assert_eq!(recipe.popup_selectors(), POPUP_SELECTORS);
+                    assert_eq!(recipe.video_selectors(), VIDEO_SELECTORS);
+                    assert_eq!(recipe.dom_poll_millis(), 3_000);
+                    assert_eq!(recipe.video_poll_millis(), 1_000);
+                    assert_eq!(recipe.max_popup_clicks(), 16);
+                    assert_eq!(recipe.max_video_seconds(), 1_800);
+                    assert!(!recipe_debug.contains(task_handle));
+                    assert!(!recipe_debug.contains(&seconds.to_string()));
+                }
+                (UaiBrowserHelperAction::Ping, UaiBrowserHelperDomRecipe::Ping) => {}
+                _ => panic!("helper DOM recipe does not match projected action"),
+            }
+            let mut drifted = recipe.clone();
+            let changed = match &mut drifted {
+                UaiBrowserHelperDomRecipe::Menu(recipe) => {
+                    recipe.max_entries -= 1;
+                    true
+                }
+                UaiBrowserHelperDomRecipe::ScanPage(recipe) => {
+                    recipe.max_entries -= 1;
+                    true
+                }
+                UaiBrowserHelperDomRecipe::Click(recipe) => {
+                    recipe.steps.swap(1, 2);
+                    true
+                }
+                UaiBrowserHelperDomRecipe::Residence(recipe) => {
+                    recipe.video_poll_millis += 1;
+                    true
+                }
+                UaiBrowserHelperDomRecipe::Ping => false,
+            };
+            if changed {
+                assert_eq!(
+                    drifted.validate().unwrap_err().kind,
+                    ProviderErrorKind::ProtocolDrift
+                );
             }
 
             let observation = match &expected_action {

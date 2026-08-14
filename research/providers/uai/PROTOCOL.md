@@ -432,6 +432,31 @@ handler until Core defines active-control cancellation/recovery ownership. This
 boundary decodes and projects only; it performs no DOM operation and accepts
 no helper echo as authority.
 
+That projection now compiles into a second closed typed value before Capture
+interprets any DOM work. `ScanMenu` carries the donor's exact ordered 12-root
+container search and four immutable family descriptors: legacy `pc-slider`
+Unit/Section/Micro rows, Ant Tree/Menu rows with ARIA-level-then-visible-indent
+hierarchy and `aria-expanded`/leaf-class tests, terminal nested
+`ul/li[role=menu|menuitem]` hierarchy, and current `u3menu` Unit/courseware
+leaves. Each descriptor separately freezes its row, hierarchy-text and
+clickable-leaf selectors plus the ordered `title`/`innerText`/`textContent`
+fallbacks it actually uses. It also retains the four iframe selectors and
+30-second/1.5-second/20-retry scan bounds.
+
+Scoped `ScanPage` recipes freeze both exact Tab selectors or the one exact Task
+selector, per-selector text fields, the Tab ARIA/closest-parent/self active
+tests and the Task `active`/`pc-task-active`/`current` tests. Each click recipe
+contains only the opaque handle copied from the validated projection and the
+fixed centered-scroll then `mouseover`, `mousedown`, `mouseup`, `click`
+sequence. Residence contains only the projected Task handle/budget/video flag,
+five exact popup selectors, two exact video selectors, the 3-second DOM poll,
+donor 1-second video poll, 16-popup and 30-minute video ceilings. `Ping` has no
+DOM facts. Every field is private and has no raw JSON, script or caller-selector
+constructor; validation compares all constants, order and bounds exactly, and
+Debug redacts DOM, handles and budgets. Recipe compilation still executes no
+DOM, and the earlier projection rejection keeps `ResidenceControl` outside the
+boundary.
+
 The inverse helper boundary also remains typed. The validated projection keeps
 its session/origin/frame/Task/sequence internally but redacts all five from
 Debug. Callers can submit only bounded `MenuScanned`, `PageScanned`,

@@ -132,7 +132,12 @@ checkpoint, not a Provider completion boundary. It:
     master-resolved settings and nonce/frame/origin security. A consuming
     helper projection now validates Core secret bytes/digest plus actual
     session/origin/frame/sequence and exposes only seven typed audited actions
-    with a read-only compile-time DOM profile. The same projection accepts only
+    with a read-only compile-time DOM profile. It compiles those two authorities
+    into a closed action-specific DOM recipe: exact four-family Menu hierarchy,
+    scoped Tab/Task active tests, projected-handle-only click flow, bounded
+    popup/video residence or DOM-free Ping. Recipe fields are private,
+    compile-time-only, exactly revalidated and Debug-redacted. The same
+    projection accepts only
     action-matched bounded typed observations, reconstructs every binding and
     opaque handle itself and emits the existing zeroizing event/residence
     schema for Core; shared action dispatch remains the executor gap;
