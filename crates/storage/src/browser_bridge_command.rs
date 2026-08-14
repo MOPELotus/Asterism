@@ -1548,6 +1548,122 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression proves result dead letter, session failure, token revocation and audit in one transaction"
+    )]
+    async fn dead_letter_fails_session_and_revokes_helper_access_atomically() {
+        let fixture = fixture().await;
+        let now = Utc::now() - Duration::seconds(10);
+        let (session, access_digest) = fixture.claimed_session(now).await;
+        let command = br#"{"kind":"capture_snapshot","nonce":"dead-letter"}"#;
+        let issued = BrowserBridgeExchange::issue(
+            session.id,
+            1,
+            "cidaren.capture.snapshot".to_owned(),
+            digest(command),
+            now + Duration::seconds(2),
+        )
+        .unwrap();
+        let access = Fixture::access();
+        fixture
+            .command_repository
+            .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
+                exchange: &issued,
+                command_artifact: SecretValue::new(command.to_vec()),
+                runtime_state: None,
+                access: &access,
+            })
+            .await
+            .unwrap();
+        fixture
+            .dispatch_command(
+                &session,
+                1,
+                &access_digest,
+                &access,
+                now + Duration::milliseconds(2_500),
+            )
+            .await;
+        let received_at = now + Duration::seconds(3);
+        let raw_result = br#"{"kind":"capture_snapshot","token":"invalid"}"#;
+        fixture
+            .command_repository
+            .receive_browser_bridge_result(BrowserBridgeResultReceiveRequest {
+                metadata: &BrowserBridgeResultArtifactMetadata {
+                    session_id: session.id,
+                    sequence: 1,
+                    result_type: "cidaren.capture.snapshot.result".to_owned(),
+                    result_digest: digest(raw_result),
+                    received_at,
+                },
+                result_artifact: SecretValue::new(raw_result.to_vec()),
+                access_token_digest: &access_digest,
+                access: &access,
+            })
+            .await
+            .unwrap();
+        let claimed = fixture
+            .session_repository
+            .claim_pending_browser_bridge_results(
+                received_at,
+                &fixture.provider,
+                &["cidaren.capture.snapshot.result"],
+                1,
+                "dead-letter-worker",
+                received_at + Duration::seconds(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let failed_at = received_at + Duration::seconds(1);
+        assert!(
+            fixture
+                .session_repository
+                .finish_browser_bridge_result_attempt(BrowserBridgeResultAttemptFinishRequest {
+                    session_id: session.id,
+                    sequence: 1,
+                    worker_id: "dead-letter-worker",
+                    failed_at,
+                    retry_at: None,
+                    error_kind: "provider_validation",
+                })
+                .await
+                .unwrap()
+        );
+
+        let persisted: (String, Option<Vec<u8>>, i64, String, Option<String>) = sqlx::query_as(
+            "SELECT session.state_json, session.access_token_hash, session.revision, \
+                    result.processing_state, result.last_error_kind \
+             FROM browser_bridge_sessions AS session \
+             JOIN browser_bridge_result_artifacts AS result ON result.session_id = session.id \
+             WHERE session.id = ? AND result.sequence = 1",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<BrowserBridgeSessionState>(&persisted.0).unwrap(),
+            BrowserBridgeSessionState::Failed
+        );
+        assert_eq!(persisted.1, None);
+        assert_eq!(persisted.2, 3);
+        assert_eq!(persisted.3, "dead_letter");
+        assert_eq!(persisted.4.as_deref(), Some("provider_validation"));
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_records \
+             WHERE resource_id = ? AND action = 'browser_bridge_session_failed' \
+               AND actor_type = 'browser_bridge_worker' AND actor_id = 'dead-letter-worker'",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 1);
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn terminal_result_credentials_and_session_commit_atomically() {
         let fixture = fixture().await;
@@ -1733,6 +1849,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retry_claim[0].attempt_no, 3);
+        let final_retry_at = retry_at + Duration::seconds(5);
         assert!(
             fixture
                 .session_repository
@@ -1741,8 +1858,8 @@ mod tests {
                     sequence: 1,
                     worker_id: "worker-c",
                     failed_at: retry_at,
-                    retry_at: None,
-                    error_kind: "attempts_exhausted",
+                    retry_at: Some(final_retry_at),
+                    error_kind: "commit_storage",
                 },)
                 .await
                 .unwrap()
@@ -1751,7 +1868,7 @@ mod tests {
             fixture
                 .session_repository
                 .list_pending_browser_bridge_results(
-                    retry_at + Duration::seconds(1),
+                    final_retry_at - Duration::milliseconds(1),
                     &fixture.provider,
                     &["cidaren.capture.snapshot.result"],
                     10,
@@ -1770,11 +1887,11 @@ mod tests {
             .fetch_one(fixture.database.pool())
             .await
             .unwrap();
-        assert_eq!(processing.0, "dead_letter");
+        assert_eq!(processing.0, "retry");
         assert_eq!(processing.1, 3);
         assert_eq!(processing.2, None);
-        assert_eq!(processing.3, None);
-        assert_eq!(processing.4.as_deref(), Some("attempts_exhausted"));
+        assert!(processing.3.is_some());
+        assert_eq!(processing.4.as_deref(), Some("commit_storage"));
         let mut completed = issued.clone();
         completed
             .complete(

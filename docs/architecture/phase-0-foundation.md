@@ -3805,3 +3805,20 @@ successful atomic credential/session commit remains the only path that marks
 the exchange completed. This preserves exact result receipt and restart
 recovery while preventing malformed terminal artifacts from creating a hot
 retry loop.
+
+## Two-hundred-and-eleventh Phase 0 slice
+
+A credential-result dead letter now terminates its helper authority in the
+same immediate transaction. Storage first proves that the result is still
+owned by the expected processing worker, then transitions the bound claimed
+session through the Domain `Failed` state, clears both pairing and access-token
+hashes, and writes a sanitized worker audit record. A concurrent completion or
+session transition rolls back the dead letter as well, so result and session
+terminal states cannot disagree.
+
+The same transaction helper handles an expired lease at the database's final
+attempt cap. Crash recovery therefore cannot leave an exhausted result hidden
+from future claims while its helper token remains usable. Retryable failures
+continue to release only the processing lease and persist `next_attempt_at`;
+they deliberately keep the short-lived claimed session available for the next
+bounded attempt.
