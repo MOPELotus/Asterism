@@ -155,6 +155,14 @@ implementation scope. Where the shared Core cannot yet express a reply draft,
 artifact handle or external resolver, that is a Core Gap rather than a Provider
 policy exclusion.
 
+For one exact `discussion` Group, the Apache runner exposes two independent
+direct-empty branches in addition to topic/reply automation. Its skip-content
+branch sends the no-Question `submitType=2` marker; its allow-empty branch uses
+the generic builder's `instanceId=0`, one empty child, courseAnswer map and
+`discussion` judge under `submitType=1`. Asterism retains both behind a frozen
+versioned runtime choice and replaces the donor's captured judge Course version
+with the current independently refreshed publish version.
+
 The same Apache runner recognizes the exact compound family
 `basic-scoop-content,oral-sentence`, reads one encrypted standard-answer array
 for both native modules and submits both slots in one `submitType=1` body.

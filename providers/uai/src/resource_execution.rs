@@ -4,13 +4,14 @@ use asterism_domain::{RemoteState, SubmissionReceipt, TaskCapability};
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionOutcome, ExecutionRequest, ProviderContext, ProviderError,
     ProviderErrorKind, ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
-    ProviderResult, ProviderRuntimeSettingsSchema, TaskDetailCapability, TaskExecutionCapability,
-    TaskProgressCapability,
+    ProviderResult, ProviderRuntimeSettingsSchema, ResolvedProviderRuntimeSettings,
+    TaskDetailCapability, TaskExecutionCapability, TaskProgressCapability,
 };
 use async_trait::async_trait;
 
 use crate::{
-    metadata::development_metadata, runtime_settings::runtime_settings_schema,
+    metadata::development_metadata,
+    runtime_settings::{DISCUSSION_EMPTY_MODE_KEY, runtime_settings_schema},
     submission_execute::valid_submission_version,
 };
 
@@ -63,6 +64,31 @@ impl<'a> UaiOralEmptySubmission<'a> {
     }
 }
 
+/// Immutable donor placeholder shape for one direct discussion empty-answer
+/// execution. The publish version comes from the same fresh Task snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UaiDiscussionEmptySubmission {
+    question_count: u32,
+    course_publish_version: u64,
+}
+
+impl UaiDiscussionEmptySubmission {
+    const fn new(question_count: u32, course_publish_version: u64) -> Self {
+        Self {
+            question_count,
+            course_publish_version,
+        }
+    }
+
+    pub const fn question_count(self) -> u32 {
+        self.question_count
+    }
+
+    pub const fn course_publish_version(self) -> u64 {
+        self.course_publish_version
+    }
+}
+
 #[async_trait]
 pub trait UaiPresetCompletionTransport: Send + Sync {
     async fn complete_preset(
@@ -94,6 +120,17 @@ pub trait UaiPresetCompletionTransport: Send + Sync {
         group_id: &str,
     ) -> ProviderResult<UaiPresetCompletionResult>;
 
+    /// Completes one exact `discussion` Group with the donor's placeholder
+    /// `instanceId=0` body selected by the frozen runtime settings snapshot.
+    async fn complete_discussion_empty_placeholder(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        submission: UaiDiscussionEmptySubmission,
+    ) -> ProviderResult<UaiPresetCompletionResult>;
+
     /// Submits the donor-configured empty-answer shape for one exact oral
     /// Group. This is intentionally distinct from no-Question completion.
     async fn complete_oral_empty(
@@ -110,11 +147,20 @@ pub trait UaiPresetCompletionTransport: Send + Sync {
 enum EmptyCompletionKind {
     Preset,
     ExitTicket,
-    DiscussionEmptyMarker,
+    Discussion {
+        mode: DiscussionEmptyMode,
+        question_count: u32,
+    },
     Oral {
         task_type: OralTaskType,
         question_count: u32,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiscussionEmptyMode {
+    Marker,
+    Placeholder,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,7 +185,14 @@ impl EmptyCompletionKind {
         match self {
             Self::Preset => "preset",
             Self::ExitTicket => "exit_ticket",
-            Self::DiscussionEmptyMarker => "discussion_empty_marker",
+            Self::Discussion {
+                mode: DiscussionEmptyMode::Marker,
+                ..
+            } => "discussion_empty_marker",
+            Self::Discussion {
+                mode: DiscussionEmptyMode::Placeholder,
+                ..
+            } => "discussion_empty_placeholder",
             Self::Oral { .. } => "oral_empty",
         }
     }
@@ -148,11 +201,38 @@ impl EmptyCompletionKind {
         match self {
             Self::Preset => "纯学习任务已通过新鲜详情校验，准备核验并按需提交完成标记",
             Self::ExitTicket => "出口问卷已通过新鲜详情校验，准备核验并提交 donor 定义的空完成标记",
-            Self::DiscussionEmptyMarker => {
-                "讨论任务已通过新鲜详情校验，准备提交 donor 定义的直接空标记"
-            }
+            Self::Discussion {
+                mode: DiscussionEmptyMode::Marker,
+                ..
+            } => "讨论任务已通过新鲜详情校验，准备提交 donor 定义的直接空标记",
+            Self::Discussion {
+                mode: DiscussionEmptyMode::Placeholder,
+                ..
+            } => "讨论任务已通过新鲜详情校验，准备提交 donor 定义的占位空答案",
             Self::Oral { .. } => "口语任务已通过新鲜详情校验，准备核验并提交 donor 定义的空答案",
         }
+    }
+
+    fn resolve_runtime_settings(
+        self,
+        settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Self> {
+        let Self::Discussion { question_count, .. } = self else {
+            return Ok(self);
+        };
+        let mode = match settings.choice(DISCUSSION_EMPTY_MODE_KEY) {
+            Some("marker") => DiscussionEmptyMode::Marker,
+            Some("placeholder") => DiscussionEmptyMode::Placeholder,
+            _ => {
+                return Err(internal(
+                    "UAI discussion empty mode is missing from the frozen settings",
+                ));
+            }
+        };
+        Ok(Self::Discussion {
+            mode,
+            question_count,
+        })
     }
 }
 
@@ -192,7 +272,7 @@ impl UaiResourceExecution {
         context: &ProviderContext,
         identity: &GroupIdentity,
         completion_kind: EmptyCompletionKind,
-        oral_course_publish_version: Option<u64>,
+        placeholder_course_publish_version: Option<u64>,
     ) -> ProviderResult<UaiPresetCompletionResult> {
         match completion_kind {
             EmptyCompletionKind::Preset => {
@@ -215,7 +295,10 @@ impl UaiResourceExecution {
                     )
                     .await
             }
-            EmptyCompletionKind::DiscussionEmptyMarker => {
+            EmptyCompletionKind::Discussion {
+                mode: DiscussionEmptyMode::Marker,
+                ..
+            } => {
                 self.transport
                     .complete_discussion_empty_marker(
                         context,
@@ -225,6 +308,26 @@ impl UaiResourceExecution {
                     )
                     .await
             }
+            EmptyCompletionKind::Discussion {
+                mode: DiscussionEmptyMode::Placeholder,
+                question_count,
+            } => self
+                .transport
+                .complete_discussion_empty_placeholder(
+                    context,
+                    &identity.course_resource,
+                    &identity.unit,
+                    &identity.group,
+                    UaiDiscussionEmptySubmission::new(
+                        question_count,
+                        placeholder_course_publish_version.ok_or_else(|| {
+                            remote_changed(
+                                "UAI discussion placeholder lost its fresh Course publish version",
+                            )
+                        })?,
+                    ),
+                )
+                .await,
             EmptyCompletionKind::Oral {
                 task_type,
                 question_count,
@@ -238,7 +341,7 @@ impl UaiResourceExecution {
                         UaiOralEmptySubmission::new(
                             task_type.as_str(),
                             question_count,
-                            oral_course_publish_version.ok_or_else(|| {
+                            placeholder_course_publish_version.ok_or_else(|| {
                                 remote_changed(
                                     "UAI oral execution lost its fresh Course publish version",
                                 )
@@ -298,8 +401,10 @@ impl TaskExecutionCapability for UaiResourceExecution {
             .task_detail(context, &request.remote_task_id)
             .await?;
         let completion_kind =
-            validate_fresh_empty_completion_detail(&detail, &identity, &request.remote_task_id)?;
-        let oral_course_publish_version = oral_course_publish_version(&detail, completion_kind)?;
+            validate_fresh_empty_completion_detail(&detail, &identity, &request.remote_task_id)?
+                .resolve_runtime_settings(&request.runtime_settings)?;
+        let placeholder_course_publish_version =
+            empty_answer_course_publish_version(&detail, completion_kind)?;
 
         events
             .log(ProviderExecutionLog {
@@ -319,7 +424,7 @@ impl TaskExecutionCapability for UaiResourceExecution {
                 context,
                 &identity,
                 completion_kind,
-                oral_course_publish_version,
+                placeholder_course_publish_version,
             )
             .await?;
         let already_completed = match completion {
@@ -395,8 +500,9 @@ impl TaskExecutionCapability for UaiResourceExecution {
             .task_detail(context, &request.remote_task_id)
             .await?;
         let completion_kind =
-            validate_fresh_empty_completion_detail(&detail, &identity, &request.remote_task_id)?;
-        oral_course_publish_version(&detail, completion_kind)?;
+            validate_fresh_empty_completion_detail(&detail, &identity, &request.remote_task_id)?
+                .resolve_runtime_settings(&request.runtime_settings)?;
+        empty_answer_course_publish_version(&detail, completion_kind)?;
         let progress = self
             .progress
             .read_progress(context, &request.remote_task_id)
@@ -441,7 +547,10 @@ fn empty_completion_kind(
     } else if task_types == ["exit-ticket"] {
         Some(EmptyCompletionKind::ExitTicket)
     } else if task_types == ["discussion"] && question_count == Some(1) {
-        Some(EmptyCompletionKind::DiscussionEmptyMarker)
+        Some(EmptyCompletionKind::Discussion {
+            mode: DiscussionEmptyMode::Marker,
+            question_count: 1,
+        })
     } else {
         let task_type = match task_types {
             [task_type] if task_type == "oral-sentence" => OralTaskType::Sentence,
@@ -527,11 +636,18 @@ fn validate_fresh_empty_completion_detail(
     })
 }
 
-fn oral_course_publish_version(
+fn empty_answer_course_publish_version(
     detail: &asterism_provider_api::RemoteTaskDetail,
     completion_kind: EmptyCompletionKind,
 ) -> ProviderResult<Option<u64>> {
-    if !matches!(completion_kind, EmptyCompletionKind::Oral { .. }) {
+    if !matches!(
+        completion_kind,
+        EmptyCompletionKind::Oral { .. }
+            | EmptyCompletionKind::Discussion {
+                mode: DiscussionEmptyMode::Placeholder,
+                ..
+            }
+    ) {
         return Ok(None);
     }
     detail
@@ -542,7 +658,9 @@ fn oral_course_publish_version(
         .and_then(serde_json::Value::as_u64)
         .filter(|value| *value > 0 && i64::try_from(*value).is_ok())
         .map(Some)
-        .ok_or_else(|| remote_changed("UAI oral execution requires a fresh Course publish version"))
+        .ok_or_else(|| {
+            remote_changed("UAI empty-answer execution requires a fresh Course publish version")
+        })
 }
 
 struct GroupIdentity {
@@ -625,13 +743,16 @@ fn unsupported(message: &'static str) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{collections::BTreeMap, sync::Mutex};
 
     use asterism_domain::{
         AssessmentClass, CourseId, ProviderAccountId, ProviderId, RemoteState, SecretId,
         SourceType, TaskId,
     };
-    use asterism_provider_api::{RemoteProgress, RemoteTask, RemoteTaskDetail};
+    use asterism_provider_api::{
+        ProviderRuntimeSettingsPatch, ProviderSettingValue, RemoteProgress, RemoteTask,
+        RemoteTaskDetail,
+    };
     use chrono::Utc;
 
     use super::*;
@@ -822,6 +943,36 @@ mod tests {
             }))
         }
 
+        async fn complete_discussion_empty_placeholder(
+            &self,
+            _context: &ProviderContext,
+            course_resource_id: &str,
+            unit_id: &str,
+            group_id: &str,
+            submission: UaiDiscussionEmptySubmission,
+        ) -> ProviderResult<UaiPresetCompletionResult> {
+            assert_eq!(submission.question_count(), 1);
+            assert_eq!(submission.course_publish_version(), 123_290);
+            self.calls.lock().unwrap().push((
+                course_resource_id.to_owned(),
+                unit_id.to_owned(),
+                group_id.to_owned(),
+                "discussion_empty_placeholder",
+            ));
+            if self.fail {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "synthetic ambiguous mutation failure",
+                ));
+            }
+            Ok(UaiPresetCompletionResult::Submitted(SubmissionReceipt {
+                remote_status: "accepted".to_owned(),
+                message_sanitized: Some("accepted for verification".to_owned()),
+                provider_trace_id: Some("submit-version-42".to_owned()),
+                received_at: Utc::now(),
+            }))
+        }
+
         async fn complete_oral_empty(
             &self,
             _context: &ProviderContext,
@@ -972,17 +1123,17 @@ mod tests {
             validate_fresh_empty_completion_detail(&detail, &identity, "group:2001:unit-1:group-1")
                 .unwrap();
         assert_eq!(
-            oral_course_publish_version(&detail, kind).unwrap(),
+            empty_answer_course_publish_version(&detail, kind).unwrap(),
             Some(123_290)
         );
 
         detail.normalized_detail["task"]["course_publish_version"] = serde_json::json!(0);
-        assert!(oral_course_publish_version(&detail, kind).is_err());
+        assert!(empty_answer_course_publish_version(&detail, kind).is_err());
         detail.normalized_detail["task"]
             .as_object_mut()
             .unwrap()
             .remove("course_publish_version");
-        assert!(oral_course_publish_version(&detail, kind).is_err());
+        assert!(empty_answer_course_publish_version(&detail, kind).is_err());
     }
 
     #[tokio::test]
@@ -1059,6 +1210,52 @@ mod tests {
                 "unit-1".to_owned(),
                 "group-1".to_owned(),
                 "discussion_empty_marker",
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn donor_discussion_placeholder_mode_freezes_question_and_course_version() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = UaiResourceExecution::try_new(
+            Arc::new(FixtureDetail {
+                task_types: vec!["discussion".to_owned()],
+            }),
+            fixture_progress(RemoteState::Completed),
+            transport.clone(),
+        )
+        .unwrap();
+        let mut request = request();
+        let schema = runtime_settings_schema();
+        request.runtime_settings = schema
+            .resolve(
+                None,
+                None,
+                Some(&ProviderRuntimeSettingsPatch {
+                    schema_version: schema.version,
+                    values: BTreeMap::from([(
+                        DISCUSSION_EMPTY_MODE_KEY.to_owned(),
+                        ProviderSettingValue::Choice("placeholder".to_owned()),
+                    )]),
+                }),
+            )
+            .unwrap();
+        let outcome = execution
+            .execute(&context(), &request, &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.result_sanitized["resource_kind"],
+            "discussion_empty_placeholder"
+        );
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            &[(
+                "2001".to_owned(),
+                "unit-1".to_owned(),
+                "group-1".to_owned(),
+                "discussion_empty_placeholder",
             )]
         );
     }

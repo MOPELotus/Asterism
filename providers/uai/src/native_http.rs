@@ -24,14 +24,15 @@ use crate::{
     UaiCompoundOralVerification, UaiCompoundUploadSubmission, UaiCompoundUploadTransport,
     UaiCompoundUploadVerification, UaiCourseInventoryTransport, UaiCoursePolicyDocument,
     UaiCoursePolicyTransport, UaiCourseProgressDocument, UaiDiscussionBinding,
-    UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult, UaiDiscussionReplyDraft,
-    UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument, UaiDurationTransport,
-    UaiInventoryDocument, UaiJwtSession, UaiOralEmptySubmission, UaiPresetCompletionResult,
-    UaiPresetCompletionTransport, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
-    UaiQuestionTransport, UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument,
-    UaiSubmissionTransport, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
-    UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport,
-    UaiUploadVerification, UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
+    UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult, UaiDiscussionEmptySubmission,
+    UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument,
+    UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiOralEmptySubmission,
+    UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiProgressDocument,
+    UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport, UaiSessionResolver,
+    UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
+    UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification,
+    UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_compound_oral_submission_body, build_compound_upload_submission_body,
     build_discussion_reply_page_request, build_discussion_reply_request,
@@ -79,6 +80,12 @@ enum EmptyCompletionPreflight {
     ExitTicket,
     Oral,
     Discussion,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EmptyAnswerSubmission<'a> {
+    Oral(UaiOralEmptySubmission<'a>),
+    Discussion(UaiDiscussionEmptySubmission),
 }
 
 /// Native, non-redirecting UAI read and submission transport.
@@ -630,7 +637,7 @@ impl NativeUaiInventoryTransport {
             unit_id,
             group_id,
             EmptyCompletionPreflight::Oral,
-            Some(submission),
+            Some(EmptyAnswerSubmission::Oral(submission)),
         )
         .await
     }
@@ -649,6 +656,25 @@ impl NativeUaiInventoryTransport {
             group_id,
             EmptyCompletionPreflight::Discussion,
             None,
+        )
+        .await
+    }
+
+    async fn complete_discussion_empty_placeholder_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        submission: UaiDiscussionEmptySubmission,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        self.complete_empty_with_session(
+            session,
+            course_resource_id,
+            unit_id,
+            group_id,
+            EmptyCompletionPreflight::Discussion,
+            Some(EmptyAnswerSubmission::Discussion(submission)),
         )
         .await
     }
@@ -695,7 +721,7 @@ impl NativeUaiInventoryTransport {
         unit_id: &str,
         group_id: &str,
         preflight: EmptyCompletionPreflight,
-        oral: Option<UaiOralEmptySubmission<'_>>,
+        empty_answer: Option<EmptyAnswerSubmission<'_>>,
     ) -> ProviderResult<UaiPresetCompletionResult> {
         let course_resource_id = required_remote_component(
             Some(&serde_json::Value::String(course_resource_id.to_owned())),
@@ -758,21 +784,12 @@ impl NativeUaiInventoryTransport {
             return Ok(UaiPresetCompletionResult::AlreadyCompleted);
         }
 
-        let body = Zeroizing::new(match oral {
-            Some(submission) => build_oral_empty_submission_body(
-                route.course_instance_id(),
-                session.expose_open_id(),
-                &group_id,
-                submission.task_type(),
-                submission.question_count(),
-                submission.course_publish_version(),
-            )?,
-            None => build_preset_submission_body(
-                route.course_instance_id(),
-                session.expose_open_id(),
-                &group_id,
-            )?,
-        });
+        let body = build_empty_completion_body(
+            route.course_instance_id(),
+            session.expose_open_id(),
+            &group_id,
+            empty_answer,
+        )?;
         let response = self
             .client
             .post(submission_url()?)
@@ -1662,6 +1679,40 @@ impl UaiPresetCompletionTransport for NativeUaiInventoryTransport {
         }
     }
 
+    async fn complete_discussion_empty_placeholder(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        submission: UaiDiscussionEmptySubmission,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .complete_discussion_empty_placeholder_with_session(
+                &session,
+                course_resource_id,
+                unit_id,
+                group_id,
+                submission,
+            )
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.complete_discussion_empty_placeholder_with_session(
+                    &session,
+                    course_resource_id,
+                    unit_id,
+                    group_id,
+                    submission,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+
     async fn complete_oral_empty(
         &self,
         context: &ProviderContext,
@@ -2514,6 +2565,35 @@ fn build_submission_body(
     Ok(encoded)
 }
 
+fn build_empty_completion_body(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+    empty_answer: Option<EmptyAnswerSubmission<'_>>,
+) -> ProviderResult<Zeroizing<String>> {
+    let body = match empty_answer {
+        Some(EmptyAnswerSubmission::Oral(submission)) => build_oral_empty_submission_body(
+            course_instance_id,
+            open_id,
+            group_id,
+            submission.task_type(),
+            submission.question_count(),
+            submission.course_publish_version(),
+        )?,
+        Some(EmptyAnswerSubmission::Discussion(submission)) => {
+            build_discussion_empty_placeholder_body(
+                course_instance_id,
+                open_id,
+                group_id,
+                submission.question_count(),
+                submission.course_publish_version(),
+            )?
+        }
+        None => build_preset_submission_body(course_instance_id, open_id, group_id)?,
+    };
+    Ok(Zeroizing::new(body))
+}
+
 fn build_preset_submission_body(
     course_instance_id: &str,
     open_id: &str,
@@ -2554,7 +2634,51 @@ fn build_oral_empty_submission_body(
             "UAI oral empty submission received an unsupported bounded shape",
         ));
     }
-    let question = build_oral_placeholder_question(group_id, question_count)?;
+    build_empty_placeholder_submission_body(
+        course_instance_id,
+        open_id,
+        group_id,
+        task_type,
+        question_count,
+        course_publish_version,
+    )
+}
+
+fn build_discussion_empty_placeholder_body(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+    question_count: u32,
+    course_publish_version: u64,
+) -> ProviderResult<String> {
+    build_empty_placeholder_submission_body(
+        course_instance_id,
+        open_id,
+        group_id,
+        "discussion",
+        question_count,
+        course_publish_version,
+    )
+}
+
+fn build_empty_placeholder_submission_body(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+    task_type: &str,
+    question_count: u32,
+    course_publish_version: u64,
+) -> ProviderResult<String> {
+    if !(1..=128).contains(&question_count)
+        || course_publish_version == 0
+        || i64::try_from(course_publish_version).is_err()
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI empty placeholder submission received an unsupported bounded shape",
+        ));
+    }
+    let question = build_empty_placeholder_question(group_id, question_count)?;
     let questions = vec![question; question_count as usize];
     let completed = vec![true; question_count as usize];
     let judge = serde_json::json!({
@@ -2586,7 +2710,7 @@ fn build_oral_empty_submission_body(
     Ok(encoded)
 }
 
-fn build_oral_placeholder_question(
+fn build_empty_placeholder_question(
     group_id: &str,
     question_count: u32,
 ) -> ProviderResult<serde_json::Value> {
@@ -3204,6 +3328,23 @@ mod tests {
             build_oral_empty_submission_body("course", "openid", "group", "oral-sentence", 1, 0,)
                 .is_err()
         );
+
+        let discussion = build_discussion_empty_placeholder_body(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-1",
+            1,
+            456_789,
+        )
+        .unwrap();
+        let discussion: serde_json::Value = serde_json::from_str(&discussion).unwrap();
+        assert_eq!(discussion["submitType"], 1);
+        assert_eq!(discussion["quesDatas"][0]["instanceId"], "0");
+        let judges: serde_json::Value =
+            serde_json::from_str(discussion["thirdPartyJudges"].as_str().unwrap()).unwrap();
+        assert_eq!(judges[0]["question_type"], "discussion");
+        assert_eq!(judges[0]["reply_type"], "discussion");
+        assert_eq!(judges[0]["versions"]["course"], 456_789);
     }
 
     #[test]

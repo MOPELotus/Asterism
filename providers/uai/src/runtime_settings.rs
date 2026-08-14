@@ -10,6 +10,7 @@ pub(crate) const ACCOUNT_EXECUTION_CONCURRENCY_KEY: &str = "execution.account_co
 pub(crate) const ACCOUNT_SCAN_INTERVAL_KEY: &str = "discovery.scan_interval";
 pub(crate) const BROWSER_RESIDENCE_SECONDS_KEY: &str = "browser.residence_seconds";
 pub(crate) const BROWSER_PLAY_VIDEO_KEY: &str = "browser.play_video";
+pub(crate) const DISCUSSION_EMPTY_MODE_KEY: &str = "discussion.empty_mode";
 
 pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
     let provider_account_task_scopes = BTreeSet::from([
@@ -18,7 +19,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 1,
+        version: 2,
         definitions: vec![
             ProviderSettingDefinition {
                 key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
@@ -86,6 +87,18 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 description: "BrowserBridge 驻留时是否播放并保活当前页面的视频。".to_owned(),
                 kind: ProviderSettingKind::Boolean,
                 default: ProviderSettingValue::Boolean(false),
+                scopes: provider_account_task_scopes.clone(),
+                core_behavior: None,
+            },
+            ProviderSettingDefinition {
+                key: DISCUSSION_EMPTY_MODE_KEY.to_owned(),
+                display_name: "讨论空执行模式".to_owned(),
+                description: "直接标记使用无题体；占位答案复现 donor 的 instanceId=0 写法。"
+                    .to_owned(),
+                kind: ProviderSettingKind::Choice {
+                    options: BTreeSet::from(["marker".to_owned(), "placeholder".to_owned()]),
+                },
+                default: ProviderSettingValue::Choice("marker".to_owned()),
                 scopes: provider_account_task_scopes,
                 core_behavior: None,
             },
@@ -129,6 +142,7 @@ mod tests {
             Some(1_200)
         );
         assert_eq!(resolved.boolean(BROWSER_PLAY_VIDEO_KEY), Some(true));
+        assert_eq!(resolved.choice(DISCUSSION_EMPTY_MODE_KEY), Some("marker"));
         assert_eq!(
             schema.execution_concurrency(&resolved).unwrap(),
             asterism_provider_api::ProviderExecutionConcurrency {

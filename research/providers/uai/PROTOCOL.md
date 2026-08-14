@@ -77,9 +77,10 @@ The complete Development Provider factory shares one resolved network policy and
 one account-scoped stored-session resolver across Authentication,
 CourseInventory, TaskInventory, TaskDetail, TaskProgressRead, DurationRead and
 the question/answer/submission transports. Its versioned Master-owned runtime
-schema defaults both Provider and account execution to serial admission,
+schema v2 defaults both Provider and account execution to serial admission,
 requests a 30-minute account scan interval, and exposes bounded page-residence
-seconds plus optional video playback at Provider, account and Task scope. Core
+seconds, optional video playback and direct-discussion `marker|placeholder`
+mode at Provider, account and Task scope. Core
 resolves and freezes those values; the current BrowserBridge Core Gap must pass
 that immutable snapshot into the eventual rendered execution rather than read
 mutable settings mid-run. Native mutation paths already reject snapshots that
@@ -557,14 +558,18 @@ read-only verifier without replaying the mutation.
 
 Asterism registers ResourceExecution for a non-empty set containing those five
 audited labels and, independently, for exact `exit-ticket`, exact single
-`discussion`, `oral-sentence`, `video-dub` and `oral-personal-state`; every such Task is marked with
-ExecutionVerify plus ProgressRead. Before mutation the native transport
-refreshes Course detail and the exact Unit progress document, requires the
-exact Group leaf and `tab_type=text|video` for a preset or `tab_type=task` for
-exit-ticket/discussion/oral, requires the fresh donor availability window to contain the
-current time, and skips the POST if all three completion flags are already
-`1`. Preset, exit-ticket and direct discussion marker send the donor-observed no-Question empty body;
-oral sends the donor's distinct bounded placeholder-answer body with
+`discussion`, `oral-sentence`, `video-dub` and `oral-personal-state`; every
+such Task is marked with ExecutionVerify plus ProgressRead. Before mutation
+the native transport refreshes Course detail and the exact Unit progress
+document, requires the exact Group leaf and `tab_type=text|video` for a preset
+or `tab_type=task` for exit-ticket/discussion/oral, requires the fresh donor
+availability window to contain the current time, and skips the POST if all
+three completion flags are already `1`. Preset and exit-ticket send the
+donor-observed no-Question empty body. Direct discussion freezes the resolved
+runtime mode: `marker` sends that same `submitType=2` body, while `placeholder`
+uses the donor's `instanceId=0`, empty child, courseAnswer map and discussion
+judge in a `submitType=1` body. Oral sends its distinct bounded
+placeholder-answer body with
 `instanceId=0`, one empty child per declared Question, `submitType=1` and the
 audited score/judge structure. The Course judge version is taken only from the
 fresh TaskDetail/Course-progress snapshot; missing, zero or unsigned values
@@ -575,8 +580,8 @@ persists the mutation attempt before the call, accepts success only from the
 existing exact Group progress reader, and uses that reader alone after
 ambiguous transport failure, worker interruption or pending readback. The POST
 is never replayed and neither its receipt nor a duration observation is
-completion evidence. Only the exact single-discussion direct-marker behavior
-joins this path; the reply/readback workflow remains a separately authorized
+completion evidence. Only the exact single-discussion direct-empty behaviors
+join this path; the reply/readback workflow remains a separately authorized
 two-mutation family. Upload and mixed/compound modes do not inherit it;
 exit-ticket and each oral family are likewise separately classified, and the
 other audited known families remain required dedicated capabilities rather
@@ -599,11 +604,15 @@ submission:
   model, while the current Rust donor can transcribe referenced audio/video
   before resolving an answer.
 
-All are active implementation scope. The Provider also exposes the donor's
-independent direct empty-marker ResourceExecution for one exact single
-`discussion` Task. It uses the same fresh Task/progress gate, one
-`submitType=2` body and progress-only verification as the later completion
-stage, but does not falsely claim that a topic reply exists. The richer
+All are active implementation scope. The Provider also exposes both of the
+donor's independent direct-empty ResourceExecution shapes for one exact single
+`discussion` Task. Master resolves `marker` or `placeholder` at Provider,
+account or Task scope and Core freezes the selection in the attempt snapshot.
+Marker uses one `submitType=2` no-Question body; placeholder reproduces the
+donor's `instanceId=0` empty child and score/judge map with the current fresh
+Course publish version instead of its captured constant. Both use the same
+fresh Task/progress gate and progress-only verification, but neither falsely
+claims that a topic reply exists. The richer
 Provider-private discussion protocol now derives Course instance, class,
 curricula and current-user facts from fresh
 Course/detail/user-info reads; builds the exact topic/reply-page/reply-add
