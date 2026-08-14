@@ -879,6 +879,53 @@ artifact-upload mutations each retain their donor-specific execution and
 verification semantics and continue through shared contract work. This remains
 synthetic offline coverage and is not a live compatibility claim.
 
+## Answer evidence, bootstrap and post-completion policy
+
+The four-donor full sweep found no account-wide UAI answer-history or attempt-
+version enumeration route. The executable MIT read is exactly
+`user_module/{courseInstance}/{groupId}-{acceptedSubmitVersion}` and is called
+only after the corresponding mutation returns that version. The current Rust
+donor contains an unused `fetch_my_records(groupId)` module marked as
+pre-reserved; its wall-clock suffix and `data.rows` parsing have no caller,
+fixture, pagination or documented version semantics. It is insufficient
+authority for a first-bind harvest. UAI bootstrap may inventory existing
+Courses/Tasks/progress read-only, but answer harvesting must report partial/
+unsupported rather than guess a version or create a submission.
+
+The exact receipt-bound response does expose reusable evidence. `quesData`
+retains each native module, submitted context and every completed submitted
+child value. `__SUMMARY__.answerList` additionally exposes bounded `done`,
+`right`, `questionType`, `student_answer` and protocol-version facts. Those
+summary rows can describe module children, whereas the current shared Draft
+represents a UAI multi-child module as one Composite Question. The Provider
+must not align summary rows to Draft items by map order or promote a task-level
+score to correctness. A shared child-evidence/provenance result contract must
+land before UAI can append `right` as `VerifiedHistorical`; exact submitted
+values and the optional fixed-point score remain suitable incremental facts.
+
+Strict Completion and Score Improvement are separate default-enabled Core state
+machines. For UAI, strict completion is only a fresh exact Group observation
+with `pass=1`, `pass2=1` and `perm=1`. Course/Unit `finishProgress=100`, a submit
+receipt, verified answer persistence, duration or score cannot replace it. An
+incomplete Task may receive another ordinary attempt only after fresh
+`tab_type=task`, exact identity and availability-window preflight.
+
+Scoring facts also remain separate: progress supplies Group
+`min_score_pct`; user-module strategy may supply `task_mini_score_pct`; Course
+policy supplies Unit `passScore`/`scoreType` plus Course `scoringMode`; study
+records expose `scoreTaskFlag` and optional total score. No donor establishes a
+universal precedence rule between them.
+
+Every executable donor skips an already completed Group. No donor or issue
+provides a reset/redo request, retake-attempt creation route, remaining-attempt
+count or positive eligibility response. Rust issue 4 is only a request to
+repeat a Course displayed as completed. `record_every_submit` and
+`record_max_submit` are observed recording strategies, not retake authority.
+Score Improvement must therefore leave UAI retake unavailable/unknown and must
+not invoke ordinary SubmissionExecute on a completed Group. Owner-global corpus
+storage, first-bind harvest recovery, incremental evidence ingestion, typed
+scoring reconciliation and both policy machines remain Main-owned Core gaps.
+
 The MIT and current Rust donors complete pure-study Groups with
 `quesDatas=[]`, `isCompleted=[]`, `thirdPartyJudges="[]"` and `submitType=2`,
 followed by fresh progress reads. The current donor chooses that body only for

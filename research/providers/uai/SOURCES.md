@@ -63,6 +63,30 @@ that route as an independent Provider-private policy snapshot; it does not
 erase the current Rust donor's independently evidenced progress-leaf required
 flag.
 
+The mandatory one-time full sweep on 2026-08-14 re-read every default-branch
+file, README/configuration and implementation path, MIT docs/inline examples,
+all fetched tags/Releases, and every public issue for all four donors. Apache
+has no tag, Release or public issue; MIT has four tags/Releases and 34 issues;
+AutoPlayer has 14 tag refs, 13 Releases and 15 issues; current Rust has one
+tag/Release and 18 issues. No donor revision or executable route changed.
+`research/providers/uai/FULL_UPSTREAM_SWEEP.md` records the complete mapping.
+
+That sweep also establishes negative history/retake facts. No donor enumerates
+account-wide user-module versions or historical attempts. MIT reads one exact
+Group only with the accepted submit version. Rust's `user_module.rs` is marked
+pre-reserved, has no caller and uses an undocumented wall-clock suffix, so it
+cannot authorize historical bootstrap. All three execution donors skip
+completed Groups. Rust issue 4 requests repeat learning after a Course is shown
+completed but supplies no implementation, route or eligibility response.
+
+The receipt-bound user-module does contain child-level evidence beyond the
+currently shared result: `answerList` carries `done`, `right`, submitted-answer
+and version facts, while `quesData` carries exact submitted children. A UAI
+module can contain multiple children represented by one Composite Question, so
+the child rows cannot be assigned to Draft items by position. Owner-global
+corpus ingestion therefore requires Main's lossless child-evidence contract;
+overall `score_avg` remains task-level and never proves a child correct.
+
 On 2026-08-13, all four UAI source checkouts were fetched with tags and compared
 against their default remote branches. Apache `bef0d29155ce`, MIT
 `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and current Rust
