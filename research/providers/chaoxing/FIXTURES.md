@@ -33,6 +33,7 @@ fixtures/providers/chaoxing/
     list-empty-script-keywords.html
     list-mixed.html
     list-mixed.expected.json
+    detail-result.html
     cover-ready.html
     start-question.html
     submit-save-1.json
@@ -61,7 +62,8 @@ covers strict discovery of a fresh Work iframe route. The mixed expectation
 files cover normalized identity, source module and remote state. The mixed Exam
 fixture additionally covers an optional bounded decimal score, structural
 `reTest(...)` availability, and minute text that must not become a score. The
-detail fixtures cover the conservative Work redirect classification.
+Exam result fixture covers the same facts after a strictly bound fresh preview
+read, while the Work detail fixtures cover conservative redirect classification.
 The Chapter and Resource fixtures cover stable knowledge/job identity, locked
 and completed state, the exact resource type split, empty card slots, execution
 token redaction, immediate Document/Read routing, Video object/report metadata,
@@ -126,11 +128,14 @@ fixtures/providers/chaoxing/
     list-not-open.html
     list-completed.html
     list-expired.html
-    detail-result.html
+    detail-result.live.html
+    detail-result.live.expected.json
 ```
 
 Each fixture requires a sibling expectation file containing normalized remote
 identity, source module, state, raw time facts and any expected classified error.
+The committed `detail-result.html` remains explicitly synthetic; a future live
+sanitized capture must use the `.live` sibling and must not overwrite it.
 
 ## Sanitization requirements
 
@@ -158,6 +163,9 @@ every fixture before staging it.
   out-of-range or conflicting evidence fails closed, and `分钟` is never a score.
 - Exam retake availability requires an exact row-local `reTest(...)` handler;
   lookalike handlers stay false and the fact never changes state or capability.
+- Supported Exam result routes must bind the exact course/class/exam identity;
+  missing, duplicate, foreign, unexpected or list-conflicting detail facts fail
+  the complete scan, and redirects are not accepted as result evidence.
 - Remote IDs remain stable across scans while mutable status/time facts produce a
   typed diff.
 - Exam start fixtures must prove that the read-only cover freezes the exact

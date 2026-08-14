@@ -284,6 +284,11 @@ mod tests {
         assert_eq!(detail.task, exam_task());
         assert_eq!(detail.normalized_detail["task"]["score"], 82.5);
         assert_eq!(detail.normalized_detail["task"]["retake_available"], true);
+        assert_eq!(detail.normalized_detail["task"]["detail_score"], 82.5);
+        assert_eq!(
+            detail.normalized_detail["task"]["detail_retake_available"],
+            true
+        );
         assert_eq!(detail.task.remote_state, RemoteState::Completed);
         assert_eq!(detail.task.capabilities, Vec::new());
     }
@@ -356,6 +361,8 @@ mod tests {
                 "remote_state": "completed",
                 "score": 82.5,
                 "retake_available": true,
+                "detail_score": 82.5,
+                "detail_retake_available": true,
             }),
             raw_sanitized: json!({
                 "score": 82.5,

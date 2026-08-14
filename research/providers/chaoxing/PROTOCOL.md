@@ -205,16 +205,24 @@ snapshot. It parses the stable `module:course:class:task` identity, rediscovers
 the current account course list, selects exactly one matching course through
 ephemeral route context, and reruns the bounded all-or-nothing Task inventory
 for that course. The exact remote Task must still exist exactly once. Work tasks
-therefore include their followed final-route state; Exam tasks currently retain
-the freshly parsed list state, bounded score and retake-availability facts until
-a dedicated entry/detail fixture contract is available.
+therefore include their followed final-route state. A completed Exam row with a
+structural `/exam-ans/mooc2/exam/preview` entry now receives one fresh result
+read. The HTTPS route must bind the same course, class and Exam identity with no
+duplicate query keys, userinfo, port or fragment; redirects are not followed.
+The bounded result parser removes script/style content and accepts only score,
+structural `reTest(...)`, or answer-result evidence. It merges score and retake
+facts into the fresh Task, records separate `detail_score` and
+`detail_retake_available` provenance, and fails the entire scan if list and
+detail scores conflict or the transport omits, duplicates or adds a Task.
+Unsupported Exam entry variants remain list-level evidence pending fixtures.
 
 `TaskProgressRead` preserves the same module split. Executable Resource tasks
 retain the targeted fresh-card lookup used for crash recovery. Chapter, Work and
 Exam tasks use exact Task rediscovery; `Completed` and `Pending` expose only
 binary 100/0 completion while all other remote states leave percentage absent.
 No duration or fractional completion is inferred from the independent score
-fact.
+fact. Result readback never changes `RemoteState` or capabilities and never
+executes a retake.
 
 ## Native independent Work question read
 

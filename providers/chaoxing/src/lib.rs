@@ -68,7 +68,8 @@ pub use submission_verify::{ChaoxingSubmissionVerificationTransport, ChaoxingSub
 pub use task_detail::ChaoxingTaskDetail;
 pub use task_inventory::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
-    ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingTaskInventory,
-    ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
+    ChaoxingExamDetailFacts, ChaoxingExamDetailRequest, ChaoxingInventoryDocument,
+    ChaoxingInventoryTransport, ChaoxingTaskInventory, ChaoxingWorkDetailRequest,
+    ChaoxingWorkDetailState,
 };
 pub use task_progress::ChaoxingTaskProgress;

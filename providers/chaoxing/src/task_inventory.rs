@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+};
 
 use asterism_domain::RemoteState;
 use asterism_provider_api::{
@@ -11,9 +15,12 @@ use zeroize::Zeroize;
 
 use crate::{
     ChaoxingCourseScope,
-    inventory::{apply_work_detail_state, parse_work_inventory_entries},
+    inventory::{
+        ChaoxingExamFacts, apply_exam_detail_facts, apply_work_detail_state,
+        parse_exam_detail_facts, parse_exam_inventory_entries, parse_work_inventory_entries,
+    },
     metadata::development_metadata,
-    parse_chapter_inventory, parse_chapter_resource_inventory, parse_exam_inventory,
+    parse_chapter_inventory, parse_chapter_resource_inventory,
 };
 
 const COURSE_ID_ROUTE_KEY: &str = "chaoxing.course_id";
@@ -22,10 +29,13 @@ const CPI_ROUTE_KEY: &str = "chaoxing.cpi";
 const MAX_INVENTORY_DOCUMENT_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_WORK_DETAIL_REQUESTS: usize = 256;
 const MAX_WORK_DETAIL_ROUTE_BYTES: usize = 8 * 1_024;
+pub(crate) const MAX_EXAM_DETAIL_REQUESTS: usize = 256;
+const MAX_EXAM_DETAIL_ROUTE_BYTES: usize = 8 * 1_024;
 pub(crate) const MAX_RESOURCE_CHAPTER_REQUESTS: usize = 64;
 pub(crate) const CHAPTER_RESOURCE_CARD_COUNT: u8 = 7;
 pub(crate) const MAX_RESOURCE_BATCH_DOCUMENT_BYTES: usize = 32 * 1_024 * 1_024;
 const WORK_DETAIL_ORIGIN: &str = "https://mooc1.chaoxing.com";
+const EXAM_DETAIL_ORIGIN: &str = "https://mooc1.chaoxing.com";
 
 /// Borrowed Chaoxing routing facts carried only inside one Provider scan.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -363,6 +373,111 @@ impl ChaoxingWorkDetailState {
     }
 }
 
+/// One fresh, read-only Exam result route bound to the selected course and
+/// stable Exam task identity. The route is never serialized or logged.
+#[derive(Clone, Copy)]
+pub struct ChaoxingExamDetailRequest<'a> {
+    remote_task_id: &'a str,
+    exam_id: &'a str,
+    route: &'a str,
+}
+
+impl<'a> ChaoxingExamDetailRequest<'a> {
+    pub(crate) fn try_new(
+        course: ChaoxingCourseRoute<'_>,
+        remote_task_id: &'a str,
+        route: &'a str,
+    ) -> ProviderResult<Option<Self>> {
+        if route.is_empty() || route.len() > MAX_EXAM_DETAIL_ROUTE_BYTES {
+            return Err(protocol_drift(
+                "Chaoxing Exam detail route is empty or exceeds the size limit",
+            ));
+        }
+        let exam_id = bound_exam_id(course, remote_task_id)?;
+        let url = Url::parse(route).or_else(|_| {
+            Url::parse(EXAM_DETAIL_ORIGIN)
+                .expect("static Chaoxing Exam origin must be valid")
+                .join(route)
+        });
+        let url = url.map_err(|_| protocol_drift("Chaoxing Exam detail route is invalid"))?;
+        if !valid_exam_origin(&url) {
+            return Err(protocol_drift(
+                "Chaoxing Exam detail route crossed its origin boundary",
+            ));
+        }
+        if !is_exam_detail_path(&url) {
+            return Ok(None);
+        }
+        if unique_query(&url, "courseId").as_deref() != Some(course.course_id())
+            || unique_query(&url, "classId").as_deref() != Some(course.class_id())
+            || exam_query_id(&url).as_deref() != Some(exam_id)
+        {
+            return Err(protocol_drift(
+                "Chaoxing Exam detail route is not bound to the current task",
+            ));
+        }
+        Ok(Some(Self {
+            remote_task_id,
+            exam_id,
+            route,
+        }))
+    }
+
+    pub const fn remote_task_id(self) -> &'a str {
+        self.remote_task_id
+    }
+
+    pub const fn exam_id(self) -> &'a str {
+        self.exam_id
+    }
+
+    pub(crate) fn url(self) -> ProviderResult<Url> {
+        Url::parse(self.route)
+            .or_else(|_| {
+                Url::parse(EXAM_DETAIL_ORIGIN)
+                    .expect("static Chaoxing Exam origin must be valid")
+                    .join(self.route)
+            })
+            .map_err(|_| protocol_drift("Chaoxing Exam detail route is invalid"))
+    }
+}
+
+impl fmt::Debug for ChaoxingExamDetailRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingExamDetailRequest")
+            .field("remote_task_id", &self.remote_task_id)
+            .field("exam_id", &self.exam_id)
+            .field("route", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChaoxingExamDetailFacts {
+    remote_task_id: String,
+    facts: ChaoxingExamFacts,
+}
+
+impl ChaoxingExamDetailFacts {
+    /// Parses one bounded result document and binds it to its originating
+    /// fresh Exam request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized protocol error when the result document has no
+    /// recognized bounded score, retake or answer-result evidence.
+    pub fn for_request(
+        request: ChaoxingExamDetailRequest<'_>,
+        document: &str,
+    ) -> ProviderResult<Self> {
+        Ok(Self {
+            remote_task_id: request.remote_task_id().to_owned(),
+            facts: parse_exam_detail_facts(document)?,
+        })
+    }
+}
+
 /// Runtime adapter which obtains current Chaoxing inventory pages. A concrete
 /// adapter must resolve credentials through Core's secrets boundary, discover
 /// a fresh Work `enc`, and preserve the bounded resource-card matrix; none of
@@ -400,6 +515,17 @@ pub trait ChaoxingInventoryTransport: Send + Sync {
         route: ChaoxingCourseRoute<'_>,
         requests: &[ChaoxingWorkDetailRequest<'_>],
     ) -> ProviderResult<Vec<ChaoxingWorkDetailState>>;
+
+    async fn fetch_exam_detail_facts(
+        &self,
+        _context: &ProviderContext,
+        _route: ChaoxingCourseRoute<'_>,
+        _requests: &[ChaoxingExamDetailRequest<'_>],
+    ) -> ProviderResult<Vec<ChaoxingExamDetailFacts>> {
+        Err(protocol_drift(
+            "Chaoxing inventory transport does not implement Exam detail reads",
+        ))
+    }
 }
 
 /// Development-level Chaoxing task inventory capability. Daemon registration
@@ -538,9 +664,77 @@ impl TaskInventoryCapability for ChaoxingTaskInventory {
                 .into_iter()
                 .map(crate::inventory::ChaoxingParsedInventoryTask::into_task),
         );
-        tasks.extend(parse_exam_inventory(exam.as_str(), &scope)?);
+        tasks.extend(
+            parse_exam_tasks_with_details(self.transport.as_ref(), context, route, &exam).await?,
+        );
         Ok(tasks)
     }
+}
+
+async fn parse_exam_tasks_with_details(
+    transport: &dyn ChaoxingInventoryTransport,
+    context: &ProviderContext,
+    route: ChaoxingCourseRoute<'_>,
+    document: &ChaoxingInventoryDocument,
+) -> ProviderResult<Vec<RemoteTask>> {
+    let scope = route.parser_scope()?;
+    let mut tasks = parse_exam_inventory_entries(document.as_str(), &scope)?;
+    let requests = tasks
+        .iter()
+        .filter(|parsed| parsed.task().remote_state == RemoteState::Completed)
+        .map(|parsed| {
+            ChaoxingExamDetailRequest::try_new(route, &parsed.task().remote_id, parsed.entry())
+        })
+        .collect::<ProviderResult<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if requests.len() > MAX_EXAM_DETAIL_REQUESTS {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Chaoxing Exam detail count exceeds the size limit",
+        ));
+    }
+    let mut requested = requests
+        .iter()
+        .map(|request| request.remote_task_id().to_owned())
+        .collect::<HashSet<_>>();
+    let details = if requests.is_empty() {
+        Vec::new()
+    } else {
+        transport
+            .fetch_exam_detail_facts(context, route, &requests)
+            .await?
+    };
+    drop(requests);
+    let mut details_by_task = HashMap::with_capacity(details.len());
+    for detail in details {
+        if !requested.remove(&detail.remote_task_id) {
+            return Err(protocol_drift(
+                "Chaoxing Exam detail transport returned an unexpected or duplicate task",
+            ));
+        }
+        details_by_task.insert(detail.remote_task_id, detail.facts);
+    }
+    if !requested.is_empty() {
+        return Err(protocol_drift(
+            "Chaoxing Exam detail transport omitted a requested task",
+        ));
+    }
+    for parsed in &mut tasks {
+        if let Some(facts) = details_by_task.remove(&parsed.task().remote_id) {
+            apply_exam_detail_facts(parsed.task_mut(), facts)?;
+        }
+    }
+    if !details_by_task.is_empty() {
+        return Err(protocol_drift(
+            "Chaoxing Exam detail transport returned an unbound task",
+        ));
+    }
+    Ok(tasks
+        .into_iter()
+        .map(crate::inventory::ChaoxingParsedInventoryTask::into_task)
+        .collect())
 }
 
 fn chapter_resource_requests(
@@ -646,6 +840,57 @@ fn valid_work_detail_url(url: &Url) -> bool {
             .any(|suffix| path.ends_with(suffix))
 }
 
+fn bound_exam_id<'a>(
+    route: ChaoxingCourseRoute<'_>,
+    remote_task_id: &'a str,
+) -> ProviderResult<&'a str> {
+    let mut fields = remote_task_id.splitn(4, ':');
+    if fields.next() != Some("exam")
+        || fields.next() != Some(route.course_id())
+        || fields.next() != Some(route.class_id())
+    {
+        return Err(protocol_drift(
+            "Chaoxing Exam detail task identity is outside the current course",
+        ));
+    }
+    let exam_id = fields.next().unwrap_or_default();
+    if exam_id.is_empty() || exam_id.len() > 128 {
+        return Err(protocol_drift(
+            "Chaoxing Exam detail task identity is invalid",
+        ));
+    }
+    Ok(exam_id)
+}
+
+fn valid_exam_origin(url: &Url) -> bool {
+    url.as_str().len() <= MAX_EXAM_DETAIL_ROUTE_BYTES
+        && url.query_pairs().count() <= 64
+        && url.scheme() == "https"
+        && url.host_str() == Some("mooc1.chaoxing.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.fragment().is_none()
+}
+
+fn is_exam_detail_path(url: &Url) -> bool {
+    url.path()
+        .eq_ignore_ascii_case("/exam-ans/mooc2/exam/preview")
+}
+
+fn exam_query_id(url: &Url) -> Option<std::borrow::Cow<'_, str>> {
+    let mut values = url
+        .query_pairs()
+        .filter(|(key, _)| {
+            ["examId", "taskrefId"]
+                .iter()
+                .any(|alias| key.eq_ignore_ascii_case(alias))
+        })
+        .map(|(_, value)| value);
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
 fn work_query_id(url: &Url) -> Option<std::borrow::Cow<'_, str>> {
     ["workId", "oldWorkId", "jobid"]
         .into_iter()
@@ -716,6 +961,8 @@ mod tests {
 
     const EXAM_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/exam/list-mixed.html");
+    const EXAM_DETAIL: &str =
+        include_str!("../../../fixtures/providers/chaoxing/exam/detail-result.html");
     const CHAPTER_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/chapter/list-mixed.html");
     const RESOURCE_MIXED: &str =
@@ -731,6 +978,15 @@ mod tests {
         DuplicateFirst,
     }
 
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    enum ExamDetailFixtureBehavior {
+        #[default]
+        Complete,
+        Omit,
+        Duplicate,
+        Unexpected,
+    }
+
     #[derive(Debug, Default)]
     struct FixtureTransport {
         chapter_calls: AtomicUsize,
@@ -738,9 +994,11 @@ mod tests {
         exam_calls: AtomicUsize,
         resource_calls: AtomicUsize,
         work_detail_calls: AtomicUsize,
+        exam_detail_calls: AtomicUsize,
         fail_exam: bool,
         resource_behavior: ResourceFixtureBehavior,
         omit_work_detail: bool,
+        exam_detail_behavior: ExamDetailFixtureBehavior,
     }
 
     #[async_trait]
@@ -843,6 +1101,31 @@ mod tests {
                 RemoteState::Expired,
             )])
         }
+
+        async fn fetch_exam_detail_facts(
+            &self,
+            _context: &ProviderContext,
+            route: ChaoxingCourseRoute<'_>,
+            requests: &[ChaoxingExamDetailRequest<'_>],
+        ) -> ProviderResult<Vec<ChaoxingExamDetailFacts>> {
+            assert_eq!(route.course_id(), "100");
+            assert_eq!(route.class_id(), "200");
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].remote_task_id(), "exam:100:200:exam-2");
+            assert_eq!(requests[0].exam_id(), "exam-2");
+            assert!(!format!("{:?}", requests[0]).contains("/preview"));
+            self.exam_detail_calls.fetch_add(1, Ordering::Relaxed);
+            let detail = ChaoxingExamDetailFacts::for_request(requests[0], EXAM_DETAIL)?;
+            match self.exam_detail_behavior {
+                ExamDetailFixtureBehavior::Complete => Ok(vec![detail]),
+                ExamDetailFixtureBehavior::Omit => Ok(Vec::new()),
+                ExamDetailFixtureBehavior::Duplicate => Ok(vec![detail.clone(), detail]),
+                ExamDetailFixtureBehavior::Unexpected => Ok(vec![ChaoxingExamDetailFacts {
+                    remote_task_id: "exam:100:200:unexpected".to_owned(),
+                    ..detail
+                }]),
+            }
+        }
     }
 
     #[tokio::test]
@@ -901,12 +1184,26 @@ mod tests {
         assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.resource_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_detail_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.exam_detail_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
             tasks
                 .iter()
                 .find(|task| task.remote_id.ends_with(":work-1"))
                 .map(|task| task.remote_state),
             Some(RemoteState::Expired)
+        );
+        let completed_exam = tasks
+            .iter()
+            .find(|task| task.remote_id.ends_with(":exam-2"))
+            .unwrap();
+        assert_eq!(completed_exam.normalized["score"], 82.5);
+        assert_eq!(completed_exam.normalized["retake_available"], true);
+        assert_eq!(completed_exam.normalized["detail_score"], 82.5);
+        assert_eq!(completed_exam.normalized["detail_retake_available"], true);
+        assert_eq!(completed_exam.remote_state, RemoteState::Completed);
+        assert_eq!(
+            completed_exam.capabilities,
+            [asterism_domain::TaskCapability::ProgressRead]
         );
         assert_eq!(
             inventory.metadata().verification,
@@ -973,6 +1270,7 @@ mod tests {
         assert_eq!(transport.exam_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.resource_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work_detail_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.exam_detail_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -1024,6 +1322,32 @@ mod tests {
 
         assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
         assert_eq!(transport.work_detail_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn capability_rejects_incomplete_duplicate_or_unexpected_exam_details() {
+        for behavior in [
+            ExamDetailFixtureBehavior::Omit,
+            ExamDetailFixtureBehavior::Duplicate,
+            ExamDetailFixtureBehavior::Unexpected,
+        ] {
+            let transport = Arc::new(FixtureTransport {
+                exam_detail_behavior: behavior,
+                ..FixtureTransport::default()
+            });
+            let inventory = ChaoxingTaskInventory::try_new(transport.clone()).unwrap();
+            let error = inventory
+                .list_tasks(&context(), Some(&course()))
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift, "{behavior:?}");
+            assert_eq!(
+                transport.exam_detail_calls.load(Ordering::Relaxed),
+                1,
+                "{behavior:?}"
+            );
+        }
     }
 
     #[test]
@@ -1080,6 +1404,57 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn exam_detail_routes_remain_bound_to_course_class_and_task() {
+        let course = course();
+        let route = ChaoxingCourseRoute::from_remote_course(&course).unwrap();
+        let valid = ChaoxingExamDetailRequest::try_new(
+            route,
+            "exam:100:200:exam-2",
+            "/exam-ans/mooc2/exam/preview?courseId=100&classId=200&examId=exam-2",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(valid.exam_id(), "exam-2");
+        let url = valid.url().unwrap();
+        assert_eq!(url.host_str(), Some("mooc1.chaoxing.com"));
+        assert_eq!(url.path(), "/exam-ans/mooc2/exam/preview");
+        assert!(!format!("{valid:?}").contains("/preview"));
+
+        assert!(
+            ChaoxingExamDetailRequest::try_new(
+                route,
+                "exam:100:200:exam-3",
+                "/exam/task?taskrefId=exam-3",
+            )
+            .unwrap()
+            .is_none()
+        );
+        for candidate in [
+            "https://evil.invalid/exam-ans/mooc2/exam/preview?courseId=100&classId=200&examId=exam-2",
+            "https://user@mooc1.chaoxing.com/exam-ans/mooc2/exam/preview?courseId=100&classId=200&examId=exam-2",
+            "/exam-ans/mooc2/exam/preview?courseId=other&classId=200&examId=exam-2",
+            "/exam-ans/mooc2/exam/preview?courseId=100&classId=other&examId=exam-2",
+            "/exam-ans/mooc2/exam/preview?courseId=100&classId=200&examId=other",
+            "/exam-ans/mooc2/exam/preview?courseId=100&courseId=100&classId=200&examId=exam-2",
+            "/exam-ans/mooc2/exam/preview?courseId=100&classId=200&examId=exam-2&taskrefId=exam-2",
+        ] {
+            assert!(
+                ChaoxingExamDetailRequest::try_new(route, "exam:100:200:exam-2", candidate,)
+                    .is_err(),
+                "{candidate}"
+            );
+        }
+        assert!(
+            ChaoxingExamDetailRequest::try_new(
+                route,
+                "exam:100:other:exam-2",
+                "/exam-ans/mooc2/exam/preview?courseId=100&classId=200&examId=exam-2",
+            )
+            .is_err()
+        );
     }
 
     fn context() -> ProviderContext {

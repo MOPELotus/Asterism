@@ -19,8 +19,8 @@ pub(crate) struct ChaoxingParsedInventoryTask {
     entry: SecretString,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ExamListFacts {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ChaoxingExamFacts {
     score: Option<f64>,
     retake_available: bool,
 }
@@ -285,17 +285,17 @@ fn parse_inventory(
 fn parse_exam_list_facts(
     row: ElementRef<'_>,
     source_type: SourceType,
-) -> ProviderResult<Option<ExamListFacts>> {
+) -> ProviderResult<Option<ChaoxingExamFacts>> {
     if source_type != SourceType::Exam {
         return Ok(None);
     }
-    Ok(Some(ExamListFacts {
+    Ok(Some(ChaoxingExamFacts {
         score: extract_exam_score(row)?,
         retake_available: exam_retake_available(row),
     }))
 }
 
-fn insert_exam_list_facts(value: &mut Value, facts: Option<ExamListFacts>) {
+fn insert_exam_list_facts(value: &mut Value, facts: Option<ChaoxingExamFacts>) {
     let Some(facts) = facts else {
         return;
     };
@@ -310,7 +310,7 @@ fn sanitized_inventory_facts(
     status_text: &str,
     time_text: Option<&str>,
     entry_kind: &str,
-    exam_facts: Option<ExamListFacts>,
+    exam_facts: Option<ChaoxingExamFacts>,
 ) -> Value {
     let mut value = json!({
         "status_text": status_text,
@@ -319,6 +319,98 @@ fn sanitized_inventory_facts(
     });
     insert_exam_list_facts(&mut value, exam_facts);
     value
+}
+
+/// Parses score and structural retake facts from one bounded Exam result or
+/// detail document. Script/style text is excluded from evidence.
+pub(crate) fn parse_exam_detail_facts(html: &str) -> ProviderResult<ChaoxingExamFacts> {
+    if html.len() > MAX_INVENTORY_DOCUMENT_BYTES {
+        return Err(invalid_response(
+            "Chaoxing Exam detail document exceeds the configured size limit",
+        ));
+    }
+    let mut visible = strip_inert_markup(html);
+    let result = (|| {
+        let document = Html::parse_document(&visible);
+        let root = document.root_element();
+        let facts = ChaoxingExamFacts {
+            score: extract_exam_score(root)?,
+            retake_available: exam_retake_available(root),
+        };
+        let text = normalize_evidence(&root.text().collect::<Vec<_>>().join(" "));
+        if facts.score.is_none() && !facts.retake_available && !text.contains("我的答案") {
+            return Err(protocol_drift(
+                "Chaoxing Exam detail response contains no result facts",
+            ));
+        }
+        Ok(facts)
+    })();
+    visible.zeroize();
+    result
+}
+
+pub(crate) fn apply_exam_detail_facts(
+    task: &mut RemoteTask,
+    facts: ChaoxingExamFacts,
+) -> ProviderResult<()> {
+    if task.source_type != SourceType::Exam {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Exam detail facts were applied to another module",
+        ));
+    }
+    let normalized = task.normalized.as_object_mut().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Exam task has invalid normalized metadata",
+        )
+    })?;
+    let list_score = normalized_score(normalized.get("score"))?;
+    if list_score.is_some() && facts.score.is_some() && list_score != facts.score {
+        return Err(protocol_drift(
+            "Chaoxing Exam list and detail scores disagree",
+        ));
+    }
+    let list_retake = normalized
+        .get("retake_available")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| protocol_drift("Chaoxing Exam task has no retake fact"))?;
+    let score = facts.score.or(list_score);
+    let retake_available = list_retake || facts.retake_available;
+    normalized.insert("score".to_owned(), json!(score));
+    normalized.insert("retake_available".to_owned(), json!(retake_available));
+    normalized.insert("detail_score".to_owned(), json!(facts.score));
+    normalized.insert(
+        "detail_retake_available".to_owned(),
+        json!(facts.retake_available),
+    );
+    let raw = task.raw_sanitized.as_object_mut().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Exam task has invalid sanitized metadata",
+        )
+    })?;
+    raw.insert("score".to_owned(), json!(score));
+    raw.insert("retake_available".to_owned(), json!(retake_available));
+    raw.insert("detail_score".to_owned(), json!(facts.score));
+    raw.insert(
+        "detail_retake_available".to_owned(),
+        json!(facts.retake_available),
+    );
+    task.fingerprint = fingerprint(&task.normalized)?;
+    Ok(())
+}
+
+fn normalized_score(value: Option<&Value>) -> ProviderResult<Option<f64>> {
+    match value {
+        Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .filter(|score| score.is_finite() && (0.0..=100.0).contains(score))
+            .map(Some)
+            .ok_or_else(|| protocol_drift("Chaoxing Exam task has an invalid score fact")),
+        None => Err(protocol_drift("Chaoxing Exam task has no score fact")),
+    }
 }
 
 pub(crate) fn apply_work_detail_state(
@@ -759,6 +851,8 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/exam/list-mixed.html");
     const EXAM_EXPECTED: &str =
         include_str!("../../../fixtures/providers/chaoxing/exam/list-mixed.expected.json");
+    const EXAM_DETAIL: &str =
+        include_str!("../../../fixtures/providers/chaoxing/exam/detail-result.html");
     const WORK_MIXED: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/list-mixed.html");
     const WORK_EXPECTED: &str =
@@ -930,6 +1024,48 @@ mod tests {
         assert_eq!(task.normalized["retake_available"], false);
         assert_eq!(task.remote_state, RemoteState::Completed);
         assert_eq!(task.capabilities, [TaskCapability::ProgressRead]);
+    }
+
+    #[test]
+    fn exam_detail_facts_merge_without_changing_state_or_capabilities() {
+        let facts = parse_exam_detail_facts(EXAM_DETAIL).unwrap();
+        assert_eq!(facts.score, Some(82.5));
+        assert!(facts.retake_available);
+
+        let mut task = parse_exam_inventory(EXAM_MIXED, &scope())
+            .unwrap()
+            .into_iter()
+            .find(|task| task.remote_id.ends_with(":exam-2"))
+            .unwrap();
+        let state = task.remote_state;
+        let capabilities = task.capabilities.clone();
+        apply_exam_detail_facts(&mut task, facts).unwrap();
+
+        assert_eq!(task.normalized["score"], 82.5);
+        assert_eq!(task.normalized["retake_available"], true);
+        assert_eq!(task.normalized["detail_score"], 82.5);
+        assert_eq!(task.normalized["detail_retake_available"], true);
+        assert_eq!(task.remote_state, state);
+        assert_eq!(task.capabilities, capabilities);
+    }
+
+    #[test]
+    fn exam_detail_unknown_or_conflicting_results_fail_closed() {
+        assert!(parse_exam_detail_facts("<main>页面待验证</main>").is_err());
+        assert!(
+            parse_exam_detail_facts(
+                "<script>reTest(); const score = '99 分';</script><main>页面待验证</main>",
+            )
+            .is_err()
+        );
+
+        let mut task = parse_exam_inventory(EXAM_MIXED, &scope())
+            .unwrap()
+            .into_iter()
+            .find(|task| task.remote_id.ends_with(":exam-2"))
+            .unwrap();
+        let conflicting = parse_exam_detail_facts(&EXAM_DETAIL.replace("82.5", "90")).unwrap();
+        assert!(apply_exam_detail_facts(&mut task, conflicting).is_err());
     }
 
     fn scope() -> ChaoxingCourseScope {

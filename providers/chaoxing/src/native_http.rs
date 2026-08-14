@@ -18,10 +18,11 @@ use zeroize::Zeroize;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
-    ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingExamQuestionArtifact,
-    ChaoxingExamQuestionRequest, ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
-    ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingQuestionTransport,
-    ChaoxingSubmissionPlan, ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
+    ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingExamDetailFacts,
+    ChaoxingExamDetailRequest, ChaoxingExamQuestionArtifact, ChaoxingExamQuestionRequest,
+    ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse, ChaoxingInventoryDocument,
+    ChaoxingInventoryTransport, ChaoxingQuestionTransport, ChaoxingSubmissionPlan,
+    ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
     ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
     ChaoxingWorkVerificationRoute, classify_work_detail,
     exam_attempt::{
@@ -37,7 +38,7 @@ use crate::{
     },
     submission_support::ChaoxingSubmissionForm,
     task_inventory::{
-        CHAPTER_RESOURCE_CARD_COUNT, MAX_RESOURCE_BATCH_DOCUMENT_BYTES,
+        CHAPTER_RESOURCE_CARD_COUNT, MAX_EXAM_DETAIL_REQUESTS, MAX_RESOURCE_BATCH_DOCUMENT_BYTES,
         MAX_RESOURCE_CHAPTER_REQUESTS,
     },
 };
@@ -325,6 +326,28 @@ impl NativeChaoxingInventoryTransport {
             states.push(self.fetch_work_detail_state(session, *request).await?);
         }
         Ok(states)
+    }
+
+    async fn fetch_exam_detail_facts_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        requests: &[ChaoxingExamDetailRequest<'_>],
+    ) -> ProviderResult<Vec<ChaoxingExamDetailFacts>> {
+        if requests.len() > MAX_EXAM_DETAIL_REQUESTS {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing Exam detail request batch exceeds the size limit",
+            ));
+        }
+        let mut details = Vec::with_capacity(requests.len());
+        for request in requests {
+            let document = self.get_html(session, request.url()?).await?;
+            details.push(ChaoxingExamDetailFacts::for_request(
+                *request,
+                document.as_str(),
+            )?);
+        }
+        Ok(details)
     }
 
     async fn fetch_work_detail_state(
@@ -919,6 +942,22 @@ impl ChaoxingInventoryTransport for NativeChaoxingInventoryTransport {
             Err(error) if should_renew_after(&error, renewed) => {
                 let session = self.sessions.renew_session(context).await?;
                 self.fetch_work_detail_states_once(&session, requests).await
+            }
+            result => result,
+        }
+    }
+
+    async fn fetch_exam_detail_facts(
+        &self,
+        context: &ProviderContext,
+        _route: ChaoxingCourseRoute<'_>,
+        requests: &[ChaoxingExamDetailRequest<'_>],
+    ) -> ProviderResult<Vec<ChaoxingExamDetailFacts>> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_exam_detail_facts_once(&session, requests).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_exam_detail_facts_once(&session, requests).await
             }
             result => result,
         }

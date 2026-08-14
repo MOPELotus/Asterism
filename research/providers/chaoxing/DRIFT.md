@@ -8,6 +8,7 @@
 | Domain variants change | Donors use `mooc1`, `mooc1-api`, `mooc2-ans` and historical institutional mirrors | Allow only audited hosts and classify unexpected redirects as protocol drift |
 | Status keyword false positives | Exam pages embed localized status words in scripts | Remove script/style content and parse item structure before fallback text classification |
 | Exam score/retake false positives | The PortSource scans localized score text and structural `reTest(...)` handlers beside remaining-time text | Bound scores to 0-100, reject conflicts/malformed precision, exclude `分钟`, require an exact row-local handler, and keep both facts separate from state and authorization |
+| Exam result route or facts drift | Current PortSource distinguishes Exam preview/detail pages, but entry variants and result DOM may differ | Read only the allowlisted preview path with exact course/class/exam binding, reject redirects and conflicting list/detail scores, and retain unsupported variants as list-level evidence until separately fixtured |
 | `未交` is ambiguous | Current donor observed expired Work still labelled `未交` | Follow the detail redirect before declaring a task actionable |
 | Per-attempt QIDs change | Current Exam donor observed complete QID regeneration on retake | Reparse every attempt; never make QID the task identity |
 | Browser DOM handlers change | OCS and agent donors use different current page modes | Fixture each supported page mode and fail closed on unknown form structure |
