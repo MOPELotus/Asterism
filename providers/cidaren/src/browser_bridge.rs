@@ -529,6 +529,10 @@ impl BrowserBridgeCapability for CidarenBrowserBridge {
             .then_some(BrowserBridgeResultDisposition::CredentialTerminal)
     }
 
+    fn browser_bridge_credential_result_types(&self) -> &'static [&'static str] {
+        &[crate::CIDAREN_CAPTURE_RESULT_TYPE]
+    }
+
     async fn complete_browser_bridge_credential_result(
         &self,
         context: &ProviderContext,
@@ -799,8 +803,12 @@ mod tests {
     }
 
     #[test]
-    fn result_disposition_accepts_only_exact_capture_result_type() {
+    fn credential_result_type_set_matches_exact_terminal_disposition() {
         let capability = bridge(true);
+        assert_eq!(
+            capability.browser_bridge_credential_result_types(),
+            [crate::CIDAREN_CAPTURE_RESULT_TYPE]
+        );
         assert_eq!(
             capability.browser_bridge_result_disposition(crate::CIDAREN_CAPTURE_RESULT_TYPE),
             Some(BrowserBridgeResultDisposition::CredentialTerminal)
@@ -812,6 +820,11 @@ mod tests {
             "CIDAREN.CAPTURE.SNAPSHOT.RESULT",
             "uai.capture.snapshot.result",
         ] {
+            assert!(
+                !capability
+                    .browser_bridge_credential_result_types()
+                    .contains(&result_type)
+            );
             assert_eq!(
                 capability.browser_bridge_result_disposition(result_type),
                 None
