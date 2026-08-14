@@ -355,7 +355,7 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
     }
 }
 
-async fn authenticate_session_for_exchange(
+pub(crate) async fn authenticate_session_for_exchange(
     transaction: &mut Transaction<'_, Sqlite>,
     session_id: BrowserBridgeSessionId,
     access_token_digest: &TokenDigest,

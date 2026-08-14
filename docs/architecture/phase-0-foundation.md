@@ -3340,3 +3340,26 @@ longer exposes the metadata-only storage entry point. Provider-specific Cidaren
 Capture and UAI residence artifacts can now enter this shared boundary; helper
 dispatch, typed result transport and the atomic terminal-result/credential
 replacement transaction remain the next shared BrowserBridge slices.
+
+## One-hundred-and-ninety-first Phase 0 slice
+
+A credential-producing `BrowserBridge` result now has one terminal transaction
+instead of separate exchange, Secret and session writes. Storage reauthenticates
+the exact helper-token digest against the live claimed session, repeats the
+owner/account/Task/Provider binding, requires the issued sequence to reference
+an encrypted command artifact, and compares the immutable command metadata
+before accepting the Provider-validated completed exchange.
+
+Within the same immediate SQLite transaction, Core records the terminal result,
+replaces the complete encrypted Provider credential set, marks the bound account
+authenticated, advances the helper session to Completed and clears both token
+families. Any command mismatch, absent artifact, stale session update, account
+binding conflict or Secret failure rolls the entire operation back. A lost
+response cannot replay credential replacement through the now-invalid helper
+token; recovery reads the already terminal ledger instead.
+
+Engine owns helper-token hashing and exposes only the validated-bundle commit
+request. Provider code still cannot access Storage, choose another account or
+declare a helper echo as command authority. This closes Cidaren's shared atomic
+Capture commit gap; generic typed helper dispatch and result transport remain a
+separate bounded slice.

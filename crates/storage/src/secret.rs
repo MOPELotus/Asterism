@@ -7,8 +7,9 @@ use std::{
 
 use asterism_domain::{
     AuditActor, AuditRecordId, AuthBootstrapPurpose, AuthBootstrapSessionId, AuthMethod,
-    AuthSession, AuthState, ProviderAccount, ProviderAccountId, ProviderId, SecretId, SessionKind,
-    Timestamp, UserId,
+    AuthSession, AuthState, BrowserBridgeExchangeState, BrowserBridgeSession,
+    BrowserBridgeSessionState, ProviderAccount, ProviderAccountId, ProviderId, SecretId,
+    SessionKind, Timestamp, UserId,
 };
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, NewProviderCredential, ProviderCredential,
@@ -27,9 +28,12 @@ use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use crate::{
     AuthBootstrapCredentialCommit, AuthBootstrapCredentialCommitOutcome,
     AuthBootstrapCredentialCommitRequest, AuthBootstrapCredentialRepository,
-    AuthenticatedCredentialRepository, Database,
+    AuthenticatedCredentialRepository, BrowserBridgeCredentialCommit,
+    BrowserBridgeCredentialCommitOutcome, BrowserBridgeCredentialCommitRequest,
+    BrowserBridgeCredentialRepository, Database,
     auth_bootstrap::{authenticate_access_in_transaction, complete_auth_bootstrap_in_transaction},
     auth_session::update_auth_session_in_transaction,
+    browser_bridge::{authenticate_session_for_exchange, fetch_exchange, insert_exchange_audit},
 };
 use crate::{QuestionReadContinuationRepositoryFactory, QuestionSessionArtifactRepositoryFactory};
 
@@ -1080,6 +1084,224 @@ impl AuthBootstrapCredentialRepository for SqliteSecretStore {
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
+impl BrowserBridgeCredentialRepository for SqliteSecretStore {
+    async fn commit_browser_bridge_credentials(
+        &self,
+        request: BrowserBridgeCredentialCommitRequest<'_>,
+    ) -> Result<BrowserBridgeCredentialCommitOutcome, SecretStoreError> {
+        request
+            .exchange
+            .validate()
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+        let Some(completed_at) = request.exchange.completed_at else {
+            return Err(SecretStoreError::InvalidValue);
+        };
+        if request.exchange.state != BrowserBridgeExchangeState::Completed
+            || request.validated_bundle.captured_at < request.exchange.issued_at
+            || request.validated_bundle.captured_at > completed_at
+            || !matches!(
+                request.validated_bundle.acquired_via,
+                CredentialAcquisition::CaptureTool
+                    | CredentialAcquisition::BrowserExtension
+                    | CredentialAcquisition::AndroidHelper
+            )
+        {
+            return Err(SecretStoreError::InvalidValue);
+        }
+        request
+            .validated_bundle
+            .validate()
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let Some(session) = authenticate_session_for_exchange(
+            &mut transaction,
+            request.exchange.session_id,
+            request.access_token_digest,
+            completed_at,
+        )
+        .await
+        .map_err(|_| SecretStoreError::Storage)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCredentialCommitOutcome::AccessRejected);
+        };
+        authorize_browser_bridge_secret_access(&session, request.access)?;
+        if request.validated_bundle.provider_id != session.provider_id {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCredentialCommitOutcome::BindingConflict);
+        }
+        match ensure_account_binding(
+            &mut transaction,
+            session.owner_user_id,
+            session.provider_account_id,
+            &session.provider_id,
+            request.validated_bundle.tenant.as_deref(),
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(SecretStoreError::NotFound | SecretStoreError::AccountMismatch) => {
+                transaction.rollback().await.map_err(storage_error)?;
+                return Ok(BrowserBridgeCredentialCommitOutcome::BindingConflict);
+            }
+            Err(error) => return Err(error),
+        }
+
+        let sequence =
+            i64::try_from(request.exchange.sequence).map_err(|_| SecretStoreError::InvalidValue)?;
+        let Some(existing) =
+            fetch_exchange(&mut transaction, request.exchange.session_id, sequence)
+                .await
+                .map_err(|_| SecretStoreError::Storage)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCredentialCommitOutcome::SequenceConflict);
+        };
+        let artifact_present: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM browser_bridge_exchanges \
+             WHERE session_id = ? AND sequence = ? AND command_secret_blob_id IS NOT NULL)",
+        )
+        .bind(request.exchange.session_id.to_string())
+        .bind(sequence)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if artifact_present != 1 {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCredentialCommitOutcome::BindingConflict);
+        }
+        if existing.state != BrowserBridgeExchangeState::Issued
+            || existing.command_type != request.exchange.command_type
+            || existing.command_digest != request.exchange.command_digest
+            || existing.issued_at != request.exchange.issued_at
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCredentialCommitOutcome::SequenceConflict);
+        }
+
+        let (key_id, key) = self.keyring.active();
+        let prepared = prepare_credential_bundle(
+            session.owner_user_id,
+            session.provider_account_id,
+            request.validated_bundle,
+            key_id,
+            key,
+        )?;
+        let updated_exchange = sqlx::query(
+            "UPDATE browser_bridge_exchanges SET result_type = ?, result_digest = ?, \
+             state = 'completed', completed_at = ? \
+             WHERE session_id = ? AND sequence = ? AND state = 'issued' \
+               AND command_type = ? AND command_digest = ? AND issued_at = ?",
+        )
+        .bind(request.exchange.result_type.as_deref())
+        .bind(request.exchange.result_digest.map(|digest| digest.to_vec()))
+        .bind(encode_timestamp(completed_at))
+        .bind(request.exchange.session_id.to_string())
+        .bind(sequence)
+        .bind(&request.exchange.command_type)
+        .bind(request.exchange.command_digest.as_slice())
+        .bind(encode_timestamp(request.exchange.issued_at))
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if updated_exchange.rows_affected() != 1 {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCredentialCommitOutcome::SequenceConflict);
+        }
+
+        let replaced_count = replace_previous_credentials(
+            &mut transaction,
+            session.provider_account_id,
+            request.access,
+        )
+        .await?;
+        persist_prepared_credentials(&mut transaction, &prepared.credentials, request.access)
+            .await?;
+        authenticate_provider_account(
+            &mut transaction,
+            session.owner_user_id,
+            session.provider_account_id,
+            &session.provider_id,
+            prepared.prepared_at,
+        )
+        .await?;
+        insert_bundle_audit(
+            &mut transaction,
+            request.access,
+            session.provider_account_id,
+            prepared.auth_method,
+            prepared.session_kind,
+            replaced_count,
+            prepared.credentials.len(),
+        )
+        .await
+        .map_err(storage_error)?;
+
+        let mut completed_session = session;
+        completed_session
+            .complete(completed_at)
+            .map_err(|_| SecretStoreError::VersionConflict)?;
+        let updated_session = sqlx::query(
+            "UPDATE browser_bridge_sessions SET state_json = ?, pairing_token_hash = NULL, \
+             access_token_hash = NULL, revision = ?, updated_at = ? \
+             WHERE id = ? AND access_token_hash = ? AND pairing_token_hash IS NULL \
+               AND state_json = ? AND revision = 2",
+        )
+        .bind(
+            serde_json::to_string(&completed_session.state)
+                .map_err(|_| SecretStoreError::Storage)?,
+        )
+        .bind(i64::from(completed_session.revision))
+        .bind(encode_timestamp(completed_session.updated_at))
+        .bind(completed_session.id.to_string())
+        .bind(request.access_token_digest.as_bytes().as_slice())
+        .bind(
+            serde_json::to_string(&BrowserBridgeSessionState::Claimed)
+                .map_err(|_| SecretStoreError::Storage)?,
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if updated_session.rows_affected() != 1 {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCredentialCommitOutcome::BindingConflict);
+        }
+        insert_exchange_audit(
+            &mut transaction,
+            &request.access.correlation_id,
+            &completed_session,
+            request.exchange,
+            "credential_committed",
+        )
+        .await
+        .map_err(|_| SecretStoreError::Storage)?;
+        insert_browser_bridge_session_audit(&mut transaction, request.access, &completed_session)
+            .await
+            .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        let credentials = prepared
+            .credentials
+            .into_iter()
+            .map(|prepared| prepared.credential)
+            .collect();
+        Ok(BrowserBridgeCredentialCommitOutcome::Committed(Box::new(
+            BrowserBridgeCredentialCommit {
+                session: completed_session,
+                exchange: request.exchange.clone(),
+                credentials,
+            },
+        )))
+    }
+}
+
+#[async_trait]
 impl AuthenticatedCredentialRepository for SqliteSecretStore {
     async fn commit_authenticated_credentials(
         &self,
@@ -1654,6 +1876,54 @@ async fn insert_bundle_audit(
     .bind(provider_account_id.to_string())
     .bind(&access.correlation_id)
     .bind(serde_json::to_string(&metadata).map_err(|error| sqlx::Error::Encode(Box::new(error)))?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn authorize_browser_bridge_secret_access(
+    session: &BrowserBridgeSession,
+    access: &SecretAccess,
+) -> Result<(), SecretStoreError> {
+    authorize(session.owner_user_id, access)?;
+    let actor_matches = match &access.actor {
+        SecretActor::CoreService(_) => true,
+        SecretActor::ProviderRuntime(provider_id) => provider_id == session.provider_id.as_str(),
+        SecretActor::User(_) | SecretActor::ServiceToken(_) => false,
+    };
+    actor_matches
+        .then_some(())
+        .ok_or(SecretStoreError::Unauthorized)
+}
+
+async fn insert_browser_bridge_session_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    access: &SecretAccess,
+    session: &BrowserBridgeSession,
+) -> Result<(), sqlx::Error> {
+    let (actor_type, actor_id) = encode_secret_actor(&access.actor);
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, ?, ?, 'browser_bridge_session_completed', \
+                 'browser_bridge_session', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(session.updated_at))
+    .bind(actor_type)
+    .bind(actor_id)
+    .bind(session.id.to_string())
+    .bind(&access.correlation_id)
+    .bind(
+        serde_json::json!({
+            "state": session.state,
+            "revision": session.revision,
+            "provider_id": session.provider_id,
+            "task_id": session.task_id,
+        })
+        .to_string(),
+    )
     .execute(&mut **transaction)
     .await?;
     Ok(())

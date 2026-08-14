@@ -1113,6 +1113,39 @@ pub trait BrowserBridgeCommandArtifactRepository: Send + Sync {
 }
 
 #[derive(Debug)]
+pub struct BrowserBridgeCredentialCommitRequest<'a> {
+    pub exchange: &'a BrowserBridgeExchange,
+    pub access_token_digest: &'a TokenDigest,
+    pub validated_bundle: CredentialBundle,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeCredentialCommit {
+    pub session: BrowserBridgeSession,
+    pub exchange: BrowserBridgeExchange,
+    pub credentials: Vec<ProviderCredential>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserBridgeCredentialCommitOutcome {
+    Committed(Box<BrowserBridgeCredentialCommit>),
+    AccessRejected,
+    BindingConflict,
+    SequenceConflict,
+}
+
+/// Atomic terminal-result and credential replacement boundary for a claimed
+/// `BrowserBridge` command whose Provider result has already been validated.
+#[async_trait]
+pub trait BrowserBridgeCredentialRepository: Send + Sync {
+    async fn commit_browser_bridge_credentials(
+        &self,
+        request: BrowserBridgeCredentialCommitRequest<'_>,
+    ) -> Result<BrowserBridgeCredentialCommitOutcome, SecretStoreError>;
+}
+
+#[derive(Debug)]
 pub struct AuthBootstrapCredentialCommitRequest<'a> {
     pub session_id: AuthBootstrapSessionId,
     pub access_token_digest: &'a TokenDigest,

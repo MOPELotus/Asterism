@@ -299,21 +299,29 @@ mod tests {
 
     use asterism_auth::OpaqueTokenService;
     use asterism_domain::{
-        AuditActor, BrowserBridgeExchange, BrowserBridgeSession, BrowserBridgeSessionCreate,
-        ProviderAccountId, Role, TaskId, UserId,
+        AuditActor, AuthMethod, AuthState, BrowserBridgeExchange, BrowserBridgeSession,
+        BrowserBridgeSessionCreate, BrowserBridgeSessionState, ProviderAccountId, Role,
+        SessionKind, TaskId, UserId,
     };
     use asterism_provider_api::BrowserSessionSpec;
-    use asterism_secrets::{SecretKey, SecretStoreError};
+    use asterism_secrets::{
+        CredentialAcquisition, CredentialBundle, CredentialField, SecretKey, SecretPurpose,
+        SecretStore, SecretStoreError,
+    };
     use chrono::{Duration, Utc};
 
     use super::*;
-    use crate::{BrowserBridgeSessionRepository, SqliteBrowserBridgeSessionRepository};
+    use crate::{
+        BrowserBridgeCredentialCommitOutcome, BrowserBridgeCredentialCommitRequest,
+        BrowserBridgeCredentialRepository, BrowserBridgeSessionRepository,
+        SqliteBrowserBridgeSessionRepository, SqliteSecretStore,
+    };
 
     #[tokio::test]
     async fn command_is_encrypted_recoverable_bound_and_legacy_safe() {
         let fixture = fixture().await;
         let now = Utc::now();
-        let session = fixture.claimed_session(now).await;
+        let (session, _) = fixture.claimed_session(now).await;
         let command = br#"{"kind":"capture_snapshot","nonce":"n-1"}"#;
         let issued = BrowserBridgeExchange::issue(
             session.id,
@@ -414,10 +422,181 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn terminal_result_credentials_and_session_commit_atomically() {
+        let fixture = fixture().await;
+        let now = Utc::now() - Duration::seconds(10);
+        let (session, access_digest) = fixture.claimed_session(now).await;
+        let command = br#"{"kind":"capture_snapshot","nonce":"credential-1"}"#;
+        let issued = BrowserBridgeExchange::issue(
+            session.id,
+            1,
+            "cidaren.capture.snapshot".to_owned(),
+            digest(command),
+            now + Duration::seconds(2),
+        )
+        .unwrap();
+        let access = Fixture::access();
+        fixture
+            .command_repository
+            .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
+                exchange: &issued,
+                command_artifact: SecretValue::new(command.to_vec()),
+                access: &access,
+            })
+            .await
+            .unwrap();
+        let completed_at = now + Duration::seconds(3);
+        let mut completed = issued.clone();
+        completed
+            .complete(
+                "cidaren.capture.snapshot.result".to_owned(),
+                [8; 32],
+                completed_at,
+            )
+            .unwrap();
+        let outcome = fixture
+            .secret_store
+            .commit_browser_bridge_credentials(BrowserBridgeCredentialCommitRequest {
+                exchange: &completed,
+                access_token_digest: &access_digest,
+                validated_bundle: fixture.bundle(completed_at, b"captured-token"),
+                access: &access,
+            })
+            .await
+            .unwrap();
+        let BrowserBridgeCredentialCommitOutcome::Committed(committed) = outcome else {
+            panic!("expected atomic BrowserBridge credential commit");
+        };
+        assert_eq!(
+            committed.session.state,
+            BrowserBridgeSessionState::Completed
+        );
+        assert_eq!(committed.exchange, completed);
+        assert_eq!(committed.credentials.len(), 1);
+        assert_eq!(
+            fixture
+                .secret_store
+                .get(&committed.credentials[0].secret, &access)
+                .await
+                .unwrap()
+                .expose_secret(),
+            b"captured-token"
+        );
+        let persisted: (String, Option<Vec<u8>>, String) = sqlx::query_as(
+            "SELECT state_json, access_token_hash, auth_state_json \
+             FROM browser_bridge_sessions \
+             JOIN provider_accounts ON provider_accounts.id = browser_bridge_sessions.provider_account_id \
+             WHERE browser_bridge_sessions.id = ?",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<BrowserBridgeSessionState>(&persisted.0).unwrap(),
+            BrowserBridgeSessionState::Completed
+        );
+        assert!(persisted.1.is_none());
+        assert_eq!(
+            serde_json::from_str::<AuthState>(&persisted.2).unwrap(),
+            AuthState::Authenticated
+        );
+
+        let retry = fixture
+            .secret_store
+            .commit_browser_bridge_credentials(BrowserBridgeCredentialCommitRequest {
+                exchange: &completed,
+                access_token_digest: &access_digest,
+                validated_bundle: fixture.bundle(completed_at, b"captured-token"),
+                access: &access,
+            })
+            .await
+            .unwrap();
+        assert_eq!(retry, BrowserBridgeCredentialCommitOutcome::AccessRejected);
+    }
+
+    #[tokio::test]
+    async fn terminal_binding_conflict_leaves_exchange_session_and_credentials_unchanged() {
+        let fixture = fixture().await;
+        let now = Utc::now() - Duration::seconds(10);
+        let (session, access_digest) = fixture.claimed_session(now).await;
+        let command = br#"{"kind":"capture_snapshot","nonce":"credential-rollback"}"#;
+        let issued = BrowserBridgeExchange::issue(
+            session.id,
+            1,
+            "cidaren.capture.snapshot".to_owned(),
+            digest(command),
+            now + Duration::seconds(2),
+        )
+        .unwrap();
+        let access = Fixture::access();
+        fixture
+            .command_repository
+            .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
+                exchange: &issued,
+                command_artifact: SecretValue::new(command.to_vec()),
+                access: &access,
+            })
+            .await
+            .unwrap();
+        let completed_at = now + Duration::seconds(3);
+        let mut foreign = issued.clone();
+        foreign.command_digest = [7; 32];
+        foreign
+            .complete(
+                "cidaren.capture.snapshot.result".to_owned(),
+                [8; 32],
+                completed_at,
+            )
+            .unwrap();
+        let outcome = fixture
+            .secret_store
+            .commit_browser_bridge_credentials(BrowserBridgeCredentialCommitRequest {
+                exchange: &foreign,
+                access_token_digest: &access_digest,
+                validated_bundle: fixture.bundle(completed_at, b"must-not-persist"),
+                access: &access,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            BrowserBridgeCredentialCommitOutcome::SequenceConflict
+        );
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM browser_bridge_exchanges WHERE session_id = ? AND sequence = 1",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        let session_state: String =
+            sqlx::query_scalar("SELECT state_json FROM browser_bridge_sessions WHERE id = ?")
+                .bind(session.id.to_string())
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        let credential_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_account_credentials WHERE provider_account_id = ?",
+        )
+        .bind(fixture.account.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(state, "issued");
+        assert_eq!(
+            serde_json::from_str::<BrowserBridgeSessionState>(&session_state).unwrap(),
+            BrowserBridgeSessionState::Claimed
+        );
+        assert_eq!(credential_count, 0);
+    }
+
     struct Fixture {
         database: Database,
         session_repository: SqliteBrowserBridgeSessionRepository,
         command_repository: SqliteBrowserBridgeCommandArtifactRepository,
+        secret_store: SqliteSecretStore,
         owner: UserId,
         account: ProviderAccountId,
         task: TaskId,
@@ -425,7 +604,10 @@ mod tests {
     }
 
     impl Fixture {
-        async fn claimed_session(&self, now: asterism_domain::Timestamp) -> BrowserBridgeSession {
+        async fn claimed_session(
+            &self,
+            now: asterism_domain::Timestamp,
+        ) -> (BrowserBridgeSession, asterism_auth::TokenDigest) {
             let spec = BrowserSessionSpec {
                 version: 1,
                 isolation_key: "cidaren-task".to_owned(),
@@ -458,7 +640,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            self.session_repository
+            let claimed = self
+                .session_repository
                 .claim_browser_bridge_session(
                     session.id,
                     &pairing_tokens.digest(&pairing),
@@ -468,8 +651,8 @@ mod tests {
                 )
                 .await
                 .unwrap()
-                .unwrap()
-                .0
+                .unwrap();
+            (claimed.0, access_digest)
         }
 
         fn access() -> SecretAccess {
@@ -493,6 +676,27 @@ mod tests {
                 session_id: session.id,
                 sequence,
                 access,
+            }
+        }
+
+        fn bundle(
+            &self,
+            captured_at: asterism_domain::Timestamp,
+            value: &[u8],
+        ) -> CredentialBundle {
+            CredentialBundle {
+                provider_id: self.provider.clone(),
+                tenant: None,
+                auth_method: AuthMethod::AssistedSession,
+                acquired_via: CredentialAcquisition::CaptureTool,
+                captured_at,
+                expires_at: None,
+                session_kind: SessionKind::BearerToken,
+                fields: vec![CredentialField {
+                    purpose: SecretPurpose::ProviderAccessToken,
+                    value: SecretValue::new(value.to_vec()),
+                }],
+                user_id_hint: None,
             }
         }
     }
@@ -548,14 +752,16 @@ mod tests {
         let mut keys = BTreeMap::new();
         keys.insert("test-key".to_owned(), SecretKey::new([7; 32]));
         let keyring = Arc::new(SecretKeyring::new("test-key", keys).unwrap());
+        let secret_store = SqliteSecretStore::new(database.clone(), keyring.clone());
         Fixture {
             database: database.clone(),
             session_repository: SqliteBrowserBridgeSessionRepository::new(database.clone()),
             command_repository: SqliteBrowserBridgeCommandArtifactRepository::new(
-                database,
+                database.clone(),
                 keyring,
                 provider.clone(),
             ),
+            secret_store,
             owner,
             account,
             task,

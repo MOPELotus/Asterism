@@ -5,13 +5,17 @@ use asterism_domain::{
     Timestamp, UserId,
 };
 use asterism_provider_api::{BrowserSessionSpec, BrowserSessionSpecError};
-use asterism_secrets::{SecretAccess, SecretStoreError, SecretString, SecretValue};
+use asterism_secrets::{
+    CredentialBundle, SecretAccess, SecretStoreError, SecretString, SecretValue,
+};
 use asterism_storage::{
     BrowserBridgeCommandArtifactRepository,
     BrowserBridgeCommandIssueRequest as StorageBrowserBridgeCommandIssueRequest,
     BrowserBridgeCommandResolveRequest as StorageBrowserBridgeCommandResolveRequest,
-    BrowserBridgeExchangeRecord, BrowserBridgeSessionRepository, ResolvedBrowserBridgeCommand,
-    StorageError,
+    BrowserBridgeCredentialCommitOutcome,
+    BrowserBridgeCredentialCommitRequest as StorageBrowserBridgeCredentialCommitRequest,
+    BrowserBridgeCredentialRepository, BrowserBridgeExchangeRecord, BrowserBridgeSessionRepository,
+    ResolvedBrowserBridgeCommand, StorageError,
 };
 
 #[derive(Debug)]
@@ -279,6 +283,56 @@ where
     }
 }
 
+/// Core-owned terminal boundary for a Provider-validated browser result that
+/// replaces account credentials. Result, credentials and session completion
+/// are committed atomically by Storage.
+#[derive(Debug)]
+pub struct BrowserBridgeCredentialCommitService<R> {
+    repository: R,
+    access_tokens: OpaqueTokenService,
+}
+
+impl<R> BrowserBridgeCredentialCommitService<R> {
+    /// # Errors
+    ///
+    /// Returns [`TokenError`] only if the fixed helper-token family is invalid.
+    pub fn new(repository: R) -> Result<Self, TokenError> {
+        Ok(Self {
+            repository,
+            access_tokens: OpaqueTokenService::new("ast_bridge")?,
+        })
+    }
+}
+
+impl<R> BrowserBridgeCredentialCommitService<R>
+where
+    R: BrowserBridgeCredentialRepository,
+{
+    /// Digests the session-bound helper token and commits one already validated
+    /// Provider result plus its replacement credentials exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed secret-storage error without retrying the terminal
+    /// Provider mutation or accepting helper-supplied command authority.
+    pub async fn commit(
+        &self,
+        request: BrowserBridgeCredentialCommitRequest,
+    ) -> Result<BrowserBridgeCredentialCommitOutcome, BrowserBridgeCredentialCommitServiceError>
+    {
+        let access_token_digest = self.access_tokens.digest(&request.access_token);
+        Ok(self
+            .repository
+            .commit_browser_bridge_credentials(StorageBrowserBridgeCredentialCommitRequest {
+                exchange: &request.exchange,
+                access_token_digest: &access_token_digest,
+                validated_bundle: request.validated_bundle,
+                access: &request.access,
+            })
+            .await?)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BrowserBridgeSessionCreateRequest {
     pub owner_user_id: UserId,
@@ -355,6 +409,14 @@ pub struct BrowserBridgeCommandResolveRequest {
 }
 
 #[derive(Debug)]
+pub struct BrowserBridgeCredentialCommitRequest {
+    pub exchange: BrowserBridgeExchange,
+    pub access_token: SecretString,
+    pub validated_bundle: CredentialBundle,
+    pub access: SecretAccess,
+}
+
+#[derive(Debug)]
 pub struct BrowserBridgeExchangeRequest {
     pub exchange: BrowserBridgeExchange,
     pub access_token: SecretString,
@@ -381,6 +443,12 @@ pub enum BrowserBridgeHelperSessionError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserBridgeCommandServiceError {
+    #[error(transparent)]
+    SecretStore(#[from] SecretStoreError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BrowserBridgeCredentialCommitServiceError {
     #[error(transparent)]
     SecretStore(#[from] SecretStoreError),
 }

@@ -53,6 +53,8 @@ pub use repository::{
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, BrowserBridgeCommandArtifactRepository,
     BrowserBridgeCommandIssueRequest, BrowserBridgeCommandResolveRequest,
+    BrowserBridgeCredentialCommit, BrowserBridgeCredentialCommitOutcome,
+    BrowserBridgeCredentialCommitRequest, BrowserBridgeCredentialRepository,
     BrowserBridgeExchangeRecord, BrowserBridgeSessionRepository, CreditQueryRepository,
     CreditRepository, CreditReservationDetail, CreditReservationPage, CreditTransactionPage,
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionBillingReservation,

@@ -54,7 +54,9 @@ pub use auth_session::{
 };
 pub use browser_bridge_session::{
     BrowserBridgeCommandIssueRequest, BrowserBridgeCommandResolveRequest,
-    BrowserBridgeCommandService, BrowserBridgeCommandServiceError, BrowserBridgeExchangeRequest,
+    BrowserBridgeCommandService, BrowserBridgeCommandServiceError,
+    BrowserBridgeCredentialCommitRequest, BrowserBridgeCredentialCommitService,
+    BrowserBridgeCredentialCommitServiceError, BrowserBridgeExchangeRequest,
     BrowserBridgeHelperSessionError, BrowserBridgeHelperSessionService,
     BrowserBridgeSessionAccessRequest, BrowserBridgeSessionCancelRequest,
     BrowserBridgeSessionClaimRequest, BrowserBridgeSessionClaimed,
