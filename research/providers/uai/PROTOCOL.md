@@ -437,7 +437,13 @@ authenticated session, generated annotator token and exact zeroizing POST
 owner, and return the prepared `uai.answer-submit.v1` operation. Core records
 the request digest before dispatch. The operation sends once and returns a
 separate exact response-body digest plus the accepted receipt; an ambiguous
-issued mutation has no Provider replay path. Media-free snapshots retain the
+issued mutation has no Provider replay path. Its recovery hook first validates
+the exact continuation revision, operation type, timestamps and nonzero
+recorded digest, then repeats only fresh Task/route/account/progress discovery
+and request materialization. A changed request fails closed; an identical
+request still returns no outcome and keeps the session locked because the
+receipt-authorized user-module version cannot be reconstructed safely.
+Media-free snapshots retain the
 legacy single-call execution path. Embedded WEBVTT is parsed with bounded
 input/output, strips its header, cue ordinals and timestamp rows, normalizes
 only cue text into transcript metadata and is excluded from the display stem. The

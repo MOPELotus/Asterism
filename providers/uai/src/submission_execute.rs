@@ -5,9 +5,10 @@ use asterism_domain::{
     SubmissionReceipt, TaskCapability,
 };
 use asterism_provider_api::{
-    ExecutionEventSink, PreparedProviderSubmissionOperation, ProviderContext, ProviderError,
-    ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
-    ProviderRuntimeSettingsSchema, ResolvedProviderQuestionSessionContinuation,
+    AmbiguousProviderQuestionSessionOperation, ExecutionEventSink,
+    PreparedProviderSubmissionOperation, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderIdentity, ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema,
+    ProviderSubmissionStepOutcome, ResolvedProviderQuestionSessionContinuation,
     ResolvedProviderRuntimeSettings, SubmissionBuildCapability, SubmissionExecuteCapability,
     TaskDetailCapability,
 };
@@ -954,6 +955,33 @@ impl UaiSubmissionExecute {
             fresh.protocol_versions,
         )
     }
+
+    fn validate_session_continuation(
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        continuation: &ResolvedProviderQuestionSessionContinuation<'_>,
+    ) -> ProviderResult<()> {
+        if continuation.continuation_type != UAI_QUESTION_SET_ARTIFACT_TYPE
+            || continuation.phase != UAI_QUESTION_SET_ARTIFACT_PHASE
+            || continuation.revision == 0
+        {
+            return Err(protocol_drift(
+                "UAI submission continuation metadata is stale or foreign",
+            ));
+        }
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        UaiQuestionArtifactSet::decode_bound(
+            continuation.value,
+            continuation.continuation_digest,
+            remote_task_id,
+            &questions,
+        )?;
+        Ok(())
+    }
 }
 
 impl fmt::Debug for UaiSubmissionExecute {
@@ -1028,25 +1056,7 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
         let identity = self
             .validate_draft(context, remote_task_id, draft, runtime_settings)
             .await?;
-        if continuation.continuation_type != UAI_QUESTION_SET_ARTIFACT_TYPE
-            || continuation.phase != UAI_QUESTION_SET_ARTIFACT_PHASE
-            || continuation.revision == 0
-        {
-            return Err(protocol_drift(
-                "UAI submission continuation metadata is stale or foreign",
-            ));
-        }
-        let questions = draft
-            .items
-            .iter()
-            .map(|item| item.question.clone())
-            .collect::<Vec<_>>();
-        UaiQuestionArtifactSet::decode_bound(
-            continuation.value,
-            continuation.continuation_digest,
-            remote_task_id,
-            &questions,
-        )?;
+        Self::validate_session_continuation(remote_task_id, draft, &continuation)?;
         let plan = self
             .fresh_plan(context, remote_task_id, draft, &identity)
             .await?;
@@ -1073,6 +1083,52 @@ impl SubmissionExecuteCapability for UaiSubmissionExecute {
             account_id: context.account_id,
             operation,
         })))
+    }
+
+    async fn recover_ambiguous_submission_operation(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+        operation: &AmbiguousProviderQuestionSessionOperation,
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderSubmissionStepOutcome>> {
+        let identity = self
+            .validate_draft(context, remote_task_id, draft, runtime_settings)
+            .await?;
+        Self::validate_session_continuation(remote_task_id, draft, &continuation)?;
+        if operation.continuation_revision != continuation.revision
+            || operation.operation_type != UAI_SUBMISSION_OPERATION_TYPE
+            || operation.request_digest == [0; 32]
+            || operation.ambiguous_at < operation.issued_at
+        {
+            return Err(protocol_drift(
+                "UAI ambiguous submission operation is stale or foreign",
+            ));
+        }
+        let plan = self
+            .fresh_plan(context, remote_task_id, draft, &identity)
+            .await?;
+        let fresh = self
+            .transport
+            .prepare_submission(
+                context,
+                &identity.course_resource,
+                &identity.unit,
+                &identity.group,
+                &plan,
+            )
+            .await?;
+        if fresh.operation_type() != UAI_SUBMISSION_OPERATION_TYPE
+            || fresh.request_digest() != operation.request_digest
+            || fresh.delay_before_execute_seconds() != 0
+        {
+            return Err(remote_changed(
+                "UAI ambiguous submission no longer matches the fresh request",
+            ));
+        }
+        Ok(None)
     }
 }
 
@@ -2010,6 +2066,67 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::Internal);
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_media_submission_rebinds_exact_request_without_replay() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability =
+            UaiSubmissionExecute::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
+        let context = context();
+        let (draft, value, digest) = media_draft_and_artifact().await;
+        let issued_at = Utc::now();
+        let operation = AmbiguousProviderQuestionSessionOperation {
+            continuation_revision: 1,
+            operation_type: UAI_SUBMISSION_OPERATION_TYPE.to_owned(),
+            request_digest: [41; 32],
+            issued_at,
+            ambiguous_at: issued_at,
+        };
+        let recovered = capability
+            .recover_ambiguous_submission_operation(
+                &context,
+                "group:2001:unit-1:group-1",
+                &draft,
+                ResolvedProviderQuestionSessionContinuation {
+                    continuation_type: UAI_QUESTION_SET_ARTIFACT_TYPE,
+                    continuation_digest: digest,
+                    phase: UAI_QUESTION_SET_ARTIFACT_PHASE,
+                    revision: 1,
+                    value: &value,
+                },
+                &operation,
+                &runtime_settings(),
+            )
+            .await
+            .unwrap();
+        assert!(recovered.is_none());
+        assert!(transport.calls.lock().unwrap().is_empty());
+
+        let changed = AmbiguousProviderQuestionSessionOperation {
+            request_digest: [43; 32],
+            ..operation
+        };
+        let error = capability
+            .recover_ambiguous_submission_operation(
+                &context,
+                "group:2001:unit-1:group-1",
+                &draft,
+                ResolvedProviderQuestionSessionContinuation {
+                    continuation_type: UAI_QUESTION_SET_ARTIFACT_TYPE,
+                    continuation_digest: digest,
+                    phase: UAI_QUESTION_SET_ARTIFACT_PHASE,
+                    revision: 1,
+                    value: &value,
+                },
+                &changed,
+                &runtime_settings(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
         assert!(transport.calls.lock().unwrap().is_empty());
     }
 
