@@ -58,9 +58,11 @@ pub use browser_bridge_session::{
     BrowserBridgeCredentialCommitRequest, BrowserBridgeCredentialCommitService,
     BrowserBridgeCredentialCommitServiceError, BrowserBridgeExchangeRequest,
     BrowserBridgeHelperSessionError, BrowserBridgeHelperSessionService,
-    BrowserBridgeSessionAccessRequest, BrowserBridgeSessionCancelRequest,
-    BrowserBridgeSessionClaimRequest, BrowserBridgeSessionClaimed,
-    BrowserBridgeSessionCreateRequest, BrowserBridgeSessionCreated, BrowserBridgeSessionSnapshot,
+    BrowserBridgeResultArtifactService, BrowserBridgeResultReceiveRequest,
+    BrowserBridgeResultResolveRequest, BrowserBridgeSessionAccessRequest,
+    BrowserBridgeSessionCancelRequest, BrowserBridgeSessionClaimRequest,
+    BrowserBridgeSessionClaimed, BrowserBridgeSessionCreateRequest, BrowserBridgeSessionCreated,
+    BrowserBridgeSessionSnapshot,
 };
 pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredentialService};
 pub use execution_job::{

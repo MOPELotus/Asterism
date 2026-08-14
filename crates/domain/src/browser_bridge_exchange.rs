@@ -32,6 +32,34 @@ pub enum BrowserBridgeExchangeState {
     Rejected,
 }
 
+/// Durable identity for one raw helper result received before Provider parsing.
+/// The exact bytes live only in encrypted Storage and do not become an accepted
+/// exchange result until the Provider validates them against the issued command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeResultArtifactMetadata {
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub result_type: String,
+    pub result_digest: [u8; 32],
+    pub received_at: Timestamp,
+}
+
+impl BrowserBridgeResultArtifactMetadata {
+    /// # Errors
+    ///
+    /// Rejects an invalid sequence, result type or zero digest.
+    pub fn validate(&self) -> Result<(), BrowserBridgeExchangeError> {
+        if self.sequence == 0 || i64::try_from(self.sequence).is_err() {
+            return Err(BrowserBridgeExchangeError::InvalidSequence);
+        }
+        validate_type(&self.result_type)?;
+        if self.result_digest == [0; 32] {
+            return Err(BrowserBridgeExchangeError::InvalidDigest);
+        }
+        Ok(())
+    }
+}
+
 impl BrowserBridgeExchange {
     /// Creates a new command record. Sequence assignment is performed by the
     /// persistence boundary, so callers must provide the expected next value.
@@ -238,6 +266,29 @@ mod tests {
         assert_eq!(
             exchange.complete("rejected".to_owned(), [2; 32], now - Duration::seconds(1)),
             Err(BrowserBridgeExchangeError::InvalidResult)
+        );
+    }
+
+    #[test]
+    fn raw_result_metadata_is_bounded_before_provider_parsing() {
+        let mut metadata = BrowserBridgeResultArtifactMetadata {
+            session_id: BrowserBridgeSessionId::new(),
+            sequence: 1,
+            result_type: "uai.browser.event".to_owned(),
+            result_digest: [3; 32],
+            received_at: Utc::now(),
+        };
+        assert_eq!(metadata.validate(), Ok(()));
+        metadata.result_digest = [0; 32];
+        assert_eq!(
+            metadata.validate(),
+            Err(BrowserBridgeExchangeError::InvalidDigest)
+        );
+        metadata.result_digest = [3; 32];
+        metadata.result_type = "unsafe result".to_owned();
+        assert_eq!(
+            metadata.validate(),
+            Err(BrowserBridgeExchangeError::InvalidMessageType)
         );
     }
 }

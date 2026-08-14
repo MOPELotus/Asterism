@@ -1166,10 +1166,18 @@ impl BrowserBridgeCredentialRepository for SqliteSecretStore {
         };
         let artifact_present: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM browser_bridge_exchanges \
-             WHERE session_id = ? AND sequence = ? AND command_secret_blob_id IS NOT NULL)",
+             JOIN browser_bridge_result_artifacts AS result \
+               ON result.session_id = browser_bridge_exchanges.session_id \
+              AND result.sequence = browser_bridge_exchanges.sequence \
+             WHERE browser_bridge_exchanges.session_id = ? \
+               AND browser_bridge_exchanges.sequence = ? \
+               AND browser_bridge_exchanges.command_secret_blob_id IS NOT NULL \
+               AND result.result_type = ? AND result.result_digest = ?)",
         )
         .bind(request.exchange.session_id.to_string())
         .bind(sequence)
+        .bind(request.exchange.result_type.as_deref())
+        .bind(request.exchange.result_digest.map(|digest| digest.to_vec()))
         .fetch_one(&mut *transaction)
         .await
         .map_err(storage_error)?;

@@ -4,17 +4,17 @@ use asterism_auth::TokenDigest;
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor, AuditRecord,
     AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId, AuthSession,
-    AuthSessionId, BrowserBridgeExchange, BrowserBridgeSession, BrowserBridgeSessionId,
-    CreditAccount, CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId,
-    Execution, ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease,
-    ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
-    LogLevel, OrchestrationState, PriceQuote, ProviderAccount, ProviderAccountId,
-    ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
-    QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId, QuestionSession,
-    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
-    SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
-    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
-    UserProfile, UserStatus, WebSession, WebSessionId,
+    AuthSessionId, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
+    BrowserBridgeSession, BrowserBridgeSessionId, CreditAccount, CreditReservation,
+    CreditReservationId, CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt,
+    ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
+    ExecutionStage, ExecutionState, ExternalOauthPending, LogLevel, OrchestrationState, PriceQuote,
+    ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
+    Question, QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId,
+    QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId,
+    SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
+    SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
+    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     BrowserSessionSpec, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
@@ -1110,6 +1110,49 @@ pub trait BrowserBridgeCommandArtifactRepository: Send + Sync {
         &self,
         request: BrowserBridgeCommandResolveRequest<'_>,
     ) -> Result<Option<ResolvedBrowserBridgeCommand>, SecretStoreError>;
+
+    async fn receive_browser_bridge_result(
+        &self,
+        request: BrowserBridgeResultReceiveRequest<'_>,
+    ) -> Result<BrowserBridgeResultArtifactRecord, SecretStoreError>;
+
+    async fn resolve_browser_bridge_result(
+        &self,
+        request: BrowserBridgeResultResolveRequest<'_>,
+    ) -> Result<Option<ResolvedBrowserBridgeResult>, SecretStoreError>;
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeResultReceiveRequest<'a> {
+    pub metadata: &'a BrowserBridgeResultArtifactMetadata,
+    pub result_artifact: SecretValue,
+    pub access_token_digest: &'a TokenDigest,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeResultResolveRequest<'a> {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub task_id: TaskId,
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct ResolvedBrowserBridgeResult {
+    pub exchange: BrowserBridgeExchange,
+    pub metadata: BrowserBridgeResultArtifactMetadata,
+    pub result_artifact: SecretValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserBridgeResultArtifactRecord {
+    Inserted(BrowserBridgeResultArtifactMetadata),
+    Duplicate(BrowserBridgeResultArtifactMetadata),
+    AccessRejected,
+    SequenceConflict,
 }
 
 #[derive(Debug)]

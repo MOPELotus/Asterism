@@ -1,8 +1,8 @@
 use asterism_auth::{OpaqueTokenService, TokenError};
 use asterism_domain::{
-    AuditActor, BrowserBridgeExchange, BrowserBridgeSession, BrowserBridgeSessionCreate,
-    BrowserBridgeSessionError, BrowserBridgeSessionId, ProviderAccountId, ProviderId, TaskId,
-    Timestamp, UserId,
+    AuditActor, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata, BrowserBridgeSession,
+    BrowserBridgeSessionCreate, BrowserBridgeSessionError, BrowserBridgeSessionId,
+    ProviderAccountId, ProviderId, TaskId, Timestamp, UserId,
 };
 use asterism_provider_api::{BrowserSessionSpec, BrowserSessionSpecError};
 use asterism_secrets::{
@@ -14,8 +14,12 @@ use asterism_storage::{
     BrowserBridgeCommandResolveRequest as StorageBrowserBridgeCommandResolveRequest,
     BrowserBridgeCredentialCommitOutcome,
     BrowserBridgeCredentialCommitRequest as StorageBrowserBridgeCredentialCommitRequest,
-    BrowserBridgeCredentialRepository, BrowserBridgeExchangeRecord, BrowserBridgeSessionRepository,
-    ResolvedBrowserBridgeCommand, StorageError,
+    BrowserBridgeCredentialRepository, BrowserBridgeExchangeRecord,
+    BrowserBridgeResultArtifactRecord,
+    BrowserBridgeResultReceiveRequest as StorageBrowserBridgeResultReceiveRequest,
+    BrowserBridgeResultResolveRequest as StorageBrowserBridgeResultResolveRequest,
+    BrowserBridgeSessionRepository, ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult,
+    StorageError,
 };
 
 #[derive(Debug)]
@@ -283,6 +287,77 @@ where
     }
 }
 
+/// Core-owned encrypted inbox for raw helper results. Receipt is durable before
+/// Provider parsing; recovery can replay parsing without asking the helper to
+/// echo browser state or credentials.
+#[derive(Debug)]
+pub struct BrowserBridgeResultArtifactService<R> {
+    repository: R,
+    access_tokens: OpaqueTokenService,
+}
+
+impl<R> BrowserBridgeResultArtifactService<R> {
+    /// # Errors
+    ///
+    /// Returns [`TokenError`] only if the fixed helper-token family is invalid.
+    pub fn new(repository: R) -> Result<Self, TokenError> {
+        Ok(Self {
+            repository,
+            access_tokens: OpaqueTokenService::new("ast_bridge")?,
+        })
+    }
+}
+
+impl<R> BrowserBridgeResultArtifactService<R>
+where
+    R: BrowserBridgeCommandArtifactRepository,
+{
+    /// Encrypts one raw result under the exact session/sequence and returns an
+    /// idempotent receipt classification without marking it Provider-accepted.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid helper access, result bytes, bindings or sequence drift.
+    pub async fn receive(
+        &self,
+        request: BrowserBridgeResultReceiveRequest,
+    ) -> Result<BrowserBridgeResultArtifactRecord, BrowserBridgeCommandServiceError> {
+        let access_token_digest = self.access_tokens.digest(&request.access_token);
+        Ok(self
+            .repository
+            .receive_browser_bridge_result(StorageBrowserBridgeResultReceiveRequest {
+                metadata: &request.metadata,
+                result_artifact: request.result_artifact,
+                access_token_digest: &access_token_digest,
+                access: &request.access,
+            })
+            .await?)
+    }
+
+    /// Resolves one encrypted raw result only after complete owner/account/Task
+    /// and Provider rebinding.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unauthorized, incomplete, tampered or un-decryptable records.
+    pub async fn resolve(
+        &self,
+        request: BrowserBridgeResultResolveRequest,
+    ) -> Result<Option<ResolvedBrowserBridgeResult>, BrowserBridgeCommandServiceError> {
+        Ok(self
+            .repository
+            .resolve_browser_bridge_result(StorageBrowserBridgeResultResolveRequest {
+                owner_user_id: request.owner_user_id,
+                provider_account_id: request.provider_account_id,
+                task_id: request.task_id,
+                session_id: request.session_id,
+                sequence: request.sequence,
+                access: &request.access,
+            })
+            .await?)
+    }
+}
+
 /// Core-owned terminal boundary for a Provider-validated browser result that
 /// replaces account credentials. Result, credentials and session completion
 /// are committed atomically by Storage.
@@ -413,6 +488,24 @@ pub struct BrowserBridgeCredentialCommitRequest {
     pub exchange: BrowserBridgeExchange,
     pub access_token: SecretString,
     pub validated_bundle: CredentialBundle,
+    pub access: SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeResultReceiveRequest {
+    pub metadata: BrowserBridgeResultArtifactMetadata,
+    pub result_artifact: SecretValue,
+    pub access_token: SecretString,
+    pub access: SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeResultResolveRequest {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub task_id: TaskId,
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
     pub access: SecretAccess,
 }
 

@@ -47,6 +47,7 @@ pub use browser_bridge::{
 };
 pub use browser_bridge_exchange::{
     BrowserBridgeExchange, BrowserBridgeExchangeError, BrowserBridgeExchangeState,
+    BrowserBridgeResultArtifactMetadata,
 };
 pub use credits::{
     CreditAccount, CreditAmount, CreditError, CreditReservation, CreditReservationState,

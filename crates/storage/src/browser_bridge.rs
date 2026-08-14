@@ -315,6 +315,20 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
             transaction.rollback().await?;
             return Ok(BrowserBridgeExchangeRecord::SequenceConflict);
         }
+        let received_result_matches: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM browser_bridge_result_artifacts \
+             WHERE session_id = ? AND sequence = ? AND result_type = ? AND result_digest = ?)",
+        )
+        .bind(exchange.session_id.to_string())
+        .bind(sequence)
+        .bind(exchange.result_type.as_deref())
+        .bind(exchange.result_digest.map(|digest| digest.to_vec()))
+        .fetch_one(&mut *transaction)
+        .await?;
+        if received_result_matches != 1 {
+            transaction.rollback().await?;
+            return Ok(BrowserBridgeExchangeRecord::SequenceConflict);
+        }
         if existing.state != BrowserBridgeExchangeState::Issued {
             let same_result = existing.state == exchange.state
                 && existing.result_type == exchange.result_type
@@ -701,7 +715,7 @@ fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
 #[cfg(test)]
 mod tests {
     use asterism_auth::OpaqueTokenService;
-    use asterism_domain::{BrowserBridgeSessionCreate, Role};
+    use asterism_domain::{BrowserBridgeSessionCreate, Role, SecretId};
     use chrono::{Duration, Utc};
 
     use super::*;
@@ -878,6 +892,32 @@ mod tests {
                 now + Duration::seconds(3),
             )
             .unwrap();
+        let result_secret_id = SecretId::new();
+        sqlx::query(
+            "INSERT INTO secret_blobs \
+             (id, owner_user_id, purpose, key_id, nonce, encrypted_data, version, created_at, updated_at) \
+             VALUES (?, ?, 'browser_job_credential', 'test', X'00', X'00', 1, ?, ?)",
+        )
+        .bind(result_secret_id.to_string())
+        .bind(fixture.owner.to_string())
+        .bind(encode_timestamp(now + Duration::seconds(3)))
+        .bind(encode_timestamp(now + Duration::seconds(3)))
+        .execute(fixture.repository.database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO browser_bridge_result_artifacts \
+             (session_id, sequence, result_type, result_digest, secret_blob_id, received_at) \
+             VALUES (?, 1, ?, ?, ?, ?)",
+        )
+        .bind(session.id.to_string())
+        .bind(completed.result_type.as_deref())
+        .bind(completed.result_digest.map(|digest| digest.to_vec()))
+        .bind(result_secret_id.to_string())
+        .bind(encode_timestamp(now + Duration::seconds(3)))
+        .execute(fixture.repository.database.pool())
+        .await
+        .unwrap();
         assert!(matches!(
             fixture
                 .repository

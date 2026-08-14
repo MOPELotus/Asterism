@@ -3363,3 +3363,27 @@ request. Provider code still cannot access Storage, choose another account or
 declare a helper echo as command authority. This closes Cidaren's shared atomic
 Capture commit gap; generic typed helper dispatch and result transport remain a
 separate bounded slice.
+
+## One-hundred-and-ninety-second Phase 0 slice
+
+Raw helper results now enter an encrypted Provider-scoped inbox before parsing.
+Migration 043 binds one bounded result type, SHA-256 digest, encrypted Secret
+blob and first-received timestamp to the exact BrowserBridge session/sequence.
+The helper token must still authenticate the live claimed session, the issued
+command must already have its encrypted artifact, and conflicting retries cannot
+replace the first result. Identical retries return the original durable metadata.
+
+Core can resolve every retained result by owner, Provider account, Task,
+Provider and sequence after restart. Decryption authenticates the Secret AAD and
+recomputes the exact result digest before Provider code sees any raw JSON,
+credential or opaque browser handle. Ciphertext corruption and foreign bindings
+fail closed. A terminal exchange, including the credential-producing Capture
+transaction, is accepted only when its result type and digest match this inbox.
+
+This deliberately keeps receipt separate from Provider acceptance. A Provider
+may recover the prior command plus raw result, validate it, and then derive the
+next self-contained encrypted command through the existing issue-before-dispatch
+boundary. UAI may retain accumulated menu/Tab/Task and budget cursor state inside
+its opaque command artifact or reference earlier result sequences; Core does not
+interpret Provider DOM state and does not need an oversized complete-and-next
+transaction.
