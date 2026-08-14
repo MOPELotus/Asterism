@@ -8,7 +8,7 @@ pending.
 
 | Source | Revision | Updated | Use | Audited implementation surface | Live status |
 |---|---|---|---|---|---|
-| [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `dee643fd0a8e47e2b9ebeefc6515ff8c5acba49a` | 2026-07-22 | Reference | Password and Cookie login, Cookie validation, course/folder inventory, Chapter cards, Video, Document, Chapter Work | Pending |
+| [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `9699e632b492cdc55ea35a1ab05b6dfcbfb7cf70` | 2026-08-14 | Reference | Password and Cookie login, Cookie validation, course/folder inventory, Chapter cards, Video, Document, Live, Chapter Work | Pending |
 | [`surinrasu/CxKitty`](https://github.com/surinrasu/CxKitty) | `1589eac9c07c4bab71f79d762b45210643dd537d` | 2024-09-29 | Reference | Web password/QR login, SSO session validation, mobile course/Chapter APIs, independent Exam inventory, Exam/Chapter Work detail and submission, typed error branches | Pending; protocol age is a risk |
 | [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b36996d27d00577015663ec39e782500` | 2026-06-17 | PortSource | Browser-session Work and Exam inventory/status, submittability classification, result verification, current DOM reliability rules | Donor reports real use; Asterism validation pending |
 | [`ocsjs/ocsjs`](https://github.com/ocsjs/ocsjs) | `890686a5e54f9a6d52d1169bae9ea5971e0863c7` | 2026-07-01 | Reference | Current Work/Exam page route taxonomy, question-page behavior and Browser lifecycle | Pending |
@@ -65,6 +65,11 @@ atomic credential commit remain shared runtime responsibilities.
 
 ## Refresh log
 
+- 2026-08-14: `Samueli924/chaoxing` advanced from `dee643fd0a8e` to
+  `9699e632b492` on `main` via merge PR #621. The delta is limited to external
+  AI/Tiku connectivity checks and Python cleanup; it changes no audited
+  Chapter, Resource or Live request contract. Its latest tag remains `v3.1.4`.
+  The other five recorded donor default revisions remain unchanged.
 - 2026-08-14: refreshed all six recorded donor default `HEAD` revisions at the
   durable Exam-start checkpoint. Every revision remains unchanged. OCS still
   resolves its default `HEAD` to branch `4.0` at `890686a5e54f`; its unrelated

@@ -746,6 +746,9 @@ fn parse_resource_attachment(
             ("document" | "read" | "video", RemoteState::Completed) => {
                 vec![TaskCapability::ProgressRead]
             }
+            ("live", RemoteState::Pending | RemoteState::Completed) => {
+                vec![TaskCapability::ProgressRead]
+            }
             _ => Vec::new(),
         },
         fingerprint: fingerprint(&normalized)?,
@@ -1044,6 +1047,12 @@ mod tests {
             tasks
                 .iter()
                 .find(|task| task.remote_id.ends_with(":job-document"))
+                .is_some_and(|task| task.capabilities == [TaskCapability::ProgressRead])
+        );
+        assert!(
+            tasks
+                .iter()
+                .find(|task| task.remote_id.ends_with(":job-live"))
                 .is_some_and(|task| task.capabilities == [TaskCapability::ProgressRead])
         );
         assert!(

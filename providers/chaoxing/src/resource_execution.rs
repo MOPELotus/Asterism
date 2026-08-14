@@ -270,7 +270,9 @@ impl ChaoxingResourceExecution {
             locate_resource_fact(&documents, route, &resource_request, remote_task_id)?;
         if !matches!(
             kind,
-            ExecutableResourceKind::Immediate | ExecutableResourceKind::Video
+            ExecutableResourceKind::Immediate
+                | ExecutableResourceKind::Video
+                | ExecutableResourceKind::Live
         ) {
             return Err(ProviderError::new(
                 ProviderErrorKind::UnsupportedTask,
@@ -560,10 +562,12 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
                 )
                 .await
             }
-            ExecutableResourceKind::Unsupported => Err(ProviderError::new(
-                ProviderErrorKind::UnsupportedTask,
-                "Chaoxing resource kind has no execution path",
-            )),
+            ExecutableResourceKind::Live | ExecutableResourceKind::Unsupported => {
+                Err(ProviderError::new(
+                    ProviderErrorKind::UnsupportedTask,
+                    "Chaoxing resource kind has no execution path",
+                ))
+            }
         }
     }
 }
@@ -660,6 +664,7 @@ fn locate_target(
 enum ExecutableResourceKind {
     Immediate,
     Video,
+    Live,
     Unsupported,
 }
 
@@ -706,6 +711,7 @@ fn locate_resource_fact(
             {
                 Some("document" | "read") => ExecutableResourceKind::Immediate,
                 Some("video") => ExecutableResourceKind::Video,
+                Some("live") => ExecutableResourceKind::Live,
                 Some(_) => ExecutableResourceKind::Unsupported,
                 None => {
                     return Err(protocol_drift(
@@ -1137,6 +1143,13 @@ mod tests {
             .unwrap();
         assert_eq!(pending_video.remote_state, RemoteState::Pending);
         assert_eq!(pending_video.percent, Some(0));
+
+        let pending_live = execution
+            .read_progress(&context(), "resource:100:200:4001:job-live")
+            .await
+            .unwrap();
+        assert_eq!(pending_live.remote_state, RemoteState::Pending);
+        assert_eq!(pending_live.percent, Some(0));
 
         fixture.completed_read.store(true, Ordering::Relaxed);
         let completed = execution

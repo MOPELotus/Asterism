@@ -216,10 +216,11 @@ facts into the fresh Task, records separate `detail_score` and
 detail scores conflict or the transport omits, duplicates or adds a Task.
 Unsupported Exam entry variants remain list-level evidence pending fixtures.
 
-`TaskProgressRead` preserves the same module split. Executable Resource tasks
-retain the targeted fresh-card lookup used for crash recovery. Chapter, Work and
-Exam tasks use exact Task rediscovery; `Completed` and `Pending` expose only
-binary 100/0 completion while all other remote states leave percentage absent.
+`TaskProgressRead` preserves the same module split. Document, Read, Video and
+Live Resource tasks retain the targeted fresh-card lookup used for crash
+recovery. Chapter, Work and Exam tasks use exact Task rediscovery; `Completed`
+and `Pending` expose only binary 100/0 completion while all other remote states
+leave percentage absent.
 No duration or fractional completion is inferred from the independent score
 fact. Result readback never changes `RemoteState` or capabilities and never
 executes a retake.

@@ -10,11 +10,11 @@ source modules even when their assessments share field names or HTML shapes.
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
-| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls plus signed interval-based Video progress, idempotence and fresh-card verification are offline-covered; Live remains pending |
+| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls plus signed interval-based Video progress, idempotence and fresh-card verification are offline-covered. Live's `saveTimePc` loop remains blocked on a durable per-heartbeat mutation boundary that prevents ambiguous replay |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text is parsed after removing scripts, while bounded score and structural `reTest(...)` availability remain read-only facts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, while completed Exams with a strictly bound preview entry add fresh result score/retake provenance without enabling retake execution |
-| TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
+| TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Document/Read/Video/Live resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live-account validation still pending |
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
 | AnswerResolve | `chaoxing-exam` completed Chapter result | Samueli Tiku, CxKitty searchers, OCS wrappers/cache, agent pre-computed answers | Reference | A typed but unregistered component rebinds fresh completed Chapter Work detail and consumes one abstract bound result document before producing strict ProviderNative candidates; all other donor sources are external/manual/random and no pending Work/Exam standard-answer protocol exists |
 | SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts. Exam has a separate value-free preview and durable one-operation-at-a-time native chain: donor signature and request digest are frozen before dispatch, each accepted answer save advances one cursor and rotates `enc`/timing state, and the final submit yields only a Receipt. No Exam mutation is routed through Work payloads or replayed after ambiguity |
@@ -94,10 +94,16 @@ policy and remains independently guarded.
   accepts success only when the remote attachment is completed. Live and
   Chapter Work execution remain current audited implementation gaps; the
   completed native Document/Read/Video slice is not a Provider stopping point.
-- Document and Read also advertise `ProgressRead`; the capability performs the
+- Document, Read, Video and Live advertise `ProgressRead`; the capability performs the
   same bounded course/chapter/card rediscovery without invoking the completion
   endpoint and returns only normalized remote state and percentage. This is the
   safe remote-fact input for crash recovery, not live-account verification.
+- The refreshed Samueli donor implements Live completion as repeated
+  `saveTimePc` mutations after a `liveinfo` duration read. Asterism does not
+  advertise Live `ResourceExecution` yet: the current task execution boundary
+  cannot durably ledger each heartbeat before send, so retry/recovery could
+  replay an ambiguous non-idempotent write. That is a Main-owned Core gap, not a
+  reason to suppress the independently safe Live `ProgressRead` capability.
 - Video execution now re-resolves fresh non-persisted Card metadata, obtains one
   bounded status/dtoken response, reports monotonic intervals with the donor
   signature, and accepts completion only after a fresh Card reports passed.
