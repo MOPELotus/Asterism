@@ -199,6 +199,11 @@ than asking the Provider to schedule them. Current Fanyuchang keeps
 hidden/completed SCO rows and samples per-SCO targets; YZBRH also derives each
 target independently; Auto_WeLearn filters visible SCOs, samples one aggregate
 minute budget, floors one equal per-child share and discards the remainder.
+For atomic entries, `WellearnAtomicChildPlan` now provides a bounded versioned
+Provider-private serialization boundary binding Course/Task/ordinal, exact
+flow, atomic shape, profile and concrete target. It requires an explicitly
+frozen nonzero Fanyuchang target, consumes Auto's entry target including zero,
+and rejects all singleton flows and restored tuple drift.
 Immutable Core Execution identity now makes donor-style per-Execution random
 duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
 persisted capability-step plan still needs the atomic duration-completion

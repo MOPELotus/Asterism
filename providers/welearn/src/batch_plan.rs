@@ -5,12 +5,14 @@ use asterism_domain::{RemoteState, TaskCapability};
 use asterism_provider_api::{
     ProviderError, ProviderErrorKind, ProviderResult, RemoteTask, RemoteTaskDetail,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{WellearnUnitObservation, task_detail::validate_fresh_execution_detail};
 
 /// Audited donor batch flow. This is a pure membership/target boundary; it
 /// does not create or schedule Core executions.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WellearnBatchFlow {
     FanyuchangCompletion,
     FanyuchangDuration,
@@ -44,7 +46,8 @@ pub enum WellearnBatchTargetStrategy {
 /// Capability authority shape required by one donor batch child. Atomic
 /// duration-completion flows remain a Provider fact until Core can authorize
 /// and recover the combined mutation without crossing singleton step authority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WellearnBatchExecutionShape {
     ResourceExecution,
     DurationReport,
@@ -52,7 +55,8 @@ pub enum WellearnBatchExecutionShape {
 }
 
 /// Exact final completion mutation attached to an atomic duration child.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WellearnAtomicCompletionProfile {
     /// Current Fanyuchang carries fresh time into CMI, then saves score 100 once.
     FanyuchangFreshSetSave100,
@@ -72,6 +76,8 @@ pub enum WellearnBatchUnitSelection {
 const MAX_BATCH_TASKS: usize = 8_192;
 const MAX_AUTO_DURATION_MINUTES: u64 = 330;
 const MAX_BATCH_ID_COMPONENT_BYTES: usize = 128;
+const WELLEARN_ATOMIC_CHILD_PLAN_VERSION: u16 = 1;
+const MAX_ATOMIC_CHILD_PLAN_BYTES: usize = 1_024;
 
 impl WellearnBatchFlow {
     pub const fn dispatch(self) -> WellearnBatchDispatch {
@@ -210,6 +216,289 @@ pub struct WellearnBatchPlan {
     pub entries: Vec<WellearnBatchEntry>,
     pub aggregate_duration_seconds: Option<u64>,
     pub discarded_remainder_seconds: u64,
+}
+
+/// Versioned Provider-private payload for one exact atomic batch child.
+///
+/// Core may persist the bounded serialized value but does not interpret its
+/// donor flow or wire profile. The Course/SCO and batch ordinal bindings keep
+/// the payload from being substituted across children during recovery.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WellearnAtomicChildPlan {
+    version: u16,
+    entry_index: u32,
+    course_remote_id: String,
+    remote_task_id: String,
+    flow: WellearnBatchFlow,
+    execution_shape: WellearnBatchExecutionShape,
+    atomic_completion_profile: WellearnAtomicCompletionProfile,
+    target_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnAtomicChildPlanWire {
+    version: u16,
+    entry_index: u32,
+    course_remote_id: String,
+    remote_task_id: String,
+    flow: WellearnBatchFlow,
+    execution_shape: WellearnBatchExecutionShape,
+    atomic_completion_profile: WellearnAtomicCompletionProfile,
+    target_seconds: u64,
+}
+
+impl<'de> Deserialize<'de> for WellearnAtomicChildPlan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = WellearnAtomicChildPlanWire::deserialize(deserializer)?;
+        Self::try_from(wire).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<WellearnAtomicChildPlanWire> for WellearnAtomicChildPlan {
+    type Error = ProviderError;
+
+    fn try_from(wire: WellearnAtomicChildPlanWire) -> Result<Self, Self::Error> {
+        let plan = Self {
+            version: wire.version,
+            entry_index: wire.entry_index,
+            course_remote_id: wire.course_remote_id,
+            remote_task_id: wire.remote_task_id,
+            flow: wire.flow,
+            execution_shape: wire.execution_shape,
+            atomic_completion_profile: wire.atomic_completion_profile,
+            target_seconds: wire.target_seconds,
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+}
+
+impl WellearnAtomicChildPlan {
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    pub const fn entry_index(&self) -> u32 {
+        self.entry_index
+    }
+
+    pub fn course_remote_id(&self) -> &str {
+        self.course_remote_id.as_str()
+    }
+
+    pub fn remote_task_id(&self) -> &str {
+        self.remote_task_id.as_str()
+    }
+
+    pub const fn flow(&self) -> WellearnBatchFlow {
+        self.flow
+    }
+
+    pub const fn execution_shape(&self) -> WellearnBatchExecutionShape {
+        self.execution_shape
+    }
+
+    pub const fn atomic_completion_profile(&self) -> WellearnAtomicCompletionProfile {
+        self.atomic_completion_profile
+    }
+
+    pub const fn target_seconds(&self) -> u64 {
+        self.target_seconds
+    }
+
+    /// Revalidates every restored Provider-private plan fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for version, identity, flow/profile or target
+    /// drift. No field is repaired or inferred from another field.
+    pub fn validate(&self) -> ProviderResult<()> {
+        let entry_index =
+            usize::try_from(self.entry_index).map_err(|_| invalid_atomic_child_plan())?;
+        if self.version != WELLEARN_ATOMIC_CHILD_PLAN_VERSION
+            || entry_index >= MAX_BATCH_TASKS
+            || self.course_remote_id.is_empty()
+            || self.remote_task_id.is_empty()
+            || self.course_remote_id.chars().any(char::is_control)
+            || self.remote_task_id.chars().any(char::is_control)
+            || self.execution_shape != WellearnBatchExecutionShape::AtomicDurationCompletion
+        {
+            return Err(invalid_atomic_child_plan());
+        }
+        split_batch_identity(self.course_remote_id.as_str(), self.remote_task_id.as_str())?;
+        let profile_matches_flow = matches!(
+            (self.flow, self.atomic_completion_profile),
+            (
+                WellearnBatchFlow::FanyuchangDuration,
+                WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
+            ) | (
+                WellearnBatchFlow::AutoDuration,
+                WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
+            )
+        );
+        if !profile_matches_flow
+            || self.flow.execution_shape() != self.execution_shape
+            || self.flow.atomic_completion_profile() != Some(self.atomic_completion_profile)
+            || crate::WellearnAtomicDurationCompletionPlan::try_new(
+                self.atomic_completion_profile,
+                self.target_seconds,
+            )
+            .is_err()
+        {
+            return Err(invalid_atomic_child_plan());
+        }
+        Ok(())
+    }
+
+    /// Rebinds a restored child payload to its exact immutable batch entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the batch has drifted or materializing
+    /// its recorded ordinal and target authority does not reproduce this value
+    /// byte-for-byte at the typed field boundary.
+    pub fn validate_for_batch_entry(
+        &self,
+        batch: &WellearnBatchPlan,
+        expected_entry_index: usize,
+        frozen_fanyuchang_target_seconds: Option<u64>,
+    ) -> ProviderResult<()> {
+        self.validate()?;
+        if usize::try_from(self.entry_index).map_err(|_| invalid_atomic_child_plan())?
+            != expected_entry_index
+        {
+            return Err(invalid_atomic_child_plan());
+        }
+        let expected = materialize_atomic_child_plan(
+            batch,
+            expected_entry_index,
+            frozen_fanyuchang_target_seconds,
+        )?;
+        if self != &expected {
+            return Err(invalid_atomic_child_plan());
+        }
+        Ok(())
+    }
+
+    /// Encodes one revalidated bounded Provider-private child plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when validation, serialization or the encoded
+    /// size bound fails.
+    pub fn encode(&self) -> ProviderResult<Vec<u8>> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(self).map_err(|_| invalid_atomic_child_plan())?;
+        if encoded.is_empty() || encoded.len() > MAX_ATOMIC_CHILD_PLAN_BYTES {
+            return Err(invalid_atomic_child_plan());
+        }
+        Ok(encoded)
+    }
+
+    /// Decodes and revalidates a bounded Provider-private child plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for size, schema or invariant drift.
+    pub fn decode(encoded: &[u8]) -> ProviderResult<Self> {
+        if encoded.is_empty() || encoded.len() > MAX_ATOMIC_CHILD_PLAN_BYTES {
+            return Err(invalid_atomic_child_plan());
+        }
+        serde_json::from_slice(encoded).map_err(|_| invalid_atomic_child_plan())
+    }
+
+    /// Restores one payload and rebinds it to the exact immutable batch entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for encoded drift or when the restored value
+    /// does not exactly match the validated batch and frozen target authority.
+    pub fn decode_bound(
+        encoded: &[u8],
+        batch: &WellearnBatchPlan,
+        expected_entry_index: usize,
+        frozen_fanyuchang_target_seconds: Option<u64>,
+    ) -> ProviderResult<Self> {
+        let plan = Self::decode(encoded)?;
+        plan.validate_for_batch_entry(
+            batch,
+            expected_entry_index,
+            frozen_fanyuchang_target_seconds,
+        )?;
+        Ok(plan)
+    }
+}
+
+/// Materializes one exact atomic child from a fully validated batch plan.
+///
+/// Current Fanyuchang has no aggregate entry target, so its deterministic
+/// per-Execution target must already be frozen and supplied. Modular Auto must
+/// use the equal-floor target stored on the exact entry, including zero.
+/// Singleton flows never produce this value.
+///
+/// # Errors
+///
+/// Returns an internal error for batch drift, a foreign ordinal, a singleton
+/// flow, missing/extra target authority or an invalid atomic target.
+pub fn materialize_atomic_child_plan(
+    batch: &WellearnBatchPlan,
+    entry_index: usize,
+    frozen_fanyuchang_target_seconds: Option<u64>,
+) -> ProviderResult<WellearnAtomicChildPlan> {
+    validate_batch_plan_integrity(batch)?;
+    let entry = batch
+        .entries
+        .get(entry_index)
+        .ok_or_else(invalid_atomic_child_plan)?;
+    let profile = batch
+        .atomic_completion_profile
+        .ok_or_else(invalid_atomic_child_plan)?;
+    if batch.execution_shape != WellearnBatchExecutionShape::AtomicDurationCompletion {
+        return Err(invalid_atomic_child_plan());
+    }
+    let target_seconds = match batch.flow {
+        WellearnBatchFlow::FanyuchangDuration => {
+            if entry.target_seconds.is_some() {
+                return Err(invalid_atomic_child_plan());
+            }
+            frozen_fanyuchang_target_seconds.ok_or_else(invalid_atomic_child_plan)?
+        }
+        WellearnBatchFlow::AutoDuration => {
+            if frozen_fanyuchang_target_seconds.is_some() {
+                return Err(invalid_atomic_child_plan());
+            }
+            entry.target_seconds.ok_or_else(invalid_atomic_child_plan)?
+        }
+        WellearnBatchFlow::FanyuchangCompletion
+        | WellearnBatchFlow::YzbrhCompletion
+        | WellearnBatchFlow::YzbrhDuration
+        | WellearnBatchFlow::AutoCompletion
+        | WellearnBatchFlow::AutoLegacyDuration => return Err(invalid_atomic_child_plan()),
+    };
+    let plan = WellearnAtomicChildPlan {
+        version: WELLEARN_ATOMIC_CHILD_PLAN_VERSION,
+        entry_index: u32::try_from(entry_index).map_err(|_| invalid_atomic_child_plan())?,
+        course_remote_id: batch.course_remote_id.clone(),
+        remote_task_id: entry.remote_task_id.clone(),
+        flow: batch.flow,
+        execution_shape: batch.execution_shape,
+        atomic_completion_profile: profile,
+        target_seconds,
+    };
+    plan.validate()?;
+    Ok(plan)
+}
+
+fn invalid_atomic_child_plan() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn atomic child plan is invalid or inconsistent with its frozen batch entry",
+    )
 }
 
 /// Validates that a public or restored batch plan still contains one
@@ -1296,6 +1585,139 @@ mod tests {
             plan.entries
                 .iter()
                 .all(|entry| entry.target_seconds == Some(0))
+        );
+    }
+
+    #[test]
+    fn atomic_child_plan_freezes_fanyuchang_target_and_round_trips() {
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let plan = materialize_atomic_child_plan(&batch, 1, Some(37)).unwrap();
+
+        assert_eq!(plan.version(), WELLEARN_ATOMIC_CHILD_PLAN_VERSION);
+        assert_eq!(plan.entry_index(), 1);
+        assert_eq!(plan.course_remote_id(), "course:1001");
+        assert_eq!(plan.remote_task_id(), batch.entries[1].remote_task_id);
+        assert_eq!(plan.flow(), WellearnBatchFlow::FanyuchangDuration);
+        assert_eq!(
+            plan.execution_shape(),
+            WellearnBatchExecutionShape::AtomicDurationCompletion
+        );
+        assert_eq!(
+            plan.atomic_completion_profile(),
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100
+        );
+        assert_eq!(plan.target_seconds(), 37);
+
+        let encoded = plan.encode().unwrap();
+        assert!(encoded.len() <= MAX_ATOMIC_CHILD_PLAN_BYTES);
+        assert_eq!(WellearnAtomicChildPlan::decode(&encoded).unwrap(), plan);
+        assert_eq!(
+            WellearnAtomicChildPlan::decode_bound(&encoded, &batch, 1, Some(37)).unwrap(),
+            plan
+        );
+        assert!(WellearnAtomicChildPlan::decode_bound(&encoded, &batch, 0, Some(37)).is_err());
+        assert!(WellearnAtomicChildPlan::decode_bound(&encoded, &batch, 1, Some(38)).is_err());
+        assert_eq!(
+            serde_json::from_slice::<WellearnAtomicChildPlan>(&encoded).unwrap(),
+            plan
+        );
+    }
+
+    #[test]
+    fn atomic_child_plan_preserves_auto_zero_floor_without_external_target() {
+        let template = tasks().remove(0);
+        let mut many = Vec::with_capacity(61);
+        for index in 0..61_usize {
+            let mut task = template.clone();
+            task.remote_id = format!("sco:1001:atomic-{index}");
+            task.normalized["sco_id"] = serde_json::json!(format!("atomic-{index}"));
+            task.normalized["sco_index"] = serde_json::json!(index);
+            many.push(task);
+        }
+        let batch = build_batch_plan(&many, WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
+        let plan = materialize_atomic_child_plan(&batch, 60, None).unwrap();
+
+        assert_eq!(plan.entry_index(), 60);
+        assert_eq!(plan.flow(), WellearnBatchFlow::AutoDuration);
+        assert_eq!(
+            plan.atomic_completion_profile(),
+            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0
+        );
+        assert_eq!(plan.target_seconds(), 0);
+        assert!(materialize_atomic_child_plan(&batch, 0, Some(1)).is_err());
+        assert_eq!(
+            WellearnAtomicChildPlan::decode_bound(&plan.encode().unwrap(), &batch, 60, None)
+                .unwrap(),
+            plan
+        );
+    }
+
+    #[test]
+    fn atomic_child_plan_rejects_missing_or_invalid_fanyuchang_target() {
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        assert!(materialize_atomic_child_plan(&batch, 0, None).is_err());
+        assert!(materialize_atomic_child_plan(&batch, 0, Some(0)).is_err());
+        assert!(
+            materialize_atomic_child_plan(
+                &batch,
+                0,
+                Some(crate::runtime_settings::MAX_DURATION_REPORT_SECONDS + 1),
+            )
+            .is_err()
+        );
+        assert!(materialize_atomic_child_plan(&batch, batch.entries.len(), Some(1)).is_err());
+    }
+
+    #[test]
+    fn singleton_batch_flows_never_materialize_atomic_children() {
+        for flow in [
+            WellearnBatchFlow::FanyuchangCompletion,
+            WellearnBatchFlow::YzbrhCompletion,
+            WellearnBatchFlow::YzbrhDuration,
+            WellearnBatchFlow::AutoCompletion,
+            WellearnBatchFlow::AutoLegacyDuration,
+        ] {
+            let source = if matches!(
+                flow,
+                WellearnBatchFlow::YzbrhCompletion | WellearnBatchFlow::AutoCompletion
+            ) {
+                pending_tasks()
+            } else {
+                tasks()
+            };
+            let batch = build_batch_plan(&source, flow, None).unwrap();
+            assert!(materialize_atomic_child_plan(&batch, 0, Some(1)).is_err());
+        }
+    }
+
+    #[test]
+    fn restored_atomic_child_plan_rejects_schema_and_profile_drift() {
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let plan = materialize_atomic_child_plan(&batch, 0, Some(10)).unwrap();
+        let mut value = serde_json::to_value(&plan).unwrap();
+        assert_eq!(value["flow"], "fanyuchang_duration");
+        assert_eq!(value["execution_shape"], "atomic_duration_completion");
+
+        value["atomic_completion_profile"] = serde_json::json!("auto_zero_time_save_only0");
+        assert!(serde_json::from_value::<WellearnAtomicChildPlan>(value).is_err());
+
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value["version"] = serde_json::json!(2);
+        assert!(serde_json::from_value::<WellearnAtomicChildPlan>(value).is_err());
+
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<WellearnAtomicChildPlan>(value).is_err());
+        let other = materialize_atomic_child_plan(&batch, 1, Some(10)).unwrap();
+        assert!(
+            WellearnAtomicChildPlan::decode_bound(&other.encode().unwrap(), &batch, 0, Some(10))
+                .is_err()
+        );
+        assert!(
+            WellearnAtomicChildPlan::decode(&vec![b'x'; MAX_ATOMIC_CHILD_PLAN_BYTES + 1]).is_err()
         );
     }
 

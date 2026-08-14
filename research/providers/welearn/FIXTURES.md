@@ -209,6 +209,12 @@ only structural field names, response codes and bounded placeholder shapes.
   `false` receipts remain valid diagnostics, while missing, extra or
   post-rejection mutations fail before CMI parsing. No execution entry is
   fixture-claimed by these value tests.
+- Atomic child-plan tests materialize current Fanyuchang only with an explicit
+  frozen nonzero deterministic target, take modular Auto targets only from the
+  exact validated batch entry, preserve Auto's zero equal-floor child, and
+  reject every singleton flow. Bounded JSON round trips retain Course/Task and
+  ordinal bindings; unknown fields, version drift, cross-flow profiles,
+  missing/extra target authority and oversized artifacts fail closed.
 - Native atomic transport tests bind current duration/completion to the
   query-uid endpoint and simple Referer, while Auto binds its duration phase to
   plain endpoint/simple Referer and switches only final completion to the

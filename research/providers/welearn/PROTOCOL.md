@@ -618,6 +618,18 @@ reuse the standalone completion flow's selected-score then second-100 save.
 Modular Auto uses no CMI set and one zero-time score-0 completion save. These
 facts are `FanyuchangFreshSetSave100` and `AutoZeroTimeSaveOnly0`, respectively.
 
+`WellearnAtomicChildPlan` is the versioned, bounded Provider-private
+serialization boundary materialized from one exact entry only after the whole
+`WellearnBatchPlan` passes integrity validation. It binds the parent Course,
+child remote Task, entry ordinal, flow, atomic execution shape, exact completion
+profile and concrete target. Current Fanyuchang entries intentionally contain
+no aggregate target, so their already-frozen deterministic per-Execution target
+must be supplied explicitly and must be at least one second. Modular Auto takes
+only the entry's equal-floor target and preserves zero; an external replacement
+target is rejected. Singleton flows cannot produce this payload. Decode repeats
+the schema, size, identity, flow/profile and atomic target validation instead of
+trusting serialized fields.
+
 `WellearnBatchPlan.target_strategy` records the corresponding target boundary:
 Fanyuchang, YZBRH and Auto completion resolve score or duration targets per
 child from their fixed or independent random settings, while Auto duration
@@ -625,8 +637,9 @@ derives one equal floor target from its frozen aggregate budget. The aggregate
 strategy also persists the discarded remainder. The floor is donor-exact and
 may be zero when the selected SCO count exceeds the aggregate seconds; the
 Provider must preserve that zero target rather than silently rounding it up.
-The shared DurationReport contract still needs an explicit decision for
-zero-target children.
+The shared execution contract must carry the Provider-private child payload so
+Auto's valid zero target does not pass through the singleton DurationReport
+setting whose lower bound is one.
 
 Asterism now retains a Provider-private bounded Unit observation list, exact
 selection kind/order and selected-but-empty Units in addition to Unit facts on
