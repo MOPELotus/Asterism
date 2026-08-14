@@ -5,8 +5,8 @@ use std::sync::{
 
 use asterism_domain::{
     AnswerCandidateId, AnswerSource, NormalizedAnswer, ProviderAccountId, ProviderId, QuestionKind,
-    QuestionOption, QuestionSnapshotId, SecretId, SelectedAnswer, SubmissionDraft,
-    SubmissionDraftId, SubmissionDraftItem, SubmissionQuestionVerificationStatus,
+    QuestionOption, QuestionSnapshotId, SecretId, SelectedAnswer, SubmissionAnswerCoverage,
+    SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, SubmissionQuestionVerificationStatus,
     SubmissionReceipt, SubmissionVerificationStatus, TaskId,
 };
 use asterism_provider_api::{
@@ -575,6 +575,11 @@ async fn draft() -> SubmissionDraft {
         question_snapshot_id: QuestionSnapshotId::new(),
         provider_id: ProviderId::new("chaoxing").unwrap(),
         provider_version: development_metadata().unwrap().implementation_version,
+        answer_coverage: SubmissionAnswerCoverage {
+            total_question_count: 2,
+            minimum_coverage_millis: 1_000,
+            unanswered_question_ids: Vec::new(),
+        },
         items: questions
             .into_iter()
             .zip(selected)
@@ -623,6 +628,11 @@ async fn chapter_draft() -> SubmissionDraft {
         question_snapshot_id: QuestionSnapshotId::new(),
         provider_id: ProviderId::new("chaoxing").unwrap(),
         provider_version: development_metadata().unwrap().implementation_version,
+        answer_coverage: SubmissionAnswerCoverage {
+            total_question_count: 4,
+            minimum_coverage_millis: 1_000,
+            unanswered_question_ids: Vec::new(),
+        },
         items: questions
             .into_iter()
             .zip(selected)
@@ -664,6 +674,11 @@ async fn exam_draft_and_artifact() -> (SubmissionDraft, ChaoxingExamQuestionArti
         question_snapshot_id: QuestionSnapshotId::new(),
         provider_id: ProviderId::new("chaoxing").unwrap(),
         provider_version: development_metadata().unwrap().implementation_version,
+        answer_coverage: SubmissionAnswerCoverage {
+            total_question_count: 2,
+            minimum_coverage_millis: 1_000,
+            unanswered_question_ids: Vec::new(),
+        },
         items: questions
             .into_iter()
             .zip(selected_answers)

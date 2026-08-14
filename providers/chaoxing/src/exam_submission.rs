@@ -662,7 +662,7 @@ fn invalid_response(message: &'static str) -> ProviderError {
 mod tests {
     use asterism_domain::{
         AnswerCandidateId, AnswerSource, NormalizedAnswer, ProviderId, QuestionSnapshotId,
-        SelectedAnswer, SubmissionDraftId, SubmissionDraftItem, TaskId,
+        SelectedAnswer, SubmissionAnswerCoverage, SubmissionDraftId, SubmissionDraftItem, TaskId,
     };
     use asterism_provider_api::{ProviderRouteContext, RemoteCourse, SubmissionBuildCapability};
     use chrono::{TimeZone, Utc};
@@ -842,6 +842,11 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("chaoxing").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 2,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: questions
                 .into_iter()
                 .zip(selected)

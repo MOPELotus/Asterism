@@ -9,6 +9,7 @@ use asterism_provider_api::{
 pub(crate) const PROVIDER_EXECUTION_CONCURRENCY_KEY: &str = "execution.provider_concurrency";
 pub(crate) const ACCOUNT_EXECUTION_CONCURRENCY_KEY: &str = "execution.account_concurrency";
 pub(crate) const ACCOUNT_SCAN_INTERVAL_KEY: &str = "discovery.scan_interval";
+pub(crate) const MINIMUM_ANSWER_COVERAGE_KEY: &str = "submission.minimum_answer_coverage";
 pub(crate) const VIDEO_PLAYBACK_RATE_KEY: &str = "video.playback_rate";
 pub(crate) const VIDEO_PROGRESS_INTERVAL_KEY: &str = "video.progress_interval";
 
@@ -64,7 +65,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 4,
+        version: 5,
         definitions: vec![
             ProviderSettingDefinition {
                 key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
@@ -111,6 +112,20 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 core_behavior: Some(ProviderSettingCoreBehavior::AccountScanInterval),
             },
             ProviderSettingDefinition {
+                key: MINIMUM_ANSWER_COVERAGE_KEY.to_owned(),
+                display_name: "最低答案覆盖率".to_owned(),
+                description: "提交前已回答题目占完整题目快照的最低比例；超星 donor 默认 90%。"
+                    .to_owned(),
+                kind: ProviderSettingKind::DecimalMillis {
+                    minimum: 1,
+                    maximum: 1_000,
+                    step: 1,
+                },
+                default: ProviderSettingValue::DecimalMillis(900),
+                scopes: scopes.clone(),
+                core_behavior: Some(ProviderSettingCoreBehavior::MinimumAnswerCoverage),
+            },
+            ProviderSettingDefinition {
                 key: VIDEO_PLAYBACK_RATE_KEY.to_owned(),
                 display_name: "视频播放速度".to_owned(),
                 description: "视频进度按真实经过时间乘以该速度推进，最高 2.0 倍。".to_owned(),
@@ -150,9 +165,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn video_settings_are_bounded_and_resolve_task_overrides() {
+    fn settings_are_bounded_and_resolve_task_overrides() {
         let schema = runtime_settings_schema();
         schema.validate().unwrap();
+        let defaults = schema.resolve(None, None, None).unwrap();
+        assert_eq!(
+            schema.minimum_answer_coverage_millis(&defaults).unwrap(),
+            900
+        );
         let task = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
             values: BTreeMap::from([
@@ -163,6 +183,10 @@ mod tests {
                 (
                     ACCOUNT_EXECUTION_CONCURRENCY_KEY.to_owned(),
                     ProviderSettingValue::Integer(3),
+                ),
+                (
+                    MINIMUM_ANSWER_COVERAGE_KEY.to_owned(),
+                    ProviderSettingValue::DecimalMillis(950),
                 ),
             ]),
         };
@@ -185,6 +209,10 @@ mod tests {
             schema.account_scan_interval(&resolved).unwrap(),
             Some(1_800)
         );
+        assert_eq!(
+            schema.minimum_answer_coverage_millis(&resolved).unwrap(),
+            950
+        );
 
         let invalid = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
@@ -198,5 +226,20 @@ mod tests {
                 .validate_patch(ProviderSettingScope::Task, &invalid)
                 .is_err()
         );
+
+        for value in [0, 1_001] {
+            let invalid = ProviderRuntimeSettingsPatch {
+                schema_version: schema.version,
+                values: BTreeMap::from([(
+                    MINIMUM_ANSWER_COVERAGE_KEY.to_owned(),
+                    ProviderSettingValue::DecimalMillis(value),
+                )]),
+            };
+            assert!(
+                schema
+                    .validate_patch(ProviderSettingScope::Task, &invalid)
+                    .is_err()
+            );
+        }
     }
 }

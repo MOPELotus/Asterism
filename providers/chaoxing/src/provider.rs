@@ -248,8 +248,8 @@ mod tests {
         assert!(entry.submission_execute.is_some());
         assert!(entry.submission_verify.is_some());
         assert!(entry.task_detail.is_some());
-        assert_eq!(entry.runtime_settings.version, 4);
-        assert_eq!(entry.runtime_settings.definitions.len(), 5);
+        assert_eq!(entry.runtime_settings.version, 5);
+        assert_eq!(entry.runtime_settings.definitions.len(), 6);
         assert!(
             entry
                 .runtime_settings

@@ -1541,7 +1541,7 @@ impl Drop for SubmissionResponse {
 mod tests {
     use asterism_domain::{
         AnswerCandidateId, AnswerSource, ProviderId, QuestionSnapshotId, SelectedAnswer,
-        SubmissionDraftId, SubmissionDraftItem, TaskId,
+        SubmissionAnswerCoverage, SubmissionDraftId, SubmissionDraftItem, TaskId,
     };
 
     use super::*;
@@ -1995,6 +1995,11 @@ mod tests {
             provider_version: crate::metadata::development_metadata()
                 .unwrap()
                 .implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 2,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: questions
                 .into_iter()
                 .zip(selected)
@@ -2007,7 +2012,12 @@ mod tests {
 
     async fn chapter_result_draft() -> SubmissionDraft {
         let mut draft = chapter_draft().await;
-        draft.items.remove(2);
+        let removed_question_id = draft.items.remove(2).question.id;
+        draft
+            .payload_preview
+            .fields
+            .retain(|field| field.question_id != removed_question_id);
+        draft.answer_coverage.total_question_count = 3;
         for (index, item) in draft.items.iter_mut().enumerate() {
             item.question.position = u32::try_from(index + 1).unwrap();
         }
@@ -2060,6 +2070,11 @@ mod tests {
             provider_version: crate::metadata::development_metadata()
                 .unwrap()
                 .implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 4,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: questions
                 .into_iter()
                 .zip(selected)
@@ -2104,6 +2119,11 @@ mod tests {
             provider_version: crate::metadata::development_metadata()
                 .unwrap()
                 .implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 2,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: questions
                 .into_iter()
                 .zip(selected)
