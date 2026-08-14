@@ -69,6 +69,7 @@ pub enum CidarenAttemptFlowStatus {
     Receipt(CidarenAssessmentReceiptKind),
     Ambiguous(CidarenAttemptOperation),
     FailedClosed(CidarenAttemptOperation),
+    Invalid,
 }
 
 /// Provider-private, single-step Cidaren attempt lifecycle.
@@ -496,27 +497,36 @@ impl CidarenAttemptFlow {
     }
 
     pub fn status(&self) -> CidarenAttemptFlowStatus {
-        match self.phase() {
-            CidarenAttemptPhase::ReadyToSelectWords(_) => {
+        match self.phase.as_ref() {
+            Some(CidarenAttemptPhase::ReadyToSelectWords(_)) => {
                 CidarenAttemptFlowStatus::ReadyToSelectWords
             }
-            CidarenAttemptPhase::ReadyToStart => CidarenAttemptFlowStatus::ReadyToStart,
-            CidarenAttemptPhase::CurrentQuestion(_) => CidarenAttemptFlowStatus::CurrentQuestion,
-            CidarenAttemptPhase::CurrentReadingCard(_) => {
+            Some(CidarenAttemptPhase::ReadyToStart) => CidarenAttemptFlowStatus::ReadyToStart,
+            Some(CidarenAttemptPhase::CurrentQuestion(_)) => {
+                CidarenAttemptFlowStatus::CurrentQuestion
+            }
+            Some(CidarenAttemptPhase::CurrentReadingCard(_)) => {
                 CidarenAttemptFlowStatus::CurrentReadingCard
             }
-            CidarenAttemptPhase::ReadyToVerify { .. } => CidarenAttemptFlowStatus::ReadyToVerify,
-            CidarenAttemptPhase::ReadyToAdvance { .. } => CidarenAttemptFlowStatus::ReadyToAdvance,
-            CidarenAttemptPhase::Issued { operation, .. } => {
+            Some(CidarenAttemptPhase::ReadyToVerify { .. }) => {
+                CidarenAttemptFlowStatus::ReadyToVerify
+            }
+            Some(CidarenAttemptPhase::ReadyToAdvance { .. }) => {
+                CidarenAttemptFlowStatus::ReadyToAdvance
+            }
+            Some(CidarenAttemptPhase::Issued { operation, .. }) => {
                 CidarenAttemptFlowStatus::Issued(*operation)
             }
-            CidarenAttemptPhase::Receipt { kind, .. } => CidarenAttemptFlowStatus::Receipt(*kind),
-            CidarenAttemptPhase::Ambiguous(operation) => {
+            Some(CidarenAttemptPhase::Receipt { kind, .. }) => {
+                CidarenAttemptFlowStatus::Receipt(*kind)
+            }
+            Some(CidarenAttemptPhase::Ambiguous(operation)) => {
                 CidarenAttemptFlowStatus::Ambiguous(*operation)
             }
-            CidarenAttemptPhase::FailedClosed(operation) => {
+            Some(CidarenAttemptPhase::FailedClosed(operation)) => {
                 CidarenAttemptFlowStatus::FailedClosed(*operation)
             }
+            None => CidarenAttemptFlowStatus::Invalid,
         }
     }
 
@@ -530,7 +540,11 @@ impl CidarenAttemptFlow {
     pub fn pre_question_continuation(
         &self,
     ) -> ProviderResult<Option<CidarenPreQuestionContinuation>> {
-        let artifact = match self.phase() {
+        let phase = self
+            .phase
+            .as_ref()
+            .ok_or_else(|| internal("Cidaren attempt lost its pre-Question phase"))?;
+        let artifact = match phase {
             CidarenAttemptPhase::ReadyToSelectWords(_) => {
                 CidarenPreQuestionArtifact::ready_to_select_words(
                     self.task_id,
@@ -561,10 +575,12 @@ impl CidarenAttemptFlow {
     }
 
     pub fn current_question(&self) -> Option<&Question> {
-        match self.phase() {
-            CidarenAttemptPhase::CurrentQuestion(current)
-            | CidarenAttemptPhase::ReadyToVerify { current, .. }
-            | CidarenAttemptPhase::ReadyToAdvance { current, .. } => Some(&current.question),
+        match self.phase.as_ref() {
+            Some(
+                CidarenAttemptPhase::CurrentQuestion(current)
+                | CidarenAttemptPhase::ReadyToVerify { current, .. }
+                | CidarenAttemptPhase::ReadyToAdvance { current, .. },
+            ) => Some(&current.question),
             _ => None,
         }
     }
@@ -580,7 +596,11 @@ impl CidarenAttemptFlow {
     pub fn current_question_materialization(
         &self,
     ) -> ProviderResult<Option<CidarenQuestionMaterialization>> {
-        let (current, rotated_topic_code, verified_steps, phase) = match self.phase() {
+        let state = self
+            .phase
+            .as_ref()
+            .ok_or_else(|| internal("Cidaren attempt lost its current Question phase"))?;
+        let (current, rotated_topic_code, verified_steps, phase) = match state {
             CidarenAttemptPhase::CurrentQuestion(current) => {
                 (current.as_ref(), None, 0, CIDAREN_QUESTION_ARTIFACT_PHASE)
             }
@@ -628,8 +648,8 @@ impl CidarenAttemptFlow {
     }
 
     pub fn current_reading_card(&self) -> Option<&ParsedCidarenReadingCard> {
-        match self.phase() {
-            CidarenAttemptPhase::CurrentReadingCard(card) => Some(card),
+        match self.phase.as_ref() {
+            Some(CidarenAttemptPhase::CurrentReadingCard(card)) => Some(card),
             _ => None,
         }
     }
@@ -637,13 +657,13 @@ impl CidarenAttemptFlow {
     /// Returns the donor-observed completed/total counters for the current
     /// remote step, independently from this machine's local position.
     pub fn current_remote_progress(&self) -> Option<CidarenAttemptProgress> {
-        match self.phase() {
-            CidarenAttemptPhase::CurrentQuestion(current)
-            | CidarenAttemptPhase::ReadyToVerify { current, .. }
-            | CidarenAttemptPhase::ReadyToAdvance { current, .. } => {
-                current.parsed.remote_progress()
-            }
-            CidarenAttemptPhase::CurrentReadingCard(card) => card.remote_progress(),
+        match self.phase.as_ref() {
+            Some(
+                CidarenAttemptPhase::CurrentQuestion(current)
+                | CidarenAttemptPhase::ReadyToVerify { current, .. }
+                | CidarenAttemptPhase::ReadyToAdvance { current, .. },
+            ) => current.parsed.remote_progress(),
+            Some(CidarenAttemptPhase::CurrentReadingCard(card)) => card.remote_progress(),
             _ => None,
         }
     }
@@ -690,7 +710,7 @@ impl CidarenAttemptFlow {
         request_at: Timestamp,
     ) -> ProviderResult<CidarenIssuedCommand> {
         let timestamp_millis = request_timestamp_millis(request_at)?;
-        let phase = self.take_phase();
+        let phase = self.take_phase()?;
         let CidarenAttemptPhase::ReadyToSelectWords(plan) = phase else {
             self.phase = Some(phase);
             return Err(invalid_state(
@@ -721,7 +741,7 @@ impl CidarenAttemptFlow {
     /// Returns a typed error unless word selection is complete and start is ready.
     pub fn issue_start(&mut self, request_at: Timestamp) -> ProviderResult<CidarenIssuedCommand> {
         let timestamp_millis = request_timestamp_millis(request_at)?;
-        let phase = self.take_phase();
+        let phase = self.take_phase()?;
         if !matches!(phase, CidarenAttemptPhase::ReadyToStart) {
             self.phase = Some(phase);
             return Err(invalid_state(
@@ -751,8 +771,8 @@ impl CidarenAttemptFlow {
         request_at: Timestamp,
     ) -> ProviderResult<CidarenIssuedCommand> {
         let timestamp_millis = request_timestamp_millis(request_at)?;
-        let (topic_code, mut answers) = match self.phase() {
-            CidarenAttemptPhase::CurrentQuestion(current) => (
+        let (topic_code, mut answers) = match self.phase.as_ref() {
+            Some(CidarenAttemptPhase::CurrentQuestion(current)) => (
                 Zeroizing::new(current.parsed.topic_code().to_owned()),
                 wire_answers(&current.question, selected)?,
             ),
@@ -767,8 +787,12 @@ impl CidarenAttemptFlow {
             .ok_or_else(|| invalid_state("Cidaren normalized answer has no Verify step"))?;
         let request =
             build_verify_answer_request(&self.binding, &topic_code, &answer, timestamp_millis)?;
-        let CidarenAttemptPhase::CurrentQuestion(current) = self.take_phase() else {
-            unreachable!("Cidaren current Question was checked before request construction");
+        let phase = self.take_phase()?;
+        let CidarenAttemptPhase::CurrentQuestion(current) = phase else {
+            self.phase = Some(phase);
+            return Err(internal(
+                "Cidaren current Question changed during request construction",
+            ));
         };
         self.issue(
             CidarenAttemptOperation::VerifyAnswer,
@@ -793,7 +817,7 @@ impl CidarenAttemptFlow {
         request_at: Timestamp,
     ) -> ProviderResult<CidarenIssuedCommand> {
         let timestamp_millis = request_timestamp_millis(request_at)?;
-        let phase = self.take_phase();
+        let phase = self.take_phase()?;
         let CidarenAttemptPhase::ReadyToVerify {
             current,
             topic_code,
@@ -861,7 +885,7 @@ impl CidarenAttemptFlow {
         request_at: Timestamp,
     ) -> ProviderResult<CidarenIssuedCommand> {
         let timestamp_millis = request_timestamp_millis(request_at)?;
-        let phase = self.take_phase();
+        let phase = self.take_phase()?;
         let delay_entropy = step_entropy(self.flow_binding, self.position, b"advance-delay");
         let (topic_code, delay_before_execute_seconds) = match &phase {
             CidarenAttemptPhase::ReadyToAdvance { topic_code, .. } => (
@@ -921,7 +945,7 @@ impl CidarenAttemptFlow {
         request_at: Timestamp,
     ) -> ProviderResult<CidarenIssuedCommand> {
         let timestamp_millis = request_timestamp_millis(request_at)?;
-        let CidarenAttemptPhase::CurrentQuestion(current) = self.phase() else {
+        let Some(CidarenAttemptPhase::CurrentQuestion(current)) = self.phase.as_ref() else {
             return Err(invalid_state(
                 "Cidaren SkipAnswer requires the current Question",
             ));
@@ -933,7 +957,7 @@ impl CidarenAttemptFlow {
             settings.skip_reported_time_millis(),
             timestamp_millis,
         )?;
-        let _current = self.take_phase();
+        let _current = self.take_phase()?;
         self.issue(
             CidarenAttemptOperation::SkipAnswer,
             CidarenAttemptContinuation::NextStep {
@@ -963,7 +987,10 @@ impl CidarenAttemptFlow {
             kind: CidarenAssessmentReceiptKind::Completed,
             message_sanitized,
             received_at,
-        } = self.phase()
+        } = self
+            .phase
+            .as_ref()
+            .ok_or_else(|| internal("Cidaren attempt lost its completion phase"))?
         else {
             return Err(invalid_state(
                 "Cidaren attempt has no terminal completion receipt",
@@ -990,6 +1017,9 @@ impl CidarenAttemptFlow {
     /// Returns a typed error if a completed receipt lost or changed its
     /// response binding.
     pub fn terminal_completion(&self) -> ProviderResult<Option<(SubmissionReceipt, [u8; 32])>> {
+        if self.status() == CidarenAttemptFlowStatus::Invalid {
+            return Err(internal("Cidaren terminal attempt phase is invalid"));
+        }
         if self.status()
             != CidarenAttemptFlowStatus::Receipt(CidarenAssessmentReceiptKind::Completed)
         {
@@ -1020,7 +1050,7 @@ impl CidarenAttemptFlow {
                 "Cidaren attempt outcome belongs to another execution",
             ));
         }
-        let phase = self.take_phase();
+        let phase = self.take_phase()?;
         let CidarenAttemptPhase::Issued {
             operation,
             continuation,
@@ -1060,7 +1090,7 @@ impl CidarenAttemptFlow {
     ///
     /// Returns a typed error unless an operation is currently issued.
     pub fn mark_ambiguous(&mut self) -> ProviderResult<()> {
-        let phase = self.take_phase();
+        let phase = self.take_phase()?;
         let CidarenAttemptPhase::Issued { operation, .. } = phase else {
             self.phase = Some(phase);
             return Err(invalid_state(
@@ -1223,16 +1253,10 @@ impl CidarenAttemptFlow {
         }
     }
 
-    fn phase(&self) -> &CidarenAttemptPhase {
-        self.phase
-            .as_ref()
-            .expect("Cidaren attempt phase is restored before returning")
-    }
-
-    fn take_phase(&mut self) -> CidarenAttemptPhase {
+    fn take_phase(&mut self) -> ProviderResult<CidarenAttemptPhase> {
         self.phase
             .take()
-            .expect("Cidaren attempt phase is restored before returning")
+            .ok_or_else(|| internal("Cidaren attempt lost its state-machine phase"))
     }
 }
 
@@ -1556,6 +1580,10 @@ fn invalid_state(message: impl Into<String>) -> ProviderError {
     ProviderError::new(ProviderErrorKind::InvalidResponse, message)
 }
 
+fn internal(message: impl Into<String>) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::Internal, message)
+}
+
 fn invalid_response(message: impl Into<String>) -> ProviderError {
     ProviderError::new(ProviderErrorKind::InvalidResponse, message)
 }
@@ -1658,6 +1686,32 @@ mod tests {
 
     fn request_at() -> Timestamp {
         Utc.with_ymd_and_hms(2026, 8, 14, 0, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn missing_internal_phase_fails_closed_without_panicking() {
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context(),
+            TaskId::new(),
+            "class-task:2002",
+            &detail(),
+            None,
+        )
+        .unwrap();
+        flow.phase = None;
+
+        assert_eq!(flow.status(), CidarenAttemptFlowStatus::Invalid);
+        assert!(flow.current_question().is_none());
+        assert!(flow.current_reading_card().is_none());
+        assert!(format!("{flow:?}").contains("Invalid"));
+        assert_eq!(
+            flow.pre_question_continuation().unwrap_err().kind,
+            ProviderErrorKind::Internal
+        );
+        assert_eq!(
+            flow.issue_start(request_at()).unwrap_err().kind,
+            ProviderErrorKind::Internal
+        );
     }
 
     #[tokio::test]

@@ -222,6 +222,8 @@ placeholder identities, result codes, status values and pagination shape.
 - Attempt tests freeze one-operation-at-a-time start/verify/advance/skip,
   sequential rotated tokens for matching, reading-card execution, word
   selection acknowledgement, ambiguity no-replay and semantic fail-closed.
+  A synthetic missing internal phase stays Debug-safe, reports `Invalid` and
+  returns a typed Internal error instead of panicking or inventing a mutation.
   Issued start/verify/skip commands have no hidden preflight wait; verified
   advance freezes 1-2 seconds, reading-card advance freezes 1-3 seconds, and
   the independently configurable post-step delay remains 2 seconds by default.

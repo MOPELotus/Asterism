@@ -696,11 +696,11 @@ struct OptionSemantics<'a> {
 }
 
 fn answer_tag(value: Option<&Value>) -> ProviderResult<String> {
-    raw_answer_tag(value).map(|tag| match value {
-        Some(Value::Number(_)) => format!("n:{tag}"),
-        Some(Value::String(_)) => format!("s:{tag}"),
-        _ => unreachable!("raw_answer_tag accepts only number or string"),
-    })
+    match value {
+        Some(Value::Number(_)) => raw_answer_tag(value).map(|tag| format!("n:{tag}")),
+        Some(Value::String(_)) => raw_answer_tag(value).map(|tag| format!("s:{tag}")),
+        _ => Err(protocol_drift("Cidaren Question answer tag is invalid")),
+    }
 }
 
 fn raw_answer_tag(value: Option<&Value>) -> ProviderResult<String> {
