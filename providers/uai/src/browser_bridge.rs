@@ -1256,9 +1256,23 @@ impl UaiBrowserCommandEnvelope {
         sequence: u32,
         target: &UaiBrowserTargetTaskEntry,
     ) -> ProviderResult<Self> {
+        Self::residence_target_for_leaf(plan, binding, sequence, target, plan.residence_seconds)
+    }
+
+    pub(crate) fn residence_target_for_leaf(
+        plan: &UaiBrowserResidencePlan,
+        binding: &UaiBrowserSessionBinding,
+        sequence: u32,
+        target: &UaiBrowserTargetTaskEntry,
+        leaf_seconds: u64,
+    ) -> ProviderResult<Self> {
         let entry = target.entry();
         entry.validate_for_binding(plan, binding)?;
-        if entry.scope != UaiBrowserPageScope::Task || entry.label != plan.target.task {
+        if entry.scope != UaiBrowserPageScope::Task
+            || entry.label != plan.target.task
+            || leaf_seconds == 0
+            || leaf_seconds > plan.residence_seconds
+        {
             return Err(ProviderError::new(
                 ProviderErrorKind::RemoteChanged,
                 "UAI BrowserBridge residence action is outside the exact fresh Task target",
@@ -1270,7 +1284,7 @@ impl UaiBrowserCommandEnvelope {
             sequence,
             UaiBrowserCommand::ResidenceTarget {
                 task_handle: entry.handle.clone(),
-                seconds: plan.residence_seconds,
+                seconds: leaf_seconds,
                 play_video: plan.play_video,
             },
         )
@@ -1371,14 +1385,16 @@ impl UaiBrowserCommandEnvelope {
                 &self.command,
                 UaiBrowserCommand::ResidenceTarget { task_handle, seconds, play_video }
                     if !is_browser_page_handle(task_handle)
-                        || *seconds != plan.residence_seconds
+                        || *seconds == 0
+                        || *seconds > plan.residence_seconds
                         || *play_video != plan.play_video
             )
             || matches!(
                 &self.command,
                 UaiBrowserCommand::ResidenceControl { task_handle, seconds, control }
                     if !is_browser_page_handle(task_handle)
-                        || *seconds != plan.residence_seconds
+                        || *seconds == 0
+                        || *seconds > plan.residence_seconds
                         || matches!(control, UaiBrowserResidenceControl::Restart { start_micro_ordinal } if *start_micro_ordinal >= plan.max_discovered_micros)
             )
         {
@@ -2116,7 +2132,7 @@ impl UaiBrowserBridge {
         let plan = self
             .residence_plan(context, remote_task_id, settings)
             .await?;
-        issue_command_exchange_inner(&plan, remote_task_id, session_id, command, issued_at)
+        issue_command_exchange_inner(&plan, remote_task_id, session_id, command, issued_at, false)
     }
 
     /// Freshly rebinds one accumulated cursor and issues its exact next
@@ -2145,8 +2161,14 @@ impl UaiBrowserBridge {
             .residence_plan(context, remote_task_id, settings)
             .await?;
         let cursor_artifact = cursor.encode_artifact(batch, &plan, &command)?;
-        let issued =
-            issue_command_exchange_inner(&plan, remote_task_id, session_id, command, issued_at)?;
+        let issued = issue_command_exchange_inner(
+            &plan,
+            remote_task_id,
+            session_id,
+            command,
+            issued_at,
+            true,
+        )?;
         if cursor.next_command_digest() != issued.command_artifact().digest() {
             return Err(ProviderError::new(
                 ProviderErrorKind::Internal,
@@ -2363,12 +2385,26 @@ fn issue_command_exchange_inner(
     session_id: BrowserBridgeSessionId,
     command: UaiBrowserCommandEnvelope,
     issued_at: Timestamp,
+    allow_leaf_residence_budget: bool,
 ) -> ProviderResult<UaiBrowserExchangeIssued> {
     command.validate_for_plan(plan)?;
     if command.session_nonce != session_id.to_string() || command.remote_task_id != remote_task_id {
         return Err(ProviderError::new(
             ProviderErrorKind::RemoteChanged,
             "UAI BrowserBridge command is foreign to the durable Core session",
+        ));
+    }
+    if !allow_leaf_residence_budget
+        && matches!(
+            &command.command,
+            UaiBrowserCommand::ResidenceTarget { seconds, .. }
+                | UaiBrowserCommand::ResidenceControl { seconds, .. }
+                if *seconds != plan.residence_seconds
+        )
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "UAI leaf residence budget requires an accumulated cursor",
         ));
     }
     let sequence = u64::from(command.sequence);
@@ -3302,6 +3338,32 @@ mod tests {
         (batch, plan, command, cursor)
     }
 
+    fn scanning_direct_tasks_cursor(
+        session_id: BrowserBridgeSessionId,
+    ) -> (
+        crate::UaiCourseResidenceBatchPlan,
+        UaiBrowserResidencePlan,
+        UaiBrowserCommandEnvelope,
+        crate::UaiBrowserResidenceCursor,
+    ) {
+        let (batch, plan, command, cursor) = scanning_tabs_cursor(session_id);
+        let completed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::PageList {
+                scope: UaiBrowserPageScope::Tab,
+                entries: Vec::new(),
+            },
+            [3; 32],
+        );
+        let tasks = cursor
+            .advance_tab_list(&batch, &plan, &command, &completed)
+            .unwrap();
+        let (cursor, command) = tasks.into_parts();
+        (batch, plan, command, cursor)
+    }
+
     fn clicking_first_tab_cursor(
         session_id: BrowserBridgeSessionId,
     ) -> (
@@ -3442,6 +3504,89 @@ mod tests {
             .advance_tab_click(&batch, &plan, next_tab.command(), &clicked)
             .unwrap();
         let (cursor, command) = tasks.into_parts();
+        (batch, plan, command, cursor)
+    }
+
+    fn clicking_target_task_cursor(
+        session_id: BrowserBridgeSessionId,
+    ) -> (
+        crate::UaiCourseResidenceBatchPlan,
+        UaiBrowserResidencePlan,
+        UaiBrowserCommandEnvelope,
+        crate::UaiBrowserResidenceCursor,
+    ) {
+        let (batch, plan, command, cursor) = scanning_first_tab_tasks_cursor(session_id);
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )
+        .unwrap();
+        let tasks = vec![
+            UaiBrowserPageEntry::try_new(
+                &plan,
+                &binding,
+                UaiBrowserPageScope::Task,
+                0,
+                "Introduction".to_owned(),
+                false,
+            )
+            .unwrap(),
+            UaiBrowserPageEntry::try_new(
+                &plan,
+                &binding,
+                UaiBrowserPageScope::Task,
+                1,
+                "Task Z".to_owned(),
+                true,
+            )
+            .unwrap(),
+        ];
+        let completed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::PageList {
+                scope: UaiBrowserPageScope::Task,
+                entries: tasks,
+            },
+            [5; 32],
+        );
+        let clicked = cursor
+            .advance_task_list(&batch, &plan, &command, &completed)
+            .unwrap();
+        let (cursor, command) = clicked.into_parts();
+        (batch, plan, command, cursor)
+    }
+
+    fn residing_cursor(
+        session_id: BrowserBridgeSessionId,
+    ) -> (
+        crate::UaiCourseResidenceBatchPlan,
+        UaiBrowserResidencePlan,
+        UaiBrowserCommandEnvelope,
+        crate::UaiBrowserResidenceCursor,
+    ) {
+        let (batch, plan, command, cursor) = clicking_target_task_cursor(session_id);
+        let handle = match &command.command {
+            UaiBrowserCommand::ClickTask { handle } => handle.clone(),
+            other => panic!("expected Task click, got {other:?}"),
+        };
+        let completed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::ClickResult {
+                handle,
+                clicked: true,
+            },
+            [6; 32],
+        );
+        let residence = cursor
+            .advance_task_click(&batch, &plan, &command, &completed)
+            .unwrap();
+        let (cursor, command) = residence.into_parts();
         (batch, plan, command, cursor)
     }
 
@@ -4099,6 +4244,164 @@ mod tests {
         assert_eq!(cursor.current_tab_ordinal(), Some(1));
         assert_eq!(cursor.next_tab_ordinal(), 2);
         assert_eq!(cursor.processed_tabs(), 1);
+    }
+
+    #[test]
+    fn completed_task_click_uses_runtime_batch_leaf_budget() {
+        let session_id = BrowserBridgeSessionId::new();
+        let (batch, plan, command, cursor) = residing_cursor(session_id);
+        let expected_seconds = batch
+            .budget_share()
+            .unwrap()
+            .rounded_leaf_seconds(2, 2)
+            .unwrap();
+        assert_eq!(expected_seconds, 100);
+        assert_eq!(cursor.stage(), crate::UaiBrowserCursorStage::Residing);
+        assert_eq!(cursor.processed_tabs(), 1);
+        assert_eq!(cursor.processed_tasks(), 1);
+        assert_eq!(cursor.prior_result_sequence(), Some(6));
+        assert_eq!(cursor.prior_result_digest(), Some([6; 32]));
+        assert_eq!(cursor.remaining_active_seconds(), 1_200);
+        assert!(matches!(
+            command.command,
+            UaiBrowserCommand::ResidenceTarget {
+                seconds,
+                play_video: false,
+                ..
+            } if seconds == expected_seconds
+        ));
+        assert_eq!(command.sequence, 7);
+        assert_ne!(expected_seconds, plan.residence_seconds);
+        cursor.encode_artifact(&batch, &plan, &command).unwrap();
+    }
+
+    #[test]
+    fn direct_task_page_uses_task_only_leaf_denominator() {
+        let session_id = BrowserBridgeSessionId::new();
+        let (batch, plan, command, cursor) = scanning_direct_tasks_cursor(session_id);
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )
+        .unwrap();
+        let tasks = vec![
+            UaiBrowserPageEntry::try_new(
+                &plan,
+                &binding,
+                UaiBrowserPageScope::Task,
+                0,
+                "Introduction".to_owned(),
+                false,
+            )
+            .unwrap(),
+            UaiBrowserPageEntry::try_new(
+                &plan,
+                &binding,
+                UaiBrowserPageScope::Task,
+                1,
+                "Task Z".to_owned(),
+                true,
+            )
+            .unwrap(),
+        ];
+        let listed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::PageList {
+                scope: UaiBrowserPageScope::Task,
+                entries: tasks,
+            },
+            [4; 32],
+        );
+        let clicked = cursor
+            .advance_task_list(&batch, &plan, &command, &listed)
+            .unwrap();
+        let handle = match &clicked.command().command {
+            UaiBrowserCommand::ClickTask { handle } => handle.clone(),
+            other => panic!("expected Task click, got {other:?}"),
+        };
+        let completed = completed_event(
+            &plan,
+            session_id,
+            clicked.command(),
+            UaiBrowserEvent::ClickResult {
+                handle,
+                clicked: true,
+            },
+            [5; 32],
+        );
+        let residence = clicked
+            .cursor()
+            .advance_task_click(&batch, &plan, clicked.command(), &completed)
+            .unwrap();
+        let expected_seconds = batch
+            .budget_share()
+            .unwrap()
+            .rounded_leaf_seconds(0, 2)
+            .unwrap();
+
+        assert_eq!(expected_seconds, 200);
+        assert_eq!(residence.cursor().processed_tabs(), 0);
+        assert_eq!(residence.cursor().processed_tasks(), 1);
+        assert!(matches!(
+            residence.command().command,
+            UaiBrowserCommand::ResidenceTarget { seconds: 200, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn leaf_budget_can_only_be_issued_with_its_accumulated_cursor() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let (_batch, _plan, command, _cursor) = residing_cursor(session_id);
+        let issued_at = chrono::Utc::now();
+        assert_eq!(
+            bridge
+                .issue_command_exchange(
+                    &context,
+                    "group:2001:unit-z:group-z",
+                    &settings,
+                    session_id,
+                    command,
+                    issued_at,
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        let (fresh_batch, _plan, fresh_command, fresh_cursor) = residing_cursor(session_id);
+        let issued = bridge
+            .issue_cursor_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &fresh_batch,
+                session_id,
+                &fresh_cursor,
+                fresh_command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(issued.exchange().sequence, 7);
+        assert_eq!(
+            issued.cursor_artifact().digest(),
+            fresh_cursor
+                .encode_artifact(
+                    &fresh_batch,
+                    &residence_plan_for_group_z(),
+                    issued.command(),
+                )
+                .unwrap()
+                .digest()
+        );
     }
 
     #[tokio::test]

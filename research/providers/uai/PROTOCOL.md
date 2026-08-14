@@ -440,8 +440,17 @@ as processed before its Tasks run, and advances to sequence-next
 snapshot. Exactly one fresh target title authorizes `ClickTask`; a missing
 target advances to the next handle from the frozen Tab snapshot, clears the
 old Task snapshot and counts the inspected Tab once. Exhausting every frozen
-Tab without the target fails `RemoteChanged`. Residence and post-click
-transitions remain incremental Provider work around the shared dispatcher.
+Tab without the target fails `RemoteChanged`.
+After the exact Task click is accepted, the Provider computes the residence
+leaf from the Course batch's unchanged rational Micro share and the frozen
+runtime Tab/Task snapshot cardinalities. It rounds only once through
+`rounded_leaf_seconds`; a two-Tab/two-Task page across three selected Micros
+therefore receives 100 seconds from a 1,200-second total, while a direct
+two-Task page receives 200 seconds. The resulting sequence-next
+`ResidenceTarget` and `Residing` cursor bind that exact leaf budget. Ordinary
+command issuance continues to require the full plan budget, so a smaller leaf
+command is dispatchable only through cursor-aware issuance and its fresh batch
+revalidation.
 
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.

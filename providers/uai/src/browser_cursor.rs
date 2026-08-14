@@ -598,6 +598,72 @@ impl UaiBrowserResidenceCursor {
         })
     }
 
+    /// Advances the accepted exact Task click to its batch-distributed
+    /// residence leaf.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error unless the cursor owns the snapshot-derived
+    /// `ClickTask`, the completed event accepted that same handle and the
+    /// runtime Tab/Task cardinalities yield one bounded positive leaf budget.
+    pub fn advance_task_click(
+        &self,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+        completed: &UaiBrowserEventExchangeCompleted,
+    ) -> ProviderResult<UaiBrowserCursorAdvance> {
+        self.validate_for_command(batch, plan, command)?;
+        if self.stage != UaiBrowserCursorStage::ClickingTask
+            || !matches!(&command.command, UaiBrowserCommand::ClickTask { .. })
+        {
+            return Err(stale_cursor());
+        }
+        let result_digest = completed_event_digest(self, command, completed)?;
+        completed
+            .event()
+            .validate_for_command(plan, command, &completed.event().origin)?;
+        if !matches!(
+            &completed.event().event,
+            UaiBrowserEvent::ClickResult { .. }
+        ) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI accumulated cursor requires a completed Task-click event",
+            ));
+        }
+        let binding = UaiBrowserSessionBinding::try_new(
+            plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )?;
+        let target = plan.select_target_task_entry(&binding, &self.task_snapshot)?;
+        let next_sequence = command.sequence.checked_add(1).ok_or_else(invalid_cursor)?;
+        let leaf_seconds = expected_leaf_seconds(self, batch)?;
+        let next_command = UaiBrowserCommandEnvelope::residence_target_for_leaf(
+            plan,
+            &binding,
+            next_sequence,
+            &target,
+            leaf_seconds,
+        )?;
+        let mut next = self.clone();
+        next.stage = UaiBrowserCursorStage::Residing;
+        next.processed_tasks = next
+            .processed_tasks
+            .checked_add(1)
+            .ok_or_else(invalid_cursor)?;
+        next.prior_result_sequence = Some(command.sequence);
+        next.prior_result_digest = Some(result_digest);
+        next.next_command_digest = next_command.exchange_digest(plan)?;
+        next.validate_for_command(batch, plan, &next_command)?;
+        Ok(UaiBrowserCursorAdvance {
+            cursor: next,
+            command: next_command,
+        })
+    }
+
     /// Encodes this validated accumulated cursor for encrypted persistence.
     ///
     /// # Errors
@@ -693,6 +759,8 @@ impl UaiBrowserResidenceCursor {
             || self.batch_plan_digest != batch.plan_digest()
             || self.browser_plan_digest != fresh_browser_plan_digest
             || self.next_command_digest != fresh_command_digest
+            || batch.total_residence_seconds() != plan.residence_seconds
+            || batch.play_video() != plan.play_video
             || self.current_micro_ordinal < batch.start().ordinal()
             || self.current_micro_identity_digest != micro.identity_digest()
             || micro.unit_title() != plan.target.unit
@@ -724,17 +792,32 @@ impl UaiBrowserResidenceCursor {
         )?;
         let tab_count = u32::try_from(self.tab_snapshot.len()).map_err(|_| invalid_cursor())?;
         let micro_count = u32::try_from(batch.micros().len()).map_err(|_| invalid_cursor())?;
+        let current_direct_task_page = u32::from(
+            self.tab_snapshot.is_empty()
+                && matches!(
+                    self.stage,
+                    UaiBrowserCursorStage::ScanningTasks
+                        | UaiBrowserCursorStage::ClickingTask
+                        | UaiBrowserCursorStage::Residing
+                        | UaiBrowserCursorStage::ControllingResidence
+                ),
+        );
+        let task_page_count = self
+            .processed_tabs
+            .checked_add(self.processed_micros)
+            .and_then(|count| count.checked_add(current_direct_task_page))
+            .ok_or_else(invalid_cursor)?;
         if self.next_tab_ordinal > tab_count
             || self
                 .current_tab_ordinal
                 .is_some_and(|ordinal| ordinal >= tab_count)
             || self.processed_micros > self.current_micro_ordinal - batch.start().ordinal()
             || self.processed_tabs > plan.max_tabs_per_micro.saturating_mul(micro_count)
-            || self.processed_tasks > self.processed_tabs.saturating_mul(plan.max_tasks_per_tab)
+            || self.processed_tasks > task_page_count.saturating_mul(plan.max_tasks_per_tab)
         {
             return Err(invalid_cursor());
         }
-        validate_stage(self, plan, command)
+        validate_stage(self, batch, plan, command)
     }
 }
 
@@ -841,6 +924,7 @@ fn validate_snapshot(
 
 fn validate_stage(
     cursor: &UaiBrowserResidenceCursor,
+    batch: &UaiCourseResidenceBatchPlan,
     plan: &UaiBrowserResidencePlan,
     command: &UaiBrowserCommandEnvelope,
 ) -> ProviderResult<()> {
@@ -884,7 +968,7 @@ fn validate_stage(
                 play_video,
             },
         ) => {
-            *seconds == plan.residence_seconds
+            *seconds == expected_leaf_seconds(cursor, batch)?
                 && *play_video == plan.play_video
                 && cursor
                     .task_snapshot
@@ -902,7 +986,7 @@ fn validate_stage(
                 control,
             },
         ) => {
-            *seconds == plan.residence_seconds
+            *seconds == expected_leaf_seconds(cursor, batch)?
                 && cursor
                     .task_snapshot
                     .iter()
@@ -927,6 +1011,17 @@ fn validate_stage(
             "UAI accumulated browser cursor does not match its next command",
         ))
     }
+}
+
+fn expected_leaf_seconds(
+    cursor: &UaiBrowserResidenceCursor,
+    batch: &UaiCourseResidenceBatchPlan,
+) -> ProviderResult<u64> {
+    let tab_count = u32::try_from(cursor.tab_snapshot.len()).map_err(|_| invalid_cursor())?;
+    let task_count = u32::try_from(cursor.task_snapshot.len()).map_err(|_| invalid_cursor())?;
+    batch
+        .budget_share()?
+        .rounded_leaf_seconds(tab_count, task_count)
 }
 
 trait ExactlyOne<'a, T: 'a>: Iterator<Item = &'a T> + Sized {
