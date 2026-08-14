@@ -69,12 +69,15 @@ stable Task+remote-Question+URL-bound opaque attachment IDs,
 fragment-free HTTPS routes, URL redaction, different IDs for the same URL
 under another Task, and rejection of non-HTTPS or literal-IP routes. Durable
 artifact fixtures cover deterministic encoding, redacted debug output, exact
-Task/Group/Question/position/content-fingerprint binding, ordered attachment
-set equality, URL/kind/attachment-ID recomputation, unknown fields, digest
-substitution and the encoded-size ceiling. Parser-adapter coverage additionally
-requires the Question and artifact to derive from the same ephemeral entry,
-redacts the combined result and returns no artifact for media-free Questions.
-Persisted Domain Questions never
+Task/Group/every-Question/position/content-fingerprint manifest binding,
+ordered attachment-set equality, URL/kind/attachment-ID recomputation, unknown
+fields, digest substitution, reordered snapshots and the encoded-size ceiling.
+Parser-adapter coverage atomically consumes the complete cached reference set,
+aggregates media entries into one Core continuation, rejects partial/replayed
+attempts and returns no artifact for an entirely media-free set. Session-aware
+AnswerResolve accepts the exact type/phase/revision/digest-bound artifact,
+rebinds it before fresh content/answer reads, keeps the legacy `None` path and
+rejects foreign metadata without transport. Persisted Domain Questions never
 contain a fetch URL; only Core's encrypted QuestionSession continuation can
 retain the Provider-private route. DNS/private-range resolution,
 redirect handling and host-scoped authenticated media fetching remain the

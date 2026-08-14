@@ -113,8 +113,10 @@ pub use question::{
     UaiQuestionRead, UaiQuestionTransport, parse_question_content,
 };
 pub use question_artifact::{
-    EncodedUaiQuestionArtifact, UAI_QUESTION_ARTIFACT_PHASE, UAI_QUESTION_ARTIFACT_TYPE,
-    UaiQuestionArtifact, UaiQuestionArtifactMediaSource,
+    EncodedUaiQuestionArtifact, EncodedUaiQuestionArtifactSet, UAI_QUESTION_ARTIFACT_PHASE,
+    UAI_QUESTION_ARTIFACT_TYPE, UAI_QUESTION_SET_ARTIFACT_PHASE,
+    UAI_QUESTION_SET_ARTIFACT_TTL_SECONDS, UAI_QUESTION_SET_ARTIFACT_TYPE, UaiQuestionArtifact,
+    UaiQuestionArtifactMediaSource, UaiQuestionArtifactSet,
 };
 pub use resource_execution::{
     UaiDiscussionEmptySubmission, UaiOralEmptySubmission, UaiPresetCompletionResult,

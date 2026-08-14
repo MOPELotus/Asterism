@@ -6,13 +6,15 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AnswerResolveCapability, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, RemoteTaskDetail, TaskDetailCapability,
+    ProviderMetadata, ProviderResult, RemoteTaskDetail,
+    ResolvedProviderQuestionSessionContinuation, TaskDetailCapability,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    UAI_QUESTION_SET_ARTIFACT_PHASE, UAI_QUESTION_SET_ARTIFACT_TYPE, UaiQuestionArtifactSet,
     UaiQuestionDocument,
     encrypted::{ZeroizingJsonValue, decrypt_unipus_payload},
     metadata::development_metadata,
@@ -120,6 +122,47 @@ impl UaiAnswerResolve {
             transport,
         })
     }
+
+    async fn resolve_bound_answers(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        questions: &[Question],
+        artifact: Option<&UaiQuestionArtifactSet>,
+    ) -> ProviderResult<Vec<AnswerCandidate>> {
+        validate_context(context, &self.metadata)?;
+        let identity = GroupIdentity::parse(remote_task_id)?;
+        let detail = self.details.task_detail(context, remote_task_id).await?;
+        let shape = TaskAnswerShape::from_detail(&detail, &identity, remote_task_id)?;
+        validate_snapshot_questions(questions, &shape, remote_task_id)?;
+        if let Some(artifact) = artifact
+            && (artifact.question_count() != questions.len()
+                || questions.iter().any(|question| {
+                    question
+                        .remote_question_id
+                        .as_deref()
+                        .is_none_or(|remote_id| {
+                            artifact.media_sources_for_question(remote_id).is_none()
+                        })
+                }))
+        {
+            return Err(protocol_drift(
+                "UAI media artifact no longer covers the complete Question snapshot",
+            ));
+        }
+        let documents = self
+            .transport
+            .fetch_answer_documents(context, &identity.course_resource, &identity.group)
+            .await?;
+        let parsed = parse_question_content(
+            documents.content.as_str(),
+            remote_task_id,
+            &shape.task_types,
+            Some(shape.question_count),
+        )?;
+        validate_fresh_content(questions, parsed)?;
+        parse_answer_candidates(documents.answer.as_str(), questions)
+    }
 }
 
 impl fmt::Debug for UaiAnswerResolve {
@@ -147,23 +190,41 @@ impl AnswerResolveCapability for UaiAnswerResolve {
         remote_task_id: &str,
         questions: &[Question],
     ) -> ProviderResult<Vec<AnswerCandidate>> {
+        self.resolve_bound_answers(context, remote_task_id, questions, None)
+            .await
+    }
+
+    async fn resolve_answers_with_session(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        questions: &[Question],
+        continuation: Option<ResolvedProviderQuestionSessionContinuation<'_>>,
+    ) -> ProviderResult<Vec<AnswerCandidate>> {
         validate_context(context, &self.metadata)?;
-        let identity = GroupIdentity::parse(remote_task_id)?;
-        let detail = self.details.task_detail(context, remote_task_id).await?;
-        let shape = TaskAnswerShape::from_detail(&detail, &identity, remote_task_id)?;
-        validate_snapshot_questions(questions, &shape, remote_task_id)?;
-        let documents = self
-            .transport
-            .fetch_answer_documents(context, &identity.course_resource, &identity.group)
-            .await?;
-        let parsed = parse_question_content(
-            documents.content.as_str(),
+        GroupIdentity::parse(remote_task_id)?;
+        let Some(continuation) = continuation else {
+            return self
+                .resolve_bound_answers(context, remote_task_id, questions, None)
+                .await;
+        };
+        if continuation.continuation_type != UAI_QUESTION_SET_ARTIFACT_TYPE
+            || continuation.phase != UAI_QUESTION_SET_ARTIFACT_PHASE
+            || continuation.revision == 0
+            || continuation.continuation_digest == [0; 32]
+        {
+            return Err(protocol_drift(
+                "UAI QuestionSession continuation metadata is invalid",
+            ));
+        }
+        let artifact = UaiQuestionArtifactSet::decode_bound(
+            continuation.value,
+            continuation.continuation_digest,
             remote_task_id,
-            &shape.task_types,
-            Some(shape.question_count),
+            questions,
         )?;
-        validate_fresh_content(questions, parsed)?;
-        parse_answer_candidates(documents.answer.as_str(), questions)
+        self.resolve_bound_answers(context, remote_task_id, questions, Some(&artifact))
+            .await
     }
 }
 
@@ -929,7 +990,11 @@ fn internal(message: &'static str) -> ProviderError {
 mod tests {
     use std::sync::Mutex;
 
-    use asterism_domain::{NormalizedAnswer, ProviderAccountId, ProviderId, SecretId, TaskId};
+    use asterism_domain::{
+        AssessmentClass, NormalizedAnswer, ProviderAccountId, ProviderId, RemoteState, SecretId,
+        SourceType, TaskId,
+    };
+    use asterism_provider_api::RemoteTask;
 
     use super::*;
     use crate::{parse_course_context, parse_course_inventory, parse_task_inventory};
@@ -985,6 +1050,84 @@ mod tests {
     #[derive(Debug, Default)]
     struct FixtureTransport {
         calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[derive(Debug)]
+    struct MediaFixtureDetail {
+        metadata: ProviderMetadata,
+    }
+
+    impl ProviderIdentity for MediaFixtureDetail {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl TaskDetailCapability for MediaFixtureDetail {
+        async fn task_detail(
+            &self,
+            _context: &ProviderContext,
+            remote_task_id: &str,
+        ) -> ProviderResult<RemoteTaskDetail> {
+            let normalized = json!({
+                "schema": "uai.group-task.v1",
+                "course_resource_id": "2001",
+                "unit": {"id":"unit-1","title":"Unit 1"},
+                "section": {"id":"section-1","title":"Section 1"},
+                "micro": {"id":"micro-1","title":"Media"},
+                "group_id": "group-media",
+                "task_types": ["short_answer"],
+                "question_count": 1,
+            });
+            Ok(RemoteTaskDetail {
+                task: RemoteTask {
+                    remote_id: remote_task_id.to_owned(),
+                    course_remote_id: Some("course-resource:2001".to_owned()),
+                    title: "Media short answer".to_owned(),
+                    source_type: SourceType::Resource,
+                    assessment_class: AssessmentClass::Routine,
+                    remote_state: RemoteState::Unknown,
+                    opens_at: None,
+                    due_at: None,
+                    closes_at: None,
+                    capabilities: vec![TaskCapability::AnswerResolve],
+                    fingerprint: "v1:media-short-answer".to_owned(),
+                    normalized: normalized.clone(),
+                    raw_sanitized: json!({"schema":"uai.group-task.raw.v1"}),
+                },
+                normalized_detail: json!({
+                    "schema":"uai.group-task-detail.v1",
+                    "task": normalized,
+                }),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct MediaFixtureTransport {
+        content: String,
+        answer: String,
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl UaiAnswerTransport for MediaFixtureTransport {
+        async fn fetch_answer_documents(
+            &self,
+            _context: &ProviderContext,
+            course_resource_id: &str,
+            group_id: &str,
+        ) -> ProviderResult<UaiAnswerDocuments> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((course_resource_id.to_owned(), group_id.to_owned()));
+            Ok(UaiAnswerDocuments::new(
+                UaiQuestionDocument::try_new(self.content.clone())?,
+                UaiAnswerDocument::try_new(self.answer.clone())?,
+            ))
+        }
     }
 
     #[async_trait]
@@ -1384,6 +1527,102 @@ mod tests {
             transport.calls.lock().unwrap().as_slice(),
             &[("2001".to_owned(), "group-1".to_owned())]
         );
+        let legacy_session = resolver
+            .resolve_answers_with_session(
+                &provider_context(),
+                "group:2001:unit-1:group-1",
+                &fixture_questions(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy_session.len(), 1);
+        assert_eq!(transport.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn session_answer_resolve_decodes_and_binds_the_complete_media_snapshot() {
+        let remote_task_id = "group:2001:unit-1:group-media";
+        let task_id = TaskId::new();
+        let parsed = crate::question::parse_question_entry(
+            &media_question_entry(),
+            1,
+            "short_answer",
+            remote_task_id,
+        )
+        .unwrap();
+        let question = parsed.to_question(task_id).unwrap();
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            std::slice::from_ref(&parsed),
+            std::slice::from_ref(&question),
+            remote_task_id,
+        )
+        .unwrap()
+        .unwrap()
+        .encode()
+        .unwrap();
+        let digest = artifact.digest();
+        let value = artifact.into_secret_value();
+        let transport = Arc::new(MediaFixtureTransport {
+            content: encrypted_content_for_test(&json!([media_question_entry()]).to_string()),
+            answer: encrypted_answer_for_test(
+                &json!([{
+                    "id":"6001",
+                    "answer":"",
+                    "analysis":"a bound media explanation"
+                }])
+                .to_string(),
+            ),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = UaiAnswerResolve::try_new(
+            Arc::new(MediaFixtureDetail {
+                metadata: development_metadata().unwrap(),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+        let continuation = ResolvedProviderQuestionSessionContinuation {
+            continuation_type: UAI_QUESTION_SET_ARTIFACT_TYPE,
+            continuation_digest: digest,
+            phase: UAI_QUESTION_SET_ARTIFACT_PHASE,
+            revision: 1,
+            value: &value,
+        };
+        let candidates = resolver
+            .resolve_answers_with_session(
+                &provider_context(),
+                remote_task_id,
+                std::slice::from_ref(&question),
+                Some(continuation),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            candidates[0].answer,
+            NormalizedAnswer::Texts(vec!["a bound media explanation".to_owned()])
+        );
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+
+        let invalid = ResolvedProviderQuestionSessionContinuation {
+            continuation_type: "uai.foreign-artifact.v1",
+            continuation_digest: digest,
+            phase: UAI_QUESTION_SET_ARTIFACT_PHASE,
+            revision: 1,
+            value: &value,
+        };
+        assert!(
+            resolver
+                .resolve_answers_with_session(
+                    &provider_context(),
+                    remote_task_id,
+                    &[question],
+                    Some(invalid),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1427,7 +1666,34 @@ mod tests {
         }
     }
 
+    fn media_question_entry() -> Value {
+        json!({
+            "id": "6001",
+            "content": {
+                "type": "short_answer",
+                "direction": {"text": "Summarize the recording"},
+                "contents": [{
+                    "name": "Listening.mp3",
+                    "path": "https://media.example.edu/listening.mp3"
+                }],
+                "children": [{
+                    "type": "basic",
+                    "replyType": "text-area",
+                    "quesText": "What happened?"
+                }]
+            }
+        })
+    }
+
+    fn encrypted_content_for_test(plaintext: &str) -> String {
+        encrypted_document_for_test(plaintext, "content")
+    }
+
     fn encrypted_answer_for_test(plaintext: &str) -> String {
+        encrypted_document_for_test(plaintext, "data")
+    }
+
+    fn encrypted_document_for_test(plaintext: &str, field: &str) -> String {
         use aes::{
             Aes128,
             cipher::{Array, BlockCipherEncrypt, KeyInit},
@@ -1450,6 +1716,10 @@ mod tests {
             }
         }
         bytes.zeroize();
-        format!(r#"{{"code":0,"data":"unipus.{encoded}","k":"k1234567"}}"#)
+        let mut document = serde_json::Map::new();
+        document.insert("code".to_owned(), json!(0));
+        document.insert(field.to_owned(), json!(format!("unipus.{encoded}")));
+        document.insert("k".to_owned(), json!("k1234567"));
+        Value::Object(document).to_string()
     }
 }

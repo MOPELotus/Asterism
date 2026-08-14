@@ -418,18 +418,19 @@ zeroizing Provider-private media owner. That owner repeats the exact remote
 Task and Question identities, and the opaque attachment digest hashes both
 with the canonical URL, so the same CDN URL cannot authorize cross-Task reuse.
 The persisted Question receives only that attachment ID, kind, bounded label
-and subtitle flag, never a fetch URL. When a media-bearing Question enters the
-durable QuestionSession lifecycle, its routes are encoded as a bounded,
-zeroizing Provider artifact and encrypted at rest by Core. The session digest
-binds the exact Core Task, remote Group/Question, position, Question content
-fingerprint, ordered attachment set and canonical routes; decode revalidates
-the schema, digest, every identity, URL normalization, kind and recomputed
-attachment ID before a source can be exposed. UAI's Provider-specific parse
-adapter creates the normalized Question and optional encoded artifact from the
-same cached parser entry, so the route cannot be recovered from a later or
-foreign read; media-free Questions return no continuation. The shared
-Provider/Engine adapter still needs to route this richer result into snapshot
-plus QuestionSession persistence. Embedded WEBVTT is parsed with bounded
+and subtitle flag, never a fetch URL. The Provider atomically consumes the
+complete cached reference set and creates one immutable Question set. If any
+Question has media, every ordered Question enters a bounded zeroizing manifest
+containing Task/remote identity, position and content fingerprint, while only
+media entries carry ordered attachment IDs and canonical routes. Core encrypts
+that single continuation at rest alongside the snapshot; entirely media-free
+sets return no continuation. Session-aware AnswerResolve requires the exact UAI
+type, phase, nonzero revision and digest, then revalidates the complete manifest,
+every identity, URL normalization, kind and recomputed attachment ID before any
+source can be exposed or any answer network read can begin. It subsequently
+refreshes Task detail and encrypted content, so a valid old artifact cannot
+bypass protocol drift. The legacy no-artifact standard-answer path remains
+unchanged. Embedded WEBVTT is parsed with bounded
 input/output, strips its header, cue ordinals and timestamp rows, normalizes
 only cue text into transcript metadata and is excluded from the display stem. The
 current donor sends its default authorization/cookie header set through its
@@ -659,9 +660,10 @@ empty `submitType=2` Group mutation once. Its accepted version is a separate
 receipt and only fresh exact Group progress can confirm completion.
 Cross-Provider registration still requires a shared immutable discussion
 Draft/attempt contract so both mutations and their independent readbacks remain
-durably recoverable without ambiguous replay. Artifact handles and external
-AnswerResolve/media-source orchestration likewise require shared Core contracts
-for account/Task ownership and secret isolation. The Provider-private upload
+durably recoverable without ambiguous replay. External media-source
+orchestration still requires the shared downloader/model contracts; ordinary
+QuestionSession persistence and session-aware AnswerResolve handoff are now
+integrated. The Provider-private upload
 boundary starts by canonicalizing the platform's camel-case
 `multiFileUpload` label at Task-tree parsing; ordinary UAI labels remain
 lowercase, but this label is never stored as an unreachable

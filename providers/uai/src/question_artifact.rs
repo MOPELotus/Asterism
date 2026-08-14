@@ -17,8 +17,12 @@ use crate::{
 
 pub const UAI_QUESTION_ARTIFACT_TYPE: &str = "uai.question-attempt.v1";
 pub const UAI_QUESTION_ARTIFACT_PHASE: &str = "answer-media";
+pub const UAI_QUESTION_SET_ARTIFACT_TYPE: &str = "uai.question-set.v1";
+pub const UAI_QUESTION_SET_ARTIFACT_PHASE: &str = "uai.answer-media";
+pub const UAI_QUESTION_SET_ARTIFACT_TTL_SECONDS: u64 = 5 * 60;
 
 const MAX_ARTIFACT_BYTES: usize = 768 * 1_024;
+const MAX_ARTIFACT_QUESTIONS: usize = 5_000;
 const MAX_MEDIA_SOURCES: usize = 64;
 const MAX_ATTACHMENT_ID_BYTES: usize = 128;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
@@ -30,6 +34,33 @@ const MAX_POSITION: u32 = 100_000;
 pub struct EncodedUaiQuestionArtifact {
     value: SecretValue,
     digest: [u8; 32],
+}
+
+/// Encoded complete-snapshot continuation consumed by Core's ordinary
+/// read-only Question artifact contract.
+pub struct EncodedUaiQuestionArtifactSet {
+    value: SecretValue,
+    digest: [u8; 32],
+}
+
+impl EncodedUaiQuestionArtifactSet {
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub fn into_secret_value(self) -> SecretValue {
+        self.value
+    }
+}
+
+impl fmt::Debug for EncodedUaiQuestionArtifactSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncodedUaiQuestionArtifactSet")
+            .field("value", &"[REDACTED]")
+            .field("digest", &self.digest)
+            .finish()
+    }
 }
 
 impl EncodedUaiQuestionArtifact {
@@ -293,6 +324,288 @@ impl fmt::Debug for UaiQuestionArtifact {
     }
 }
 
+/// One complete immutable Question snapshot plus the media routes deliberately
+/// omitted from Domain Questions. Entries without media remain in the manifest
+/// so a partial or reordered snapshot cannot consume another session's routes.
+pub struct UaiQuestionArtifactSet {
+    task_id: Zeroizing<String>,
+    remote_task_id: Zeroizing<String>,
+    questions: Vec<UaiQuestionArtifactEntry>,
+}
+
+impl UaiQuestionArtifactSet {
+    /// Aggregates the existing per-Question media binding into one complete
+    /// snapshot continuation. An artifact-free snapshot returns `None`.
+    pub(crate) fn from_parsed_questions(
+        parsed: &[ParsedUaiQuestion],
+        questions: &[Question],
+        expected_remote_task_id: &str,
+    ) -> ProviderResult<Option<Self>> {
+        validate_remote_task_identity(expected_remote_task_id)?;
+        if parsed.is_empty()
+            || parsed.len() != questions.len()
+            || parsed.len() > MAX_ARTIFACT_QUESTIONS
+        {
+            return Err(protocol_drift(
+                "UAI Question artifact set has invalid snapshot cardinality",
+            ));
+        }
+        let task_id = questions[0].task_id;
+        let mut entries = Vec::with_capacity(questions.len());
+        let mut has_media = false;
+        for (index, (parsed, question)) in parsed.iter().zip(questions).enumerate() {
+            let expected_position = u32::try_from(index + 1)
+                .map_err(|_| invalid_response("UAI artifact Question position exceeds bounds"))?;
+            let expected = parsed.to_question(task_id)?;
+            let fingerprint = question
+                .content_fingerprint()
+                .map_err(|_| invalid_response("UAI artifact Question fingerprint is invalid"))?;
+            let expected_fingerprint = expected.content_fingerprint().map_err(|_| {
+                invalid_response("UAI parsed artifact Question fingerprint is invalid")
+            })?;
+            let remote_question_id = question
+                .remote_question_id
+                .as_deref()
+                .ok_or_else(|| protocol_drift("UAI artifact Question has no remote identity"))?;
+            let remote_task_id = question
+                .metadata_sanitized
+                .get("remote_task_id")
+                .and_then(serde_json::Value::as_str);
+            if question.task_id != task_id
+                || question.position != expected_position
+                || parsed.position() != expected_position
+                || parsed.remote_id() != remote_question_id
+                || remote_task_id != Some(expected_remote_task_id)
+                || fingerprint != expected_fingerprint
+                || question.validate().is_err()
+            {
+                return Err(protocol_drift(
+                    "UAI Question artifact set does not match its parsed snapshot",
+                ));
+            }
+            valid_question_identity(remote_question_id)?;
+            let media_sources = if parsed.media_sources().is_empty() {
+                validate_question_source_ids(question, &[])?;
+                Vec::new()
+            } else {
+                has_media = true;
+                let artifact = UaiQuestionArtifact::from_parsed(parsed, question)?;
+                artifact.media_sources
+            };
+            entries.push(UaiQuestionArtifactEntry {
+                remote_question_id: Zeroizing::new(remote_question_id.to_owned()),
+                position: expected_position,
+                question_fingerprint: Zeroizing::new(fingerprint.to_string()),
+                media_sources,
+            });
+        }
+        if !has_media {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            task_id: Zeroizing::new(task_id.to_string()),
+            remote_task_id: Zeroizing::new(expected_remote_task_id.to_owned()),
+            questions: entries,
+        }))
+    }
+
+    /// Encodes one bounded deterministic snapshot continuation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidResponse` when serialization fails or the complete
+    /// manifest exceeds the encrypted continuation bound.
+    pub fn encode(&self) -> ProviderResult<EncodedUaiQuestionArtifactSet> {
+        let questions = self
+            .questions
+            .iter()
+            .map(UaiQuestionArtifactEntry::wire_ref)
+            .collect::<Vec<_>>();
+        let mut encoded = Zeroizing::new(
+            serde_json::to_vec(&ArtifactSetWireRef {
+                schema: UAI_QUESTION_SET_ARTIFACT_TYPE,
+                task_id: &self.task_id,
+                remote_task_id: &self.remote_task_id,
+                questions: &questions,
+            })
+            .map_err(|_| invalid_response("UAI Question artifact set could not be encoded"))?,
+        );
+        if encoded.is_empty() || encoded.len() > MAX_ARTIFACT_BYTES {
+            return Err(invalid_response(
+                "UAI Question artifact set exceeds the encoded bound",
+            ));
+        }
+        let digest = Sha256::digest(encoded.as_slice()).into();
+        let value = SecretValue::new(std::mem::take(&mut *encoded));
+        Ok(EncodedUaiQuestionArtifactSet { value, digest })
+    }
+
+    /// Decodes and rebinds the complete manifest before exposing any media
+    /// source to `AnswerResolve` or a future external resolver.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed, oversized, digest-mismatched, partial, reordered or
+    /// foreign manifests and any changed Question or media binding.
+    pub fn decode_bound(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+        expected_remote_task_id: &str,
+        expected_questions: &[Question],
+    ) -> ProviderResult<Self> {
+        let bytes = value.expose_secret();
+        if bytes.is_empty() || bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(invalid_response(
+                "UAI Question artifact set exceeds the encoded bound",
+            ));
+        }
+        if Sha256::digest(bytes).as_slice() != expected_digest {
+            return Err(protocol_drift(
+                "UAI Question artifact set digest does not match its session",
+            ));
+        }
+        validate_remote_task_identity(expected_remote_task_id)?;
+        if expected_questions.is_empty() || expected_questions.len() > MAX_ARTIFACT_QUESTIONS {
+            return Err(protocol_drift(
+                "UAI Question artifact set has invalid expected cardinality",
+            ));
+        }
+        let wire: ArtifactSetWire = serde_json::from_slice(bytes)
+            .map_err(|_| protocol_drift("UAI Question artifact set schema is invalid"))?;
+        let task_id = expected_questions[0].task_id;
+        if wire.schema != UAI_QUESTION_SET_ARTIFACT_TYPE
+            || wire.task_id != task_id.to_string()
+            || wire.remote_task_id != expected_remote_task_id
+            || wire.questions.len() != expected_questions.len()
+        {
+            return Err(protocol_drift(
+                "UAI Question artifact set binding is stale or foreign",
+            ));
+        }
+        let mut entries = Vec::with_capacity(wire.questions.len());
+        let mut has_media = false;
+        for (index, (wire, question)) in wire.questions.iter().zip(expected_questions).enumerate() {
+            let expected_position = u32::try_from(index + 1)
+                .map_err(|_| invalid_response("UAI artifact Question position exceeds bounds"))?;
+            let remote_question_id = question
+                .remote_question_id
+                .as_deref()
+                .ok_or_else(|| protocol_drift("UAI artifact Question has no remote identity"))?;
+            let expected_fingerprint = question
+                .content_fingerprint()
+                .map_err(|_| invalid_response("UAI artifact Question fingerprint is invalid"))?;
+            let parsed_fingerprint =
+                QuestionContentFingerprint::from_str(&wire.question_fingerprint).map_err(|_| {
+                    protocol_drift("UAI artifact Question fingerprint is malformed")
+                })?;
+            if question.task_id != task_id
+                || question.position != expected_position
+                || question.validate().is_err()
+                || wire.remote_question_id != remote_question_id
+                || wire.position != expected_position
+                || parsed_fingerprint != expected_fingerprint
+                || question
+                    .metadata_sanitized
+                    .get("remote_task_id")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(expected_remote_task_id)
+            {
+                return Err(protocol_drift(
+                    "UAI Question artifact entry is stale or foreign",
+                ));
+            }
+            valid_question_identity(remote_question_id)?;
+            let media_sources = wire
+                .media_sources
+                .iter()
+                .map(|source| {
+                    UaiQuestionArtifactMediaSource::try_new(
+                        source.attachment_id.clone(),
+                        parse_attachment_kind(&source.kind)?,
+                        &source.url,
+                        source.subtitle,
+                        expected_remote_task_id,
+                        remote_question_id,
+                    )
+                })
+                .collect::<ProviderResult<Vec<_>>>()?;
+            validate_source_set(&media_sources)?;
+            validate_question_source_ids(question, &media_sources)?;
+            has_media |= !media_sources.is_empty();
+            entries.push(UaiQuestionArtifactEntry {
+                remote_question_id: Zeroizing::new(wire.remote_question_id.clone()),
+                position: wire.position,
+                question_fingerprint: Zeroizing::new(wire.question_fingerprint.clone()),
+                media_sources,
+            });
+        }
+        if !has_media {
+            return Err(protocol_drift(
+                "UAI Question artifact set contains no media continuation",
+            ));
+        }
+        Ok(Self {
+            task_id: Zeroizing::new(wire.task_id.clone()),
+            remote_task_id: Zeroizing::new(wire.remote_task_id.clone()),
+            questions: entries,
+        })
+    }
+
+    pub fn media_sources_for_question(
+        &self,
+        remote_question_id: &str,
+    ) -> Option<&[UaiQuestionArtifactMediaSource]> {
+        self.questions
+            .iter()
+            .find(|question| question.remote_question_id.as_str() == remote_question_id)
+            .map(|question| question.media_sources.as_slice())
+    }
+
+    pub fn question_count(&self) -> usize {
+        self.questions.len()
+    }
+}
+
+impl fmt::Debug for UaiQuestionArtifactSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiQuestionArtifactSet")
+            .field("binding", &"configured")
+            .field("question_count", &self.questions.len())
+            .field(
+                "media_question_count",
+                &self
+                    .questions
+                    .iter()
+                    .filter(|question| !question.media_sources.is_empty())
+                    .count(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+struct UaiQuestionArtifactEntry {
+    remote_question_id: Zeroizing<String>,
+    position: u32,
+    question_fingerprint: Zeroizing<String>,
+    media_sources: Vec<UaiQuestionArtifactMediaSource>,
+}
+
+impl UaiQuestionArtifactEntry {
+    fn wire_ref(&self) -> ArtifactSetQuestionWireRef<'_> {
+        ArtifactSetQuestionWireRef {
+            remote_question_id: &self.remote_question_id,
+            position: self.position,
+            question_fingerprint: &self.question_fingerprint,
+            media_sources: self
+                .media_sources
+                .iter()
+                .map(UaiQuestionArtifactMediaSource::wire_ref)
+                .collect(),
+        }
+    }
+}
+
 pub struct UaiQuestionArtifactMediaSource {
     attachment_id: Zeroizing<String>,
     kind: QuestionAttachmentKind,
@@ -385,6 +698,22 @@ struct ArtifactWireRef<'a> {
 }
 
 #[derive(Serialize)]
+struct ArtifactSetWireRef<'a> {
+    schema: &'static str,
+    task_id: &'a str,
+    remote_task_id: &'a str,
+    questions: &'a [ArtifactSetQuestionWireRef<'a>],
+}
+
+#[derive(Serialize)]
+struct ArtifactSetQuestionWireRef<'a> {
+    remote_question_id: &'a str,
+    position: u32,
+    question_fingerprint: &'a str,
+    media_sources: Vec<MediaSourceWireRef<'a>>,
+}
+
+#[derive(Serialize)]
 struct MediaSourceWireRef<'a> {
     attachment_id: &'a str,
     kind: &'static str,
@@ -398,6 +727,24 @@ struct ArtifactWire {
     schema: String,
     task_id: String,
     remote_task_id: String,
+    remote_question_id: String,
+    position: u32,
+    question_fingerprint: String,
+    media_sources: Vec<MediaSourceWire>,
+}
+
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+struct ArtifactSetWire {
+    schema: String,
+    task_id: String,
+    remote_task_id: String,
+    questions: Vec<ArtifactSetQuestionWire>,
+}
+
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+struct ArtifactSetQuestionWire {
     remote_question_id: String,
     position: u32,
     question_fingerprint: String,
@@ -551,6 +898,29 @@ mod tests {
         (parsed, question)
     }
 
+    fn plain_question(task_id: TaskId, position: u32) -> (ParsedUaiQuestion, Question) {
+        let parsed = parse_question_entry(
+            &json!({
+                "id": "9002",
+                "content": {
+                    "type": "short_answer",
+                    "direction": {"text": "Summarize the text"},
+                    "children": [{
+                        "type": "basic",
+                        "replyType": "text-area",
+                        "quesText": "What happened next?"
+                    }]
+                }
+            }),
+            position,
+            "short_answer",
+            REMOTE_TASK_ID,
+        )
+        .unwrap();
+        let question = parsed.to_question(task_id).unwrap();
+        (parsed, question)
+    }
+
     #[test]
     fn media_artifact_round_trips_with_stable_digest_and_redaction() {
         let (parsed, question) = parsed_question(TaskId::new());
@@ -656,6 +1026,83 @@ mod tests {
                 Sha256::digest(oversized.expose_secret()).into(),
                 REMOTE_TASK_ID,
                 &question,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn media_artifact_set_binds_every_question_and_only_exposes_bound_routes() {
+        let task_id = TaskId::new();
+        let (media_parsed, media_question) = parsed_question(task_id);
+        let (plain_parsed, plain_question) = plain_question(task_id, 2);
+        let parsed = vec![media_parsed, plain_parsed];
+        let questions = vec![media_question, plain_question];
+        let artifact =
+            UaiQuestionArtifactSet::from_parsed_questions(&parsed, &questions, REMOTE_TASK_ID)
+                .unwrap()
+                .unwrap();
+        assert_eq!(artifact.question_count(), 2);
+        assert_eq!(
+            artifact.media_sources_for_question("9001").unwrap().len(),
+            2
+        );
+        assert!(
+            artifact
+                .media_sources_for_question("9002")
+                .unwrap()
+                .is_empty()
+        );
+        let encoded = artifact.encode().unwrap();
+        let digest = encoded.digest();
+        let value = encoded.into_secret_value();
+        let decoded =
+            UaiQuestionArtifactSet::decode_bound(&value, digest, REMOTE_TASK_ID, &questions)
+                .unwrap();
+        assert_eq!(decoded.question_count(), 2);
+        assert!(!format!("{decoded:?}").contains("media.example.edu"));
+        assert!(
+            UaiQuestionArtifactSet::decode_bound(&value, [8; 32], REMOTE_TASK_ID, &questions,)
+                .is_err()
+        );
+        let mut reordered = questions.clone();
+        reordered.swap(0, 1);
+        assert!(
+            UaiQuestionArtifactSet::decode_bound(&value, digest, REMOTE_TASK_ID, &reordered,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn artifact_free_set_returns_none_and_unknown_set_fields_fail_closed() {
+        let task_id = TaskId::new();
+        let (parsed, question) = plain_question(task_id, 1);
+        assert!(
+            UaiQuestionArtifactSet::from_parsed_questions(&[parsed], &[question], REMOTE_TASK_ID,)
+                .unwrap()
+                .is_none()
+        );
+
+        let (parsed, question) = parsed_question(task_id);
+        let encoded = UaiQuestionArtifactSet::from_parsed_questions(
+            &[parsed],
+            std::slice::from_ref(&question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap()
+        .encode()
+        .unwrap();
+        let value = encoded.into_secret_value();
+        let mut wire: Value = serde_json::from_slice(value.expose_secret()).unwrap();
+        wire["questions"][0]["unexpected"] = json!(true);
+        let changed = SecretValue::new(serde_json::to_vec(&wire).unwrap());
+        assert!(
+            UaiQuestionArtifactSet::decode_bound(
+                &changed,
+                Sha256::digest(changed.expose_secret()).into(),
+                REMOTE_TASK_ID,
+                &[question],
             )
             .is_err()
         );

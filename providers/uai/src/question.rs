@@ -12,8 +12,9 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
-    ProviderResult, ProviderRouteContext, QuestionInventoryCapability, QuestionParseCapability,
-    RemoteQuestionRef, RemoteTaskDetail, TaskDetailCapability,
+    ProviderQuestionParseSet, ProviderQuestionReadContinuation, ProviderResult,
+    ProviderRouteContext, QuestionInventoryCapability, QuestionParseCapability, RemoteQuestionRef,
+    RemoteTaskDetail, TaskDetailCapability,
 };
 use async_trait::async_trait;
 use scraper::Html;
@@ -22,7 +23,9 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    EncodedUaiQuestionArtifact, UaiQuestionArtifact,
+    EncodedUaiQuestionArtifact, UAI_QUESTION_SET_ARTIFACT_PHASE,
+    UAI_QUESTION_SET_ARTIFACT_TTL_SECONDS, UAI_QUESTION_SET_ARTIFACT_TYPE, UaiQuestionArtifact,
+    UaiQuestionArtifactSet,
     encrypted::{ZeroizingJsonValue, decrypt_unipus_payload},
     metadata::development_metadata,
     task_type::{audited_question_kind, audited_reply_kind, supports_audited_question_type},
@@ -203,6 +206,35 @@ impl UaiQuestionRead {
         Ok(result)
     }
 
+    fn consume_parsed_question_set(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        references: &[RemoteQuestionRef],
+    ) -> ProviderResult<Vec<ParsedUaiQuestion>> {
+        let key = QuestionAttemptKey::new(context, remote_task_id);
+        let mut attempts = self
+            .attempts
+            .lock()
+            .map_err(|_| internal("UAI Question attempt cache lock is unavailable"))?;
+        let attempt = attempts.get(&key).ok_or_else(question_attempt_changed)?;
+        if attempt.created_at.elapsed() >= QUESTION_ATTEMPT_TTL {
+            attempts.remove(&key);
+            return Err(question_attempt_changed());
+        }
+        if references.len() != attempt.questions.len()
+            || references
+                .iter()
+                .zip(&attempt.questions)
+                .any(|(reference, parsed)| !parsed.matches_reference(reference))
+        {
+            return Err(question_attempt_changed());
+        }
+        let parsed = attempt.questions.clone();
+        attempts.remove(&key);
+        Ok(parsed)
+    }
+
     /// Parses one cached Question and, when it contains donor media routes,
     /// returns the matching encrypted continuation for a Core
     /// `QuestionSession` in the same cache-consumption step.
@@ -277,6 +309,53 @@ impl QuestionParseCapability for UaiQuestionRead {
     ) -> ProviderResult<Question> {
         self.parse_question_with_artifact(context, task_id, remote_task_id, question)
             .map(UaiQuestionParseResult::into_question)
+    }
+
+    async fn parse_question_set(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        references: &[RemoteQuestionRef],
+    ) -> ProviderResult<ProviderQuestionParseSet> {
+        validate_context(context, &self.metadata)?;
+        GroupIdentity::parse(remote_task_id)?;
+        if references.is_empty()
+            || references.iter().any(|reference| {
+                reference.validate().is_err()
+                    || reference.route_context.get("content_kind") != Some("encrypted_v3")
+            })
+        {
+            return Err(invalid_response(
+                "UAI Question reference set is empty or invalid",
+            ));
+        }
+        let parsed = self.consume_parsed_question_set(context, remote_task_id, references)?;
+        let questions = parsed
+            .iter()
+            .map(|question| question.to_question(task_id))
+            .collect::<ProviderResult<Vec<_>>>()?;
+        let artifact =
+            UaiQuestionArtifactSet::from_parsed_questions(&parsed, &questions, remote_task_id)?
+                .map(|artifact| {
+                    let encoded = artifact.encode()?;
+                    let expected_digest = encoded.digest();
+                    let continuation = ProviderQuestionReadContinuation::try_new(
+                        &self.metadata.id,
+                        UAI_QUESTION_SET_ARTIFACT_TYPE,
+                        UAI_QUESTION_SET_ARTIFACT_PHASE,
+                        encoded.into_secret_value(),
+                        UAI_QUESTION_SET_ARTIFACT_TTL_SECONDS,
+                    )?;
+                    if continuation.continuation_digest() != expected_digest {
+                        return Err(internal(
+                            "UAI Question artifact digest changed at the Core boundary",
+                        ));
+                    }
+                    Ok(continuation)
+                })
+                .transpose()?;
+        ProviderQuestionParseSet::try_new(questions, artifact)
     }
 }
 
@@ -2218,6 +2297,93 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_parse_set_aggregates_media_into_one_core_continuation() {
+        let reader = UaiQuestionRead::try_new(
+            Arc::new(FixtureDetail {
+                metadata: development_metadata().unwrap(),
+            }),
+            Arc::new(FixtureTransport::default()),
+        )
+        .unwrap();
+        let context = provider_context("media-question-set");
+        let remote_task_id = "group:2001:unit-1:group-media";
+        let parsed = parse_question_entry(
+            &json!({
+                "id": "9001",
+                "content": {
+                    "type": "short_answer",
+                    "direction": {"text": "Summarize the recording"},
+                    "contents": [{
+                        "name": "Listening.mp3",
+                        "path": "https://media.example.edu/listening.mp3"
+                    }],
+                    "children": [{
+                        "type": "basic",
+                        "replyType": "text-area",
+                        "quesText": "What happened?"
+                    }]
+                }
+            }),
+            1,
+            "short_answer",
+            remote_task_id,
+        )
+        .unwrap();
+        let references = reader
+            .store_attempt(
+                QuestionAttemptKey::new(&context, remote_task_id),
+                vec![parsed],
+            )
+            .unwrap();
+        let parsed = reader
+            .parse_question_set(&context, TaskId::new(), remote_task_id, &references)
+            .await
+            .unwrap();
+        let (questions, artifact) = parsed.into_parts();
+        let artifact = artifact.unwrap();
+        assert_eq!(artifact.continuation_type(), UAI_QUESTION_SET_ARTIFACT_TYPE);
+        assert_eq!(artifact.phase(), UAI_QUESTION_SET_ARTIFACT_PHASE);
+        let (artifact_type, digest, phase, value, ttl) = artifact.into_parts();
+        assert_eq!(artifact_type, UAI_QUESTION_SET_ARTIFACT_TYPE);
+        assert_eq!(phase, UAI_QUESTION_SET_ARTIFACT_PHASE);
+        assert_eq!(ttl, UAI_QUESTION_SET_ARTIFACT_TTL_SECONDS);
+        let decoded =
+            UaiQuestionArtifactSet::decode_bound(&value, digest, remote_task_id, &questions)
+                .unwrap();
+        assert_eq!(decoded.question_count(), 1);
+        assert_eq!(decoded.media_sources_for_question("9001").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_parse_set_keeps_artifact_free_questions_on_the_legacy_path() {
+        let reader = UaiQuestionRead::try_new(
+            Arc::new(FixtureDetail {
+                metadata: development_metadata().unwrap(),
+            }),
+            Arc::new(FixtureTransport::default()),
+        )
+        .unwrap();
+        let context = provider_context("plain-question-set");
+        let remote_task_id = "group:2001:unit-1:group-1";
+        let references = reader
+            .list_question_refs(&context, remote_task_id)
+            .await
+            .unwrap();
+        let parsed = reader
+            .parse_question_set(&context, TaskId::new(), remote_task_id, &references)
+            .await
+            .unwrap();
+        assert_eq!(parsed.questions().len(), 1);
+        assert!(parsed.artifact().is_none());
+        assert!(
+            reader
+                .parse_question_set(&context, TaskId::new(), remote_task_id, &references)
+                .await
+                .is_err()
         );
     }
 
