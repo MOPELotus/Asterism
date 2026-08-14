@@ -1228,6 +1228,7 @@ mod tests {
             runtime_settings: crate::runtime_settings::runtime_settings_schema()
                 .resolve(None, None, None)
                 .unwrap(),
+            provider_plan_artifact: None,
         }
     }
 
@@ -1249,6 +1250,7 @@ mod tests {
             capability_plan: vec![TaskCapability::ResourceExecution],
             capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 
