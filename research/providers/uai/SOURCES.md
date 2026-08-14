@@ -107,6 +107,12 @@ fractional total/Micro/Tab/Task division and final-leaf `Math.round`. These
 unchanged behaviors are now frozen in the Provider-local Course residence
 batch fixture and plan; no new upstream revision or tag appeared.
 
+All four remote default branches and complete tag refs were queried again at
+the terminal residence/fresh-duration-readback checkpoint on 2026-08-14.
+Apache `bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and
+current Rust `40ead69c7dabf` remained current, with no new tag or capability
+delta requiring an incremental port.
+
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
 `https://ucontent.unipus.cn/_explorationpc_default/pc.html` as the browser

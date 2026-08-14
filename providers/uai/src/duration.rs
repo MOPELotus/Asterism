@@ -11,6 +11,8 @@ use serde_json::{Map, Value};
 use zeroize::Zeroize;
 
 use crate::{
+    UaiBrowserDurationReadback, UaiBrowserResidenceCheckpoint, UaiBrowserResidencePlan,
+    UaiCourseResidenceBatchPlan,
     course_inventory::{protocol_drift, required_remote_component},
     metadata::development_metadata,
 };
@@ -154,6 +156,35 @@ impl UaiTaskDuration {
             .fetch_duration(context, &identity.course_resource, &identity.unit)
             .await?;
         parse_task_study_record(document.as_str(), &identity.unit, &identity.group)
+    }
+
+    /// Reads and binds the independent fresh Task study record required after
+    /// one terminal `BrowserBridge` residence observation.
+    ///
+    /// The returned owner preserves observed duration and richer donor facts;
+    /// it does not infer that any particular duration delta is success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a foreign checkpoint/plan/Task or a read
+    /// observed before the completed residence exchange.
+    pub async fn read_browser_residence_readback(
+        &self,
+        context: &ProviderContext,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        checkpoint: &UaiBrowserResidenceCheckpoint,
+    ) -> ProviderResult<UaiBrowserDurationReadback> {
+        if checkpoint.remote_task_id() != plan.target_remote_task_id {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI duration readback Task is foreign to its BrowserBridge plan",
+            ));
+        }
+        let record = self
+            .read_study_record(context, checkpoint.remote_task_id())
+            .await?;
+        checkpoint.bind_fresh_duration_readback(batch, plan, record)
     }
 }
 

@@ -468,6 +468,23 @@ next command and cannot be encoded as a resumable cursor; it still explicitly
 requires fresh DurationRead and does not authorize cross-leaf scheduling or
 Core acceptance.
 
+The independent Provider Duration boundary can now consume that checkpoint
+directly. It re-reads the checkpoint's exact CourseResource/Unit/Group route,
+requires the checkpoint's Course-batch and Browser-plan digests plus current
+Micro membership to remain unchanged, and accepts only a study record observed
+at or after the completed residence exchange. The resulting Provider-local
+readback owner retains the exact residence-result digest, Task, completion
+time, observed duration and richer study-record facts. It deliberately does
+not infer a required duration delta, remote completion or authority for the
+next browser leaf; those remain Core policy/orchestration decisions.
+
+Pause/resume/restart cannot safely enter the accumulated cursor yet. Core must
+first define how a control exchange owns or cancels an already issued active
+`ResidenceTarget`, how its sequence advances, which terminal state the old
+exchange receives and which owner survives recovery. The Provider will not
+invent concurrent exchange or replay semantics around that missing runtime
+contract.
+
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.
 

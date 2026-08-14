@@ -2646,11 +2646,49 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::{UaiDurationDocument, UaiDurationTransport, UaiTaskDuration};
 
     #[derive(Debug)]
     struct FixtureDetail {
         metadata: ProviderMetadata,
         advertised: bool,
+    }
+
+    #[derive(Debug)]
+    struct FixtureDuration;
+
+    #[async_trait]
+    impl UaiDurationTransport for FixtureDuration {
+        async fn fetch_duration(
+            &self,
+            _context: &ProviderContext,
+            course_resource_id: &str,
+            unit_id: &str,
+        ) -> ProviderResult<UaiDurationDocument> {
+            assert_eq!(course_resource_id, "2001");
+            assert_eq!(unit_id, "unit-z");
+            UaiDurationDocument::try_new(
+                serde_json::json!({
+                    "code": 1,
+                    "success": true,
+                    "value": {
+                        "list": [{
+                            "nodeId": "unit-z",
+                            "role": "unit",
+                            "children": [{
+                                "nodeId": "group-z",
+                                "role": "link",
+                                "finishProgress": 50,
+                                "duration": 700,
+                                "required": true,
+                                "scoreTaskFlag": false
+                            }]
+                        }]
+                    }
+                })
+                .to_string(),
+            )
+        }
     }
 
     impl ProviderIdentity for FixtureDetail {
@@ -4433,7 +4471,8 @@ mod tests {
             UaiBrowserCommand::ResidenceTarget { task_handle, .. } => task_handle.clone(),
             other => panic!("expected residence target, got {other:?}"),
         };
-        let issued_at = chrono::Utc::now();
+        let completed_at = chrono::Utc::now();
+        let issued_at = completed_at - chrono::Duration::seconds(100);
         let issued = bridge
             .issue_cursor_exchange(
                 &context,
@@ -4477,7 +4516,7 @@ mod tests {
                 issued.command_issuance(),
                 document,
                 UCONTENT_ORIGIN,
-                issued_at + chrono::Duration::seconds(100),
+                completed_at,
             )
             .await
             .unwrap();
@@ -4486,12 +4525,24 @@ mod tests {
             .unwrap();
         assert_eq!(checkpoint.completed_command_sequence(), 7);
         assert_eq!(checkpoint.result_digest(), result_digest);
+        assert_eq!(checkpoint.remote_task_id(), "group:2001:unit-z:group-z");
+        assert_eq!(checkpoint.completed_at(), completed_at);
         assert_eq!(checkpoint.remaining_active_seconds(), 1_100);
         assert_eq!(checkpoint.observed_video_seconds(), 0);
         assert_eq!(checkpoint.processed_micros(), 1);
         assert_eq!(checkpoint.processed_tabs(), 1);
         assert_eq!(checkpoint.processed_tasks(), 1);
         assert!(checkpoint.requires_fresh_duration_read());
+
+        assert_fresh_duration_readback(
+            &context,
+            &batch,
+            &plan,
+            &checkpoint,
+            result_digest,
+            completed_at,
+        )
+        .await;
 
         completed.result.observed_active_seconds = 99;
         assert_eq!(
@@ -4500,6 +4551,47 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::ProtocolDrift
+        );
+    }
+
+    async fn assert_fresh_duration_readback(
+        context: &ProviderContext,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        checkpoint: &crate::UaiBrowserResidenceCheckpoint,
+        result_digest: [u8; 32],
+        completed_at: Timestamp,
+    ) {
+        let readback = UaiTaskDuration::try_new(Arc::new(FixtureDuration))
+            .unwrap()
+            .read_browser_residence_readback(context, batch, plan, checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(readback.batch_plan_digest(), batch.plan_digest());
+        assert_eq!(
+            readback.browser_plan_digest(),
+            checkpoint.browser_plan_digest()
+        );
+        assert_eq!(readback.residence_result_digest(), result_digest);
+        assert_eq!(readback.remote_task_id(), checkpoint.remote_task_id());
+        assert_eq!(readback.residence_completed_at(), completed_at);
+        assert!(readback.study_record().observed_at() >= completed_at);
+        assert_eq!(readback.study_record().duration_seconds(), 700);
+        assert_eq!(
+            readback.study_record().finish_progress_percent(),
+            Some(50.0)
+        );
+
+        let mut foreign_plan = plan.clone();
+        foreign_plan.target_remote_task_id = "group:2001:unit-1:group-1".to_owned();
+        assert_eq!(
+            UaiTaskDuration::try_new(Arc::new(FixtureDuration))
+                .unwrap()
+                .read_browser_residence_readback(context, batch, &foreign_plan, checkpoint)
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
         );
     }
 

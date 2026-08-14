@@ -1,12 +1,13 @@
 use std::fmt;
 
-use asterism_domain::BrowserBridgeExchangeState;
+use asterism_domain::{BrowserBridgeExchangeState, Timestamp};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::duration::UaiTaskStudyRecord;
 use crate::{
     UaiBrowserCommand, UaiBrowserCommandEnvelope, UaiBrowserEvent, UaiBrowserEventEnvelope,
     UaiBrowserEventExchangeCompleted, UaiBrowserPageEntry, UaiBrowserPageScope,
@@ -80,6 +81,8 @@ pub struct UaiBrowserResidenceCheckpoint {
     completed_command_sequence: u32,
     completed_command_digest: [u8; 32],
     result_digest: [u8; 32],
+    remote_task_id: String,
+    completed_at: Timestamp,
     remaining_active_seconds: u64,
     observed_video_seconds: u64,
     processed_micros: u32,
@@ -88,12 +91,32 @@ pub struct UaiBrowserResidenceCheckpoint {
 }
 
 impl UaiBrowserResidenceCheckpoint {
+    pub const fn batch_plan_digest(&self) -> [u8; 32] {
+        self.batch_plan_digest
+    }
+
+    pub const fn browser_plan_digest(&self) -> [u8; 32] {
+        self.browser_plan_digest
+    }
+
     pub const fn completed_command_sequence(&self) -> u32 {
         self.completed_command_sequence
     }
 
+    pub const fn completed_command_digest(&self) -> [u8; 32] {
+        self.completed_command_digest
+    }
+
     pub const fn result_digest(&self) -> [u8; 32] {
         self.result_digest
+    }
+
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub const fn completed_at(&self) -> Timestamp {
+        self.completed_at
     }
 
     pub const fn remaining_active_seconds(&self) -> u64 {
@@ -118,6 +141,100 @@ impl UaiBrowserResidenceCheckpoint {
 
     pub const fn requires_fresh_duration_read(&self) -> bool {
         true
+    }
+
+    pub(crate) fn bind_fresh_duration_readback(
+        &self,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        study_record: UaiTaskStudyRecord,
+    ) -> ProviderResult<UaiBrowserDurationReadback> {
+        batch.validate()?;
+        plan.validate()?;
+        let browser_plan_digest = browser_plan_digest(plan)?;
+        let mut matching_micros = batch
+            .micros()
+            .iter()
+            .filter(|micro| micro.identity_digest() == self.current_micro_identity_digest);
+        let micro = matching_micros.next().ok_or_else(stale_cursor)?;
+        if matching_micros.next().is_some()
+            || self.batch_plan_digest != batch.plan_digest()
+            || self.browser_plan_digest != browser_plan_digest
+            || self.remote_task_id != plan.target_remote_task_id
+            || micro.unit_id() != study_record.unit_id()
+            || !micro
+                .tasks()
+                .iter()
+                .any(|task| task.remote_task_id() == self.remote_task_id)
+        {
+            return Err(stale_cursor());
+        }
+        let course_resource_id = batch
+            .course_remote_id()
+            .strip_prefix("course-resource:")
+            .ok_or_else(stale_cursor)?;
+        let expected_remote_task_id = format!(
+            "group:{course_resource_id}:{}:{}",
+            study_record.unit_id(),
+            study_record.group_id()
+        );
+        if expected_remote_task_id != self.remote_task_id
+            || study_record.observed_at() < self.completed_at
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI duration readback is stale or foreign to its residence checkpoint",
+            ));
+        }
+        Ok(UaiBrowserDurationReadback {
+            batch_plan_digest: self.batch_plan_digest,
+            browser_plan_digest: self.browser_plan_digest,
+            residence_result_digest: self.result_digest,
+            remote_task_id: self.remote_task_id.clone(),
+            residence_completed_at: self.completed_at,
+            study_record,
+        })
+    }
+}
+
+/// Exact fresh Task study record bound to one terminal browser observation.
+///
+/// This owner preserves the independent readback fact for Core policy. It
+/// does not infer a required duration delta, completion or permission to
+/// schedule another browser leaf.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UaiBrowserDurationReadback {
+    batch_plan_digest: [u8; 32],
+    browser_plan_digest: [u8; 32],
+    residence_result_digest: [u8; 32],
+    remote_task_id: String,
+    residence_completed_at: Timestamp,
+    study_record: UaiTaskStudyRecord,
+}
+
+impl UaiBrowserDurationReadback {
+    pub const fn batch_plan_digest(&self) -> [u8; 32] {
+        self.batch_plan_digest
+    }
+
+    pub const fn browser_plan_digest(&self) -> [u8; 32] {
+        self.browser_plan_digest
+    }
+
+    pub const fn residence_result_digest(&self) -> [u8; 32] {
+        self.residence_result_digest
+    }
+
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub const fn residence_completed_at(&self) -> Timestamp {
+        self.residence_completed_at
+    }
+
+    pub const fn study_record(&self) -> &UaiTaskStudyRecord {
+        &self.study_record
     }
 }
 
@@ -774,6 +891,8 @@ impl UaiBrowserResidenceCursor {
             completed_command_sequence: command.sequence,
             completed_command_digest: self.next_command_digest,
             result_digest,
+            remote_task_id: plan.target_remote_task_id.clone(),
+            completed_at: completed.exchange().completed_at.ok_or_else(stale_cursor)?,
             remaining_active_seconds,
             observed_video_seconds,
             processed_micros,
