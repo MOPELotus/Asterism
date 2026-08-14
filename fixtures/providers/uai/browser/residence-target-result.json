@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "session_nonce": "{{session_nonce}}",
   "origin": "https://ucontent.unipus.cn",
   "frame_id": "top-frame",

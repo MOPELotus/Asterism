@@ -96,6 +96,11 @@ The four remote default branches and complete tag refs were queried again at
 the persisted Browser exchange recovery checkpoint on 2026-08-14. Apache
 `bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and current Rust
 `40ead69c7dabf` remained current, with no new tag or protocol/capability delta.
+The unchanged AutoPlayer `cc6bdc86a13e` source was then re-read at the plan-v2
+executor audit boundary. It confirms that `UAI_CMD` is iframe-side only, while
+the top page owns direct Tab/Task/residence/video actions, and freezes the four
+ordered iframe selectors plus its 30-second observer and 20×1.5-second retry
+window. This is a clarified protocol boundary, not a new upstream revision.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends

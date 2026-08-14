@@ -292,22 +292,33 @@ frozen `5.2.14` donor supplies the following concrete action evidence:
   bounded labels plus an element handle, and exchange SCAN/CLICK/result events
   with the owning top-level page.
 
-The donor uses wildcard `postMessage` targets and does not validate sender
-origin. That is behavior evidence, not an acceptable Asterism security
-contract: Core must bind every message to the current browser session nonce,
-expected frame/window and the two exact allowed origins; arbitrary selectors,
-wildcard receivers and donor-generated script are not portable inputs. DOM
-polls, menu rows, action counts, residence budgets, video ceilings and popup
-retries must all be bounded and cancellation-aware.
+The donor's `ipub` iframe side alone receives wildcard `UAI_CMD`
+`SCAN`/`CLICK`/`PING`; the `ucontent` top page consumes its menu/click/PONG
+events and directly performs the main-page Menu/Tab/Task/residence/video DOM
+actions. The top page locates that child through four ordered selectors:
+`#ipublish-pc-book-easy-iframe`, `iframe.ipublish-pc-iframe-container`,
+`iframe[id*="iframe"]`, then generic `iframe`. Initial iframe scanning uses a
+MutationObserver bounded to 30 seconds plus at most 20 retries at 1.5-second
+intervals. The donor does not validate sender origin. That is behavior
+evidence, not an acceptable Asterism security contract: Core must bind every
+message to the current browser session nonce, expected frame/window and the
+two exact allowed origins. In particular, the generic final selector is
+accepted only if transport independently observes the selected frame at exact
+`ipub` origin. Arbitrary replacement selectors, wildcard receivers and
+donor-generated script are not portable inputs. DOM polls, menu rows, action
+counts, residence budgets, video ceilings and popup retries must all be
+bounded and cancellation-aware.
 
 The Provider issues a freshly Task-bound BrowserSessionSpec restricted to
 `ucontent.unipus.cn` and `ipub.unipus.cn` and independently re-reads the exact
-Group detail before creating a versioned private residence plan. The plan binds
+Group detail before creating a versioned private residence plan. Plan v2 binds
 the normalized Unit/Section/Micro/Task labels and freezes the four audited discovery families, exact current
-Tab/Task/popup/video selector sets, a 2048-Micro/64-Tab/128-Task ceiling,
-bounded popup retries, 3-second DOM polls, the 30-minute donor video ceiling,
+iframe/Tab/Task/popup/video selector sets, the exact iframe scan timing above,
+a 2048-Micro/64-Tab/128-Task ceiling, bounded popup retries, 3-second DOM polls, the 30-minute donor video ceiling,
 the master-resolved residence/video settings snapshot, and mandatory
-session-nonce/frame/exact-origin message binding. The Provider result parser
+session-nonce/frame/exact-origin message binding. Validation requires exact
+ordered selector equality and exact timing constants, so a modified serialized
+plan cannot widen the helper's DOM authority. The Provider result parser
 then requires the same plan version, session nonce, frame, allowed origin and
 Task; bounds observed residence/video time and Micro/Tab/Task counts; rejects
 video activity when disabled; and marks every valid observation as still

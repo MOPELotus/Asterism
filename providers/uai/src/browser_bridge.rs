@@ -36,6 +36,29 @@ const MAX_BROWSER_BINDING_BYTES: usize = 256;
 const MAX_BROWSER_MENU_LABEL_BYTES: usize = 512;
 const BROWSER_MENU_HANDLE_PREFIX: &str = "uai-menu-v1-";
 const BROWSER_PAGE_HANDLE_PREFIX: &str = "uai-page-v1-";
+const UAI_BROWSER_PLAN_VERSION: u32 = 2;
+const IFRAME_SCAN_TIMEOUT_MILLIS: u64 = 30_000;
+const IFRAME_SCAN_RETRY_MILLIS: u64 = 1_500;
+const MAX_IFRAME_SCAN_RETRIES: u32 = 20;
+const IFRAME_SELECTORS: [&str; 4] = [
+    "#ipublish-pc-book-easy-iframe",
+    "iframe.ipublish-pc-iframe-container",
+    "iframe[id*=\"iframe\"]",
+    "iframe",
+];
+const TAB_SELECTORS: [&str; 2] = [
+    ".pc-header-tabs-container .ant-col.tab .pc-tab-view-container",
+    "#header ul.TabsBox a.topTab",
+];
+const TASK_SELECTORS: [&str; 1] = [".pc-header-tasks-row .pc-task"];
+const POPUP_SELECTORS: [&str; 5] = [
+    ".know-box .iKnow",
+    ".ant-modal-confirm-btns .ant-btn-primary.system-info-cloud-ok-button",
+    ".ant-modal-confirm-btns .ant-btn.ant-btn-primary",
+    ".ipublish-modal-footer-ok",
+    "button.ant-btn.ant-btn-default.ipublish-modal-footer-ok",
+];
+const VIDEO_SELECTORS: [&str; 2] = ["video.vjs-tech", "video"];
 
 /// Stable Core `BrowserBridge` exchange type for one typed UAI command.
 pub const UAI_BROWSER_COMMAND_TYPE: &str = "uai.browser.command";
@@ -273,6 +296,7 @@ pub struct UaiBrowserResidencePlan {
     pub target: UaiBrowserTarget,
     pub allowed_origins: Vec<String>,
     pub discovery_strategies: Vec<UaiMenuDiscoveryStrategy>,
+    pub iframe_selectors: Vec<String>,
     pub tab_selectors: Vec<String>,
     pub task_selectors: Vec<String>,
     pub popup_selectors: Vec<String>,
@@ -284,6 +308,9 @@ pub struct UaiBrowserResidencePlan {
     pub max_tasks_per_tab: u32,
     pub max_popup_clicks_per_stage: u32,
     pub dom_poll_millis: u64,
+    pub iframe_scan_timeout_millis: u64,
+    pub iframe_scan_retry_millis: u64,
+    pub max_iframe_scan_retries: u32,
     pub max_video_seconds: u64,
     pub message_security: UaiBrowserMessageSecurity,
 }
@@ -1807,7 +1834,7 @@ impl UaiBrowserResidencePlan {
     pub fn validate(&self) -> ProviderResult<()> {
         self.target.validate()?;
         validate_start_url(&self.start_url)?;
-        let valid = self.version == 1
+        let valid = self.version == UAI_BROWSER_PLAN_VERSION
             && self.target_remote_task_id.starts_with("group:")
             && self.allowed_origins == [UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()]
             && self.discovery_strategies
@@ -1817,16 +1844,20 @@ impl UaiBrowserResidencePlan {
                     UaiMenuDiscoveryStrategy::AriaMenu,
                     UaiMenuDiscoveryStrategy::U3Menu,
                 ]
-            && !self.tab_selectors.is_empty()
-            && !self.task_selectors.is_empty()
-            && !self.popup_selectors.is_empty()
-            && !self.video_selectors.is_empty()
+            && exact_selector_set(&self.iframe_selectors, &IFRAME_SELECTORS)
+            && exact_selector_set(&self.tab_selectors, &TAB_SELECTORS)
+            && exact_selector_set(&self.task_selectors, &TASK_SELECTORS)
+            && exact_selector_set(&self.popup_selectors, &POPUP_SELECTORS)
+            && exact_selector_set(&self.video_selectors, &VIDEO_SELECTORS)
             && (60..=28_800).contains(&self.residence_seconds)
             && self.max_discovered_micros == MAX_DISCOVERED_MICROS
             && self.max_tabs_per_micro == MAX_TABS_PER_MICRO
             && self.max_tasks_per_tab == MAX_TASKS_PER_TAB
             && self.max_popup_clicks_per_stage == MAX_POPUP_CLICKS_PER_STAGE
             && self.dom_poll_millis == MAX_DOM_POLL_MILLIS
+            && self.iframe_scan_timeout_millis == IFRAME_SCAN_TIMEOUT_MILLIS
+            && self.iframe_scan_retry_millis == IFRAME_SCAN_RETRY_MILLIS
+            && self.max_iframe_scan_retries == MAX_IFRAME_SCAN_RETRIES
             && self.max_video_seconds == MAX_VIDEO_SECONDS
             && self.message_security == UaiBrowserMessageSecurity::SessionNonceFrameAndExactOrigin;
         if valid {
@@ -1921,6 +1952,17 @@ impl UaiBrowserResidencePlan {
             )
         })
     }
+}
+
+fn exact_selector_set(actual: &[String], expected: &[&str]) -> bool {
+    actual
+        .iter()
+        .map(String::as_str)
+        .eq(expected.iter().copied())
+}
+
+fn owned_selectors(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
 }
 
 /// Builds the account-and-Task isolated browser boundary required by UAI's
@@ -2281,7 +2323,7 @@ fn residence_plan_from_detail(
         )
     })?;
     let plan = UaiBrowserResidencePlan {
-        version: 1,
+        version: UAI_BROWSER_PLAN_VERSION,
         target_remote_task_id: detail.task.remote_id.clone(),
         start_url: browser_start_url_from_detail(detail)?,
         target: UaiBrowserTarget::from_detail(detail)?,
@@ -2292,19 +2334,11 @@ fn residence_plan_from_detail(
             UaiMenuDiscoveryStrategy::AriaMenu,
             UaiMenuDiscoveryStrategy::U3Menu,
         ],
-        tab_selectors: vec![
-            ".pc-header-tabs-container .ant-col.tab .pc-tab-view-container".to_owned(),
-            "#header ul.TabsBox a.topTab".to_owned(),
-        ],
-        task_selectors: vec![".pc-header-tasks-row .pc-task".to_owned()],
-        popup_selectors: vec![
-            ".know-box .iKnow".to_owned(),
-            ".ant-modal-confirm-btns .ant-btn-primary.system-info-cloud-ok-button".to_owned(),
-            ".ant-modal-confirm-btns .ant-btn.ant-btn-primary".to_owned(),
-            ".ipublish-modal-footer-ok".to_owned(),
-            "button.ant-btn.ant-btn-default.ipublish-modal-footer-ok".to_owned(),
-        ],
-        video_selectors: vec!["video.vjs-tech".to_owned(), "video".to_owned()],
+        iframe_selectors: owned_selectors(&IFRAME_SELECTORS),
+        tab_selectors: owned_selectors(&TAB_SELECTORS),
+        task_selectors: owned_selectors(&TASK_SELECTORS),
+        popup_selectors: owned_selectors(&POPUP_SELECTORS),
+        video_selectors: owned_selectors(&VIDEO_SELECTORS),
         residence_seconds,
         play_video,
         max_discovered_micros: MAX_DISCOVERED_MICROS,
@@ -2312,6 +2346,9 @@ fn residence_plan_from_detail(
         max_tasks_per_tab: MAX_TASKS_PER_TAB,
         max_popup_clicks_per_stage: MAX_POPUP_CLICKS_PER_STAGE,
         dom_poll_millis: MAX_DOM_POLL_MILLIS,
+        iframe_scan_timeout_millis: IFRAME_SCAN_TIMEOUT_MILLIS,
+        iframe_scan_retry_millis: IFRAME_SCAN_RETRY_MILLIS,
+        max_iframe_scan_retries: MAX_IFRAME_SCAN_RETRIES,
         max_video_seconds: MAX_VIDEO_SECONDS,
         message_security: UaiBrowserMessageSecurity::SessionNonceFrameAndExactOrigin,
     };
@@ -2558,8 +2595,13 @@ mod tests {
         );
         assert!(!plan.start_url.contains("openid"));
         assert!(!plan.start_url.contains("token"));
+        assert_eq!(plan.version, UAI_BROWSER_PLAN_VERSION);
         assert_eq!(plan.discovery_strategies.len(), 4);
+        assert_eq!(plan.iframe_selectors.len(), 4);
         assert_eq!(plan.tab_selectors.len(), 2);
+        assert_eq!(plan.iframe_scan_timeout_millis, 30_000);
+        assert_eq!(plan.iframe_scan_retry_millis, 1_500);
+        assert_eq!(plan.max_iframe_scan_retries, 20);
         assert_eq!(plan.max_video_seconds, 1_800);
         assert_eq!(plan.target.unit, "Unit 1");
         assert_eq!(plan.target.section.as_deref(), Some("Section 2"));
@@ -2574,6 +2616,44 @@ mod tests {
         let mut unsafe_plan = plan;
         unsafe_plan.allowed_origins.pop();
         assert!(unsafe_plan.validate().is_err());
+    }
+
+    #[test]
+    fn residence_plan_rejects_selector_or_iframe_scan_drift() {
+        let plan = residence_plan(false);
+        assert!(exact_selector_set(
+            &plan.iframe_selectors,
+            &IFRAME_SELECTORS
+        ));
+        assert!(exact_selector_set(&plan.tab_selectors, &TAB_SELECTORS));
+        assert!(exact_selector_set(&plan.task_selectors, &TASK_SELECTORS));
+        assert!(exact_selector_set(&plan.popup_selectors, &POPUP_SELECTORS));
+        assert!(exact_selector_set(&plan.video_selectors, &VIDEO_SELECTORS));
+
+        let mut changed = plan.clone();
+        changed.iframe_selectors[3] = "iframe[data-arbitrary]".to_owned();
+        assert!(changed.validate().is_err());
+        let mut changed = plan.clone();
+        changed.tab_selectors.swap(0, 1);
+        assert!(changed.validate().is_err());
+        let mut changed = plan.clone();
+        changed.task_selectors.push(".foreign-task".to_owned());
+        assert!(changed.validate().is_err());
+        let mut changed = plan.clone();
+        changed.popup_selectors.pop();
+        assert!(changed.validate().is_err());
+        let mut changed = plan.clone();
+        changed.video_selectors[0] = "video[data-foreign]".to_owned();
+        assert!(changed.validate().is_err());
+        let mut changed = plan.clone();
+        changed.iframe_scan_timeout_millis += 1;
+        assert!(changed.validate().is_err());
+        let mut changed = plan.clone();
+        changed.iframe_scan_retry_millis -= 1;
+        assert!(changed.validate().is_err());
+        let mut changed = plan;
+        changed.max_iframe_scan_retries += 1;
+        assert!(changed.validate().is_err());
     }
 
     #[test]
@@ -2616,7 +2696,7 @@ mod tests {
         let command =
             UaiBrowserCommandEnvelope::residence_target(&plan, &binding, 9, &target).unwrap();
         let document = serde_json::json!({
-            "version": 1,
+            "version": UAI_BROWSER_PLAN_VERSION,
             "session_nonce": "nonce-42",
             "origin": UCONTENT_ORIGIN,
             "frame_id": "top-frame",
@@ -2697,7 +2777,7 @@ mod tests {
         assert!(!entry.handle.contains('['));
 
         let menu_document = serde_json::json!({
-            "version": 1,
+            "version": UAI_BROWSER_PLAN_VERSION,
             "session_nonce": "nonce-42",
             "origin": UCONTENT_ORIGIN,
             "frame_id": "content-frame",
@@ -2725,7 +2805,7 @@ mod tests {
         let click = UaiBrowserCommandEnvelope::click_menu(&plan, &binding, 2, &target).unwrap();
         assert!(matches!(click.command, UaiBrowserCommand::ClickMenu { .. }));
         let rejected_event = serde_json::json!({
-            "version": 1,
+            "version": UAI_BROWSER_PLAN_VERSION,
             "session_nonce": "nonce-42",
             "origin": UCONTENT_ORIGIN,
             "frame_id": "content-frame",
@@ -2752,7 +2832,7 @@ mod tests {
                 .unwrap();
         let ping = UaiBrowserCommandEnvelope::ping(&plan, &binding, 7).unwrap();
         let pong_document = serde_json::json!({
-            "version": 1,
+            "version": UAI_BROWSER_PLAN_VERSION,
             "session_nonce": "nonce-42",
             "origin": IPUB_ORIGIN,
             "frame_id": "ipub-frame",
@@ -3231,7 +3311,7 @@ mod tests {
             UaiBrowserCommandEnvelope::scan_page(&plan, &binding, 3, UaiBrowserPageScope::Tab)
                 .unwrap();
         let tab_document = serde_json::json!({
-            "version": 1,
+            "version": UAI_BROWSER_PLAN_VERSION,
             "session_nonce": "nonce-42",
             "origin": UCONTENT_ORIGIN,
             "frame_id": "frame-1",
