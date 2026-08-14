@@ -132,8 +132,10 @@ checkpoint, not a Provider completion boundary. It:
     master-resolved settings and nonce/frame/origin security. A consuming
     helper projection now validates Core secret bytes/digest plus actual
     session/origin/frame/sequence and exposes only seven typed audited actions
-    with a read-only compile-time DOM profile; shared action dispatch remains
-    the executor gap;
+    with a read-only compile-time DOM profile. The same projection accepts only
+    action-matched bounded typed observations, reconstructs every binding and
+    opaque handle itself and emits the existing zeroizing event/residence
+    schema for Core; shared action dispatch remains the executor gap;
 21. makes no live compatibility claim until real-account validation, while
     continuing BrowserBridge DurationReport, shared discussion integration,
     upload and external AnswerResolve integration rather than treating this

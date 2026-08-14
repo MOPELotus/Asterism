@@ -432,6 +432,28 @@ handler until Core defines active-control cancellation/recovery ownership. This
 boundary decodes and projects only; it performs no DOM operation and accepts
 no helper echo as authority.
 
+The inverse helper boundary also remains typed. The validated projection keeps
+its session/origin/frame/Task/sequence internally but redacts all five from
+Debug. Callers can submit only bounded `MenuScanned`, `PageScanned`,
+`ClickAcknowledged`, `Residence` or `Pong` observations. Menu/Page inputs carry
+ordered ordinals and rendered labels only; they cannot supply handles. UAI
+reconstructs each opaque handle from the retained binding, rejects missing or
+reordered ordinals and applies the 2048-Micro/64-Tab/128-Task and 512-byte label
+bounds. Click/Ping observations carry no echoed binding. Residence accepts only
+bounded actual active/video/count/cancel/last-label facts and must remain under
+the projected action budget and video policy. Only the matching command action
+can encode each observation.
+
+Successful encoding uses the existing exact `UaiBrowserEventEnvelope` or
+`UaiBrowserResidenceResult`, returns `uai.browser.event` or
+`uai.browser.residence.result`, and moves canonical JSON into a zeroizing
+`SecretValue` with its SHA-256 digest. Existing Provider parsers validate those
+documents unchanged against the original fresh plan/command. The event owner
+is bounded to 8 MiB so the already-audited 2048 rows with maximum rendered
+labels remain representable; residence stays at 64 KiB. Raw JSON,
+selector/script fields and caller-supplied bindings are not encoder inputs, and
+the boundary performs no DOM operation.
+
 Core's durable exchange ledger now receives only the stable message types
 `uai.browser.command`, `uai.browser.event` and
 `uai.browser.residence.result`, plus SHA-256 digests of the validated typed

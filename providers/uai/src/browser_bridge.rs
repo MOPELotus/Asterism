@@ -32,7 +32,7 @@ const MAX_DOM_POLL_MILLIS: u64 = 3_000;
 const MAX_VIDEO_SECONDS: u64 = 30 * 60;
 const MAX_BROWSER_RESULT_BYTES: usize = 64 * 1_024;
 const MAX_BROWSER_RESULT_LABEL_BYTES: usize = 512;
-const MAX_BROWSER_MESSAGE_BYTES: usize = 1_024 * 1_024;
+const MAX_BROWSER_MESSAGE_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_BROWSER_COMMAND_BYTES: usize = 64 * 1_024;
 const MAX_BROWSER_BINDING_BYTES: usize = 256;
 const MAX_HELPER_REMOTE_TASK_ID_BYTES: usize = 512;
@@ -1463,6 +1463,118 @@ impl UaiBrowserHelperCommandProjection {
     pub const fn dom_profile(&self) -> UaiBrowserHelperDomProfile {
         UaiBrowserHelperDomProfile
     }
+
+    /// Encodes one action-matched typed helper observation into the existing
+    /// UAI event/residence schema.
+    ///
+    /// Callers cannot supply raw JSON or repeat session/origin/frame/Task/
+    /// sequence bindings. This function only constructs a bounded zeroizing
+    /// result document and performs no DOM operation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an observation from another action, missing/reordered/oversized
+    /// rows, or residence facts outside the projected action's budget/video
+    /// policy.
+    pub fn encode_observation(
+        &self,
+        observation: UaiBrowserHelperObservation,
+    ) -> ProviderResult<EncodedUaiBrowserHelperResult> {
+        let nonce = self.session_id.to_string();
+        match (&self.action, observation) {
+            (UaiBrowserHelperAction::ScanMenu, UaiBrowserHelperObservation::MenuScanned(rows)) => {
+                let entries = helper_menu_entries(self, &nonce, rows)?;
+                self.encode_event(&nonce, UaiBrowserEvent::MenuList { entries })
+            }
+            (
+                UaiBrowserHelperAction::ScanPage { scope },
+                UaiBrowserHelperObservation::PageScanned(rows),
+            ) => {
+                let entries = helper_page_entries(self, &nonce, *scope, rows)?;
+                self.encode_event(
+                    &nonce,
+                    UaiBrowserEvent::PageList {
+                        scope: *scope,
+                        entries,
+                    },
+                )
+            }
+            (
+                UaiBrowserHelperAction::ClickMenu { handle }
+                | UaiBrowserHelperAction::ClickTab { handle }
+                | UaiBrowserHelperAction::ClickTask { handle },
+                UaiBrowserHelperObservation::ClickAcknowledged,
+            ) => self.encode_event(
+                &nonce,
+                UaiBrowserEvent::ClickResult {
+                    handle: handle.clone(),
+                    clicked: true,
+                },
+            ),
+            (UaiBrowserHelperAction::Ping, UaiBrowserHelperObservation::Pong) => {
+                self.encode_event(&nonce, UaiBrowserEvent::Pong)
+            }
+            (
+                UaiBrowserHelperAction::Residence {
+                    task_handle,
+                    seconds,
+                    play_video,
+                },
+                UaiBrowserHelperObservation::Residence(observation),
+            ) => {
+                if observation.observed_active_seconds > *seconds
+                    || (!play_video && observation.video_seconds != 0)
+                {
+                    return Err(invalid_helper_result(
+                        "UAI helper Residence observation exceeds its projected action",
+                    ));
+                }
+                let result = UaiBrowserResidenceResult {
+                    version: UAI_BROWSER_PLAN_VERSION,
+                    session_nonce: nonce,
+                    origin: self.origin.clone(),
+                    frame_id: self.frame_id.clone(),
+                    remote_task_id: self.remote_task_id.clone(),
+                    reply_to_sequence: self.sequence,
+                    target_task_handle: task_handle.clone(),
+                    planned_residence_seconds: *seconds,
+                    observed_active_seconds: observation.observed_active_seconds,
+                    processed_micros: observation.processed_micros,
+                    processed_tabs: observation.processed_tabs,
+                    processed_tasks: observation.processed_tasks,
+                    video_seconds: observation.video_seconds,
+                    cancelled: observation.cancelled,
+                    last_label: observation.last_label,
+                };
+                encode_helper_result(
+                    UAI_BROWSER_RESIDENCE_RESULT_TYPE,
+                    MAX_BROWSER_RESULT_BYTES,
+                    &result,
+                )
+            }
+            _ => Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI helper observation does not match its projected action",
+            )),
+        }
+    }
+
+    fn encode_event(
+        &self,
+        nonce: &str,
+        event: UaiBrowserEvent,
+    ) -> ProviderResult<EncodedUaiBrowserHelperResult> {
+        let envelope = UaiBrowserEventEnvelope {
+            version: UAI_BROWSER_PLAN_VERSION,
+            session_nonce: nonce.to_owned(),
+            origin: self.origin.clone(),
+            frame_id: self.frame_id.clone(),
+            remote_task_id: self.remote_task_id.clone(),
+            reply_to_sequence: self.sequence,
+            event,
+        };
+        encode_helper_result(UAI_BROWSER_EVENT_TYPE, MAX_BROWSER_MESSAGE_BYTES, &envelope)
+    }
 }
 
 /// Authenticates and projects one Core-dispatched opaque UAI DOM command.
@@ -1497,12 +1609,236 @@ impl fmt::Debug for UaiBrowserHelperCommandProjection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UaiBrowserHelperCommandProjection")
-            .field("session_id", &self.session_id)
-            .field("origin", &self.origin)
+            .field("session_id", &"[REDACTED]")
+            .field("origin", &"[REDACTED]")
             .field("frame_id", &"[REDACTED]")
             .field("remote_task_id", &"[REDACTED]")
-            .field("sequence", &self.sequence)
+            .field("sequence", &"[REDACTED]")
             .field("action", &self.action)
+            .finish()
+    }
+}
+
+/// One bounded ordered Menu row observed by the helper.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiBrowserHelperMenuObservation {
+    ordinal: u32,
+    unit: String,
+    section: String,
+    micro: String,
+}
+
+impl UaiBrowserHelperMenuObservation {
+    /// # Errors
+    ///
+    /// Rejects an out-of-range ordinal or unsafe rendered labels.
+    pub fn try_new(
+        ordinal: u32,
+        unit: String,
+        section: String,
+        micro: String,
+    ) -> ProviderResult<Self> {
+        if ordinal >= MAX_DISCOVERED_MICROS
+            || !is_browser_label(&unit, true)
+            || !is_browser_label(&section, true)
+            || !is_browser_label(&micro, false)
+        {
+            return Err(invalid_helper_result(
+                "UAI helper Menu observation is invalid or unbounded",
+            ));
+        }
+        Ok(Self {
+            ordinal,
+            unit,
+            section,
+            micro,
+        })
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperMenuObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperMenuObservation")
+            .field("ordinal", &self.ordinal)
+            .field("unit", &"[REDACTED]")
+            .field("section", &"[REDACTED]")
+            .field("micro", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// One bounded ordered Tab or Task label observed by the helper.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiBrowserHelperPageObservation {
+    ordinal: u32,
+    label: String,
+    active: bool,
+}
+
+impl UaiBrowserHelperPageObservation {
+    /// # Errors
+    ///
+    /// Rejects an ordinal beyond the largest page scope or an unsafe label.
+    pub fn try_new(ordinal: u32, label: String, active: bool) -> ProviderResult<Self> {
+        if ordinal >= MAX_TASKS_PER_TAB || !is_browser_label(&label, false) {
+            return Err(invalid_helper_result(
+                "UAI helper page observation is invalid or unbounded",
+            ));
+        }
+        Ok(Self {
+            ordinal,
+            label,
+            active,
+        })
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperPageObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperPageObservation")
+            .field("ordinal", &self.ordinal)
+            .field("label", &"[REDACTED]")
+            .field("active", &self.active)
+            .finish()
+    }
+}
+
+/// Bounded terminal facts observed during one Residence action.
+#[derive(Clone, Eq, PartialEq)]
+pub struct UaiBrowserHelperResidenceObservation {
+    observed_active_seconds: u64,
+    processed_micros: u32,
+    processed_tabs: u32,
+    processed_tasks: u32,
+    video_seconds: u64,
+    cancelled: bool,
+    last_label: Option<String>,
+}
+
+impl UaiBrowserHelperResidenceObservation {
+    /// # Errors
+    ///
+    /// Rejects absolute timing/cardinality or rendered-label overflow. The
+    /// action-specific budget and video policy are checked during encoding.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each observed residence counter is an independent bounded fact"
+    )]
+    pub fn try_new(
+        observed_active_seconds: u64,
+        processed_micros: u32,
+        processed_tabs: u32,
+        processed_tasks: u32,
+        video_seconds: u64,
+        cancelled: bool,
+        last_label: Option<String>,
+    ) -> ProviderResult<Self> {
+        let max_tasks = processed_tabs
+            .max(processed_micros)
+            .checked_mul(MAX_TASKS_PER_TAB);
+        if observed_active_seconds > 28_800
+            || processed_micros > 1
+            || processed_tabs > MAX_TABS_PER_MICRO
+            || max_tasks.is_none_or(|maximum| processed_tasks > maximum)
+            || video_seconds > MAX_VIDEO_SECONDS
+            || last_label.as_ref().is_some_and(|label| {
+                label.is_empty()
+                    || label.len() > MAX_BROWSER_RESULT_LABEL_BYTES
+                    || label.chars().any(char::is_control)
+            })
+        {
+            return Err(invalid_helper_result(
+                "UAI helper Residence observation is invalid or unbounded",
+            ));
+        }
+        Ok(Self {
+            observed_active_seconds,
+            processed_micros,
+            processed_tabs,
+            processed_tasks,
+            video_seconds,
+            cancelled,
+            last_label,
+        })
+    }
+}
+
+impl fmt::Debug for UaiBrowserHelperResidenceObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserHelperResidenceObservation")
+            .field("observed_active_seconds", &self.observed_active_seconds)
+            .field("processed_micros", &self.processed_micros)
+            .field("processed_tabs", &self.processed_tabs)
+            .field("processed_tasks", &self.processed_tasks)
+            .field("video_seconds", &self.video_seconds)
+            .field("cancelled", &self.cancelled)
+            .field("last_label", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Closed typed observation set accepted by the UAI helper encoder.
+#[derive(Clone, Eq, PartialEq)]
+pub enum UaiBrowserHelperObservation {
+    MenuScanned(Vec<UaiBrowserHelperMenuObservation>),
+    PageScanned(Vec<UaiBrowserHelperPageObservation>),
+    ClickAcknowledged,
+    Residence(UaiBrowserHelperResidenceObservation),
+    Pong,
+}
+
+impl fmt::Debug for UaiBrowserHelperObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MenuScanned(entries) => formatter
+                .debug_tuple("MenuScanned")
+                .field(&entries.len())
+                .finish(),
+            Self::PageScanned(entries) => formatter
+                .debug_tuple("PageScanned")
+                .field(&entries.len())
+                .finish(),
+            Self::ClickAcknowledged => formatter.write_str("ClickAcknowledged"),
+            Self::Residence(observation) => formatter
+                .debug_tuple("Residence")
+                .field(observation)
+                .finish(),
+            Self::Pong => formatter.write_str("Pong"),
+        }
+    }
+}
+
+/// Exact bounded zeroizing result document emitted for Core transport.
+pub struct EncodedUaiBrowserHelperResult {
+    result_type: &'static str,
+    value: SecretValue,
+    digest: [u8; 32],
+}
+
+impl EncodedUaiBrowserHelperResult {
+    pub const fn result_type(&self) -> &'static str {
+        self.result_type
+    }
+
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub fn into_parts(self) -> (&'static str, SecretValue, [u8; 32]) {
+        (self.result_type, self.value, self.digest)
+    }
+}
+
+impl fmt::Debug for EncodedUaiBrowserHelperResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncodedUaiBrowserHelperResult")
+            .field("result_type", &self.result_type)
+            .field("value", &"[REDACTED]")
+            .field("digest", &self.digest)
             .finish()
     }
 }
@@ -2123,6 +2459,115 @@ fn helper_action_from_command(
 }
 
 fn invalid_helper_dispatch(message: &'static str) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::InvalidResponse, message)
+}
+
+fn helper_menu_entries(
+    projection: &UaiBrowserHelperCommandProjection,
+    nonce: &str,
+    rows: Vec<UaiBrowserHelperMenuObservation>,
+) -> ProviderResult<Vec<UaiBrowserMenuEntry>> {
+    if rows.len() > MAX_DISCOVERED_MICROS as usize {
+        return Err(invalid_helper_result(
+            "UAI helper Menu observation exceeds the audited bound",
+        ));
+    }
+    let binding = helper_session_binding(projection, nonce);
+    rows.into_iter()
+        .enumerate()
+        .map(|(expected_ordinal, row)| {
+            if row.ordinal as usize != expected_ordinal {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "UAI helper Menu observation ordinals are missing or reordered",
+                ));
+            }
+            let handle =
+                browser_menu_handle(&binding, row.ordinal, &row.unit, &row.section, &row.micro);
+            Ok(UaiBrowserMenuEntry {
+                ordinal: row.ordinal,
+                handle,
+                unit: row.unit,
+                section: row.section,
+                micro: row.micro,
+            })
+        })
+        .collect()
+}
+
+fn helper_page_entries(
+    projection: &UaiBrowserHelperCommandProjection,
+    nonce: &str,
+    scope: UaiBrowserPageScope,
+    rows: Vec<UaiBrowserHelperPageObservation>,
+) -> ProviderResult<Vec<UaiBrowserPageEntry>> {
+    let limit = match scope {
+        UaiBrowserPageScope::Tab => MAX_TABS_PER_MICRO,
+        UaiBrowserPageScope::Task => MAX_TASKS_PER_TAB,
+    };
+    if rows.len() > limit as usize {
+        return Err(invalid_helper_result(
+            "UAI helper page observation exceeds its audited scope bound",
+        ));
+    }
+    let binding = helper_session_binding(projection, nonce);
+    rows.into_iter()
+        .enumerate()
+        .map(|(expected_ordinal, row)| {
+            if row.ordinal as usize != expected_ordinal || row.ordinal >= limit {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "UAI helper page observation ordinals are missing or reordered",
+                ));
+            }
+            let handle = browser_page_handle(&binding, scope, row.ordinal, &row.label);
+            Ok(UaiBrowserPageEntry {
+                scope,
+                ordinal: row.ordinal,
+                handle,
+                label: row.label,
+                active: row.active,
+            })
+        })
+        .collect()
+}
+
+fn helper_session_binding(
+    projection: &UaiBrowserHelperCommandProjection,
+    nonce: &str,
+) -> UaiBrowserSessionBinding {
+    UaiBrowserSessionBinding {
+        version: UAI_BROWSER_PLAN_VERSION,
+        session_nonce: nonce.to_owned(),
+        origin: projection.origin.clone(),
+        frame_id: projection.frame_id.clone(),
+        remote_task_id: projection.remote_task_id.clone(),
+    }
+}
+
+fn encode_helper_result<T: Serialize>(
+    result_type: &'static str,
+    maximum_bytes: usize,
+    result: &T,
+) -> ProviderResult<EncodedUaiBrowserHelperResult> {
+    let mut encoded = Zeroizing::new(serde_json::to_vec(result).map_err(|_| {
+        invalid_helper_result("UAI helper result cannot be encoded in the audited schema")
+    })?);
+    if encoded.is_empty() || encoded.len() > maximum_bytes {
+        return Err(invalid_helper_result(
+            "UAI helper result is empty or exceeds its audited byte bound",
+        ));
+    }
+    let digest = Sha256::digest(encoded.as_slice()).into();
+    let value = SecretValue::new(std::mem::take(&mut *encoded));
+    Ok(EncodedUaiBrowserHelperResult {
+        result_type,
+        value,
+        digest,
+    })
+}
+
+fn invalid_helper_result(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::InvalidResponse, message)
 }
 
@@ -4159,13 +4604,69 @@ mod tests {
             assert_eq!(projected.remote_task_id(), plan.target_remote_task_id);
             assert_eq!(projected.action(), &expected_action);
             let debug = format!("{projected:?}");
+            assert!(!debug.contains(&session_id.to_string()));
+            assert!(!debug.contains(UCONTENT_ORIGIN));
             assert!(!debug.contains("frame-helper"));
             assert!(!debug.contains(&plan.target_remote_task_id));
+            assert!(debug.contains("sequence: \"[REDACTED]\""));
             if let UaiBrowserHelperAction::ClickMenu { handle }
             | UaiBrowserHelperAction::ClickTab { handle }
             | UaiBrowserHelperAction::ClickTask { handle } = &expected_action
             {
                 assert!(!debug.contains(handle));
+            }
+
+            let observation = match &expected_action {
+                UaiBrowserHelperAction::ScanMenu => UaiBrowserHelperObservation::MenuScanned(vec![
+                    UaiBrowserHelperMenuObservation::try_new(
+                        0,
+                        plan.target.unit.clone(),
+                        plan.target.section.clone().unwrap(),
+                        plan.target.micro.clone(),
+                    )
+                    .unwrap(),
+                ]),
+                UaiBrowserHelperAction::ScanPage { .. } => {
+                    UaiBrowserHelperObservation::PageScanned(vec![
+                        UaiBrowserHelperPageObservation::try_new(0, "Reading".to_owned(), true)
+                            .unwrap(),
+                    ])
+                }
+                UaiBrowserHelperAction::ClickMenu { .. }
+                | UaiBrowserHelperAction::ClickTab { .. }
+                | UaiBrowserHelperAction::ClickTask { .. } => {
+                    UaiBrowserHelperObservation::ClickAcknowledged
+                }
+                UaiBrowserHelperAction::Residence { .. } => UaiBrowserHelperObservation::Residence(
+                    UaiBrowserHelperResidenceObservation::try_new(
+                        1_200,
+                        1,
+                        1,
+                        1,
+                        30,
+                        false,
+                        Some("Read the passage".to_owned()),
+                    )
+                    .unwrap(),
+                ),
+                UaiBrowserHelperAction::Ping => UaiBrowserHelperObservation::Pong,
+            };
+            let encoded = projected.encode_observation(observation).unwrap();
+            let encoded_debug = format!("{encoded:?}");
+            assert!(encoded_debug.contains("[REDACTED]"));
+            assert!(!encoded_debug.contains("Read the passage"));
+            let (result_type, value, result_digest) = encoded.into_parts();
+            assert_eq!(
+                result_digest,
+                <[u8; 32]>::from(Sha256::digest(value.expose_secret()))
+            );
+            let document = std::str::from_utf8(value.expose_secret()).unwrap();
+            if matches!(expected_action, UaiBrowserHelperAction::Residence { .. }) {
+                assert_eq!(result_type, UAI_BROWSER_RESIDENCE_RESULT_TYPE);
+                parse_browser_residence_result(document, &plan, &command, UCONTENT_ORIGIN).unwrap();
+            } else {
+                assert_eq!(result_type, UAI_BROWSER_EVENT_TYPE);
+                parse_browser_event(document, &plan, &command, UCONTENT_ORIGIN).unwrap();
             }
         }
 
@@ -4396,6 +4897,162 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn helper_result_encoder_rejects_mismatched_reordered_and_unbounded_observations() {
+        let plan = residence_plan(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let nonce = session_id.to_string();
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, &nonce, UCONTENT_ORIGIN, "frame-result")
+                .unwrap();
+        let ping = UaiBrowserCommandEnvelope::ping(&plan, &binding, 1).unwrap();
+        let artifact = ping.encode_artifact(&plan).unwrap();
+        let digest = artifact.digest();
+        let ping = project_browser_helper_command(
+            artifact.into_secret_value(),
+            digest,
+            session_id,
+            UCONTENT_ORIGIN,
+            "frame-result",
+            1,
+        )
+        .unwrap();
+        assert!(
+            ping.encode_observation(UaiBrowserHelperObservation::MenuScanned(Vec::new()))
+                .is_err()
+        );
+        assert!(
+            UaiBrowserHelperMenuObservation::try_new(
+                MAX_DISCOVERED_MICROS,
+                "Unit".to_owned(),
+                String::new(),
+                "Micro".to_owned(),
+            )
+            .is_err()
+        );
+        assert!(UaiBrowserHelperPageObservation::try_new(0, " bad".to_owned(), false).is_err());
+
+        let scan =
+            UaiBrowserCommandEnvelope::scan_page(&plan, &binding, 2, UaiBrowserPageScope::Tab)
+                .unwrap();
+        let artifact = scan.encode_artifact(&plan).unwrap();
+        let digest = artifact.digest();
+        let scan = project_browser_helper_command(
+            artifact.into_secret_value(),
+            digest,
+            session_id,
+            UCONTENT_ORIGIN,
+            "frame-result",
+            2,
+        )
+        .unwrap();
+        let reordered =
+            vec![UaiBrowserHelperPageObservation::try_new(1, "Second".to_owned(), false).unwrap()];
+        assert!(
+            scan.encode_observation(UaiBrowserHelperObservation::PageScanned(reordered))
+                .is_err()
+        );
+        let tab_overflow = (0..=MAX_TABS_PER_MICRO)
+            .map(|ordinal| {
+                UaiBrowserHelperPageObservation::try_new(ordinal, format!("Tab {ordinal}"), false)
+                    .unwrap()
+            })
+            .collect();
+        assert!(
+            scan.encode_observation(UaiBrowserHelperObservation::PageScanned(tab_overflow))
+                .is_err()
+        );
+
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            plan.target.task.clone(),
+            true,
+        )
+        .unwrap();
+        let task = plan
+            .select_target_task_entry(&binding, std::slice::from_ref(&task))
+            .unwrap();
+        let residence =
+            UaiBrowserCommandEnvelope::residence_target(&plan, &binding, 3, &task).unwrap();
+        let artifact = residence.encode_artifact(&plan).unwrap();
+        let digest = artifact.digest();
+        let residence = project_browser_helper_command(
+            artifact.into_secret_value(),
+            digest,
+            session_id,
+            UCONTENT_ORIGIN,
+            "frame-result",
+            3,
+        )
+        .unwrap();
+        let video =
+            UaiBrowserHelperResidenceObservation::try_new(1_200, 1, 1, 1, 1, false, None).unwrap();
+        assert!(
+            residence
+                .encode_observation(UaiBrowserHelperObservation::Residence(video))
+                .is_err()
+        );
+        assert!(
+            UaiBrowserHelperResidenceObservation::try_new(28_801, 1, 1, 1, 0, false, None,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn helper_result_encoder_preserves_the_full_audited_menu_bound() {
+        let plan = residence_plan(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let nonce = session_id.to_string();
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, &nonce, UCONTENT_ORIGIN, "frame-max-menu")
+                .unwrap();
+        let command = UaiBrowserCommandEnvelope::scan_menu(&plan, &binding, 1).unwrap();
+        let artifact = command.encode_artifact(&plan).unwrap();
+        let digest = artifact.digest();
+        let projection = project_browser_helper_command(
+            artifact.into_secret_value(),
+            digest,
+            session_id,
+            UCONTENT_ORIGIN,
+            "frame-max-menu",
+            1,
+        )
+        .unwrap();
+        let label = "x".repeat(MAX_BROWSER_MENU_LABEL_BYTES);
+        let rows = (0..MAX_DISCOVERED_MICROS)
+            .map(|ordinal| {
+                UaiBrowserHelperMenuObservation::try_new(
+                    ordinal,
+                    label.clone(),
+                    label.clone(),
+                    label.clone(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let encoded = projection
+            .encode_observation(UaiBrowserHelperObservation::MenuScanned(rows))
+            .unwrap();
+        let (result_type, value, result_digest) = encoded.into_parts();
+        assert_eq!(result_type, UAI_BROWSER_EVENT_TYPE);
+        assert!(value.expose_secret().len() > 1_024 * 1_024);
+        assert!(value.expose_secret().len() <= MAX_BROWSER_MESSAGE_BYTES);
+        assert_eq!(
+            result_digest,
+            <[u8; 32]>::from(Sha256::digest(value.expose_secret()))
+        );
+        parse_browser_event(
+            std::str::from_utf8(value.expose_secret()).unwrap(),
+            &plan,
+            &command,
+            UCONTENT_ORIGIN,
+        )
+        .unwrap();
     }
 
     fn initial_residence_cursor(
