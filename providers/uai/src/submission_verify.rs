@@ -7,7 +7,8 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
-    ProviderResult, SubmissionBuildCapability, SubmissionVerifyCapability, TaskDetailCapability,
+    ProviderResult, ResolvedProviderQuestionSessionContinuation, SubmissionBuildCapability,
+    SubmissionVerifyCapability, TaskDetailCapability,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -15,6 +16,7 @@ use serde_json::Value;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    UAI_QUESTION_SET_ARTIFACT_PHASE, UAI_QUESTION_SET_ARTIFACT_TYPE, UaiQuestionArtifactSet,
     UaiSubmissionBuild, UaiSubmissionPlan, encrypted::ZeroizingJsonValue,
     metadata::development_metadata, submission_execute::valid_submission_version,
     task_type::supports_audited_question_type,
@@ -179,6 +181,38 @@ impl SubmissionVerifyCapability for UaiSubmissionVerify {
             .fetch_verification(context, &identity.course_resource, &identity.group, version)
             .await?;
         parse_verification_snapshot(document.as_str(), &identity.group, version, &plan, draft)
+    }
+
+    async fn verify_submission_with_session(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        receipt: Option<&SubmissionReceipt>,
+        continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+    ) -> ProviderResult<SubmissionVerificationSnapshot> {
+        validate_context(context, &self.metadata)?;
+        if continuation.continuation_type != UAI_QUESTION_SET_ARTIFACT_TYPE
+            || continuation.phase != UAI_QUESTION_SET_ARTIFACT_PHASE
+            || continuation.revision == 0
+        {
+            return Err(protocol_drift(
+                "UAI verification continuation metadata is stale or foreign",
+            ));
+        }
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        UaiQuestionArtifactSet::decode_bound(
+            continuation.value,
+            continuation.continuation_digest,
+            remote_task_id,
+            &questions,
+        )?;
+        self.verify_submission(context, remote_task_id, draft, receipt)
+            .await
     }
 }
 
@@ -1019,6 +1053,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn media_session_verification_rebinds_artifact_before_readback() {
+        let transport = Arc::new(FixtureTransport::default());
+        let capability =
+            UaiSubmissionVerify::try_new(Arc::new(FixtureDetail::single()), transport.clone())
+                .unwrap();
+        let (draft, value, digest) = media_draft_and_artifact().await;
+        let snapshot = capability
+            .verify_submission_with_session(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &draft,
+                Some(&receipt()),
+                ResolvedProviderQuestionSessionContinuation {
+                    continuation_type: UAI_QUESTION_SET_ARTIFACT_TYPE,
+                    continuation_digest: digest,
+                    phase: UAI_QUESTION_SET_ARTIFACT_PHASE,
+                    revision: 1,
+                    value: &value,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+
+        let error = capability
+            .verify_submission_with_session(
+                &context(),
+                "group:2001:unit-1:group-1",
+                &draft,
+                Some(&receipt()),
+                ResolvedProviderQuestionSessionContinuation {
+                    continuation_type: "uai.foreign-artifact.v1",
+                    continuation_digest: digest,
+                    phase: UAI_QUESTION_SET_ARTIFACT_PHASE,
+                    revision: 1,
+                    value: &value,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn missing_receipt_is_inconclusive_without_guessing_a_route() {
         let transport = Arc::new(FixtureTransport::default());
         let capability =
@@ -1108,6 +1188,83 @@ mod tests {
             payload_preview: preview,
             created_at: Utc::now(),
         }
+    }
+
+    async fn media_draft_and_artifact() -> (SubmissionDraft, asterism_secrets::SecretValue, [u8; 32])
+    {
+        let remote_task_id = "group:2001:unit-1:group-1";
+        let task_id = TaskId::new();
+        let parsed = crate::question::parse_question_entry(
+            &serde_json::json!({
+                "id": "1001",
+                "content": {
+                    "type": "basic",
+                    "direction": {"text": "Choose every matching answer"},
+                    "contents": [{
+                        "name": "Listening.mp3",
+                        "path": "https://media.example.edu/listening.mp3"
+                    }],
+                    "children": [{
+                        "type": "basic",
+                        "replyType": "multichoice",
+                        "options": [
+                            {"name": "A", "text": "Alpha"},
+                            {"name": "B", "text": "Beta"}
+                        ]
+                    }]
+                }
+            }),
+            1,
+            "multichoice",
+            remote_task_id,
+        )
+        .unwrap();
+        let question = parsed.to_question(task_id).unwrap();
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer: asterism_domain::NormalizedAnswer::Selections(vec![
+                "A".to_owned(),
+                "B".to_owned(),
+            ]),
+            source: AnswerSource::Manual,
+            confidence: None,
+        };
+        let preview = UaiSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context(),
+                remote_task_id,
+                std::slice::from_ref(&question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            std::slice::from_ref(&parsed),
+            std::slice::from_ref(&question),
+            remote_task_id,
+        )
+        .unwrap()
+        .unwrap()
+        .encode()
+        .unwrap();
+        let digest = artifact.digest();
+        let value = artifact.into_secret_value();
+        (
+            SubmissionDraft {
+                id: SubmissionDraftId::new(),
+                task_id,
+                question_snapshot_id: QuestionSnapshotId::new(),
+                provider_id: ProviderId::new("uai").unwrap(),
+                provider_version: development_metadata().unwrap().implementation_version,
+                items: vec![SubmissionDraftItem { question, selected }],
+                payload_preview: preview,
+                created_at: Utc::now(),
+            },
+            value,
+            digest,
+        )
     }
 
     async fn multiple_draft() -> SubmissionDraft {

@@ -453,6 +453,14 @@ credential leak. A shared downloader must enforce DNS/private-range and
 redirect policy, decide host-scoped authentication, and bind the resulting
 bytes plus model credential to the exact Task and AnswerResolve attempt.
 
+After a durable media submission yields its receipt, session-aware
+SubmissionVerify rebinds that same complete manifest to every immutable Draft
+Question before starting fresh Task or user-module reads. The existing
+receipt-versioned verifier then remains the only authority for answer
+persistence and score facts. A foreign type, phase, revision, digest, Task or
+Question fails before verification transport; an artifact-free execution uses
+the unchanged legacy verifier.
+
 Execution is advertised only when a fresh Group has a bounded positive
 `question_num` and either one homogeneous type or exactly one positional type
 per Question. The currently lossless mappings cover `single-choice`,
