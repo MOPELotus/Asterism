@@ -112,7 +112,7 @@ export type CreditAccountContractIsTyped = Assert<
 >;
 
 export type QuestionContractIsTyped = Assert<
-  GetTaskQuestionsResponse extends {
+  Exclude<GetTaskQuestionsResponse, void> extends {
     captured_at: string;
     questions: Array<{ id: string; kind: string; position: number; task_id: string }>;
     snapshot_id: string;
