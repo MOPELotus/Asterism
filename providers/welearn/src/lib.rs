@@ -29,7 +29,7 @@ mod task_inventory;
 
 pub use atomic_duration_completion::{
     WellearnAtomicDurationCompletionDocuments, WellearnAtomicDurationCompletionPlan,
-    WellearnAtomicDurationCompletionReceipts,
+    WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionTransport,
 };
 pub use authentication::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCookieSession,

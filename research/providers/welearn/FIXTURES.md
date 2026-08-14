@@ -209,6 +209,14 @@ only structural field names, response codes and bounded placeholder shapes.
   `false` receipts remain valid diagnostics, while missing, extra or
   post-rejection mutations fail before CMI parsing. No execution entry is
   fixture-claimed by these value tests.
+- Native atomic transport tests bind current duration/completion to the
+  query-uid endpoint and simple Referer, while Auto binds its duration phase to
+  plain endpoint/simple Referer and switches only final completion to the
+  task-specific Referer. Renewal-stage tests allow Authentication renewal only
+  before start and during final read-only verification; every error after the
+  first mutation maps to non-retryable HumanRequired. The transport trait and
+  native implementation remain unregistered and unreachable from singleton
+  TaskExecution.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.

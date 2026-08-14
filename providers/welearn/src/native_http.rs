@@ -14,6 +14,8 @@ use reqwest::{
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    WellearnAtomicDurationCompletionDocuments, WellearnAtomicDurationCompletionPlan,
+    WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionTransport,
     WellearnCmiDocument, WellearnCmiTransport, WellearnCourseInventoryTransport,
     WellearnDurationReportDocuments, WellearnDurationReportTransport, WellearnInventoryDocument,
     WellearnResourceExecutionDocuments, WellearnResourceExecutionTransport,
@@ -299,6 +301,95 @@ impl NativeWellearnInventoryTransport {
             .map_err(|error| classify_reqwest_error(&error))?;
         read_inventory_response(response, ResponseContent::Json).await
     }
+
+    async fn send_atomic_mutation_form(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        task_referer: &Url,
+        plan: WellearnAtomicDurationCompletionPlan,
+        phase: AtomicMutationPhase,
+        fields: &[(&str, &str)],
+    ) -> ProviderResult<WellearnInventoryDocument> {
+        let profile = atomic_http_profile(plan, phase);
+        match profile.referer {
+            ScoRefererProfile::Simple => {
+                self.send_sco_form_at_endpoint(session, route, profile.endpoint, fields)
+                    .await
+            }
+            ScoRefererProfile::TaskSpecific => {
+                if profile.endpoint != ScoEndpoint::Plain {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Internal,
+                        "WELearn atomic task Referer requires the plain SCO endpoint",
+                    ));
+                }
+                self.send_plain_sco_form_with_referer(session, task_referer, fields)
+                    .await
+            }
+        }
+    }
+
+    async fn set_atomic_completion(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        task_referer: &Url,
+        plan: WellearnAtomicDurationCompletionPlan,
+        sco_id: &str,
+        cmi: &str,
+    ) -> ProviderResult<bool> {
+        let response = self
+            .send_atomic_mutation_form(
+                session,
+                route,
+                task_referer,
+                plan,
+                AtomicMutationPhase::Completion,
+                &[
+                    ("action", "setscoinfo"),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("uid", route.user_id()),
+                    ("data", cmi),
+                    ("isend", "False"),
+                ],
+            )
+            .await?;
+        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
+    }
+
+    async fn save_atomic_completion(
+        &self,
+        session: &crate::WellearnCookieSession,
+        route: &crate::WellearnCourseContext,
+        task_referer: &Url,
+        plan: WellearnAtomicDurationCompletionPlan,
+        sco_id: &str,
+    ) -> ProviderResult<bool> {
+        let score = plan.completion().score_percent.to_string();
+        let response = self
+            .send_atomic_mutation_form(
+                session,
+                route,
+                task_referer,
+                plan,
+                AtomicMutationPhase::Completion,
+                &[
+                    ("action", "savescoinfo160928"),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("uid", route.user_id()),
+                    ("progress", "100"),
+                    ("crate", score.as_str()),
+                    ("status", "unknown"),
+                    ("cstatus", "completed"),
+                    ("trycount", "0"),
+                ],
+            )
+            .await?;
+        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
+    }
 }
 
 impl fmt::Debug for NativeWellearnInventoryTransport {
@@ -376,6 +467,214 @@ impl WellearnCmiTransport for NativeWellearnInventoryTransport {
             }
             result => result,
         }
+    }
+}
+
+#[async_trait]
+impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransport {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the one-start lifecycle keeps the no-renew mutation boundary and donor phases explicit"
+    )]
+    async fn complete_duration_atomically(
+        &self,
+        context: &ProviderContext,
+        course_id: &str,
+        sco_id: &str,
+        plan: WellearnAtomicDurationCompletionPlan,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<WellearnAtomicDurationCompletionDocuments> {
+        plan.validate()?;
+        let duration_profile = atomic_http_profile(plan, AtomicMutationPhase::Duration);
+        let completion_profile = atomic_http_profile(plan, AtomicMutationPhase::Completion);
+        let completion = plan.completion();
+        let (mut session, mut renewed) = self.session_for_operation(context).await?;
+        let (route, initial) = match self
+            .read_duration_baseline(&session, course_id, sco_id, duration_profile.endpoint)
+            .await
+        {
+            Err(error)
+                if atomic_may_renew(
+                    AtomicRenewalStage::BeforeFirstMutation,
+                    renewed,
+                    error.kind,
+                ) =>
+            {
+                session = self.sessions.renew_session(context).await?;
+                renewed = true;
+                self.read_duration_baseline(&session, course_id, sco_id, duration_profile.endpoint)
+                    .await?
+            }
+            result => result?,
+        };
+        let task_referer = study_course_url(&route, sco_id)?;
+        let start_payload = atomic_start_payload(plan);
+        let start_fields = sco_start_fields(&route, sco_id, start_payload);
+
+        // The first mutation boundary begins before awaiting the start request.
+        // Every failure below is non-replayable until final read-only verification.
+        let start = self
+            .send_atomic_mutation_form(
+                &session,
+                &route,
+                &task_referer,
+                plan,
+                AtomicMutationPhase::Duration,
+                &start_fields,
+            )
+            .await
+            .map_err(atomic_post_mutation_error)?;
+        let start_accepted = mutation_accepted(start.as_str(), MutationResponseKind::StrictSuccess)
+            .map_err(atomic_post_mutation_error)?;
+        if plan.profile() == crate::WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100
+            && !start_accepted
+        {
+            return Err(atomic_post_mutation_error(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "WELearn current atomic duration start was not accepted",
+            )));
+        }
+
+        let mut heartbeat_acceptances = Vec::new();
+        let mut after_duration = None;
+        let mut set_accepted = None;
+        match plan.profile() {
+            crate::WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+                for elapsed in 0..plan.target_seconds() {
+                    let accepted = self
+                        .keep_duration_counter(
+                            &session,
+                            &route,
+                            duration_profile.endpoint,
+                            sco_id,
+                            elapsed,
+                        )
+                        .await
+                        .map_err(atomic_post_mutation_error)?;
+                    heartbeat_acceptances.push(accepted);
+                    if !accepted {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    report_duration_heartbeat(
+                        events,
+                        elapsed.saturating_add(1),
+                        plan.target_seconds(),
+                    )
+                    .await
+                    .map_err(atomic_post_mutation_error)?;
+                }
+                let fresh_time = self
+                    .fetch_cmi_for_route_at_endpoint(
+                        &session,
+                        &route,
+                        sco_id,
+                        duration_profile.endpoint,
+                    )
+                    .await
+                    .map_err(atomic_post_mutation_error)?;
+                let fresh_snapshot =
+                    parse_cmi_snapshot(fresh_time.as_str()).map_err(atomic_post_mutation_error)?;
+                let cmi = resource_completion_cmi(
+                    completion.score_percent,
+                    completion.time_mode,
+                    completion.cmi_format,
+                    Some(&fresh_snapshot),
+                )
+                .map_err(atomic_post_mutation_error)?;
+                set_accepted = Some(
+                    self.set_atomic_completion(
+                        &session,
+                        &route,
+                        &task_referer,
+                        plan,
+                        sco_id,
+                        cmi.as_str(),
+                    )
+                    .await
+                    .map_err(atomic_post_mutation_error)?,
+                );
+                after_duration = Some(fresh_time);
+            }
+            crate::WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => {
+                let (complete_intervals, trailing_seconds) = duration_heartbeat_plan(
+                    plan.target_seconds(),
+                    plan.heartbeat_interval_seconds(),
+                );
+                for completed in 1..=complete_intervals {
+                    tokio::time::sleep(Duration::from_secs(plan.heartbeat_interval_seconds()))
+                        .await;
+                    let accepted = self
+                        .keep_duration_implicit(&session, &route, duration_profile.endpoint, sco_id)
+                        .await
+                        .map_err(atomic_post_mutation_error)?;
+                    heartbeat_acceptances.push(accepted);
+                    report_duration_heartbeat(
+                        events,
+                        completed.saturating_mul(plan.heartbeat_interval_seconds()),
+                        plan.target_seconds(),
+                    )
+                    .await
+                    .map_err(atomic_post_mutation_error)?;
+                }
+                if trailing_seconds != 0 {
+                    tokio::time::sleep(Duration::from_secs(trailing_seconds)).await;
+                    report_duration_tail(events)
+                        .await
+                        .map_err(atomic_post_mutation_error)?;
+                }
+            }
+        }
+
+        let save_accepted = self
+            .save_atomic_completion(&session, &route, &task_referer, plan, sco_id)
+            .await
+            .map_err(atomic_post_mutation_error)?;
+
+        let after_completion = match self
+            .fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, completion_profile.endpoint)
+            .await
+        {
+            Err(error)
+                if atomic_may_renew(
+                    AtomicRenewalStage::FinalReadOnlyVerification,
+                    renewed,
+                    error.kind,
+                ) =>
+            {
+                session = self
+                    .sessions
+                    .renew_session(context)
+                    .await
+                    .map_err(atomic_post_mutation_error)?;
+                let verification_route = self
+                    .resolve_course_route(&session, course_id)
+                    .await
+                    .map_err(atomic_post_mutation_error)?;
+                self.fetch_cmi_for_route_at_endpoint(
+                    &session,
+                    &verification_route,
+                    sco_id,
+                    completion_profile.endpoint,
+                )
+                .await
+                .map_err(atomic_post_mutation_error)?
+            }
+            result => result.map_err(atomic_post_mutation_error)?,
+        };
+        WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            initial,
+            after_duration,
+            after_completion,
+            WellearnAtomicDurationCompletionReceipts::new(
+                start_accepted,
+                heartbeat_acceptances,
+                set_accepted,
+                save_accepted,
+            ),
+        )
+        .map_err(atomic_post_mutation_error)
     }
 }
 
@@ -585,6 +884,46 @@ fn resource_mutation_error(error: ProviderError) -> ProviderError {
         ),
         _ => error,
     }
+}
+
+fn atomic_post_mutation_error(error: ProviderError) -> ProviderError {
+    debug_assert!(!atomic_may_renew(
+        AtomicRenewalStage::AfterFirstMutation,
+        false,
+        error.kind,
+    ));
+    if error.kind == ProviderErrorKind::HumanRequired {
+        return error;
+    }
+    let reason = if error.kind == ProviderErrorKind::Authentication {
+        HumanRequiredReason::SessionExpired
+    } else {
+        HumanRequiredReason::ManualIntervention
+    };
+    ProviderError::human_required(
+        "WELearn atomic mutation began and was not replayed; fresh manual review is required",
+        reason,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AtomicRenewalStage {
+    BeforeFirstMutation,
+    AfterFirstMutation,
+    FinalReadOnlyVerification,
+}
+
+const fn atomic_may_renew(
+    stage: AtomicRenewalStage,
+    already_renewed: bool,
+    error_kind: ProviderErrorKind,
+) -> bool {
+    !already_renewed
+        && matches!(error_kind, ProviderErrorKind::Authentication)
+        && matches!(
+            stage,
+            AtomicRenewalStage::BeforeFirstMutation | AtomicRenewalStage::FinalReadOnlyVerification
+        )
 }
 
 #[async_trait]
@@ -1493,6 +1832,58 @@ enum ScoEndpoint {
     Plain,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AtomicMutationPhase {
+    Duration,
+    Completion,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScoRefererProfile {
+    Simple,
+    TaskSpecific,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AtomicHttpProfile {
+    endpoint: ScoEndpoint,
+    referer: ScoRefererProfile,
+}
+
+const fn atomic_http_profile(
+    plan: WellearnAtomicDurationCompletionPlan,
+    phase: AtomicMutationPhase,
+) -> AtomicHttpProfile {
+    match phase {
+        AtomicMutationPhase::Duration => AtomicHttpProfile {
+            endpoint: duration_endpoint(plan.duration_protocol_mode()),
+            referer: ScoRefererProfile::Simple,
+        },
+        AtomicMutationPhase::Completion => AtomicHttpProfile {
+            endpoint: resource_endpoint(plan.completion().mutation_profile),
+            referer: match plan.completion().mutation_profile {
+                crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer => {
+                    ScoRefererProfile::Simple
+                }
+                crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer => {
+                    ScoRefererProfile::TaskSpecific
+                }
+            },
+        },
+    }
+}
+
+const fn atomic_start_payload(plan: WellearnAtomicDurationCompletionPlan) -> ScoStartPayload {
+    match plan.profile() {
+        crate::WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+            ScoStartPayload::FullRoute
+        }
+        crate::WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => {
+            ScoStartPayload::MinimalIdentity
+        }
+    }
+}
+
 fn sco_endpoint_url(
     route: &crate::WellearnCourseContext,
     endpoint: ScoEndpoint,
@@ -1809,6 +2200,97 @@ mod tests {
             ]
         );
         assert_eq!(duration_heartbeat_plan(61, 60), (1, 1));
+    }
+
+    #[test]
+    fn atomic_http_profiles_switch_auto_referer_only_for_completion() {
+        let current = WellearnAtomicDurationCompletionPlan::try_new(
+            crate::WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            atomic_http_profile(current, AtomicMutationPhase::Duration),
+            AtomicHttpProfile {
+                endpoint: ScoEndpoint::QueryUserId,
+                referer: ScoRefererProfile::Simple,
+            }
+        );
+        assert_eq!(
+            atomic_http_profile(current, AtomicMutationPhase::Completion),
+            AtomicHttpProfile {
+                endpoint: ScoEndpoint::QueryUserId,
+                referer: ScoRefererProfile::Simple,
+            }
+        );
+        assert_eq!(atomic_start_payload(current), ScoStartPayload::FullRoute);
+
+        let auto = WellearnAtomicDurationCompletionPlan::try_new(
+            crate::WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            atomic_http_profile(auto, AtomicMutationPhase::Duration),
+            AtomicHttpProfile {
+                endpoint: ScoEndpoint::Plain,
+                referer: ScoRefererProfile::Simple,
+            }
+        );
+        assert_eq!(
+            atomic_http_profile(auto, AtomicMutationPhase::Completion),
+            AtomicHttpProfile {
+                endpoint: ScoEndpoint::Plain,
+                referer: ScoRefererProfile::TaskSpecific,
+            }
+        );
+        assert_eq!(atomic_start_payload(auto), ScoStartPayload::MinimalIdentity);
+    }
+
+    #[test]
+    fn atomic_renewal_is_forbidden_between_start_and_final_verification() {
+        assert!(atomic_may_renew(
+            AtomicRenewalStage::BeforeFirstMutation,
+            false,
+            ProviderErrorKind::Authentication,
+        ));
+        assert!(!atomic_may_renew(
+            AtomicRenewalStage::AfterFirstMutation,
+            false,
+            ProviderErrorKind::Authentication,
+        ));
+        assert!(atomic_may_renew(
+            AtomicRenewalStage::FinalReadOnlyVerification,
+            false,
+            ProviderErrorKind::Authentication,
+        ));
+        assert!(!atomic_may_renew(
+            AtomicRenewalStage::FinalReadOnlyVerification,
+            true,
+            ProviderErrorKind::Authentication,
+        ));
+        assert!(!atomic_may_renew(
+            AtomicRenewalStage::BeforeFirstMutation,
+            false,
+            ProviderErrorKind::Network,
+        ));
+
+        for kind in [
+            ProviderErrorKind::Authentication,
+            ProviderErrorKind::Authorization,
+            ProviderErrorKind::RateLimited,
+            ProviderErrorKind::Network,
+            ProviderErrorKind::ProviderUnavailable,
+            ProviderErrorKind::ProtocolDrift,
+            ProviderErrorKind::RemoteChanged,
+            ProviderErrorKind::InvalidResponse,
+            ProviderErrorKind::Internal,
+        ] {
+            let mapped = atomic_post_mutation_error(ProviderError::new(kind, "fixture"));
+            assert_eq!(mapped.kind, ProviderErrorKind::HumanRequired);
+            assert!(!mapped.is_retryable());
+            assert!(mapped.human_required_reason.is_some());
+        }
     }
 
     #[test]

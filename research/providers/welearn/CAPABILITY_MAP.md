@@ -155,9 +155,13 @@ current donor's post-duration evidence, accepted start and terminal first keep
 rejection, while Auto has exactly one receipt per complete 60-second interval,
 no post-duration/set slot and supports an empty zero-target keep list. Explicit
 negative receipts remain diagnostics; no bundle grants mutation authority.
-Current singleton mutation authority deliberately does not execute either
-exact combined flow until Core can persist, authorize and recover it without
-inserting a bare save or second start.
+An unregistered Provider-owned native transport now consumes only this
+validated plan and emits the combined bundle in one session/route lifecycle.
+It implements the exact request sequence and no-replay error boundary, but is
+not present in Provider capability registration and cannot be reached from
+singleton TaskExecution. Core must still persist, authorize and recover the
+composite attempt before an execution entry may call it without inserting a
+bare save or second start.
 
 One donor-level orchestration contract remains a shared Core gap. The Provider
 now freezes bounded Unit identity, all/explicit selection, explicit order,

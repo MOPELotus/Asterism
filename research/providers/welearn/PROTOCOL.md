@@ -432,8 +432,8 @@ a valid singleton `DurationReport` plan. The value provides no persistence,
 scheduling or mutation authority by itself; Core must carry it with the exact
 selected capabilities and durable attempt binding.
 
-The future atomic transport must return one independent combined evidence
-shape rather than concatenate singleton `DurationReport` and
+The unregistered Provider-owned atomic transport returns one independent
+combined evidence shape rather than concatenate singleton `DurationReport` and
 `ResourceExecution` documents. `WellearnAtomicDurationCompletionDocuments`
 contains the initial CMI, a current-donor-only post-duration CMI used to source
 fresh time fields, the final completion CMI, and separate ordered mutation
@@ -444,6 +444,21 @@ and one save receipt. Modular Auto records one keep receipt per complete
 negative receipts, omits both the post-duration CMI and set receipt, and has one
 completion-bearing save receipt. Receipt booleans never replace final CMI
 verification, and this returned shape still provides no execution authority.
+
+`WellearnAtomicDurationCompletionTransport` consumes an already validated plan
+plus exact Course/SCO identity; it never accepts mutable runtime settings or an
+ordinary singleton request. Before the first start request it may renew one
+authentication failure during session/route/initial-CMI resolution. The first
+start send is the mutation boundary: every later request, parse, event or
+intermediate read error becomes non-retryable `HumanRequired`, with no renewal
+or mutation replay. Current Fanyuchang uses query-uid/simple-Referer full start,
+counter keeps, a same-session fresh-time read, one set and one score-100 save.
+Modular Auto uses plain/simple-Referer minimal start and implicit keeps, then
+switches only its completion-bearing score-0 save to the task-specific Referer;
+it never emits the singleton bare save. After the final mutation only, an
+authentication failure may renew once for a fresh read-only verification. The
+transport remains absent from capability registration until Core supplies the
+durable composite authority and per-transition persistence boundary.
 
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or

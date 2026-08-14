@@ -1,4 +1,7 @@
-use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
+use asterism_provider_api::{
+    ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderResult,
+};
+use async_trait::async_trait;
 
 use crate::{
     WellearnAtomicCompletionProfile, WellearnCmiDocument, WellearnDurationProtocolMode,
@@ -160,6 +163,24 @@ fn invalid_atomic_documents() -> ProviderError {
         ProviderErrorKind::Internal,
         "WELearn atomic duration-completion documents do not match the frozen lifecycle",
     )
+}
+
+/// Native boundary for one Core-authorized, one-start atomic
+/// duration-completion lifecycle.
+///
+/// Implementations may renew authentication only before the first mutation or
+/// for final read-only verification. They must not replay or resume mutations
+/// after the first start request has been sent.
+#[async_trait]
+pub trait WellearnAtomicDurationCompletionTransport: Send + Sync {
+    async fn complete_duration_atomically(
+        &self,
+        context: &ProviderContext,
+        course_id: &str,
+        sco_id: &str,
+        plan: WellearnAtomicDurationCompletionPlan,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<WellearnAtomicDurationCompletionDocuments>;
 }
 
 /// Complete immutable wire plan for one donor-audited, one-start
