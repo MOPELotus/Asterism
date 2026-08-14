@@ -3355,6 +3355,96 @@ mod tests {
         (batch, plan, command, cursor)
     }
 
+    fn scanning_first_tab_tasks_cursor(
+        session_id: BrowserBridgeSessionId,
+    ) -> (
+        crate::UaiCourseResidenceBatchPlan,
+        UaiBrowserResidencePlan,
+        UaiBrowserCommandEnvelope,
+        crate::UaiBrowserResidenceCursor,
+    ) {
+        let (batch, plan, command, cursor) = clicking_first_tab_cursor(session_id);
+        let handle = match &command.command {
+            UaiBrowserCommand::ClickTab { handle } => handle.clone(),
+            other => panic!("expected Tab click, got {other:?}"),
+        };
+        let completed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::ClickResult {
+                handle,
+                clicked: true,
+            },
+            [4; 32],
+        );
+        let tasks = cursor
+            .advance_tab_click(&batch, &plan, &command, &completed)
+            .unwrap();
+        let (cursor, command) = tasks.into_parts();
+        (batch, plan, command, cursor)
+    }
+
+    fn scanning_second_tab_tasks_cursor(
+        session_id: BrowserBridgeSessionId,
+    ) -> (
+        crate::UaiCourseResidenceBatchPlan,
+        UaiBrowserResidencePlan,
+        UaiBrowserCommandEnvelope,
+        crate::UaiBrowserResidenceCursor,
+    ) {
+        let (batch, plan, command, cursor) = scanning_first_tab_tasks_cursor(session_id);
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )
+        .unwrap();
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            "Introduction".to_owned(),
+            false,
+        )
+        .unwrap();
+        let listed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::PageList {
+                scope: UaiBrowserPageScope::Task,
+                entries: vec![task],
+            },
+            [5; 32],
+        );
+        let next_tab = cursor
+            .advance_task_list(&batch, &plan, &command, &listed)
+            .unwrap();
+        let handle = match &next_tab.command().command {
+            UaiBrowserCommand::ClickTab { handle } => handle.clone(),
+            other => panic!("expected Tab click, got {other:?}"),
+        };
+        let clicked = completed_event(
+            &plan,
+            session_id,
+            next_tab.command(),
+            UaiBrowserEvent::ClickResult {
+                handle,
+                clicked: true,
+            },
+            [6; 32],
+        );
+        let tasks = next_tab
+            .cursor()
+            .advance_tab_click(&batch, &plan, next_tab.command(), &clicked)
+            .unwrap();
+        let (cursor, command) = tasks.into_parts();
+        (batch, plan, command, cursor)
+    }
+
     #[test]
     fn encrypted_accumulated_cursor_artifact_is_stable_redacted_and_recoverable() {
         let (batch, plan, command, cursor) = initial_residence_cursor("nonce-cursor");
@@ -3873,6 +3963,142 @@ mod tests {
             }
         ));
         assert_eq!(cursor.stage(), crate::UaiBrowserCursorStage::ClickingTab);
+    }
+
+    #[test]
+    fn completed_task_scan_freezes_snapshot_and_clicks_unique_target() {
+        let session_id = BrowserBridgeSessionId::new();
+        let (batch, plan, command, cursor) = scanning_first_tab_tasks_cursor(session_id);
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )
+        .unwrap();
+        let tasks = vec![
+            UaiBrowserPageEntry::try_new(
+                &plan,
+                &binding,
+                UaiBrowserPageScope::Task,
+                0,
+                "Introduction".to_owned(),
+                false,
+            )
+            .unwrap(),
+            UaiBrowserPageEntry::try_new(
+                &plan,
+                &binding,
+                UaiBrowserPageScope::Task,
+                1,
+                "Task Z".to_owned(),
+                true,
+            )
+            .unwrap(),
+        ];
+        let target_handle = tasks[1].handle.clone();
+        let completed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::PageList {
+                scope: UaiBrowserPageScope::Task,
+                entries: tasks.clone(),
+            },
+            [5; 32],
+        );
+        let advanced = cursor
+            .advance_task_list(&batch, &plan, &command, &completed)
+            .unwrap();
+
+        assert_eq!(
+            advanced.cursor().stage(),
+            crate::UaiBrowserCursorStage::ClickingTask
+        );
+        assert_eq!(advanced.cursor().task_snapshot(), tasks);
+        assert_eq!(advanced.cursor().processed_tabs(), 1);
+        assert_eq!(advanced.cursor().current_tab_ordinal(), Some(0));
+        assert_eq!(advanced.cursor().next_tab_ordinal(), 1);
+        assert_eq!(advanced.cursor().prior_result_digest(), Some([5; 32]));
+        assert!(matches!(
+            advanced.command().command,
+            UaiBrowserCommand::ClickTask { ref handle } if *handle == target_handle
+        ));
+    }
+
+    #[test]
+    fn task_scan_without_target_advances_to_next_frozen_tab() {
+        let session_id = BrowserBridgeSessionId::new();
+        let (batch, plan, command, cursor) = scanning_first_tab_tasks_cursor(session_id);
+        let binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )
+        .unwrap();
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            "Introduction".to_owned(),
+            false,
+        )
+        .unwrap();
+        let next_tab_handle = cursor.tab_snapshot()[1].handle.clone();
+        let completed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::PageList {
+                scope: UaiBrowserPageScope::Task,
+                entries: vec![task],
+            },
+            [5; 32],
+        );
+        let advanced = cursor
+            .advance_task_list(&batch, &plan, &command, &completed)
+            .unwrap();
+
+        assert_eq!(
+            advanced.cursor().stage(),
+            crate::UaiBrowserCursorStage::ClickingTab
+        );
+        assert!(advanced.cursor().task_snapshot().is_empty());
+        assert_eq!(advanced.cursor().processed_tabs(), 1);
+        assert_eq!(advanced.cursor().current_tab_ordinal(), Some(1));
+        assert_eq!(advanced.cursor().next_tab_ordinal(), 2);
+        assert!(matches!(
+            advanced.command().command,
+            UaiBrowserCommand::ClickTab { ref handle } if *handle == next_tab_handle
+        ));
+    }
+
+    #[test]
+    fn final_task_scan_without_target_fails_closed() {
+        let session_id = BrowserBridgeSessionId::new();
+        let (batch, plan, command, cursor) = scanning_second_tab_tasks_cursor(session_id);
+        let completed = completed_event(
+            &plan,
+            session_id,
+            &command,
+            UaiBrowserEvent::PageList {
+                scope: UaiBrowserPageScope::Task,
+                entries: Vec::new(),
+            },
+            [7; 32],
+        );
+        assert_eq!(
+            cursor
+                .advance_task_list(&batch, &plan, &command, &completed)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(cursor.current_tab_ordinal(), Some(1));
+        assert_eq!(cursor.next_tab_ordinal(), 2);
+        assert_eq!(cursor.processed_tabs(), 1);
     }
 
     #[tokio::test]

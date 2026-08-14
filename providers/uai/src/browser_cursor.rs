@@ -499,6 +499,105 @@ impl UaiBrowserResidenceCursor {
         })
     }
 
+    /// Freezes the current bounded Task snapshot and selects either the exact
+    /// target Task or the next frozen Tab to inspect.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a foreign Task scan, duplicate target title,
+    /// invalid snapshot, or when every frozen Tab has been exhausted without
+    /// finding the fresh target Task.
+    pub fn advance_task_list(
+        &self,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+        completed: &UaiBrowserEventExchangeCompleted,
+    ) -> ProviderResult<UaiBrowserCursorAdvance> {
+        self.validate_for_command(batch, plan, command)?;
+        if self.stage != UaiBrowserCursorStage::ScanningTasks
+            || !matches!(
+                &command.command,
+                UaiBrowserCommand::ScanPage {
+                    scope: UaiBrowserPageScope::Task
+                }
+            )
+        {
+            return Err(stale_cursor());
+        }
+        let result_digest = completed_event_digest(self, command, completed)?;
+        completed
+            .event()
+            .validate_for_command(plan, command, &completed.event().origin)?;
+        let UaiBrowserEvent::PageList {
+            scope: UaiBrowserPageScope::Task,
+            entries,
+        } = &completed.event().event
+        else {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI accumulated cursor requires a completed Task-list event",
+            ));
+        };
+        let binding = UaiBrowserSessionBinding::try_new(
+            plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )?;
+        let next_sequence = command.sequence.checked_add(1).ok_or_else(invalid_cursor)?;
+        let target_present = entries.iter().any(|entry| entry.label == plan.target.task);
+        let (stage, current_tab_ordinal, next_tab_ordinal, retain_tasks, next_command) =
+            if target_present {
+                let target = plan.select_target_task_entry(&binding, entries)?;
+                (
+                    UaiBrowserCursorStage::ClickingTask,
+                    self.current_tab_ordinal,
+                    self.next_tab_ordinal,
+                    true,
+                    UaiBrowserCommandEnvelope::click_task(plan, &binding, next_sequence, &target)?,
+                )
+            } else if let Some(next_tab) = self.tab_snapshot.get(self.next_tab_ordinal as usize) {
+                (
+                    UaiBrowserCursorStage::ClickingTab,
+                    Some(next_tab.ordinal),
+                    next_tab.ordinal.checked_add(1).ok_or_else(invalid_cursor)?,
+                    false,
+                    UaiBrowserCommandEnvelope::click_tab(plan, &binding, next_sequence, next_tab)?,
+                )
+            } else {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::RemoteChanged,
+                    "UAI target Task disappeared from every frozen Tab",
+                ));
+            };
+        let processed_tabs = if self.current_tab_ordinal.is_some() {
+            self.processed_tabs
+                .checked_add(1)
+                .ok_or_else(invalid_cursor)?
+        } else {
+            self.processed_tabs
+        };
+        let mut next = self.clone();
+        next.stage = stage;
+        next.current_tab_ordinal = current_tab_ordinal;
+        next.next_tab_ordinal = next_tab_ordinal;
+        if retain_tasks {
+            next.task_snapshot.clone_from(entries);
+        } else {
+            next.task_snapshot.clear();
+        }
+        next.processed_tabs = processed_tabs;
+        next.prior_result_sequence = Some(command.sequence);
+        next.prior_result_digest = Some(result_digest);
+        next.next_command_digest = next_command.exchange_digest(plan)?;
+        next.validate_for_command(batch, plan, &next_command)?;
+        Ok(UaiBrowserCursorAdvance {
+            cursor: next,
+            command: next_command,
+        })
+    }
+
     /// Encodes this validated accumulated cursor for encrypted persistence.
     ///
     /// # Errors

@@ -436,8 +436,12 @@ only ordinal zero for sequence-next `ClickTab`, while an empty Tab list moves
 directly to `ScanPage(Task)` without inventing a click. An accepted Tab click
 retains the frozen snapshot and current/next ordinals, does not count the Tab
 as processed before its Tasks run, and advances to sequence-next
-`ScanPage(Task)`. Later Task snapshot, residence and remaining-Tab transitions
-remain incremental Provider work around the shared dispatcher.
+`ScanPage(Task)`. The completed Task scan freezes its validated ordered
+snapshot. Exactly one fresh target title authorizes `ClickTask`; a missing
+target advances to the next handle from the frozen Tab snapshot, clears the
+old Task snapshot and counts the inspected Tab once. Exhausting every frozen
+Tab without the target fails `RemoteChanged`. Residence and post-click
+transitions remain incremental Provider work around the shared dispatcher.
 
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.
