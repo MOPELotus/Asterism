@@ -3179,3 +3179,24 @@ and UAI residence envelopes remain in their Provider crates; helper dispatch,
 result transport, credential commit, DOM execution,
 durable Attempt/QuestionSession binding and fresh verification continue as
 separate Core work.
+
+## One-hundred-and-eighty-fourth Phase 0 slice
+
+Chaoxing Exam Question acquisition now uses the shared durable pre-Question
+attempt contract instead of hiding `phone/start` inside a read call. The
+Provider first performs Course/Exam/cover reads and encodes an encrypted,
+Task-bound command. Immediately before execution it repeats those read-only
+lookups and requires the full continuation digest to remain identical. Core
+persists the exact `chaoxing.exam-start.v1` request digest before the Native
+transport sends the one-shot request, so a network ambiguity cannot trigger an
+automatic replay.
+
+A validated start redirect yields the current attempt identity, dynamic `enc`
+and timing fields. The Provider fetches the exact attempt-bound mobile page,
+normalizes every Question, fingerprints the complete ordered set and returns a minimal
+encrypted artifact. SQLite atomically materializes that artifact with the
+immutable `QuestionSnapshot`, `QuestionSession` and accepted operation record;
+HTML and answer content never enter the artifact. Exam-code, face and captcha
+branches remain typed `HumanRequired` for the pending BrowserBridge/Capture
+execution path, and ambiguous start recovery remains locked until fresh
+readback behavior is proven rather than guessed.

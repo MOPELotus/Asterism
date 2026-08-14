@@ -31,6 +31,10 @@ No donor source is vendored into Asterism by this audit.
 
 ## Refresh log
 
+- 2026-08-14: refreshed all six recorded donor default `HEAD` revisions at the
+  durable Exam-start checkpoint. Every revision remains unchanged. OCS still
+  resolves its default `HEAD` to branch `4.0` at `890686a5e54f`; its unrelated
+  `main` and `master` pointers are not treated as default-branch updates.
 - 2026-08-13: refreshed every recorded donor through the GitHub API. All six
   recorded default-branch revisions remained unchanged. Tags and releases were
   also enumerated: `Samueli924/chaoxing` latest tag/release remains `v3.1.4`,

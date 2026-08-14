@@ -1,6 +1,6 @@
 use std::{borrow::Cow, fmt, sync::Arc};
 
-use asterism_domain::HumanRequiredReason;
+use asterism_domain::{HumanRequiredReason, TaskId};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{ProviderContext, ProviderError, ProviderErrorKind, ProviderResult};
 use asterism_secrets::SecretString;
@@ -12,6 +12,7 @@ use reqwest::{
 };
 use scraper::{Html, Selector};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::{
@@ -22,7 +23,7 @@ use crate::{
     ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
     ChaoxingWorkVerificationRoute, classify_work_detail,
     exam_attempt::{
-        parse_exam_attempt, parse_exam_cover, valid_exam_question_url, valid_exam_start_redirect,
+        ChaoxingExamStartCommand, ChaoxingExamStartOutcome, parse_exam_attempt, parse_exam_cover,
     },
     parse_submission_receipt,
     resource_execution::{
@@ -408,12 +409,13 @@ impl NativeChaoxingInventoryTransport {
             .into_inventory_document()
     }
 
-    #[allow(clippy::too_many_lines)]
-    async fn fetch_exam_question_document_once(
+    async fn prepare_exam_start_once(
         &self,
         session: &ChaoxingCookieSession,
-        request: ChaoxingExamQuestionRequest<'_>,
-    ) -> ProviderResult<ChaoxingInventoryDocument> {
+        task_id: TaskId,
+        remote_task_id: &str,
+        request: &ChaoxingExamQuestionRequest<'_>,
+    ) -> ProviderResult<ChaoxingExamStartCommand> {
         let cover_url = build_url(
             EXAM_COVER_BASE,
             &[
@@ -435,15 +437,24 @@ impl NativeChaoxingInventoryTransport {
                 HumanRequiredReason::BrowserRequired,
             ));
         }
+        ChaoxingExamStartCommand::from_cover(task_id, remote_task_id, request, cover_facts)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn execute_exam_start_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        command: &ChaoxingExamStartCommand,
+    ) -> ProviderResult<ChaoxingExamStartOutcome> {
         let start_url = build_url(
             EXAM_START_BASE,
             &[
-                ("courseId", request.route().course_id()),
-                ("classId", request.route().class_id()),
-                ("examId", request.exam_id()),
+                ("courseId", command.course_id()),
+                ("classId", command.class_id()),
+                ("examId", command.exam_id()),
                 ("source", "0"),
-                ("examAnswerId", &cover_facts.exam_answer_id),
-                ("cpi", request.route().cpi()),
+                ("examAnswerId", command.exam_answer_id()),
+                ("cpi", command.cpi()),
                 ("keyboardDisplayRequiresUserAction", "1"),
                 ("imei", "asterism-native"),
                 ("faceDetection", "0"),
@@ -472,29 +483,28 @@ impl NativeChaoxingInventoryTransport {
             let url = start_url
                 .join(location)
                 .map_err(|_| protocol_drift("Chaoxing Exam start redirect is invalid"))?;
-            if !valid_exam_start_redirect(&url, request.route(), request.exam_id()) {
+            if !command.valid_start_redirect(&url) {
                 return Err(protocol_drift(
                     "Chaoxing Exam start redirect crossed its route boundary",
                 ));
             }
             let document = self.get_html(session, url.clone()).await?;
-            let material =
-                parse_exam_attempt(&url, document.as_str(), &cover_facts.exam_answer_id)?;
+            let material = parse_exam_attempt(&url, document.as_str(), command.exam_answer_id())?;
             let question_url = build_url(
                 EXAM_QUESTION_BASE,
                 &[
-                    ("courseId", request.route().course_id()),
-                    ("classId", request.route().class_id()),
-                    ("tId", request.exam_id()),
-                    ("id", &material.exam_answer_id),
+                    ("courseId", command.course_id()),
+                    ("classId", command.class_id()),
+                    ("tId", command.exam_id()),
+                    ("id", material.exam_answer_id.as_str()),
                     ("source", "0"),
                     ("p", "1"),
                     ("isphone", "true"),
                     ("tag", "1"),
-                    ("cpi", request.route().cpi()),
+                    ("cpi", command.cpi()),
                     ("imei", "asterism-native"),
                     ("start", "0"),
-                    ("enc", material.enc.expose_secret()),
+                    ("enc", material.enc.as_str()),
                     ("keyboardDisplayRequiresUserAction", "1"),
                     ("monitorStatus", "0"),
                     ("monitorOp", "-1"),
@@ -506,17 +516,23 @@ impl NativeChaoxingInventoryTransport {
                 ],
             )?;
             let question = self.get_html(session, question_url.clone()).await?;
-            if !valid_exam_question_url(
-                &question_url,
-                request.route(),
-                request.exam_id(),
-                &material.exam_answer_id,
-            ) {
+            if !command.valid_question_url(&question_url, &material.exam_answer_id) {
                 return Err(protocol_drift(
                     "Chaoxing Exam Question route lost attempt binding",
                 ));
             }
-            return question.into_inventory_document();
+            let mut response_hasher = Sha256::new();
+            response_hasher.update(url.as_str().as_bytes());
+            response_hasher.update([0]);
+            response_hasher.update(document.as_str().as_bytes());
+            response_hasher.update([0]);
+            response_hasher.update(question.as_str().as_bytes());
+            return Ok(ChaoxingExamStartOutcome {
+                document: question.into_inventory_document()?,
+                material,
+                response_digest: response_hasher.finalize().into(),
+                received_at: Utc::now(),
+            });
         }
         if status.is_success() {
             return Err(ProviderError::human_required(
@@ -922,8 +938,51 @@ impl ChaoxingQuestionTransport for NativeChaoxingInventoryTransport {
         request: ChaoxingExamQuestionRequest<'_>,
     ) -> ProviderResult<ChaoxingInventoryDocument> {
         let (session, _) = self.session_for_operation(context).await?;
-        self.fetch_exam_question_document_once(&session, request)
+        let remote_task_id = format!(
+            "exam:{}:{}:{}",
+            request.route().course_id(),
+            request.route().class_id(),
+            request.exam_id()
+        );
+        let command = self
+            .prepare_exam_start_once(&session, TaskId::new(), &remote_task_id, &request)
+            .await?;
+        Ok(self
+            .execute_exam_start_once(&session, &command)
+            .await?
+            .document)
+    }
+
+    async fn prepare_exam_start(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        request: &ChaoxingExamQuestionRequest<'_>,
+    ) -> ProviderResult<ChaoxingExamStartCommand> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .prepare_exam_start_once(&session, task_id, remote_task_id, request)
             .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.prepare_exam_start_once(&session, task_id, remote_task_id, request)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn execute_exam_start(
+        &self,
+        context: &ProviderContext,
+        command: &ChaoxingExamStartCommand,
+    ) -> ProviderResult<ChaoxingExamStartOutcome> {
+        // Authentication is resolved before the registered one-shot command.
+        // A send error is returned directly and Core retains ambiguity.
+        let (session, _) = self.session_for_operation(context).await?;
+        self.execute_exam_start_once(&session, command).await
     }
 }
 

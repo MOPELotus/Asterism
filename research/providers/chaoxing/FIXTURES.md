@@ -139,3 +139,10 @@ every fixture before staging it.
 - Unknown status text is retained as sanitized evidence and maps to `Unknown`.
 - Remote IDs remain stable across scans while mutable status/time facts produce a
   typed diff.
+- Exam start fixtures must prove that the read-only cover freezes the exact
+  course/class/exam/attempt request, that a second fresh discovery matches the
+  encrypted continuation, and that only normalized Questions plus bounded
+  dynamic attempt material enter the atomic artifact.
+- A changed `enc_task`, `examAnswerId`, course/class route or command digest must
+  fail before the one-shot start; an issued transport error must remain
+  ambiguous and must never be represented by a fixture retry.

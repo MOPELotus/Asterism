@@ -35,7 +35,10 @@ pub use chapter_inventory::parse_chapter_inventory;
 pub use course_inventory::{
     ChaoxingCourseInventory, ChaoxingCourseInventoryTransport, parse_course_inventory,
 };
-pub(crate) use exam_attempt::ChaoxingExamQuestionRequest;
+pub(crate) use exam_attempt::ChaoxingExamQuestionArtifact;
+pub use exam_attempt::{
+    ChaoxingExamQuestionRequest, ChaoxingExamStartCommand, ChaoxingExamStartOutcome,
+};
 pub use inventory::{
     ChaoxingCourseScope, classify_work_detail, parse_exam_inventory, parse_work_inventory,
 };

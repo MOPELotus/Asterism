@@ -1,10 +1,13 @@
 use std::fmt;
 
+use asterism_domain::{Question, TaskId, Timestamp};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
-use asterism_secrets::SecretString;
+use asterism_secrets::{SecretString, SecretValue};
 use reqwest::Url;
 use scraper::{Html, Selector};
-use zeroize::Zeroize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::ChaoxingCourseRoute;
 
@@ -13,6 +16,14 @@ const MAX_EXAM_ID_BYTES: usize = 128;
 const MAX_ENC_TASK_BYTES: usize = 2_048;
 const MAX_ATTEMPT_ENC_BYTES: usize = 4_096;
 const MAX_TITLE_BYTES: usize = 512;
+const MAX_EXAM_STATE_BYTES: usize = 128 * 1_024;
+const MAX_REMOTE_TASK_ID_BYTES: usize = 640;
+
+pub const CHAOXING_EXAM_PRE_QUESTION_TYPE: &str = "chaoxing.exam-pre-question.v1";
+pub const CHAOXING_EXAM_READY_TO_START_PHASE: &str = "chaoxing.exam-ready-to-start";
+pub const CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE: &str = "chaoxing.exam-question-attempt.v1";
+pub const CHAOXING_EXAM_QUESTIONS_READY_PHASE: &str = "chaoxing.exam-questions-ready";
+pub const CHAOXING_EXAM_START_OPERATION: &str = "chaoxing.exam-start.v1";
 
 /// Fresh Exam entry facts carried from one task inventory into the mutating
 /// start chain. The entry and dynamic `enc_task` remain provider-private.
@@ -80,27 +91,500 @@ impl fmt::Debug for ChaoxingExamQuestionRequest<'_> {
             .field("exam_id", &self.exam_id)
             .field("enc_task", &"[REDACTED]")
             .field("route", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Exact, encrypted-at-rest command for the donor-observed one-shot Exam
+/// start request. Core persists its request digest before the transport sends
+/// anything, so an ambiguous response cannot cause an automatic replay.
+pub struct ChaoxingExamStartCommand {
+    task_id: Zeroizing<String>,
+    remote_task_id: Zeroizing<String>,
+    remote_course_id: Zeroizing<String>,
+    course_id: Zeroizing<String>,
+    class_id: Zeroizing<String>,
+    cpi: Zeroizing<String>,
+    exam_id: Zeroizing<String>,
+    enc_task: Zeroizing<String>,
+    exam_answer_id: Zeroizing<String>,
+    request_digest: [u8; 32],
+}
+
+impl ChaoxingExamStartCommand {
+    pub(crate) fn from_cover(
+        task_id: TaskId,
+        remote_task_id: &str,
+        request: &ChaoxingExamQuestionRequest<'_>,
+        cover: ChaoxingExamCover,
+    ) -> ProviderResult<Self> {
+        let command = Self {
+            task_id: Zeroizing::new(task_id.to_string()),
+            remote_task_id: Zeroizing::new(remote_task_id.to_owned()),
+            remote_course_id: Zeroizing::new(request.route().remote_course_id().to_owned()),
+            course_id: Zeroizing::new(request.route().course_id().to_owned()),
+            class_id: Zeroizing::new(request.route().class_id().to_owned()),
+            cpi: Zeroizing::new(request.route().cpi().to_owned()),
+            exam_id: Zeroizing::new(request.exam_id().to_owned()),
+            enc_task: Zeroizing::new(request.enc_task().to_owned()),
+            exam_answer_id: cover.exam_answer_id,
+            request_digest: [0; 32],
+        };
+        command.validate_bound(task_id, remote_task_id)?;
+        let request_digest = command.derive_request_digest()?;
+        Ok(Self {
+            request_digest,
+            ..command
+        })
+    }
+
+    pub(crate) fn encode(&self) -> ProviderResult<EncodedChaoxingExamState> {
+        let mut encoded = Zeroizing::new(
+            serde_json::to_vec(&ExamStartCommandWireRef {
+                schema: CHAOXING_EXAM_PRE_QUESTION_TYPE,
+                task_id: &self.task_id,
+                remote_task_id: &self.remote_task_id,
+                remote_course_id: &self.remote_course_id,
+                course_id: &self.course_id,
+                class_id: &self.class_id,
+                cpi: &self.cpi,
+                exam_id: &self.exam_id,
+                enc_task: &self.enc_task,
+                exam_answer_id: &self.exam_answer_id,
+            })
+            .map_err(|_| invalid_response("Chaoxing Exam start command could not be encoded"))?,
+        );
+        encoded_state(&mut encoded)
+    }
+
+    pub(crate) fn decode_bound(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+        task_id: TaskId,
+        remote_task_id: &str,
+    ) -> ProviderResult<Self> {
+        let bytes = value.expose_secret();
+        validate_encoded_state(bytes, expected_digest)?;
+        let mut wire: ExamStartCommandWire = serde_json::from_slice(bytes)
+            .map_err(|_| protocol_drift("Chaoxing Exam start command schema is invalid"))?;
+        if wire.schema != CHAOXING_EXAM_PRE_QUESTION_TYPE {
+            return Err(protocol_drift(
+                "Chaoxing Exam start command type is invalid",
+            ));
+        }
+        let mut command = Self {
+            task_id: Zeroizing::new(std::mem::take(&mut wire.task_id)),
+            remote_task_id: Zeroizing::new(std::mem::take(&mut wire.remote_task_id)),
+            remote_course_id: Zeroizing::new(std::mem::take(&mut wire.remote_course_id)),
+            course_id: Zeroizing::new(std::mem::take(&mut wire.course_id)),
+            class_id: Zeroizing::new(std::mem::take(&mut wire.class_id)),
+            cpi: Zeroizing::new(std::mem::take(&mut wire.cpi)),
+            exam_id: Zeroizing::new(std::mem::take(&mut wire.exam_id)),
+            enc_task: Zeroizing::new(std::mem::take(&mut wire.enc_task)),
+            exam_answer_id: Zeroizing::new(std::mem::take(&mut wire.exam_answer_id)),
+            request_digest: [0; 32],
+        };
+        command.validate_bound(task_id, remote_task_id)?;
+        command.request_digest = command.derive_request_digest()?;
+        Ok(command)
+    }
+
+    fn validate_bound(&self, task_id: TaskId, remote_task_id: &str) -> ProviderResult<()> {
+        if self.task_id.as_str() != task_id.to_string()
+            || self.remote_task_id.as_str() != remote_task_id
+            || !valid_remote_task_id(remote_task_id)
+            || !valid_component(&self.course_id)
+            || !valid_component(&self.class_id)
+            || !valid_component(&self.cpi)
+            || !valid_component(&self.exam_id)
+            || !valid_component(&self.exam_answer_id)
+            || self.enc_task.is_empty()
+            || self.enc_task.len() > MAX_ENC_TASK_BYTES
+            || self.enc_task.chars().any(char::is_control)
+            || remote_task_id
+                != format!(
+                    "exam:{}:{}:{}",
+                    self.course_id(),
+                    self.class_id(),
+                    self.exam_id()
+                )
+            || self.remote_course_id.as_str()
+                != format!("course:{}:{}", self.course_id(), self.class_id())
+        {
+            return Err(protocol_drift(
+                "Chaoxing Exam start command is stale or foreign",
+            ));
+        }
+        Ok(())
+    }
+
+    fn derive_request_digest(&self) -> ProviderResult<[u8; 32]> {
+        let encoded = serde_json::to_vec(&ExamStartRequestIdentity {
+            method: "GET",
+            endpoint: "/exam-ans/exam/phone/start",
+            course_id: &self.course_id,
+            class_id: &self.class_id,
+            exam_id: &self.exam_id,
+            source: "0",
+            exam_answer_id: &self.exam_answer_id,
+            cpi: &self.cpi,
+            keyboard_display_requires_user_action: "1",
+            imei: "asterism-native",
+            face_detection: "0",
+            facekey: "",
+            face_detection_result: "",
+            captcha_validate: "",
+            jt: "0",
+            code: "",
+        })
+        .map_err(|_| invalid_response("Chaoxing Exam start identity could not be encoded"))?;
+        Ok(Sha256::digest(encoded).into())
+    }
+
+    pub(crate) const fn operation_type() -> &'static str {
+        CHAOXING_EXAM_START_OPERATION
+    }
+
+    pub(crate) const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    pub(crate) fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub(crate) fn remote_course_id(&self) -> &str {
+        &self.remote_course_id
+    }
+
+    pub(crate) fn course_id(&self) -> &str {
+        &self.course_id
+    }
+
+    pub(crate) fn class_id(&self) -> &str {
+        &self.class_id
+    }
+
+    pub(crate) fn cpi(&self) -> &str {
+        &self.cpi
+    }
+
+    pub(crate) fn exam_id(&self) -> &str {
+        &self.exam_id
+    }
+
+    pub(crate) fn exam_answer_id(&self) -> &str {
+        &self.exam_answer_id
+    }
+
+    pub(crate) fn valid_start_redirect(&self, url: &Url) -> bool {
+        valid_exam_start_redirect_binding(url, self.course_id(), self.class_id(), self.exam_id())
+    }
+
+    pub(crate) fn valid_question_url(&self, url: &Url, exam_answer_id: &str) -> bool {
+        valid_exam_question_url_binding(
+            url,
+            self.course_id(),
+            self.class_id(),
+            self.exam_id(),
+            exam_answer_id,
+        )
+    }
+}
+
+impl fmt::Debug for ChaoxingExamStartCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingExamStartCommand")
+            .field("binding", &"configured")
+            .field("request_digest", &self.request_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct ChaoxingExamStartOutcome {
+    pub(crate) document: crate::ChaoxingInventoryDocument,
+    pub(crate) material: ChaoxingExamAttemptMaterial,
+    pub(crate) response_digest: [u8; 32],
+    pub(crate) received_at: Timestamp,
+}
+
+impl fmt::Debug for ChaoxingExamStartOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingExamStartOutcome")
+            .field("document", &"[REDACTED]")
+            .field("material", &self.material)
+            .field("response_digest", &self.response_digest)
+            .field("received_at", &self.received_at)
             .finish()
     }
 }
 
+/// Minimal encrypted attempt material attached to the immutable Core Question
+/// snapshot. It retains no response HTML or answer content.
+pub(crate) struct ChaoxingExamQuestionArtifact {
+    task_id: Zeroizing<String>,
+    remote_task_id: Zeroizing<String>,
+    remote_course_id: Zeroizing<String>,
+    course_id: Zeroizing<String>,
+    class_id: Zeroizing<String>,
+    cpi: Zeroizing<String>,
+    exam_id: Zeroizing<String>,
+    exam_answer_id: Zeroizing<String>,
+    enc: Zeroizing<String>,
+    enc_remain_time: u64,
+    remain_time: u64,
+    last_update_time: u64,
+    question_count: u32,
+    question_set_digest: Zeroizing<String>,
+}
+
+impl ChaoxingExamQuestionArtifact {
+    pub(crate) fn from_materialization(
+        task_id: TaskId,
+        command: &ChaoxingExamStartCommand,
+        material: ChaoxingExamAttemptMaterial,
+        questions: &[Question],
+    ) -> ProviderResult<Self> {
+        if material.exam_answer_id.as_str() != command.exam_answer_id() || questions.is_empty() {
+            return Err(protocol_drift(
+                "Chaoxing Exam materialization changed its attempt binding",
+            ));
+        }
+        let question_count = u32::try_from(questions.len())
+            .map_err(|_| invalid_response("Chaoxing Exam Question count is unbounded"))?;
+        let mut question_set_hasher = Sha256::new();
+        for question in questions {
+            question
+                .validate()
+                .map_err(|_| invalid_response("Chaoxing Exam Question is invalid"))?;
+            if question.task_id != task_id {
+                return Err(protocol_drift(
+                    "Chaoxing Exam Question belongs to another Task",
+                ));
+            }
+            let remote_question_id = question
+                .remote_question_id
+                .as_deref()
+                .ok_or_else(|| protocol_drift("Chaoxing Exam Question has no remote identity"))?;
+            let fingerprint = question
+                .content_fingerprint()
+                .map_err(|_| invalid_response("Chaoxing Exam Question fingerprint failed"))?
+                .to_string();
+            hash_bounded_component(&mut question_set_hasher, remote_question_id)?;
+            question_set_hasher.update(question.position.to_be_bytes());
+            hash_bounded_component(&mut question_set_hasher, &fingerprint)?;
+        }
+        Ok(Self {
+            task_id: Zeroizing::new(task_id.to_string()),
+            remote_task_id: Zeroizing::new(command.remote_task_id().to_owned()),
+            remote_course_id: Zeroizing::new(command.remote_course_id().to_owned()),
+            course_id: Zeroizing::new(command.course_id().to_owned()),
+            class_id: Zeroizing::new(command.class_id().to_owned()),
+            cpi: Zeroizing::new(command.cpi().to_owned()),
+            exam_id: Zeroizing::new(command.exam_id().to_owned()),
+            exam_answer_id: material.exam_answer_id,
+            enc: material.enc,
+            enc_remain_time: material.enc_remain_time,
+            remain_time: material.remain_time,
+            last_update_time: material.last_update_time,
+            question_count,
+            question_set_digest: Zeroizing::new(hex_digest(question_set_hasher.finalize().into())),
+        })
+    }
+
+    pub(crate) fn encode(&self) -> ProviderResult<EncodedChaoxingExamState> {
+        let mut encoded = Zeroizing::new(
+            serde_json::to_vec(&ExamQuestionArtifactWireRef {
+                schema: CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE,
+                task_id: &self.task_id,
+                remote_task_id: &self.remote_task_id,
+                remote_course_id: &self.remote_course_id,
+                course_id: &self.course_id,
+                class_id: &self.class_id,
+                cpi: &self.cpi,
+                exam_id: &self.exam_id,
+                exam_answer_id: &self.exam_answer_id,
+                enc: &self.enc,
+                enc_remain_time: self.enc_remain_time,
+                remain_time: self.remain_time,
+                last_update_time: self.last_update_time,
+                question_count: self.question_count,
+                question_set_digest: &self.question_set_digest,
+            })
+            .map_err(|_| invalid_response("Chaoxing Exam artifact could not be encoded"))?,
+        );
+        encoded_state(&mut encoded)
+    }
+}
+
+pub(crate) struct EncodedChaoxingExamState {
+    value: SecretValue,
+    digest: [u8; 32],
+}
+
+impl EncodedChaoxingExamState {
+    pub(crate) const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub(crate) fn into_secret_value(self) -> SecretValue {
+        self.value
+    }
+}
+
+impl fmt::Debug for EncodedChaoxingExamState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncodedChaoxingExamState")
+            .field("value", &"[REDACTED]")
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct ExamStartCommandWireRef<'a> {
+    schema: &'static str,
+    task_id: &'a str,
+    remote_task_id: &'a str,
+    remote_course_id: &'a str,
+    course_id: &'a str,
+    class_id: &'a str,
+    cpi: &'a str,
+    exam_id: &'a str,
+    enc_task: &'a str,
+    exam_answer_id: &'a str,
+}
+
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+struct ExamStartCommandWire {
+    schema: String,
+    task_id: String,
+    remote_task_id: String,
+    remote_course_id: String,
+    course_id: String,
+    class_id: String,
+    cpi: String,
+    exam_id: String,
+    enc_task: String,
+    exam_answer_id: String,
+}
+
+#[derive(Serialize)]
+struct ExamStartRequestIdentity<'a> {
+    method: &'static str,
+    endpoint: &'static str,
+    course_id: &'a str,
+    class_id: &'a str,
+    exam_id: &'a str,
+    source: &'static str,
+    exam_answer_id: &'a str,
+    cpi: &'a str,
+    keyboard_display_requires_user_action: &'static str,
+    imei: &'static str,
+    face_detection: &'static str,
+    facekey: &'static str,
+    face_detection_result: &'static str,
+    captcha_validate: &'static str,
+    jt: &'static str,
+    code: &'static str,
+}
+
+#[derive(Serialize)]
+struct ExamQuestionArtifactWireRef<'a> {
+    schema: &'static str,
+    task_id: &'a str,
+    remote_task_id: &'a str,
+    remote_course_id: &'a str,
+    course_id: &'a str,
+    class_id: &'a str,
+    cpi: &'a str,
+    exam_id: &'a str,
+    exam_answer_id: &'a str,
+    enc: &'a str,
+    enc_remain_time: u64,
+    remain_time: u64,
+    last_update_time: u64,
+    question_count: u32,
+    question_set_digest: &'a str,
+}
+
+fn encoded_state(encoded: &mut Zeroizing<Vec<u8>>) -> ProviderResult<EncodedChaoxingExamState> {
+    if encoded.is_empty() || encoded.len() > MAX_EXAM_STATE_BYTES {
+        return Err(invalid_response("Chaoxing Exam state exceeds its bound"));
+    }
+    let digest = Sha256::digest(encoded.as_slice()).into();
+    Ok(EncodedChaoxingExamState {
+        value: SecretValue::new(std::mem::take(&mut **encoded)),
+        digest,
+    })
+}
+
+fn validate_encoded_state(bytes: &[u8], expected_digest: [u8; 32]) -> ProviderResult<()> {
+    if bytes.is_empty()
+        || bytes.len() > MAX_EXAM_STATE_BYTES
+        || Sha256::digest(bytes).as_slice() != expected_digest
+    {
+        return Err(protocol_drift(
+            "Chaoxing Exam state digest or size is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn hash_bounded_component(hasher: &mut Sha256, value: &str) -> ProviderResult<()> {
+    let length = u64::try_from(value.len())
+        .map_err(|_| invalid_response("Chaoxing Exam Question binding is unbounded"))?;
+    hasher.update(length.to_be_bytes());
+    hasher.update(value.as_bytes());
+    Ok(())
+}
+
+fn hex_digest(value: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in value {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 /// Non-secret metadata from the Exam cover page. Dynamic attempt material is
 /// intentionally kept separate and is only produced after the one-shot start.
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ChaoxingExamCover {
     pub(crate) title: String,
-    pub(crate) exam_answer_id: String,
-    pub(crate) monitor_enc: String,
+    pub(crate) exam_answer_id: Zeroizing<String>,
     pub(crate) need_code: bool,
     pub(crate) need_face: bool,
     pub(crate) need_captcha: bool,
     pub(crate) captcha_id: Option<String>,
 }
 
+impl fmt::Debug for ChaoxingExamCover {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingExamCover")
+            .field("title", &self.title)
+            .field("attempt_material", &"[REDACTED]")
+            .field("need_code", &self.need_code)
+            .field("need_face", &self.need_face)
+            .field("need_captcha", &self.need_captcha)
+            .field(
+                "captcha_id",
+                &self.captcha_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 /// Dynamic attempt state returned by the start redirect/page.
 pub(crate) struct ChaoxingExamAttemptMaterial {
-    pub(crate) exam_answer_id: String,
-    pub(crate) enc: SecretString,
+    pub(crate) exam_answer_id: Zeroizing<String>,
+    pub(crate) enc: Zeroizing<String>,
     pub(crate) enc_remain_time: u64,
     pub(crate) remain_time: u64,
     pub(crate) last_update_time: u64,
@@ -116,12 +600,6 @@ impl fmt::Debug for ChaoxingExamAttemptMaterial {
             .field("remain_time", &self.remain_time)
             .field("last_update_time", &self.last_update_time)
             .finish()
-    }
-}
-
-impl Drop for ChaoxingExamAttemptMaterial {
-    fn drop(&mut self) {
-        self.exam_answer_id.zeroize();
     }
 }
 
@@ -166,8 +644,7 @@ pub(crate) fn parse_exam_cover(html: &str) -> ProviderResult<ChaoxingExamCover> 
     let captcha_id = input_value(&document, "#captchaCaptchaId").filter(|v| !v.is_empty());
     Ok(ChaoxingExamCover {
         title,
-        exam_answer_id,
-        monitor_enc,
+        exam_answer_id: Zeroizing::new(exam_answer_id),
         need_code,
         need_face,
         need_captcha,
@@ -203,25 +680,26 @@ pub(crate) fn parse_exam_attempt(
     let remain_time = bounded_u64_input(&document, "#remainTime")?;
     let last_update_time = bounded_u64_input(&document, "#encLastUpdateTime")?;
     Ok(ChaoxingExamAttemptMaterial {
-        exam_answer_id,
-        enc: SecretString::new(enc),
+        exam_answer_id: Zeroizing::new(exam_answer_id),
+        enc: Zeroizing::new(enc),
         enc_remain_time,
         remain_time,
         last_update_time,
     })
 }
 
-pub(crate) fn valid_exam_question_url(
+fn valid_exam_question_url_binding(
     url: &Url,
-    route: ChaoxingCourseRoute<'_>,
+    course_id: &str,
+    class_id: &str,
     exam_id: &str,
     exam_answer_id: &str,
 ) -> bool {
     url.scheme() == "https"
         && url.host_str() == Some("mooc1-api.chaoxing.com")
         && url.path().contains("/exam-ans/exam/")
-        && unique_query(url, "courseId").as_deref() == Some(route.course_id())
-        && unique_query(url, "classId").as_deref() == Some(route.class_id())
+        && unique_query(url, "courseId").as_deref() == Some(course_id)
+        && unique_query(url, "classId").as_deref() == Some(class_id)
         && unique_query(url, "tId")
             .or_else(|| unique_query(url, "examRelationId"))
             .is_some_and(|value| value == exam_id)
@@ -230,16 +708,26 @@ pub(crate) fn valid_exam_question_url(
             .is_some_and(|value| value == exam_answer_id)
 }
 
+#[cfg(test)]
 pub(crate) fn valid_exam_start_redirect(
     url: &Url,
     route: ChaoxingCourseRoute<'_>,
     exam_id: &str,
 ) -> bool {
+    valid_exam_start_redirect_binding(url, route.course_id(), route.class_id(), exam_id)
+}
+
+fn valid_exam_start_redirect_binding(
+    url: &Url,
+    course_id: &str,
+    class_id: &str,
+    exam_id: &str,
+) -> bool {
     url.scheme() == "https"
         && url.host_str() == Some("mooc1-api.chaoxing.com")
         && url.path().contains("/exam-ans/exam/")
-        && unique_query(url, "courseId").as_deref() == Some(route.course_id())
-        && unique_query(url, "classId").as_deref() == Some(route.class_id())
+        && unique_query(url, "courseId").as_deref() == Some(course_id)
+        && unique_query(url, "classId").as_deref() == Some(class_id)
         && unique_query(url, "tId")
             .or_else(|| unique_query(url, "examRelationId"))
             .is_some_and(|value| value == exam_id)
@@ -328,6 +816,12 @@ fn valid_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+fn valid_remote_task_id(value: &str) -> bool {
+    value.starts_with("exam:")
+        && value.len() <= MAX_REMOTE_TASK_ID_BYTES
+        && !value.chars().any(char::is_control)
+}
+
 fn unique_query<'a>(url: &'a Url, key: &str) -> Option<std::borrow::Cow<'a, str>> {
     let mut values = url
         .query_pairs()
@@ -358,14 +852,14 @@ mod tests {
     #[test]
     fn cover_and_start_bind_dynamic_attempt_material() {
         let cover = parse_exam_cover(COVER).unwrap();
-        assert_eq!(cover.exam_answer_id, "answer-1");
+        assert_eq!(cover.exam_answer_id.as_str(), "answer-1");
         assert!(cover.need_code);
         let url = Url::parse(
             "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew?courseId=100&classId=200&tId=exam-1&id=answer-1&enc=SAFE_ATTEMPT_ENC",
         )
         .unwrap();
         let attempt = parse_exam_attempt(&url, START, &cover.exam_answer_id).unwrap();
-        assert_eq!(attempt.exam_answer_id, "answer-1");
+        assert_eq!(attempt.exam_answer_id.as_str(), "answer-1");
         assert_eq!(attempt.enc_remain_time, 3600);
         assert_eq!(attempt.remain_time, 3600);
     }

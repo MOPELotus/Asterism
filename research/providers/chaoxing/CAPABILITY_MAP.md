@@ -142,12 +142,18 @@ policy and remains independently guarded.
   readback. This synthetic/offline checkpoint does not stop further work.
 - Pending independent Exam rows with a structural `goTest` entry now advertise
   `QuestionInventory` and `QuestionParse`. The fresh read rebinds the exact
-  course/class/exam identity and `enc_task`, obtains the donor cover, performs
-  one non-replayed `phone/start`, validates the resulting `examAnswerId` and
-  dynamic `enc`, then fetches the bounded mobile Question page. Start material
-  never enters a Task snapshot; exam-code, face and captcha gates return typed
-  `HumanRequired` for BrowserBridge/Capture continuation. Exam remains separate
-  from Work payload and submission semantics.
+  course/class/exam identity and `enc_task`, obtains the donor cover, freezes a
+  versioned exact `phone/start` command and hands it to Core's durable
+  pre-Question attempt ledger. Before sending, the Provider repeats the
+  read-only discovery and requires the encrypted command digest to remain
+  identical. Core records the operation type/request digest first; the Native
+  transport then sends it once, validates the resulting `examAnswerId` and
+  dynamic `enc`, and fetches the bounded mobile Question page. The normalized
+  Question set and a minimal encrypted attempt artifact are materialized
+  atomically; neither HTML nor answer content is persisted. Ambiguous start
+  errors remain locked rather than replayed. Exam-code, face and captcha gates
+  return typed `HumanRequired` pending their BrowserBridge/Capture command path.
+  Exam remains separate from Work payload and submission semantics.
 
 ## Completion boundary
 

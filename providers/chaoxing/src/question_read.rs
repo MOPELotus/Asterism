@@ -5,18 +5,26 @@ use std::{
     time::{Duration, Instant},
 };
 
-use asterism_domain::{ProviderAccountId, Question, TaskId};
+use asterism_domain::{ProviderAccountId, ProviderId, Question, TaskId};
 use asterism_provider_api::{
-    CourseInventoryCapability, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
-    ProviderMetadata, ProviderResult, QuestionInventoryCapability, QuestionParseCapability,
-    RemoteCourse, RemoteQuestionRef,
+    AmbiguousProviderQuestionReadOperation, CourseInventoryCapability,
+    PreparedProviderQuestionReadOperation, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderIdentity, ProviderMetadata, ProviderQuestionMaterialization,
+    ProviderQuestionReadContinuation, ProviderQuestionReadStepOutcome, ProviderResult,
+    QuestionInventoryCapability, QuestionParseCapability, RemoteCourse, RemoteQuestionRef,
+    ResolvedProviderQuestionReadContinuation, ResolvedProviderRuntimeSettings,
 };
 use async_trait::async_trait;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingChapterWorkTarget,
-    ChaoxingCourseRoute, ChaoxingExamQuestionRequest, ChaoxingInventoryDocument,
-    ChaoxingInventoryTransport, ChaoxingWorkDetailRequest,
+    ChaoxingCourseRoute, ChaoxingExamQuestionRequest, ChaoxingExamStartCommand,
+    ChaoxingExamStartOutcome, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
+    ChaoxingWorkDetailRequest,
+    exam_attempt::{
+        CHAOXING_EXAM_PRE_QUESTION_TYPE, CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE,
+        CHAOXING_EXAM_QUESTIONS_READY_PHASE, CHAOXING_EXAM_READY_TO_START_PHASE,
+    },
     inventory::parse_work_inventory_entries,
     metadata::development_metadata,
     parse_chapter_inventory,
@@ -30,6 +38,7 @@ use crate::{
 const MAX_ACTIVE_QUESTION_ATTEMPTS: usize = 128;
 const QUESTION_ATTEMPT_TTL: Duration = Duration::from_mins(5);
 const MAX_REMOTE_TASK_ID_BYTES: usize = 640;
+const EXAM_CONTINUATION_TTL_SECONDS: u64 = 30 * 60;
 
 /// Native read transport for one independently discovered Work Question page.
 /// Implementations must preserve the Work route allowlist and bounded body
@@ -60,6 +69,33 @@ pub trait ChaoxingQuestionTransport: Send + Sync {
         context: &ProviderContext,
         request: ChaoxingExamQuestionRequest<'_>,
     ) -> ProviderResult<ChaoxingInventoryDocument>;
+
+    /// Performs only fresh read-only discovery and freezes the exact one-shot
+    /// Exam start request for Core to register before execution.
+    async fn prepare_exam_start(
+        &self,
+        _context: &ProviderContext,
+        _task_id: TaskId,
+        _remote_task_id: &str,
+        _request: &ChaoxingExamQuestionRequest<'_>,
+    ) -> ProviderResult<ChaoxingExamStartCommand> {
+        Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "Chaoxing transport does not implement durable Exam start preparation",
+        ))
+    }
+
+    /// Executes one command whose digest has already been persisted by Core.
+    async fn execute_exam_start(
+        &self,
+        _context: &ProviderContext,
+        _command: &ChaoxingExamStartCommand,
+    ) -> ProviderResult<ChaoxingExamStartOutcome> {
+        Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "Chaoxing transport does not implement durable Exam start execution",
+        ))
+    }
 }
 
 /// Development-level independent Work Question reader. Inventory and parsing
@@ -149,6 +185,42 @@ impl ChaoxingQuestionRead {
             .fetch_exam_question_document(context, request)
             .await?;
         crate::question_parser::parse_exam_question_page(document.as_str())
+    }
+
+    async fn prepare_fresh_exam_start(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        identity: &ScopedQuestionIdentity<'_>,
+    ) -> ProviderResult<ChaoxingExamStartCommand> {
+        let parsed_identity = QuestionTaskIdentity::Exam(*identity);
+        let courses = self.courses.list_courses(context).await?;
+        let course = matching_course(&courses, &parsed_identity)?;
+        let route = ChaoxingCourseRoute::from_remote_course(course)?;
+        let document = self.inventory.fetch_exam_inventory(context, route).await?;
+        let entries = crate::inventory::parse_exam_inventory_entries(
+            document.as_str(),
+            &route.parser_scope()?,
+        )?;
+        let mut matching = entries
+            .iter()
+            .filter(|entry| entry.task().remote_id == identity.remote_task);
+        let entry = matching.next().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Exam task is no longer present in fresh inventory",
+            )
+        })?;
+        if matching.next().is_some() {
+            return Err(protocol_drift(
+                "Chaoxing Exam inventory contains duplicate task identity",
+            ));
+        }
+        let request =
+            ChaoxingExamQuestionRequest::try_new(route, identity.remote_task, entry.entry())?;
+        self.transport
+            .prepare_exam_start(context, task_id, identity.remote_task, &request)
+            .await
     }
 
     async fn discover_independent_work_questions(
@@ -288,8 +360,184 @@ impl QuestionInventoryCapability for ChaoxingQuestionRead {
     ) -> ProviderResult<Vec<RemoteQuestionRef>> {
         validate_context(context, &self.metadata)?;
         let identity = QuestionTaskIdentity::parse(remote_task_id)?;
+        if matches!(identity, QuestionTaskIdentity::Exam(_)) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing Exam Questions require the durable start flow",
+            ));
+        }
         let questions = self.discover_questions(context, &identity).await?;
         self.store_attempt(QuestionAttemptKey::new(context, remote_task_id), questions)
+    }
+
+    async fn prepare_question_read_attempt(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderQuestionReadContinuation>> {
+        validate_context(context, &self.metadata)?;
+        let QuestionTaskIdentity::Exam(identity) = QuestionTaskIdentity::parse(remote_task_id)?
+        else {
+            return Ok(None);
+        };
+        let command = self
+            .prepare_fresh_exam_start(context, task_id, &identity)
+            .await?;
+        let encoded = command.encode()?;
+        let expected_digest = encoded.digest();
+        let continuation = ProviderQuestionReadContinuation::try_new(
+            &self.metadata.id,
+            CHAOXING_EXAM_PRE_QUESTION_TYPE,
+            CHAOXING_EXAM_READY_TO_START_PHASE,
+            encoded.into_secret_value(),
+            EXAM_CONTINUATION_TTL_SECONDS,
+        )?;
+        if continuation.continuation_digest() != expected_digest {
+            return Err(internal(
+                "Chaoxing Exam command digest changed at the Provider boundary",
+            ));
+        }
+        Ok(Some(continuation))
+    }
+
+    async fn prepare_question_read_operation(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        continuation: ResolvedProviderQuestionReadContinuation<'_>,
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Box<dyn PreparedProviderQuestionReadOperation>> {
+        validate_context(context, &self.metadata)?;
+        if continuation.continuation_type != CHAOXING_EXAM_PRE_QUESTION_TYPE
+            || continuation.phase != CHAOXING_EXAM_READY_TO_START_PHASE
+        {
+            return Err(protocol_drift(
+                "Chaoxing Exam pre-Question continuation metadata is invalid",
+            ));
+        }
+        let command = ChaoxingExamStartCommand::decode_bound(
+            continuation.value,
+            continuation.continuation_digest,
+            task_id,
+            remote_task_id,
+        )?;
+        let QuestionTaskIdentity::Exam(identity) = QuestionTaskIdentity::parse(remote_task_id)?
+        else {
+            return Err(protocol_drift(
+                "Chaoxing Exam continuation belongs to another task family",
+            ));
+        };
+        let fresh = self
+            .prepare_fresh_exam_start(context, task_id, &identity)
+            .await?;
+        if fresh.encode()?.digest() != continuation.continuation_digest {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Exam start binding changed during fresh rediscovery",
+            ));
+        }
+        Ok(Box::new(PreparedChaoxingExamStart {
+            provider_id: self.metadata.id.clone(),
+            task_id,
+            command,
+            transport: self.transport.clone(),
+        }))
+    }
+
+    async fn recover_ambiguous_question_read_operation(
+        &self,
+        context: &ProviderContext,
+        _task_id: TaskId,
+        _remote_task_id: &str,
+        _continuation: ResolvedProviderQuestionReadContinuation<'_>,
+        _operation: &AmbiguousProviderQuestionReadOperation,
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Option<ProviderQuestionReadStepOutcome>> {
+        validate_context(context, &self.metadata)?;
+        Ok(None)
+    }
+}
+
+struct PreparedChaoxingExamStart {
+    provider_id: ProviderId,
+    task_id: TaskId,
+    command: ChaoxingExamStartCommand,
+    transport: Arc<dyn ChaoxingQuestionTransport>,
+}
+
+impl fmt::Debug for PreparedChaoxingExamStart {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedChaoxingExamStart")
+            .field("provider_id", &self.provider_id)
+            .field("task_id", &self.task_id)
+            .field("command", &self.command)
+            .field("transport", &"configured")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl PreparedProviderQuestionReadOperation for PreparedChaoxingExamStart {
+    fn operation_type(&self) -> &str {
+        ChaoxingExamStartCommand::operation_type()
+    }
+
+    fn request_digest(&self) -> [u8; 32] {
+        self.command.request_digest()
+    }
+
+    fn delay_before_execute_seconds(&self) -> u64 {
+        0
+    }
+
+    async fn execute(
+        self: Box<Self>,
+        context: &ProviderContext,
+    ) -> ProviderResult<ProviderQuestionReadStepOutcome> {
+        let Self {
+            provider_id,
+            task_id,
+            command,
+            transport,
+        } = *self;
+        let outcome = transport.execute_exam_start(context, &command).await?;
+        let parsed = crate::question_parser::parse_exam_question_page(outcome.document.as_str())?;
+        let questions = parsed
+            .iter()
+            .map(|question| question.to_question(task_id))
+            .collect::<ProviderResult<Vec<_>>>()?;
+        let artifact = crate::ChaoxingExamQuestionArtifact::from_materialization(
+            task_id,
+            &command,
+            outcome.material,
+            &questions,
+        )?
+        .encode()?;
+        let expected_digest = artifact.digest();
+        let artifact = ProviderQuestionReadContinuation::try_new(
+            &provider_id,
+            CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE,
+            CHAOXING_EXAM_QUESTIONS_READY_PHASE,
+            artifact.into_secret_value(),
+            EXAM_CONTINUATION_TTL_SECONDS,
+        )?;
+        if artifact.continuation_digest() != expected_digest {
+            return Err(internal(
+                "Chaoxing Exam artifact digest changed at the Provider boundary",
+            ));
+        }
+        Ok(ProviderQuestionReadStepOutcome::Materialize(
+            ProviderQuestionMaterialization::try_new(
+                questions,
+                artifact,
+                outcome.response_digest,
+                outcome.received_at,
+            )?,
+        ))
     }
 }
 
@@ -581,6 +829,8 @@ mod tests {
 
     use asterism_domain::{ProviderId, SecretId};
     use asterism_provider_api::ProviderRouteContext;
+    use chrono::Utc;
+    use zeroize::Zeroizing;
 
     use super::*;
 
@@ -749,6 +999,48 @@ mod tests {
             self.exam.question.fetch_add(1, Ordering::Relaxed);
             ChaoxingInventoryDocument::try_new(EXAM_QUESTIONS)
         }
+
+        async fn prepare_exam_start(
+            &self,
+            _context: &ProviderContext,
+            task_id: TaskId,
+            remote_task_id: &str,
+            request: &ChaoxingExamQuestionRequest<'_>,
+        ) -> ProviderResult<ChaoxingExamStartCommand> {
+            ChaoxingExamStartCommand::from_cover(
+                task_id,
+                remote_task_id,
+                request,
+                crate::exam_attempt::ChaoxingExamCover {
+                    title: "Fixture Exam".to_owned(),
+                    exam_answer_id: Zeroizing::new("answer-1".to_owned()),
+                    need_code: false,
+                    need_face: false,
+                    need_captcha: false,
+                    captcha_id: None,
+                },
+            )
+        }
+
+        async fn execute_exam_start(
+            &self,
+            _context: &ProviderContext,
+            command: &ChaoxingExamStartCommand,
+        ) -> ProviderResult<ChaoxingExamStartOutcome> {
+            self.exam.question.fetch_add(1, Ordering::Relaxed);
+            Ok(ChaoxingExamStartOutcome {
+                document: ChaoxingInventoryDocument::try_new(EXAM_QUESTIONS)?,
+                material: crate::exam_attempt::ChaoxingExamAttemptMaterial {
+                    exam_answer_id: Zeroizing::new(command.exam_answer_id().to_owned()),
+                    enc: Zeroizing::new("fixture-attempt-enc".to_owned()),
+                    enc_remain_time: 3_600,
+                    remain_time: 3_600,
+                    last_update_time: 1_700_000_000_000,
+                },
+                response_digest: [7; 32],
+                received_at: Utc::now(),
+            })
+        }
     }
 
     #[tokio::test]
@@ -814,7 +1106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chapter_work_is_freshly_rebound_and_exam_uses_its_attempt_family() {
+    async fn chapter_work_is_freshly_rebound_and_exam_uses_durable_start() {
         let transport = Arc::new(FixtureTransport::default());
         let capability = ChaoxingQuestionRead::try_new(
             Arc::new(FixtureCourses::new()),
@@ -844,28 +1136,54 @@ mod tests {
         assert_eq!(transport.chapter.question.load(Ordering::Relaxed), 1);
 
         let exam_context = context("exam-question");
-        let exam_references = capability
+        let direct = capability
             .list_question_refs(&exam_context, "exam:100:200:exam-1")
             .await
+            .unwrap_err();
+        assert_eq!(direct.kind, ProviderErrorKind::UnsupportedTask);
+
+        let task_id = TaskId::new();
+        let settings = crate::runtime_settings::runtime_settings_schema()
+            .resolve(None, None, None)
             .unwrap();
-        assert_eq!(exam_references.len(), 4);
-        assert!(
-            exam_references
-                .iter()
-                .all(|reference| reference.route_context.get("page_kind") == Some("exam_mobile"))
+        let continuation = capability
+            .prepare_question_read_attempt(&exam_context, task_id, "exam:100:200:exam-1", &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            continuation.continuation_type(),
+            CHAOXING_EXAM_PRE_QUESTION_TYPE
         );
-        for reference in &exam_references {
-            capability
-                .parse_question(
-                    &exam_context,
-                    TaskId::new(),
-                    "exam:100:200:exam-1",
-                    reference,
-                )
-                .await
-                .unwrap();
-        }
-        assert_eq!(transport.exam.inventory.load(Ordering::Relaxed), 1);
+        let (continuation_type, continuation_digest, phase, value, _) = continuation.into_parts();
+        let operation = capability
+            .prepare_question_read_operation(
+                &exam_context,
+                task_id,
+                "exam:100:200:exam-1",
+                ResolvedProviderQuestionReadContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest,
+                    phase: &phase,
+                    revision: 1,
+                    value: &value,
+                },
+                &settings,
+            )
+            .await
+            .unwrap();
+        assert_eq!(operation.operation_type(), "chaoxing.exam-start.v1");
+        assert_ne!(operation.request_digest(), [0; 32]);
+        let outcome = operation.execute(&exam_context).await.unwrap();
+        let ProviderQuestionReadStepOutcome::Materialize(materialization) = outcome else {
+            panic!("expected Exam Question materialization");
+        };
+        assert_eq!(materialization.questions().len(), 4);
+        assert_eq!(
+            materialization.artifact().continuation_type(),
+            CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE
+        );
+        assert_eq!(transport.exam.inventory.load(Ordering::Relaxed), 2);
         assert_eq!(transport.exam.question.load(Ordering::Relaxed), 1);
         assert_eq!(transport.work.inventory.load(Ordering::Relaxed), 0);
         assert_eq!(transport.work.question.load(Ordering::Relaxed), 0);

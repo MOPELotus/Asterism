@@ -316,16 +316,26 @@ needed Capture/BrowserBridge or human-interaction handoff as a separate first-
 batch capability family. The start receipt is not proof of completion, and an
 ambiguous non-idempotent start/submit is never blindly replayed.
 
-The first native Exam Question slice now follows that boundary: a fresh
-`exam:course:class:exam` task must resolve to one current Exam list row with a
-structural `goTest` entry and bounded `enc_task`. The Provider obtains the
-cover, rejects completed/not-started states, and performs exactly one
-`phone/start` before accepting the returned `examAnswerId` and dynamic `enc`.
-It then reads the mobile Question route with exact course/class/exam/attempt
-binding. Cover or start responses requiring an exam code, face check or captcha
-return `HumanRequired` for BrowserBridge/Capture handoff; dynamic material is
-never persisted or reused across attempts. Synthetic fixtures and 81 Provider
-tests cover this boundary; live account validation remains pending.
+The first native Exam Question slice now follows that boundary through Core's
+durable pre-Question attempt ledger. A fresh `exam:course:class:exam` task must
+resolve to one current Exam list row with a structural `goTest` entry and
+bounded `enc_task`. The Provider obtains the cover, rejects completed/not-started
+states, and encodes an owner/account/Task-bound `chaoxing.exam-pre-question.v1`
+continuation. Before execution it repeats Course/Exam/cover discovery and
+requires the exact encrypted continuation digest to match.
+
+Core persists `chaoxing.exam-start.v1` and the canonical request digest before
+the Provider performs one `phone/start`. The Native transport accepts only the
+bound redirect and returned `examAnswerId`, then reads the dynamic-`enc` mobile
+Question route. Success atomically materializes normalized Questions plus the
+minimal encrypted `chaoxing.exam-question-attempt.v1` artifact containing route,
+attempt/timing material, Question count and an ordered Question-set fingerprint. No HTML or
+answer content enters the artifact. Any error after issue remains ambiguous and
+cannot be auto-replayed; fresh readback recovery is still a separate pending
+protocol slice. Cover or start responses requiring an exam code, face check or
+captcha return `HumanRequired` for BrowserBridge/Capture handoff. Synthetic
+fixtures and 82 Provider tests cover this boundary; live account validation
+remains pending.
 
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.
