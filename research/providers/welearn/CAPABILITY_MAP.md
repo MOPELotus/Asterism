@@ -203,7 +203,10 @@ For atomic entries, `WellearnAtomicChildPlan` now provides a bounded versioned
 Provider-private serialization boundary binding Course/Task/ordinal, exact
 flow, atomic shape, profile and concrete target. It requires an explicitly
 frozen nonzero Fanyuchang target, consumes Auto's entry target including zero,
-and rejects all singleton flows and restored tuple drift.
+and rejects all singleton flows and restored tuple drift. It now converts to
+Core's credential-free `welearn.atomic-child.v1` execution-plan artifact under
+the stricter local 1 KiB bound; recovery checks provider/type and fully rebinds
+the payload to the validated batch, expected ordinal and frozen target.
 Immutable Core Execution identity now makes donor-style per-Execution random
 duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
 persisted capability-step plan still needs the atomic duration-completion

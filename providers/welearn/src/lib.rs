@@ -40,11 +40,11 @@ pub use authentication::{
     classify_password_login_response, encode_password_at,
 };
 pub use batch_plan::{
-    WellearnAtomicChildPlan, WellearnAtomicCompletionProfile, WellearnBatchDispatch,
-    WellearnBatchEntry, WellearnBatchExecutionShape, WellearnBatchFlow, WellearnBatchPlan,
-    WellearnBatchTargetStrategy, WellearnBatchUnitSelection, build_batch_plan,
-    build_selected_batch_plan, materialize_atomic_child_plan, validate_batch_plan_integrity,
-    validate_fresh_batch_entry,
+    WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE, WellearnAtomicChildPlan,
+    WellearnAtomicCompletionProfile, WellearnBatchDispatch, WellearnBatchEntry,
+    WellearnBatchExecutionShape, WellearnBatchFlow, WellearnBatchPlan, WellearnBatchTargetStrategy,
+    WellearnBatchUnitSelection, build_batch_plan, build_selected_batch_plan,
+    materialize_atomic_child_plan, validate_batch_plan_integrity, validate_fresh_batch_entry,
 };
 pub use cmi::{
     WellearnCmiDocument, WellearnCmiSnapshot, WellearnCmiTransport, WellearnTaskProgress,

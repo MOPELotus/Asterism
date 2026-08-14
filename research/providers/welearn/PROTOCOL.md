@@ -630,6 +630,15 @@ target is rejected. Singleton flows cannot produce this payload. Decode repeats
 the schema, size, identity, flow/profile and atomic target validation instead of
 trusting serialized fields.
 
+The Core adapter uses the exact namespaced artifact type
+`welearn.atomic-child.v1`. Conversion first applies WELearn's stricter 1 KiB
+encoding bound, then gives Core only the credential-free JSON object; Core's
+generic 64 KiB ceiling does not widen the Provider boundary. Restoration first
+requires provider `welearn` and the exact artifact type, then runs the existing
+bound decode against the complete batch, expected child ordinal and frozen
+Fanyuchang target authority. Merely deserializing a valid payload, including a
+valid plan for another child, never authorizes recovery.
+
 `WellearnBatchPlan.target_strategy` records the corresponding target boundary:
 Fanyuchang, YZBRH and Auto completion resolve score or duration targets per
 child from their fixed or independent random settings, while Auto duration

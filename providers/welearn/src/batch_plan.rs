@@ -1,13 +1,19 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use asterism_domain::{RemoteState, TaskCapability};
+use asterism_domain::{ProviderId, RemoteState, TaskCapability};
 use asterism_provider_api::{
-    ProviderError, ProviderErrorKind, ProviderResult, RemoteTask, RemoteTaskDetail,
+    ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderResult, RemoteTask,
+    RemoteTaskDetail,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{WellearnUnitObservation, task_detail::validate_fresh_execution_detail};
+use crate::{
+    WellearnUnitObservation, metadata::PROVIDER_ID, task_detail::validate_fresh_execution_detail,
+};
+
+/// Namespaced Core artifact type for one version-one atomic child plan.
+pub const WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE: &str = "welearn.atomic-child.v1";
 
 /// Audited donor batch flow. This is a pure membership/target boundary; it
 /// does not create or schedule Core executions.
@@ -432,6 +438,62 @@ impl WellearnAtomicChildPlan {
         )?;
         Ok(plan)
     }
+
+    /// Converts one validated credential-free plan into Core's generic
+    /// Provider execution artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the local plan is invalid, exceeds its
+    /// stricter one-KiB bound or cannot satisfy Core's provider/type/payload
+    /// artifact contract.
+    pub fn to_provider_execution_plan_artifact(
+        &self,
+    ) -> ProviderResult<ProviderExecutionPlanArtifact> {
+        let encoded = self.encode()?;
+        let payload = serde_json::from_slice(&encoded).map_err(|_| invalid_atomic_child_plan())?;
+        ProviderExecutionPlanArtifact::try_new(
+            welearn_provider_id()?,
+            WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE,
+            payload,
+        )
+    }
+
+    /// Restores Core's generic artifact and rebinds it to one exact batch
+    /// child and frozen target authority.
+    ///
+    /// Provider namespace and artifact type are checked before the payload is
+    /// decoded. A valid payload for another batch ordinal still fails the
+    /// existing full batch/ordinal/target rebind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for a foreign provider/type or any payload,
+    /// batch, ordinal, profile, identity or target drift.
+    pub fn from_provider_execution_plan_artifact_bound(
+        artifact: &ProviderExecutionPlanArtifact,
+        batch: &WellearnBatchPlan,
+        expected_entry_index: usize,
+        frozen_fanyuchang_target_seconds: Option<u64>,
+    ) -> ProviderResult<Self> {
+        if artifact.provider_id() != &welearn_provider_id()?
+            || artifact.artifact_type() != WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE
+        {
+            return Err(invalid_atomic_child_plan());
+        }
+        let encoded = serde_json::to_vec(artifact.payload_sanitized())
+            .map_err(|_| invalid_atomic_child_plan())?;
+        Self::decode_bound(
+            &encoded,
+            batch,
+            expected_entry_index,
+            frozen_fanyuchang_target_seconds,
+        )
+    }
+}
+
+fn welearn_provider_id() -> ProviderResult<ProviderId> {
+    ProviderId::new(PROVIDER_ID).map_err(|_| invalid_atomic_child_plan())
 }
 
 /// Materializes one exact atomic child from a fully validated batch plan.
@@ -1625,6 +1687,53 @@ mod tests {
     }
 
     #[test]
+    fn atomic_child_plan_converts_to_credential_free_core_artifact_and_rebinds() {
+        let batch =
+            build_batch_plan(&tasks(), WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let plan = materialize_atomic_child_plan(&batch, 1, Some(37)).unwrap();
+        let artifact = plan.to_provider_execution_plan_artifact().unwrap();
+
+        assert_eq!(artifact.provider_id().as_str(), PROVIDER_ID);
+        assert_eq!(
+            artifact.artifact_type(),
+            WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE
+        );
+        assert_ne!(artifact.artifact_digest(), [0; 32]);
+        let keys = artifact
+            .payload_sanitized()
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "atomic_completion_profile",
+                "course_remote_id",
+                "entry_index",
+                "execution_shape",
+                "flow",
+                "remote_task_id",
+                "target_seconds",
+                "version",
+            ])
+        );
+        let debug = format!("{artifact:?}");
+        assert!(debug.contains("[HASHED]") && debug.contains("[REDACTED]"));
+        assert_eq!(
+            WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact,
+                &batch,
+                1,
+                Some(37),
+            )
+            .unwrap(),
+            plan
+        );
+    }
+
+    #[test]
     fn atomic_child_plan_preserves_auto_zero_floor_without_external_target() {
         let template = tasks().remove(0);
         let mut many = Vec::with_capacity(61);
@@ -1649,6 +1758,15 @@ mod tests {
         assert_eq!(
             WellearnAtomicChildPlan::decode_bound(&plan.encode().unwrap(), &batch, 60, None)
                 .unwrap(),
+            plan
+        );
+        let artifact = plan.to_provider_execution_plan_artifact().unwrap();
+        assert_eq!(artifact.payload_sanitized()["target_seconds"], 0);
+        assert_eq!(
+            WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact, &batch, 60, None,
+            )
+            .unwrap(),
             plan
         );
     }
@@ -1718,6 +1836,68 @@ mod tests {
         );
         assert!(
             WellearnAtomicChildPlan::decode(&vec![b'x'; MAX_ATOMIC_CHILD_PLAN_BYTES + 1]).is_err()
+        );
+    }
+
+    #[test]
+    fn core_artifact_restore_rejects_namespace_and_full_rebind_drift() {
+        let batch = build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
+        let plan = materialize_atomic_child_plan(&batch, 1, None).unwrap();
+        let artifact = plan.to_provider_execution_plan_artifact().unwrap();
+        assert_eq!(plan.target_seconds(), 20);
+
+        let foreign_provider = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new("uai").unwrap(),
+            "uai.atomic-child.v1",
+            artifact.payload_sanitized().clone(),
+        )
+        .unwrap();
+        assert!(
+            WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+                &foreign_provider,
+                &batch,
+                1,
+                None,
+            )
+            .is_err()
+        );
+        let foreign_type = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new(PROVIDER_ID).unwrap(),
+            "welearn.other-plan.v1",
+            artifact.payload_sanitized().clone(),
+        )
+        .unwrap();
+        assert!(
+            WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+                &foreign_type,
+                &batch,
+                1,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact, &batch, 0, None,
+            )
+            .is_err()
+        );
+        assert!(
+            WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact,
+                &batch,
+                1,
+                Some(20),
+            )
+            .is_err()
+        );
+        let mut drifted = batch;
+        drifted.entries[1].target_seconds = Some(19);
+        assert!(
+            WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact, &drifted, 1, None,
+            )
+            .is_err()
         );
     }
 

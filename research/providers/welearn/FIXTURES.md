@@ -215,6 +215,11 @@ only structural field names, response codes and bounded placeholder shapes.
   reject every singleton flow. Bounded JSON round trips retain Course/Task and
   ordinal bindings; unknown fields, version drift, cross-flow profiles,
   missing/extra target authority and oversized artifacts fail closed.
+- Core-artifact adapter tests freeze `welearn.atomic-child.v1`, require provider
+  `welearn`, prove the JSON payload contains only the eight bounded plan fields,
+  preserve Auto's zero target, and verify Debug redaction. Foreign provider or
+  type, another valid ordinal, wrong frozen target and drifted batch facts all
+  fail before a child plan can be restored.
 - Native atomic transport tests bind current duration/completion to the
   query-uid endpoint and simple Referer, while Auto binds its duration phase to
   plain endpoint/simple Referer and switches only final completion to the
