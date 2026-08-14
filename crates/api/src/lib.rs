@@ -2330,11 +2330,11 @@ mod tests {
 
     use asterism_domain::{
         AnswerCandidate, AnswerCandidateId, AnswerSource, AssessmentClass, AuthMethod, AuthState,
-        BrowserBridgeExchange, BrowserBridgeSessionId, ExecutionAttemptId, ExecutionId,
-        NormalizedAnswer, ProviderId, Question, QuestionId, QuestionKind, QuestionSnapshotId,
-        RemoteState, SelectedAnswer, SessionKind, SourceType, SubmissionDraft, SubmissionDraftId,
-        SubmissionDraftItem, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
-        SubmissionPayloadPreview, SubmissionQuestionVerification,
+        BrowserBridgeExchange, BrowserBridgeRuntimeStateMetadata, BrowserBridgeSessionId,
+        ExecutionAttemptId, ExecutionId, NormalizedAnswer, ProviderId, Question, QuestionId,
+        QuestionKind, QuestionSnapshotId, RemoteState, SelectedAnswer, SessionKind, SourceType,
+        SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadEncoding,
+        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, SubmissionQuestionVerification,
         SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult,
         SubmissionResultId, SubmissionResultStatus, SubmissionScore,
         SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId,
@@ -4508,6 +4508,7 @@ mod tests {
         assert_eq!(conflicting_binding.status(), StatusCode::CONFLICT);
 
         let command = br#"{"version":1,"kind":"capture_snapshot"}"#;
+        let runtime_state = br#"{"cursor":"provider-private"}"#;
         let issued_at = Utc::now();
         let exchange = BrowserBridgeExchange::issue(
             BrowserBridgeSessionId::from_str(&session_id).unwrap(),
@@ -4523,6 +4524,16 @@ mod tests {
         .issue(asterism_engine::BrowserBridgeCommandIssueRequest {
             exchange,
             command_artifact: SecretValue::new(command.to_vec()),
+            runtime_state: Some(asterism_engine::BrowserBridgeRuntimeStateIssue {
+                metadata: BrowserBridgeRuntimeStateMetadata {
+                    session_id: BrowserBridgeSessionId::from_str(&session_id).unwrap(),
+                    sequence: 1,
+                    state_type: "provider-alpha.runtime.cursor.v1".to_owned(),
+                    state_digest: sha2::Sha256::digest(runtime_state).into(),
+                    stored_at: issued_at,
+                },
+                state_artifact: SecretValue::new(runtime_state.to_vec()),
+            }),
             access: SecretAccess {
                 actor: SecretActor::CoreService("browser-bridge-api-test"),
                 correlation_id: "browser-bridge-command-issue".to_owned(),

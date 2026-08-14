@@ -1,9 +1,10 @@
 use asterism_auth::{OpaqueTokenService, TokenError};
 use asterism_domain::{
     AuditActor, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
-    BrowserBridgeRuntimeBinding, BrowserBridgeRuntimeBindingError, BrowserBridgeSession,
-    BrowserBridgeSessionCreate, BrowserBridgeSessionError, BrowserBridgeSessionId,
-    ProviderAccountId, ProviderId, TaskId, Timestamp, UserId,
+    BrowserBridgeRuntimeBinding, BrowserBridgeRuntimeBindingError,
+    BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession, BrowserBridgeSessionCreate,
+    BrowserBridgeSessionError, BrowserBridgeSessionId, ProviderAccountId, ProviderId, TaskId,
+    Timestamp, UserId,
 };
 use asterism_provider_api::{BrowserSessionSpec, BrowserSessionSpecError};
 use asterism_secrets::{
@@ -20,8 +21,10 @@ use asterism_storage::{
     BrowserBridgeResultArtifactRecord,
     BrowserBridgeResultReceiveRequest as StorageBrowserBridgeResultReceiveRequest,
     BrowserBridgeResultResolveRequest as StorageBrowserBridgeResultResolveRequest,
-    BrowserBridgeRuntimeBindingRecord, BrowserBridgeSessionRepository,
-    ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, StorageError,
+    BrowserBridgeRuntimeBindingRecord,
+    BrowserBridgeRuntimeStateIssue as StorageBrowserBridgeRuntimeStateIssue,
+    BrowserBridgeSessionRepository, ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult,
+    StorageError,
 };
 
 #[derive(Debug)]
@@ -279,6 +282,12 @@ where
             .issue_browser_bridge_command(StorageBrowserBridgeCommandIssueRequest {
                 exchange: &request.exchange,
                 command_artifact: request.command_artifact,
+                runtime_state: request.runtime_state.map(|runtime_state| {
+                    StorageBrowserBridgeRuntimeStateIssue {
+                        metadata: runtime_state.metadata,
+                        state_artifact: runtime_state.state_artifact,
+                    }
+                }),
                 access: &request.access,
             })
             .await?)
@@ -548,7 +557,14 @@ pub struct BrowserBridgeSessionCancelRequest {
 pub struct BrowserBridgeCommandIssueRequest {
     pub exchange: BrowserBridgeExchange,
     pub command_artifact: SecretValue,
+    pub runtime_state: Option<BrowserBridgeRuntimeStateIssue>,
     pub access: SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeRuntimeStateIssue {
+    pub metadata: BrowserBridgeRuntimeStateMetadata,
+    pub state_artifact: SecretValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -44,6 +44,34 @@ pub struct BrowserBridgeResultArtifactMetadata {
     pub received_at: Timestamp,
 }
 
+/// Durable identity for optional Provider-private state frozen with one
+/// command. The encrypted bytes are recoverable by Core/Provider runtime but
+/// are never dispatched to the browser helper.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeRuntimeStateMetadata {
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub state_type: String,
+    pub state_digest: [u8; 32],
+    pub stored_at: Timestamp,
+}
+
+impl BrowserBridgeRuntimeStateMetadata {
+    /// # Errors
+    ///
+    /// Rejects an invalid sequence, state type or zero digest.
+    pub fn validate(&self) -> Result<(), BrowserBridgeExchangeError> {
+        if self.sequence == 0 || i64::try_from(self.sequence).is_err() {
+            return Err(BrowserBridgeExchangeError::InvalidSequence);
+        }
+        validate_type(&self.state_type)?;
+        if self.state_digest == [0; 32] {
+            return Err(BrowserBridgeExchangeError::InvalidDigest);
+        }
+        Ok(())
+    }
+}
+
 impl BrowserBridgeResultArtifactMetadata {
     /// # Errors
     ///
@@ -286,6 +314,29 @@ mod tests {
         );
         metadata.result_digest = [3; 32];
         metadata.result_type = "unsafe result".to_owned();
+        assert_eq!(
+            metadata.validate(),
+            Err(BrowserBridgeExchangeError::InvalidMessageType)
+        );
+    }
+
+    #[test]
+    fn runtime_state_metadata_is_sequence_type_and_digest_bound() {
+        let mut metadata = BrowserBridgeRuntimeStateMetadata {
+            session_id: BrowserBridgeSessionId::new(),
+            sequence: 1,
+            state_type: "uai.browser.cursor.v1".to_owned(),
+            state_digest: [4; 32],
+            stored_at: Utc::now(),
+        };
+        assert_eq!(metadata.validate(), Ok(()));
+        metadata.sequence = 0;
+        assert_eq!(
+            metadata.validate(),
+            Err(BrowserBridgeExchangeError::InvalidSequence)
+        );
+        metadata.sequence = 1;
+        metadata.state_type = "unsafe state".to_owned();
         assert_eq!(
             metadata.validate(),
             Err(BrowserBridgeExchangeError::InvalidMessageType)

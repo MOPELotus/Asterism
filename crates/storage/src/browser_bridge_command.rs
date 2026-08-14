@@ -1,8 +1,8 @@
 use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
-    AuditRecordId, BrowserBridgeExchangeState, BrowserBridgeResultArtifactMetadata, ProviderId,
-    SecretId,
+    AuditRecordId, BrowserBridgeExchangeState, BrowserBridgeResultArtifactMetadata,
+    BrowserBridgeRuntimeStateMetadata, ProviderId, SecretId,
 };
 use asterism_secrets::{
     SecretAccess, SecretActor, SecretPurpose, SecretRef, SecretStoreError, SecretValue,
@@ -17,8 +17,9 @@ use crate::{
     BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandIssueRequest,
     BrowserBridgeCommandResolveRequest, BrowserBridgeExchangeRecord,
     BrowserBridgeResultArtifactRecord, BrowserBridgeResultReceiveRequest,
-    BrowserBridgeResultResolveRequest, Database, ResolvedBrowserBridgeCommand,
-    ResolvedBrowserBridgeResult, SecretKeyring,
+    BrowserBridgeResultResolveRequest, Database, DispatchedBrowserBridgeCommand,
+    ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, ResolvedBrowserBridgeRuntimeState,
+    SecretKeyring,
     browser_bridge::{
         authenticate_session_for_exchange, binding_is_valid, fetch_exchange, fetch_runtime_binding,
         fetch_session, find_claimed_session_for_exchange, insert_exchange_audit,
@@ -67,6 +68,21 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
             || digest(request.command_artifact.expose_secret()) != request.exchange.command_digest
         {
             return Err(SecretStoreError::InvalidValue);
+        }
+        if let Some(runtime_state) = &request.runtime_state {
+            runtime_state
+                .metadata
+                .validate()
+                .map_err(|_| SecretStoreError::InvalidValue)?;
+            validate_secret(&runtime_state.state_artifact)?;
+            if runtime_state.metadata.session_id != request.exchange.session_id
+                || runtime_state.metadata.sequence != request.exchange.sequence
+                || runtime_state.metadata.stored_at != request.exchange.issued_at
+                || digest(runtime_state.state_artifact.expose_secret())
+                    != runtime_state.metadata.state_digest
+            {
+                return Err(SecretStoreError::InvalidValue);
+            }
         }
 
         let mut transaction = self
@@ -129,8 +145,19 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
             .fetch_one(&mut *transaction)
             .await
             .map_err(storage_error)?;
+            let existing_state = fetch_runtime_state_metadata(
+                &mut transaction,
+                request.exchange.session_id,
+                sequence,
+            )
+            .await?;
+            let state_same = match (&request.runtime_state, existing_state) {
+                (None, None) => true,
+                (Some(requested), Some(existing)) => requested.metadata == existing,
+                (None, Some(_)) | (Some(_), None) => false,
+            };
             transaction.rollback().await.map_err(storage_error)?;
-            return Ok(if same && artifact_present == 1 {
+            return Ok(if same && artifact_present == 1 && state_same {
                 BrowserBridgeExchangeRecord::Duplicate(existing.expect("same requires a record"))
             } else {
                 BrowserBridgeExchangeRecord::SequenceConflict
@@ -164,6 +191,39 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
         .execute(&mut *transaction)
         .await
         .map_err(storage_error)?;
+        if let Some(runtime_state) = request.runtime_state {
+            let runtime_secret = SecretRef {
+                id: SecretId::new(),
+                owner_user_id: session.owner_user_id,
+                purpose: SecretPurpose::BrowserJobCredential,
+                version: 1,
+                key_id: key_id.to_owned(),
+                created_at: runtime_state.metadata.stored_at,
+                updated_at: runtime_state.metadata.stored_at,
+            };
+            let (runtime_nonce, runtime_encrypted_data) = encrypt(
+                key,
+                &runtime_secret,
+                runtime_state.state_artifact.expose_secret(),
+            )?;
+            insert_secret_blob(
+                &mut transaction,
+                &runtime_secret,
+                &runtime_nonce,
+                &runtime_encrypted_data,
+            )
+            .await?;
+            insert_runtime_state(&mut transaction, &runtime_state.metadata, runtime_secret.id)
+                .await?;
+            insert_secret_audit(
+                &mut transaction,
+                request.access,
+                "browser_bridge_runtime_state_stored",
+                &runtime_secret,
+            )
+            .await
+            .map_err(storage_error)?;
+        }
         insert_secret_audit(
             &mut transaction,
             request.access,
@@ -262,6 +322,21 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
         if digest(&plaintext) != exchange.command_digest {
             return Err(SecretStoreError::AuthenticationFailed);
         }
+        let runtime_state = resolve_runtime_state(
+            &mut transaction,
+            request.session_id,
+            sequence,
+            session.owner_user_id,
+            &self.keyring,
+            request.access,
+        )
+        .await?;
+        if runtime_state
+            .as_ref()
+            .is_some_and(|runtime_state| runtime_state.metadata.stored_at != exchange.issued_at)
+        {
+            return Err(SecretStoreError::AuthenticationFailed);
+        }
         insert_secret_audit(
             &mut transaction,
             request.access,
@@ -274,6 +349,7 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
         Ok(Some(ResolvedBrowserBridgeCommand {
             exchange,
             command_artifact: SecretValue::new(plaintext),
+            runtime_state,
         }))
     }
 
@@ -410,7 +486,7 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
         .await?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(BrowserBridgeCommandDispatchRecord::Dispatched(
-            ResolvedBrowserBridgeCommand {
+            DispatchedBrowserBridgeCommand {
                 exchange,
                 command_artifact: SecretValue::new(plaintext),
             },
@@ -788,6 +864,130 @@ async fn insert_result_audit(
     Ok(())
 }
 
+async fn fetch_runtime_state_metadata(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: asterism_domain::BrowserBridgeSessionId,
+    sequence: i64,
+) -> Result<Option<BrowserBridgeRuntimeStateMetadata>, SecretStoreError> {
+    sqlx::query(
+        "SELECT state_type, state_digest, stored_at \
+         FROM browser_bridge_runtime_state_artifacts \
+         WHERE session_id = ? AND sequence = ?",
+    )
+    .bind(session_id.to_string())
+    .bind(sequence)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?
+    .as_ref()
+    .map(|row| decode_runtime_state_metadata(row, session_id, sequence))
+    .transpose()
+}
+
+async fn insert_runtime_state(
+    transaction: &mut Transaction<'_, Sqlite>,
+    metadata: &BrowserBridgeRuntimeStateMetadata,
+    secret_id: SecretId,
+) -> Result<(), SecretStoreError> {
+    sqlx::query(
+        "INSERT INTO browser_bridge_runtime_state_artifacts \
+         (session_id, sequence, state_type, state_digest, secret_blob_id, stored_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(metadata.session_id.to_string())
+    .bind(i64::try_from(metadata.sequence).map_err(|_| SecretStoreError::InvalidValue)?)
+    .bind(&metadata.state_type)
+    .bind(metadata.state_digest.as_slice())
+    .bind(secret_id.to_string())
+    .bind(encode_timestamp(metadata.stored_at))
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+async fn resolve_runtime_state(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: asterism_domain::BrowserBridgeSessionId,
+    sequence: i64,
+    owner_user_id: asterism_domain::UserId,
+    keyring: &SecretKeyring,
+    access: &SecretAccess,
+) -> Result<Option<ResolvedBrowserBridgeRuntimeState>, SecretStoreError> {
+    let Some(row) = sqlx::query(
+        "SELECT state_type, state_digest, secret_blob_id, stored_at \
+         FROM browser_bridge_runtime_state_artifacts \
+         WHERE session_id = ? AND sequence = ?",
+    )
+    .bind(session_id.to_string())
+    .bind(sequence)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?
+    else {
+        return Ok(None);
+    };
+    let metadata = decode_runtime_state_metadata(&row, session_id, sequence)?;
+    let secret_id = SecretId::from_str(&row.get::<String, _>("secret_blob_id"))
+        .map_err(|_| SecretStoreError::Storage)?;
+    let stored = fetch_secret(transaction, secret_id).await?;
+    if stored.owner_user_id != owner_user_id
+        || stored.purpose != SecretPurpose::BrowserJobCredential
+        || stored.created_at != metadata.stored_at
+        || stored.updated_at != metadata.stored_at
+    {
+        return Err(SecretStoreError::AuthenticationFailed);
+    }
+    let secret = SecretRef {
+        id: secret_id,
+        owner_user_id: stored.owner_user_id,
+        purpose: stored.purpose,
+        version: stored.version,
+        key_id: stored.key_id.clone(),
+        created_at: stored.created_at,
+        updated_at: stored.updated_at,
+    };
+    let key = keyring.get(&stored.key_id)?;
+    let plaintext = decrypt(key, &secret, &stored.nonce, &stored.encrypted_data)?;
+    if digest(&plaintext) != metadata.state_digest {
+        return Err(SecretStoreError::AuthenticationFailed);
+    }
+    insert_secret_audit(
+        transaction,
+        access,
+        "browser_bridge_runtime_state_resolved",
+        &secret,
+    )
+    .await
+    .map_err(storage_error)?;
+    Ok(Some(ResolvedBrowserBridgeRuntimeState {
+        metadata,
+        state_artifact: SecretValue::new(plaintext),
+    }))
+}
+
+fn decode_runtime_state_metadata(
+    row: &sqlx::sqlite::SqliteRow,
+    session_id: asterism_domain::BrowserBridgeSessionId,
+    sequence: i64,
+) -> Result<BrowserBridgeRuntimeStateMetadata, SecretStoreError> {
+    let state_digest: [u8; 32] = row
+        .get::<Vec<u8>, _>("state_digest")
+        .try_into()
+        .map_err(|_| SecretStoreError::Storage)?;
+    let metadata = BrowserBridgeRuntimeStateMetadata {
+        session_id,
+        sequence: u64::try_from(sequence).map_err(|_| SecretStoreError::Storage)?,
+        state_type: row.get("state_type"),
+        state_digest,
+        stored_at: decode_timestamp(&row.get::<String, _>("stored_at"))?,
+    };
+    metadata
+        .validate()
+        .map_err(|_| SecretStoreError::AuthenticationFailed)?;
+    Ok(metadata)
+}
+
 fn authorize_scoped(
     owner_user_id: asterism_domain::UserId,
     actual_provider: &ProviderId,
@@ -876,6 +1076,7 @@ mod tests {
                 .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
                     exchange: &issued,
                     command_artifact: SecretValue::new(command.to_vec()),
+                    runtime_state: None,
                     access: &access,
                 })
                 .await
@@ -899,11 +1100,23 @@ mod tests {
                 .unwrap(),
             crate::BrowserBridgeRuntimeBindingRecord::Bound(_)
         ));
+        let runtime_state = br#"{"cursor":"opaque-state-1"}"#;
+        let runtime_metadata = BrowserBridgeRuntimeStateMetadata {
+            session_id: session.id,
+            sequence: 1,
+            state_type: "uai.browser.cursor.v1".to_owned(),
+            state_digest: digest(runtime_state),
+            stored_at: issued.issued_at,
+        };
         let inserted = fixture
             .command_repository
             .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
                 exchange: &issued,
                 command_artifact: SecretValue::new(command.to_vec()),
+                runtime_state: Some(crate::BrowserBridgeRuntimeStateIssue {
+                    metadata: runtime_metadata.clone(),
+                    state_artifact: SecretValue::new(runtime_state.to_vec()),
+                }),
                 access: &access,
             })
             .await
@@ -914,6 +1127,10 @@ mod tests {
             .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
                 exchange: &issued,
                 command_artifact: SecretValue::new(command.to_vec()),
+                runtime_state: Some(crate::BrowserBridgeRuntimeStateIssue {
+                    metadata: runtime_metadata.clone(),
+                    state_artifact: SecretValue::new(runtime_state.to_vec()),
+                }),
                 access: &access,
             })
             .await
@@ -922,6 +1139,19 @@ mod tests {
             duplicate,
             BrowserBridgeExchangeRecord::Duplicate(_)
         ));
+        assert_eq!(
+            fixture
+                .command_repository
+                .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
+                    exchange: &issued,
+                    command_artifact: SecretValue::new(command.to_vec()),
+                    runtime_state: None,
+                    access: &access,
+                })
+                .await
+                .unwrap(),
+            BrowserBridgeExchangeRecord::SequenceConflict
+        );
 
         let encrypted: Vec<u8> = sqlx::query_scalar(
             "SELECT secret.encrypted_data FROM browser_bridge_exchanges AS exchange \
@@ -939,6 +1169,17 @@ mod tests {
                 .any(|window| window == command)
         );
 
+        let encrypted_runtime_state: Vec<u8> = sqlx::query_scalar(
+            "SELECT secret.encrypted_data FROM browser_bridge_runtime_state_artifacts AS state \
+             JOIN secret_blobs AS secret ON secret.id = state.secret_blob_id \
+             WHERE state.session_id = ? AND state.sequence = 1",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_ne!(encrypted_runtime_state, runtime_state);
+
         let resolved = fixture
             .command_repository
             .resolve_browser_bridge_command(fixture.resolve_request(&session, 1, &access))
@@ -947,6 +1188,37 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.exchange, issued);
         assert_eq!(resolved.command_artifact.expose_secret(), command);
+        let resolved_runtime_state = resolved.runtime_state.unwrap();
+        assert_eq!(resolved_runtime_state.metadata, runtime_metadata);
+        assert_eq!(
+            resolved_runtime_state.state_artifact.expose_secret(),
+            runtime_state
+        );
+        sqlx::query(
+            "UPDATE browser_bridge_runtime_state_artifacts SET stored_at = ? \
+             WHERE session_id = ? AND sequence = 1",
+        )
+        .bind(encode_timestamp(issued.issued_at + Duration::seconds(1)))
+        .bind(session.id.to_string())
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            fixture
+                .command_repository
+                .resolve_browser_bridge_command(fixture.resolve_request(&session, 1, &access))
+                .await,
+            Err(SecretStoreError::AuthenticationFailed)
+        ));
+        sqlx::query(
+            "UPDATE browser_bridge_runtime_state_artifacts SET stored_at = ? \
+             WHERE session_id = ? AND sequence = 1",
+        )
+        .bind(encode_timestamp(issued.issued_at))
+        .bind(session.id.to_string())
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
 
         let raw_result = br#"{"kind":"menu_list","entries":[]}"#;
         let result_metadata = BrowserBridgeResultArtifactMetadata {
@@ -1240,6 +1512,22 @@ mod tests {
                 .await,
             Err(SecretStoreError::VersionConflict)
         ));
+        sqlx::query(
+            "UPDATE secret_blobs SET encrypted_data = X'00' WHERE id = ( \
+             SELECT secret_blob_id FROM browser_bridge_runtime_state_artifacts \
+             WHERE session_id = ? AND sequence = 1)",
+        )
+        .bind(session.id.to_string())
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            fixture
+                .command_repository
+                .resolve_browser_bridge_command(fixture.resolve_request(&session, 1, &access))
+                .await,
+            Err(SecretStoreError::AuthenticationFailed)
+        ));
     }
 
     #[tokio::test]
@@ -1263,6 +1551,7 @@ mod tests {
             .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
                 exchange: &issued,
                 command_artifact: SecretValue::new(command.to_vec()),
+                runtime_state: None,
                 access: &access,
             })
             .await
@@ -1388,6 +1677,7 @@ mod tests {
             .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
                 exchange: &issued,
                 command_artifact: SecretValue::new(command.to_vec()),
+                runtime_state: None,
                 access: &access,
             })
             .await

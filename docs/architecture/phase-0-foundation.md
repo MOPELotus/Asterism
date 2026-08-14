@@ -3454,3 +3454,26 @@ caller-only frame or origin value.
 The runtime binding still grants no remote mutation by itself. It carries no
 credential, command bytes or completion state; every browser action remains an
 independent encrypted exchange that Core persists before its one-shot dispatch.
+
+## One-hundred-and-ninety-sixth Phase 0 slice
+
+BrowserBridge command issuance can now atomically retain one optional
+Provider-private runtime-state sidecar. Migration 046 binds a bounded state
+type, SHA-256 digest, encrypted Secret and issuance timestamp to the exact
+session/sequence exchange. Storage validates the command and state bytes
+independently, requires both identities to match the same issued exchange, and
+writes both encrypted artifacts in the same immediate transaction. A duplicate
+issuance succeeds only when the command and optional-state shapes are identical;
+adding, removing or changing a sidecar after the fact is a sequence conflict.
+
+Owner/account/Task/Provider-scoped recovery decrypts both artifacts and verifies
+their independent digests before Provider runtime receives them. Ciphertext
+corruption or metadata drift fails closed. The dispatch path deliberately uses
+a command-only result type and never queries or decrypts runtime state, so a UAI
+cursor, accumulated batch identity or future Provider recovery artifact cannot
+cross the helper transport boundary.
+
+The sidecar is not a scheduler or authority by itself. UAI still requires Core
+to freeze the Course batch owner and start ordinal, then rebuild fresh ordered
+inventory before its Provider can validate the cursor and issue sequence `n+1`.
+Cidaren commands need no sidecar and retain the existing command-only shape.
