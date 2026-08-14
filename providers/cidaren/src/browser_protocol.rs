@@ -187,6 +187,11 @@ impl CidarenBrowserCommandEnvelope {
             serde_json::to_vec(self)
                 .map_err(|_| invalid_response("Cidaren Capture command cannot be encoded"))?,
         );
+        if encoded.len() > MAX_BROWSER_COMMAND_BYTES {
+            return Err(invalid_response(
+                "Cidaren Capture command exceeds its recovery bound",
+            ));
+        }
         let digest = Sha256::digest(encoded.as_slice()).into();
         let value = SecretValue::new(std::mem::take(&mut *encoded));
         Ok(EncodedCidarenBrowserCommandArtifact { value, digest })

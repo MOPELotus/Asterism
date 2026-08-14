@@ -449,7 +449,8 @@ snapshot-only consuming path and can hand Core an exact credential
 replacement + terminal exchange pair for its atomic commit. Exact compact
 TokenOnly/Composite command fixtures now freeze the same bytes used by helper
 dispatch, encrypted recovery and the command digest. Recovered commands have
-a separate 4 KiB bound and cannot consume the 256 KiB helper-result budget.
+a separate 4 KiB symmetric issue/recovery bound and cannot consume the 256 KiB
+helper-result budget or be issued in a form that recovery would reject.
 All 149 Cidaren
 tests, all-target strict clippy, formatting and scoped diff checks passed
 against the landed atomic shared transition contract. The three symbolic

@@ -178,7 +178,9 @@ Committed TokenOnly/Composite command fixtures are byte-identical to the
 compact JSON stored in the encrypted artifact and hashed into the exchange;
 helper dispatch and recovery therefore cannot evolve separate wire shapes.
 The recovery artifact has its own 4 KiB input bound; the 256 KiB result bound
-is not reused for the much smaller command schema.
+is not reused for the much smaller command schema. Issuance applies the same
+bound after serialization, so Core cannot persist a command the recovery path
+would later reject.
 The high-level Provider adapter accepts the raw result only as an owned,
 bounded `CidarenBrowserResultDocument`. Its contents are unavailable through
 Debug or the public API, and the consumed transport buffer is zeroized after
