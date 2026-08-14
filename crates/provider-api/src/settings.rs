@@ -41,6 +41,7 @@ pub enum ProviderSettingCoreBehavior {
     ProviderExecutionConcurrency,
     AccountExecutionConcurrency,
     AccountScanInterval,
+    MinimumAnswerCoverage,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -348,7 +349,11 @@ impl ProviderRuntimeSettingsSchema {
             let Some(behavior) = definition.core_behavior else {
                 continue;
             };
-            if behavior == ProviderSettingCoreBehavior::AccountScanInterval {
+            if matches!(
+                behavior,
+                ProviderSettingCoreBehavior::AccountScanInterval
+                    | ProviderSettingCoreBehavior::MinimumAnswerCoverage
+            ) {
                 continue;
             }
             let value = resolved
@@ -365,7 +370,8 @@ impl ProviderRuntimeSettingsSchema {
                 ProviderSettingCoreBehavior::AccountExecutionConcurrency => {
                     limits.account = value;
                 }
-                ProviderSettingCoreBehavior::AccountScanInterval => unreachable!(),
+                ProviderSettingCoreBehavior::AccountScanInterval
+                | ProviderSettingCoreBehavior::MinimumAnswerCoverage => unreachable!(),
             }
         }
         Ok(limits)
@@ -398,6 +404,38 @@ impl ProviderRuntimeSettingsSchema {
                 })
             })
             .transpose()
+    }
+
+    /// Resolves the minimum answered fraction Core must enforce against the
+    /// complete immutable Question snapshot. Providers without this optional
+    /// behavior retain the conservative 100% requirement.
+    ///
+    /// The value uses thousandths (`900` = 90%) so no floating-point policy is
+    /// persisted or compared.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] when the snapshot or declared hint is
+    /// incompatible with this schema.
+    pub fn minimum_answer_coverage_millis(
+        &self,
+        resolved: &ResolvedProviderRuntimeSettings,
+    ) -> Result<u16, ProviderSettingsError> {
+        self.validate_resolved(resolved)?;
+        self.definitions
+            .iter()
+            .find(|definition| {
+                definition.core_behavior == Some(ProviderSettingCoreBehavior::MinimumAnswerCoverage)
+            })
+            .map_or(Ok(1_000), |definition| {
+                resolved
+                    .decimal_millis(&definition.key)
+                    .and_then(|value| u16::try_from(value).ok())
+                    .ok_or_else(|| ProviderSettingsError::InvalidCoreBehavior {
+                        key: definition.key.clone(),
+                        behavior: ProviderSettingCoreBehavior::MinimumAnswerCoverage,
+                    })
+            })
     }
 }
 
@@ -584,7 +622,8 @@ fn validate_core_behavior(
         ProviderSettingCoreBehavior::AccountExecutionConcurrency => {
             MAX_ACCOUNT_EXECUTION_CONCURRENCY
         }
-        ProviderSettingCoreBehavior::AccountScanInterval => 0,
+        ProviderSettingCoreBehavior::AccountScanInterval
+        | ProviderSettingCoreBehavior::MinimumAnswerCoverage => 0,
     };
     let valid_kind = match behavior {
         ProviderSettingCoreBehavior::ProviderExecutionConcurrency
@@ -605,13 +644,22 @@ fn validate_core_behavior(
             } if minimum >= MIN_ACCOUNT_SCAN_INTERVAL_SECONDS
                 && maximum <= MAX_ACCOUNT_SCAN_INTERVAL_SECONDS
         ),
+        ProviderSettingCoreBehavior::MinimumAnswerCoverage => matches!(
+            definition.kind,
+            ProviderSettingKind::DecimalMillis {
+                minimum,
+                maximum,
+                step: 1,
+            } if minimum >= 1 && maximum <= 1_000
+        ),
     };
     let valid_scopes = match behavior {
         ProviderSettingCoreBehavior::ProviderExecutionConcurrency => {
             definition.scopes.len() == 1
                 && definition.scopes.contains(&ProviderSettingScope::Provider)
         }
-        ProviderSettingCoreBehavior::AccountExecutionConcurrency => {
+        ProviderSettingCoreBehavior::AccountExecutionConcurrency
+        | ProviderSettingCoreBehavior::MinimumAnswerCoverage => {
             definition.scopes.contains(&ProviderSettingScope::Provider)
         }
         ProviderSettingCoreBehavior::AccountScanInterval => {
@@ -912,6 +960,50 @@ mod tests {
         ]);
         assert!(matches!(
             schema.validate(),
+            Err(ProviderSettingsError::InvalidCoreBehavior { .. })
+        ));
+    }
+
+    #[test]
+    fn answer_coverage_is_fixed_point_bounded_and_defaults_to_complete() {
+        let plain = schema();
+        let resolved = plain.resolve(None, None, None).unwrap();
+        assert_eq!(
+            plain.minimum_answer_coverage_millis(&resolved).unwrap(),
+            1_000
+        );
+
+        let mut partial = schema();
+        partial.definitions.push(ProviderSettingDefinition {
+            key: "submission.minimum_answer_coverage".to_owned(),
+            display_name: "Minimum answer coverage".to_owned(),
+            description: "Minimum answered fraction required before submission.".to_owned(),
+            kind: ProviderSettingKind::DecimalMillis {
+                minimum: 1,
+                maximum: 1_000,
+                step: 1,
+            },
+            default: ProviderSettingValue::DecimalMillis(900),
+            scopes: BTreeSet::from([
+                ProviderSettingScope::Provider,
+                ProviderSettingScope::ProviderAccount,
+                ProviderSettingScope::Task,
+            ]),
+            core_behavior: Some(ProviderSettingCoreBehavior::MinimumAnswerCoverage),
+        });
+        let resolved = partial.resolve(None, None, None).unwrap();
+        assert_eq!(
+            partial.minimum_answer_coverage_millis(&resolved).unwrap(),
+            900
+        );
+
+        partial.definitions.last_mut().unwrap().kind = ProviderSettingKind::DecimalMillis {
+            minimum: 0,
+            maximum: 1_000,
+            step: 1,
+        };
+        assert!(matches!(
+            partial.validate(),
             Err(ProviderSettingsError::InvalidCoreBehavior { .. })
         ));
     }

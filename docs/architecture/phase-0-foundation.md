@@ -3898,3 +3898,17 @@ changed plan ciphertext, missing plan metadata or a foreign secret owner fails
 closed. This gives a daemon result processor the exact creation-time settings
 and Provider plan after restart instead of re-resolving mutable settings or
 asking the helper to echo workflow authority.
+
+## Two-hundred-and-sixteenth Phase 0 slice
+
+Provider runtime schemas can now declare one portable
+`minimum_answer_coverage` Core behavior. Core resolves it as integer
+thousandths, with `1000` as the conservative default when no Provider declares
+the behavior. A declared setting must be a bounded `DecimalMillis` value from
+1 through 1000 and may be overridden only through its explicit Master-owned
+Provider, account or Task scopes.
+
+This setting is policy input, not permission to invent answers or silently
+drop Questions. The following Draft slice must calculate it against the full
+immutable Question snapshot and persist the selected/unanswered partition plus
+the resolved threshold before a subset can become executable.
