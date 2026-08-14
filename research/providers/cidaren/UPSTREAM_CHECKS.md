@@ -281,6 +281,19 @@ it as a bounded FillBlank Question and can use the already evidenced Skip
 operation, but does not guess the missing multi-answer Verify encoding. The
 Provider suite reached 121 passing tests with strict clippy clean.
 
+The durable-attempt checkpoint re-resolved `MOPELotus/master` at `a74b4a2`,
+`ularch/master` at `bce9559`, its latest tag `1.5.4` at `7e29ee4`, and
+`github123666/main` at `1409858`; no branch or tag delta was present. Both
+current donors route `StartAnswer` through a helper that repeats the same GET
+after receiving an unknown `jv`, and rerunning their task workflow calls
+`StartAnswer` again. This is recorded as donor behavior after a definite
+response, not evidence that a request with unknown transport outcome is safe
+to replay. Asterism's Provider-private interface therefore retains ambiguous
+no-replay while adding encrypted, Task-bound selection/start/reading-card
+continuations and real-Question materialization bundles. Correlation remains
+audit-only so recovery can reconstruct the same Provider/account/Task binding.
+The Provider suite reached 128 passing tests before strict-clippy closure.
+
 ## Check procedure
 
 For the next checkpoint:

@@ -423,13 +423,6 @@ impl CidarenWordSelectionPlan {
         &self.word_map
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used by the Provider-private lifecycle awaiting durable QuestionSession integration"
-        )
-    )]
     pub(crate) fn is_bound_to(&self, remote_task_id: &str) -> bool {
         self.remote_task_id == remote_task_id
     }

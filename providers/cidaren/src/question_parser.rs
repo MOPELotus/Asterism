@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 const MAX_TOPIC_CODE_BYTES: usize = 4_096;
+const MAX_REMOTE_STEP_ID_BYTES: usize = 512;
 const MAX_STEM_BYTES: usize = 64 * 1_024;
 const MAX_OPTION_BYTES: usize = 32 * 1_024;
 const MAX_ANSWER_TAG_BYTES: usize = 256;
@@ -33,6 +34,15 @@ impl CidarenAttemptProgress {
 
     pub const fn total(self) -> u32 {
         self.total
+    }
+
+    pub(crate) fn from_artifact(completed: u32, total: u32) -> ProviderResult<Self> {
+        if total == 0 || total > MAX_REMOTE_TOPIC_TOTAL || completed > total {
+            return Err(protocol_drift(
+                "Cidaren attempt artifact progress is invalid",
+            ));
+        }
+        Ok(Self { completed, total })
     }
 }
 
@@ -81,13 +91,6 @@ pub struct ParsedCidarenReadingCard {
 }
 
 impl ParsedCidarenReadingCard {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used by the Provider-private lifecycle awaiting durable QuestionSession integration"
-        )
-    )]
     pub(crate) fn topic_code(&self) -> &str {
         self.topic_code.as_str()
     }
@@ -119,6 +122,33 @@ impl ParsedCidarenReadingCard {
 
     pub const fn remote_progress(&self) -> Option<CidarenAttemptProgress> {
         self.remote_progress
+    }
+
+    pub(crate) fn from_artifact(
+        topic_code: String,
+        remote_id: String,
+        stem_sanitized: String,
+        position: u32,
+        remote_progress: Option<CidarenAttemptProgress>,
+    ) -> ProviderResult<Self> {
+        if !valid_optional_text(&topic_code, MAX_TOPIC_CODE_BYTES)
+            || !valid_optional_text(&remote_id, MAX_REMOTE_STEP_ID_BYTES)
+            || !remote_id.starts_with("reading-card:")
+            || !valid_optional_text(&stem_sanitized, MAX_STEM_BYTES)
+            || position == 0
+            || position > MAX_POSITION
+        {
+            return Err(protocol_drift(
+                "Cidaren reading-card artifact binding is invalid",
+            ));
+        }
+        Ok(Self {
+            topic_code: Zeroizing::new(topic_code),
+            remote_id,
+            stem_sanitized,
+            position,
+            remote_progress,
+        })
     }
 }
 

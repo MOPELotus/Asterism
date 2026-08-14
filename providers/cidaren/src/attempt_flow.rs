@@ -13,10 +13,14 @@ use asterism_provider_api::{
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::pre_question_artifact::CidarenPreQuestionState;
 use crate::{
+    CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_READY_TO_ADVANCE_PHASE, CIDAREN_READY_TO_VERIFY_PHASE,
     CidarenAssessmentBinding, CidarenAssessmentReceiptKind, CidarenAssessmentResponse,
     CidarenAssessmentTransport, CidarenAttemptProgress, CidarenMutationRequest,
-    CidarenRuntimeSettings, CidarenStartAnswerRequest, CidarenWireAnswer, CidarenWordSelectionPlan,
+    CidarenPreQuestionArtifact, CidarenQuestionArtifact, CidarenRuntimeSettings,
+    CidarenStartAnswerRequest, CidarenWireAnswer, CidarenWordSelectionPlan,
+    EncodedCidarenPreQuestionArtifact, EncodedCidarenQuestionArtifact,
     ParsedCidarenAttemptQuestion, ParsedCidarenAttemptStep, ParsedCidarenReadingCard,
     build_skip_answer_request, build_start_answer_request, build_submit_answer_and_save_request,
     build_submit_chose_word_request, build_verify_answer_request, parse_attempt_step,
@@ -81,6 +85,13 @@ pub struct CidarenAttemptFlow {
     task_id: TaskId,
     position: u32,
     phase: Option<CidarenAttemptPhase>,
+    last_response_binding: Option<CidarenQuestionResponseBinding>,
+}
+
+#[derive(Clone, Copy)]
+struct CidarenQuestionResponseBinding {
+    response_digest: [u8; 32],
+    received_at: Timestamp,
 }
 
 enum CidarenAttemptPhase {
@@ -89,10 +100,12 @@ enum CidarenAttemptPhase {
     CurrentQuestion(Box<CidarenCurrentQuestion>),
     CurrentReadingCard(ParsedCidarenReadingCard),
     ReadyToVerify {
+        current: Box<CidarenCurrentQuestion>,
         topic_code: Zeroizing<String>,
         remaining: VecDeque<CidarenWireAnswer>,
     },
     ReadyToAdvance {
+        current: Box<CidarenCurrentQuestion>,
         topic_code: Zeroizing<String>,
     },
     Issued {
@@ -117,6 +130,7 @@ enum CidarenAttemptContinuation {
     SelectWords,
     Start,
     Verify {
+        current: Box<CidarenCurrentQuestion>,
         remaining: VecDeque<CidarenWireAnswer>,
     },
     NextStep {
@@ -163,6 +177,130 @@ pub struct CidarenIssuedOutcome {
     received_at: asterism_domain::Timestamp,
 }
 
+/// Provider-private material Core needs to atomically create or rotate a
+/// `QuestionSession` after one accepted Cidaren operation yielded a real
+/// Question. The artifact value remains zeroizing and Debug-redacted.
+pub struct CidarenQuestionMaterialization {
+    question: Question,
+    artifact: EncodedCidarenQuestionArtifact,
+    phase: &'static str,
+    response_digest: [u8; 32],
+    received_at: Timestamp,
+}
+
+impl CidarenQuestionMaterialization {
+    pub fn question(&self) -> &Question {
+        &self.question
+    }
+
+    pub fn artifact(&self) -> &EncodedCidarenQuestionArtifact {
+        &self.artifact
+    }
+
+    pub const fn phase(&self) -> &'static str {
+        self.phase
+    }
+
+    pub const fn response_digest(&self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    pub const fn received_at(&self) -> Timestamp {
+        self.received_at
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Question,
+        EncodedCidarenQuestionArtifact,
+        &'static str,
+        [u8; 32],
+        Timestamp,
+    ) {
+        (
+            self.question,
+            self.artifact,
+            self.phase,
+            self.response_digest,
+            self.received_at,
+        )
+    }
+}
+
+impl fmt::Debug for CidarenQuestionMaterialization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenQuestionMaterialization")
+            .field("question_id", &self.question.id)
+            .field("artifact", &self.artifact)
+            .field("phase", &self.phase)
+            .field("response_digest", &self.response_digest)
+            .field("received_at", &self.received_at)
+            .finish()
+    }
+}
+
+/// Encrypted continuation input for accepted pre-Question stages. Initial
+/// continuations have no response binding; rotations produced by a remote
+/// acknowledgement retain its digest and observation time.
+pub struct CidarenPreQuestionContinuation {
+    artifact: EncodedCidarenPreQuestionArtifact,
+    phase: &'static str,
+    response_binding: Option<CidarenQuestionResponseBinding>,
+}
+
+impl CidarenPreQuestionContinuation {
+    pub fn artifact(&self) -> &EncodedCidarenPreQuestionArtifact {
+        &self.artifact
+    }
+
+    pub const fn phase(&self) -> &'static str {
+        self.phase
+    }
+
+    pub const fn response_digest(&self) -> Option<[u8; 32]> {
+        match self.response_binding {
+            Some(binding) => Some(binding.response_digest),
+            None => None,
+        }
+    }
+
+    pub const fn received_at(&self) -> Option<Timestamp> {
+        match self.response_binding {
+            Some(binding) => Some(binding.received_at),
+            None => None,
+        }
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        EncodedCidarenPreQuestionArtifact,
+        &'static str,
+        Option<[u8; 32]>,
+        Option<Timestamp>,
+    ) {
+        (
+            self.artifact,
+            self.phase,
+            self.response_binding.map(|binding| binding.response_digest),
+            self.response_binding.map(|binding| binding.received_at),
+        )
+    }
+}
+
+impl fmt::Debug for CidarenPreQuestionContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenPreQuestionContinuation")
+            .field("artifact", &self.artifact)
+            .field("phase", &self.phase)
+            .field("has_response", &self.response_binding.is_some())
+            .finish()
+    }
+}
+
 impl CidarenAttemptFlow {
     /// Creates an attempt from one fresh Core Task detail. An optional word
     /// selection plan must have been derived from the same stable Task ID.
@@ -202,6 +340,57 @@ impl CidarenAttemptFlow {
             task_id,
             position: 1,
             phase: Some(phase),
+            last_response_binding: None,
+        })
+    }
+
+    /// Restores one encrypted pre-Question phase after fresh account/Task
+    /// rebinding. A word-selection phase requires a freshly rediscovered plan;
+    /// the potentially large prior map is never trusted from storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a stale Task, missing/foreign fresh plan, or a
+    /// phase that carries an unexpected plan.
+    pub fn restore_pre_question(
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        detail: &RemoteTaskDetail,
+        artifact: CidarenPreQuestionArtifact,
+        fresh_word_selection: Option<CidarenWordSelectionPlan>,
+    ) -> ProviderResult<Self> {
+        validate_context(context)?;
+        let binding = CidarenAssessmentBinding::from_fresh_detail(remote_task_id, detail)?;
+        let phase = match (artifact.into_state(), fresh_word_selection) {
+            (CidarenPreQuestionState::ReadyToSelectWords, Some(plan))
+                if plan.is_bound_to(remote_task_id) =>
+            {
+                CidarenAttemptPhase::ReadyToSelectWords(plan)
+            }
+            (CidarenPreQuestionState::ReadyToStart, None) => CidarenAttemptPhase::ReadyToStart,
+            (CidarenPreQuestionState::ReadingCard(card), None) => {
+                CidarenAttemptPhase::CurrentReadingCard(card)
+            }
+            _ => {
+                return Err(remote_changed(
+                    "Cidaren pre-Question recovery plan does not match its phase",
+                ));
+            }
+        };
+        let context_binding = context_binding(context);
+        Ok(Self {
+            binding,
+            context_binding,
+            flow_binding: flow_binding(context_binding, task_id, remote_task_id),
+            remote_task_id: remote_task_id.to_owned(),
+            task_id,
+            position: match &phase {
+                CidarenAttemptPhase::CurrentReadingCard(card) => card.position(),
+                _ => 1,
+            },
+            phase: Some(phase),
+            last_response_binding: None,
         })
     }
 
@@ -230,11 +419,100 @@ impl CidarenAttemptFlow {
         }
     }
 
+    /// Encodes the current pre-Question phase for Main's encrypted attempt
+    /// continuation. This never copies the fresh word map into storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if a reading-card payload cannot be represented
+    /// by the bounded artifact schema.
+    pub fn pre_question_continuation(
+        &self,
+    ) -> ProviderResult<Option<CidarenPreQuestionContinuation>> {
+        let artifact = match self.phase() {
+            CidarenAttemptPhase::ReadyToSelectWords(_) => {
+                CidarenPreQuestionArtifact::ready_to_select_words(
+                    self.task_id,
+                    &self.remote_task_id,
+                )
+            }
+            CidarenAttemptPhase::ReadyToStart => {
+                CidarenPreQuestionArtifact::ready_to_start(self.task_id, &self.remote_task_id)
+            }
+            CidarenAttemptPhase::CurrentReadingCard(card) => {
+                CidarenPreQuestionArtifact::reading_card(self.task_id, &self.remote_task_id, card)?
+            }
+            _ => return Ok(None),
+        };
+        let phase = artifact.phase();
+        Ok(Some(CidarenPreQuestionContinuation {
+            artifact: artifact.encode()?,
+            phase,
+            response_binding: self.last_response_binding,
+        }))
+    }
+
     pub fn current_question(&self) -> Option<&Question> {
         match self.phase() {
-            CidarenAttemptPhase::CurrentQuestion(current) => Some(&current.question),
+            CidarenAttemptPhase::CurrentQuestion(current)
+            | CidarenAttemptPhase::ReadyToVerify { current, .. }
+            | CidarenAttemptPhase::ReadyToAdvance { current, .. } => Some(&current.question),
             _ => None,
         }
+    }
+
+    /// Builds the exact real Question plus encrypted-at-rest Provider artifact
+    /// input produced by the latest accepted remote response. The same method
+    /// also emits rotated artifacts after sequential `VerifyAnswer` steps.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if the in-memory Question/artifact binding is
+    /// invalid or no accepted response is bound to the current phase.
+    pub fn current_question_materialization(
+        &self,
+    ) -> ProviderResult<Option<CidarenQuestionMaterialization>> {
+        let (current, rotated_topic_code, phase) = match self.phase() {
+            CidarenAttemptPhase::CurrentQuestion(current) => {
+                (current.as_ref(), None, CIDAREN_QUESTION_ARTIFACT_PHASE)
+            }
+            CidarenAttemptPhase::ReadyToVerify {
+                current,
+                topic_code,
+                ..
+            } => (
+                current.as_ref(),
+                Some(topic_code.as_str()),
+                CIDAREN_READY_TO_VERIFY_PHASE,
+            ),
+            CidarenAttemptPhase::ReadyToAdvance {
+                current,
+                topic_code,
+            } => (
+                current.as_ref(),
+                Some(topic_code.as_str()),
+                CIDAREN_READY_TO_ADVANCE_PHASE,
+            ),
+            _ => return Ok(None),
+        };
+        let binding = self.last_response_binding.ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Cidaren current Question has no accepted response binding",
+            )
+        })?;
+        let mut artifact =
+            CidarenQuestionArtifact::from_parsed(&current.parsed, &current.question)?;
+        if let Some(topic_code) = rotated_topic_code {
+            artifact = artifact.rotate_topic_code(topic_code)?;
+        }
+        Ok(Some(CidarenQuestionMaterialization {
+            question: current.question.clone(),
+            artifact: artifact.encode()?,
+            phase,
+            response_digest: binding.response_digest,
+            received_at: binding.received_at,
+        }))
     }
 
     pub fn current_reading_card(&self) -> Option<&ParsedCidarenReadingCard> {
@@ -248,7 +526,11 @@ impl CidarenAttemptFlow {
     /// remote step, independently from this machine's local position.
     pub fn current_remote_progress(&self) -> Option<CidarenAttemptProgress> {
         match self.phase() {
-            CidarenAttemptPhase::CurrentQuestion(current) => current.parsed.remote_progress(),
+            CidarenAttemptPhase::CurrentQuestion(current)
+            | CidarenAttemptPhase::ReadyToVerify { current, .. }
+            | CidarenAttemptPhase::ReadyToAdvance { current, .. } => {
+                current.parsed.remote_progress()
+            }
             CidarenAttemptPhase::CurrentReadingCard(card) => card.remote_progress(),
             _ => None,
         }
@@ -373,10 +655,15 @@ impl CidarenAttemptFlow {
             .ok_or_else(|| invalid_state("Cidaren normalized answer has no Verify step"))?;
         let request =
             build_verify_answer_request(&self.binding, &topic_code, &answer, timestamp_millis)?;
-        let _current = self.take_phase();
+        let CidarenAttemptPhase::CurrentQuestion(current) = self.take_phase() else {
+            unreachable!("Cidaren current Question was checked before request construction");
+        };
         self.issue(
             CidarenAttemptOperation::VerifyAnswer,
-            CidarenAttemptContinuation::Verify { remaining: answers },
+            CidarenAttemptContinuation::Verify {
+                current,
+                remaining: answers,
+            },
             CidarenIssuedAction::VerifyAnswer(request),
             0,
         )
@@ -395,6 +682,7 @@ impl CidarenAttemptFlow {
         let timestamp_millis = request_timestamp_millis(request_at)?;
         let phase = self.take_phase();
         let CidarenAttemptPhase::ReadyToVerify {
+            current,
             topic_code,
             mut remaining,
         } = phase
@@ -406,6 +694,7 @@ impl CidarenAttemptFlow {
         };
         let Some(answer) = remaining.pop_front() else {
             self.phase = Some(CidarenAttemptPhase::ReadyToVerify {
+                current,
                 topic_code,
                 remaining,
             });
@@ -423,6 +712,7 @@ impl CidarenAttemptFlow {
             Err(error) => {
                 remaining.push_front(answer);
                 self.phase = Some(CidarenAttemptPhase::ReadyToVerify {
+                    current,
                     topic_code,
                     remaining,
                 });
@@ -431,7 +721,7 @@ impl CidarenAttemptFlow {
         };
         self.issue(
             CidarenAttemptOperation::VerifyAnswer,
-            CidarenAttemptContinuation::Verify { remaining },
+            CidarenAttemptContinuation::Verify { current, remaining },
             CidarenIssuedAction::VerifyAnswer(request),
             0,
         )
@@ -454,7 +744,7 @@ impl CidarenAttemptFlow {
         let phase = self.take_phase();
         let delay_entropy = step_entropy(self.flow_binding, self.position, b"advance-delay");
         let (topic_code, delay_before_execute_seconds) = match &phase {
-            CidarenAttemptPhase::ReadyToAdvance { topic_code } => (
+            CidarenAttemptPhase::ReadyToAdvance { topic_code, .. } => (
                 topic_code.as_str(),
                 settings.verified_advance_delay_seconds(&delay_entropy),
             ),
@@ -604,9 +894,15 @@ impl CidarenAttemptFlow {
                 "Cidaren attempt outcome operation does not match",
             ));
         }
+        let response_binding = CidarenQuestionResponseBinding {
+            response_digest: outcome.response_digest,
+            received_at: outcome.received_at,
+        };
         let applied = self.apply_response(continuation, outcome.response, outcome.received_at);
         if applied.is_err() {
             self.phase = Some(CidarenAttemptPhase::FailedClosed(operation));
+        } else {
+            self.last_response_binding = Some(response_binding);
         }
         applied
     }
@@ -698,7 +994,7 @@ impl CidarenAttemptFlow {
             CidarenAttemptContinuation::Start => {
                 self.apply_next_step_response(response, self.position, received_at)
             }
-            CidarenAttemptContinuation::Verify { remaining } => {
+            CidarenAttemptContinuation::Verify { current, remaining } => {
                 let CidarenAssessmentResponse::Payload(payload) = response else {
                     return Err(protocol_drift(
                         "Cidaren VerifyAnswer returned no rotated topic code",
@@ -706,9 +1002,13 @@ impl CidarenAttemptFlow {
                 };
                 let topic_code = rotated_topic_code(payload.as_value())?;
                 self.phase = Some(if remaining.is_empty() {
-                    CidarenAttemptPhase::ReadyToAdvance { topic_code }
+                    CidarenAttemptPhase::ReadyToAdvance {
+                        current,
+                        topic_code,
+                    }
                 } else {
                     CidarenAttemptPhase::ReadyToVerify {
+                        current,
                         topic_code,
                         remaining,
                     }
@@ -794,6 +1094,9 @@ impl Drop for CidarenAttemptFlow {
         self.remote_task_id.zeroize();
         self.context_binding.zeroize();
         self.flow_binding.zeroize();
+        if let Some(binding) = &mut self.last_response_binding {
+            binding.response_digest.zeroize();
+        }
     }
 }
 
@@ -1048,8 +1351,6 @@ fn context_binding(context: &ProviderContext) -> [u8; 32] {
         .chain_update(context.provider_id.as_str().as_bytes())
         .chain_update(b"\0")
         .chain_update(context.account_id.to_string().as_bytes())
-        .chain_update(b"\0")
-        .chain_update(context.correlation_id.as_bytes())
         .finalize()
         .into()
 }
@@ -1202,6 +1503,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pre_question_start_restores_across_audit_correlation() {
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([response(&start_payload())])),
+            operations: Mutex::new(Vec::new()),
+        });
+        let context = context();
+        let task_id = TaskId::new();
+        let mut flow =
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &detail(), None)
+                .unwrap();
+        let continuation = flow.pre_question_continuation().unwrap().unwrap();
+        assert_eq!(continuation.phase(), crate::CIDAREN_READY_TO_START_PHASE);
+        assert!(continuation.response_digest().is_none());
+        assert!(continuation.received_at().is_none());
+        let artifact_digest = continuation.artifact().digest();
+        let (artifact, _, _, _) = continuation.into_parts();
+        let value = artifact.into_secret_value();
+
+        let recovered_context = recovered_context(&context);
+        let outcome = flow
+            .issue_start(request_at())
+            .unwrap()
+            .execute(transport, &recovered_context)
+            .await
+            .unwrap();
+        flow.accept(outcome).unwrap();
+        assert!(flow.current_question_materialization().unwrap().is_some());
+
+        let decoded = CidarenPreQuestionArtifact::decode_bound(
+            &value,
+            artifact_digest,
+            task_id,
+            "class-task:2002",
+        )
+        .unwrap();
+        let restored = CidarenAttemptFlow::restore_pre_question(
+            &recovered_context,
+            task_id,
+            "class-task:2002",
+            &detail(),
+            decoded,
+            None,
+        )
+        .unwrap();
+        assert_eq!(restored.status(), CidarenAttemptFlowStatus::ReadyToStart);
+    }
+
+    #[test]
+    fn word_selection_continuation_requires_fresh_plan_without_persisting_map() {
+        let context = context();
+        let task_id = TaskId::new();
+        let (detail, plan) = word_selection_plan();
+        let flow =
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &detail, Some(plan))
+                .unwrap();
+        let continuation = flow.pre_question_continuation().unwrap().unwrap();
+        assert_eq!(
+            continuation.phase(),
+            crate::CIDAREN_READY_TO_SELECT_WORDS_PHASE
+        );
+        let digest = continuation.artifact().digest();
+        let (artifact, _, _, _) = continuation.into_parts();
+        let value = artifact.into_secret_value();
+        assert!(!String::from_utf8_lossy(value.expose_secret()).contains("alpha"));
+        assert!(
+            CidarenPreQuestionArtifact::decode_bound(&value, [7; 32], task_id, "class-task:2002",)
+                .is_err()
+        );
+        assert!(
+            CidarenPreQuestionArtifact::decode_bound(
+                &value,
+                digest,
+                TaskId::new(),
+                "class-task:2002",
+            )
+            .is_err()
+        );
+        let decoded =
+            CidarenPreQuestionArtifact::decode_bound(&value, digest, task_id, "class-task:2002")
+                .unwrap();
+        assert!(
+            CidarenAttemptFlow::restore_pre_question(
+                &context,
+                task_id,
+                "class-task:2002",
+                &detail,
+                decoded,
+                None,
+            )
+            .is_err()
+        );
+
+        let decoded =
+            CidarenPreQuestionArtifact::decode_bound(&value, digest, task_id, "class-task:2002")
+                .unwrap();
+        let (_, fresh_plan) = word_selection_plan();
+        let restored = CidarenAttemptFlow::restore_pre_question(
+            &context,
+            task_id,
+            "class-task:2002",
+            &detail,
+            decoded,
+            Some(fresh_plan),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.status(),
+            CidarenAttemptFlowStatus::ReadyToSelectWords
+        );
+    }
+
+    #[tokio::test]
     async fn single_answer_advances_one_durable_operation_at_a_time() {
         let transport = Arc::new(FixtureTransport {
             responses: Mutex::new(VecDeque::from([
@@ -1212,14 +1625,10 @@ mod tests {
             operations: Mutex::new(Vec::new()),
         });
         let context = context();
-        let mut flow = CidarenAttemptFlow::try_new(
-            &context,
-            TaskId::new(),
-            "class-task:2002",
-            &detail(),
-            None,
-        )
-        .unwrap();
+        let task_id = TaskId::new();
+        let mut flow =
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &detail(), None)
+                .unwrap();
 
         let command = flow.issue_start(request_at()).unwrap();
         assert_eq!(command.delay_before_execute_seconds(), 0);
@@ -1233,6 +1642,15 @@ mod tests {
         assert_ne!(outcome.response_digest(), [0; 32]);
         assert_eq!(outcome.received_at(), request_at());
         flow.accept(outcome).unwrap();
+        let initial_materialization = flow.current_question_materialization().unwrap().unwrap();
+        assert_eq!(
+            initial_materialization.phase(),
+            CIDAREN_QUESTION_ARTIFACT_PHASE
+        );
+        assert_ne!(initial_materialization.response_digest(), [0; 32]);
+        assert_eq!(initial_materialization.received_at(), request_at());
+        let initial_artifact_digest = initial_materialization.artifact().digest();
+        assert!(!format!("{initial_materialization:?}").contains("synthetic-topic-code"));
         let remote_progress = flow.current_remote_progress().unwrap();
         assert_eq!(remote_progress.completed(), 1);
         assert_eq!(remote_progress.total(), 127);
@@ -1249,6 +1667,16 @@ mod tests {
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToAdvance);
+        let rotated_materialization = flow.current_question_materialization().unwrap().unwrap();
+        assert_eq!(rotated_materialization.question().id, question.id);
+        assert_eq!(
+            rotated_materialization.phase(),
+            CIDAREN_READY_TO_ADVANCE_PHASE
+        );
+        assert_ne!(
+            rotated_materialization.artifact().digest(),
+            initial_artifact_digest
+        );
 
         let command = flow.issue_advance(&settings(), request_at()).unwrap();
         assert!((1..=2).contains(&command.delay_before_execute_seconds()));
@@ -1298,6 +1726,12 @@ mod tests {
             .await
             .unwrap();
         flow.accept(outcome).unwrap();
+        let initial_artifact_digest = flow
+            .current_question_materialization()
+            .unwrap()
+            .unwrap()
+            .artifact()
+            .digest();
         let question = flow.current_question().unwrap().clone();
         let selected = SelectedAnswer {
             candidate_id: AnswerCandidateId::new(),
@@ -1323,6 +1757,11 @@ mod tests {
             .unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToVerify);
+        let first_rotation = flow.current_question_materialization().unwrap().unwrap();
+        assert_eq!(first_rotation.question().id, question.id);
+        assert_eq!(first_rotation.phase(), CIDAREN_READY_TO_VERIFY_PHASE);
+        assert_ne!(first_rotation.artifact().digest(), initial_artifact_digest);
+        let first_rotation_digest = first_rotation.artifact().digest();
         let outcome = flow
             .issue_next_verify(request_at())
             .unwrap()
@@ -1331,6 +1770,10 @@ mod tests {
             .unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToAdvance);
+        let second_rotation = flow.current_question_materialization().unwrap().unwrap();
+        assert_eq!(second_rotation.question().id, question.id);
+        assert_eq!(second_rotation.phase(), CIDAREN_READY_TO_ADVANCE_PHASE);
+        assert_ne!(second_rotation.artifact().digest(), first_rotation_digest);
         assert_eq!(
             *transport.operations.lock().unwrap(),
             [
@@ -1507,14 +1950,10 @@ mod tests {
             operations: Mutex::new(Vec::new()),
         });
         let context = context();
-        let mut flow = CidarenAttemptFlow::try_new(
-            &context,
-            TaskId::new(),
-            "class-task:2002",
-            &detail(),
-            None,
-        )
-        .unwrap();
+        let task_id = TaskId::new();
+        let mut flow =
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &detail(), None)
+                .unwrap();
         let outcome = flow
             .issue_start(request_at())
             .unwrap()
@@ -1526,15 +1965,41 @@ mod tests {
         let remote_progress = flow.current_remote_progress().unwrap();
         assert_eq!(remote_progress.completed(), 0);
         assert_eq!(remote_progress.total(), 2);
+        let continuation = flow.pre_question_continuation().unwrap().unwrap();
+        assert_eq!(continuation.phase(), crate::CIDAREN_READING_CARD_PHASE);
+        assert!(continuation.response_digest().is_some());
+        let digest = continuation.artifact().digest();
+        let (artifact, _, _, _) = continuation.into_parts();
+        let value = artifact.into_secret_value();
+        let recovered_context = recovered_context(&context);
+        let artifact =
+            CidarenPreQuestionArtifact::decode_bound(&value, digest, task_id, "class-task:2002")
+                .unwrap();
+        flow = CidarenAttemptFlow::restore_pre_question(
+            &recovered_context,
+            task_id,
+            "class-task:2002",
+            &detail(),
+            artifact,
+            None,
+        )
+        .unwrap();
+        assert_eq!(flow.current_reading_card().unwrap().position(), 1);
         let command = flow.issue_advance(&settings(), request_at()).unwrap();
         assert!((1..=3).contains(&command.delay_before_execute_seconds()));
-        let outcome = command.execute(transport.clone(), &context).await.unwrap();
+        let outcome = command
+            .execute(transport.clone(), &recovered_context)
+            .await
+            .unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.current_question().unwrap().position, 2);
         assert_eq!(flow.inter_step_delay_seconds(&settings()), 2);
         let command = flow.issue_skip(&settings(), request_at()).unwrap();
         assert_eq!(command.delay_before_execute_seconds(), 0);
-        let outcome = command.execute(transport.clone(), &context).await.unwrap();
+        let outcome = command
+            .execute(transport.clone(), &recovered_context)
+            .await
+            .unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(
             flow.status(),
@@ -1782,6 +2247,15 @@ mod tests {
             account_id: ProviderAccountId::new(),
             credential_refs: vec![SecretId::new()],
             correlation_id: "cidaren-attempt-flow-test".to_owned(),
+        }
+    }
+
+    fn recovered_context(original: &ProviderContext) -> ProviderContext {
+        ProviderContext {
+            provider_id: original.provider_id.clone(),
+            account_id: original.account_id,
+            credential_refs: original.credential_refs.clone(),
+            correlation_id: "cidaren-recovery-audit".to_owned(),
         }
     }
 

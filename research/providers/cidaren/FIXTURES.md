@@ -193,6 +193,13 @@ placeholder identities, result codes, status values and pagination shape.
   response digest plus observation time; artifact rotation tests prove a fresh
   topic code changes the digest without weakening Task/Question bindings or
   accepting malformed replacement state.
+- Pre-Question recovery tests cover namespaced selection/start/reading-card
+  phases, absence of word-map values from encrypted artifact plaintext, fresh
+  plan requirements, local/remote Task rebinding, correlation-independent
+  identity and reading-card continuation into the next real Question.
+- Matching recovery tests retain one immutable Question ID across each
+  sequential Verify rotation while requiring a distinct artifact digest and
+  the exact `cidaren.ready-to-verify` / `cidaren.ready-to-advance` phase.
 - Native-boundary tests cover both `ClassTask` and `StudyTask` route families,
   preserve the donor's read/submit `Authorization-v` split for every mutation,
   and reject any operation outside the audited five-operation allowlist.

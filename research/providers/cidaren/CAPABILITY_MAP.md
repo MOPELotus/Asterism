@@ -129,6 +129,16 @@ The current checkpoint (not a completion boundary):
     typed transport outcome. Accepted `VerifyAnswer` state can replace only the
     topic code while retaining every immutable artifact binding; all Provider
     continuation phases use the required `cidaren.*` namespace.
+31. exposes the audited attempt flow and materialization bundles as a public
+    Provider-private integration surface: a real Question bundle carries the
+    normalized Question, zeroizing artifact, phase, raw response digest and
+    observation time, while matching Verify rotations retain the same
+    immutable Question binding across every topic-code revision.
+32. encodes pre-Question selection/start/reading-card state as the bounded
+    `cidaren.pre-question-attempt.v1` artifact. Recovery rebinds local/remote
+    Task identity, requires a fresh word-selection plan instead of persisting
+    its large map, restores reading-card progress and allows correlation to
+    change because it remains audit metadata rather than execution identity.
 
 The remaining work is durable shared QuestionSession/Attempt registration for
 QuestionInventory/QuestionParse and SubmissionExecute, shared execution for

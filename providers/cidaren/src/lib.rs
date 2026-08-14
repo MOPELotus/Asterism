@@ -15,10 +15,6 @@ mod answer_resolve;
 mod assessment_protocol;
 mod assessment_response;
 mod assessment_transport;
-#[expect(
-    dead_code,
-    reason = "Provider-private audited lifecycle awaits Main-owned durable QuestionSession trait integration"
-)]
 mod attempt_flow;
 mod authentication;
 mod browser_bridge;
@@ -32,6 +28,7 @@ mod metadata;
 mod native_http;
 mod oauth_authorization;
 mod oauth_exchange;
+mod pre_question_artifact;
 mod provider;
 mod question_artifact;
 mod question_parser;
@@ -67,6 +64,10 @@ pub use assessment_response::{
     parse_assessment_response, parse_word_selection_response,
 };
 pub use assessment_transport::{CidarenAssessmentTransport, CidarenAssessmentTransportOutcome};
+pub use attempt_flow::{
+    CidarenAttemptFlow, CidarenAttemptFlowStatus, CidarenAttemptOperation, CidarenIssuedCommand,
+    CidarenIssuedOutcome, CidarenPreQuestionContinuation, CidarenQuestionMaterialization,
+};
 pub use authentication::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenSessionResolver,
     CidarenTokenSession, classify_token_validation_response,
@@ -90,6 +91,11 @@ pub use inventory::{
 };
 pub use metadata::development_metadata;
 pub use native_http::NativeCidarenTransport;
+pub use pre_question_artifact::{
+    CIDAREN_PRE_QUESTION_ARTIFACT_TYPE, CIDAREN_READING_CARD_PHASE,
+    CIDAREN_READY_TO_SELECT_WORDS_PHASE, CIDAREN_READY_TO_START_PHASE, CidarenPreQuestionArtifact,
+    EncodedCidarenPreQuestionArtifact,
+};
 pub use provider::{
     build_development_provider, build_development_provider_native,
     build_development_provider_with_stored_session,

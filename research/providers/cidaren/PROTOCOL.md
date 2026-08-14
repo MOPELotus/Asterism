@@ -478,7 +478,8 @@ SubmitChoseWord receipt (when required)
 -> next step or terminal receipt
 ```
 
-Every command is account/task/correlation-bound and consumed on execution. A
+Every command is Provider/account/Task-bound and consumed on execution.
+Correlation IDs are validated audit metadata, not recoverable identity. A
 transport error leaves the flow `Issued`; the caller must mark it ambiguous,
 after which no replay is possible. Unexpected response semantics enter a
 separate fail-closed terminal state. This Provider-private machine is not yet a
@@ -555,6 +556,22 @@ QuestionSession continuation boundary; Provider decoding repeats every binding
 check before reuse. This post-start artifact does not make `StartAnswer`
 replayable: the non-idempotent mutation before the first Question still needs
 the separate Main-owned pre-question AttemptSession and ambiguity recovery.
+The Provider now emits a bounded `cidaren.pre-question-attempt.v1` encrypted
+artifact for that shared boundary. Its phases are
+`cidaren.ready-to-select-words`, `cidaren.ready-to-start` and
+`cidaren.reading-card`. The word-selection phase deliberately omits the
+potentially large word map and requires fresh Task-bound rediscovery on
+recovery; ready-to-start needs no secret payload; reading-card retains only its
+zeroizing topic code, stable card identity, sanitized stem, position and
+optional progress. Decode repeats local/remote Task binding. A new audit
+correlation can therefore resume the same account/Task state without becoming
+part of its identity hash.
+
+Both current donors retry `StartAnswer` after receiving an unknown `jv`
+response, and rerunning their GUI enters `StartAnswer` again. This establishes
+donor retry behavior after a definite response, not safe replay after an
+ambiguous network outcome. Asterism continues to mark an unknown transport
+outcome ambiguous and does not issue the mutation again.
 The donor's strings such as “task complete” are bounded receipt facts and do
 not replace an identity-bound post-mutation read. The Provider-private
 SubmissionVerify implementation recomputes the immutable preview, freshly
