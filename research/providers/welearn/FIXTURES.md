@@ -211,6 +211,9 @@ only structural field names, response codes and bounded placeholder shapes.
 - Well-formed negative historical duration receipts may continue and can only
   succeed after exact fresh preservation/readback; malformed or network-
   ambiguous receipts still stop with no replay.
+- Duration document tests bind start receipt presence, accepted/rejected keep
+  totals and final receipt presence to each frozen protocol. False receipts are
+  valid slots; missing, extra or impossible slots fail before CMI parsing.
 - Completion `auto` tests freeze fresh-time versus zero-time facts and reject a
   malformed plan binding before Provider transport; immutable plan context is
   not authority to execute the pending atomic duration-completion flow.

@@ -80,6 +80,58 @@ impl WellearnDurationReportDocuments {
             final_accepted: receipts.final_accepted,
         }
     }
+
+    fn validate_for_plan(&self, plan: WellearnDurationReportPlan) -> ProviderResult<()> {
+        if self.start_accepted.is_some() != self.started {
+            return Err(invalid_duration_documents());
+        }
+        let recorded_heartbeats = self
+            .heartbeat_accepted
+            .checked_add(self.heartbeat_rejected)
+            .ok_or_else(invalid_duration_documents)?;
+        if recorded_heartbeats != self.heartbeat_count {
+            return Err(invalid_duration_documents());
+        }
+
+        let complete_intervals = plan.duration_seconds / plan.heartbeat_interval_seconds;
+        let expected_complete =
+            u32::try_from(complete_intervals).map_err(|_| invalid_duration_documents())?;
+        let valid_protocol_shape = match plan.protocol_mode {
+            WellearnDurationProtocolMode::PreserveFresh => {
+                self.heartbeat_count == expected_complete.saturating_add(1)
+                    && self.final_accepted.is_some()
+            }
+            WellearnDurationProtocolMode::ImplicitServer => {
+                self.started
+                    && self.heartbeat_count == expected_complete
+                    && self.final_accepted.is_some()
+            }
+            WellearnDurationProtocolMode::ClientCounter => {
+                let expected = u32::try_from(plan.duration_seconds)
+                    .map_err(|_| invalid_duration_documents())?;
+                self.started
+                    && self.start_accepted == Some(true)
+                    && self.final_accepted.is_none()
+                    && self.heartbeat_rejected <= 1
+                    && if self.heartbeat_rejected == 0 {
+                        self.heartbeat_count == expected
+                    } else {
+                        self.heartbeat_count <= expected
+                    }
+            }
+        };
+        if !valid_protocol_shape {
+            return Err(invalid_duration_documents());
+        }
+        Ok(())
+    }
+}
+
+fn invalid_duration_documents() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn duration transport returned receipts inconsistent with the frozen plan",
+    )
 }
 
 /// Immutable, bounded donor wire plan selected from one frozen execution.
@@ -231,6 +283,7 @@ impl TaskExecutionCapability for WellearnDurationReport {
             .transport
             .report_duration(context, &course_id, &sco_id, plan, events)
             .await?;
+        documents.validate_for_plan(plan)?;
         let before = parse_cmi_snapshot(documents.before.as_str())?;
         let after = parse_cmi_snapshot(documents.after.as_str())?;
         require_duration_snapshot(&before, "baseline")?;
@@ -502,6 +555,7 @@ mod tests {
         UnchangedDuration,
         IncompleteVerification,
         ExplicitRejections,
+        MalformedReceipts,
     }
 
     #[derive(Debug, Default)]
@@ -533,19 +587,24 @@ mod tests {
                 FixtureBehavior::DriftCompletion => AFTER.replace("incomplete", "completed"),
                 FixtureBehavior::UnchangedDuration => BEFORE.to_owned(),
                 FixtureBehavior::IncompleteVerification => r#"{"ret":0,"comment":"{}"}"#.to_owned(),
-                FixtureBehavior::Normal | FixtureBehavior::ExplicitRejections => AFTER.to_owned(),
+                FixtureBehavior::Normal
+                | FixtureBehavior::ExplicitRejections
+                | FixtureBehavior::MalformedReceipts => AFTER.to_owned(),
             };
             let accepted = self.behavior != FixtureBehavior::ExplicitRejections;
+            let heartbeat_count =
+                u32::try_from(1 + plan.duration_seconds / plan.heartbeat_interval_seconds).unwrap();
             Ok(WellearnDurationReportDocuments::with_receipts(
                 WellearnCmiDocument::try_new(BEFORE).unwrap(),
                 WellearnCmiDocument::try_new(after).unwrap(),
                 false,
-                3,
+                heartbeat_count,
                 WellearnDurationReportReceipts {
                     start_accepted: None,
-                    heartbeat_accepted: if accepted { 3 } else { 0 },
-                    heartbeat_rejected: if accepted { 0 } else { 3 },
-                    final_accepted: Some(accepted),
+                    heartbeat_accepted: if accepted { heartbeat_count } else { 0 },
+                    heartbeat_rejected: if accepted { 0 } else { heartbeat_count },
+                    final_accepted: (self.behavior != FixtureBehavior::MalformedReceipts)
+                        .then_some(accepted),
                 },
             ))
         }
@@ -617,6 +676,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn duration_documents_bind_protocol_specific_receipt_slots() {
+        let documents = |started, heartbeat_count, receipts| {
+            WellearnDurationReportDocuments::with_receipts(
+                WellearnCmiDocument::try_new(BEFORE).unwrap(),
+                WellearnCmiDocument::try_new(AFTER).unwrap(),
+                started,
+                heartbeat_count,
+                receipts,
+            )
+        };
+        let preserve = WellearnDurationReportPlan {
+            duration_seconds: 120,
+            heartbeat_interval_seconds: 60,
+            protocol_mode: WellearnDurationProtocolMode::PreserveFresh,
+        };
+        documents(
+            false,
+            3,
+            WellearnDurationReportReceipts {
+                start_accepted: None,
+                heartbeat_accepted: 2,
+                heartbeat_rejected: 1,
+                final_accepted: Some(false),
+            },
+        )
+        .validate_for_plan(preserve)
+        .unwrap();
+
+        let client_counter = WellearnDurationReportPlan {
+            duration_seconds: 10,
+            heartbeat_interval_seconds: 1,
+            protocol_mode: WellearnDurationProtocolMode::ClientCounter,
+        };
+        documents(
+            true,
+            4,
+            WellearnDurationReportReceipts {
+                start_accepted: Some(true),
+                heartbeat_accepted: 3,
+                heartbeat_rejected: 1,
+                final_accepted: None,
+            },
+        )
+        .validate_for_plan(client_counter)
+        .unwrap();
+        assert!(
+            documents(
+                true,
+                10,
+                WellearnDurationReportReceipts {
+                    start_accepted: Some(false),
+                    heartbeat_accepted: 10,
+                    heartbeat_rejected: 0,
+                    final_accepted: None,
+                },
+            )
+            .validate_for_plan(client_counter)
+            .is_err()
+        );
+        let error = documents(
+            true,
+            4,
+            WellearnDurationReportReceipts {
+                start_accepted: Some(true),
+                heartbeat_accepted: 2,
+                heartbeat_rejected: 2,
+                final_accepted: None,
+            },
+        )
+        .validate_for_plan(client_counter)
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
+
+        let implicit = WellearnDurationReportPlan {
+            duration_seconds: 120,
+            heartbeat_interval_seconds: 60,
+            protocol_mode: WellearnDurationProtocolMode::ImplicitServer,
+        };
+        documents(
+            true,
+            2,
+            WellearnDurationReportReceipts {
+                start_accepted: Some(false),
+                heartbeat_accepted: 2,
+                heartbeat_rejected: 0,
+                final_accepted: Some(false),
+            },
+        )
+        .validate_for_plan(implicit)
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn duration_report_uses_frozen_settings_and_verifies_fresh_cmi() {
         let transport = Arc::new(FixtureTransport::default());
@@ -671,6 +823,24 @@ mod tests {
         assert_eq!(outcome.result_sanitized["heartbeat_accepted"], 0);
         assert_eq!(outcome.result_sanitized["heartbeat_rejected"], 3);
         assert_eq!(outcome.result_sanitized["final_accepted"], false);
+    }
+
+    #[tokio::test]
+    async fn duration_receipts_must_match_the_frozen_protocol_shape() {
+        let capability = WellearnDurationReport::try_new(
+            Arc::new(FixtureDetail::present()),
+            Arc::new(FixtureTransport {
+                behavior: FixtureBehavior::MalformedReceipts,
+                ..FixtureTransport::default()
+            }),
+        )
+        .unwrap();
+
+        let error = capability
+            .execute(&context(), &request(), &FixtureEvents::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
     }
 
     #[tokio::test]

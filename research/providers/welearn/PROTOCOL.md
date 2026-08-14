@@ -276,6 +276,15 @@ Only the YZBRH and Auto single-file preservation/bare-save modes are complete
 singleton DurationReport lifecycles; the two completion-bearing flows require
 the atomic shape recorded below.
 
+Duration transport documents also bind the actual call shape to the frozen
+plan. Preserve-fresh records its initial keep plus every complete 60-second
+interval and a final receipt; implicit-server records only complete intervals
+plus a final receipt; client-counter records at most one keep per target second,
+stops after its first explicit rejection and has no final receipt. In every
+mode accepted plus rejected equals the total heartbeat count, and start receipt
+presence equals the `started` fact. Structural mismatch fails `Internal` before
+CMI parsing; present false receipts remain diagnostic evidence.
+
 After singleton finalization, a fresh CMI read must preserve completion,
 progress, score and success status with the same explicit field presence while
 changing at least one raw time observation. An absent or partial readback is
