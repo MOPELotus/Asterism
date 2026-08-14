@@ -158,7 +158,9 @@ placeholder identities, result codes, status values and pagination shape.
   recipe drift before any helper result can be accepted.
   TokenOnly and Composite command fixtures freeze the exact compact JSON bytes
   sent to the helper; those same bytes are the encrypted recovery artifact and
-  command-digest input, paired with the existing result fixtures.
+  command-digest input, paired with the existing result fixtures. Recovery
+  caps this command artifact independently at 4 KiB rather than inheriting the
+  much larger bounded result-document allowance.
   A recovered-exchange fixture drops the in-memory issued wrapper, resolves
   only the encrypted artifact plus persisted exchange, rejects a foreign
   recipe and then completes the exact Composite result through fresh rebinding.

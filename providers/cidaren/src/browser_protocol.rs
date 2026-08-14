@@ -12,6 +12,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::CidarenCryptoContext;
 
 const CIDAREN_ORIGIN: &str = "https://app.vocabgo.com";
+const MAX_BROWSER_COMMAND_BYTES: usize = 4 * 1_024;
 const MAX_BROWSER_DOCUMENT_BYTES: usize = 256 * 1_024;
 const MAX_SESSION_NONCE_BYTES: usize = 512;
 const MAX_FRAME_ID_BYTES: usize = 256;
@@ -207,7 +208,7 @@ impl CidarenBrowserCommandEnvelope {
         expected_mode: CidarenCaptureMode,
     ) -> ProviderResult<Self> {
         let bytes = value.expose_secret();
-        if bytes.is_empty() || bytes.len() > MAX_BROWSER_DOCUMENT_BYTES {
+        if bytes.is_empty() || bytes.len() > MAX_BROWSER_COMMAND_BYTES {
             return Err(invalid_response(
                 "Cidaren Capture command artifact is empty or oversized",
             ));
@@ -854,6 +855,25 @@ mod tests {
             .unwrap_err()
             .kind,
             ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[test]
+    fn encrypted_command_artifact_has_an_independent_tight_bound() {
+        let oversized = SecretValue::new(vec![b'x'; MAX_BROWSER_COMMAND_BYTES + 1]);
+        let digest: [u8; 32] = Sha256::digest(oversized.expose_secret()).into();
+        assert_eq!(
+            CidarenBrowserCommandEnvelope::decode_artifact_bound(
+                &oversized,
+                digest,
+                BrowserBridgeSessionId::new(),
+                "class-task:2002",
+                1,
+                CidarenCaptureMode::TokenOnly,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::InvalidResponse
         );
     }
 
