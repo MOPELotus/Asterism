@@ -1026,6 +1026,7 @@ mod tests {
     fn spec() -> BrowserSessionSpec {
         BrowserSessionSpec {
             version: 1,
+            start_url: "https://provider.example/task/a1".to_owned(),
             isolation_key: "provider-task-a1".to_owned(),
             allowed_origins: vec!["https://provider.example".to_owned()],
             headless: false,

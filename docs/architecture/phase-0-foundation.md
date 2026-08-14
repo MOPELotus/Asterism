@@ -3413,3 +3413,21 @@ not mark an exchange complete, interpret Provider DOM state, derive credentials
 or issue a successor command. Provider runtime must resolve the encrypted
 command/result pair, validate its own protocol and fresh bindings, and only then
 use the existing terminal exchange or atomic credential-commit boundary.
+
+## One-hundred-and-ninety-fourth Phase 0 slice
+
+A `BrowserBridge` session now freezes the exact credential-free HTTPS route the
+isolated helper opens first. The Provider must derive this route from the same
+fresh Task detail used to authorize the capability; Core bounds and parses it,
+rejects non-HTTPS or userinfo-bearing routes, and requires its exact origin to
+belong to the session's immutable navigation allowlist. The route participates
+in the existing specification digest, durable JSON snapshot and helper claim
+response, so a restart or later Provider change cannot redirect an already
+created session.
+
+This is navigation authority, not credential injection and not command
+authority. The helper still receives no Provider credential through the
+session specification, and no browser action can run until Core has durably
+issued and one-shot dispatched its exact encrypted command. Provider policy
+versions advance when adopting the new route binding so old and new session
+shapes cannot be mistaken for one another.

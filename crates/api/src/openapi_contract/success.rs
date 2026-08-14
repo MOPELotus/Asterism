@@ -806,9 +806,16 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         (
             "BrowserSessionSpec",
             object(
-                &["version", "isolation_key", "allowed_origins", "headless"],
+                &[
+                    "version",
+                    "start_url",
+                    "isolation_key",
+                    "allowed_origins",
+                    "headless",
+                ],
                 json!({
                     "version": {"type": "integer", "minimum": 1, "maximum": u32::MAX},
+                    "start_url": {"type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2048},
                     "isolation_key": {"type": "string", "minLength": 1, "maxLength": 128},
                     "allowed_origins": {
                         "type": "array",

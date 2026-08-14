@@ -2427,6 +2427,7 @@ mod tests {
             assert_eq!(remote_task_id, "task-a");
             Ok(BrowserSessionSpec {
                 version: 1,
+                start_url: "https://provider-alpha.example/task/a".to_owned(),
                 isolation_key: "provider-alpha-task-a".to_owned(),
                 allowed_origins: vec!["https://provider-alpha.example".to_owned()],
                 headless: false,

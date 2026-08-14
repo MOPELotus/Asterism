@@ -2192,6 +2192,8 @@ pub struct BrowserSessionSpec {
     /// Provider-owned wire revision for the browser policy represented by this
     /// immutable snapshot.
     pub version: u32,
+    /// Exact credential-free HTTPS route the isolated helper opens first.
+    pub start_url: String,
     pub isolation_key: String,
     pub allowed_origins: Vec<String>,
     pub headless: bool,
@@ -2205,9 +2207,11 @@ impl BrowserSessionSpec {
     /// # Errors
     ///
     /// Returns [`BrowserSessionSpecError::Invalid`] for a zero revision,
-    /// malformed isolation key, unsafe origin or duplicate/unbounded origin
-    /// set.
+    /// unsafe start route, malformed isolation key, unsafe origin or
+    /// duplicate/unbounded origin set.
     pub fn validate(&self) -> Result<(), BrowserSessionSpecError> {
+        let start_origin =
+            https_origin(&self.start_url, false).map_err(|_| BrowserSessionSpecError::Invalid)?;
         if self.version == 0
             || self.isolation_key.is_empty()
             || self.isolation_key.len() > 128
@@ -2219,6 +2223,10 @@ impl BrowserSessionSpec {
             })
             || self.allowed_origins.is_empty()
             || self.allowed_origins.len() > MAX_CAPTURE_ORIGINS
+            || !self
+                .allowed_origins
+                .iter()
+                .any(|origin| origin == &start_origin)
         {
             return Err(BrowserSessionSpecError::Invalid);
         }
@@ -2265,6 +2273,7 @@ mod browser_session_spec_tests {
     fn spec() -> BrowserSessionSpec {
         BrowserSessionSpec {
             version: 1,
+            start_url: "https://provider.example/task/a1".to_owned(),
             isolation_key: "provider-task-a1".to_owned(),
             allowed_origins: vec!["https://provider.example".to_owned()],
             headless: false,
@@ -2276,6 +2285,10 @@ mod browser_session_spec_tests {
         assert_eq!(spec().validate(), Ok(()));
         assert_eq!(spec().digest(), spec().digest());
 
+        let mut changed_start = spec();
+        changed_start.start_url = "https://provider.example/task/a2".to_owned();
+        assert_ne!(spec().digest(), changed_start.digest());
+
         let mut duplicate = spec();
         duplicate
             .allowed_origins
@@ -2285,6 +2298,20 @@ mod browser_session_spec_tests {
         let mut route = spec();
         route.allowed_origins[0].push_str("/task");
         assert_eq!(route.validate(), Err(BrowserSessionSpecError::Invalid));
+
+        let mut foreign_start = spec();
+        foreign_start.start_url = "https://foreign.example/task/a1".to_owned();
+        assert_eq!(
+            foreign_start.validate(),
+            Err(BrowserSessionSpecError::Invalid)
+        );
+
+        let mut unsafe_start = spec();
+        unsafe_start.start_url = "http://provider.example/task/a1".to_owned();
+        assert_eq!(
+            unsafe_start.validate(),
+            Err(BrowserSessionSpecError::Invalid)
+        );
 
         let mut secret_shaped = spec();
         secret_shaped.isolation_key = "Provider:token".to_owned();
