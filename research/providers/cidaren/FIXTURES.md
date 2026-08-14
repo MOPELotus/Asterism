@@ -180,6 +180,9 @@ placeholder identities, result codes, status values and pagination shape.
   the source event with an empty value before its own Drop cleanup.
 - Capture JSON-object shape checks recursively clear their temporary parsed
   value, including the optional unused browser session, before returning.
+- `Student/Main` token validation and selected-Course extraction wrap the
+  complete `user_info` JSON tree in an RAII zeroizing owner, including every
+  malformed, rejected and early-return path.
 - Encrypted pre/post-Question wire decoders move validated one-time fields
   into runtime artifacts instead of cloning them. Parser restoration wraps
   topic codes and binding strings in zeroizing owners before its first

@@ -416,9 +416,13 @@ pub fn classify_token_validation_response(document: &[u8]) -> ProviderResult<()>
     if document.is_empty() || document.len() > MAX_VALIDATION_RESPONSE_BYTES {
         return Err(invalid_validation_response());
     }
-    let root: Value =
-        serde_json::from_slice(document).map_err(|_| invalid_validation_response())?;
-    let object = root.as_object().ok_or_else(invalid_validation_response)?;
+    let root = ZeroizingValidationJson::new(
+        serde_json::from_slice(document).map_err(|_| invalid_validation_response())?,
+    );
+    let object = root
+        .as_value()
+        .as_object()
+        .ok_or_else(invalid_validation_response)?;
     let code = object
         .get("code")
         .and_then(Value::as_i64)
@@ -441,9 +445,11 @@ pub fn classify_token_validation_response(document: &[u8]) -> ProviderResult<()>
 
 pub(crate) fn selected_course_id(document: &[u8]) -> ProviderResult<String> {
     classify_token_validation_response(document)?;
-    let root: Value =
-        serde_json::from_slice(document).map_err(|_| invalid_validation_response())?;
+    let root = ZeroizingValidationJson::new(
+        serde_json::from_slice(document).map_err(|_| invalid_validation_response())?,
+    );
     let course_id = root
+        .as_value()
         .get("data")
         .and_then(Value::as_object)
         .and_then(|data| data.get("user_info"))
@@ -465,6 +471,33 @@ pub(crate) fn selected_course_id(document: &[u8]) -> ProviderResult<String> {
             )
         })?;
     Ok(course_id.to_owned())
+}
+
+struct ZeroizingValidationJson(Value);
+
+impl ZeroizingValidationJson {
+    const fn new(value: Value) -> Self {
+        Self(value)
+    }
+
+    const fn as_value(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl Drop for ZeroizingValidationJson {
+    fn drop(&mut self) {
+        zeroize_json(&mut self.0);
+    }
+}
+
+fn zeroize_json(value: &mut Value) {
+    match value {
+        Value::String(value) => value.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_json),
+        Value::Object(values) => values.values_mut().for_each(zeroize_json),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 const fn valid_session(kind: SessionKind) -> SessionStatus {
