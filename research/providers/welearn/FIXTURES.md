@@ -90,6 +90,22 @@ goal: execution succeeds only because the readback matches, and exposes false
 start/set/save acceptance fields for diagnostics. Malformed or ambiguous
 responses remain covered by HumanRequired no-replay tests.
 
+## Full-sweep regression disposition
+
+The 2026-08-14 mandatory full sweep found no additional remote document shape,
+Question/result response or mutation route, so it does not justify inventing a
+new protocol fixture. Existing authentication fixtures already prove that raw
+or anonymous Cookies are not accepted without an authenticated Course read,
+which is stronger than the donor Cookie path discussed in Fany issue #1.
+
+Inline batch tests now freeze Auto's previously lossy aggregate setting
+provenance: configured minutes `1..=300`, random range `0..=30`, a sampled
+signed offset inside that range, `max(1, configured + offset)`, and the maximum
+330-minute aggregate. Negative cases reject invalid base/range/offset values
+before parent planning. No answer-evidence fixture exists because the complete
+donor sweep exposed no historical result, per-Question answer, grading,
+threshold or retake document to sanitize.
+
 ## Required live-sanitized fixtures
 
 ```text

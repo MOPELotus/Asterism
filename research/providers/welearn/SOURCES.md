@@ -2,8 +2,11 @@
 
 Audit date: 2026-08-14
 
-Default-branch heads, tags and releases were rechecked on 2026-08-14 and still match all three
-pinned revisions below; no new donor capability surface was introduced.
+The mandatory next-checkpoint full sweep was completed on 2026-08-14. It
+re-read every tracked README, configuration/dependency file, text source,
+default branch, tag/release, commit history, issue and example/fixture surface;
+it was not limited to changes after the pins. Default-branch heads still match
+all three pinned revisions below, and no new remote protocol route was found.
 The 2026-08-13 read-only public SSO audit observed the current static bundle,
 the host/path of unauthenticated external-login redirects, and the exact
 Course-list login-script response produced with anonymous prelogin Cookies; no
@@ -18,6 +21,24 @@ pending.
 | [`Fanyuchang2026/welearn-helper`](https://github.com/Fanyuchang2026/welearn-helper) | `afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2` | 2026-06-09 | Reference | Current SSO/OIDC password flow and interactive captcha/SMS/third-party browser behavior, Course/Unit/SCO discovery including deliberately unfiltered hidden/already-completed SCO execution, clamped-Gaussian selected score followed by an unconditional second `crate=100` save, duration heartbeat and concurrency behavior | Offline/native/Capture response-readiness helper boundary covered; OAuth callback and live learning validation pending |
 | [`YZBRH/Welearn_helper`](https://github.com/YZBRH/Welearn_helper) | `bd160e91d0452b8bf483087fbdd3bdd58d855e13` | 2025-12-25 | Reference | Redirect handling, TLS-client behavior, direct `setscoinfo`/save accuracy preset, CMI read, per-SCO concurrent heartbeat and final save | Offline/native boundary covered; live pending |
 | [`1q2w-c/Auto_WeLearn`](https://github.com/1q2w-c/Auto_WeLearn) | `85918caaccd93b73b1e41fe537b4e9a11377b759` | 2025-12-14 | Historical | Modular API boundary, multi-account management, fixed/random score UX, selected-Unit/all-task batch execution, aggregate duration-budget distribution and explicit 1–100 worker setting, plus the distinct sequential single-file completion/duration routes | Protocol/settings cross-check covered; shared Unit/batch orchestration gap recorded |
+
+## Mandatory full-sweep ledger
+
+| Re-enumerated surface | Evidence | Classification after comparison |
+|---|---|---|
+| Password/OIDC, raw Cookie input, captcha/SMS and external-provider browser choices | Fany source, `login_code.txt`, README and [issue #1](https://github.com/Fanyuchang2026/welearn-helper/issues/1) | Password, ImportedCookie and two bounded Capture alternatives are implemented. The issue confirms donor Cookie mode was not rewritten and may fail; Asterism does not inherit that shortcut and requires an authenticated Course read. Captcha/SMS/OAuth callback live validation remains live-only |
+| Course → Unit → SCO inventory and one/all/ordered Unit choices | all three source trees; YZBRH [issue #1](https://github.com/YZBRH/Welearn_helper/issues/1) documents the Course-page `uid`/`classid` shape change | Implemented inventory and Provider-private selection semantics; durable parent selection remains a shared Core Gap |
+| Fixed/uniform/clamped-Gaussian score, CMI envelope, start/set/save profiles and current dual save | all completion implementations; Fany tag `v4.0.0` versus `master` | Implemented. The older tag wrote fractional/progress variants that current `master` deliberately replaced; they are recorded as superseded drift, not selectable current wire profiles |
+| Per-SCO fixed/random seconds; YZBRH preserved-CMI lifecycle; current one-second client counter; Auto 60-second implicit keeps | all duration implementations; YZBRH [issue #4](https://github.com/YZBRH/Welearn_helper/issues/4) | Implemented or encoded behind the existing atomic Core Gap. Issue #4 requests an inter-SCO delay but the maintainer declined it and no implementation exists, so it is not donor capability evidence |
+| Auto modular aggregate budget: base 1–300 minutes, signed random range 0–30, one sample for the selected membership, equal-floor allocation | `ui/account_detail.py`, `ui/workers.py` | Provider-private `WellearnAutoDurationBudget` now retains and validates base/range/frozen offset/actual minutes. Exposing and persisting a parent-batch runtime policy plus immutable parent entropy remains a shared Core Gap; per-Task random duration must not substitute for it |
+| 1–100 duration worker pool and independent account sessions | Auto modular UI/workers | Provider/account concurrency bounds are implemented. Cross-account scheduling remains Core-owned |
+| Add/remove accounts, nickname/status, CSV/TXT import/export, independent account windows and batch account queue | Auto README, account manager, views and batch manager | Cross-cutting product/Core/API/UI surface, not WELearn wire behavior. Main must decide the shared account-bulk contract; donor plaintext password export must not be copied |
+| Retry/timeouts, TLS-client packaging and stop/log display behavior | Fany retry loops; Auto 10-second timeouts; YZBRH [issues #5](https://github.com/YZBRH/Welearn_helper/issues/5), [#6](https://github.com/YZBRH/Welearn_helper/issues/6) and [#8](https://github.com/YZBRH/Welearn_helper/issues/8) | Shared network/runtime/packaging concerns. Existing bounded HTTP policy is retained; donor exception swallowing, forced thread termination and dependency packaging are not Provider capabilities |
+| Historical task/result enumeration, per-Question submitted/official answers, grading evidence, pass/completion thresholds and retake | every README/config/source/issue/example/fixture in all three repositories | Unsupported due to missing protocol evidence. Donors expose only Course/SCO CMI completion, score and duration; no Question inventory, result page, answer evidence, threshold or retake route exists. WELearn therefore cannot yet feed the owner-level Answer Evidence Corpus or its bootstrap/Strict Completion/Score Improvement state machines |
+
+No repository contains a protocol fixture directory or executable example
+beyond the listed application sources. Binary executables were inventoried but
+not executed or reverse engineered. No donor script was run during the sweep.
 
 ## Upstream refresh
 

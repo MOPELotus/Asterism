@@ -80,6 +80,9 @@ pub enum WellearnBatchUnitSelection {
 }
 
 const MAX_BATCH_TASKS: usize = 8_192;
+const MIN_AUTO_CONFIGURED_DURATION_MINUTES: u16 = 1;
+const MAX_AUTO_CONFIGURED_DURATION_MINUTES: u16 = 300;
+const MAX_AUTO_DURATION_RANDOM_RANGE_MINUTES: u8 = 30;
 const MAX_AUTO_DURATION_MINUTES: u64 = 330;
 const MAX_BATCH_ID_COMPONENT_BYTES: usize = 128;
 const WELLEARN_ATOMIC_CHILD_PLAN_VERSION: u16 = 1;
@@ -224,6 +227,72 @@ pub struct WellearnBatchPlan {
     pub discarded_remainder_seconds: u64,
 }
 
+/// Complete modular `Auto_WeLearn` parent-budget selection.
+///
+/// The donor samples one signed offset for the whole selected batch and then
+/// divides the resulting aggregate across every eligible child. Retaining the
+/// inputs and sampled offset prevents a restored parent plan from presenting
+/// an unexplained final minute value as valid donor configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WellearnAutoDurationBudget {
+    configured: u16,
+    random_range: u8,
+    sampled_offset: i16,
+    actual: u16,
+}
+
+impl WellearnAutoDurationBudget {
+    /// Validates the donor's 1..=300 minute base, 0..=30 minute random range,
+    /// and one already-frozen signed sample from that inclusive range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when any restored setting or sample is
+    /// outside the audited UI/worker bounds.
+    pub fn try_new(
+        configured_minutes: u16,
+        random_range_minutes: u8,
+        sampled_offset_minutes: i16,
+    ) -> ProviderResult<Self> {
+        if !(MIN_AUTO_CONFIGURED_DURATION_MINUTES..=MAX_AUTO_CONFIGURED_DURATION_MINUTES)
+            .contains(&configured_minutes)
+            || random_range_minutes > MAX_AUTO_DURATION_RANDOM_RANGE_MINUTES
+            || sampled_offset_minutes.unsigned_abs() > u16::from(random_range_minutes)
+        {
+            return Err(invalid_auto_duration_budget());
+        }
+        let actual_minutes = (i32::from(configured_minutes) + i32::from(sampled_offset_minutes))
+            .max(i32::from(MIN_AUTO_CONFIGURED_DURATION_MINUTES));
+        let actual_minutes =
+            u16::try_from(actual_minutes).map_err(|_| invalid_auto_duration_budget())?;
+        if u64::from(actual_minutes) > MAX_AUTO_DURATION_MINUTES {
+            return Err(invalid_auto_duration_budget());
+        }
+        Ok(Self {
+            configured: configured_minutes,
+            random_range: random_range_minutes,
+            sampled_offset: sampled_offset_minutes,
+            actual: actual_minutes,
+        })
+    }
+
+    pub const fn configured_minutes(self) -> u16 {
+        self.configured
+    }
+
+    pub const fn random_range_minutes(self) -> u8 {
+        self.random_range
+    }
+
+    pub const fn sampled_offset_minutes(self) -> i16 {
+        self.sampled_offset
+    }
+
+    pub const fn actual_minutes(self) -> u16 {
+        self.actual
+    }
+}
+
 /// Explicit parent authority required before a fresh atomic Course batch can
 /// be planned. None of these facts may be inferred from one child Task.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -233,7 +302,7 @@ pub struct WellearnAtomicBatchPlanningAuthority {
     selection: WellearnBatchUnitSelection,
     expected_remote_task_id: String,
     frozen_fanyuchang_target_seconds: Option<u64>,
-    frozen_auto_duration_minutes: Option<u64>,
+    frozen_auto_duration_budget: Option<WellearnAutoDurationBudget>,
 }
 
 impl WellearnAtomicBatchPlanningAuthority {
@@ -250,7 +319,7 @@ impl WellearnAtomicBatchPlanningAuthority {
         selection: WellearnBatchUnitSelection,
         expected_remote_task_id: impl Into<String>,
         frozen_fanyuchang_target_seconds: Option<u64>,
-        frozen_auto_duration_minutes: Option<u64>,
+        frozen_auto_duration_budget: Option<WellearnAutoDurationBudget>,
     ) -> ProviderResult<Self> {
         let authority = Self {
             course_remote_id: course_remote_id.into(),
@@ -258,7 +327,7 @@ impl WellearnAtomicBatchPlanningAuthority {
             selection,
             expected_remote_task_id: expected_remote_task_id.into(),
             frozen_fanyuchang_target_seconds,
-            frozen_auto_duration_minutes,
+            frozen_auto_duration_budget,
         };
         authority.validate()?;
         Ok(authority)
@@ -284,8 +353,13 @@ impl WellearnAtomicBatchPlanningAuthority {
         self.frozen_fanyuchang_target_seconds
     }
 
-    pub const fn frozen_auto_duration_minutes(&self) -> Option<u64> {
-        self.frozen_auto_duration_minutes
+    pub const fn frozen_auto_duration_budget(&self) -> Option<WellearnAutoDurationBudget> {
+        self.frozen_auto_duration_budget
+    }
+
+    pub fn frozen_auto_duration_minutes(&self) -> Option<u64> {
+        self.frozen_auto_duration_budget
+            .map(|budget| u64::from(budget.actual_minutes()))
     }
 
     /// Revalidates restored parent authority without fresh I/O.
@@ -308,7 +382,7 @@ impl WellearnAtomicBatchPlanningAuthority {
         }
         let valid = match self.flow {
             WellearnBatchFlow::FanyuchangDuration => {
-                self.frozen_auto_duration_minutes.is_none()
+                self.frozen_auto_duration_budget.is_none()
                     && self.frozen_fanyuchang_target_seconds.is_some_and(|target| {
                         crate::WellearnAtomicDurationCompletionPlan::try_new(
                             WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
@@ -319,9 +393,10 @@ impl WellearnAtomicBatchPlanningAuthority {
             }
             WellearnBatchFlow::AutoDuration => {
                 self.frozen_fanyuchang_target_seconds.is_none()
-                    && self
-                        .frozen_auto_duration_minutes
-                        .is_some_and(|minutes| (1..=MAX_AUTO_DURATION_MINUTES).contains(&minutes))
+                    && self.frozen_auto_duration_budget.is_some_and(|budget| {
+                        (1..=MAX_AUTO_DURATION_MINUTES)
+                            .contains(&u64::from(budget.actual_minutes()))
+                    })
             }
             WellearnBatchFlow::FanyuchangCompletion
             | WellearnBatchFlow::YzbrhCompletion
@@ -769,7 +844,7 @@ pub fn prepare_atomic_child_plan_from_fresh_inventory(
         fresh_units,
         authority.selection.clone(),
         authority.flow,
-        authority.frozen_auto_duration_minutes,
+        authority.frozen_auto_duration_minutes(),
     )?;
     if batch_plan.course_remote_id != authority.course_remote_id {
         return Err(atomic_planning_remote_changed());
@@ -801,6 +876,13 @@ fn invalid_atomic_planning_authority() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
         "WELearn atomic batch planning authority is incomplete or inconsistent",
+    )
+}
+
+fn invalid_auto_duration_budget() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn Auto aggregate duration budget is outside donor bounds",
     )
 }
 
@@ -1715,6 +1797,10 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    fn auto_budget(configured_minutes: u16) -> WellearnAutoDurationBudget {
+        WellearnAutoDurationBudget::try_new(configured_minutes, 0, 0).unwrap()
+    }
     use crate::{
         WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionDocuments,
         WellearnAtomicDurationCompletionPlan, WellearnAtomicDurationCompletionReceipts,
@@ -2178,6 +2264,28 @@ mod tests {
     }
 
     #[test]
+    fn auto_duration_budget_retains_configured_range_and_frozen_sample() {
+        let minimum = WellearnAutoDurationBudget::try_new(1, 30, -30).unwrap();
+        assert_eq!(minimum.configured_minutes(), 1);
+        assert_eq!(minimum.random_range_minutes(), 30);
+        assert_eq!(minimum.sampled_offset_minutes(), -30);
+        assert_eq!(minimum.actual_minutes(), 1);
+
+        let maximum = WellearnAutoDurationBudget::try_new(300, 30, 30).unwrap();
+        assert_eq!(maximum.actual_minutes(), 330);
+
+        for invalid in [
+            WellearnAutoDurationBudget::try_new(0, 0, 0),
+            WellearnAutoDurationBudget::try_new(301, 0, 0),
+            WellearnAutoDurationBudget::try_new(60, 31, 0),
+            WellearnAutoDurationBudget::try_new(60, 5, -6),
+            WellearnAutoDurationBudget::try_new(60, 5, 6),
+        ] {
+            assert!(invalid.is_err());
+        }
+    }
+
+    #[test]
     fn fresh_atomic_planning_preserves_auto_zero_floor_from_full_membership() {
         let template = tasks().remove(0);
         let mut many = Vec::with_capacity(61);
@@ -2194,9 +2302,13 @@ mod tests {
             WellearnBatchUnitSelection::Explicit(vec![0]),
             "sco:1001:planning-60",
             None,
-            Some(1),
+            Some(auto_budget(1)),
         )
         .unwrap();
+        assert_eq!(
+            authority.frozen_auto_duration_budget(),
+            Some(auto_budget(1))
+        );
         let prepared =
             prepare_atomic_child_plan_from_fresh_inventory(&many, &units(), &authority).unwrap();
 
@@ -2221,7 +2333,7 @@ mod tests {
             WellearnBatchUnitSelection::All,
             "sco:1001:301",
             None,
-            Some(1),
+            Some(auto_budget(1)),
         )
         .unwrap();
         let prepared =
@@ -2318,7 +2430,7 @@ mod tests {
             WellearnBatchUnitSelection::All,
             "sco:1001:301",
             None,
-            Some(1),
+            Some(auto_budget(1)),
         )
         .unwrap();
         let prepared =
@@ -2383,7 +2495,7 @@ mod tests {
                 WellearnBatchUnitSelection::All,
                 "sco:1001:301",
                 Some(1),
-                Some(1),
+                Some(auto_budget(1)),
             )
             .is_err()
         );
@@ -2394,7 +2506,7 @@ mod tests {
                 WellearnBatchUnitSelection::Explicit(vec![0, 0]),
                 "sco:1001:301",
                 None,
-                Some(1),
+                Some(auto_budget(1)),
             )
             .is_err()
         );

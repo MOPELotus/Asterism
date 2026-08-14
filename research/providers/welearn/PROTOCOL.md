@@ -334,6 +334,36 @@ bounded. Auto_WeLearn exposes 1–100 concurrent workers; both WELearn
 concurrency settings therefore accept 1–100 with a default of 1, while Core's
 global admission and durable leases remain the final scheduling bounds.
 
+The mandatory full sweep confirmed that Auto's modular aggregate inputs are a
+different setting family from singleton report seconds. Its UI supplies a
+1–300 minute configured base and a 0–30 minute random range; the worker samples
+one signed offset for the complete selected membership, clamps the aggregate to
+at least one minute, then performs equal-floor allocation. Provider-private
+`WellearnAutoDurationBudget` now freezes all four facts: configured base,
+configured range, sampled offset and resulting aggregate. The atomic parent
+authority carries that value rather than accepting an unexplained aggregate.
+The shared runtime settings model still lacks parent-batch scope, immutable
+parent entropy and durable parent/child creation, so these two UI settings must
+not be exposed as ordinary per-Task duration overrides until Main closes that
+Core Gap.
+
+## Historical results, answer evidence and retake audit
+
+The full README/config/source/history/issue/example/fixture sweep found no
+Question inventory, result-page enumeration, submitted answer, official or
+reference answer, per-Question grading, pass/completion threshold, or retake
+route in any WELearn donor. The only historical state read by these programs is
+SCO-level CMI and inventory completion/time metadata. A completion score written
+by the donor is not per-Question evidence and must never seed an answer corpus.
+
+Consequently WELearn currently has no safe Provider parser for the owner-level
+Answer Evidence Corpus, first-account read-only bootstrap, or normal
+SubmissionVerify increment. Strict Completion and Score Improvement remain
+separate shared state machines, but neither can create a WELearn retake or infer
+a passing threshold from Course percentage/CMI score. Future evidence must
+establish the exact readable history and attempt-creation wire before any such
+path is registered.
+
 ## Completion, progress and score execution
 
 All three pinned donors expose direct SCO execution behavior and agree on this
