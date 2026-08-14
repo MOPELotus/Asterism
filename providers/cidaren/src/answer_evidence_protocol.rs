@@ -339,19 +339,53 @@ impl Drop for CidarenWordLookup {
 }
 
 /// Exact credential-free `Course/StudyWordInfo` request facts.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct CidarenWordInfoRequest {
     pub path: &'static str,
     pub query: Vec<(String, String)>,
 }
 
+impl fmt::Debug for CidarenWordInfoRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenWordInfoRequest")
+            .field("path", &self.path)
+            .field("query_field_count", &self.query.len())
+            .field("query", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for CidarenWordInfoRequest {
+    fn drop(&mut self) {
+        zeroize_query_values(&mut self.query);
+    }
+}
+
 /// Exact credential-free `Course/SearchWord` request facts used by the donor
 /// when local lemmatization cannot bind an inflected prompt to the Task word
 /// inventory.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct CidarenWordPrototypeRequest {
     pub path: &'static str,
     pub query: Vec<(String, String)>,
+}
+
+impl fmt::Debug for CidarenWordPrototypeRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CidarenWordPrototypeRequest")
+            .field("path", &self.path)
+            .field("query_field_count", &self.query.len())
+            .field("query", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for CidarenWordPrototypeRequest {
+    fn drop(&mut self) {
+        zeroize_query_values(&mut self.query);
+    }
 }
 
 /// Builds a word-info request from one location returned by the freshly bound
@@ -382,16 +416,30 @@ pub fn build_word_prototype_request(
     word: &str,
     timestamp_millis: u64,
 ) -> ProviderResult<CidarenWordPrototypeRequest> {
-    let word = required_text(Some(&Value::String(word.to_owned())), "prototype word")?;
+    if word.is_empty()
+        || word.len() > MAX_WORD_BYTES
+        || word.trim() != word
+        || word.chars().any(char::is_control)
+    {
+        return Err(protocol_drift(
+            "Cidaren answer evidence contains an invalid prototype word",
+        ));
+    }
     Ok(CidarenWordPrototypeRequest {
         path: SEARCH_WORD_PATH,
         query: vec![
-            ("word".to_owned(), word),
+            ("word".to_owned(), word.to_owned()),
             ("timestamp".to_owned(), timestamp_millis.to_string()),
             ("version".to_owned(), SEARCH_WORD_VERSION.to_owned()),
             ("app_type".to_owned(), "1".to_owned()),
         ],
     })
+}
+
+fn zeroize_query_values(query: &mut [(String, String)]) {
+    for (_, value) in query {
+        value.zeroize();
+    }
 }
 
 struct CidarenWordLocation {
@@ -1119,6 +1167,7 @@ mod tests {
         let request = build_word_info_request(&lookup, 1_730_000_000_000);
         assert_eq!(request.path, "Course/StudyWordInfo");
         assert_eq!(query_value(&request.query, "list_id"), Some("course-a_02"));
+        assert!(!format!("{request:?}").contains("alpha"));
         let info = parse_word_info_response(WORD_INFO.as_bytes(), &lookup, None).unwrap();
         let evidence = inventory.into_answer_evidence(vec![info]).unwrap();
         assert!(!format!("{evidence:?}").contains("alpha"));
@@ -1176,6 +1225,7 @@ mod tests {
         let request = build_word_prototype_request("packed", 1_730_000_000_000).unwrap();
         assert_eq!(request.path, "Course/SearchWord");
         assert_eq!(query_value(&request.query, "word"), Some("packed"));
+        assert!(!format!("{request:?}").contains("packed"));
         assert_eq!(
             query_value(&request.query, "version"),
             Some("2.6.2.24031302")
