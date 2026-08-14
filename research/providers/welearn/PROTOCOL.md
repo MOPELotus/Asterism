@@ -200,12 +200,20 @@ Completion != Progress != Session Time != Total Time
 ```
 
 The implemented `DurationReport` lifecycle acquires a fresh Course route and
-CMI document using one resolved Cookie. Malformed or ambiguous reads never
-trigger a start fallback. Every mode establishes a post-start baseline and
-requires the complete audited CMI preservation set; a still-absent or partial
-CMI stops before any heartbeat or finalization rather than synthesizing
-defaults. The baseline binds bounded `completion_status`, `progress_measure`,
-`score.scaled`, `success_status`, `session_time` and `total_time` values.
+CMI document using one resolved Cookie. YZBRH explicitly treats a response
+containing `学习数据不正确` as uninitialized, starts the SCO and reads CMI
+again; Asterism preserves that exact marker alongside a valid no-CMI document
+as the only initialization signals in this mutation-capable path. Because the
+donor checks raw response text, the CMI reader retains this one bounded marker
+even under an unexpected media type, but only after structural login-page
+detection; all other unexpected HTML still fails. Unrelated malformed or
+ambiguous reads never trigger start. Every mode establishes a post-start
+baseline and requires the complete audited CMI preservation set; a
+still-uninitialized, absent or partial CMI stops before any heartbeat or
+finalization rather than synthesizing defaults. The baseline binds bounded
+`completion_status`, `progress_measure`, `score.scaled`, `success_status`,
+`session_time` and `total_time` values. The independent read capabilities keep
+their stricter no-mutation rule and never consume the marker as a fallback.
 
 Three donor wire modes remain separate:
 

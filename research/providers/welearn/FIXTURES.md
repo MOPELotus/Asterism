@@ -58,6 +58,12 @@ start and `0,1,2...` paired client counters, and Auto_WeLearn's delayed
 60-second implicit plan distinct. Native request tests also keep the audited
 plain-endpoint four-field minimal start separate from the query-uid six-field
 full-route start.
+The duration baseline regression recognizes YZBRH's exact
+`学习数据不正确` marker as uninitialized only inside the mutation-capable
+DurationReport path, rejects unrelated non-JSON text, and requires the next
+post-start document to pass the ordinary strict CMI parser. Response-reader
+tests allow only that marker through an unexpected media type while still
+classifying structural login HTML as Authentication.
 
 The ResourceExecution fixtures prove the independently written bounded CMI
 preset and the nested fresh-read goal used by immediate verification and crash
@@ -96,6 +102,7 @@ fixtures/providers/welearn/
   units/list-visible-hidden.json
   tasks/leaves-pending-completed.json
   cmi/not-attempted.json
+  cmi/uninitialized-live.txt
   cmi/in-progress.json
   cmi/completed-with-duration.json
   cmi/resource-completed-selected-score.json
@@ -130,7 +137,10 @@ only structural field names, response codes and bounded placeholder shapes.
 - Generic TaskProgress never conflates raw time with progress; the independent
   DurationRead accepts only donor-observed bounded canonical integer seconds
   and fails closed on every other grammar.
-- Missing or malformed CMI never triggers a start/mutation fallback.
+- Read-only Progress/DurationRead never starts a missing or malformed CMI.
+  DurationReport accepts only valid no-CMI or the exact audited YZBRH
+  uninitialized marker as a start signal; every other malformed baseline and
+  every malformed post-start read fails closed.
 - A missing, string-valued or non-zero outer CMI `ret` fails closed before the
   nested `comment` document can be treated as an observation.
 - A post-start baseline or final readback without the complete preservation set

@@ -222,7 +222,7 @@ impl NativeWellearnInventoryTransport {
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
-        let document = read_inventory_response(response, ResponseContent::Json).await?;
+        let document = read_inventory_response(response, ResponseContent::Cmi).await?;
         WellearnCmiDocument::try_new(document.as_str().to_owned())
     }
 
@@ -644,10 +644,13 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             }
             result => result?,
         };
-        let mut snapshot = parse_cmi_snapshot(before.as_str())?;
+        let mut snapshot = parse_duration_baseline(before.as_str())?;
         let mut started = false;
         let mut start_accepted = None;
-        let must_start = duration_requires_start(protocol_mode, snapshot.cmi_present());
+        let must_start = match snapshot.as_ref() {
+            Some(snapshot) => duration_requires_start(protocol_mode, snapshot.cmi_present()),
+            None => true,
+        };
         if must_start {
             events
                 .log(duration_log(
@@ -686,8 +689,15 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
             before = self
                 .fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, endpoint)
                 .await?;
-            snapshot = parse_cmi_snapshot(before.as_str())?;
+            snapshot = Some(parse_cmi_snapshot(before.as_str())?);
         }
+
+        let snapshot = snapshot.ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn duration baseline remained uninitialized after start",
+            )
+        })?;
 
         if protocol_mode == crate::WellearnDurationProtocolMode::PreserveFresh
             && snapshot.success_status_raw() != Some("unknown")
@@ -882,6 +892,15 @@ const fn duration_requires_start(
         crate::WellearnDurationProtocolMode::ClientCounter
         | crate::WellearnDurationProtocolMode::ImplicitServer => true,
     }
+}
+
+const UNINITIALIZED_DURATION_MARKER: &str = "学习数据不正确";
+
+fn parse_duration_baseline(document: &str) -> ProviderResult<Option<WellearnCmiSnapshot>> {
+    if document.contains(UNINITIALIZED_DURATION_MARKER) {
+        return Ok(None);
+    }
+    parse_cmi_snapshot(document).map(Some)
 }
 
 fn duration_counter_fields(elapsed_seconds: u64) -> (String, String) {
@@ -1291,10 +1310,11 @@ fn duration_log(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ResponseContent {
     Html,
     Json,
+    Cmi,
 }
 
 async fn read_inventory_response(
@@ -1340,7 +1360,10 @@ async fn read_inventory_response(
             "WELearn returned a login page for the current session",
         ));
     }
-    if let Err(error) = content_type_result {
+    if let Err(error) = content_type_result
+        && (expected_content != ResponseContent::Cmi
+            || !document.contains(UNINITIALIZED_DURATION_MARKER))
+    {
         let mut document = document;
         document.zeroize();
         return Err(error);
@@ -1378,7 +1401,7 @@ fn validate_response_content_type(
             media_type.eq_ignore_ascii_case("text/html")
                 || media_type.eq_ignore_ascii_case("application/xhtml+xml")
         }
-        ResponseContent::Json => {
+        ResponseContent::Json | ResponseContent::Cmi => {
             media_type.eq_ignore_ascii_case("application/json")
                 || media_type.eq_ignore_ascii_case("text/json")
                 || media_type.eq_ignore_ascii_case("text/plain")
@@ -1812,6 +1835,22 @@ mod tests {
     }
 
     #[test]
+    fn duration_baseline_recognizes_only_the_donor_uninitialized_marker() {
+        assert!(
+            parse_duration_baseline("学习数据不正确，请先开始学习")
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse_duration_baseline("not-json").is_err());
+
+        let initialized = parse_duration_baseline(
+            r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0\",\"session_time\":\"0\",\"total_time\":\"0\",\"score\":{\"scaled\":\"0\"},\"success_status\":\"unknown\"}}"}"#,
+        )
+        .unwrap();
+        assert!(initialized.is_some());
+    }
+
+    #[test]
     fn resource_completion_cmi_is_bounded_and_matches_the_current_donor_shape() {
         let baseline = parse_cmi_snapshot(
             r#"{"ret":0,"comment":"{\"cmi\":{\"completion_status\":\"incomplete\",\"progress_measure\":\"0.25\",\"session_time\":\"15\",\"total_time\":\"45\",\"score\":{\"scaled\":\"20\"},\"success_status\":\"unknown\"}}"}"#,
@@ -2044,6 +2083,24 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+
+        let uninitialized = fixture_response("text/html", "学习数据不正确，请先开始学习").await;
+        let document = read_inventory_response(uninitialized, ResponseContent::Cmi)
+            .await
+            .unwrap();
+        assert!(document.as_str().contains(UNINITIALIZED_DURATION_MARKER));
+
+        let login = fixture_response(
+            "text/html",
+            include_str!(
+                "../../../fixtures/providers/welearn/auth/anonymous-course-list-login.html"
+            ),
+        )
+        .await;
+        let error = read_inventory_response(login, ResponseContent::Cmi)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Authentication);
     }
 
     async fn fixture_response(content_type: &'static str, body: &'static str) -> Response {
