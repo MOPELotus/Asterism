@@ -110,7 +110,8 @@ pub use question_artifact::{
     UaiQuestionArtifact, UaiQuestionArtifactMediaSource,
 };
 pub use resource_execution::{
-    UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiResourceExecution,
+    UaiOralEmptySubmission, UaiPresetCompletionResult, UaiPresetCompletionTransport,
+    UaiResourceExecution,
 };
 pub use stored_session::StoredUaiSessionResolver;
 pub use submission_build::UaiSubmissionBuild;

@@ -555,7 +555,10 @@ current time, and skips the POST if all three completion flags are already
 `1`. Preset and exit-ticket send the donor-observed no-Question empty body;
 oral sends the donor's distinct bounded placeholder-answer body with
 `instanceId=0`, one empty child per declared Question, `submitType=1` and the
-audited score/judge structure. Each body is sent once, validates an accepted
+audited score/judge structure. The Course judge version is taken only from the
+fresh TaskDetail/Course-progress snapshot; missing, zero or unsigned values
+outside the signed protocol range fail before transport, and the captured
+donor example value is never hardcoded. Each body is sent once, validates an accepted
 version acknowledgement, and returns an explicitly unverified outcome. Core
 persists the mutation attempt before the call, accepts success only from the
 existing exact Group progress reader, and uses that reader alone after

@@ -25,12 +25,13 @@ use crate::{
     UaiCoursePolicyDocument, UaiCoursePolicyTransport, UaiCourseProgressDocument,
     UaiDiscussionBinding, UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult,
     UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument,
-    UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult,
-    UaiPresetCompletionTransport, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
-    UaiQuestionTransport, UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument,
-    UaiSubmissionTransport, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
-    UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport,
-    UaiUploadVerification, UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
+    UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiOralEmptySubmission,
+    UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiProgressDocument,
+    UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport, UaiSessionResolver,
+    UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
+    UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification,
+    UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_compound_upload_submission_body, build_discussion_reply_page_request,
     build_discussion_reply_request, build_discussion_topic_request, build_upload_multipart,
@@ -619,8 +620,7 @@ impl NativeUaiInventoryTransport {
         course_resource_id: &str,
         unit_id: &str,
         group_id: &str,
-        task_type: &str,
-        question_count: u32,
+        submission: UaiOralEmptySubmission<'_>,
     ) -> ProviderResult<UaiPresetCompletionResult> {
         self.complete_empty_with_session(
             session,
@@ -628,7 +628,7 @@ impl NativeUaiInventoryTransport {
             unit_id,
             group_id,
             EmptyCompletionPreflight::Oral,
-            Some((task_type, question_count)),
+            Some(submission),
         )
         .await
     }
@@ -677,7 +677,7 @@ impl NativeUaiInventoryTransport {
         unit_id: &str,
         group_id: &str,
         preflight: EmptyCompletionPreflight,
-        oral: Option<(&str, u32)>,
+        oral: Option<UaiOralEmptySubmission<'_>>,
     ) -> ProviderResult<UaiPresetCompletionResult> {
         let course_resource_id = required_remote_component(
             Some(&serde_json::Value::String(course_resource_id.to_owned())),
@@ -741,12 +741,13 @@ impl NativeUaiInventoryTransport {
         }
 
         let body = Zeroizing::new(match oral {
-            Some((task_type, question_count)) => build_oral_empty_submission_body(
+            Some(submission) => build_oral_empty_submission_body(
                 route.course_instance_id(),
                 session.expose_open_id(),
                 &group_id,
-                task_type,
-                question_count,
+                submission.task_type(),
+                submission.question_count(),
+                submission.course_publish_version(),
             )?,
             None => build_preset_submission_body(
                 route.course_instance_id(),
@@ -1516,8 +1517,7 @@ impl UaiPresetCompletionTransport for NativeUaiInventoryTransport {
         course_resource_id: &str,
         unit_id: &str,
         group_id: &str,
-        task_type: &str,
-        question_count: u32,
+        submission: UaiOralEmptySubmission<'_>,
     ) -> ProviderResult<UaiPresetCompletionResult> {
         let (session, renewed) = self.session_for_operation(context).await?;
         match self
@@ -1526,8 +1526,7 @@ impl UaiPresetCompletionTransport for NativeUaiInventoryTransport {
                 course_resource_id,
                 unit_id,
                 group_id,
-                task_type,
-                question_count,
+                submission,
             )
             .await
         {
@@ -1538,8 +1537,7 @@ impl UaiPresetCompletionTransport for NativeUaiInventoryTransport {
                     course_resource_id,
                     unit_id,
                     group_id,
-                    task_type,
-                    question_count,
+                    submission,
                 )
                 .await
             }
@@ -2364,11 +2362,14 @@ fn build_oral_empty_submission_body(
     group_id: &str,
     task_type: &str,
     question_count: u32,
+    course_publish_version: u64,
 ) -> ProviderResult<String> {
     if !matches!(
         task_type,
         "oral-sentence" | "video-dub" | "oral-personal-state"
     ) || !(1..=128).contains(&question_count)
+        || course_publish_version == 0
+        || i64::try_from(course_publish_version).is_err()
     {
         return Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
@@ -2382,7 +2383,7 @@ fn build_oral_empty_submission_body(
         "value": "",
         "question_type": task_type.replace('_', "-"),
         "reply_type": task_type.replace('_', "-"),
-        "versions": {"course": 123_290, "group": 1, "template": 1, "answer": 3, "content": 0},
+        "versions": {"course": course_publish_version, "group": 1, "template": 1, "answer": 3, "content": 0},
         "payloads": [],
     });
     let judges = serde_json::to_string(&vec![judge; question_count as usize])
@@ -2990,6 +2991,7 @@ mod tests {
             "group-1",
             "oral-sentence",
             2,
+            456_789,
         )
         .unwrap();
         let body: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -3008,8 +3010,20 @@ mod tests {
         assert_eq!(judges.as_array().unwrap().len(), 2);
         assert_eq!(judges[0]["question_type"], "oral-sentence");
         assert_eq!(judges[0]["reply_type"], "oral-sentence");
+        assert_eq!(judges[0]["versions"]["course"], 456_789);
         assert!(
-            build_oral_empty_submission_body("course", "openid", "group", "discussion", 1,)
+            build_oral_empty_submission_body(
+                "course",
+                "openid",
+                "group",
+                "discussion",
+                1,
+                456_789,
+            )
+                .is_err()
+        );
+        assert!(
+            build_oral_empty_submission_body("course", "openid", "group", "oral-sentence", 1, 0,)
                 .is_err()
         );
     }

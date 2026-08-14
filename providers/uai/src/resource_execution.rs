@@ -27,6 +27,42 @@ pub enum UaiPresetCompletionResult {
     Submitted(SubmissionReceipt),
 }
 
+/// Immutable donor-observed shape for one oral empty-answer submission.
+///
+/// The Course publish version is frozen from the same fresh Task detail as
+/// the oral type and bounded Question count before the mutation starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UaiOralEmptySubmission<'a> {
+    task_type: &'a str,
+    question_count: u32,
+    course_publish_version: u64,
+}
+
+impl<'a> UaiOralEmptySubmission<'a> {
+    fn new(task_type: &'a str, question_count: u32, course_publish_version: u64) -> Self {
+        Self {
+            task_type,
+            question_count,
+            course_publish_version,
+        }
+    }
+
+    /// Returns the freshly bound donor task type.
+    pub const fn task_type(&self) -> &str {
+        self.task_type
+    }
+
+    /// Returns the bounded number of placeholder answers to submit.
+    pub const fn question_count(&self) -> u32 {
+        self.question_count
+    }
+
+    /// Returns the freshly bound Course publish version used by oral judges.
+    pub const fn course_publish_version(&self) -> u64 {
+        self.course_publish_version
+    }
+}
+
 #[async_trait]
 pub trait UaiPresetCompletionTransport: Send + Sync {
     async fn complete_preset(
@@ -56,8 +92,7 @@ pub trait UaiPresetCompletionTransport: Send + Sync {
         course_resource_id: &str,
         unit_id: &str,
         group_id: &str,
-        task_type: &str,
-        question_count: u32,
+        submission: UaiOralEmptySubmission<'_>,
     ) -> ProviderResult<UaiPresetCompletionResult>;
 }
 
@@ -142,6 +177,7 @@ impl UaiResourceExecution {
         context: &ProviderContext,
         identity: &GroupIdentity,
         completion_kind: EmptyCompletionKind,
+        oral_course_publish_version: Option<u64>,
     ) -> ProviderResult<UaiPresetCompletionResult> {
         match completion_kind {
             EmptyCompletionKind::Preset => {
@@ -174,8 +210,15 @@ impl UaiResourceExecution {
                         &identity.course_resource,
                         &identity.unit,
                         &identity.group,
-                        task_type.as_str(),
-                        question_count,
+                        UaiOralEmptySubmission::new(
+                            task_type.as_str(),
+                            question_count,
+                            oral_course_publish_version.ok_or_else(|| {
+                                remote_changed(
+                                    "UAI oral execution lost its fresh Course publish version",
+                                )
+                            })?,
+                        ),
                     )
                     .await
             }
@@ -231,6 +274,7 @@ impl TaskExecutionCapability for UaiResourceExecution {
             .await?;
         let completion_kind =
             validate_fresh_empty_completion_detail(&detail, &identity, &request.remote_task_id)?;
+        let oral_course_publish_version = oral_course_publish_version(&detail, completion_kind)?;
 
         events
             .log(ProviderExecutionLog {
@@ -246,7 +290,12 @@ impl TaskExecutionCapability for UaiResourceExecution {
             .await?;
 
         let completion = self
-            .submit_empty_completion(context, &identity, completion_kind)
+            .submit_empty_completion(
+                context,
+                &identity,
+                completion_kind,
+                oral_course_publish_version,
+            )
             .await?;
         let already_completed = match completion {
             UaiPresetCompletionResult::AlreadyCompleted => true,
@@ -322,6 +371,7 @@ impl TaskExecutionCapability for UaiResourceExecution {
             .await?;
         let completion_kind =
             validate_fresh_empty_completion_detail(&detail, &identity, &request.remote_task_id)?;
+        oral_course_publish_version(&detail, completion_kind)?;
         let progress = self
             .progress
             .read_progress(context, &request.remote_task_id)
@@ -450,6 +500,24 @@ fn validate_fresh_empty_completion_detail(
     })
 }
 
+fn oral_course_publish_version(
+    detail: &asterism_provider_api::RemoteTaskDetail,
+    completion_kind: EmptyCompletionKind,
+) -> ProviderResult<Option<u64>> {
+    if !matches!(completion_kind, EmptyCompletionKind::Oral { .. }) {
+        return Ok(None);
+    }
+    detail
+        .normalized_detail
+        .get("task")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|task| task.get("course_publish_version"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| *value > 0 && i64::try_from(*value).is_ok())
+        .map(Some)
+        .ok_or_else(|| remote_changed("UAI oral execution requires a fresh Course publish version"))
+}
+
 struct GroupIdentity {
     course_resource: String,
     unit: String,
@@ -560,6 +628,7 @@ mod tests {
                 "section": null,
                 "micro": null,
                 "group_id": "group-1",
+                "course_publish_version": 123_290,
                 "task_types": self.task_types,
                 "question_count": 1,
             });
@@ -702,11 +771,11 @@ mod tests {
             course_resource_id: &str,
             unit_id: &str,
             group_id: &str,
-            task_type: &str,
-            question_count: u32,
+            submission: UaiOralEmptySubmission<'_>,
         ) -> ProviderResult<UaiPresetCompletionResult> {
-            assert_eq!(task_type, "oral-sentence");
-            assert_eq!(question_count, 1);
+            assert_eq!(submission.task_type(), "oral-sentence");
+            assert_eq!(submission.question_count(), 1);
+            assert_eq!(submission.course_publish_version(), 123_290);
             self.calls.lock().unwrap().push((
                 course_resource_id.to_owned(),
                 unit_id.to_owned(),
@@ -830,6 +899,33 @@ mod tests {
                 "oral_empty",
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn oral_execution_rejects_missing_or_invalid_fresh_publish_version() {
+        let fixture = FixtureDetail {
+            task_types: vec!["oral-sentence".to_owned()],
+        };
+        let mut detail = fixture
+            .task_detail(&context(), "group:2001:unit-1:group-1")
+            .await
+            .unwrap();
+        let identity = GroupIdentity::parse("group:2001:unit-1:group-1").unwrap();
+        let kind =
+            validate_fresh_empty_completion_detail(&detail, &identity, "group:2001:unit-1:group-1")
+                .unwrap();
+        assert_eq!(
+            oral_course_publish_version(&detail, kind).unwrap(),
+            Some(123_290)
+        );
+
+        detail.normalized_detail["task"]["course_publish_version"] = serde_json::json!(0);
+        assert!(oral_course_publish_version(&detail, kind).is_err());
+        detail.normalized_detail["task"]
+            .as_object_mut()
+            .unwrap()
+            .remove("course_publish_version");
+        assert!(oral_course_publish_version(&detail, kind).is_err());
     }
 
     #[tokio::test]
