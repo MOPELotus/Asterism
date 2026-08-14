@@ -11,14 +11,14 @@ use async_trait::async_trait;
 
 use crate::{
     metadata::development_metadata,
-    runtime_settings::{DISCUSSION_EMPTY_MODE_KEY, runtime_settings_schema},
+    runtime_settings::{DISCUSSION_EMPTY_MODE_KEY, PRESET_EMPTY_MODE_KEY, runtime_settings_schema},
     submission_execute::valid_submission_version,
 };
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
 
-/// Native boundary for an audited no-Question completion mutation.
+/// Native boundary for an audited marker or placeholder completion mutation.
 /// Implementations must not retry an ambiguous mutation failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UaiPresetCompletionResult {
@@ -89,6 +89,23 @@ impl UaiDiscussionEmptySubmission {
     }
 }
 
+/// Immutable Apache-donor placeholder plan for one pure-study Group.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UaiPresetEmptySubmission {
+    task_types: Vec<String>,
+    course_publish_version: u64,
+}
+
+impl UaiPresetEmptySubmission {
+    pub fn task_types(&self) -> &[String] {
+        &self.task_types
+    }
+
+    pub const fn course_publish_version(&self) -> u64 {
+        self.course_publish_version
+    }
+}
+
 #[async_trait]
 pub trait UaiPresetCompletionTransport: Send + Sync {
     async fn complete_preset(
@@ -97,6 +114,17 @@ pub trait UaiPresetCompletionTransport: Send + Sync {
         course_resource_id: &str,
         unit_id: &str,
         group_id: &str,
+    ) -> ProviderResult<UaiPresetCompletionResult>;
+
+    /// Completes a pure-study Group with Apache donor's typed placeholder
+    /// Questions selected by the frozen runtime settings snapshot.
+    async fn complete_preset_placeholder(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        submission: &UaiPresetEmptySubmission,
     ) -> ProviderResult<UaiPresetCompletionResult>;
 
     /// Completes one exact `exit-ticket` Group with the donor-observed empty
@@ -146,6 +174,7 @@ pub trait UaiPresetCompletionTransport: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EmptyCompletionKind {
     Preset,
+    PresetPlaceholder,
     ExitTicket,
     Discussion {
         mode: DiscussionEmptyMode,
@@ -184,6 +213,7 @@ impl EmptyCompletionKind {
     const fn resource_kind(self) -> &'static str {
         match self {
             Self::Preset => "preset",
+            Self::PresetPlaceholder => "preset_placeholder",
             Self::ExitTicket => "exit_ticket",
             Self::Discussion {
                 mode: DiscussionEmptyMode::Marker,
@@ -200,6 +230,9 @@ impl EmptyCompletionKind {
     const fn log_message(self) -> &'static str {
         match self {
             Self::Preset => "纯学习任务已通过新鲜详情校验，准备核验并按需提交完成标记",
+            Self::PresetPlaceholder => {
+                "纯学习任务已通过新鲜详情校验，准备提交 Apache donor 定义的占位答案"
+            }
             Self::ExitTicket => "出口问卷已通过新鲜详情校验，准备核验并提交 donor 定义的空完成标记",
             Self::Discussion {
                 mode: DiscussionEmptyMode::Marker,
@@ -217,26 +250,35 @@ impl EmptyCompletionKind {
         self,
         settings: &ResolvedProviderRuntimeSettings,
     ) -> ProviderResult<Self> {
-        let Self::Discussion { question_count, .. } = self else {
-            return Ok(self);
-        };
-        let mode = match settings.choice(DISCUSSION_EMPTY_MODE_KEY) {
-            Some("marker") => DiscussionEmptyMode::Marker,
-            Some("placeholder") => DiscussionEmptyMode::Placeholder,
-            _ => {
-                return Err(internal(
-                    "UAI discussion empty mode is missing from the frozen settings",
-                ));
+        match self {
+            Self::Preset => match settings.choice(PRESET_EMPTY_MODE_KEY) {
+                Some("marker") => Ok(Self::Preset),
+                Some("placeholder") => Ok(Self::PresetPlaceholder),
+                _ => Err(internal(
+                    "UAI preset empty mode is missing from the frozen settings",
+                )),
+            },
+            Self::Discussion { question_count, .. } => {
+                let mode = match settings.choice(DISCUSSION_EMPTY_MODE_KEY) {
+                    Some("marker") => DiscussionEmptyMode::Marker,
+                    Some("placeholder") => DiscussionEmptyMode::Placeholder,
+                    _ => {
+                        return Err(internal(
+                            "UAI discussion empty mode is missing from the frozen settings",
+                        ));
+                    }
+                };
+                Ok(Self::Discussion {
+                    mode,
+                    question_count,
+                })
             }
-        };
-        Ok(Self::Discussion {
-            mode,
-            question_count,
-        })
+            _ => Ok(self),
+        }
     }
 }
 
-/// Executes donor-audited UAI no-Question completion Groups. Core must
+/// Executes donor-audited UAI marker/placeholder completion Groups. Core must
 /// independently confirm completion through `TaskProgressRead` and recover
 /// without replay.
 pub struct UaiResourceExecution {
@@ -273,6 +315,7 @@ impl UaiResourceExecution {
         identity: &GroupIdentity,
         completion_kind: EmptyCompletionKind,
         placeholder_course_publish_version: Option<u64>,
+        preset_placeholder: Option<&UaiPresetEmptySubmission>,
     ) -> ProviderResult<UaiPresetCompletionResult> {
         match completion_kind {
             EmptyCompletionKind::Preset => {
@@ -282,6 +325,19 @@ impl UaiResourceExecution {
                         &identity.course_resource,
                         &identity.unit,
                         &identity.group,
+                    )
+                    .await
+            }
+            EmptyCompletionKind::PresetPlaceholder => {
+                self.transport
+                    .complete_preset_placeholder(
+                        context,
+                        &identity.course_resource,
+                        &identity.unit,
+                        &identity.group,
+                        preset_placeholder.ok_or_else(|| {
+                            remote_changed("UAI preset placeholder lost its fresh Task plan")
+                        })?,
                     )
                     .await
             }
@@ -405,6 +461,7 @@ impl TaskExecutionCapability for UaiResourceExecution {
                 .resolve_runtime_settings(&request.runtime_settings)?;
         let placeholder_course_publish_version =
             empty_answer_course_publish_version(&detail, completion_kind)?;
+        let preset_placeholder = preset_empty_submission(&detail, completion_kind)?;
 
         events
             .log(ProviderExecutionLog {
@@ -425,6 +482,7 @@ impl TaskExecutionCapability for UaiResourceExecution {
                 &identity,
                 completion_kind,
                 placeholder_course_publish_version,
+                preset_placeholder.as_ref(),
             )
             .await?;
         let already_completed = match completion {
@@ -503,6 +561,7 @@ impl TaskExecutionCapability for UaiResourceExecution {
             validate_fresh_empty_completion_detail(&detail, &identity, &request.remote_task_id)?
                 .resolve_runtime_settings(&request.runtime_settings)?;
         empty_answer_course_publish_version(&detail, completion_kind)?;
+        preset_empty_submission(&detail, completion_kind)?;
         let progress = self
             .progress
             .read_progress(context, &request.remote_task_id)
@@ -632,7 +691,7 @@ fn validate_fresh_empty_completion_detail(
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| u32::try_from(value).ok());
     empty_completion_kind(&task_types, question_count).ok_or_else(|| {
-        unsupported("UAI fresh Group is not an audited no-Question completion family")
+        unsupported("UAI fresh Group is not an audited marker/placeholder completion family")
     })
 }
 
@@ -661,6 +720,60 @@ fn empty_answer_course_publish_version(
         .ok_or_else(|| {
             remote_changed("UAI empty-answer execution requires a fresh Course publish version")
         })
+}
+
+fn preset_empty_submission(
+    detail: &asterism_provider_api::RemoteTaskDetail,
+    completion_kind: EmptyCompletionKind,
+) -> ProviderResult<Option<UaiPresetEmptySubmission>> {
+    if completion_kind != EmptyCompletionKind::PresetPlaceholder {
+        return Ok(None);
+    }
+    let task = detail
+        .normalized_detail
+        .get("task")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| remote_changed("UAI preset placeholder lost its fresh Task"))?;
+    let mut task_types = task
+        .get("task_types")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| remote_changed("UAI preset placeholder has no fresh Task types"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| remote_changed("UAI preset placeholder Task type is not text"))
+        })
+        .collect::<ProviderResult<Vec<_>>>()?;
+    let question_count = task
+        .get("question_count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| (1..=128).contains(value))
+        .ok_or_else(|| remote_changed("UAI preset placeholder Question count is invalid"))?;
+    if !supports_preset_execution(&task_types) {
+        return Err(unsupported(
+            "UAI preset placeholder contains a non-study Task type",
+        ));
+    }
+    task_types.truncate(question_count);
+    let last = task_types
+        .last()
+        .cloned()
+        .ok_or_else(|| remote_changed("UAI preset placeholder has no Task type"))?;
+    task_types.resize(question_count, last);
+    let course_publish_version = task
+        .get("course_publish_version")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| *value > 0 && i64::try_from(*value).is_ok())
+        .ok_or_else(|| {
+            remote_changed("UAI preset placeholder requires a fresh Course publish version")
+        })?;
+    Ok(Some(UaiPresetEmptySubmission {
+        task_types,
+        course_publish_version,
+    }))
 }
 
 struct GroupIdentity {
@@ -883,6 +996,36 @@ mod tests {
             }))
         }
 
+        async fn complete_preset_placeholder(
+            &self,
+            _context: &ProviderContext,
+            course_resource_id: &str,
+            unit_id: &str,
+            group_id: &str,
+            submission: &UaiPresetEmptySubmission,
+        ) -> ProviderResult<UaiPresetCompletionResult> {
+            assert_eq!(submission.task_types(), ["rich-text-read"]);
+            assert_eq!(submission.course_publish_version(), 123_290);
+            self.calls.lock().unwrap().push((
+                course_resource_id.to_owned(),
+                unit_id.to_owned(),
+                group_id.to_owned(),
+                "preset_placeholder",
+            ));
+            if self.fail {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "synthetic ambiguous mutation failure",
+                ));
+            }
+            Ok(UaiPresetCompletionResult::Submitted(SubmissionReceipt {
+                remote_status: "accepted".to_owned(),
+                message_sanitized: Some("accepted for verification".to_owned()),
+                provider_trace_id: Some("submit-version-42".to_owned()),
+                received_at: Utc::now(),
+            }))
+        }
+
         async fn complete_exit_ticket(
             &self,
             _context: &ProviderContext,
@@ -1050,6 +1193,65 @@ mod tests {
                 "preset",
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn apache_preset_placeholder_mode_freezes_expanded_task_types() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = UaiResourceExecution::try_new(
+            Arc::new(FixtureDetail {
+                task_types: vec!["rich-text-read".to_owned()],
+            }),
+            fixture_progress(RemoteState::Completed),
+            transport.clone(),
+        )
+        .unwrap();
+        let mut request = request();
+        let schema = runtime_settings_schema();
+        request.runtime_settings = schema
+            .resolve(
+                None,
+                None,
+                Some(&ProviderRuntimeSettingsPatch {
+                    schema_version: schema.version,
+                    values: BTreeMap::from([(
+                        PRESET_EMPTY_MODE_KEY.to_owned(),
+                        ProviderSettingValue::Choice("placeholder".to_owned()),
+                    )]),
+                }),
+            )
+            .unwrap();
+        let outcome = execution
+            .execute(&context(), &request, &FixtureEvents)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.result_sanitized["resource_kind"],
+            "preset_placeholder"
+        );
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            &[(
+                "2001".to_owned(),
+                "unit-1".to_owned(),
+                "group-1".to_owned(),
+                "preset_placeholder",
+            )]
+        );
+
+        let fixture = FixtureDetail {
+            task_types: vec!["vocabulary".to_owned(), "input".to_owned()],
+        };
+        let mut detail = fixture
+            .task_detail(&context(), "group:2001:unit-1:group-1")
+            .await
+            .unwrap();
+        detail.normalized_detail["task"]["question_count"] = serde_json::json!(3);
+        let expanded = preset_empty_submission(&detail, EmptyCompletionKind::PresetPlaceholder)
+            .unwrap()
+            .unwrap();
+        assert_eq!(expanded.task_types(), ["vocabulary", "input", "input"]);
     }
 
     #[tokio::test]

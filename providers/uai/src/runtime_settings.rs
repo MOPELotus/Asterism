@@ -11,6 +11,7 @@ pub(crate) const ACCOUNT_SCAN_INTERVAL_KEY: &str = "discovery.scan_interval";
 pub(crate) const BROWSER_RESIDENCE_SECONDS_KEY: &str = "browser.residence_seconds";
 pub(crate) const BROWSER_PLAY_VIDEO_KEY: &str = "browser.play_video";
 pub(crate) const DISCUSSION_EMPTY_MODE_KEY: &str = "discussion.empty_mode";
+pub(crate) const PRESET_EMPTY_MODE_KEY: &str = "preset.empty_mode";
 
 pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
     let provider_account_task_scopes = BTreeSet::from([
@@ -19,7 +20,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 2,
+        version: 3,
         definitions: vec![
             ProviderSettingDefinition {
                 key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
@@ -90,19 +91,38 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                 scopes: provider_account_task_scopes.clone(),
                 core_behavior: None,
             },
-            ProviderSettingDefinition {
-                key: DISCUSSION_EMPTY_MODE_KEY.to_owned(),
-                display_name: "讨论空执行模式".to_owned(),
-                description: "直接标记使用无题体；占位答案复现 donor 的 instanceId=0 写法。"
-                    .to_owned(),
-                kind: ProviderSettingKind::Choice {
-                    options: BTreeSet::from(["marker".to_owned(), "placeholder".to_owned()]),
-                },
-                default: ProviderSettingValue::Choice("marker".to_owned()),
-                scopes: provider_account_task_scopes,
-                core_behavior: None,
-            },
+            empty_mode_definition(
+                DISCUSSION_EMPTY_MODE_KEY,
+                "讨论空执行模式",
+                "直接标记使用无题体；占位答案复现 donor 的 instanceId=0 写法。",
+                provider_account_task_scopes.clone(),
+            ),
+            empty_mode_definition(
+                PRESET_EMPTY_MODE_KEY,
+                "学习任务空执行模式",
+                "无题标记使用原生空体；占位答案复现 Apache donor 的题型展开。",
+                provider_account_task_scopes,
+            ),
         ],
+    }
+}
+
+fn empty_mode_definition(
+    key: &str,
+    display_name: &str,
+    description: &str,
+    scopes: BTreeSet<ProviderSettingScope>,
+) -> ProviderSettingDefinition {
+    ProviderSettingDefinition {
+        key: key.to_owned(),
+        display_name: display_name.to_owned(),
+        description: description.to_owned(),
+        kind: ProviderSettingKind::Choice {
+            options: BTreeSet::from(["marker".to_owned(), "placeholder".to_owned()]),
+        },
+        default: ProviderSettingValue::Choice("marker".to_owned()),
+        scopes,
+        core_behavior: None,
     }
 }
 
@@ -143,6 +163,7 @@ mod tests {
         );
         assert_eq!(resolved.boolean(BROWSER_PLAY_VIDEO_KEY), Some(true));
         assert_eq!(resolved.choice(DISCUSSION_EMPTY_MODE_KEY), Some("marker"));
+        assert_eq!(resolved.choice(PRESET_EMPTY_MODE_KEY), Some("marker"));
         assert_eq!(
             schema.execution_concurrency(&resolved).unwrap(),
             asterism_provider_api::ProviderExecutionConcurrency {

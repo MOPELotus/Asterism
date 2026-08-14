@@ -343,7 +343,7 @@ mod tests {
         assert!(entry.submission_verify.is_some());
         assert!(entry.task_execution.is_some());
         assert!(entry.browser_bridge.is_some());
-        assert_eq!(entry.runtime_settings.definitions.len(), 6);
+        assert_eq!(entry.runtime_settings.definitions.len(), 7);
         for capability in [
             ProviderCapability::Authentication,
             ProviderCapability::CourseInventory,

@@ -77,10 +77,10 @@ The complete Development Provider factory shares one resolved network policy and
 one account-scoped stored-session resolver across Authentication,
 CourseInventory, TaskInventory, TaskDetail, TaskProgressRead, DurationRead and
 the question/answer/submission transports. Its versioned Master-owned runtime
-schema v2 defaults both Provider and account execution to serial admission,
+schema v3 defaults both Provider and account execution to serial admission,
 requests a 30-minute account scan interval, and exposes bounded page-residence
-seconds, optional video playback and direct-discussion `marker|placeholder`
-mode at Provider, account and Task scope. Core
+seconds, optional video playback, pure-study `marker|placeholder` and
+direct-discussion `marker|placeholder` mode at Provider, account and Task scope. Core
 resolves and freezes those values; the current BrowserBridge Core Gap must pass
 that immutable snapshot into the eventual rendered execution rather than read
 mutable settings mid-run. Native mutation paths already reject snapshots that
@@ -488,7 +488,9 @@ Native inventory takes the required current value from Course progress,
 cross-checks tree and per-Unit copies, and fills a missing tree field. Only an
 explicitly injected legacy transport that omits Course progress and every
 per-Unit version can select the compatibility pair; Asterism never fabricates
-a Course version or the MIT donor's client-authored score maps. A code-`0`,
+a Course version or adds MIT's client-authored score maps to ordinary answer
+submissions. Apache's separately evidenced empty-placeholder ResourceExecution
+retains its own bounded map in that dedicated wire mode. A code-`0`,
 version-bearing response becomes an accepted receipt; `600001` and `600002`
 become typed retry state without a receipt, and the mutation is not implicitly
 repeated. A Network failure from the mutation boundary is likewise returned
@@ -546,9 +548,12 @@ The MIT and current Rust donors complete pure-study Groups with
 followed by fresh progress reads. The current donor chooses that body only for
 fresh progress leaves whose `tab_type` is exactly `text` or `video`. The older
 donors agree that `rich-text-read`, `text-learn`, `vocabulary`, `input` and
-`video-point-read` are the five preset `base` labels. However, the Apache
-donor's active generic preset path inserts `instanceId=0` placeholder question
-rows, so it is not treated as evidence for the empty body. The operation has no
+`video-point-read` are the five preset `base` labels. Independently, the Apache
+donor's active generic preset path inserts `instanceId=0` placeholder Question
+rows, pads a short base list by repeating its final type, truncates an overlong
+list, and emits one ordered judge per declared Question. Asterism retains both
+wire behaviors under a frozen runtime choice rather than treating one as
+evidence against the other. The operation has no
 Question/SelectedAnswer pair and remains separate from the submission-draft
 protocol. Its execution acknowledgement remains unverified. The independent
 goal-bound verification method re-runs fresh Task detail binding and the exact
@@ -564,9 +569,12 @@ the native transport refreshes Course detail and the exact Unit progress
 document, requires the exact Group leaf and `tab_type=text|video` for a preset
 or `tab_type=task` for exit-ticket/discussion/oral, requires the fresh donor
 availability window to contain the current time, and skips the POST if all
-three completion flags are already `1`. Preset and exit-ticket send the
-donor-observed no-Question empty body. Direct discussion freezes the resolved
-runtime mode: `marker` sends that same `submitType=2` body, while `placeholder`
+three completion flags are already `1`. Preset freezes the resolved runtime
+mode: `marker` sends the MIT/current-donor no-Question `submitType=2` body,
+while `placeholder` uses Apache's expanded ordered Task types, repeated
+`instanceId=0` empty children and score/judge map in `submitType=1`. Exit-ticket
+uses its exact no-Question marker. Direct discussion independently freezes the
+same choices: `marker` sends the no-Question body, while `placeholder`
 uses the donor's `instanceId=0`, empty child, courseAnswer map and discussion
 judge in a `submitType=1` body. Oral sends its distinct bounded
 placeholder-answer body with

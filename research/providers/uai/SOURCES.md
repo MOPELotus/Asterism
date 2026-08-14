@@ -155,6 +155,14 @@ implementation scope. Where the shared Core cannot yet express a reply draft,
 artifact handle or external resolver, that is a Core Gap rather than a Provider
 policy exclusion.
 
+For pure-study Groups, MIT/current donors evidence the no-Question marker while
+Apache's active generic path evidences a separate placeholder body. Its
+`parse_base_list` pads a short comma-split base list by repeating the final
+type and truncates an overlong list to `question_num`; the builder then emits
+one `instanceId=0` empty Question and ordered judge per expanded type. Asterism
+retains both through a frozen runtime choice and replaces Apache's captured
+Course judge version with fresh Course-progress evidence.
+
 For one exact `discussion` Group, the Apache runner exposes two independent
 direct-empty branches in addition to topic/reply automation. Its skip-content
 branch sends the no-Question `submitType=2` marker; its allow-empty branch uses

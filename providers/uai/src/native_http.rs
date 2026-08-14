@@ -27,9 +27,9 @@ use crate::{
     UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult, UaiDiscussionEmptySubmission,
     UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument,
     UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiOralEmptySubmission,
-    UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiProgressDocument,
-    UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport, UaiSessionResolver,
-    UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    UaiPresetCompletionResult, UaiPresetCompletionTransport, UaiPresetEmptySubmission,
+    UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
+    UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
     UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
     UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification,
     UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
@@ -84,6 +84,7 @@ enum EmptyCompletionPreflight {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EmptyAnswerSubmission<'a> {
+    Preset(&'a UaiPresetEmptySubmission),
     Oral(UaiOralEmptySubmission<'a>),
     Discussion(UaiDiscussionEmptySubmission),
 }
@@ -601,6 +602,25 @@ impl NativeUaiInventoryTransport {
             group_id,
             EmptyCompletionPreflight::Preset,
             None,
+        )
+        .await
+    }
+
+    async fn complete_preset_placeholder_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        submission: &UaiPresetEmptySubmission,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        self.complete_empty_with_session(
+            session,
+            course_resource_id,
+            unit_id,
+            group_id,
+            EmptyCompletionPreflight::Preset,
+            Some(EmptyAnswerSubmission::Preset(submission)),
         )
         .await
     }
@@ -1622,6 +1642,40 @@ impl UaiPresetCompletionTransport for NativeUaiInventoryTransport {
         }
     }
 
+    async fn complete_preset_placeholder(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+        submission: &UaiPresetEmptySubmission,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .complete_preset_placeholder_with_session(
+                &session,
+                course_resource_id,
+                unit_id,
+                group_id,
+                submission,
+            )
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.complete_preset_placeholder_with_session(
+                    &session,
+                    course_resource_id,
+                    unit_id,
+                    group_id,
+                    submission,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+
     async fn complete_exit_ticket(
         &self,
         context: &ProviderContext,
@@ -2572,6 +2626,9 @@ fn build_empty_completion_body(
     empty_answer: Option<EmptyAnswerSubmission<'_>>,
 ) -> ProviderResult<Zeroizing<String>> {
     let body = match empty_answer {
+        Some(EmptyAnswerSubmission::Preset(submission)) => {
+            build_preset_empty_placeholder_body(course_instance_id, open_id, group_id, submission)?
+        }
         Some(EmptyAnswerSubmission::Oral(submission)) => build_oral_empty_submission_body(
             course_instance_id,
             open_id,
@@ -2661,6 +2718,26 @@ fn build_discussion_empty_placeholder_body(
     )
 }
 
+fn build_preset_empty_placeholder_body(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+    submission: &UaiPresetEmptySubmission,
+) -> ProviderResult<String> {
+    let task_types = submission
+        .task_types()
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    build_typed_empty_placeholder_submission_body(
+        course_instance_id,
+        open_id,
+        group_id,
+        &task_types,
+        submission.course_publish_version(),
+    )
+}
+
 fn build_empty_placeholder_submission_body(
     course_instance_id: &str,
     open_id: &str,
@@ -2669,7 +2746,40 @@ fn build_empty_placeholder_submission_body(
     question_count: u32,
     course_publish_version: u64,
 ) -> ProviderResult<String> {
-    if !(1..=128).contains(&question_count)
+    let question_count = usize::try_from(question_count)
+        .ok()
+        .filter(|value| (1..=128).contains(value))
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "UAI empty placeholder submission received an unsupported bounded shape",
+            )
+        })?;
+    let task_types = vec![task_type; question_count];
+    build_typed_empty_placeholder_submission_body(
+        course_instance_id,
+        open_id,
+        group_id,
+        &task_types,
+        course_publish_version,
+    )
+}
+
+fn build_typed_empty_placeholder_submission_body(
+    course_instance_id: &str,
+    open_id: &str,
+    group_id: &str,
+    task_types: &[&str],
+    course_publish_version: u64,
+) -> ProviderResult<String> {
+    if !(1..=128).contains(&task_types.len())
+        || task_types.iter().any(|task_type| {
+            task_type.is_empty()
+                || task_type.len() > 128
+                || !task_type
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
         || course_publish_version == 0
         || i64::try_from(course_publish_version).is_err()
     {
@@ -2678,18 +2788,25 @@ fn build_empty_placeholder_submission_body(
             "UAI empty placeholder submission received an unsupported bounded shape",
         ));
     }
+    let question_count = u32::try_from(task_types.len()).map_err(|_| static_submission_error())?;
     let question = build_empty_placeholder_question(group_id, question_count)?;
-    let questions = vec![question; question_count as usize];
-    let completed = vec![true; question_count as usize];
-    let judge = serde_json::json!({
-        "value": "",
-        "question_type": task_type.replace('_', "-"),
-        "reply_type": task_type.replace('_', "-"),
-        "versions": {"course": course_publish_version, "group": 1, "template": 1, "answer": 3, "content": 0},
-        "payloads": [],
-    });
-    let judges = serde_json::to_string(&vec![judge; question_count as usize])
-        .map_err(|_| static_submission_error())?;
+    let questions = vec![question; task_types.len()];
+    let completed = vec![true; task_types.len()];
+    let judges = serde_json::to_string(
+        &task_types
+            .iter()
+            .map(|task_type| {
+                serde_json::json!({
+                    "value": "",
+                    "question_type": task_type.replace('_', "-"),
+                    "reply_type": task_type.replace('_', "-"),
+                    "versions": {"course": course_publish_version, "group": 1, "template": 1, "answer": 3, "content": 0},
+                    "payloads": [],
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| static_submission_error())?;
     let mut encoded = serde_json::to_string(&serde_json::json!({
         "quesDatas": questions,
         "groupId": group_id,
@@ -3345,6 +3462,22 @@ mod tests {
         assert_eq!(judges[0]["question_type"], "discussion");
         assert_eq!(judges[0]["reply_type"], "discussion");
         assert_eq!(judges[0]["versions"]["course"], 456_789);
+
+        let preset = build_typed_empty_placeholder_submission_body(
+            "course-v2:synthetic+rw",
+            "synthetic-open-id",
+            "group-1",
+            &["vocabulary", "input", "input"],
+            456_789,
+        )
+        .unwrap();
+        let preset: serde_json::Value = serde_json::from_str(&preset).unwrap();
+        assert_eq!(preset["quesDatas"].as_array().unwrap().len(), 3);
+        let judges: serde_json::Value =
+            serde_json::from_str(preset["thirdPartyJudges"].as_str().unwrap()).unwrap();
+        assert_eq!(judges[0]["question_type"], "vocabulary");
+        assert_eq!(judges[1]["question_type"], "input");
+        assert_eq!(judges[2]["question_type"], "input");
     }
 
     #[test]
