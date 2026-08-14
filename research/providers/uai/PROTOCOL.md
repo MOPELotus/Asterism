@@ -407,12 +407,17 @@ The same donor reads `contents[].path`, subtitle-track paths and embedded
 WEBVTT before external transcription. Asterism now classifies bounded audio,
 video and subtitle routes, accepts only HTTPS names rather than literal-IP
 hosts, strips fragments, deduplicates in order and retains exact URLs only in a
-zeroizing Provider-private media owner. The persisted Question receives a
-stable hash-derived attachment ID, kind, bounded label and subtitle flag but no
-fetch URL. Embedded WEBVTT becomes bounded normalized transcript metadata and
-is excluded from the display stem. A shared downloader must still enforce DNS
-resolution/redirect policy and bind the resulting bytes plus model credential
-to the exact Task and AnswerResolve attempt.
+zeroizing Provider-private media owner. That owner repeats the exact remote
+Task and Question identities, and the opaque attachment digest hashes both
+with the canonical URL, so the same CDN URL cannot authorize cross-Task reuse.
+The persisted Question receives only that attachment ID, kind, bounded label
+and subtitle flag, never a fetch URL. Embedded WEBVTT becomes bounded
+normalized transcript metadata and is excluded from the display stem. The
+current donor sends its default authorization/cookie header set through its
+generic media GET even when the URL host changes; Asterism does not copy that
+credential leak. A shared downloader must enforce DNS/private-range and
+redirect policy, decide host-scoped authentication, and bind the resulting
+bytes plus model credential to the exact Task and AnswerResolve attempt.
 
 Execution is advertised only when a fresh Group has a bounded positive
 `question_num` and either one homogeneous type or exactly one positional type

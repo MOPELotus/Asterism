@@ -61,10 +61,12 @@ changed or reordered rows. A missing receipt produces Inconclusive without
 making a transport request.
 
 Media parsing fixtures cover audio/video content paths, subtitle tracks,
-embedded WEBVTT, stable opaque attachment IDs, fragment-free ephemeral HTTPS
-routes, URL redaction and rejection of non-HTTPS or literal-IP routes.
-Persisted Questions never contain a fetch URL; DNS resolution and authenticated
-media fetching remain the shared downloader boundary.
+embedded WEBVTT, stable Task+remote-Question+URL-bound opaque attachment IDs,
+fragment-free ephemeral HTTPS routes, URL redaction, different IDs for the same
+URL under another Task, and rejection of non-HTTPS or literal-IP routes.
+Persisted Questions never contain a fetch URL; DNS/private-range resolution,
+redirect handling and host-scoped authenticated media fetching remain the
+shared downloader boundary.
 
 ## Required live-sanitized fixtures
 

@@ -267,6 +267,8 @@ pub struct ParsedUaiQuestion {
 #[derive(Clone, Eq, PartialEq)]
 pub struct UaiQuestionMediaSource {
     attachment_id: String,
+    remote_task_id: String,
+    remote_question_id: String,
     kind: QuestionAttachmentKind,
     url: Zeroizing<String>,
     subtitle: bool,
@@ -275,6 +277,14 @@ pub struct UaiQuestionMediaSource {
 impl UaiQuestionMediaSource {
     pub fn attachment_id(&self) -> &str {
         &self.attachment_id
+    }
+
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub fn remote_question_id(&self) -> &str {
+        &self.remote_question_id
     }
 
     pub const fn kind(&self) -> QuestionAttachmentKind {
@@ -295,6 +305,8 @@ impl fmt::Debug for UaiQuestionMediaSource {
         formatter
             .debug_struct("UaiQuestionMediaSource")
             .field("attachment_id", &self.attachment_id)
+            .field("remote_task_id", &"[TASK]")
+            .field("remote_question_id", &"[QUESTION]")
             .field("kind", &self.kind)
             .field("url", &"[REDACTED]")
             .field("subtitle", &self.subtitle)
@@ -500,7 +512,7 @@ fn parse_question_entry(
             matches!(kind, QuestionKind::FillBlank | QuestionKind::Matching),
         )?
     };
-    let media = question_media(content)?;
+    let media = question_media(content, remote_task_id, &remote_id)?;
     let judge_types = current_judge_types(content)?;
     if matches!(
         kind,
@@ -672,7 +684,29 @@ struct ParsedQuestionMedia {
     embedded_transcript: Option<String>,
 }
 
-fn question_media(content: &Map<String, Value>) -> ProviderResult<ParsedQuestionMedia> {
+#[derive(Clone, Copy)]
+struct UaiMediaOwnerBinding<'a> {
+    remote_task_id: &'a str,
+    remote_question_id: &'a str,
+}
+
+impl<'a> UaiMediaOwnerBinding<'a> {
+    fn try_new(remote_task_id: &'a str, remote_question_id: &'a str) -> ProviderResult<Self> {
+        GroupIdentity::parse(remote_task_id)?;
+        valid_question_identity(remote_question_id)?;
+        Ok(Self {
+            remote_task_id,
+            remote_question_id,
+        })
+    }
+}
+
+fn question_media(
+    content: &Map<String, Value>,
+    remote_task_id: &str,
+    remote_question_id: &str,
+) -> ProviderResult<ParsedQuestionMedia> {
+    let binding = UaiMediaOwnerBinding::try_new(remote_task_id, remote_question_id)?;
     let Some(contents) = content.get("contents") else {
         return Ok(ParsedQuestionMedia {
             attachments: Vec::new(),
@@ -720,6 +754,7 @@ fn question_media(content: &Map<String, Value>) -> ProviderResult<ParsedQuestion
                 path,
                 item.get("name").and_then(Value::as_str),
                 false,
+                binding,
             )?;
         }
         if let Some(subtitles) = item.get("subtitles") {
@@ -743,6 +778,7 @@ fn question_media(content: &Map<String, Value>) -> ProviderResult<ParsedQuestion
                         path,
                         subtitle.get("name").and_then(Value::as_str),
                         true,
+                        binding,
                     )?;
                 }
             }
@@ -778,6 +814,7 @@ fn push_media_source(
     raw_url: &str,
     raw_label: Option<&str>,
     subtitle: bool,
+    binding: UaiMediaOwnerBinding<'_>,
 ) -> ProviderResult<()> {
     let (canonical_url, kind) = canonical_media_url(raw_url, subtitle)?;
     if !seen_urls.insert(canonical_url.clone()) {
@@ -790,6 +827,10 @@ fn push_media_source(
     }
     let mut digest = Sha256::new();
     digest.update(b"asterism:uai:question-media:v1\0");
+    digest.update(binding.remote_task_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(binding.remote_question_id.as_bytes());
+    digest.update(b"\0");
     digest.update(canonical_url.as_bytes());
     let attachment_id = format!("uai-media-v1:{:x}", digest.finalize());
     let label = raw_label
@@ -806,6 +847,8 @@ fn push_media_source(
     });
     sources.push(UaiQuestionMediaSource {
         attachment_id,
+        remote_task_id: binding.remote_task_id.to_owned(),
+        remote_question_id: binding.remote_question_id.to_owned(),
         kind,
         url: Zeroizing::new(canonical_url),
         subtitle,
@@ -1750,6 +1793,11 @@ mod tests {
         assert_eq!(parsed.attachments[1].kind, QuestionAttachmentKind::File);
         assert_eq!(parsed.media_sources().len(), 2);
         assert_eq!(
+            parsed.media_sources()[0].remote_task_id(),
+            "group:2001:unit-1:group-media"
+        );
+        assert_eq!(parsed.media_sources()[0].remote_question_id(), "9001");
+        assert_eq!(
             parsed.media_sources()[0].expose_url(),
             "https://media.example.edu/listening.mp3"
         );
@@ -1764,6 +1812,24 @@ mod tests {
         let encoded = serde_json::to_string(&question).unwrap();
         assert!(!encoded.contains("media.example.edu"));
         assert!(encoded.contains("uai-media-v1:"));
+
+        let same_url = json!({"contents":[{"path":"https://media.example.edu/listening.mp3"}]});
+        let first = question_media(
+            same_url.as_object().unwrap(),
+            "group:2001:unit-1:group-media",
+            "9001",
+        )
+        .unwrap();
+        let foreign_task = question_media(
+            same_url.as_object().unwrap(),
+            "group:2001:unit-1:group-other",
+            "9001",
+        )
+        .unwrap();
+        assert_ne!(
+            first.sources[0].attachment_id(),
+            foreign_task.sources[0].attachment_id()
+        );
     }
 
     #[test]
@@ -1773,7 +1839,12 @@ mod tests {
             "https://127.0.0.1/listening.mp3",
         ] {
             assert!(
-                question_media(json!({"contents":[{"path":path}]}).as_object().unwrap()).is_err()
+                question_media(
+                    json!({"contents":[{"path":path}]}).as_object().unwrap(),
+                    "group:2001:unit-1:group-media",
+                    "9001",
+                )
+                .is_err()
             );
         }
     }
