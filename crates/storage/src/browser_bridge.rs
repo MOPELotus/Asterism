@@ -1334,6 +1334,7 @@ mod tests {
             start_url: "https://provider.example/task/a1".to_owned(),
             isolation_key: "provider-task-a1".to_owned(),
             allowed_origins: vec!["https://provider.example".to_owned()],
+            read_sources: Vec::new(),
             headless: false,
         }
     }

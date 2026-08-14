@@ -8,7 +8,8 @@ use std::{
 
 use anyhow::{Context, bail};
 use asterism_provider_api::{
-    BrowserSessionSpec, CaptureReadiness, CaptureRecipe, CaptureScalarSource, CaptureValueSource,
+    BrowserBridgeReadSource, BrowserSessionSpec, CaptureReadiness, CaptureRecipe,
+    CaptureScalarSource, CaptureValueSource,
 };
 use asterism_secrets::SecretString;
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
@@ -39,6 +40,49 @@ pub struct ChromiumCapture {
 pub struct BrowserBridgeDocumentBinding {
     pub observed_origin: String,
     pub frame_id: String,
+}
+
+/// One read-policy-bound observation from a stable `BrowserBridge` document.
+/// Secret values are available only through the exact frozen source keys.
+pub struct BrowserBridgeReadSnapshot {
+    binding: BrowserBridgeDocumentBinding,
+    request_headers: BTreeMap<(String, String), SecretString>,
+    local_storage: BTreeMap<(String, String), SecretString>,
+    session_storage: BTreeMap<(String, String), SecretString>,
+}
+
+impl BrowserBridgeReadSnapshot {
+    pub const fn binding(&self) -> &BrowserBridgeDocumentBinding {
+        &self.binding
+    }
+
+    /// Takes one exact predeclared browser fact, leaving no reusable copy in
+    /// the snapshot. Missing or undeclared facts return `None`.
+    pub fn take(&mut self, source: &BrowserBridgeReadSource) -> Option<SecretString> {
+        match source {
+            BrowserBridgeReadSource::RequestHeader { origin, name } => {
+                self.request_headers.remove(&(origin.clone(), name.clone()))
+            }
+            BrowserBridgeReadSource::LocalStorage { origin, key } => {
+                self.local_storage.remove(&(origin.clone(), key.clone()))
+            }
+            BrowserBridgeReadSource::SessionStorage { origin, key } => {
+                self.session_storage.remove(&(origin.clone(), key.clone()))
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for BrowserBridgeReadSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeReadSnapshot")
+            .field("binding", &self.binding)
+            .field("request_header_count", &self.request_headers.len())
+            .field("local_storage_count", &self.local_storage.len())
+            .field("session_storage_count", &self.session_storage.len())
+            .finish()
+    }
 }
 
 /// An isolated Chromium process prepared for typed `BrowserBridge` commands.
@@ -92,7 +136,7 @@ impl ChromiumBrowserBridge {
         )
         .await?;
         let socket = CdpWebSocket::connect(&target.web_socket_debugger_url).await?;
-        let mut cdp = CdpSession::new(socket, BTreeSet::new());
+        let mut cdp = CdpSession::new(socket, browser_bridge_declared_headers(&spec));
         initialize_cdp(&mut cdp).await?;
         let mut bridge = Self {
             spec,
@@ -120,6 +164,98 @@ impl ChromiumBrowserBridge {
             observed_origin: document.origin,
             frame_id: document.frame_id,
         })
+    }
+
+    /// Reads only predeclared browser facts from one stable top-level document.
+    /// Header observations are restricted to the current loader; storage reads
+    /// are restricted to the current origin and fixed literal keys.
+    ///
+    /// # Errors
+    ///
+    /// Rejects browser exit, origin drift, malformed `DevTools` responses,
+    /// oversized values or any document change during the snapshot.
+    pub async fn read_snapshot(
+        &mut self,
+        requested_sources: &[BrowserBridgeReadSource],
+    ) -> anyhow::Result<BrowserBridgeReadSnapshot> {
+        if self.process.browser_mut().try_wait()?.is_some() {
+            bail!("isolated BrowserBridge browser exited before its read snapshot");
+        }
+        if !valid_requested_read_sources(&self.spec, requested_sources) {
+            bail!("BrowserBridge read request exceeds the frozen policy");
+        }
+        let document = current_document(&mut self.cdp, &self.spec.allowed_origins).await?;
+        let mut snapshot = BrowserBridgeReadSnapshot {
+            binding: BrowserBridgeDocumentBinding {
+                observed_origin: document.origin.clone(),
+                frame_id: document.frame_id.clone(),
+            },
+            request_headers: BTreeMap::new(),
+            local_storage: BTreeMap::new(),
+            session_storage: BTreeMap::new(),
+        };
+        self.cdp.copy_browser_bridge_headers(
+            &document.loader_id,
+            requested_sources,
+            &mut snapshot.request_headers,
+        );
+        for source in requested_sources.iter().cloned() {
+            let (local, origin, key) = match source {
+                BrowserBridgeReadSource::RequestHeader { .. } => continue,
+                BrowserBridgeReadSource::LocalStorage { origin, key } => (true, origin, key),
+                BrowserBridgeReadSource::SessionStorage { origin, key } => (false, origin, key),
+            };
+            if origin != document.origin {
+                continue;
+            }
+            let storage = if local {
+                "window.localStorage"
+            } else {
+                "window.sessionStorage"
+            };
+            let encoded_key = serde_json::to_string(&key)?;
+            let response = self
+                .cdp
+                .command(
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": format!("{storage}.getItem({encoded_key})"),
+                        "returnByValue": true,
+                        "awaitPromise": false,
+                        "userGesture": false
+                    }),
+                )
+                .await?;
+            if response
+                .value()
+                .pointer("/result/exceptionDetails")
+                .is_some()
+            {
+                continue;
+            }
+            let Some(value) = response
+                .value()
+                .pointer("/result/result/value")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if value.len() > 1024 * 1024 {
+                bail!("DevTools returned an oversized declared storage value");
+            }
+            let target = if local {
+                &mut snapshot.local_storage
+            } else {
+                &mut snapshot.session_storage
+            };
+            target.insert((origin, key), SecretString::new(value.to_owned()));
+        }
+        let confirmation = current_document(&mut self.cdp, &self.spec.allowed_origins).await?;
+        if confirmation != document {
+            bail!("browser document changed during one BrowserBridge read snapshot");
+        }
+        Ok(snapshot)
     }
 
     /// Closes the isolated browser and reclaims its process tree/profile.
@@ -527,7 +663,6 @@ struct CdpSession {
     next_id: u64,
     declared_headers: BTreeSet<(String, String)>,
     requests: BTreeMap<String, RequestBinding>,
-    pending_headers: BTreeMap<String, BTreeMap<String, SecretString>>,
     observed_headers: BTreeMap<(String, String, String), SecretString>,
     observed_requests: BTreeSet<(String, String, String, String)>,
     observed_responses: BTreeSet<(String, String, String, String, u16, String)>,
@@ -540,7 +675,6 @@ impl CdpSession {
             next_id: 1,
             declared_headers,
             requests: BTreeMap::new(),
-            pending_headers: BTreeMap::new(),
             observed_headers: BTreeMap::new(),
             observed_requests: BTreeSet::new(),
             observed_responses: BTreeSet::new(),
@@ -618,9 +752,7 @@ impl CdpSession {
         };
         if self.requests.len() >= MAX_TRACKED_REQUESTS {
             self.requests.clear();
-            self.pending_headers.clear();
         }
-        let pending_headers = self.pending_headers.remove(&request_id);
         self.requests.insert(
             request_id,
             RequestBinding {
@@ -635,9 +767,6 @@ impl CdpSession {
             &origin,
             event.pointer("/params/request/headers"),
         )?;
-        if let Some(headers) = pending_headers {
-            self.observe_header_values(&loader_id, &origin, headers);
-        }
         Ok(())
     }
 
@@ -646,7 +775,8 @@ impl CdpSession {
             return Ok(());
         };
         let Some(binding) = self.requests.get(request_id).cloned() else {
-            self.remember_pending_headers(request_id, event.pointer("/params/headers"))?;
+            // ExtraInfo can precede the request event. Without its URL there
+            // is no safe origin/loader binding, so never retain those values.
             return Ok(());
         };
         self.observe_headers(
@@ -697,7 +827,6 @@ impl CdpSession {
         };
         self.requests
             .retain(|_, binding| binding.loader_id == loader_id);
-        self.pending_headers.clear();
         self.observed_headers
             .retain(|(observed_loader, _, _), _| observed_loader == loader_id);
         self.observed_requests
@@ -736,42 +865,6 @@ impl CdpSession {
         Ok(())
     }
 
-    fn remember_pending_headers(
-        &mut self,
-        request_id: &str,
-        headers: Option<&Value>,
-    ) -> anyhow::Result<()> {
-        let Some(headers) = headers.and_then(Value::as_object) else {
-            return Ok(());
-        };
-        if self.pending_headers.len() >= MAX_TRACKED_REQUESTS {
-            self.pending_headers.clear();
-        }
-        let declared_names = self
-            .declared_headers
-            .iter()
-            .map(|(_, name)| name.as_str())
-            .collect::<BTreeSet<_>>();
-        let mut values = BTreeMap::new();
-        for (name, value) in headers {
-            let normalized = name.to_ascii_lowercase();
-            if !declared_names.contains(normalized.as_str()) {
-                continue;
-            }
-            let Some(value) = value.as_str() else {
-                bail!("DevTools returned a non-string declared request header");
-            };
-            if value.is_empty() || value.len() > 1024 * 1024 {
-                bail!("DevTools returned an empty or oversized declared request header");
-            }
-            values.insert(normalized, SecretString::new(value.to_owned()));
-        }
-        if !values.is_empty() {
-            self.pending_headers.insert(request_id.to_owned(), values);
-        }
-        Ok(())
-    }
-
     fn observe_header_values(
         &mut self,
         loader_id: &str,
@@ -804,6 +897,32 @@ impl CdpSession {
             }
         }
         Ok(())
+    }
+
+    fn copy_browser_bridge_headers(
+        &self,
+        loader_id: &str,
+        requested_sources: &[BrowserBridgeReadSource],
+        target: &mut BTreeMap<(String, String), SecretString>,
+    ) {
+        for ((observed_loader, origin, name), value) in &self.observed_headers {
+            if observed_loader == loader_id
+                && requested_sources.iter().any(|source| {
+                    matches!(
+                        source,
+                        BrowserBridgeReadSource::RequestHeader {
+                            origin: requested_origin,
+                            name: requested_name,
+                        } if requested_origin == origin && requested_name == name
+                    )
+                })
+            {
+                target.insert(
+                    (origin.clone(), name.clone()),
+                    SecretString::new(value.expose_secret().to_owned()),
+                );
+            }
+        }
     }
 
     fn readiness_satisfied(&self, readiness: &CaptureReadiness, loader_id: &str) -> bool {
@@ -1096,6 +1215,30 @@ fn declared_headers(recipe: &CaptureRecipe) -> BTreeSet<(String, String)> {
     headers
 }
 
+fn browser_bridge_declared_headers(spec: &BrowserSessionSpec) -> BTreeSet<(String, String)> {
+    spec.read_sources
+        .iter()
+        .filter_map(|source| match source {
+            BrowserBridgeReadSource::RequestHeader { origin, name } => {
+                Some((origin.clone(), name.clone()))
+            }
+            BrowserBridgeReadSource::LocalStorage { .. }
+            | BrowserBridgeReadSource::SessionStorage { .. } => None,
+        })
+        .collect()
+}
+
+fn valid_requested_read_sources(
+    spec: &BrowserSessionSpec,
+    requested_sources: &[BrowserBridgeReadSource],
+) -> bool {
+    !requested_sources.is_empty()
+        && requested_sources.len() <= spec.read_sources.len()
+        && requested_sources.iter().enumerate().all(|(index, source)| {
+            spec.read_sources.contains(source) && !requested_sources[..index].contains(source)
+        })
+}
+
 fn storage_sources(recipe: &CaptureRecipe, origin: &str) -> BTreeSet<(bool, String)> {
     let mut sources = BTreeSet::new();
     for output in &recipe.outputs {
@@ -1240,6 +1383,74 @@ mod tests {
     }
 
     #[test]
+    fn browser_bridge_read_snapshot_is_exact_consuming_and_redacted() {
+        let header = BrowserBridgeReadSource::RequestHeader {
+            origin: "https://provider.example".to_owned(),
+            name: "authorization".to_owned(),
+        };
+        let local = BrowserBridgeReadSource::LocalStorage {
+            origin: "https://provider.example".to_owned(),
+            key: "SESSION_INFO".to_owned(),
+        };
+        let spec = BrowserSessionSpec {
+            version: 2,
+            start_url: "https://provider.example/task".to_owned(),
+            isolation_key: "provider-task".to_owned(),
+            allowed_origins: vec!["https://provider.example".to_owned()],
+            read_sources: vec![header.clone(), local.clone()],
+            headless: false,
+        };
+        assert_eq!(
+            browser_bridge_declared_headers(&spec),
+            BTreeSet::from([(
+                "https://provider.example".to_owned(),
+                "authorization".to_owned()
+            )])
+        );
+        assert!(valid_requested_read_sources(
+            &spec,
+            std::slice::from_ref(&header)
+        ));
+        assert!(!valid_requested_read_sources(&spec, &[]));
+        assert!(!valid_requested_read_sources(
+            &spec,
+            &[header.clone(), header.clone()]
+        ));
+        assert!(!valid_requested_read_sources(
+            &spec,
+            &[BrowserBridgeReadSource::SessionStorage {
+                origin: "https://provider.example".to_owned(),
+                key: "SESSION_INFO".to_owned(),
+            }]
+        ));
+
+        let mut snapshot = BrowserBridgeReadSnapshot {
+            binding: BrowserBridgeDocumentBinding {
+                observed_origin: "https://provider.example".to_owned(),
+                frame_id: "frame-a".to_owned(),
+            },
+            request_headers: BTreeMap::from([(
+                (
+                    "https://provider.example".to_owned(),
+                    "authorization".to_owned(),
+                ),
+                SecretString::new("Bearer captured-secret".to_owned()),
+            )]),
+            local_storage: BTreeMap::new(),
+            session_storage: BTreeMap::new(),
+        };
+        let debug = format!("{snapshot:?}");
+        assert!(debug.contains("request_header_count: 1"));
+        assert!(!debug.contains("captured-secret"));
+        assert_eq!(
+            snapshot.take(&header).unwrap().expose_secret(),
+            "Bearer captured-secret"
+        );
+        assert!(snapshot.take(&header).is_none());
+        assert!(snapshot.take(&local).is_none());
+    }
+
+    #[test]
     fn canonical_origin_rejects_non_https_and_credentials() {
         assert_eq!(
             canonical_origin("https://provider.example/path?q=1"),
@@ -1374,6 +1585,7 @@ mod tests {
             start_url: "https://example.com/".to_owned(),
             isolation_key: "browser-bridge-example".to_owned(),
             allowed_origins: vec!["https://example.com".to_owned()],
+            read_sources: Vec::new(),
             headless: true,
         };
         let mut browser = ChromiumBrowserBridge::launch(spec, None).await.unwrap();

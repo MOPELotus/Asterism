@@ -1801,6 +1801,7 @@ mod tests {
                 start_url: "https://www.cidaren.com/student/task".to_owned(),
                 isolation_key: "cidaren-task".to_owned(),
                 allowed_origins: vec!["https://www.cidaren.com".to_owned()],
+                read_sources: Vec::new(),
                 headless: false,
             };
             let session = BrowserBridgeSession::awaiting_claim(BrowserBridgeSessionCreate {

@@ -2683,6 +2683,17 @@ pub enum ExecutionOutcomeError {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BrowserBridgeReadSource {
+    /// Retains only this exact lower-case request header from this origin.
+    RequestHeader { origin: String, name: String },
+    /// Authorizes an exact key read from the origin's local storage.
+    LocalStorage { origin: String, key: String },
+    /// Authorizes an exact key read from the origin's session storage.
+    SessionStorage { origin: String, key: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BrowserSessionSpec {
     /// Provider-owned wire revision for the browser policy represented by this
     /// immutable snapshot.
@@ -2691,6 +2702,10 @@ pub struct BrowserSessionSpec {
     pub start_url: String,
     pub isolation_key: String,
     pub allowed_origins: Vec<String>,
+    /// Credential-free browser-state read authority frozen before Chromium is
+    /// launched. Navigation authority never implies read authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_sources: Vec<BrowserBridgeReadSource>,
     pub headless: bool,
 }
 
@@ -2718,6 +2733,7 @@ impl BrowserSessionSpec {
             })
             || self.allowed_origins.is_empty()
             || self.allowed_origins.len() > MAX_CAPTURE_ORIGINS
+            || self.read_sources.len() > MAX_CAPTURE_SOURCES
             || !self
                 .allowed_origins
                 .iter()
@@ -2734,6 +2750,7 @@ impl BrowserSessionSpec {
         }
         origins.sort_unstable();
         if origins.windows(2).any(|pair| pair[0] == pair[1])
+            || !valid_browser_bridge_read_sources(&self.read_sources, &origins)
             || serde_json::to_vec(self).map_or(true, |encoded| encoded.len() > 4 * 1_024)
         {
             Err(BrowserSessionSpecError::Invalid)
@@ -2755,6 +2772,41 @@ impl BrowserSessionSpec {
     }
 }
 
+fn valid_browser_bridge_read_sources(
+    sources: &[BrowserBridgeReadSource],
+    allowed_origins: &[String],
+) -> bool {
+    let mut identities = Vec::with_capacity(sources.len());
+    for source in sources {
+        let (kind, origin, name) = match source {
+            BrowserBridgeReadSource::RequestHeader { origin, name } => {
+                if name.to_ascii_lowercase() != *name || validate_header_name(name).is_err() {
+                    return false;
+                }
+                (0_u8, origin, name)
+            }
+            BrowserBridgeReadSource::LocalStorage { origin, key } => {
+                if !valid_bounded_capture_text(key, 128) {
+                    return false;
+                }
+                (1_u8, origin, key)
+            }
+            BrowserBridgeReadSource::SessionStorage { origin, key } => {
+                if !valid_bounded_capture_text(key, 128) {
+                    return false;
+                }
+                (2_u8, origin, key)
+            }
+        };
+        if !allowed_origins.iter().any(|allowed| allowed == origin) {
+            return false;
+        }
+        identities.push((kind, origin, name));
+    }
+    identities.sort_unstable();
+    !identities.windows(2).any(|pair| pair[0] == pair[1])
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum BrowserSessionSpecError {
     #[error("Browser session specification is unsafe, unbounded, or internally inconsistent")]
@@ -2771,6 +2823,7 @@ mod browser_session_spec_tests {
             start_url: "https://provider.example/task/a1".to_owned(),
             isolation_key: "provider-task-a1".to_owned(),
             allowed_origins: vec!["https://provider.example".to_owned()],
+            read_sources: Vec::new(),
             headless: false,
         }
     }
@@ -2779,6 +2832,12 @@ mod browser_session_spec_tests {
     fn exact_https_origins_and_bounded_isolation_are_required() {
         assert_eq!(spec().validate(), Ok(()));
         assert_eq!(spec().digest(), spec().digest());
+        let legacy_json = serde_json::to_string(&spec()).unwrap();
+        assert!(!legacy_json.contains("read_sources"));
+        assert_eq!(
+            serde_json::from_str::<BrowserSessionSpec>(&legacy_json).unwrap(),
+            spec()
+        );
 
         let mut changed_start = spec();
         changed_start.start_url = "https://provider.example/task/a2".to_owned();
@@ -2814,5 +2873,48 @@ mod browser_session_spec_tests {
             secret_shaped.validate(),
             Err(BrowserSessionSpecError::Invalid)
         );
+
+        let mut authorized = spec();
+        authorized.read_sources = vec![
+            BrowserBridgeReadSource::RequestHeader {
+                origin: "https://provider.example".to_owned(),
+                name: "authorization".to_owned(),
+            },
+            BrowserBridgeReadSource::LocalStorage {
+                origin: "https://provider.example".to_owned(),
+                key: "SESSION_INFO".to_owned(),
+            },
+        ];
+        assert_eq!(authorized.validate(), Ok(()));
+        assert_ne!(authorized.digest(), spec().digest());
+
+        let mut mixed_case_header = authorized.clone();
+        let BrowserBridgeReadSource::RequestHeader { name, .. } =
+            &mut mixed_case_header.read_sources[0]
+        else {
+            unreachable!();
+        };
+        *name = "Authorization".to_owned();
+        assert_eq!(
+            mixed_case_header.validate(),
+            Err(BrowserSessionSpecError::Invalid)
+        );
+
+        let mut foreign_read = authorized.clone();
+        let BrowserBridgeReadSource::LocalStorage { origin, .. } =
+            &mut foreign_read.read_sources[1]
+        else {
+            unreachable!();
+        };
+        *origin = "https://foreign.example".to_owned();
+        assert_eq!(
+            foreign_read.validate(),
+            Err(BrowserSessionSpecError::Invalid)
+        );
+
+        authorized
+            .read_sources
+            .push(authorized.read_sources[0].clone());
+        assert_eq!(authorized.validate(), Err(BrowserSessionSpecError::Invalid));
     }
 }

@@ -214,6 +214,23 @@ impl CaptureClient {
         &self,
         claimed: &mut ClaimedBrowserBridgeSession,
     ) -> anyhow::Result<BrowserBridgeCommand> {
+        self.try_dispatch_browser_bridge_command(claimed)
+            .await?
+            .context("Asterism server has not issued the next BrowserBridge command")
+    }
+
+    /// Attempts to dispatch the next command once. A server-side `404` means
+    /// Core has not issued that sequence yet and is safe to poll again; any
+    /// transport ambiguity remains non-replayable and returns an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing runtime binding, concurrent command,
+    /// rejected access, unsafe metadata, oversized body or digest mismatch.
+    pub async fn try_dispatch_browser_bridge_command(
+        &self,
+        claimed: &mut ClaimedBrowserBridgeSession,
+    ) -> anyhow::Result<Option<BrowserBridgeCommand>> {
         claimed.ensure_live()?;
         if claimed.binding.is_none() || claimed.active_command.is_some() {
             bail!("BrowserBridge command dispatch requires one idle bound runtime");
@@ -236,6 +253,11 @@ impl CaptureClient {
             .send()
             .await
             .context("failed to dispatch the BrowserBridge command; it must not be replayed")?;
+        if response.status() == StatusCode::NOT_FOUND {
+            let _: serde_json::Value =
+                deserialize_response(response, &[StatusCode::NOT_FOUND]).await?;
+            return Ok(None);
+        }
         if response.status() != StatusCode::OK {
             if response.status() == StatusCode::UNAUTHORIZED {
                 claimed.invalidate_access();
@@ -268,13 +290,55 @@ impl CaptureClient {
             command_type: command_type.clone(),
             command_digest,
         });
-        Ok(BrowserBridgeCommand {
+        Ok(Some(BrowserBridgeCommand {
             session_id,
             sequence,
             command_type,
             command_digest,
             command_artifact: SecretValue::new(body),
-        })
+        }))
+    }
+
+    /// Revalidates the claimed session and frozen specification without
+    /// changing command state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when access is rejected or any session/spec binding
+    /// differs from the original claim.
+    pub async fn poll_browser_bridge_session(
+        &self,
+        claimed: &mut ClaimedBrowserBridgeSession,
+    ) -> anyhow::Result<BrowserBridgeSessionSnapshot> {
+        claimed.ensure_live()?;
+        let session_id = claimed.session.id;
+        let url = self
+            .base_url
+            .join(&format!(
+                "api/v1/browser-bridge/sessions/{session_id}/snapshot"
+            ))
+            .context("failed to construct the BrowserBridge snapshot endpoint")?;
+        let response = self
+            .http
+            .get(url)
+            .header(
+                AUTHORIZATION,
+                browser_bridge_authorization(&claimed.access_token, false)?,
+            )
+            .send()
+            .await
+            .context("failed to poll the BrowserBridge session")?;
+        let access_rejected = response.status() == StatusCode::UNAUTHORIZED;
+        let result = deserialize_response(response, &[StatusCode::OK]).await;
+        if access_rejected {
+            claimed.invalidate_access();
+        }
+        let snapshot: BrowserBridgeSnapshotResponse = result?;
+        validate_browser_bridge_session(&snapshot.session, session_id, &snapshot.spec)?;
+        if snapshot.session != claimed.session || snapshot.spec != claimed.spec {
+            bail!("Asterism server changed the claimed BrowserBridge session or policy");
+        }
+        Ok(snapshot.session)
     }
 
     /// Submits one opaque result for the active command. Retrying the exact
@@ -699,6 +763,12 @@ struct BrowserBridgeClaimResponse {
     session: BrowserBridgeSessionSnapshot,
     spec: asterism_provider_api::BrowserSessionSpec,
     access_token: String,
+}
+
+#[derive(Deserialize)]
+struct BrowserBridgeSnapshotResponse {
+    session: BrowserBridgeSessionSnapshot,
+    spec: asterism_provider_api::BrowserSessionSpec,
 }
 
 impl BrowserBridgeClaimResponse {
@@ -1316,7 +1386,13 @@ fn validate_base_url(value: &str, allow_insecure_loopback: bool) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{str::FromStr, sync::Arc};
+    use std::{
+        str::FromStr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use axum::{
         Json, Router,
@@ -1376,17 +1452,19 @@ mod tests {
         let command = br#"{"version":1,"action":"scan"}"#;
         let command_digest: [u8; 32] = Sha256::digest(command).into();
         let command_digest_hex = encode_test_digest(command_digest);
+        let claimed_at = Utc::now();
+        let command_requests = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route(
                 "/api/v1/browser-bridge/sessions/{session_id}/claim",
-                post(
-                    |Path(session_id): Path<String>, headers: HeaderMap| async move {
+                post({
+                    let claimed_at_for_claim = claimed_at;
+                    move |Path(session_id): Path<String>, headers: HeaderMap| async move {
                         assert_eq!(session_id, SESSION_ID);
                         assert_eq!(
                             authorization_text(&headers),
                             "BrowserBridge ast_bridge_pair_test"
                         );
-                        let claimed_at = Utc::now();
                         Json(json!({
                             "session": {
                                 "id": SESSION_ID,
@@ -1395,10 +1473,10 @@ mod tests {
                                 "provider_version": "test",
                                 "spec_version": 1,
                                 "state": "claimed",
-                                "created_at": claimed_at - ChronoDuration::seconds(1),
-                                "updated_at": claimed_at,
-                                "expires_at": claimed_at + ChronoDuration::minutes(10),
-                                "claimed_at": claimed_at,
+                                "created_at": claimed_at_for_claim - ChronoDuration::seconds(1),
+                                "updated_at": claimed_at_for_claim,
+                                "expires_at": claimed_at_for_claim + ChronoDuration::minutes(10),
+                                "claimed_at": claimed_at_for_claim,
                                 "revision": 2
                             },
                             "spec": {
@@ -1410,8 +1488,43 @@ mod tests {
                             },
                             "access_token": "ast_bridge_access_test"
                         }))
-                    },
-                ),
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/browser-bridge/sessions/{session_id}/snapshot",
+                get({
+                    let claimed_at_for_snapshot = claimed_at;
+                    move |Path(session_id): Path<String>, headers: HeaderMap| async move {
+                        assert_eq!(session_id, SESSION_ID);
+                        assert_eq!(
+                            authorization_text(&headers),
+                            "BrowserBridge ast_bridge_access_test"
+                        );
+                        Json(json!({
+                            "session": {
+                                "id": SESSION_ID,
+                                "task_id": ACCOUNT_ID,
+                                "provider_id": "uai",
+                                "provider_version": "test",
+                                "spec_version": 1,
+                                "state": "claimed",
+                                "created_at": claimed_at_for_snapshot - ChronoDuration::seconds(1),
+                                "updated_at": claimed_at_for_snapshot,
+                                "expires_at": claimed_at_for_snapshot + ChronoDuration::minutes(10),
+                                "claimed_at": claimed_at_for_snapshot,
+                                "revision": 2
+                            },
+                            "spec": {
+                                "version": 1,
+                                "start_url": "https://ucontent.unipus.cn/task/a",
+                                "isolation_key": "uai-task-a",
+                                "allowed_origins": ["https://ucontent.unipus.cn"],
+                                "headless": false
+                            }
+                        }))
+                    }
+                }),
             )
             .route(
                 "/api/v1/browser-bridge/sessions/{session_id}/binding",
@@ -1438,14 +1551,23 @@ mod tests {
                 "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}",
                 get({
                     let command_digest_hex = command_digest_hex.clone();
+                    let command_requests = command_requests.clone();
                     move |Path((session_id, sequence)): Path<(String, u64)>, headers: HeaderMap| {
                         let command_digest_hex = command_digest_hex.clone();
+                        let command_requests = command_requests.clone();
                         async move {
                             assert_eq!((session_id.as_str(), sequence), (SESSION_ID, 1));
                             assert_eq!(
                                 authorization_text(&headers),
                                 "BrowserBridge ast_bridge_access_test"
                             );
+                            if command_requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                                return AxumResponse::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .header(CONTENT_TYPE, "application/json")
+                                    .body(Body::from(r#"{"code":"not_issued"}"#))
+                                    .unwrap();
+                            }
                             AxumResponse::builder()
                                 .header(CONTENT_TYPE, "application/octet-stream")
                                 .header(X_BROWSER_COMMAND_TYPE, "uai.browser.scan.v1")
@@ -1500,12 +1622,26 @@ mod tests {
             "ast_bridge_access_test"
         );
         assert!(!format!("{claimed:?}").contains("ast_bridge_access_test"));
+        assert_eq!(
+            client
+                .poll_browser_bridge_session(&mut claimed)
+                .await
+                .unwrap(),
+            claimed.session().clone()
+        );
         let binding = client
             .bind_browser_bridge_runtime(&mut claimed, "https://ucontent.unipus.cn", "top-frame:1")
             .await
             .unwrap();
         assert_eq!(binding.frame_id, "top-frame:1");
 
+        assert!(
+            client
+                .try_dispatch_browser_bridge_command(&mut claimed)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let dispatched = client
             .dispatch_browser_bridge_command(&mut claimed)
             .await

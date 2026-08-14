@@ -3687,3 +3687,48 @@ temporary-profile reclamation path. An ignored real-Chromium smoke test covers
 headless launch, exact target selection and origin/frame binding when a local
 browser and network are available. Typed Provider DOM action handlers remain
 the next layer; this slice does not execute opaque command JSON.
+
+## Two-hundred-and-sixth Phase 0 slice
+
+`BrowserSessionSpec` now freezes a separate credential-free browser read
+policy before Chromium starts. Navigation authority still grants no access to
+browser state: every permitted request header, local-storage key or
+session-storage key names one exact allowlisted HTTPS origin. The bounded list
+is duplicate-free, request-header names are canonical lower case, and the
+policy participates in the durable spec digest. Empty policies retain the old
+serialized shape and digest for already frozen sessions.
+
+The Capture BrowserBridge registers only predeclared request-header pairs with
+CDP, so unrelated headers are discarded as events arrive rather than cached
+for later interpretation; an early extra-header event without a known
+request-origin binding is discarded as well. Each typed dispatch selects a
+duplicate-free subset of the frozen policy. A read snapshot copies only those
+selected observations from the current top-level loader and reads only the
+selected storage keys for the current origin through fixed literal
+expressions. The document binding is checked again after acquisition;
+navigation during the read invalidates the entire snapshot.
+
+Snapshot values remain secret, consuming and debug-redacted. This boundary
+does not add Cookie access, arbitrary JavaScript, Provider-supplied selectors
+or late permission expansion. Typed Provider handlers must still validate the
+opaque command envelope and select from their compiled action/source profiles
+before any browser operation or result construction.
+
+## Two-hundred-and-seventh Phase 0 slice
+
+The Capture transport can now poll Core's authenticated BrowserBridge snapshot
+and requires the session plus frozen specification to remain byte-for-byte
+consistent with the original claim. A changed Provider, revision, lifetime or
+policy fails before another command is requested.
+
+Command retrieval now distinguishes an explicit server-side `404` from a
+dispatch. That status means the exact next sequence has not been issued and is
+safe for a bounded runner to poll again. A successful response still creates
+one active command, while `401`, `409`, malformed evidence and every transport
+failure remain hard errors. In particular, the helper never retries after an
+ambiguous GET because Core may already have durably marked the command as
+dispatched.
+
+This supplies the waiting semantics for a long-lived local runner without
+inventing command replay. Provider result projection, DOM execution and Core's
+post-result orchestration remain separate typed boundaries.
