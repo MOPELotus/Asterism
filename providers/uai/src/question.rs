@@ -734,12 +734,7 @@ fn question_media(
         if let Some(text) = item.get("text").and_then(Value::as_str)
             && text.trim_start().starts_with("WEBVTT")
         {
-            let transcript = normalize_text([text]);
-            if transcript.len() > MAX_EMBEDDED_TRANSCRIPT_BYTES {
-                return Err(invalid_response(
-                    "UAI embedded transcript exceeds the size limit",
-                ));
-            }
+            let transcript = parse_embedded_webvtt(text)?;
             if !transcript.is_empty() {
                 transcript_fragments.push(transcript);
             }
@@ -787,7 +782,7 @@ fn question_media(
     let embedded_transcript = if transcript_fragments.is_empty() {
         None
     } else {
-        let transcript = transcript_fragments.join(" ");
+        let transcript = transcript_fragments.join("\n");
         if transcript.len() > MAX_EMBEDDED_TRANSCRIPT_BYTES {
             return Err(invalid_response(
                 "UAI combined embedded transcript exceeds the size limit",
@@ -805,6 +800,41 @@ fn question_media(
         attachment_ids,
         embedded_transcript,
     })
+}
+
+fn parse_embedded_webvtt(document: &str) -> ProviderResult<String> {
+    if document.is_empty() || document.len() > MAX_EMBEDDED_TRANSCRIPT_BYTES * 4 {
+        return Err(invalid_response(
+            "UAI embedded transcript source exceeds the size limit",
+        ));
+    }
+    let mut cues = Vec::new();
+    let mut output_bytes = 0_usize;
+    for line in document.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line.eq_ignore_ascii_case("WEBVTT")
+            || line.contains("-->")
+            || line.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let cue = normalize_rich_text(line);
+        if cue.is_empty() {
+            continue;
+        }
+        output_bytes = output_bytes
+            .checked_add(cue.len())
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| invalid_response("UAI embedded transcript size overflow"))?;
+        if output_bytes > MAX_EMBEDDED_TRANSCRIPT_BYTES {
+            return Err(invalid_response(
+                "UAI embedded transcript exceeds the size limit",
+            ));
+        }
+        cues.push(cue);
+    }
+    Ok(cues.join("\n"))
 }
 
 fn push_media_source(
@@ -1805,7 +1835,7 @@ mod tests {
         assert!(!format!("{:?}", parsed.media_sources()[0]).contains("media.example.edu"));
         assert_eq!(
             parsed.metadata_sanitized["embedded_transcript"],
-            "WEBVTT 00:00.000 --> 00:01.000 Synthetic transcript"
+            "Synthetic transcript"
         );
         assert!(!parsed.stem.contains("WEBVTT"));
         let question = parsed.to_question(TaskId::new()).unwrap();
@@ -1829,6 +1859,17 @@ mod tests {
         assert_ne!(
             first.sources[0].attachment_id(),
             foreign_task.sources[0].attachment_id()
+        );
+        assert_eq!(
+            parse_embedded_webvtt(
+                "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<p>Hello</p>\n\n2\n00:00:03.000 --> 00:00:04.000\nWorld"
+            )
+            .unwrap(),
+            "Hello\nWorld"
+        );
+        assert!(
+            parse_embedded_webvtt(&"WEBVTT\ntext\n".repeat(MAX_EMBEDDED_TRANSCRIPT_BYTES / 5 + 1))
+                .is_err()
         );
     }
 

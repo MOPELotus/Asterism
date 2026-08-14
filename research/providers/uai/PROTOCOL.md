@@ -411,8 +411,9 @@ zeroizing Provider-private media owner. That owner repeats the exact remote
 Task and Question identities, and the opaque attachment digest hashes both
 with the canonical URL, so the same CDN URL cannot authorize cross-Task reuse.
 The persisted Question receives only that attachment ID, kind, bounded label
-and subtitle flag, never a fetch URL. Embedded WEBVTT becomes bounded
-normalized transcript metadata and is excluded from the display stem. The
+and subtitle flag, never a fetch URL. Embedded WEBVTT is parsed with bounded
+input/output, strips its header, cue ordinals and timestamp rows, normalizes
+only cue text into transcript metadata and is excluded from the display stem. The
 current donor sends its default authorization/cookie header set through its
 generic media GET even when the URL host changes; Asterism does not copy that
 credential leak. A shared downloader must enforce DNS/private-range and

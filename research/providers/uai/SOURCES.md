@@ -101,7 +101,9 @@ already audited encrypted content/answer and media-source fields. Asterism
 therefore keeps the bounded opaque attachment/transcript boundary in the
 Provider; the Task-bound downloader, model credential and external
 AnswerResolve execution remain a shared Core contract gap rather than a
-Provider-side omission.
+Provider-side omission. Its subtitle helper also strips WEBVTT/SRT headers,
+numeric cue IDs and timestamp rows before transcription; the Provider applies
+that evidenced normalization to embedded WEBVTT without retaining timing noise.
 
 The current Rust donor also performs a separate Course-level progress read at
 `course_progress/{courseInstanceId}/{openid}/default` before the per-Unit
