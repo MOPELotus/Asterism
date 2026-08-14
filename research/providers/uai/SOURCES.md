@@ -162,10 +162,15 @@ Its empty-oral configuration proves the scalar-empty fallback and its generic
 builder proves an empty-array child when the encrypted row contains an empty
 child. Asterism freezes that observed representation and the explicit oral
 instance together with the matching Draft, current Task fingerprint and Course
-publish version. The donor's `answersExtra` indexing crosses module and child
-indices, so Asterism does not copy it or invent corrected semantics without a
-sanitized response fixture; non-empty or dynamic oral evidence fails closed
-while that exact compatibility case remains under incremental audit.
+publish version. The same donor's simple builder establishes the stable
+per-child rule: truthy `answers` wins over truthy `value`, `answersExtra` maps
+to that submitted child's `extra`, and the judge value joins text arrays or
+stringifies a scalar. Its compound builder accidentally indexes a per-module
+array by child ordinal. Asterism does not reproduce that local bug: the
+clean-room mapping retains each oral child's own bounded value/extra and uses
+only donor-stable judge encodings. Receipt readback must preserve both fields
+exactly; object values whose Python-specific string representation is not a
+stable protocol encoding still fail closed.
 
 The MIT donor also treats `video-popup` as an answer-bearing type, reads the
 first standard-answer value from every child and selects `submitType=2` because

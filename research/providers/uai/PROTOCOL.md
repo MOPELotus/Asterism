@@ -690,22 +690,26 @@ Provider-private preparation first rebuilds one immutable matching sub-Draft,
 freshly requires the exact ordered two-module Task and current positive Course
 publish version, then reads the Group's encrypted standard-answer array under
 the same account boundary. Entry one must repeat the Draft's native instance;
-entry two supplies an explicit bounded numeric oral instance. Only the donor's
-reliably evidenced empty oral representations are accepted: a missing/empty
-answer becomes one scalar-empty child, while bounded parsed children with no
-`answers` or `value` material remain empty arrays. Non-empty values and dynamic
-`answersExtra` fail before mutation because the donor indexes those extras
-across incompatible module/child axes and no sanitized live fixture currently
-resolves the intended wire shape.
+entry two supplies an explicit bounded numeric oral instance. A missing/empty
+donor answer becomes one scalar-empty child, while bounded parsed
+children with no truthy `answers` or `value` material remain empty arrays. The
+same donor's single-module builder proves that each child's own
+`answersExtra` becomes that submitted child's `extra`; Asterism uses this
+stable semantic instead of copying the compound helper's accidental
+module/child cross-index. Bounded non-empty text, text-list, number and boolean
+values retain their exact JSON value and donor judge string, and dynamic extras
+remain zeroizing Provider-owned JSON. Object values fail closed because the
+donor relies on Python-specific object stringification rather than a stable
+wire encoding.
 
 The native mutation re-resolves Course instance and the exact incomplete,
 available `tab_type=task` leaf, then emits the matching answer followed by the
 frozen oral slot in one `submitType=1` POST. Every judge uses the fresh Course
 publish version and the oral judge retains exact `oral-sentence` labels. An
-accepted version is only a receipt. Verification reads exactly that version,
-requires the complete ordered two-module user-module state, exact matching
-answer equality, the same oral instance and the same scalar-empty/empty-array
-child representation. Fresh Group progress remains the only completion
-authority. Shared Core still needs one compound Draft/Attempt slot before the
-Provider-private preparation and transport can be exposed as a public
-capability.
+accepted version is only a receipt. Verification reads exactly that version
+and requires the complete ordered two-module user-module state, exact ordinary
+answer equality, the same oral instance, and every exact scalar-empty,
+empty-array or non-empty child value plus optional extra. Fresh Group progress
+remains the only completion authority. Shared Core still needs one compound
+Draft/Attempt slot before the Provider-private preparation and transport can be
+exposed as a public capability.

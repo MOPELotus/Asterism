@@ -30,6 +30,8 @@ const MAX_NESTED_QUESTION_DATA_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_NESTED_CONTEXT_BYTES: usize = 1_024 * 1_024;
 const MAX_NESTED_ANSWER_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_ORAL_CHILDREN: usize = 128;
+const MAX_ORAL_CHILD_VALUE_BYTES: usize = 64 * 1_024;
+const MAX_ORAL_CHILD_EXTRA_BYTES: usize = 64 * 1_024;
 
 /// Provider-private native boundary for the donor's atomic
 /// `basic-scoop-content,oral-sentence` mutation and receipt-authorized
@@ -50,8 +52,8 @@ pub trait UaiCompoundOralTransport: Send + Sync {
     ) -> ProviderResult<UaiCompoundOralVerification>;
 }
 
-/// Fresh gate joining one immutable matching Draft to the exact empty oral
-/// module shape carried by the same Group's encrypted standard-answer read.
+/// Fresh gate joining one immutable matching Draft to the exact oral module
+/// carried by the same Group's encrypted standard-answer read.
 #[derive(Clone)]
 pub struct UaiCompoundOralPreparation {
     details: Arc<dyn TaskDetailCapability>,
@@ -67,12 +69,12 @@ impl UaiCompoundOralPreparation {
     }
 
     /// Rebuilds the ordinary preview, freshly rediscovers the exact two-module
-    /// Group, then freezes the encrypted oral instance and empty child shape.
+    /// Group, then freezes the encrypted oral instance and bounded child data.
     ///
     /// # Errors
     ///
-    /// Rejects stale/foreign Drafts, reordered or additional modules, non-empty
-    /// oral answers, dynamic oral extras, and missing current Course versions.
+    /// Rejects stale/foreign Drafts, reordered or additional modules,
+    /// unsupported child shapes and missing current Course versions.
     pub async fn prepare_submission(
         &self,
         context: &ProviderContext,
@@ -118,7 +120,7 @@ impl fmt::Debug for UaiCompoundOralPreparation {
     }
 }
 
-/// Immutable Provider-private plan for one matching-plus-empty-oral Group.
+/// Immutable Provider-private plan for one matching-plus-oral Group.
 /// The ordinary selected answer and oral instance remain outside shared Draft
 /// serialization until Core gains a compound Draft slot.
 pub struct UaiCompoundOralSubmission {
@@ -131,7 +133,7 @@ pub struct UaiCompoundOralSubmission {
     course_publish_version: u64,
     ordinary_plan: UaiSubmissionPlan,
     oral_instance_id: String,
-    oral_children: Vec<EmptyOralChild>,
+    oral_children: Vec<OralChildEvidence>,
     fingerprint: String,
 }
 
@@ -208,7 +210,7 @@ impl Drop for UaiCompoundOralSubmission {
     }
 }
 
-/// Receipt-versioned proof that the ordinary answer and exact empty oral slot
+/// Receipt-versioned proof that the ordinary answer and exact oral slot
 /// persisted in their original order. Fresh progress remains separate.
 pub struct UaiCompoundOralVerification {
     ordinary_draft_id: SubmissionDraftId,
@@ -271,10 +273,10 @@ impl Drop for UaiCompoundOralVerification {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EmptyOralChild {
-    Scalar,
-    Array,
+struct OralChildEvidence {
+    value: ZeroizingJsonValue,
+    extra: Option<ZeroizingJsonValue>,
+    judge_value: Zeroizing<String>,
 }
 
 struct CompoundOralBinding {
@@ -387,7 +389,7 @@ fn build_compound_oral_submission(
         .filter(|_| ordinary_plan.questions().len() == 1)
         .ok_or_else(|| invalid_input("UAI compound oral requires one ordinary Question"))?;
     let (oral_instance_id, oral_children) =
-        parse_empty_oral_evidence(answer_document, ordinary.remote_question_id())?;
+        parse_oral_evidence(answer_document, ordinary.remote_question_id())?;
 
     let mut digest = Sha256::new();
     digest.update(b"asterism:uai:compound-oral-submission:v1\0");
@@ -403,10 +405,24 @@ fn build_compound_oral_submission(
     digest.update(b"\0");
     digest.update(binding.course_publish_version.to_be_bytes());
     for child in &oral_children {
-        digest.update([match child {
-            EmptyOralChild::Scalar => 0,
-            EmptyOralChild::Array => 1,
-        }]);
+        let value =
+            Zeroizing::new(serde_json::to_string(child.value.as_value()).map_err(|_| {
+                invalid_response("UAI compound oral child value cannot be fingerprinted")
+            })?);
+        digest.update(value.as_bytes());
+        digest.update(b"\0");
+        if let Some(extra) = &child.extra {
+            let extra = Zeroizing::new(serde_json::to_string(extra.as_value()).map_err(|_| {
+                invalid_response("UAI compound oral child extra cannot be fingerprinted")
+            })?);
+            digest.update([1]);
+            digest.update(extra.as_bytes());
+        } else {
+            digest.update([0]);
+        }
+        digest.update(b"\0");
+        digest.update(child.judge_value.as_bytes());
+        digest.update(b"\0");
     }
     Ok(UaiCompoundOralSubmission {
         ordinary_draft_id: draft.id,
@@ -423,10 +439,10 @@ fn build_compound_oral_submission(
     })
 }
 
-fn parse_empty_oral_evidence(
+fn parse_oral_evidence(
     document: &str,
     expected_ordinary_id: &str,
-) -> ProviderResult<(String, Vec<EmptyOralChild>)> {
+) -> ProviderResult<(String, Vec<OralChildEvidence>)> {
     let decrypted = decrypt_answer_entries(document)?;
     let entries = decrypted
         .as_value()
@@ -459,7 +475,7 @@ fn parse_empty_oral_evidence(
         }
     };
     let Some(answer) = answer else {
-        return Ok((oral_instance_id, vec![EmptyOralChild::Scalar]));
+        return Ok((oral_instance_id, vec![scalar_empty_oral_child()]));
     };
     let answer = ZeroizingJsonValue::new(
         serde_json::from_str(answer)
@@ -471,40 +487,107 @@ fn parse_empty_oral_evidence(
         .and_then(Value::as_array)
         .filter(|children| (1..=MAX_ORAL_CHILDREN).contains(&children.len()))
         .ok_or_else(|| protocol_drift("UAI compound oral has no bounded answer children"))?;
-    let mut shape = Vec::with_capacity(children.len());
+    let mut evidence = Vec::with_capacity(children.len());
     for child in children {
         let child = child
             .as_object()
             .ok_or_else(|| protocol_drift("UAI compound oral answer child is not an object"))?;
-        reject_non_empty_oral_value(child.get("answers"))?;
-        reject_non_empty_oral_value(child.get("value"))?;
-        if child.get("answersExtra").is_some_and(|extra| {
-            !matches!(extra, Value::Null)
-                && extra.as_object().is_none_or(|object| !object.is_empty())
-        }) {
-            return Err(ProviderError::new(
-                ProviderErrorKind::UnsupportedTask,
-                "UAI compound oral dynamic answer extras require stronger protocol evidence",
-            ));
-        }
-        shape.push(EmptyOralChild::Array);
+        evidence.push(parse_oral_child_evidence(child)?);
     }
-    Ok((oral_instance_id, shape))
+    Ok((oral_instance_id, evidence))
 }
 
-fn reject_non_empty_oral_value(value: Option<&Value>) -> ProviderResult<()> {
+fn scalar_empty_oral_child() -> OralChildEvidence {
+    OralChildEvidence {
+        value: ZeroizingJsonValue::new(Value::String(String::new())),
+        extra: None,
+        judge_value: Zeroizing::new(String::new()),
+    }
+}
+
+fn parse_oral_child_evidence(
+    child: &serde_json::Map<String, Value>,
+) -> ProviderResult<OralChildEvidence> {
+    let value = child
+        .get("answers")
+        .filter(|value| json_truthy(value))
+        .or_else(|| child.get("value").filter(|value| json_truthy(value)))
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let encoded = Zeroizing::new(
+        serde_json::to_string(&value)
+            .map_err(|_| protocol_drift("UAI compound oral child value is not serializable"))?,
+    );
+    if encoded.len() > MAX_ORAL_CHILD_VALUE_BYTES {
+        return Err(protocol_drift(
+            "UAI compound oral child value exceeds its bound",
+        ));
+    }
+    let judge_value = oral_judge_value(&value)?;
+    if judge_value.len() > MAX_ORAL_CHILD_VALUE_BYTES {
+        return Err(protocol_drift(
+            "UAI compound oral child judge value exceeds its bound",
+        ));
+    }
+    let extra = child
+        .get("answersExtra")
+        .filter(|value| json_truthy(value))
+        .map(|value| {
+            let encoded = Zeroizing::new(serde_json::to_string(value).map_err(|_| {
+                protocol_drift("UAI compound oral child extra is not serializable")
+            })?);
+            if encoded.len() > MAX_ORAL_CHILD_EXTRA_BYTES {
+                return Err(protocol_drift(
+                    "UAI compound oral child extra exceeds its bound",
+                ));
+            }
+            Ok(ZeroizingJsonValue::new(value.clone()))
+        })
+        .transpose()?;
+    Ok(OralChildEvidence {
+        value: ZeroizingJsonValue::new(value),
+        extra,
+        judge_value: Zeroizing::new(judge_value),
+    })
+}
+
+fn oral_judge_value(value: &Value) -> ProviderResult<String> {
     match value {
-        None | Some(Value::Null) => Ok(()),
-        Some(Value::Array(values)) if values.is_empty() => Ok(()),
-        Some(Value::String(value)) if value.is_empty() => Ok(()),
-        _ => Err(ProviderError::new(
+        Value::String(value) => Ok(value.clone()),
+        Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                value.as_str().ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::UnsupportedTask,
+                        "UAI compound oral list answers must contain only text",
+                    )
+                })
+            })
+            .collect::<ProviderResult<Vec<_>>>()
+            .map(|values| values.join(",")),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::Bool(value) => Ok(if *value { "True" } else { "False" }.to_owned()),
+        Value::Null => Ok(String::new()),
+        Value::Object(_) => Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
-            "UAI compound oral evidence contains a non-empty oral answer",
+            "UAI compound oral object answer has no stable donor judge encoding",
         )),
     }
 }
 
-/// Builds the exact ordered matching-plus-empty-oral body only inside the
+fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+    }
+}
+
+/// Builds the exact ordered matching-plus-oral body only inside the
 /// native mutation boundary.
 ///
 /// # Errors
@@ -650,7 +733,7 @@ fn push_oral_question(
     is_completed: &mut Vec<bool>,
     judges: &mut ZeroizingJsonValue,
     oral_instance_id: &str,
-    children: &[EmptyOralChild],
+    children: &[OralChildEvidence],
     course_publish_version: u64,
 ) -> ProviderResult<()> {
     if !valid_oral_identity(oral_instance_id) || !(1..=MAX_ORAL_CHILDREN).contains(&children.len())
@@ -662,16 +745,18 @@ fn push_oral_question(
     let answer_children = children
         .iter()
         .map(|child| {
-            let value = match child {
-                EmptyOralChild::Scalar => Value::String(String::new()),
-                EmptyOralChild::Array => Value::Array(Vec::new()),
-            };
-            serde_json::json!({
-                "value": value,
-                "isDone": true,
-                "isRight": true,
-                "replyCategory": "objective",
-            })
+            let mut answer = serde_json::Map::new();
+            answer.insert("value".to_owned(), child.value.as_value().clone());
+            answer.insert("isDone".to_owned(), Value::Bool(true));
+            answer.insert("isRight".to_owned(), Value::Bool(true));
+            answer.insert(
+                "replyCategory".to_owned(),
+                Value::String("objective".to_owned()),
+            );
+            if let Some(extra) = &child.extra {
+                answer.insert("extra".to_owned(), extra.as_value().clone());
+            }
+            Value::Object(answer)
         })
         .collect::<Vec<_>>();
     let answer = Zeroizing::new(
@@ -694,14 +779,14 @@ fn push_oral_question(
             "contextVersion": 1,
             "answerVersion": 0,
         }));
-    for _ in children {
+    for child in children {
         is_completed.push(true);
         judges
             .as_value_mut()
             .as_array_mut()
             .ok_or_else(|| protocol_drift("UAI compound oral judge buffer is invalid"))?
             .push(serde_json::json!({
-                "value": "",
+                "value": child.judge_value.as_str(),
                 "question_type": "oral-sentence",
                 "reply_type": "oral-sentence",
                 "versions": {
@@ -722,8 +807,8 @@ fn push_oral_question(
 ///
 /// # Errors
 ///
-/// Rejects missing receipts, changed module order/cardinality, non-empty oral
-/// values, changed ordinary answers and any route/version drift.
+/// Rejects missing receipts, changed module order/cardinality, changed oral or
+/// ordinary answers and any route/version drift.
 pub fn parse_compound_oral_verification(
     document: &str,
     submission: &UaiCompoundOralSubmission,
@@ -764,7 +849,7 @@ pub fn parse_compound_oral_verification(
         .filter(|entries| entries.len() == 2)
         .ok_or_else(|| remote_changed("UAI compound oral readback is not exactly two modules"))?;
     parse_remote_question(&entries[0], submission.ordinary_question()?)?;
-    validate_empty_oral_readback(
+    validate_oral_readback(
         &entries[1],
         &submission.oral_instance_id,
         &submission.oral_children,
@@ -779,10 +864,10 @@ pub fn parse_compound_oral_verification(
     })
 }
 
-fn validate_empty_oral_readback(
+fn validate_oral_readback(
     entry: &Value,
     expected_instance_id: &str,
-    expected_children: &[EmptyOralChild],
+    expected_children: &[OralChildEvidence],
 ) -> ProviderResult<()> {
     let entry = entry
         .as_object()
@@ -827,17 +912,19 @@ fn validate_empty_oral_readback(
                 "UAI compound oral child is not marked submitted",
             ));
         }
-        let matches = match expected {
-            EmptyOralChild::Scalar => child.get("value").and_then(Value::as_str) == Some(""),
-            EmptyOralChild::Array => child
-                .get("value")
-                .and_then(Value::as_array)
-                .is_some_and(Vec::is_empty),
-        };
-        if !matches {
+        if child.get("value") != Some(expected.value.as_value()) {
             return Err(remote_changed(
-                "UAI compound oral readback differs from its empty submission",
+                "UAI compound oral readback value differs from its submission",
             ));
+        }
+        match &expected.extra {
+            Some(extra) if child.get("extra") == Some(extra.as_value()) => {}
+            None if child.get("extra").is_none() => {}
+            _ => {
+                return Err(remote_changed(
+                    "UAI compound oral readback extra differs from its submission",
+                ));
+            }
         }
     }
     Ok(())
@@ -954,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn oral_evidence_freezes_empty_array_shape_and_rejects_dynamic_values() {
+    fn oral_evidence_freezes_empty_nonempty_and_dynamic_child_values() {
         let empty_array = encrypted_answer(&json!([
             {"id": 5001, "answer": ""},
             {"id": 6001, "answer": json!({"children":[{"answers":[],"answersExtra":{}},{"value":""}]}).to_string()}
@@ -980,25 +1067,63 @@ mod tests {
             {"id": 5001, "answer": ""},
             {"id": 6001, "answer": json!({"children":[{"value":["spoken"]}]}).to_string()}
         ]));
-        assert!(
-            build_compound_oral_submission(
-                &detail(&["basic-scoop-content", "oral-sentence"]),
-                "group:2001:unit-1:group-oral",
-                &ordinary_draft(),
-                &non_empty,
-            )
-            .is_err()
-        );
+        let submission = build_compound_oral_submission(
+            &detail(&["basic-scoop-content", "oral-sentence"]),
+            "group:2001:unit-1:group-oral",
+            &ordinary_draft(),
+            &non_empty,
+        )
+        .unwrap();
+        let body =
+            build_compound_oral_submission_body(&submission, "course-instance-1", "openid-1")
+                .unwrap();
+        let body: Value = serde_json::from_str(&body).unwrap();
+        let oral_answer: Value =
+            serde_json::from_str(body["quesDatas"][1]["answer"].as_str().unwrap()).unwrap();
+        assert_eq!(oral_answer["children"][0]["value"], json!(["spoken"]));
+        let judges: Value =
+            serde_json::from_str(body["thirdPartyJudges"].as_str().unwrap()).unwrap();
+        assert_eq!(judges[1]["value"], "spoken");
+
         let dynamic_extra = encrypted_answer(&json!([
             {"id": 5001, "answer": ""},
-            {"id": 6001, "answer": json!({"children":[{"value":[],"answersExtra":{"token":"dynamic"}}]}).to_string()}
+            {"id": 6001, "answer": json!({"children":[
+                {"answers":["spoken"],"value":["ignored"],"answersExtra":{"slot":1}},
+                {"value":"second","answersExtra":{"slot":2}}
+            ]}).to_string()}
+        ]));
+        let submission = build_compound_oral_submission(
+            &detail(&["basic-scoop-content", "oral-sentence"]),
+            "group:2001:unit-1:group-oral",
+            &ordinary_draft(),
+            &dynamic_extra,
+        )
+        .unwrap();
+        let body =
+            build_compound_oral_submission_body(&submission, "course-instance-1", "openid-1")
+                .unwrap();
+        let body: Value = serde_json::from_str(&body).unwrap();
+        let oral_answer: Value =
+            serde_json::from_str(body["quesDatas"][1]["answer"].as_str().unwrap()).unwrap();
+        assert_eq!(oral_answer["children"][0]["value"], json!(["spoken"]));
+        assert_eq!(oral_answer["children"][0]["extra"], json!({"slot":1}));
+        assert_eq!(oral_answer["children"][1]["value"], "second");
+        assert_eq!(oral_answer["children"][1]["extra"], json!({"slot":2}));
+        let judges: Value =
+            serde_json::from_str(body["thirdPartyJudges"].as_str().unwrap()).unwrap();
+        assert_eq!(judges[1]["value"], "spoken");
+        assert_eq!(judges[2]["value"], "second");
+
+        let unsupported = encrypted_answer(&json!([
+            {"id": 5001, "answer": ""},
+            {"id": 6001, "answer": json!({"children":[{"value":{"unstable":"object"}}]}).to_string()}
         ]));
         assert!(
             build_compound_oral_submission(
                 &detail(&["basic-scoop-content", "oral-sentence"]),
                 "group:2001:unit-1:group-oral",
                 &ordinary_draft(),
-                &dynamic_extra,
+                &unsupported,
             )
             .is_err()
         );
@@ -1128,6 +1253,77 @@ mod tests {
         assert!(
             parse_compound_oral_verification(
                 &verification_document(&reversed),
+                &submission,
+                &receipt,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn receipt_readback_preserves_dynamic_oral_value_and_extra() {
+        let draft = ordinary_draft();
+        let answer = encrypted_answer(&json!([
+            {"id": 5001, "answer": ""},
+            {"id": 6001, "answer": json!({"children":[{
+                "answers":["spoken"],
+                "answersExtra":{"mediaId":"clip-1","duration":1.25}
+            }]}).to_string()}
+        ]));
+        let submission = build_compound_oral_submission(
+            &detail(&["basic-scoop-content", "oral-sentence"]),
+            "group:2001:unit-1:group-oral",
+            &draft,
+            &answer,
+        )
+        .unwrap();
+        let receipt = SubmissionReceipt {
+            remote_status: "accepted".to_owned(),
+            message_sanitized: Some("synthetic accepted compound oral".to_owned()),
+            provider_trace_id: Some("compound-oral-v1".to_owned()),
+            received_at: Utc::now(),
+        };
+        let ordinary_answer = json!({
+            "value": [],
+            "children": [{"value": ["right"], "isDone": true}],
+            "progress": {},
+            "record": {"url": ""},
+        })
+        .to_string();
+        let oral_answer = json!({
+            "value": [],
+            "children": [{
+                "value": ["spoken"],
+                "extra": {"mediaId":"clip-1","duration":1.25},
+                "isDone": true
+            }],
+            "progress": {},
+            "record": {"url": ""},
+        })
+        .to_string();
+        let questions = json!([
+            {"instanceId":"5001","answer":ordinary_answer,"context":"{\"state\":\"submitted\"}"},
+            {"instanceId":"6001","answer":oral_answer,"context":"{\"state\":\"submitted\"}"}
+        ])
+        .to_string();
+        parse_compound_oral_verification(&verification_document(&questions), &submission, &receipt)
+            .unwrap();
+
+        let changed_oral = json!({
+            "value": [],
+            "children": [{"value": ["spoken"], "isDone": true}],
+            "progress": {},
+            "record": {"url": ""},
+        })
+        .to_string();
+        let changed = json!([
+            {"instanceId":"5001","answer":ordinary_answer,"context":"{\"state\":\"submitted\"}"},
+            {"instanceId":"6001","answer":changed_oral,"context":"{\"state\":\"submitted\"}"}
+        ])
+        .to_string();
+        assert!(
+            parse_compound_oral_verification(
+                &verification_document(&changed),
                 &submission,
                 &receipt,
             )
