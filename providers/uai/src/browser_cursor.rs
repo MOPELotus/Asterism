@@ -1,8 +1,10 @@
 use std::fmt;
 
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
+use asterism_secrets::SecretValue;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     UaiBrowserCommand, UaiBrowserCommandEnvelope, UaiBrowserPageEntry, UaiBrowserPageScope,
@@ -10,7 +12,38 @@ use crate::{
     UaiCourseResidenceBatchPlan,
 };
 
-const UAI_BROWSER_CURSOR_VERSION: u32 = 3;
+const UAI_BROWSER_CURSOR_VERSION: u32 = 4;
+const MAX_BROWSER_CURSOR_ARTIFACT_BYTES: usize = 256 * 1_024;
+
+/// Encrypted-at-rest accumulated cursor material for one exact next command.
+///
+/// Only the digest belongs in ordinary durable state. The serialized cursor
+/// contains browser labels and opaque handles and must remain in Core's
+/// encrypted artifact repository.
+pub struct EncodedUaiBrowserCursorArtifact {
+    value: SecretValue,
+    digest: [u8; 32],
+}
+
+impl EncodedUaiBrowserCursorArtifact {
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub fn into_secret_value(self) -> SecretValue {
+        self.value
+    }
+}
+
+impl fmt::Debug for EncodedUaiBrowserCursorArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncodedUaiBrowserCursorArtifact")
+            .field("value", &"[REDACTED]")
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
 
 /// Command-before-dispatch stage represented by one encrypted accumulated
 /// browser cursor.
@@ -40,6 +73,8 @@ pub struct UaiBrowserResidenceCursor {
     course_remote_id: String,
     batch_membership_digest: [u8; 32],
     batch_plan_digest: [u8; 32],
+    browser_plan_digest: [u8; 32],
+    next_command_digest: [u8; 32],
     current_micro_ordinal: u32,
     current_micro_identity_digest: [u8; 32],
     stage: UaiBrowserCursorStage,
@@ -71,11 +106,15 @@ impl UaiBrowserResidenceCursor {
     ) -> ProviderResult<Self> {
         batch.validate()?;
         let current = batch.selected_micros().first().ok_or_else(invalid_cursor)?;
+        let browser_plan_digest = browser_plan_digest(plan)?;
+        let next_command_digest = command.exchange_digest(plan)?;
         let cursor = Self {
             version: UAI_BROWSER_CURSOR_VERSION,
             course_remote_id: batch.course_remote_id().to_owned(),
             batch_membership_digest: batch.membership_digest(),
             batch_plan_digest: batch.plan_digest(),
+            browser_plan_digest,
+            next_command_digest,
             current_micro_ordinal: current.ordinal(),
             current_micro_identity_digest: current.identity_digest(),
             stage: UaiBrowserCursorStage::ScanningMenu,
@@ -110,6 +149,14 @@ impl UaiBrowserResidenceCursor {
 
     pub const fn batch_plan_digest(&self) -> [u8; 32] {
         self.batch_plan_digest
+    }
+
+    pub const fn browser_plan_digest(&self) -> [u8; 32] {
+        self.browser_plan_digest
+    }
+
+    pub const fn next_command_digest(&self) -> [u8; 32] {
+        self.next_command_digest
     }
 
     pub const fn current_micro_ordinal(&self) -> u32 {
@@ -172,6 +219,72 @@ impl UaiBrowserResidenceCursor {
         self.prior_result_digest
     }
 
+    /// Encodes this validated accumulated cursor for encrypted persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the cursor is foreign to the immutable
+    /// Course/Task plans or next command, cannot be serialized or exceeds its
+    /// bounded artifact size.
+    pub fn encode_artifact(
+        &self,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+    ) -> ProviderResult<EncodedUaiBrowserCursorArtifact> {
+        self.validate_for_command(batch, plan, command)?;
+        let mut encoded = Zeroizing::new(serde_json::to_vec(self).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI accumulated browser cursor cannot be encoded",
+            )
+        })?);
+        if encoded.is_empty() || encoded.len() > MAX_BROWSER_CURSOR_ARTIFACT_BYTES {
+            return Err(invalid_cursor_artifact());
+        }
+        let digest = Sha256::digest(encoded.as_slice()).into();
+        let value = SecretValue::new(std::mem::take(&mut *encoded));
+        Ok(EncodedUaiBrowserCursorArtifact { value, digest })
+    }
+
+    /// Restores one exact cursor from Core's encrypted artifact repository.
+    ///
+    /// The digest authenticates the Provider-private bytes while the fresh
+    /// Course batch, Task plan and next command independently rebind every
+    /// execution authority needed after process recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for digest/schema/size drift or any stale batch,
+    /// Task, command, sequence, snapshot or result binding.
+    pub fn decode_artifact_bound(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+    ) -> ProviderResult<Self> {
+        let bytes = value.expose_secret();
+        if bytes.is_empty() || bytes.len() > MAX_BROWSER_CURSOR_ARTIFACT_BYTES {
+            return Err(invalid_cursor_artifact());
+        }
+        let actual_digest: [u8; 32] = Sha256::digest(bytes).into();
+        if actual_digest != expected_digest {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI accumulated browser cursor artifact digest changed",
+            ));
+        }
+        let cursor: Self = serde_json::from_slice(bytes).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI accumulated browser cursor artifact schema changed",
+            )
+        })?;
+        cursor.validate_for_command(batch, plan, command)?;
+        Ok(cursor)
+    }
+
     /// Validates one accumulated cursor against both immutable plans and the
     /// exact command it accompanies.
     ///
@@ -189,6 +302,8 @@ impl UaiBrowserResidenceCursor {
         batch.validate()?;
         plan.validate()?;
         command.validate_for_plan(plan)?;
+        let fresh_browser_plan_digest = browser_plan_digest(plan)?;
+        let fresh_command_digest = command.exchange_digest(plan)?;
         let micro = batch
             .micros()
             .get(self.current_micro_ordinal as usize)
@@ -197,6 +312,8 @@ impl UaiBrowserResidenceCursor {
             || self.course_remote_id != batch.course_remote_id()
             || self.batch_membership_digest != batch.membership_digest()
             || self.batch_plan_digest != batch.plan_digest()
+            || self.browser_plan_digest != fresh_browser_plan_digest
+            || self.next_command_digest != fresh_command_digest
             || self.current_micro_ordinal < batch.start().ordinal()
             || self.current_micro_identity_digest != micro.identity_digest()
             || !micro
@@ -247,6 +364,8 @@ impl fmt::Debug for UaiBrowserResidenceCursor {
             .field("course_remote_id", &self.course_remote_id)
             .field("batch_membership_digest", &self.batch_membership_digest)
             .field("batch_plan_digest", &self.batch_plan_digest)
+            .field("browser_plan_digest", &self.browser_plan_digest)
+            .field("next_command_digest", &self.next_command_digest)
             .field("current_micro_ordinal", &self.current_micro_ordinal)
             .field(
                 "current_micro_identity_digest",
@@ -421,6 +540,17 @@ fn zeroize_snapshot(entries: &mut Vec<UaiBrowserPageEntry>) {
     entries.clear();
 }
 
+fn browser_plan_digest(plan: &UaiBrowserResidencePlan) -> ProviderResult<[u8; 32]> {
+    plan.validate()?;
+    let encoded = Zeroizing::new(serde_json::to_vec(plan).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "UAI BrowserBridge residence plan cannot be encoded",
+        )
+    })?);
+    Ok(Sha256::digest(encoded.as_slice()).into())
+}
+
 fn invalid_cursor() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::InvalidResponse,
@@ -432,5 +562,12 @@ fn stale_cursor() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::RemoteChanged,
         "UAI accumulated browser cursor is stale or foreign",
+    )
+}
+
+fn invalid_cursor_artifact() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::InvalidResponse,
+        "UAI accumulated browser cursor artifact is empty or oversized",
     )
 }

@@ -314,8 +314,14 @@ same plan, binding both ordinal and Micro digest, and changes only start and
 plan digest while retaining the full membership digest and total budget.
 Fresh membership validation deliberately ignores progress/completion changes
 but rejects Course, publish-version, hierarchy, label, Group shape or order
-drift. Core still needs a durable Course batch owner and encrypted accumulated
-cursor/result recovery before this plan is executable.
+drift. The Provider's version-4 accumulated cursor can now move into a
+bounded, zeroizing `SecretValue` artifact with a stable SHA-256 digest. On
+recovery it rebinds the full batch membership and restart-sensitive plan
+digests, the exact serialized Browser residence plan and the exact next
+command, while strict decoding rejects unknown fields and malformed or
+oversized bytes. Core still needs a durable Course batch owner, encrypted
+artifact persistence wiring and the shared executor before this plan is
+executable.
 
 The donor's `ipub` iframe side alone receives wildcard `UAI_CMD`
 `SCAN`/`CLICK`/`PING`; the `ucontent` top page consumes its menu/click/PONG
@@ -393,6 +399,14 @@ runtime settings. Intermediate events complete as `uai.browser.event`; only a
 valid `ResidenceTarget` can complete as `uai.browser.residence.result`, and
 that terminal receipt still requires independent fresh DurationRead. Either
 digest remains replay/correlation metadata, not acceptance evidence.
+
+The accumulated residence cursor is a separate encrypted artifact from the
+issued command and raw result owners. It contains the bounded snapshots,
+counts, remaining active budget and prior-result authority needed to construct
+one exact next command. Its ordinary durable metadata is only the artifact
+digest; decode verifies those bytes before fresh batch, Browser plan and exact
+next-command rebinding, so neither another valid session command nor a changed
+runtime plan can inherit the cursor after recovery.
 
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.

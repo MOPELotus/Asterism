@@ -2975,6 +2975,170 @@ mod tests {
         );
     }
 
+    fn initial_residence_cursor() -> (
+        crate::UaiCourseResidenceBatchPlan,
+        UaiBrowserResidencePlan,
+        UaiBrowserCommandEnvelope,
+        crate::UaiBrowserResidenceCursor,
+    ) {
+        let courses = include_str!("../../../fixtures/providers/uai/courses/list-mixed.json");
+        let detail = include_str!("../../../fixtures/providers/uai/courses/resource-detail.json");
+        let tree = include_str!("../../../fixtures/providers/uai/tasks/tree-browser-order.json");
+        let course = crate::parse_course_inventory(courses).unwrap().remove(0);
+        let context = crate::parse_course_context(&course, detail).unwrap();
+        let tasks = crate::parse_task_inventory(&course, &context, tree).unwrap();
+        let batch = crate::build_course_residence_batch_plan(
+            &course,
+            &tasks,
+            &browser_runtime_settings(false),
+            0,
+        )
+        .unwrap();
+
+        let mut plan = residence_plan(false);
+        plan.target_remote_task_id = "group:2001:unit-z:group-z".to_owned();
+        plan.target = UaiBrowserTarget {
+            unit: "Unit Z".to_owned(),
+            section: Some("Section Z".to_owned()),
+            micro: "Micro Z".to_owned(),
+            task: "Task Z".to_owned(),
+        };
+        plan.validate().unwrap();
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, "nonce-cursor", UCONTENT_ORIGIN, "frame-1")
+                .unwrap();
+        let command = UaiBrowserCommandEnvelope::scan_menu(&plan, &binding, 1).unwrap();
+        let cursor = crate::UaiBrowserResidenceCursor::begin(&batch, &plan, &command).unwrap();
+
+        (batch, plan, command, cursor)
+    }
+
+    #[test]
+    fn encrypted_accumulated_cursor_artifact_is_stable_redacted_and_recoverable() {
+        let (batch, plan, command, cursor) = initial_residence_cursor();
+        let artifact = cursor.encode_artifact(&batch, &plan, &command).unwrap();
+        let digest = artifact.digest();
+        assert_eq!(
+            cursor
+                .encode_artifact(&batch, &plan, &command)
+                .unwrap()
+                .digest(),
+            digest
+        );
+        let debug = format!("{artifact:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("Unit Z") && !debug.contains("group-z"));
+
+        let value = artifact.into_secret_value();
+        let restored = crate::UaiBrowserResidenceCursor::decode_artifact_bound(
+            &value, digest, &batch, &plan, &command,
+        )
+        .unwrap();
+        assert_eq!(restored, cursor);
+        assert_eq!(
+            restored.current_micro_identity_digest(),
+            batch.micros()[0].identity_digest()
+        );
+    }
+
+    #[test]
+    fn encrypted_accumulated_cursor_rejects_batch_plan_command_and_schema_drift() {
+        let (batch, plan, command, cursor) = initial_residence_cursor();
+        let artifact = cursor.encode_artifact(&batch, &plan, &command).unwrap();
+        let digest = artifact.digest();
+        let value = artifact.into_secret_value();
+        assert_eq!(
+            crate::UaiBrowserResidenceCursor::decode_artifact_bound(
+                &value, [9; 32], &batch, &plan, &command,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        let restarted = batch.restart_at(&batch.restart_target(1).unwrap()).unwrap();
+        assert_eq!(
+            crate::UaiBrowserResidenceCursor::decode_artifact_bound(
+                &value, digest, &restarted, &plan, &command,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+
+        let mut changed_plan = plan.clone();
+        changed_plan.residence_seconds += 1;
+        changed_plan.validate().unwrap();
+        assert_eq!(
+            crate::UaiBrowserResidenceCursor::decode_artifact_bound(
+                &value,
+                digest,
+                &batch,
+                &changed_plan,
+                &command,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+
+        let changed_binding = UaiBrowserSessionBinding::try_new(
+            &plan,
+            "nonce-cursor-changed",
+            UCONTENT_ORIGIN,
+            "frame-1",
+        )
+        .unwrap();
+        let changed_command =
+            UaiBrowserCommandEnvelope::scan_menu(&plan, &changed_binding, 1).unwrap();
+        assert_eq!(
+            crate::UaiBrowserResidenceCursor::decode_artifact_bound(
+                &value,
+                digest,
+                &batch,
+                &plan,
+                &changed_command,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+
+        let mut malformed: serde_json::Value =
+            serde_json::from_slice(value.expose_secret()).unwrap();
+        malformed["unexpected"] = serde_json::json!(true);
+        let malformed = SecretValue::new(serde_json::to_vec(&malformed).unwrap());
+        assert_eq!(
+            crate::UaiBrowserResidenceCursor::decode_artifact_bound(
+                &malformed,
+                Sha256::digest(malformed.expose_secret()).into(),
+                &batch,
+                &plan,
+                &command,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+
+        for invalid in [
+            SecretValue::new(Vec::new()),
+            SecretValue::new(vec![b'x'; 256 * 1_024 + 1]),
+        ] {
+            assert_eq!(
+                crate::UaiBrowserResidenceCursor::decode_artifact_bound(
+                    &invalid,
+                    Sha256::digest(invalid.expose_secret()).into(),
+                    &batch,
+                    &plan,
+                    &command,
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::InvalidResponse
+            );
+        }
+    }
+
     #[tokio::test]
     async fn issued_event_exchange_recovers_only_the_persisted_command() {
         let bridge = browser_bridge();

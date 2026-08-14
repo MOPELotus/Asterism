@@ -70,7 +70,9 @@ pub use browser_bridge::{
     UaiMenuDiscoveryStrategy, browser_event_exchange_digest, browser_residence_exchange_digest,
     browser_start_url_from_detail, parse_browser_event, parse_browser_residence_result,
 };
-pub use browser_cursor::{UaiBrowserCursorStage, UaiBrowserResidenceCursor};
+pub use browser_cursor::{
+    EncodedUaiBrowserCursorArtifact, UaiBrowserCursorStage, UaiBrowserResidenceCursor,
+};
 pub use compound_oral::{
     UaiCompoundOralPreparation, UaiCompoundOralSubmission, UaiCompoundOralSubmissionRequest,
     UaiCompoundOralTransport, UaiCompoundOralVerification, build_compound_oral_submission_request,
