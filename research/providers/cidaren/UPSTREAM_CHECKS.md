@@ -332,6 +332,16 @@ persists each frozen operation before execution and atomically materializes the
 first real Question for the public task endpoint. All 135 Cidaren Provider
 tests passed against that shared integration.
 
+The same 2026-08-14 checkpoint refreshed the public issue and release feeds,
+not only Git refs. No issue had changed after 2026-07-06 and the repository
+still publishes tags without GitHub Release records. Issues 109 and 113 report
+only local proxy/Capture-helper interference; issue 112's maintainer response
+identifies a ban or network failure without exposing a device-binding route or
+algorithm; issue 108 is the already audited encoding transition covered by the
+current public transforms and owner `jv=99` line. These reports add no new
+Provider capability or protocol fact, while retaining the existing shared
+helper-execution and live-validation gates.
+
 ## Check procedure
 
 For the next checkpoint:
