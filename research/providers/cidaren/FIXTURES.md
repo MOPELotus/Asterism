@@ -176,10 +176,11 @@ placeholder identities, result codes, status values and pagination shape.
   a fresh account-bound Capture context and zeroizes crypto JSON, key and
   plaintext buffers.
 - `topic_code` is absent from serialized Question fixtures and immutable
-  Drafts. Its versioned Provider artifact is bounded, zeroizing and stable-
-  digest covered for Core's encrypted continuation store; decode tests reject
-  foreign local/remote Tasks, Questions, positions, fingerprints, unknown
-  fields, digest drift and oversized values.
+  Drafts. The `cidaren.question-attempt.v2` Provider artifact is bounded,
+  zeroizing and stable-digest covered for Core's encrypted continuation store;
+  decode tests reject foreign local/remote Tasks, Questions, positions,
+  fingerprints, unknown fields, digest drift, oversized values and invalid
+  `verified_steps` checkpoints.
 - Optional `topic_done_num/topic_total` are bounded integers, completed never
   exceeds total, missing legacy payloads remain valid, and the counters neither
   alter Question fingerprints nor drive the local mutation position.
@@ -198,8 +199,10 @@ placeholder identities, result codes, status values and pagination shape.
   plan requirements, local/remote Task rebinding, correlation-independent
   identity and reading-card continuation into the next real Question.
 - Matching recovery tests retain one immutable Question ID across each
-  sequential Verify rotation while requiring a distinct artifact digest and
-  the exact `cidaren.ready-to-verify` / `cidaren.ready-to-advance` phase.
+  sequential Verify rotation while requiring a distinct artifact digest,
+  monotonic `verified_steps` and the exact `cidaren.ready-to-verify` /
+  `cidaren.ready-to-advance` phase. Recovery regenerates relation identity from
+  the immutable selection and rejects an impossible accepted prefix.
 - Native-boundary tests cover both `ClassTask` and `StudyTask` route families,
   preserve the donor's read/submit `Authorization-v` split for every mutation,
   and reject any operation outside the audited five-operation allowlist.

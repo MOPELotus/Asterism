@@ -557,10 +557,15 @@ fresh verification remain separate capabilities. `topic_code` is redacted and
 zeroized; it never enters a persisted Question or immutable Draft. For durable
 recovery after a Question exists, the Provider encodes only the local/remote
 Task binding, remote Question ID, position, complete content fingerprint and
-one-time code in the versioned `cidaren.question-attempt.v1` artifact. Core
+one-time code and bounded accepted-Verify count in the versioned
+`cidaren.question-attempt.v2` artifact. Core
 checks its stable digest and stores the plaintext only through the encrypted
 QuestionSession continuation boundary; Provider decoding repeats every binding
-check before reuse. This post-start artifact does not make `StartAnswer`
+check before reuse. For matching Questions, recovery deterministically rebuilds
+the exact relation queue from the immutable Draft selection and removes only
+the prefix identified by `verified_steps`; a zero, excessive or phase-
+inconsistent count fails closed. No answer value or relation text is added to
+the artifact. This post-start artifact does not make `StartAnswer`
 replayable: the non-idempotent mutation before the first Question still needs
 the separate Main-owned pre-question AttemptSession and ambiguity recovery.
 The Provider now emits a bounded `cidaren.pre-question-attempt.v1` encrypted

@@ -28,6 +28,7 @@ use crate::{
 
 const MAX_CORRELATION_ID_BYTES: usize = 512;
 const MAX_TOPIC_CODE_BYTES: usize = 4_096;
+const MAX_VERIFIED_STEPS: u32 = 256;
 
 /// One donor-observed remote mutation in the Cidaren answer lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,10 +104,12 @@ enum CidarenAttemptPhase {
         current: Box<CidarenCurrentQuestion>,
         topic_code: Zeroizing<String>,
         remaining: VecDeque<CidarenWireAnswer>,
+        verified_steps: u32,
     },
     ReadyToAdvance {
         current: Box<CidarenCurrentQuestion>,
         topic_code: Zeroizing<String>,
+        verified_steps: u32,
     },
     Issued {
         operation: CidarenAttemptOperation,
@@ -132,6 +135,7 @@ enum CidarenAttemptContinuation {
     Verify {
         current: Box<CidarenCurrentQuestion>,
         remaining: VecDeque<CidarenWireAnswer>,
+        verified_steps: u32,
     },
     NextStep {
         position: u32,
@@ -394,6 +398,103 @@ impl CidarenAttemptFlow {
         })
     }
 
+    /// Restores a post-materialization Question phase from its encrypted
+    /// artifact and the immutable Draft selection bound to the same snapshot.
+    /// Matching relation progress is rebuilt deterministically and the
+    /// already accepted prefix is removed according to `verified_steps`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a stale Task/Question, mismatched phase,
+    /// missing Draft selection, or an impossible relation checkpoint.
+    pub fn restore_question(
+        context: &ProviderContext,
+        remote_task_id: &str,
+        detail: &RemoteTaskDetail,
+        artifact: &CidarenQuestionArtifact,
+        phase: &str,
+        question: &Question,
+        selected: Option<&SelectedAnswer>,
+    ) -> ProviderResult<Self> {
+        validate_context(context)?;
+        let binding = CidarenAssessmentBinding::from_fresh_detail(remote_task_id, detail)?;
+        let verified_steps = artifact.verified_steps();
+        let parsed = ParsedCidarenAttemptQuestion::from_artifact(
+            artifact.topic_code().to_owned(),
+            remote_task_id.to_owned(),
+            question,
+        )?;
+        let topic_code = Zeroizing::new(artifact.topic_code().to_owned());
+        let current = Box::new(CidarenCurrentQuestion {
+            parsed,
+            question: question.clone(),
+        });
+        let restored_phase = match phase {
+            CIDAREN_QUESTION_ARTIFACT_PHASE if verified_steps == 0 => {
+                CidarenAttemptPhase::CurrentQuestion(current)
+            }
+            CIDAREN_READY_TO_VERIFY_PHASE => {
+                let selected = selected.ok_or_else(|| {
+                    invalid_state("Cidaren matching recovery requires its immutable selection")
+                })?;
+                let mut remaining = wire_answers(question, selected)?;
+                let verified_steps = usize::try_from(verified_steps).map_err(|_| {
+                    protocol_drift("Cidaren verified relation checkpoint is unrepresentable")
+                })?;
+                if verified_steps == 0 || verified_steps >= remaining.len() {
+                    return Err(protocol_drift(
+                        "Cidaren ready-to-verify checkpoint does not match its selection",
+                    ));
+                }
+                for _ in 0..verified_steps {
+                    remaining.pop_front();
+                }
+                CidarenAttemptPhase::ReadyToVerify {
+                    current,
+                    topic_code,
+                    remaining,
+                    verified_steps: u32::try_from(verified_steps).map_err(|_| {
+                        protocol_drift("Cidaren verified relation checkpoint exceeds its bound")
+                    })?,
+                }
+            }
+            CIDAREN_READY_TO_ADVANCE_PHASE => {
+                let selected = selected.ok_or_else(|| {
+                    invalid_state("Cidaren advance recovery requires its immutable selection")
+                })?;
+                let answers = wire_answers(question, selected)?;
+                if verified_steps == 0
+                    || usize::try_from(verified_steps).ok() != Some(answers.len())
+                {
+                    return Err(protocol_drift(
+                        "Cidaren ready-to-advance checkpoint does not match its selection",
+                    ));
+                }
+                CidarenAttemptPhase::ReadyToAdvance {
+                    current,
+                    topic_code,
+                    verified_steps,
+                }
+            }
+            _ => {
+                return Err(protocol_drift(
+                    "Cidaren Question artifact phase shape is invalid",
+                ));
+            }
+        };
+        let context_binding = context_binding(context);
+        Ok(Self {
+            binding,
+            context_binding,
+            flow_binding: flow_binding(context_binding, question.task_id, remote_task_id),
+            remote_task_id: remote_task_id.to_owned(),
+            task_id: question.task_id,
+            position: question.position,
+            phase: Some(restored_phase),
+            last_response_binding: None,
+        })
+    }
+
     pub fn status(&self) -> CidarenAttemptFlowStatus {
         match self.phase() {
             CidarenAttemptPhase::ReadyToSelectWords(_) => {
@@ -479,25 +580,29 @@ impl CidarenAttemptFlow {
     pub fn current_question_materialization(
         &self,
     ) -> ProviderResult<Option<CidarenQuestionMaterialization>> {
-        let (current, rotated_topic_code, phase) = match self.phase() {
+        let (current, rotated_topic_code, verified_steps, phase) = match self.phase() {
             CidarenAttemptPhase::CurrentQuestion(current) => {
-                (current.as_ref(), None, CIDAREN_QUESTION_ARTIFACT_PHASE)
+                (current.as_ref(), None, 0, CIDAREN_QUESTION_ARTIFACT_PHASE)
             }
             CidarenAttemptPhase::ReadyToVerify {
                 current,
                 topic_code,
+                verified_steps,
                 ..
             } => (
                 current.as_ref(),
                 Some(topic_code.as_str()),
+                *verified_steps,
                 CIDAREN_READY_TO_VERIFY_PHASE,
             ),
             CidarenAttemptPhase::ReadyToAdvance {
                 current,
                 topic_code,
+                verified_steps,
             } => (
                 current.as_ref(),
                 Some(topic_code.as_str()),
+                *verified_steps,
                 CIDAREN_READY_TO_ADVANCE_PHASE,
             ),
             _ => return Ok(None),
@@ -511,7 +616,7 @@ impl CidarenAttemptFlow {
         let mut artifact =
             CidarenQuestionArtifact::from_parsed(&current.parsed, &current.question)?;
         if let Some(topic_code) = rotated_topic_code {
-            artifact = artifact.rotate_topic_code(topic_code)?;
+            artifact = artifact.checkpoint_after_verify(topic_code, verified_steps)?;
         }
         Ok(Some(CidarenQuestionMaterialization {
             question: current.question.clone(),
@@ -670,6 +775,7 @@ impl CidarenAttemptFlow {
             CidarenAttemptContinuation::Verify {
                 current,
                 remaining: answers,
+                verified_steps: 0,
             },
             CidarenIssuedAction::VerifyAnswer(request),
             0,
@@ -692,6 +798,7 @@ impl CidarenAttemptFlow {
             current,
             topic_code,
             mut remaining,
+            verified_steps,
         } = phase
         else {
             self.phase = Some(phase);
@@ -704,6 +811,7 @@ impl CidarenAttemptFlow {
                 current,
                 topic_code,
                 remaining,
+                verified_steps,
             });
             return Err(invalid_state(
                 "Cidaren normalized answer has no Verify step",
@@ -722,13 +830,18 @@ impl CidarenAttemptFlow {
                     current,
                     topic_code,
                     remaining,
+                    verified_steps,
                 });
                 return Err(error);
             }
         };
         self.issue(
             CidarenAttemptOperation::VerifyAnswer,
-            CidarenAttemptContinuation::Verify { current, remaining },
+            CidarenAttemptContinuation::Verify {
+                current,
+                remaining,
+                verified_steps,
+            },
             CidarenIssuedAction::VerifyAnswer(request),
             0,
         )
@@ -1027,23 +1140,35 @@ impl CidarenAttemptFlow {
             CidarenAttemptContinuation::Start => {
                 self.apply_next_step_response(response, self.position, received_at)
             }
-            CidarenAttemptContinuation::Verify { current, remaining } => {
+            CidarenAttemptContinuation::Verify {
+                current,
+                remaining,
+                verified_steps,
+            } => {
                 let CidarenAssessmentResponse::Payload(payload) = response else {
                     return Err(protocol_drift(
                         "Cidaren VerifyAnswer returned no rotated topic code",
                     ));
                 };
                 let topic_code = rotated_topic_code(payload.as_value())?;
+                let verified_steps = verified_steps
+                    .checked_add(1)
+                    .filter(|steps| *steps <= MAX_VERIFIED_STEPS)
+                    .ok_or_else(|| {
+                        invalid_response("Cidaren VerifyAnswer step count exceeds its bound")
+                    })?;
                 self.phase = Some(if remaining.is_empty() {
                     CidarenAttemptPhase::ReadyToAdvance {
                         current,
                         topic_code,
+                        verified_steps,
                     }
                 } else {
                     CidarenAttemptPhase::ReadyToVerify {
                         current,
                         topic_code,
                         remaining,
+                        verified_steps,
                     }
                 });
                 Ok(())
@@ -1687,7 +1812,11 @@ mod tests {
         let remote_progress = flow.current_remote_progress().unwrap();
         assert_eq!(remote_progress.completed(), 1);
         assert_eq!(remote_progress.total(), 127);
-        let question = flow.current_question().unwrap().clone();
+        let recovered = recovered_context(&context);
+        let (mut flow, question, verified_steps) =
+            restore_materialization(&recovered, initial_materialization, None, None);
+        assert_eq!(verified_steps, 0);
+        assert_eq!(flow.status(), CidarenAttemptFlowStatus::CurrentQuestion);
         let selected = SelectedAnswer {
             candidate_id: AnswerCandidateId::new(),
             question_id: question.id,
@@ -1697,7 +1826,10 @@ mod tests {
         };
         let command = flow.issue_selected_answer(&selected, request_at()).unwrap();
         assert_eq!(command.delay_before_execute_seconds(), 0);
-        let outcome = command.execute(transport.clone(), &context).await.unwrap();
+        let outcome = command
+            .execute(transport.clone(), &recovered)
+            .await
+            .unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToAdvance);
         let rotated_materialization = flow.current_question_materialization().unwrap().unwrap();
@@ -1710,7 +1842,11 @@ mod tests {
             rotated_materialization.artifact().digest(),
             initial_artifact_digest
         );
-
+        let (mut flow, restored_question, verified_steps) =
+            restore_materialization(&context, rotated_materialization, Some(&selected), None);
+        assert_eq!(verified_steps, 1);
+        assert_eq!(restored_question.id, question.id);
+        assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToAdvance);
         let command = flow.issue_advance(&settings(), request_at()).unwrap();
         assert!((1..=2).contains(&command.delay_before_execute_seconds()));
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
@@ -1795,10 +1931,20 @@ mod tests {
         assert_eq!(first_rotation.phase(), CIDAREN_READY_TO_VERIFY_PHASE);
         assert_ne!(first_rotation.artifact().digest(), initial_artifact_digest);
         let first_rotation_digest = first_rotation.artifact().digest();
+        let recovered = recovered_context(&context);
+        let (mut flow, restored_question, verified_steps) = restore_materialization(
+            &recovered,
+            first_rotation,
+            Some(&selected),
+            Some(CIDAREN_READY_TO_ADVANCE_PHASE),
+        );
+        assert_eq!(verified_steps, 1);
+        assert_eq!(restored_question.id, question.id);
+        assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToVerify);
         let outcome = flow
             .issue_next_verify(request_at())
             .unwrap()
-            .execute(transport.clone(), &context)
+            .execute(transport.clone(), &recovered)
             .await
             .unwrap();
         flow.accept(outcome).unwrap();
@@ -2169,6 +2315,49 @@ mod tests {
 
         parsed.metadata_sanitized["topic_mode"] = json!(17);
         assert!(wire_answers(&parsed, &selected).is_err());
+    }
+
+    fn restore_materialization(
+        context: &ProviderContext,
+        materialization: CidarenQuestionMaterialization,
+        selected: Option<&SelectedAnswer>,
+        rejected_phase: Option<&str>,
+    ) -> (CidarenAttemptFlow, Question, u32) {
+        let (question, encoded, phase, _, _) = materialization.into_parts();
+        let digest = encoded.digest();
+        let value = encoded.into_secret_value();
+        if let Some(rejected_phase) = rejected_phase {
+            let mismatched =
+                CidarenQuestionArtifact::decode_bound(&value, digest, "class-task:2002", &question)
+                    .unwrap();
+            assert!(
+                CidarenAttemptFlow::restore_question(
+                    context,
+                    "class-task:2002",
+                    &detail(),
+                    &mismatched,
+                    rejected_phase,
+                    &question,
+                    selected,
+                )
+                .is_err()
+            );
+        }
+        let artifact =
+            CidarenQuestionArtifact::decode_bound(&value, digest, "class-task:2002", &question)
+                .unwrap();
+        let verified_steps = artifact.verified_steps();
+        let flow = CidarenAttemptFlow::restore_question(
+            context,
+            "class-task:2002",
+            &detail(),
+            &artifact,
+            phase,
+            &question,
+            selected,
+        )
+        .unwrap();
+        (flow, question, verified_steps)
     }
 
     fn response(data: &Value) -> CidarenAssessmentResponse {

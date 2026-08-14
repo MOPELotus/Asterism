@@ -306,6 +306,17 @@ Question as a distinct terminal outcome. Synthetic adapter tests cover
 selection and terminal completion. No current donor exposes a safe ambiguity
 readback, so recovery deliberately returns no outcome rather than replaying.
 
+The post-materialization recovery audit found that phase plus rotated
+`topic_code` was insufficient for a multi-relation matching Question: after a
+crash it could not identify how many immutable Draft relations had already
+been accepted. The encrypted Question artifact is therefore versioned as
+`cidaren.question-attempt.v2` and adds only a bounded monotonic
+`verified_steps` count. Provider recovery rebinds the fresh Task and complete
+Question fingerprint, regenerates the deterministic wire relation sequence
+from the immutable selected answer, removes the accepted prefix and rejects
+every count/phase/selection disagreement. No new donor route or revision delta
+was involved.
+
 ## Check procedure
 
 For the next checkpoint:

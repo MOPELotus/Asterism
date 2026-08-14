@@ -114,9 +114,13 @@ The current checkpoint (not a completion boundary):
     AnswerResolve/Verify unsupported until evidence defines the two-answer
     wire encoding.
 28. encodes the current Question's one-time `topic_code` as a bounded,
-    versioned, zeroizing Provider artifact whose digest is stable and whose
+    versioned `cidaren.question-attempt.v2`, zeroizing Provider artifact whose
+    digest is stable and whose
     decode path rebinds the local Task, remote Task, remote Question, position
-    and complete Question content fingerprint. The plaintext is intended only
+    and complete Question content fingerprint. It also retains only the
+    bounded number of already accepted Verify relations, allowing the exact
+    remaining sequence to be rebuilt from the immutable Draft without copying
+    answer content into the artifact. The plaintext is intended only
     for Core's encrypted QuestionSession continuation store and never enters a
     normalized Question, immutable Draft or diagnostic output.
 29. freezes every assessment mutation's timestamp, path, ordered query or
@@ -133,7 +137,8 @@ The current checkpoint (not a completion boundary):
     Provider-private integration surface: a real Question bundle carries the
     normalized Question, zeroizing artifact, phase, raw response digest and
     observation time, while matching Verify rotations retain the same
-    immutable Question binding across every topic-code revision.
+    immutable Question binding and monotonically advancing verified-step
+    checkpoint across every topic-code revision.
 32. encodes pre-Question selection/start/reading-card state as the bounded
     `cidaren.pre-question-attempt.v1` artifact. Recovery rebinds local/remote
     Task identity, requires a fresh word-selection plan instead of persisting

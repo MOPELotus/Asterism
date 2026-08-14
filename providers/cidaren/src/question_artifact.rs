@@ -9,7 +9,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::ParsedCidarenAttemptQuestion;
 
-pub const CIDAREN_QUESTION_ARTIFACT_TYPE: &str = "cidaren.question-attempt.v1";
+pub const CIDAREN_QUESTION_ARTIFACT_TYPE: &str = "cidaren.question-attempt.v2";
 pub const CIDAREN_QUESTION_ARTIFACT_PHASE: &str = "cidaren.current-question";
 pub const CIDAREN_READY_TO_VERIFY_PHASE: &str = "cidaren.ready-to-verify";
 pub const CIDAREN_READY_TO_ADVANCE_PHASE: &str = "cidaren.ready-to-advance";
@@ -19,6 +19,7 @@ const MAX_REMOTE_TASK_ID_BYTES: usize = 768;
 const MAX_REMOTE_QUESTION_ID_BYTES: usize = 512;
 const MAX_TOPIC_CODE_BYTES: usize = 4_096;
 const MAX_POSITION: u32 = 100_000;
+const MAX_VERIFIED_STEPS: u32 = 256;
 
 /// Encrypted-at-rest Provider continuation attached to one immutable Core
 /// `QuestionSession`. Only the digest and type enter the Domain session.
@@ -56,6 +57,7 @@ pub struct CidarenQuestionArtifact {
     position: u32,
     question_fingerprint: Zeroizing<String>,
     topic_code: Zeroizing<String>,
+    verified_steps: u32,
 }
 
 impl CidarenQuestionArtifact {
@@ -98,6 +100,7 @@ impl CidarenQuestionArtifact {
             position: parsed.position(),
             question_fingerprint: Zeroizing::new(fingerprint.to_string()),
             topic_code: Zeroizing::new(parsed.topic_code().to_owned()),
+            verified_steps: 0,
         })
     }
 
@@ -118,6 +121,7 @@ impl CidarenQuestionArtifact {
                 position: self.position,
                 question_fingerprint: &self.question_fingerprint,
                 topic_code: &self.topic_code,
+                verified_steps: self.verified_steps,
             })
             .map_err(|_| invalid_response("Cidaren Question artifact could not be encoded"))?,
         );
@@ -131,20 +135,29 @@ impl CidarenQuestionArtifact {
         Ok(EncodedCidarenQuestionArtifact { value, digest })
     }
 
-    /// Replaces the consumed topic code with the exact rotated code returned
-    /// by an accepted `VerifyAnswer` response while retaining all immutable
-    /// Task and Question bindings.
+    /// Records a rotated topic code after an exact number of immutable Draft
+    /// relation steps have been accepted. The count is encrypted Provider
+    /// state and never enters the Draft.
     ///
     /// # Errors
     ///
-    /// Returns `ProtocolDrift` if the replacement code is malformed.
-    pub fn rotate_topic_code(mut self, next_topic_code: &str) -> ProviderResult<Self> {
-        if !valid_topic_code(next_topic_code) {
+    /// Returns `ProtocolDrift` for an invalid token or impossible checkpoint.
+    pub fn checkpoint_after_verify(
+        mut self,
+        next_topic_code: &str,
+        verified_steps: u32,
+    ) -> ProviderResult<Self> {
+        if !valid_topic_code(next_topic_code)
+            || verified_steps == 0
+            || verified_steps > MAX_VERIFIED_STEPS
+            || verified_steps <= self.verified_steps
+        {
             return Err(protocol_drift(
-                "Cidaren rotated Question artifact topic code is invalid",
+                "Cidaren verified Question checkpoint is invalid",
             ));
         }
         self.topic_code = Zeroizing::new(next_topic_code.to_owned());
+        self.verified_steps = verified_steps;
         Ok(self)
     }
 
@@ -196,6 +209,7 @@ impl CidarenQuestionArtifact {
             || wire.task_id != expected_question.task_id.to_string()
             || parsed_fingerprint != expected_fingerprint
             || !valid_topic_code(&wire.topic_code)
+            || wire.verified_steps > MAX_VERIFIED_STEPS
         {
             return Err(protocol_drift(
                 "Cidaren Question artifact binding is stale or foreign",
@@ -209,18 +223,16 @@ impl CidarenQuestionArtifact {
             position: wire.position,
             question_fingerprint: Zeroizing::new(wire.question_fingerprint.clone()),
             topic_code: Zeroizing::new(wire.topic_code.clone()),
+            verified_steps: wire.verified_steps,
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by the Provider-private attempt flow after Main-owned QuestionSession integration"
-        )
-    )]
     pub(crate) fn topic_code(&self) -> &str {
         &self.topic_code
+    }
+
+    pub(crate) const fn verified_steps(&self) -> u32 {
+        self.verified_steps
     }
 }
 
@@ -232,6 +244,7 @@ impl fmt::Debug for CidarenQuestionArtifact {
             .field("position", &self.position)
             .field("question_fingerprint", &self.question_fingerprint)
             .field("topic_code", &"[REDACTED]")
+            .field("verified_steps", &self.verified_steps)
             .finish_non_exhaustive()
     }
 }
@@ -245,6 +258,7 @@ struct ArtifactWireRef<'a> {
     position: u32,
     question_fingerprint: &'a str,
     topic_code: &'a str,
+    verified_steps: u32,
 }
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -257,6 +271,7 @@ struct ArtifactWire {
     position: u32,
     question_fingerprint: String,
     topic_code: String,
+    verified_steps: u32,
 }
 
 fn valid_remote_task_id(value: &str) -> bool {
@@ -316,12 +331,27 @@ mod tests {
             CidarenQuestionArtifact::decode_bound(&value, digest, "class-task:2002", &question)
                 .unwrap();
         assert_eq!(decoded.topic_code(), "synthetic-topic-code");
+        assert_eq!(decoded.verified_steps(), 0);
         assert!(!format!("{decoded:?}").contains("synthetic-topic-code"));
 
-        let rotated = decoded.rotate_topic_code("rotated-topic-code").unwrap();
-        assert_eq!(rotated.topic_code(), "rotated-topic-code");
-        assert_ne!(rotated.encode().unwrap().digest(), digest);
-        assert!(rotated.rotate_topic_code(" invalid").is_err());
+        let checkpoint = CidarenQuestionArtifact::from_parsed(&parsed, &question)
+            .unwrap()
+            .checkpoint_after_verify("verified-topic-code", 2)
+            .unwrap();
+        assert_eq!(checkpoint.topic_code(), "verified-topic-code");
+        assert_eq!(checkpoint.verified_steps(), 2);
+        assert_ne!(checkpoint.encode().unwrap().digest(), digest);
+        assert!(
+            checkpoint
+                .checkpoint_after_verify("regressed-topic-code", 1)
+                .is_err()
+        );
+        assert!(
+            CidarenQuestionArtifact::from_parsed(&parsed, &question)
+                .unwrap()
+                .checkpoint_after_verify(" invalid", 1)
+                .is_err()
+        );
     }
 
     #[test]
@@ -379,6 +409,7 @@ mod tests {
                 "position": 1,
                 "question_fingerprint": question.content_fingerprint().unwrap(),
                 "topic_code": "synthetic-topic-code",
+                "verified_steps": 0,
                 "unexpected": true
             }))
             .unwrap(),
@@ -388,6 +419,30 @@ mod tests {
             CidarenQuestionArtifact::decode_bound(
                 &unknown,
                 unknown_digest,
+                "class-task:2002",
+                &question,
+            )
+            .is_err()
+        );
+
+        let invalid_checkpoint = SecretValue::new(
+            serde_json::to_vec(&json!({
+                "schema": CIDAREN_QUESTION_ARTIFACT_TYPE,
+                "task_id": question.task_id.to_string(),
+                "remote_task_id": "class-task:2002",
+                "remote_question_id": question.remote_question_id,
+                "position": 1,
+                "question_fingerprint": question.content_fingerprint().unwrap(),
+                "topic_code": "synthetic-topic-code",
+                "verified_steps": MAX_VERIFIED_STEPS + 1
+            }))
+            .unwrap(),
+        );
+        let invalid_checkpoint_digest = Sha256::digest(invalid_checkpoint.expose_secret()).into();
+        assert!(
+            CidarenQuestionArtifact::decode_bound(
+                &invalid_checkpoint,
+                invalid_checkpoint_digest,
                 "class-task:2002",
                 &question,
             )

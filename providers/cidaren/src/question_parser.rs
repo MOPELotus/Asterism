@@ -197,6 +197,63 @@ pub fn parse_attempt_step(
 }
 
 impl ParsedCidarenAttemptQuestion {
+    /// Reconstructs the sanitized parser view from an immutable Question and
+    /// its separately decoded one-time topic code. The caller must first
+    /// verify the encrypted artifact's Task/Question fingerprint binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if the Question cannot round-trip through the
+    /// exact Cidaren parser representation.
+    pub(crate) fn from_artifact(
+        topic_code: String,
+        remote_task_id: String,
+        question: &Question,
+    ) -> ProviderResult<Self> {
+        question
+            .validate()
+            .map_err(|_| invalid_response("Cidaren restored Question is invalid"))?;
+        let remote_id = question
+            .remote_question_id
+            .as_deref()
+            .filter(|value| valid_optional_text(value, MAX_REMOTE_STEP_ID_BYTES))
+            .ok_or_else(|| protocol_drift("Cidaren restored Question has no remote identity"))?;
+        if !valid_remote_task_id(&remote_task_id)
+            || !valid_optional_text(&topic_code, MAX_TOPIC_CODE_BYTES)
+            || !question.attachments.is_empty()
+            || question.position == 0
+            || question.position > MAX_POSITION
+        {
+            return Err(protocol_drift(
+                "Cidaren restored Question binding is invalid",
+            ));
+        }
+        let parsed = Self {
+            topic_code: Zeroizing::new(topic_code),
+            remote_task_id,
+            remote_id: remote_id.to_owned(),
+            kind: question.kind,
+            stem: question.stem.clone(),
+            options: question.options.clone(),
+            metadata_sanitized: question.metadata_sanitized.clone(),
+            position: question.position,
+            remote_progress: None,
+        };
+        let rebuilt = parsed.to_question(question.task_id)?;
+        let rebuilt_fingerprint = rebuilt
+            .content_fingerprint()
+            .map_err(|_| invalid_response("Cidaren restored Question fingerprint is invalid"))?;
+        let expected_fingerprint = question
+            .content_fingerprint()
+            .map_err(|_| invalid_response("Cidaren Question fingerprint is invalid"))?;
+        if rebuilt_fingerprint != expected_fingerprint {
+            return Err(protocol_drift(
+                "Cidaren restored Question semantics changed",
+            ));
+        }
+        Ok(parsed)
+    }
+
     pub(crate) fn topic_code(&self) -> &str {
         self.topic_code.as_str()
     }
