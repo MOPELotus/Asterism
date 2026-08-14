@@ -7,7 +7,7 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     BrowserBridgeWorkflowNextCommand, BrowserBridgeWorkflowResult,
-    BrowserBridgeWorkflowRuntimeState, RemoteProgress,
+    BrowserBridgeWorkflowRuntimeState, RemoteProgress, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     SecretAccess, SecretActor, SecretPurpose, SecretRef, SecretStoreError, SecretValue,
@@ -23,9 +23,10 @@ use crate::{
     BrowserBridgeCommandResolveRequest, BrowserBridgeExchangeRecord,
     BrowserBridgeResultArtifactRecord, BrowserBridgeResultReceiveRequest,
     BrowserBridgeResultResolveRequest, BrowserBridgeWorkflowCommitOutcome,
-    BrowserBridgeWorkflowCommitRequest, Database, DispatchedBrowserBridgeCommand,
-    ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, ResolvedBrowserBridgeRuntimeState,
-    SecretKeyring,
+    BrowserBridgeWorkflowCommitRequest, BrowserBridgeWorkflowContextIssue, Database,
+    DispatchedBrowserBridgeCommand, ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult,
+    ResolvedBrowserBridgeRuntimeState, ResolvedBrowserBridgeWorkflowContext,
+    ResolvedBrowserBridgeWorkflowPlan, SecretKeyring,
     browser_bridge::{
         authenticate_session_for_exchange, binding_is_valid, fetch_exchange, fetch_runtime_binding,
         fetch_session, find_claimed_session_for_exchange, insert_exchange_audit,
@@ -65,6 +66,10 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
         &self,
         request: BrowserBridgeCommandIssueRequest<'_>,
     ) -> Result<BrowserBridgeExchangeRecord, SecretStoreError> {
+        let prepared_context = request
+            .workflow_context
+            .map(prepare_workflow_context)
+            .transpose()?;
         request
             .exchange
             .validate()
@@ -162,12 +167,35 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
                 (Some(requested), Some(existing)) => requested.metadata == existing,
                 (None, Some(_)) | (Some(_), None) => false,
             };
+            let existing_context =
+                fetch_workflow_context_metadata(&mut transaction, request.exchange.session_id)
+                    .await?;
+            let context_same = match (&prepared_context, existing_context) {
+                (None, None) => true,
+                (Some(requested), Some(existing)) => requested.metadata() == existing,
+                (None, Some(_)) | (Some(_), None) => false,
+            };
             transaction.rollback().await.map_err(storage_error)?;
-            return Ok(if same && artifact_present == 1 && state_same {
-                BrowserBridgeExchangeRecord::Duplicate(existing.expect("same requires a record"))
-            } else {
-                BrowserBridgeExchangeRecord::SequenceConflict
-            });
+            return Ok(
+                if same && artifact_present == 1 && state_same && context_same {
+                    BrowserBridgeExchangeRecord::Duplicate(
+                        existing.expect("same requires a record"),
+                    )
+                } else {
+                    BrowserBridgeExchangeRecord::SequenceConflict
+                },
+            );
+        }
+        let context_exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM browser_bridge_workflow_contexts WHERE session_id = ?)",
+        )
+        .bind(request.exchange.session_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if prepared_context.is_some() && (sequence != 1 || context_exists != 0) {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeExchangeRecord::SequenceConflict);
         }
 
         let (key_id, key) = self.keyring.active();
@@ -229,6 +257,17 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
             )
             .await
             .map_err(storage_error)?;
+        }
+        if let Some(workflow_context) = prepared_context {
+            insert_workflow_context(
+                &mut transaction,
+                &self.keyring,
+                &session,
+                request.exchange.issued_at,
+                workflow_context,
+                request.access,
+            )
+            .await?;
         }
         insert_secret_audit(
             &mut transaction,
@@ -343,6 +382,14 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
         {
             return Err(SecretStoreError::AuthenticationFailed);
         }
+        let workflow_context = resolve_workflow_context(
+            &mut transaction,
+            request.session_id,
+            session.owner_user_id,
+            &self.keyring,
+            request.access,
+        )
+        .await?;
         insert_secret_audit(
             &mut transaction,
             request.access,
@@ -356,6 +403,7 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
             exchange,
             command_artifact: SecretValue::new(plaintext),
             runtime_state,
+            workflow_context,
         }))
     }
 
@@ -947,6 +995,259 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BrowserBridgeWorkflowContextMetadata {
+    runtime_settings_digest: [u8; 32],
+    plan_type: Option<String>,
+    plan_digest: Option<[u8; 32]>,
+}
+
+#[derive(Debug)]
+struct PreparedBrowserBridgeWorkflowContext {
+    runtime_settings_json: String,
+    runtime_settings_digest: [u8; 32],
+    workflow_plan: Option<PreparedBrowserBridgeWorkflowPlan>,
+}
+
+impl PreparedBrowserBridgeWorkflowContext {
+    fn metadata(&self) -> BrowserBridgeWorkflowContextMetadata {
+        BrowserBridgeWorkflowContextMetadata {
+            runtime_settings_digest: self.runtime_settings_digest,
+            plan_type: self
+                .workflow_plan
+                .as_ref()
+                .map(|plan| plan.artifact_type.clone()),
+            plan_digest: self.workflow_plan.as_ref().map(|plan| plan.artifact_digest),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreparedBrowserBridgeWorkflowPlan {
+    artifact_type: String,
+    artifact_digest: [u8; 32],
+    artifact: SecretValue,
+}
+
+fn prepare_workflow_context(
+    context: BrowserBridgeWorkflowContextIssue,
+) -> Result<PreparedBrowserBridgeWorkflowContext, SecretStoreError> {
+    if context.runtime_settings.schema_version == 0 || context.runtime_settings.values.len() > 256 {
+        return Err(SecretStoreError::InvalidValue);
+    }
+    let runtime_settings_bytes =
+        serde_json::to_vec(&context.runtime_settings).map_err(storage_error)?;
+    if runtime_settings_bytes.is_empty() || runtime_settings_bytes.len() > 256 * 1_024 {
+        return Err(SecretStoreError::InvalidValue);
+    }
+    let runtime_settings_json =
+        String::from_utf8(runtime_settings_bytes.clone()).map_err(storage_error)?;
+    let workflow_plan = context
+        .workflow_plan
+        .map(|plan| {
+            validate_secret(&plan.artifact)?;
+            if !valid_artifact_type(&plan.artifact_type) {
+                return Err(SecretStoreError::InvalidValue);
+            }
+            Ok(PreparedBrowserBridgeWorkflowPlan {
+                artifact_type: plan.artifact_type,
+                artifact_digest: digest(plan.artifact.expose_secret()),
+                artifact: plan.artifact,
+            })
+        })
+        .transpose()?;
+    Ok(PreparedBrowserBridgeWorkflowContext {
+        runtime_settings_json,
+        runtime_settings_digest: digest(&runtime_settings_bytes),
+        workflow_plan,
+    })
+}
+
+fn valid_artifact_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.trim() == value
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+async fn fetch_workflow_context_metadata(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: asterism_domain::BrowserBridgeSessionId,
+) -> Result<Option<BrowserBridgeWorkflowContextMetadata>, SecretStoreError> {
+    sqlx::query(
+        "SELECT runtime_settings_digest, plan_type, plan_digest \
+         FROM browser_bridge_workflow_contexts WHERE session_id = ?",
+    )
+    .bind(session_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?
+    .map(|row| {
+        let runtime_settings_digest = row
+            .get::<Vec<u8>, _>("runtime_settings_digest")
+            .try_into()
+            .map_err(|_| SecretStoreError::Storage)?;
+        let plan_digest = row
+            .get::<Option<Vec<u8>>, _>("plan_digest")
+            .map(|value| value.try_into().map_err(|_| SecretStoreError::Storage))
+            .transpose()?;
+        Ok(BrowserBridgeWorkflowContextMetadata {
+            runtime_settings_digest,
+            plan_type: row.get("plan_type"),
+            plan_digest,
+        })
+    })
+    .transpose()
+}
+
+async fn insert_workflow_context(
+    transaction: &mut Transaction<'_, Sqlite>,
+    keyring: &SecretKeyring,
+    session: &BrowserBridgeSession,
+    created_at: asterism_domain::Timestamp,
+    context: PreparedBrowserBridgeWorkflowContext,
+    access: &SecretAccess,
+) -> Result<(), SecretStoreError> {
+    let (plan_type, plan_digest, plan_secret_id) = if let Some(plan) = context.workflow_plan {
+        let (key_id, key) = keyring.active();
+        let secret = SecretRef {
+            id: SecretId::new(),
+            owner_user_id: session.owner_user_id,
+            purpose: SecretPurpose::BrowserJobCredential,
+            version: 1,
+            key_id: key_id.to_owned(),
+            created_at,
+            updated_at: created_at,
+        };
+        let (nonce, encrypted_data) = encrypt(key, &secret, plan.artifact.expose_secret())?;
+        insert_secret_blob(transaction, &secret, &nonce, &encrypted_data).await?;
+        insert_secret_audit(
+            transaction,
+            access,
+            "browser_bridge_workflow_plan_stored",
+            &secret,
+        )
+        .await
+        .map_err(storage_error)?;
+        (
+            Some(plan.artifact_type),
+            Some(plan.artifact_digest),
+            Some(secret.id),
+        )
+    } else {
+        (None, None, None)
+    };
+    sqlx::query(
+        "INSERT INTO browser_bridge_workflow_contexts \
+         (session_id, runtime_settings_digest, runtime_settings_json, plan_type, plan_digest, \
+          plan_secret_blob_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(session.id.to_string())
+    .bind(context.runtime_settings_digest.as_slice())
+    .bind(context.runtime_settings_json)
+    .bind(plan_type)
+    .bind(plan_digest.map(|value| value.to_vec()))
+    .bind(plan_secret_id.map(|value| value.to_string()))
+    .bind(encode_timestamp(created_at))
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+async fn resolve_workflow_context(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: asterism_domain::BrowserBridgeSessionId,
+    owner_user_id: asterism_domain::UserId,
+    keyring: &SecretKeyring,
+    access: &SecretAccess,
+) -> Result<Option<ResolvedBrowserBridgeWorkflowContext>, SecretStoreError> {
+    let Some(row) = sqlx::query(
+        "SELECT runtime_settings_digest, runtime_settings_json, plan_type, plan_digest, \
+                plan_secret_blob_id FROM browser_bridge_workflow_contexts WHERE session_id = ?",
+    )
+    .bind(session_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?
+    else {
+        return Ok(None);
+    };
+    let runtime_settings_json = row.get::<String, _>("runtime_settings_json");
+    if runtime_settings_json.is_empty() || runtime_settings_json.len() > 256 * 1_024 {
+        return Err(SecretStoreError::AuthenticationFailed);
+    }
+    let expected_settings_digest: [u8; 32] = row
+        .get::<Vec<u8>, _>("runtime_settings_digest")
+        .try_into()
+        .map_err(|_| SecretStoreError::Storage)?;
+    if digest(runtime_settings_json.as_bytes()) != expected_settings_digest {
+        return Err(SecretStoreError::AuthenticationFailed);
+    }
+    let runtime_settings: ResolvedProviderRuntimeSettings =
+        serde_json::from_str(&runtime_settings_json).map_err(storage_error)?;
+    if runtime_settings.schema_version == 0 || runtime_settings.values.len() > 256 {
+        return Err(SecretStoreError::AuthenticationFailed);
+    }
+    let plan_type = row.get::<Option<String>, _>("plan_type");
+    let plan_digest = row
+        .get::<Option<Vec<u8>>, _>("plan_digest")
+        .map(|value| value.try_into().map_err(|_| SecretStoreError::Storage))
+        .transpose()?;
+    let plan_secret_id = row
+        .get::<Option<String>, _>("plan_secret_blob_id")
+        .map(|value| SecretId::from_str(&value).map_err(|_| SecretStoreError::Storage))
+        .transpose()?;
+    let workflow_plan = match (plan_type, plan_digest, plan_secret_id) {
+        (None, None, None) => None,
+        (Some(artifact_type), Some(artifact_digest), Some(secret_id))
+            if valid_artifact_type(&artifact_type) =>
+        {
+            let stored = fetch_secret(transaction, secret_id).await?;
+            if stored.owner_user_id != owner_user_id
+                || stored.purpose != SecretPurpose::BrowserJobCredential
+            {
+                return Err(SecretStoreError::AuthenticationFailed);
+            }
+            let secret = SecretRef {
+                id: secret_id,
+                owner_user_id: stored.owner_user_id,
+                purpose: stored.purpose,
+                version: stored.version,
+                key_id: stored.key_id.clone(),
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+            };
+            let key = keyring.get(&stored.key_id)?;
+            let plaintext = decrypt(key, &secret, &stored.nonce, &stored.encrypted_data)?;
+            if digest(&plaintext) != artifact_digest {
+                return Err(SecretStoreError::AuthenticationFailed);
+            }
+            insert_secret_audit(
+                transaction,
+                access,
+                "browser_bridge_workflow_plan_resolved",
+                &secret,
+            )
+            .await
+            .map_err(storage_error)?;
+            Some(ResolvedBrowserBridgeWorkflowPlan {
+                artifact_type,
+                artifact_digest,
+                artifact: SecretValue::new(plaintext),
+            })
+        }
+        _ => return Err(SecretStoreError::AuthenticationFailed),
+    };
+    Ok(Some(ResolvedBrowserBridgeWorkflowContext {
+        runtime_settings,
+        workflow_plan,
+    }))
+}
+
 fn validate_worker_id(worker_id: &str) -> Result<(), SecretStoreError> {
     if worker_id.is_empty()
         || worker_id.len() > 128
@@ -1459,7 +1760,7 @@ mod tests {
         BrowserBridgeSession, BrowserBridgeSessionCreate, BrowserBridgeSessionState,
         ProviderAccountId, RemoteState, Role, SessionKind, TaskId, UserId,
     };
-    use asterism_provider_api::BrowserSessionSpec;
+    use asterism_provider_api::{BrowserSessionSpec, ProviderSettingValue};
     use asterism_secrets::{
         CredentialAcquisition, CredentialBundle, CredentialField, SecretKey, SecretPurpose,
         SecretStore, SecretStoreError,
@@ -1502,6 +1803,7 @@ mod tests {
                     exchange: &issued,
                     command_artifact: SecretValue::new(command.to_vec()),
                     runtime_state: None,
+                    workflow_context: None,
                     access: &access,
                 })
                 .await
@@ -1542,6 +1844,7 @@ mod tests {
                     metadata: runtime_metadata.clone(),
                     state_artifact: SecretValue::new(runtime_state.to_vec()),
                 }),
+                workflow_context: None,
                 access: &access,
             })
             .await
@@ -1572,6 +1875,7 @@ mod tests {
                     metadata: runtime_metadata.clone(),
                     state_artifact: SecretValue::new(runtime_state.to_vec()),
                 }),
+                workflow_context: None,
                 access: &access,
             })
             .await
@@ -1587,6 +1891,7 @@ mod tests {
                     exchange: &issued,
                     command_artifact: SecretValue::new(command.to_vec()),
                     runtime_state: None,
+                    workflow_context: None,
                     access: &access,
                 })
                 .await
@@ -1996,6 +2301,7 @@ mod tests {
                 exchange: &issued,
                 command_artifact: SecretValue::new(command.to_vec()),
                 runtime_state: None,
+                workflow_context: None,
                 access: &access,
             })
             .await
@@ -2109,6 +2415,7 @@ mod tests {
                 exchange: &issued,
                 command_artifact: SecretValue::new(command.to_vec()),
                 runtime_state: None,
+                workflow_context: None,
                 access: &access,
             })
             .await
@@ -2424,6 +2731,7 @@ mod tests {
                 exchange: &issued,
                 command_artifact: SecretValue::new(command.to_vec()),
                 runtime_state: None,
+                workflow_context: None,
                 access: &access,
             })
             .await
@@ -2515,6 +2823,112 @@ mod tests {
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
+        reason = "workflow context issuance proves immutable settings, encrypted plan, duplicate and tamper boundaries together"
+    )]
+    async fn first_workflow_command_freezes_and_recovers_private_context() {
+        let fixture = fixture().await;
+        let now = Utc::now() - Duration::seconds(10);
+        let (session, _) = fixture.claimed_session(now).await;
+        let access = Fixture::access();
+        let command = br#"{"kind":"workflow-start"}"#;
+        let issued = BrowserBridgeExchange::issue(
+            session.id,
+            1,
+            "uai.browser.command".to_owned(),
+            digest(command),
+            now + Duration::seconds(3),
+        )
+        .unwrap();
+        let plan = br#"{"course":"course-1","membership":"opaque"}"#;
+        let settings = ResolvedProviderRuntimeSettings {
+            schema_version: 4,
+            values: BTreeMap::from([
+                (
+                    "course_residence_seconds".to_owned(),
+                    ProviderSettingValue::DurationSeconds(1_800),
+                ),
+                ("play_video".to_owned(), ProviderSettingValue::Boolean(true)),
+            ]),
+        };
+        let issue = || BrowserBridgeCommandIssueRequest {
+            exchange: &issued,
+            command_artifact: SecretValue::new(command.to_vec()),
+            runtime_state: None,
+            workflow_context: Some(crate::BrowserBridgeWorkflowContextIssue {
+                runtime_settings: settings.clone(),
+                workflow_plan: Some(crate::BrowserBridgeWorkflowPlanIssue {
+                    artifact_type: "uai.course-residence.batch.v1".to_owned(),
+                    artifact: SecretValue::new(plan.to_vec()),
+                }),
+            }),
+            access: &access,
+        };
+        assert!(matches!(
+            fixture
+                .command_repository
+                .issue_browser_bridge_command(issue())
+                .await
+                .unwrap(),
+            BrowserBridgeExchangeRecord::Inserted(_)
+        ));
+        assert!(matches!(
+            fixture
+                .command_repository
+                .issue_browser_bridge_command(issue())
+                .await
+                .unwrap(),
+            BrowserBridgeExchangeRecord::Duplicate(_)
+        ));
+        let encrypted_plan: Vec<u8> = sqlx::query_scalar(
+            "SELECT secret.encrypted_data FROM browser_bridge_workflow_contexts AS context \
+             JOIN secret_blobs AS secret ON secret.id = context.plan_secret_blob_id \
+             WHERE context.session_id = ?",
+        )
+        .bind(session.id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_ne!(encrypted_plan, plan);
+        assert!(
+            !encrypted_plan
+                .windows(plan.len())
+                .any(|window| window == plan)
+        );
+
+        let resolved = fixture
+            .command_repository
+            .resolve_browser_bridge_command(fixture.resolve_request(&session, 1, &access))
+            .await
+            .unwrap()
+            .unwrap();
+        let context = resolved.workflow_context.unwrap();
+        assert_eq!(context.runtime_settings, settings);
+        let resolved_plan = context.workflow_plan.unwrap();
+        assert_eq!(resolved_plan.artifact_type, "uai.course-residence.batch.v1");
+        assert_eq!(resolved_plan.artifact_digest, digest(plan));
+        assert_eq!(resolved_plan.artifact.expose_secret(), plan);
+
+        sqlx::query(
+            "UPDATE browser_bridge_workflow_contexts SET runtime_settings_json = ? \
+             WHERE session_id = ?",
+        )
+        .bind(r#"{"schema_version":4,"values":{}}"#)
+        .bind(session.id.to_string())
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            fixture
+                .command_repository
+                .resolve_browser_bridge_command(fixture.resolve_request(&session, 1, &access))
+                .await,
+            Err(SecretStoreError::AuthenticationFailed)
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
         reason = "one end-to-end fixture proves both atomic workflow dispositions and durable claim consumption"
     )]
     async fn claimed_workflow_results_advance_then_terminate_atomically() {
@@ -2537,6 +2951,7 @@ mod tests {
                 exchange: &issued_one,
                 command_artifact: SecretValue::new(command_one.to_vec()),
                 runtime_state: None,
+                workflow_context: None,
                 access: &access,
             })
             .await

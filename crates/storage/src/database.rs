@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 51);
+        assert_eq!(migration_count, 52);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -185,6 +185,15 @@ mod tests {
                 .iter()
                 .any(|row| row.get::<String, _>("name") == "processed_at")
         );
+
+        let workflow_contexts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'browser_bridge_workflow_contexts'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(workflow_contexts, 1);
 
         let question_sessions: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema \

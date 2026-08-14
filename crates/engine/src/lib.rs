@@ -74,6 +74,7 @@ pub use browser_bridge_session::{
     BrowserBridgeSessionAccessRequest, BrowserBridgeSessionCancelRequest,
     BrowserBridgeSessionClaimRequest, BrowserBridgeSessionClaimed,
     BrowserBridgeSessionCreateRequest, BrowserBridgeSessionCreated, BrowserBridgeSessionSnapshot,
+    BrowserBridgeWorkflowContextIssue, BrowserBridgeWorkflowPlanIssue,
 };
 pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredentialService};
 pub use execution_job::{

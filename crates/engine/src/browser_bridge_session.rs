@@ -6,7 +6,9 @@ use asterism_domain::{
     BrowserBridgeSessionCreate, BrowserBridgeSessionError, BrowserBridgeSessionId,
     ProviderAccountId, ProviderId, TaskId, Timestamp, UserId,
 };
-use asterism_provider_api::{BrowserSessionSpec, BrowserSessionSpecError};
+use asterism_provider_api::{
+    BrowserSessionSpec, BrowserSessionSpecError, ResolvedProviderRuntimeSettings,
+};
 use asterism_secrets::{
     CredentialBundle, SecretAccess, SecretStoreError, SecretString, SecretValue,
 };
@@ -23,8 +25,10 @@ use asterism_storage::{
     BrowserBridgeResultResolveRequest as StorageBrowserBridgeResultResolveRequest,
     BrowserBridgeRuntimeBindingRecord,
     BrowserBridgeRuntimeStateIssue as StorageBrowserBridgeRuntimeStateIssue,
-    BrowserBridgeSessionRepository, ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult,
-    StorageError,
+    BrowserBridgeSessionRepository,
+    BrowserBridgeWorkflowContextIssue as StorageBrowserBridgeWorkflowContextIssue,
+    BrowserBridgeWorkflowPlanIssue as StorageBrowserBridgeWorkflowPlanIssue,
+    ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, StorageError,
 };
 
 #[derive(Debug)]
@@ -286,6 +290,17 @@ where
                     StorageBrowserBridgeRuntimeStateIssue {
                         metadata: runtime_state.metadata,
                         state_artifact: runtime_state.state_artifact,
+                    }
+                }),
+                workflow_context: request.workflow_context.map(|context| {
+                    StorageBrowserBridgeWorkflowContextIssue {
+                        runtime_settings: context.runtime_settings,
+                        workflow_plan: context.workflow_plan.map(|plan| {
+                            StorageBrowserBridgeWorkflowPlanIssue {
+                                artifact_type: plan.artifact_type,
+                                artifact: plan.artifact,
+                            }
+                        }),
                     }
                 }),
                 access: &request.access,
@@ -660,6 +675,7 @@ pub struct BrowserBridgeCommandIssueRequest {
     pub exchange: BrowserBridgeExchange,
     pub command_artifact: SecretValue,
     pub runtime_state: Option<BrowserBridgeRuntimeStateIssue>,
+    pub workflow_context: Option<BrowserBridgeWorkflowContextIssue>,
     pub access: SecretAccess,
 }
 
@@ -667,6 +683,18 @@ pub struct BrowserBridgeCommandIssueRequest {
 pub struct BrowserBridgeRuntimeStateIssue {
     pub metadata: BrowserBridgeRuntimeStateMetadata,
     pub state_artifact: SecretValue,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeWorkflowContextIssue {
+    pub runtime_settings: ResolvedProviderRuntimeSettings,
+    pub workflow_plan: Option<BrowserBridgeWorkflowPlanIssue>,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeWorkflowPlanIssue {
+    pub artifact_type: String,
+    pub artifact: SecretValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

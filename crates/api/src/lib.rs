@@ -4559,6 +4559,7 @@ mod tests {
                 },
                 state_artifact: SecretValue::new(runtime_state.to_vec()),
             }),
+            workflow_context: None,
             access: SecretAccess {
                 actor: SecretActor::CoreService("browser-bridge-api-test"),
                 correlation_id: "browser-bridge-command-issue".to_owned(),

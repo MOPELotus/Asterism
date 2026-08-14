@@ -1155,6 +1155,7 @@ pub struct BrowserBridgeCommandIssueRequest<'a> {
     pub exchange: &'a BrowserBridgeExchange,
     pub command_artifact: SecretValue,
     pub runtime_state: Option<BrowserBridgeRuntimeStateIssue>,
+    pub workflow_context: Option<BrowserBridgeWorkflowContextIssue>,
     pub access: &'a SecretAccess,
 }
 
@@ -1162,6 +1163,18 @@ pub struct BrowserBridgeCommandIssueRequest<'a> {
 pub struct BrowserBridgeRuntimeStateIssue {
     pub metadata: BrowserBridgeRuntimeStateMetadata,
     pub state_artifact: SecretValue,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeWorkflowContextIssue {
+    pub runtime_settings: ResolvedProviderRuntimeSettings,
+    pub workflow_plan: Option<BrowserBridgeWorkflowPlanIssue>,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeWorkflowPlanIssue {
+    pub artifact_type: String,
+    pub artifact: SecretValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1179,12 +1192,26 @@ pub struct ResolvedBrowserBridgeCommand {
     pub exchange: BrowserBridgeExchange,
     pub command_artifact: SecretValue,
     pub runtime_state: Option<ResolvedBrowserBridgeRuntimeState>,
+    pub workflow_context: Option<ResolvedBrowserBridgeWorkflowContext>,
 }
 
 #[derive(Debug)]
 pub struct ResolvedBrowserBridgeRuntimeState {
     pub metadata: BrowserBridgeRuntimeStateMetadata,
     pub state_artifact: SecretValue,
+}
+
+#[derive(Debug)]
+pub struct ResolvedBrowserBridgeWorkflowContext {
+    pub runtime_settings: ResolvedProviderRuntimeSettings,
+    pub workflow_plan: Option<ResolvedBrowserBridgeWorkflowPlan>,
+}
+
+#[derive(Debug)]
+pub struct ResolvedBrowserBridgeWorkflowPlan {
+    pub artifact_type: String,
+    pub artifact_digest: [u8; 32],
+    pub artifact: SecretValue,
 }
 
 #[derive(Debug)]

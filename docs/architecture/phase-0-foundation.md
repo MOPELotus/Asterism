@@ -3881,3 +3881,20 @@ results, preventing a successful final-budget callback from later being
 recovered as dead letter. The worker claim is cleared only inside the successful
 transition transaction; a wrong or expired claim leaves the exchange, next
 command and session untouched.
+
+## Two-hundred-and-fifteenth Phase 0 slice
+
+The first command of a multi-step BrowserBridge workflow can now freeze a
+session-level recovery context in the same transaction as command issuance.
+The context contains canonical serialized runtime settings plus an optional
+bounded Provider-private plan. Settings are digest-bound; plan bytes are stored
+as an encrypted secret with an exact type and digest. A duplicate first issue
+must reproduce the same command, runtime sidecar and workflow-context metadata
+or it is a sequence conflict.
+
+Every later command recovery resolves the immutable context through the same
+owner/account/Task/Provider-scoped secret boundary. Changed settings JSON,
+changed plan ciphertext, missing plan metadata or a foreign secret owner fails
+closed. This gives a daemon result processor the exact creation-time settings
+and Provider plan after restart instead of re-resolving mutable settings or
+asking the helper to echo workflow authority.
