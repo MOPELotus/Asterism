@@ -135,6 +135,18 @@ The command/result JSON, token, `login_info`, optional `user_session` and
 validated `CidarenCaptureSnapshot` remain outside Domain storage and are
 zeroized/committed through the existing Capture credential path.
 
+`CidarenBrowserBridge::capture_snapshot_exchange` is the immutable Provider
+adapter to that ledger. It derives `session_nonce` from the exact
+`BrowserBridgeSessionId`, converts only a positive Provider-bounded sequence,
+and constructs the issued record from the validated command rather than
+accepting caller-supplied type or digest metadata. The matching
+`complete_capture_snapshot_exchange` repeats the fresh Task and policy check,
+parses the typed result, hashes that exact bounded document and returns a
+terminal copy of the same exchange. The zeroizing snapshot stays separate for
+Capture credential commit. This closes command/record mismatch inside the
+Provider, but does not claim that the shared helper can yet dispatch the JSON
+or commit its returned credential material.
+
 The Core adapter resolves either one exact manual or token-only Capture
 `ProviderAccessToken`, or an exact two-record Composite binding containing
 `ProviderAccessToken` plus `ProviderCompositeSession`. Every record must match

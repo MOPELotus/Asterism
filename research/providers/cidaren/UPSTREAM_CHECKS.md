@@ -216,6 +216,30 @@ validation/commit. No donor protocol delta entered this checkpoint. The
 Provider suite remained at 114 passing tests with all-target clippy and scoped
 diff checks clean.
 
+### 2026-08-14 durable Capture exchange adapter checkpoint
+
+The new-day pre-implementation check resolved `MOPELotus/HEAD` and `master` to
+`a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`, `ularch/HEAD` and `master` to
+`bce9559f536ebbdad791f41ed4e111b30accb05d`, and historical
+`github123666/main` to `1409858800f3c4bd27577a08049bf1f8d17a069c`.
+The latest public tag remained
+`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`; no default branch, tag or
+release delta entered the checkpoint. Fresh temporary source-tree audits of
+both current donors found the same account, class/study inventory,
+word-evidence, five assessment mutation, task-score and Capture call sites
+already recorded in the capability map.
+
+Core's durable BrowserBridge exchange ledger was then integrated at the
+Provider edge without persisting a Cidaren payload. The Provider now returns
+an immutable typed-command/issued-record pair whose nonce is derived from the
+exact Core session ID and whose type, digest and bounded sequence cannot be
+assembled independently. Result completion repeats fresh Task rebinding,
+validates the exact typed result and returns its zeroizing Capture snapshot
+separately from terminal hash metadata. Public helper payload dispatch and
+Capture credential commit remain Main-owned shared gaps, not dropped donor
+abilities. The Provider suite reached 116 passing tests with all-target
+clippy clean.
+
 ## Check procedure
 
 For the next checkpoint:

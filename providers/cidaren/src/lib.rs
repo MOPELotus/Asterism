@@ -70,7 +70,9 @@ pub use authentication::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenSessionResolver,
     CidarenTokenSession, classify_token_validation_response,
 };
-pub use browser_bridge::CidarenBrowserBridge;
+pub use browser_bridge::{
+    CidarenBrowserBridge, CidarenCaptureExchangeCompleted, CidarenCaptureExchangeIssued,
+};
 pub use browser_protocol::{
     CIDAREN_CAPTURE_COMMAND_TYPE, CIDAREN_CAPTURE_RESULT_TYPE, CidarenBrowserCommand,
     CidarenBrowserCommandEnvelope, CidarenBrowserEvent, CidarenBrowserEventEnvelope,

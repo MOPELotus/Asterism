@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::TaskCapability;
+use asterism_domain::{BrowserBridgeExchange, BrowserBridgeSessionId, TaskCapability, Timestamp};
 use asterism_provider_api::{
     BrowserBridgeCapability, BrowserSessionSpec, ProviderContext, ProviderError, ProviderErrorKind,
     ProviderIdentity, ProviderMetadata, ProviderResult, TaskDetailCapability,
@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CidarenBrowserCommandEnvelope, CidarenCaptureMode, CidarenCaptureSnapshot,
-    metadata::development_metadata, parse_browser_event,
+    browser_event_exchange_digest, metadata::development_metadata, parse_browser_event,
 };
 
 const CIDAREN_ORIGIN: &str = "https://app.vocabgo.com";
@@ -24,6 +24,48 @@ const MAX_REMOTE_COMPONENT_BYTES: usize = 256;
 pub struct CidarenBrowserBridge {
     metadata: ProviderMetadata,
     details: Arc<dyn TaskDetailCapability>,
+}
+
+/// One immutable Provider command paired with Core's durable issued metadata.
+///
+/// The command contains no captured credential material. Its fields stay
+/// private so callers cannot accidentally persist a digest for a different
+/// command than the one dispatched to the helper.
+#[derive(Debug)]
+pub struct CidarenCaptureExchangeIssued {
+    command: CidarenBrowserCommandEnvelope,
+    exchange: BrowserBridgeExchange,
+}
+
+impl CidarenCaptureExchangeIssued {
+    pub const fn command(&self) -> &CidarenBrowserCommandEnvelope {
+        &self.command
+    }
+
+    pub const fn exchange(&self) -> &BrowserBridgeExchange {
+        &self.exchange
+    }
+}
+
+/// One Provider-validated Capture snapshot and its terminal Core metadata.
+#[derive(Debug)]
+pub struct CidarenCaptureExchangeCompleted {
+    snapshot: CidarenCaptureSnapshot,
+    exchange: BrowserBridgeExchange,
+}
+
+impl CidarenCaptureExchangeCompleted {
+    pub const fn snapshot(&self) -> &CidarenCaptureSnapshot {
+        &self.snapshot
+    }
+
+    pub const fn exchange(&self) -> &BrowserBridgeExchange {
+        &self.exchange
+    }
+
+    pub fn into_snapshot(self) -> CidarenCaptureSnapshot {
+        self.snapshot
+    }
 }
 
 impl CidarenBrowserBridge {
@@ -75,6 +117,64 @@ impl CidarenBrowserBridge {
         )
     }
 
+    /// Builds one typed command together with the exact metadata Core must
+    /// durably issue before dispatch.
+    ///
+    /// The durable session identifier is also the command's opaque session
+    /// nonce. This prevents a caller from accidentally recording one session
+    /// while dispatching a command bound to another.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when fresh Task rebinding fails, the Provider
+    /// sequence exceeds its bounded wire representation, or Core exchange
+    /// metadata cannot represent the validated command.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Core session, Task, frame, sequence, recipe and issue time are independent bindings"
+    )]
+    pub async fn capture_snapshot_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        session_id: BrowserBridgeSessionId,
+        frame_id: String,
+        sequence: u64,
+        mode: CidarenCaptureMode,
+        issued_at: Timestamp,
+    ) -> ProviderResult<CidarenCaptureExchangeIssued> {
+        let provider_sequence = u32::try_from(sequence).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Cidaren BrowserBridge sequence exceeds the Provider boundary",
+            )
+        })?;
+        let command = self
+            .capture_snapshot_command(
+                context,
+                remote_task_id,
+                session_id.to_string(),
+                frame_id,
+                provider_sequence,
+                mode,
+            )
+            .await?;
+        let exchange = BrowserBridgeExchange::issue(
+            session_id,
+            sequence,
+            CidarenBrowserCommandEnvelope::exchange_type().to_owned(),
+            command.exchange_digest()?,
+            issued_at,
+        )
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Cidaren command cannot be represented by the durable BrowserBridge exchange",
+            )
+        })?;
+        Ok(CidarenCaptureExchangeIssued { command, exchange })
+    }
+
     /// Freshly rebinds a Task and parses one typed Capture result.
     ///
     /// Core still owns durable command issuance, sequence consumption and
@@ -106,6 +206,51 @@ impl CidarenBrowserBridge {
         }
         let event = parse_browser_event(document, command, observed_origin)?;
         event.into_capture_snapshot(command, observed_origin)
+    }
+
+    /// Freshly validates one helper result and attaches its digest to the
+    /// immutable issued exchange metadata.
+    ///
+    /// The returned snapshot remains Provider-private and zeroizing. Only the
+    /// completed exchange metadata is suitable for Core persistence; callers
+    /// must commit the snapshot through the separate Capture credential path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when fresh Task rebinding fails, the result is
+    /// foreign or malformed, or its completion time regresses.
+    pub async fn complete_capture_snapshot_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        issued: &CidarenCaptureExchangeIssued,
+        document: &str,
+        observed_origin: &str,
+        completed_at: Timestamp,
+    ) -> ProviderResult<CidarenCaptureExchangeCompleted> {
+        let snapshot = self
+            .parse_capture_snapshot_result(
+                context,
+                remote_task_id,
+                issued.command(),
+                document,
+                observed_origin,
+            )
+            .await?;
+        let mut exchange = issued.exchange().clone();
+        exchange
+            .complete(
+                crate::CidarenBrowserEventEnvelope::exchange_type().to_owned(),
+                browser_event_exchange_digest(document)?,
+                completed_at,
+            )
+            .map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "Cidaren result cannot complete the durable BrowserBridge exchange",
+                )
+            })?;
+        Ok(CidarenCaptureExchangeCompleted { snapshot, exchange })
     }
 }
 
@@ -217,9 +362,11 @@ fn valid_component(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use asterism_domain::{
-        AssessmentClass, ProviderAccountId, ProviderId, RemoteState, SecretId, SourceType,
+        AssessmentClass, BrowserBridgeExchangeState, ProviderAccountId, ProviderId, RemoteState,
+        SecretId, SourceType,
     };
     use asterism_provider_api::{RemoteTask, RemoteTaskDetail};
+    use chrono::{Duration, Utc};
 
     use super::*;
 
@@ -422,6 +569,124 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_capture_exchange_freezes_core_metadata_and_validated_result() {
+        let capability = bridge(true);
+        let session_id = BrowserBridgeSessionId::new();
+        let issued_at = Utc::now();
+        let issued = capability
+            .capture_snapshot_exchange(
+                &context(),
+                "class-task:2002",
+                session_id,
+                "frame-1".to_owned(),
+                1,
+                CidarenCaptureMode::TokenOnly,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(issued.command().session_nonce, session_id.to_string());
+        assert_eq!(issued.exchange().session_id, session_id);
+        assert_eq!(issued.exchange().sequence, 1);
+        assert_eq!(
+            issued.exchange().command_type,
+            CidarenBrowserCommandEnvelope::exchange_type()
+        );
+        assert_eq!(
+            issued.exchange().command_digest,
+            issued.command().exchange_digest().unwrap()
+        );
+        assert_eq!(issued.exchange().state, BrowserBridgeExchangeState::Issued);
+
+        let document = include_str!(
+            "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
+        )
+        .replace("synthetic-session-nonce", &session_id.to_string());
+        let completed = capability
+            .complete_capture_snapshot_exchange(
+                &context(),
+                "class-task:2002",
+                &issued,
+                &document,
+                CIDAREN_ORIGIN,
+                issued_at + Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.snapshot().user_token(),
+            Some("synthetic-user-token")
+        );
+        assert_eq!(
+            completed.exchange().state,
+            BrowserBridgeExchangeState::Completed
+        );
+        assert_eq!(
+            completed.exchange().result_digest,
+            Some(browser_event_exchange_digest(&document).unwrap())
+        );
+        assert_eq!(
+            completed.exchange().result_type.as_deref(),
+            Some(crate::CidarenBrowserEventEnvelope::exchange_type())
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_capture_exchange_rejects_unrepresentable_sequence_and_regressing_result() {
+        let capability = bridge(true);
+        let issued_at = Utc::now();
+        assert_eq!(
+            capability
+                .capture_snapshot_exchange(
+                    &context(),
+                    "class-task:2002",
+                    BrowserBridgeSessionId::new(),
+                    "frame-1".to_owned(),
+                    u64::from(u32::MAX) + 1,
+                    CidarenCaptureMode::TokenOnly,
+                    issued_at,
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::InvalidResponse
+        );
+
+        let session_id = BrowserBridgeSessionId::new();
+        let issued = capability
+            .capture_snapshot_exchange(
+                &context(),
+                "class-task:2002",
+                session_id,
+                "frame-1".to_owned(),
+                1,
+                CidarenCaptureMode::TokenOnly,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let document = include_str!(
+            "../../../fixtures/providers/cidaren/browser/capture-snapshot-token-only.json"
+        )
+        .replace("synthetic-session-nonce", &session_id.to_string());
+        assert_eq!(
+            capability
+                .complete_capture_snapshot_exchange(
+                    &context(),
+                    "class-task:2002",
+                    &issued,
+                    &document,
+                    CIDAREN_ORIGIN,
+                    issued_at - Duration::seconds(1),
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::Internal
         );
     }
 
