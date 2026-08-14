@@ -130,6 +130,12 @@ All four remote HEADs and tag sets were checked once more after binding Core
 result-inbox metadata to the consuming UAI owners on 2026-08-14; they remained
 unchanged.
 
+The same four default branches and complete tag refs were refreshed at the
+credential-free Course child-plan checkpoint on 2026-08-14. Apache
+`bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and current Rust
+`40ead69c7dabf` remained unchanged, so no incremental donor protocol or
+capability delta was present.
+
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
 `https://ucontent.unipus.cn/_explorationpc_default/pc.html` as the browser

@@ -1,10 +1,11 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
 use asterism_domain::TaskCapability;
 use asterism_provider_api::{
     ProviderError, ProviderErrorKind, ProviderResult, RemoteCourse, RemoteTask,
     ResolvedProviderRuntimeSettings,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -14,6 +15,8 @@ use crate::{
 };
 
 const UAI_COURSE_RESIDENCE_BATCH_VERSION: u32 = 1;
+const UAI_COURSE_RESIDENCE_CHILD_PLAN_VERSION: u16 = 1;
+const MAX_CHILD_PLAN_BYTES: usize = 1_048_576;
 const MIN_RESIDENCE_SECONDS: u64 = 60;
 const MAX_RESIDENCE_SECONDS: u64 = 28_800;
 const MAX_BATCH_MICROS: usize = 2_048;
@@ -40,6 +43,225 @@ pub struct UaiCourseResidenceBatchPlan {
     start: UaiCourseResidenceRestartTarget,
     membership_digest: [u8; 32],
     plan_digest: [u8; 32],
+}
+
+/// Credential-free Provider-private value that freezes one recoverable Course
+/// batch start.
+///
+/// Core may persist these bounded JSON bytes without interpreting them. The
+/// caller supplies the opaque digest of the resolved settings/profile owner;
+/// UAI does not guess Core's profile naming or revision scheme.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UaiCourseResidenceChildPlan {
+    version: u16,
+    provider_plan_version: u32,
+    course_remote_id: String,
+    course_publish_version: Option<u64>,
+    runtime_profile_digest: [u8; 32],
+    owner_remote_task_id: String,
+    ordered_tasks: Vec<UaiCourseResidenceChildTask>,
+    start_ordinal: u32,
+    start_micro_identity_digest: [u8; 32],
+    batch_membership_digest: [u8; 32],
+    batch_plan_digest: [u8; 32],
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UaiCourseResidenceChildTask {
+    remote_task_id: String,
+    fingerprint: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UaiCourseResidenceChildPlanWire {
+    version: u16,
+    provider_plan_version: u32,
+    course_remote_id: String,
+    course_publish_version: Option<u64>,
+    runtime_profile_digest: [u8; 32],
+    owner_remote_task_id: String,
+    ordered_tasks: Vec<UaiCourseResidenceChildTask>,
+    start_ordinal: u32,
+    start_micro_identity_digest: [u8; 32],
+    batch_membership_digest: [u8; 32],
+    batch_plan_digest: [u8; 32],
+}
+
+impl<'de> Deserialize<'de> for UaiCourseResidenceChildPlan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = UaiCourseResidenceChildPlanWire::deserialize(deserializer)?;
+        let plan = Self {
+            version: wire.version,
+            provider_plan_version: wire.provider_plan_version,
+            course_remote_id: wire.course_remote_id,
+            course_publish_version: wire.course_publish_version,
+            runtime_profile_digest: wire.runtime_profile_digest,
+            owner_remote_task_id: wire.owner_remote_task_id,
+            ordered_tasks: wire.ordered_tasks,
+            start_ordinal: wire.start_ordinal,
+            start_micro_identity_digest: wire.start_micro_identity_digest,
+            batch_membership_digest: wire.batch_membership_digest,
+            batch_plan_digest: wire.batch_plan_digest,
+        };
+        plan.validate().map_err(serde::de::Error::custom)?;
+        Ok(plan)
+    }
+}
+
+impl fmt::Debug for UaiCourseResidenceChildPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiCourseResidenceChildPlan")
+            .field("version", &self.version)
+            .field("provider_plan_version", &self.provider_plan_version)
+            .field("course_remote_id", &"[REDACTED]")
+            .field("runtime_profile_digest", &"[REDACTED]")
+            .field("owner_remote_task_id", &"[REDACTED]")
+            .field("ordered_task_count", &self.ordered_tasks.len())
+            .field("ordered_tasks", &"[REDACTED]")
+            .field("start_ordinal", &self.start_ordinal)
+            .field("batch_digests", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl UaiCourseResidenceChildPlan {
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    pub const fn provider_plan_version(&self) -> u32 {
+        self.provider_plan_version
+    }
+
+    pub fn course_remote_id(&self) -> &str {
+        &self.course_remote_id
+    }
+
+    pub fn owner_remote_task_id(&self) -> &str {
+        &self.owner_remote_task_id
+    }
+
+    pub const fn start_ordinal(&self) -> u32 {
+        self.start_ordinal
+    }
+
+    pub const fn runtime_profile_digest(&self) -> [u8; 32] {
+        self.runtime_profile_digest
+    }
+
+    /// Encodes the fully revalidated value under a fixed Provider bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for invariant, encoding or size drift.
+    pub fn encode(&self) -> ProviderResult<Vec<u8>> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(self).map_err(|_| invalid_child_plan())?;
+        if encoded.is_empty() || encoded.len() > MAX_CHILD_PLAN_BYTES {
+            return Err(invalid_child_plan());
+        }
+        Ok(encoded)
+    }
+
+    /// Decodes strict JSON and revalidates every self-contained field.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for an oversized, unknown or invalid value.
+    pub fn decode(encoded: &[u8]) -> ProviderResult<Self> {
+        if encoded.is_empty() || encoded.len() > MAX_CHILD_PLAN_BYTES {
+            return Err(invalid_child_plan());
+        }
+        serde_json::from_slice(encoded).map_err(|_| invalid_child_plan())
+    }
+
+    /// Rebuilds the exact batch/cursor start from fresh inventory and settings.
+    ///
+    /// The returned batch is suitable for the subsequent fresh Browser plan,
+    /// sequence-one `ScanMenu` command and `UaiBrowserResidenceCursor::begin`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RemoteChanged` when Course identity, ordered Task identities or
+    /// fingerprints, settings/profile identity, start authority or batch
+    /// digests no longer reproduce this frozen value.
+    pub fn rebuild_batch_for_cursor(
+        &self,
+        course: &RemoteCourse,
+        tasks: &[RemoteTask],
+        settings: &ResolvedProviderRuntimeSettings,
+        runtime_profile_digest: [u8; 32],
+    ) -> ProviderResult<UaiCourseResidenceBatchPlan> {
+        self.validate()?;
+        let rebuilt = build_course_residence_child_plan(
+            course,
+            tasks,
+            settings,
+            runtime_profile_digest,
+            &self.owner_remote_task_id,
+            self.start_ordinal,
+        )?;
+        if &rebuilt != self {
+            return Err(stale_child_plan());
+        }
+        build_course_residence_batch_plan(course, tasks, settings, self.start_ordinal)
+    }
+
+    /// Decodes and freshly rebinds one durable child value in one operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for invalid bytes or `RemoteChanged` when the
+    /// fresh inventory/settings no longer reproduce the value.
+    pub fn decode_bound(
+        encoded: &[u8],
+        course: &RemoteCourse,
+        tasks: &[RemoteTask],
+        settings: &ResolvedProviderRuntimeSettings,
+        runtime_profile_digest: [u8; 32],
+    ) -> ProviderResult<(Self, UaiCourseResidenceBatchPlan)> {
+        let plan = Self::decode(encoded)?;
+        let batch =
+            plan.rebuild_batch_for_cursor(course, tasks, settings, runtime_profile_digest)?;
+        Ok((plan, batch))
+    }
+
+    fn validate(&self) -> ProviderResult<()> {
+        if self.version != UAI_COURSE_RESIDENCE_CHILD_PLAN_VERSION
+            || self.provider_plan_version != UAI_COURSE_RESIDENCE_BATCH_VERSION
+            || !valid_text(&self.course_remote_id, MAX_TITLE_BYTES)
+            || !valid_text(&self.owner_remote_task_id, MAX_TITLE_BYTES)
+            || self.runtime_profile_digest == [0; 32]
+            || self.start_micro_identity_digest == [0; 32]
+            || self.batch_membership_digest == [0; 32]
+            || self.batch_plan_digest == [0; 32]
+            || self.ordered_tasks.is_empty()
+            || self.ordered_tasks.len() > MAX_BATCH_TASKS
+            || self.start_ordinal as usize >= MAX_BATCH_MICROS
+        {
+            return Err(invalid_child_plan());
+        }
+        let mut task_ids = BTreeSet::new();
+        for task in &self.ordered_tasks {
+            if !valid_text(&task.remote_task_id, MAX_TITLE_BYTES)
+                || !valid_task_fingerprint(&task.fingerprint)
+                || !task_ids.insert(task.remote_task_id.as_str())
+            {
+                return Err(invalid_child_plan());
+            }
+        }
+        if !task_ids.contains(self.owner_remote_task_id.as_str()) {
+            return Err(invalid_child_plan());
+        }
+        Ok(())
+    }
 }
 
 impl UaiCourseResidenceBatchPlan {
@@ -427,6 +649,78 @@ pub fn build_course_residence_batch_plan(
     Ok(plan)
 }
 
+/// Freezes one credential-free durable child value around a validated Course
+/// batch and an explicit Core-owned runtime settings/profile identity.
+///
+/// The owner Task must be one of the exact ordered Groups under the selected
+/// start Micro so a fresh Browser plan can reproduce the cursor's first menu
+/// target without guessing another child.
+///
+/// # Errors
+///
+/// Returns a typed error for malformed fingerprints, a zero profile digest or
+/// an owner Task that is foreign to the selected start Micro.
+pub fn build_course_residence_child_plan(
+    course: &RemoteCourse,
+    tasks: &[RemoteTask],
+    settings: &ResolvedProviderRuntimeSettings,
+    runtime_profile_digest: [u8; 32],
+    owner_remote_task_id: &str,
+    start_ordinal: u32,
+) -> ProviderResult<UaiCourseResidenceChildPlan> {
+    if runtime_profile_digest == [0; 32] {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "UAI Course residence child plan requires an explicit runtime profile identity",
+        ));
+    }
+    let batch = build_course_residence_batch_plan(course, tasks, settings, start_ordinal)?;
+    let start_micro = batch
+        .micros()
+        .get(start_ordinal as usize)
+        .ok_or_else(invalid_child_plan)?;
+    if !start_micro
+        .tasks()
+        .iter()
+        .any(|task| task.remote_task_id() == owner_remote_task_id)
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "UAI Course residence child owner is foreign to the selected start Micro",
+        ));
+    }
+    let ordered_tasks = tasks
+        .iter()
+        .map(|task| {
+            if !valid_task_fingerprint(&task.fingerprint) {
+                return Err(protocol_drift(
+                    "UAI Course residence Task fingerprint is malformed",
+                ));
+            }
+            Ok(UaiCourseResidenceChildTask {
+                remote_task_id: task.remote_id.clone(),
+                fingerprint: task.fingerprint.clone(),
+            })
+        })
+        .collect::<ProviderResult<Vec<_>>>()?;
+    let plan = UaiCourseResidenceChildPlan {
+        version: UAI_COURSE_RESIDENCE_CHILD_PLAN_VERSION,
+        provider_plan_version: batch.version(),
+        course_remote_id: batch.course_remote_id().to_owned(),
+        course_publish_version: batch.course_publish_version(),
+        runtime_profile_digest,
+        owner_remote_task_id: owner_remote_task_id.to_owned(),
+        ordered_tasks,
+        start_ordinal,
+        start_micro_identity_digest: start_micro.identity_digest(),
+        batch_membership_digest: batch.membership_digest(),
+        batch_plan_digest: batch.plan_digest(),
+    };
+    plan.validate()?;
+    plan.encode()?;
+    Ok(plan)
+}
+
 struct CourseMembership {
     course_remote_id: String,
     course_publish_version: Option<u64>,
@@ -716,10 +1010,32 @@ fn valid_text(value: &str, max_bytes: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+fn valid_task_fingerprint(value: &str) -> bool {
+    value.len() == 67
+        && value.starts_with("v1:")
+        && value[3..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn invalid_plan() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
         "UAI Course residence batch plan is internally inconsistent",
+    )
+}
+
+fn invalid_child_plan() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "UAI Course residence child plan is invalid or internally inconsistent",
+    )
+}
+
+fn stale_child_plan() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::RemoteChanged,
+        "UAI Course residence child plan no longer matches fresh inventory or settings",
     )
 }
 
@@ -879,6 +1195,161 @@ mod tests {
             share
                 .rounded_leaf_seconds(1, MAX_TASKS_PER_TAB + 1)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn child_plan_round_trips_and_rebuilds_exact_cursor_start() {
+        let (course, tasks) = inventory();
+        let settings = browser_settings(1_200, true);
+        let owner = tasks[1].remote_id.as_str();
+        let profile_digest = [7; 32];
+        let child =
+            build_course_residence_child_plan(&course, &tasks, &settings, profile_digest, owner, 1)
+                .unwrap();
+        let encoded = child.encode().unwrap();
+        let (restored, batch) = UaiCourseResidenceChildPlan::decode_bound(
+            &encoded,
+            &course,
+            &tasks,
+            &settings,
+            profile_digest,
+        )
+        .unwrap();
+
+        assert_eq!(restored, child);
+        assert_eq!(restored.version(), 1);
+        assert_eq!(restored.provider_plan_version(), batch.version());
+        assert_eq!(restored.course_remote_id(), course.remote_id);
+        assert_eq!(restored.owner_remote_task_id(), owner);
+        assert_eq!(restored.start_ordinal(), 1);
+        assert_eq!(restored.runtime_profile_digest(), profile_digest);
+        assert_eq!(batch.start().ordinal(), restored.start_ordinal());
+        assert!(
+            batch.selected_micros()[0]
+                .tasks()
+                .iter()
+                .any(|task| task.remote_task_id() == restored.owner_remote_task_id())
+        );
+
+        let debug = format!("{restored:?}");
+        assert!(!debug.contains(&course.remote_id));
+        assert!(!debug.contains(owner));
+        assert!(!debug.contains(&tasks[0].fingerprint));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn child_plan_fails_closed_on_foreign_reordered_or_stale_inputs() {
+        let (course, tasks) = inventory();
+        let settings = browser_settings(1_200, false);
+        let owner = tasks[1].remote_id.as_str();
+        let child =
+            build_course_residence_child_plan(&course, &tasks, &settings, [8; 32], owner, 1)
+                .unwrap();
+        let encoded = child.encode().unwrap();
+
+        let mut fingerprint_changed = tasks.clone();
+        fingerprint_changed[0].fingerprint = format!("v1:{}", "a".repeat(64));
+        assert_eq!(
+            UaiCourseResidenceChildPlan::decode_bound(
+                &encoded,
+                &course,
+                &fingerprint_changed,
+                &settings,
+                [8; 32],
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+
+        let mut reordered = tasks.clone();
+        reordered.swap(1, 2);
+        assert!(
+            UaiCourseResidenceChildPlan::decode_bound(
+                &encoded, &course, &reordered, &settings, [8; 32],
+            )
+            .is_err()
+        );
+        let mut foreign_course = course.clone();
+        foreign_course.remote_id = "foreign-course".to_owned();
+        assert!(
+            UaiCourseResidenceChildPlan::decode_bound(
+                &encoded,
+                &foreign_course,
+                &tasks,
+                &settings,
+                [8; 32],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            UaiCourseResidenceChildPlan::decode_bound(
+                &encoded, &course, &tasks, &settings, [9; 32],
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            UaiCourseResidenceChildPlan::decode_bound(
+                &encoded,
+                &course,
+                &tasks,
+                &browser_settings(1_260, false),
+                [8; 32],
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[test]
+    fn child_plan_rejects_schema_drift_and_foreign_start_owner() {
+        let (course, tasks) = inventory();
+        let settings = browser_settings(1_200, true);
+        assert!(
+            build_course_residence_child_plan(
+                &course,
+                &tasks,
+                &settings,
+                [5; 32],
+                &tasks[0].remote_id,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            build_course_residence_child_plan(
+                &course,
+                &tasks,
+                &settings,
+                [0; 32],
+                &tasks[1].remote_id,
+                1,
+            )
+            .is_err()
+        );
+
+        let child = build_course_residence_child_plan(
+            &course,
+            &tasks,
+            &settings,
+            [5; 32],
+            &tasks[1].remote_id,
+            1,
+        )
+        .unwrap();
+        let mut value: Value = serde_json::from_slice(&child.encode().unwrap()).unwrap();
+        value["unknown"] = serde_json::json!(true);
+        assert!(UaiCourseResidenceChildPlan::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        value.as_object_mut().unwrap().remove("unknown");
+        value["provider_plan_version"] = serde_json::json!(99);
+        assert!(UaiCourseResidenceChildPlan::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        assert!(
+            UaiCourseResidenceChildPlan::decode(&vec![b' '; MAX_CHILD_PLAN_BYTES + 1]).is_err()
         );
     }
 

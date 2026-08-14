@@ -1701,6 +1701,7 @@ mod tests {
             capability_step_position: 1,
             requested_capabilities,
             runtime_settings: runtime_settings_schema().resolve(None, None, None).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 }

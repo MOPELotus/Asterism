@@ -318,14 +318,24 @@ same plan, binding both ordinal and Micro digest, and changes only start and
 plan digest while retaining the full membership digest and total budget.
 Fresh membership validation deliberately ignores progress/completion changes
 but rejects Course, publish-version, hierarchy, label, Group shape or order
-drift. The Provider's version-4 accumulated cursor can now move into a
-bounded, zeroizing `SecretValue` artifact with a stable SHA-256 digest. On
+drift. A separate Provider-private child-plan value freezes child and batch
+plan versions, Course identity/publish version, an explicit caller-supplied
+runtime settings/profile digest, one owner Task inside the selected start
+Micro, the complete ordered Task identity/fingerprint sequence and all
+membership/start/plan digests. Its strict JSON is bounded to 1 MiB, rejects
+unknown fields, revalidates during deserialization and redacts identities and
+fingerprints from Debug. Recovery reconstructs the batch from fresh
+Course/Task/settings inputs and compares the complete typed value; foreign or
+reordered inventory, a changed Task fingerprint, stale settings or another
+profile digest fails closed before cursor construction. The Provider does not
+guess Core profile IDs or revisions. The Provider's version-4 accumulated
+cursor can now move into a bounded, zeroizing `SecretValue` artifact with a
+stable SHA-256 digest. On
 recovery it rebinds the full batch membership and restart-sensitive plan
 digests, the exact serialized Browser residence plan and the exact next
 command, while strict decoding rejects unknown fields and malformed or
-oversized bytes. Core still needs a durable Course batch owner, encrypted
-artifact persistence wiring and the shared executor before this plan is
-executable.
+oversized bytes. Core still needs to persist/index the credential-free child
+value and connect it to the shared executor before this plan is executable.
 
 The donor's `ipub` iframe side alone receives wildcard `UAI_CMD`
 `SCAN`/`CLICK`/`PING`; the `ucontent` top page consumes its menu/click/PONG
@@ -444,9 +454,11 @@ recovery rejects a missing/foreign state type, changed command or cursor bytes,
 or any session/sequence/time mismatch before fresh Provider reads; it then
 performs the existing command-first, cursor-second fresh rebind. The sidecar is
 never dispatched to the helper. It stores the accumulated cursor, not the
-complete immutable Course batch: Core still needs the frozen start authority,
-resolved settings and complete fresh ordered Course/Task inventory required to
-rebuild the same `UaiCourseResidenceBatchPlan` before Provider recovery.
+complete immutable Course batch. The bounded child-plan value now owns the
+frozen start/settings-profile/ordered-fingerprint authority; Core must persist
+that value and still supply complete fresh ordered Course/Task inventory plus
+the same resolved settings/profile digest to rebuild the exact
+`UaiCourseResidenceBatchPlan` before Provider recovery.
 
 The first cursor transition is now executable at the Provider boundary. A
 completed `ScanMenu` exchange must retain the same Core session, sequence,
