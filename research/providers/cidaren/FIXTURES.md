@@ -156,6 +156,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Typed Capture command recovery owns serialized command bytes in a zeroizing
   SecretValue artifact and rejects digest, BrowserSession, Task, sequence or
   recipe drift before any helper result can be accepted.
+  A recovered-exchange fixture drops the in-memory issued wrapper, resolves
+  only the encrypted artifact plus persisted exchange, rejects a foreign
+  recipe and then completes the exact Composite result through fresh rebinding.
 - Class-task pagination is complete and total-consistent before normalization.
 - Course identity is `course:{course_id}` and duplicate rows must agree.
 - Task identity is `class-task:{release_id}` even when `task_id == -1`.

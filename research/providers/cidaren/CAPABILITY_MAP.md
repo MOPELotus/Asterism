@@ -184,6 +184,10 @@ The current checkpoint (not a completion boundary):
     helper-echoed result fields never reconstruct command authority. Issued
     and completed wrappers expose consuming all-or-nothing ownership handoffs,
     keeping command/artifact/exchange and snapshot/exchange paired.
+39. completes Capture results from a Core-resolved encrypted command artifact
+    after process recovery. The Provider first validates the persisted Issued
+    exchange, decodes and rebinds command authority, then runs the same fresh
+    Task/result parser; a helper-selected recipe is rejected before acceptance.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

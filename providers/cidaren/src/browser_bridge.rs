@@ -1,10 +1,14 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{BrowserBridgeExchange, BrowserBridgeSessionId, TaskCapability, Timestamp};
+use asterism_domain::{
+    BrowserBridgeExchange, BrowserBridgeExchangeState, BrowserBridgeSessionId, TaskCapability,
+    Timestamp,
+};
 use asterism_provider_api::{
     BrowserBridgeCapability, BrowserSessionSpec, ProviderContext, ProviderError, ProviderErrorKind,
     ProviderIdentity, ProviderMetadata, ProviderResult, TaskDetailCapability,
 };
+use asterism_secrets::SecretValue;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
@@ -278,17 +282,98 @@ impl CidarenBrowserBridge {
         observed_origin: &str,
         completed_at: Timestamp,
     ) -> ProviderResult<CidarenCaptureExchangeCompleted> {
+        self.complete_capture_snapshot_exchange_inner(
+            context,
+            remote_task_id,
+            issued.command(),
+            issued.exchange(),
+            document,
+            observed_origin,
+            completed_at,
+        )
+        .await
+    }
+
+    /// Completes a result after Core resolves the exact encrypted command
+    /// artifact for an issued exchange following process recovery.
+    ///
+    /// The persisted exchange remains the command identity authority. The
+    /// helper result cannot choose its recipe, frame, Task or sequence; those
+    /// values are reconstructed from the digest-bound Provider artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a non-issued/foreign exchange, artifact
+    /// binding drift, stale Task or invalid helper result.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the persisted exchange, encrypted artifact, recipe and result observation are independent recovery bindings"
+    )]
+    pub async fn complete_recovered_capture_snapshot_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        issued_exchange: &BrowserBridgeExchange,
+        command_artifact: &SecretValue,
+        mode: CidarenCaptureMode,
+        document: CidarenBrowserResultDocument,
+        observed_origin: &str,
+        completed_at: Timestamp,
+    ) -> ProviderResult<CidarenCaptureExchangeCompleted> {
+        if issued_exchange.validate().is_err()
+            || issued_exchange.state != BrowserBridgeExchangeState::Issued
+            || issued_exchange.command_type != CidarenBrowserCommandEnvelope::exchange_type()
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "Cidaren recovered Capture exchange is stale or foreign",
+            ));
+        }
+        let command = CidarenBrowserCommandEnvelope::decode_artifact_bound(
+            command_artifact,
+            issued_exchange.command_digest,
+            issued_exchange.session_id,
+            remote_task_id,
+            issued_exchange.sequence,
+            mode,
+        )?;
+        self.complete_capture_snapshot_exchange_inner(
+            context,
+            remote_task_id,
+            &command,
+            issued_exchange,
+            document,
+            observed_origin,
+            completed_at,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the resolved command and its result observation retain independent recovery bindings"
+    )]
+    async fn complete_capture_snapshot_exchange_inner(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        command: &CidarenBrowserCommandEnvelope,
+        issued_exchange: &BrowserBridgeExchange,
+        document: CidarenBrowserResultDocument,
+        observed_origin: &str,
+        completed_at: Timestamp,
+    ) -> ProviderResult<CidarenCaptureExchangeCompleted> {
         let result_digest = document.exchange_digest()?;
         let snapshot = self
             .parse_capture_snapshot_result_inner(
                 context,
                 remote_task_id,
-                issued.command(),
+                command,
                 document.as_str(),
                 observed_origin,
             )
             .await?;
-        let mut exchange = issued.exchange().clone();
+        let mut exchange = issued_exchange.clone();
         exchange
             .complete(
                 crate::CidarenBrowserEventEnvelope::exchange_type().to_owned(),
@@ -710,6 +795,74 @@ mod tests {
             command_artifact.digest()
         );
         assert_eq!(issued_exchange.command_digest, command_artifact.digest());
+    }
+
+    #[tokio::test]
+    async fn recovered_capture_exchange_resolves_command_authority_before_result() {
+        let capability = bridge(true);
+        let context = context();
+        let session_id = BrowserBridgeSessionId::new();
+        let issued_at = Utc::now();
+        let issued = capability
+            .capture_snapshot_exchange(
+                &context,
+                "class-task:2002",
+                session_id,
+                "frame-recovery".to_owned(),
+                3,
+                CidarenCaptureMode::Composite,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let (_, artifact, exchange) = issued.into_parts();
+        let artifact = artifact.into_secret_value();
+        let document = include_str!(
+            "../../../fixtures/providers/cidaren/browser/capture-snapshot-composite.json"
+        )
+        .replace("synthetic-session-nonce", &session_id.to_string())
+        .replace("frame-1", "frame-recovery")
+        .replace("\"reply_to_sequence\": 1", "\"reply_to_sequence\": 3");
+
+        assert_eq!(
+            capability
+                .complete_recovered_capture_snapshot_exchange(
+                    &context,
+                    "class-task:2002",
+                    &exchange,
+                    &artifact,
+                    CidarenCaptureMode::TokenOnly,
+                    CidarenBrowserResultDocument::try_new(document.clone()).unwrap(),
+                    CIDAREN_ORIGIN,
+                    issued_at + Duration::seconds(1),
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+
+        let completed = capability
+            .complete_recovered_capture_snapshot_exchange(
+                &context,
+                "class-task:2002",
+                &exchange,
+                &artifact,
+                CidarenCaptureMode::Composite,
+                CidarenBrowserResultDocument::try_new(document).unwrap(),
+                CIDAREN_ORIGIN,
+                issued_at + Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.exchange().state,
+            BrowserBridgeExchangeState::Completed
+        );
+        assert_eq!(
+            completed.snapshot().login_info_source(),
+            Some(crate::CidarenCaptureStorageSource::LocalStorage)
+        );
     }
 
     #[tokio::test]

@@ -442,7 +442,9 @@ artifact rotations instead of regressing to the first Question. A separate
 durable matching fixture restores the same immutable Draft through two token
 rotations before terminal advance. Provider-side BrowserBridge preparation now
 also freezes a zeroizing command artifact and proves exact recovery rebinding
-without trusting helper echoes. All 146 Cidaren tests, all-target strict clippy,
+without trusting helper echoes. A recovered-result adapter now reconstructs
+command authority from only that encrypted artifact plus the persisted Issued
+exchange before accepting a helper result. All 147 Cidaren tests, all-target strict clippy,
 formatting and scoped diff checks passed against the landed atomic shared
 transition contract. The three symbolic default branches, complete public tag
 refs and latest GitHub release metadata were refreshed again after that fix.

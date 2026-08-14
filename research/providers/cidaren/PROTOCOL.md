@@ -166,6 +166,11 @@ sequence and selected Capture recipe before returning the typed command. The
 issued wrapper can be consumed only into command + artifact + exchange, while
 the completed wrapper yields snapshot + terminal exchange, so future Core
 wiring need not discard durable metadata to obtain helper or credential data.
+`complete_recovered_capture_snapshot_exchange` is the post-crash Provider
+entry: it accepts only a valid Issued exchange, resolves the encrypted command
+against that exchange and Core's selected recipe, then delegates to the same
+fresh Task binding and owned result-document completion path as an in-process
+exchange.
 The high-level Provider adapter accepts the raw result only as an owned,
 bounded `CidarenBrowserResultDocument`. Its contents are unavailable through
 Debug or the public API, and the consumed transport buffer is zeroized after
