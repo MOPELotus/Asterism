@@ -424,14 +424,16 @@ samples and divides the budget.
 Current Fanyuchang also preserves the exact comma-separated Unit input order:
 an explicit `3,1` selection fetches and appends Unit 3 before Unit 1. Empty
 selected Units are skipped after their bounded `scoLeaves` read but remain part
-of the selection attempt. Auto's checkbox UI yields response-order selected
-Units, while YZBRH supports one Unit or response-order all Units. The Provider
-therefore parses a separate bounded `WellearnUnitObservation` inventory and
-`WellearnBatchUnitSelection`; `build_selected_batch_plan` retains explicit
-selection order and selected-but-empty Units while sorting SCOs only within
-each selected Unit's response order. It rebinds every child Unit title, code
-and visibility fact before filtering, rejects cross-Course input and freezes
-the exact parent Course identity in the resulting plan.
+of the selection attempt. Auto's modular checkbox UI yields an arbitrary
+non-empty subset in fresh response order. YZBRH and Auto's single-file UI each
+support exactly one Unit or response-order all Units. The Provider therefore
+parses a separate bounded `WellearnUnitObservation` inventory and
+`WellearnBatchUnitSelection`; `build_selected_batch_plan` validates the exact
+flow-specific selection shape, retains explicit selection order and
+selected-but-empty Units, and sorts SCOs only within each selected Unit's
+response order. It rebinds every child Unit title, code and visibility fact
+before filtering, rejects cross-Course input and freezes the exact parent
+Course identity in the resulting plan.
 
 The same Auto_WeLearn revision also retains the original single-file
 `WeLearn.py` entry point. Its completion route has the same sequential,

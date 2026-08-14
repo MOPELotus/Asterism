@@ -108,6 +108,31 @@ impl WellearnBatchFlow {
             TaskCapability::ResourceExecution
         }
     }
+
+    fn validate_unit_selection(self, selection: &WellearnBatchUnitSelection) -> ProviderResult<()> {
+        let WellearnBatchUnitSelection::Explicit(indices) = selection else {
+            return Ok(());
+        };
+        if matches!(
+            self,
+            Self::YzbrhCompletion | Self::YzbrhDuration | Self::AutoLegacyDuration
+        ) && indices.len() != 1
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "WELearn donor flow accepts one explicit Unit or all Units",
+            ));
+        }
+        if matches!(self, Self::AutoCompletion | Self::AutoDuration)
+            && !indices.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "WELearn Auto Unit selection must preserve fresh response order",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// One frozen child selection. The Core batch layer owns durable child
@@ -192,6 +217,7 @@ pub fn build_selected_batch_plan(
     flow: WellearnBatchFlow,
     auto_duration_minutes: Option<u64>,
 ) -> ProviderResult<WellearnBatchPlan> {
+    flow.validate_unit_selection(&selection)?;
     let selected_units = select_units(units, &selection)?;
     let selected_ordinals = selected_units
         .iter()
@@ -872,6 +898,69 @@ mod tests {
                 WellearnBatchUnitSelection::All,
                 WellearnBatchFlow::FanyuchangCompletion,
                 None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn donor_flows_enforce_their_exact_unit_selection_shapes() {
+        let tasks = pending_tasks();
+        let units = units();
+        for flow in [
+            WellearnBatchFlow::YzbrhCompletion,
+            WellearnBatchFlow::YzbrhDuration,
+            WellearnBatchFlow::AutoLegacyDuration,
+        ] {
+            assert!(
+                build_selected_batch_plan(
+                    &tasks,
+                    &units,
+                    WellearnBatchUnitSelection::Explicit(vec![0, 1]),
+                    flow,
+                    None,
+                )
+                .is_err()
+            );
+            assert!(
+                build_selected_batch_plan(
+                    &tasks,
+                    &units,
+                    WellearnBatchUnitSelection::Explicit(vec![0]),
+                    flow,
+                    None,
+                )
+                .is_ok()
+            );
+        }
+
+        assert!(
+            build_selected_batch_plan(
+                &tasks,
+                &units,
+                WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+                WellearnBatchFlow::AutoCompletion,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            build_selected_batch_plan(
+                &tasks,
+                &units,
+                WellearnBatchUnitSelection::Explicit(vec![0, 1]),
+                WellearnBatchFlow::AutoCompletion,
+                None,
+            )
+            .is_ok()
+        );
+        assert!(
+            build_selected_batch_plan(
+                &tasks,
+                &units,
+                WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+                WellearnBatchFlow::AutoDuration,
+                Some(1),
             )
             .is_err()
         );
