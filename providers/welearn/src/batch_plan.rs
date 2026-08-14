@@ -1143,7 +1143,8 @@ mod tests {
         parse_unit_inventory(UNITS).unwrap()
     }
 
-    fn detail(task: RemoteTask) -> RemoteTaskDetail {
+    fn detail(mut task: RemoteTask) -> RemoteTaskDetail {
+        task.fingerprint = crate::task_inventory::task_fingerprint(&task.normalized).unwrap();
         let normalized = task.normalized.clone();
         RemoteTaskDetail {
             task,

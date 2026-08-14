@@ -406,7 +406,9 @@ The Provider performs a complete fresh TaskDetail rebind before mutation. If
 the public `RemoteTaskDetail.task.normalized` and nested
 `normalized_detail.task` views are not identical, the shared rebind boundary
 fails as `ProtocolDrift`; execution cannot combine capability/state facts from
-one inventory snapshot with route or Unit/SCO facts from another. If
+one inventory snapshot with route or Unit/SCO facts from another. The same
+boundary recomputes the inventory's versioned normalized-Task fingerprint and
+rejects a stale or substituted snapshot before trusting its route facts. If
 the baseline CMI is already Completed with the exact frozen score, it skips all
 mutation and verifies that fact. The exact donor uninitialized marker cannot
 prove that preflight, but zero-time/set-then-save and save-only plans may

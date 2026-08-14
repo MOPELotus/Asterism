@@ -253,7 +253,7 @@ fn parse_leaves(
             due_at: None,
             closes_at: None,
             capabilities,
-            fingerprint: fingerprint(&normalized)?,
+            fingerprint: task_fingerprint(&normalized)?,
             normalized,
             raw_sanitized: serde_json::json!({
                 "schema": "welearn.sco.raw.v2",
@@ -343,7 +343,7 @@ fn sanitized_scalar(value: &Value) -> ProviderResult<Value> {
     }
 }
 
-fn fingerprint(normalized: &Value) -> Result<String, ProviderError> {
+pub(crate) fn task_fingerprint(normalized: &Value) -> Result<String, ProviderError> {
     let bytes = serde_json::to_vec(normalized)
         .map_err(|_| invalid_response("WELearn normalized Task cannot be encoded"))?;
     Ok(format!("v1:{:x}", Sha256::digest(bytes)))

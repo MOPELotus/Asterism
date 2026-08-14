@@ -563,7 +563,7 @@ mod tests {
                         TaskCapability::ExecutionVerify,
                         TaskCapability::DurationReport,
                     ],
-                    fingerprint: "v1:synthetic".to_owned(),
+                    fingerprint: crate::task_inventory::task_fingerprint(&normalized).unwrap(),
                     normalized: normalized.clone(),
                     raw_sanitized: serde_json::json!({"schema": "welearn.sco.raw.v2"}),
                 },

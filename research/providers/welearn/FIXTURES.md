@@ -156,7 +156,9 @@ only structural field names, response codes and bounded placeholder shapes.
   scan payload; malformed or disappeared identities fail closed. Its public
   normalized Task and nested detail Task must remain value-identical;
   mixed injected/restored snapshots fail before execution rebind.
-- Every normalized Task fingerprint uses an explicit version prefix.
+- Every normalized Task fingerprint uses an explicit version prefix and is
+  recomputed at execution rebind; a stale fingerprint cannot authorize changed
+  normalized facts even when the public and nested views agree.
 - Duration reporting preserves completion, progress, score and success status;
   any drift rejects the entire execution outcome.
 - A successful mutation response is insufficient unless fresh CMI changes a raw
