@@ -165,6 +165,17 @@ fixtures/providers/chaoxing/
     list-expired.html
     detail-result.live.html
     detail-result.live.expected.json
+  harvest/
+    completed-chapter-work.live.html
+    completed-chapter-work.live.expected.json
+    completed-work.live.html
+    completed-work.live.expected.json
+    completed-exam.live.html
+    completed-exam.live.expected.json
+    fill-reference-pending.live.html
+    fill-reference-pending.live.expected.json
+    matching-shared-context.live.html
+    matching-shared-context.live.expected.json
 ```
 
 Each fixture requires a sibling expectation file containing normalized remote
@@ -226,3 +237,19 @@ every fixture before staging it.
 - Chapter Work standard-answer evidence must bind to the current Question option
   IDs. A retake's randomized DOM `data` mapping invalidates any earlier mapping;
   parser candidates do not authorize or execute the retake.
+- Historical harvest fixtures must prove that discovery and result reads do not
+  create an attempt. Their expectations keep completion, score, submitted
+  answer, official/reference answer, correctness and retake availability in
+  distinct fields and bind every fact to owner/account/course/task/attempt.
+- Fill/short fixtures must preserve exact standard/reference/pending-manual-grade
+  labels. Until those live shapes exist, result harvesting remains unsupported
+  rather than parsing nearby score or generic answer text.
+- Matching, cloze, reading and shared-option fixtures must retain shared context,
+  option identities and ordered child grading. A flat synthetic string is not a
+  valid substitute for the observed structure.
+- Coverage regression must include a complete snapshot containing an unanswered
+  supported Question, an unsupported observed Question and an unknown type; the
+  denominator is the complete snapshot and no missing value is invented.
+- Retake fixtures must show fresh QIDs/option mappings and separate Chapter
+  `redoTest` from Exam `reTest`; they may not authorize mutation during the
+  read-only bootstrap test path.

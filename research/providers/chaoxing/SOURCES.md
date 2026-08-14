@@ -1,6 +1,6 @@
 # chaoxing upstream sources
 
-Audit date: 2026-08-13
+Audit date: 2026-08-14
 
 This is a static source audit. No donor or Asterism implementation was live-tested
 against a real account during this audit, so every live-validation claim remains
@@ -8,12 +8,12 @@ pending.
 
 | Source | Revision | Updated | Use | Audited implementation surface | Live status |
 |---|---|---|---|---|---|
-| [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `9699e632b492cdc55ea35a1ab05b6dfcbfb7cf70` | 2026-08-14 | Reference | Password and Cookie login, Cookie validation, course/folder inventory, Chapter cards, Video, Document, Live, Chapter Work | Pending |
-| [`surinrasu/CxKitty`](https://github.com/surinrasu/CxKitty) | `1589eac9c07c4bab71f79d762b45210643dd537d` | 2024-09-29 | Reference | Web password/QR login, SSO session validation, mobile course/Chapter APIs, independent Exam inventory, Exam/Chapter Work detail and submission, typed error branches | Pending; protocol age is a risk |
-| [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b36996d27d00577015663ec39e782500` | 2026-06-17 | PortSource | Browser-session Work and Exam inventory/status, submittability classification, result verification, current DOM reliability rules | Donor reports real use; Asterism validation pending |
-| [`ocsjs/ocsjs`](https://github.com/ocsjs/ocsjs) | `890686a5e54f9a6d52d1169bae9ea5971e0863c7` | 2026-07-01 | Reference | Current Work/Exam page route taxonomy, question-page behavior and Browser lifecycle | Pending |
-| [`LangHY/chaoxing-exam`](https://github.com/LangHY/chaoxing-exam) | `14e1dfd9cf11cd54dabb494dd01e318856d9b8d3` | 2026-06-19 | Reference | Chapter-test iframe navigation, current question DOM and post-submit verification pitfalls | Donor reports Chapter-test coverage; Asterism validation pending |
-| [`CodFrm/cxmooc-tools`](https://github.com/CodFrm/cxmooc-tools) | `2b81f7b55a68ea2ceb6ea0312a6791ebf3ed3dc5` | 2021-11-03 | Historical | Older browser routes and Work/Exam question handling | Not current enough for implementation authority |
+| [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `9699e632b492cdc55ea35a1ab05b6dfcbfb7cf70` | 2026-08-14 | Reference | Password/Cookie login, course/folder inventory, Chapter cards, Video/Audio fallback, Document, Live, Read, Chapter Work, sign-in and learning-count behavior | Pending |
+| [`surinrasu/CxKitty`](https://github.com/surinrasu/CxKitty) | `1589eac9c07c4bab71f79d762b45210643dd537d` | 2024-09-29 | Reference | Password/QR login, SSO validation, mobile course/Chapter APIs, Video/Document, Work/Exam export/save/submit, retake facts, face/captcha branches | Pending; protocol age is a risk |
+| [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b36996d27d00577015663ec39e782500` | 2026-06-17 | PortSource | Browser Work/Exam inventory, rich editor filling, result inspection, retry/retake policy and current DOM reliability rules | Donor reports real use; Asterism validation pending |
+| [`ocsjs/ocsjs`](https://github.com/ocsjs/ocsjs) | `890686a5e54f9a6d52d1169bae9ea5971e0863c7` | 2026-07-01 | Reference | Current media/PPT/Read/Chapter-test/Work/Exam lifecycle, thresholded save/submit, extended Question types and browser controls | Pending |
+| [`LangHY/chaoxing-exam`](https://github.com/LangHY/chaoxing-exam) | `14e1dfd9cf11cd54dabb494dd01e318856d9b8d3` | 2026-06-19 | Reference | Chapter-test navigation, fill/short editor behavior, result standards, score and `redoTest` pitfalls | Donor reports Chapter-test coverage; Asterism validation pending |
+| [`CodFrm/cxmooc-tools`](https://github.com/CodFrm/cxmooc-tools) | `2b81f7b55a68ea2ceb6ea0312a6791ebf3ed3dc5` | 2021-11-03 | Historical | Older Video/Audio/Document/Read, Work/Exam question and result-collection routes | Not current enough for implementation authority |
 
 ## Source selection
 
@@ -65,6 +65,14 @@ atomic credential commit remain shared runtime responsibilities.
 
 ## Refresh log
 
+- 2026-08-14: completed the mandatory one-time full upstream sweep in
+  `FULL_UPSTREAM_SWEEP.md`: complete default-branch trees, README/config,
+  implementation, tags/Releases, issues/examples and known fixtures were
+  re-enumerated for all six donors. Revisions remain unchanged. The sweep
+  recovered partial-coverage policy, extended observed Question types,
+  historical result bootstrap, retake/score-improvement, Audio, sign-in,
+  learning-count and in-video Question scope; shared blockers and
+  provider-private/live-fixture boundaries are recorded explicitly.
 - 2026-08-14: `Samueli924/chaoxing` advanced from `dee643fd0a8e` to
   `9699e632b492` on `main` via merge PR #621. The delta is limited to external
   AI/Tiku connectivity checks and Python cleanup; it changes no audited

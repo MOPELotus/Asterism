@@ -526,3 +526,54 @@ it may renew and repeat only the read-only editor acquisition, then sends one
 form POST with the final editor URL as Referer. Verification uses only the
 existing bounded redirect reader and classifies the final editor/prompt/view
 route before handing a zeroizing document to the strict result parser.
+
+## Coverage, evidence corpus and retake checkpoint
+
+Samueli's `submit` and `cover_rate` are semantic submission policy, not form
+fields. Its default coverage is 0.9. OCS independently computes
+`finished / total Questions` and offers save-only, no-move, forced and numeric
+threshold modes. Asterism must calculate coverage over the complete fresh
+QuestionSnapshot, preserve unsupported/unanswered Questions in the denominator,
+and freeze the resolved threshold plus exact submitted/unanswered identities in
+the immutable Draft. Save-only and final submit are distinct intents. A donor
+rollback which submits below threshold to unlock a prerequisite is a separate
+explicit execution policy, never an implicit coverage bypass.
+
+Completed historical Chapter Work, independent Work and Exam rows may be
+enumerated read-only. A result fetch must remain bound to
+owner/account/course/task/attempt and must not call any attempt-creating route.
+The parser must retain these independent facts:
+
+- task completion and score;
+- the user's visible submitted answer;
+- an official standard/reference answer and its exact label;
+- per-Question correctness or pending-manual-grading state;
+- structural retake availability.
+
+Only the latter two answer facts can upgrade evidence: an explicit standard is
+Official/ProviderNative, while a correct marker can make the submitted value
+VerifiedHistorical without changing its original Manual/ExternalBank/other
+source. Normal SubmissionVerify may append the same evidence incrementally.
+The owner-level corpus, evidence status and bootstrap lifecycle are Main-owned
+and are not represented by the current `AnswerCandidate` contract.
+
+Strict Completion stops after independently verified completion. Score
+Improvement evaluates fresh score and result-route retake eligibility under a
+separate bounded policy. Chapter `redoTest` and formal Exam `reTest` create new
+attempts: every use requires a fresh QuestionSnapshot and option mapping, a new
+immutable Draft and new durable mutation operation. No attempt-start or submit
+is replayed after ambiguity. The agent donor's pass 60, target 90 and maximum 3
+are evidence-backed policy examples, not universal server thresholds.
+
+## Extended Question protocol boundary
+
+OCS maps 0/1/3 to single/multiple/true-false, 2 and 4-10 to rendered text
+completion, 11 to matching/line, 14 to cloze children and 15 to reading
+children. The existing Asterism mapping deliberately keeps code 10 Composite
+because donor evidence conflicts; it must remain non-submittable until a
+route-specific fixture resolves the variant. Types 11/14/15 require bounded
+BrowserBridge interaction and, for 14/15/shared-option issue #297, first-class
+shared context/options/children. Fill and short result answers remain blocked
+on exact result DOM and grading-label fixtures; batch observations show they
+can remain pending manual review. Unknown types stay in the snapshot as
+`QuestionKind::Unknown` and lower answer coverage instead of disappearing.

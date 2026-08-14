@@ -226,3 +226,31 @@ and required BrowserBridge/Capture fallbacks—have code and all currently
 executable verification. A native or parser milestone may be reported but does
 not stop development. Immutable Drafts, exact attempt binding, receipt/readback
 separation and no ambiguous mutation replay remain mandatory.
+
+## 2026-08-14 full-sweep additions
+
+The one-time full donor re-audit is recorded in `FULL_UPSTREAM_SWEEP.md`. It
+adds the following accepted boundaries without weakening existing capability
+contracts:
+
+- partial-answer submission is in scope with the audited Samueli default
+  `cover_rate=0.9`, but Main must bind the resolved policy, complete snapshot
+  denominator and intentional unanswered set into the immutable Draft before
+  Chaoxing can execute a subset;
+- result harvesting feeds an owner-level Answer Evidence Corpus only from a
+  read-only, strictly rebound result route; task completion, score, `我的答案`,
+  `正确答案` and per-Question correctness remain separate facts;
+- first account binding defaults to bounded read-only historical bootstrap, and
+  normal `SubmissionVerify` contributes incremental evidence, but neither
+  lifecycle exists in the shared capability/storage model yet;
+- Strict Completion and Score Improvement are independent default-enabled
+  state machines. A score-improvement retake needs an explicit capability,
+  fresh snapshot/Draft, bounded attempt authority and exact result-proven
+  eligibility; `retake_available` alone never authorizes mutation;
+- OCS-observed types 11, 14 and 15 and shared-option issue #297 establish the
+  matching/child/shared-context boundary. The current parser recognizes the
+  families, while BrowserBridge mutation and shared child modeling remain
+  required for lossless completion;
+- Audio, sign-in, post-task learning-count, in-video Questions and hyperlink
+  execution remain evidenced donor capabilities requiring their own fixtures,
+  durable mutation design and verification rather than deletion from scope.

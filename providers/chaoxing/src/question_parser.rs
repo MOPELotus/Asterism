@@ -549,6 +549,34 @@ mod tests {
     }
 
     #[test]
+    fn observed_type_codes_have_explicit_fail_closed_classification() {
+        let observed = [
+            (0, QuestionKind::SingleChoice),
+            (1, QuestionKind::MultipleChoice),
+            (2, QuestionKind::FillBlank),
+            (3, QuestionKind::TrueFalse),
+            (4, QuestionKind::ShortAnswer),
+            (5, QuestionKind::ShortAnswer),
+            (6, QuestionKind::ShortAnswer),
+            (7, QuestionKind::ShortAnswer),
+            (8, QuestionKind::ShortAnswer),
+            (9, QuestionKind::ShortAnswer),
+            // OCS treats 10 as completion, while other audited evidence maps
+            // it as compound. Preserve the conflict until a route fixture
+            // proves a safe submission encoding.
+            (10, QuestionKind::Composite),
+            (11, QuestionKind::Matching),
+            (14, QuestionKind::Composite),
+            (15, QuestionKind::Composite),
+        ];
+        for (type_code, expected) in observed {
+            assert_eq!(question_kind(type_code), expected, "type {type_code}");
+        }
+        assert_eq!(question_kind(12), QuestionKind::Unknown);
+        assert_eq!(question_kind(u16::MAX), QuestionKind::Unknown);
+    }
+
+    #[test]
     fn current_independent_work_and_exam_previews_use_distinct_page_kinds() {
         let work = parse_work_preview_question_page(WORK_PREVIEW_MIXED).unwrap();
         assert_eq!(work.len(), 2);
