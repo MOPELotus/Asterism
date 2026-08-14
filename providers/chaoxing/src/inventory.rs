@@ -243,6 +243,8 @@ fn parse_inventory(
                 TaskCapability::QuestionInventory,
                 TaskCapability::QuestionParse,
                 TaskCapability::SubmissionBuild,
+                TaskCapability::SubmissionExecute,
+                TaskCapability::SubmissionVerify,
             ]
         } else {
             vec![TaskCapability::ProgressRead]
@@ -593,6 +595,8 @@ mod tests {
                 TaskCapability::QuestionInventory,
                 TaskCapability::QuestionParse,
                 TaskCapability::SubmissionBuild,
+                TaskCapability::SubmissionExecute,
+                TaskCapability::SubmissionVerify,
             ]
         );
         assert!(

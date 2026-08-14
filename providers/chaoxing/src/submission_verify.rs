@@ -7,20 +7,21 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     CourseInventoryCapability, ProviderContext, ProviderIdentity, ProviderMetadata, ProviderResult,
-    SubmissionBuildCapability, SubmissionVerifyCapability,
+    ResolvedProviderQuestionSessionContinuation, SubmissionBuildCapability,
+    SubmissionVerifyCapability,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingCourseRoute,
-    ChaoxingInventoryTransport, ChaoxingSubmissionBuild, ChaoxingSubmissionPlan,
-    ChaoxingWorkDetailRequest, ChaoxingWorkVerificationDocument,
-    inventory::parse_work_inventory_entries,
+    ChaoxingExamQuestionArtifact, ChaoxingInventoryTransport, ChaoxingSubmissionBuild,
+    ChaoxingSubmissionPlan, ChaoxingWorkDetailRequest, ChaoxingWorkVerificationDocument,
+    inventory::{parse_exam_inventory_entries, parse_work_inventory_entries},
     metadata::development_metadata,
     submission_execute::{
         invalid_response, matching_course, protocol_drift, remote_changed, validate_context,
-        validate_draft,
+        validate_draft, validate_exam_continuation,
     },
     submission_support::{SubmissionModule, WorkSubmissionIdentity, parse_verification_snapshot},
     task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
@@ -163,8 +164,104 @@ impl SubmissionVerifyCapability for ChaoxingSubmissionVerify {
                         .await?;
                 chapter_work_snapshot(draft, state)
             }
+            SubmissionModule::Exam => Err(asterism_provider_api::ProviderError::new(
+                asterism_provider_api::ProviderErrorKind::UnsupportedTask,
+                "Chaoxing Exam verification requires its durable Question session",
+            )),
         }
     }
+
+    async fn verify_submission_with_session(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        draft: &SubmissionDraft,
+        receipt: Option<&SubmissionReceipt>,
+        continuation: ResolvedProviderQuestionSessionContinuation<'_>,
+    ) -> ProviderResult<SubmissionVerificationSnapshot> {
+        let identity = WorkSubmissionIdentity::parse(remote_task_id)?;
+        if identity.module() != SubmissionModule::Exam {
+            return self
+                .verify_submission(context, remote_task_id, draft, receipt)
+                .await;
+        }
+        validate_context(context, &self.metadata)?;
+        validate_draft(draft, &self.metadata)?;
+        validate_exam_continuation(&continuation)?;
+        if let Some(receipt) = receipt {
+            receipt
+                .validate()
+                .map_err(|_| invalid_response("Chaoxing Exam verification receipt is invalid"))?;
+            if receipt.remote_status != "accepted" {
+                return Err(invalid_response(
+                    "Chaoxing Exam verification receipt is not accepted",
+                ));
+            }
+        }
+        let artifact = ChaoxingExamQuestionArtifact::decode_bound(
+            continuation.value,
+            continuation.continuation_digest,
+            draft,
+            remote_task_id,
+        )?;
+        if artifact.next_answer_index() != artifact.question_count() {
+            return Err(remote_changed(
+                "Chaoxing Exam verification was requested before every answer save",
+            ));
+        }
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        let selected = draft
+            .items
+            .iter()
+            .map(|item| item.selected.clone())
+            .collect::<Vec<_>>();
+        let expected_preview = self
+            .preview
+            .build_submission_preview(context, remote_task_id, &questions, &selected)
+            .await?;
+        if expected_preview != draft.payload_preview {
+            return Err(invalid_response(
+                "Chaoxing Exam verification Draft preview is stale or foreign",
+            ));
+        }
+        let state = fresh_exam_state(
+            self.courses.as_ref(),
+            self.inventory.as_ref(),
+            context,
+            identity,
+        )
+        .await?;
+        task_state_snapshot(draft, state, "Exam")
+    }
+}
+
+pub(crate) async fn fresh_exam_state(
+    courses: &dyn CourseInventoryCapability,
+    inventory: &dyn ChaoxingInventoryTransport,
+    context: &ProviderContext,
+    identity: WorkSubmissionIdentity<'_>,
+) -> ProviderResult<RemoteState> {
+    let courses = courses.list_courses(context).await?;
+    let course = matching_course(&courses, identity)?;
+    let route = ChaoxingCourseRoute::from_remote_course(course)?;
+    let document = inventory.fetch_exam_inventory(context, route).await?;
+    let entries = parse_exam_inventory_entries(document.as_str(), &route.parser_scope()?)?;
+    let mut matching = entries
+        .iter()
+        .filter(|entry| entry.task().remote_id == identity.remote_task_id());
+    let entry = matching
+        .next()
+        .ok_or_else(|| remote_changed("Chaoxing Exam is no longer present during verification"))?;
+    if matching.next().is_some() {
+        return Err(protocol_drift(
+            "Chaoxing Exam verification inventory contains duplicate task identity",
+        ));
+    }
+    Ok(entry.task().remote_state)
 }
 
 async fn resolve_chapter_work_state(
@@ -266,6 +363,14 @@ fn chapter_work_snapshot(
     draft: &SubmissionDraft,
     remote_state: RemoteState,
 ) -> ProviderResult<SubmissionVerificationSnapshot> {
+    task_state_snapshot(draft, remote_state, "Chapter Work")
+}
+
+fn task_state_snapshot(
+    draft: &SubmissionDraft,
+    remote_state: RemoteState,
+    module: &'static str,
+) -> ProviderResult<SubmissionVerificationSnapshot> {
     let (status, progress_percent) = match remote_state {
         RemoteState::Completed => (SubmissionVerificationStatus::Confirmed, Some(100)),
         RemoteState::Pending | RemoteState::InProgress => {
@@ -291,8 +396,9 @@ fn chapter_work_snapshot(
             .collect(),
         verified_at: Utc::now(),
     };
-    snapshot
-        .validate()
-        .map_err(|_| invalid_response("Chaoxing Chapter Work verification snapshot is invalid"))?;
+    snapshot.validate().map_err(|_| {
+        let _ = module;
+        invalid_response("Chaoxing task-state verification snapshot is invalid")
+    })?;
     Ok(snapshot)
 }

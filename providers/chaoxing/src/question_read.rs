@@ -38,7 +38,6 @@ use crate::{
 const MAX_ACTIVE_QUESTION_ATTEMPTS: usize = 128;
 const QUESTION_ATTEMPT_TTL: Duration = Duration::from_mins(5);
 const MAX_REMOTE_TASK_ID_BYTES: usize = 640;
-const EXAM_CONTINUATION_TTL_SECONDS: u64 = 30 * 60;
 
 /// Native read transport for one independently discovered Work Question page.
 /// Implementations must preserve the Work route allowlist and bounded body
@@ -392,7 +391,7 @@ impl QuestionInventoryCapability for ChaoxingQuestionRead {
             CHAOXING_EXAM_PRE_QUESTION_TYPE,
             CHAOXING_EXAM_READY_TO_START_PHASE,
             encoded.into_secret_value(),
-            EXAM_CONTINUATION_TTL_SECONDS,
+            crate::exam_attempt::CHAOXING_EXAM_CONTINUATION_TTL_SECONDS,
         )?;
         if continuation.continuation_digest() != expected_digest {
             return Err(internal(
@@ -523,7 +522,7 @@ impl PreparedProviderQuestionReadOperation for PreparedChaoxingExamStart {
             CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE,
             CHAOXING_EXAM_QUESTIONS_READY_PHASE,
             artifact.into_secret_value(),
-            EXAM_CONTINUATION_TTL_SECONDS,
+            crate::exam_attempt::CHAOXING_EXAM_CONTINUATION_TTL_SECONDS,
         )?;
         if artifact.continuation_digest() != expected_digest {
             return Err(internal(

@@ -310,11 +310,10 @@ account validation.
 Exam is not given Work's payload semantics. In the audited mobile donor, the
 readable attempt-local question/preview chain follows the mutating exam-start
 route and requires the resulting active attempt identity and `enc`; that path
-can also encounter exam-code, face or captcha gates. Asterism will implement the
-start mutation, attempt binding, Question/Answer/Submission lifecycle and the
-needed Capture/BrowserBridge or human-interaction handoff as a separate first-
-batch capability family. The start receipt is not proof of completion, and an
-ambiguous non-idempotent start/submit is never blindly replayed.
+can also encounter exam-code, face or captcha gates. Asterism implements this
+as a separate durable capability family. The start or submit receipt is not
+proof of completion, and an ambiguous non-idempotent start/save/submit is never
+blindly replayed.
 
 The first native Exam Question slice now follows that boundary through Core's
 durable pre-Question attempt ledger. A fresh `exam:course:class:exam` task must
@@ -326,16 +325,36 @@ requires the exact encrypted continuation digest to match.
 
 Core persists `chaoxing.exam-start.v1` and the canonical request digest before
 the Provider performs one `phone/start`. The Native transport accepts only the
-bound redirect and returned `examAnswerId`, then reads the dynamic-`enc` mobile
-Question route. Success atomically materializes normalized Questions plus the
-minimal encrypted `chaoxing.exam-question-attempt.v1` artifact containing route,
-attempt/timing material, Question count and an ordered Question-set fingerprint. No HTML or
-answer content enters the artifact. Any error after issue remains ambiguous and
-cannot be auto-replayed; fresh readback recovery is still a separate pending
-protocol slice. Cover or start responses requiring an exam code, face check or
-captcha return `HumanRequired` for BrowserBridge/Capture handoff. Synthetic
-fixtures and 82 Provider tests cover this boundary; live account validation
-remains pending.
+bound redirect and returned `examAnswerId`, then reads the complete
+dynamic-`enc` mobile preview. The preview's newer `enc`, remaining-time and
+last-update values supersede the start page. Success atomically materializes
+normalized Questions plus the minimal encrypted
+`chaoxing.exam-question-attempt.v2` artifact containing route, attempt/timing
+material, Question count, ordered Question-set fingerprint and next-save
+cursor. No HTML or answer content enters the artifact. Any error after issue
+remains ambiguous and cannot be auto-replayed. Cover or start responses
+requiring an exam code, face check or captcha return `HumanRequired` for
+BrowserBridge/Capture handoff.
+
+`SubmissionBuild` exposes only the donor's value-free Exam form field names.
+After an immutable Draft claims the v2 artifact, each
+`chaoxing.exam-answer-save.v1` operation freezes the exact CxKitty-compatible
+`pos`, `rd`, `value`, `_edt`, query and form body once. Core persists the
+complete request digest before Native HTTP sends the POST. A successful save
+must return exactly `lastUpdate|encRemain|enc`; the timestamps may not regress,
+remaining time may not increase, and the cursor advances by exactly one before
+the encrypted continuation rotates. There is no read-only endpoint proving an
+individual temporary save, so ambiguity keeps that operation locked.
+
+Only after every Draft Question is saved does the Provider freeze a separate
+`chaoxing.exam-final-submit.v1` with `tempSave=false`, empty `qid` and
+`start=0`. Its accepted JSON is a Receipt, not completion. `SubmissionVerify`
+rebinds the same Course and exact Exam row and confirms only a fresh
+`Completed` state; without result-page answer evidence all per-Question facts
+remain `Unverified`. An ambiguous final submit may be recovered as accepted
+only when that same fresh exact row is already Completed, after which normal
+verification still runs. Synthetic fixtures and Provider integration tests
+cover this boundary; live account validation remains pending.
 
 - Exam and Work pages expose per-attempt question IDs; Exam retakes can regenerate
   every QID, so IDs may not be cached across attempts.

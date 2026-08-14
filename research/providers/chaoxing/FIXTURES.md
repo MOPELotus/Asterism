@@ -33,6 +33,12 @@ fixtures/providers/chaoxing/
     list-empty-script-keywords.html
     list-mixed.html
     list-mixed.expected.json
+    cover-ready.html
+    start-question.html
+    submit-save-1.json
+    submit-save-2.json
+    submit-final.json
+    submit-rejected.json
   questions/
     work-mobile-mixed.html
     exam-mobile-mixed.html
@@ -86,6 +92,15 @@ Chapter Work `form1` shape. Tests prove stale answer inputs and unknown fields
 are discarded, type codes and ordered fill text are encoded from the immutable
 Draft, the mutation occurs once, and a separate completed-card read confirms
 only task-level completion.
+
+The Exam fixtures cover the cover/start/full-preview attempt rotation and the
+separate CxKitty save/final acknowledgement shapes. They prove that each
+accepted answer save advances exactly one immutable-Draft cursor and replaces
+only monotonic timing/`enc` state, while the final response remains a Receipt
+until a fresh exact Exam list row reports Completed. Unknown compatible JSON
+extensions are ignored, but malformed state, rejection, identity drift and
+timing regression fail closed. All IDs, signatures and crypto-looking values
+are synthetic placeholders.
 
 ## Required live-sanitized fixture sets
 
@@ -146,3 +161,8 @@ every fixture before staging it.
 - A changed `enc_task`, `examAnswerId`, course/class route or command digest must
   fail before the one-shot start; an issued transport error must remain
   ambiguous and must never be represented by a fixture retry.
+- Exam preview state supersedes start-page state. Every answer-save operation
+  must have a distinct persisted request digest; only an accepted response may
+  rotate the continuation. Temporary-save ambiguity is never replayed, final
+  ambiguity needs fresh Completed evidence, and task completion does not imply
+  per-Question answer verification.

@@ -16,6 +16,8 @@
 | Work acknowledgement is mistaken for completion | Donors log `status=true` as success, while current task pages may remain on prompt/waiting states | Persist only a Receipt, then independently re-discover the Work; prompt/editor remain Pending and only exact server-visible result answers confirm completion |
 | Result-page answer DOM changes | OCS and browser donors distinguish `.mark_answer`/`我的答案` from editable hidden inputs and CSS selection state | Require an allowlisted view route, complete unique QID set and bounded per-Question answer grammar; missing result facts stay Inconclusive instead of inferring from CSS or list text |
 | Exam start response is ambiguous | `phone/start` creates an attempt before dynamic `enc` Question acquisition completes | Persist the exact start request digest before send, never auto-replay an issued operation, and add only fresh readback-based recovery when live evidence proves it |
+| Exam preview rotates attempt state | CxKitty overwrites `enc`, remaining time and last-update fields from the full preview before saving answers | Parse and bind preview state after start; reject any save response which regresses time or advances more than one Draft cursor |
+| Exam answer/final POST is ambiguous | Temporary saves and final submit share a non-idempotent route with randomized signatures | Freeze signature/query/form and digest before send; never replay a temporary save; recover only a final submit when fresh exact Exam inventory is Completed |
 
 ## Live-validation gate
 

@@ -3291,3 +3291,28 @@ confirm the exact old Draft before the claimed session and Task become
 terminal. Migration 041 makes next-session transitions durable and binds each
 one to the exact prior session, operation sequence, Execution, next session,
 snapshot and accepted timestamp.
+
+## One-hundred-and-eighty-ninth Phase 0 slice
+
+Chaoxing's durable Exam session now continues past start and Question
+materialization into the audited mobile save/final protocol. The one-shot start
+reads the full attempt preview and treats its rotated `enc`, remaining time and
+last-update time as authoritative. The encrypted v2 artifact binds that state,
+the complete ordered Question fingerprint and an exact next-answer cursor to
+the immutable Draft.
+
+For each Question, the Provider freezes CxKitty-compatible signature fields,
+query and form body into `chaoxing.exam-answer-save.v1`; Core persists its
+digest before one POST. An accepted response must rotate bounded monotonic
+attempt state and exactly one cursor before the continuation can advance.
+After the final cursor, a separate `chaoxing.exam-final-submit.v1` produces only
+a Receipt. Temporary-save ambiguity remains non-replayable. Final-submit
+ambiguity can be recovered only when a fresh exact Exam inventory row is
+already Completed.
+
+Session-aware verification decodes and rebinds the last continuation, requires
+all answer saves to have completed, repeats the value-free Draft preview, and
+then reads fresh Exam inventory. Only Completed confirms the submission; every
+Question remains Unverified without independent result-page answer evidence.
+Synthetic save/final fixtures and an end-to-end Provider operation-loop test
+cover the two continuation rotations, terminal receipt and fresh verification.

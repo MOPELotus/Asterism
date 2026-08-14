@@ -6,6 +6,7 @@ use asterism_provider_api::{ProviderContext, ProviderError, ProviderErrorKind, P
 use asterism_secrets::SecretString;
 use async_trait::async_trait;
 use chrono::Utc;
+use rand_core::{OsRng, RngCore};
 use reqwest::{
     Client, Response, StatusCode, Url,
     header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, REFERER, RETRY_AFTER},
@@ -17,7 +18,8 @@ use zeroize::Zeroize;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest,
-    ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingExamQuestionRequest,
+    ChaoxingCourseInventoryTransport, ChaoxingCourseRoute, ChaoxingExamQuestionArtifact,
+    ChaoxingExamQuestionRequest, ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
     ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingQuestionTransport,
     ChaoxingSubmissionPlan, ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
     ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
@@ -25,7 +27,7 @@ use crate::{
     exam_attempt::{
         ChaoxingExamStartCommand, ChaoxingExamStartOutcome, parse_exam_attempt, parse_exam_cover,
     },
-    parse_submission_receipt,
+    parse_exam_submission_response, parse_submission_receipt,
     resource_execution::{
         ChaoxingImmediateResourceTransport, ChaoxingVideoStatus, ChaoxingVideoTransport,
     },
@@ -57,8 +59,10 @@ const COURSE_LIST_REFERER: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visi
 const EXAM_LIST_BASE: &str = "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list";
 const EXAM_COVER_BASE: &str = "https://mooc1-api.chaoxing.com/exam-ans/exam/phone/task-exam";
 const EXAM_START_BASE: &str = "https://mooc1-api.chaoxing.com/exam-ans/exam/phone/start";
-const EXAM_QUESTION_BASE: &str =
-    "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew";
+const EXAM_PREVIEW_BASE: &str = "https://mooc1-api.chaoxing.com/exam-ans/exam/phone/preview";
+const EXAM_SUBMISSION_BASE: &str =
+    "https://mooc1.chaoxing.com/exam-ans/exam/test/reVersionSubmitTestNew";
+const EXAM_REQUESTED_WITH: &str = "com.chaoxing.mobile";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const WORK_LIST_PATH: &str = "/mooc2/work/list";
 const WORK_SUBMISSION_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/work/addStudentWorkNew";
@@ -191,6 +195,23 @@ impl NativeChaoxingInventoryTransport {
             .get(url)
             .header(COOKIE, session.header_value()?)
             .header(ACCEPT, "text/html,application/xhtml+xml")
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        classify_response(response).await
+    }
+
+    async fn get_exam_html(
+        &self,
+        session: &ChaoxingCookieSession,
+        url: Url,
+    ) -> ProviderResult<SensitiveHtml> {
+        let response = self
+            .client
+            .get(url)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "text/html,application/xhtml+xml")
+            .header("x-requested-with", EXAM_REQUESTED_WITH)
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
@@ -416,6 +437,12 @@ impl NativeChaoxingInventoryTransport {
         remote_task_id: &str,
         request: &ChaoxingExamQuestionRequest<'_>,
     ) -> ProviderResult<ChaoxingExamStartCommand> {
+        let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Exam cover requires one identity Cookie",
+            )
+        })?;
         let cover_url = build_url(
             EXAM_COVER_BASE,
             &[
@@ -423,13 +450,16 @@ impl NativeChaoxingInventoryTransport {
                 ("taskrefId", request.exam_id()),
                 ("courseId", request.route().course_id()),
                 ("classId", request.route().class_id()),
+                ("userId", user_id),
+                ("role", ""),
                 ("source", "0"),
                 ("enc_task", request.enc_task()),
                 ("cpi", request.route().cpi()),
+                ("vx", "0"),
                 ("examsignal", "1"),
             ],
         )?;
-        let cover = self.get_html(session, cover_url).await?;
+        let cover = self.get_exam_html(session, cover_url).await?;
         let cover_facts = parse_exam_cover(cover.as_str())?;
         if cover_facts.need_code || cover_facts.need_face || cover_facts.need_captcha {
             return Err(ProviderError::human_required(
@@ -470,6 +500,7 @@ impl NativeChaoxingInventoryTransport {
             .get(start_url.clone())
             .header(COOKIE, session.header_value()?)
             .header(ACCEPT, "text/html,application/xhtml+xml")
+            .header("x-requested-with", EXAM_REQUESTED_WITH)
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
@@ -488,48 +519,45 @@ impl NativeChaoxingInventoryTransport {
                     "Chaoxing Exam start redirect crossed its route boundary",
                 ));
             }
-            let document = self.get_html(session, url.clone()).await?;
+            let document = self.get_exam_html(session, url.clone()).await?;
             let material = parse_exam_attempt(&url, document.as_str(), command.exam_answer_id())?;
-            let question_url = build_url(
-                EXAM_QUESTION_BASE,
+            let enc_remain_time = material.enc_remain_time.to_string();
+            let last_update_time = material.last_update_time.to_string();
+            let preview_url = build_url(
+                EXAM_PREVIEW_BASE,
                 &[
                     ("courseId", command.course_id()),
                     ("classId", command.class_id()),
-                    ("tId", command.exam_id()),
-                    ("id", material.exam_answer_id.as_str()),
                     ("source", "0"),
-                    ("p", "1"),
-                    ("isphone", "true"),
-                    ("tag", "1"),
-                    ("cpi", command.cpi()),
                     ("imei", "asterism-native"),
                     ("start", "0"),
-                    ("enc", material.enc.as_str()),
-                    ("keyboardDisplayRequiresUserAction", "1"),
+                    ("cpi", command.cpi()),
+                    ("examRelationId", command.exam_id()),
+                    ("examRelationAnswerId", material.exam_answer_id.as_str()),
                     ("monitorStatus", "0"),
                     ("monitorOp", "-1"),
-                    ("remainTimeParam", &material.enc_remain_time.to_string()),
-                    (
-                        "relationAnswerLastUpdateTime",
-                        &material.last_update_time.to_string(),
-                    ),
+                    ("remainTimeParam", &enc_remain_time),
+                    ("relationAnswerLastUpdateTime", &last_update_time),
+                    ("enc", material.enc.as_str()),
                 ],
             )?;
-            let question = self.get_html(session, question_url.clone()).await?;
-            if !command.valid_question_url(&question_url, &material.exam_answer_id) {
+            let preview = self.get_exam_html(session, preview_url.clone()).await?;
+            if !command.valid_question_url(&preview_url, &material.exam_answer_id) {
                 return Err(protocol_drift(
-                    "Chaoxing Exam Question route lost attempt binding",
+                    "Chaoxing Exam preview route lost attempt binding",
                 ));
             }
+            let preview_material =
+                parse_exam_attempt(&preview_url, preview.as_str(), &material.exam_answer_id)?;
             let mut response_hasher = Sha256::new();
             response_hasher.update(url.as_str().as_bytes());
             response_hasher.update([0]);
             response_hasher.update(document.as_str().as_bytes());
             response_hasher.update([0]);
-            response_hasher.update(question.as_str().as_bytes());
+            response_hasher.update(preview.as_str().as_bytes());
             return Ok(ChaoxingExamStartOutcome {
-                document: question.into_inventory_document()?,
-                material,
+                document: preview.into_inventory_document()?,
+                material: preview_material,
                 response_digest: response_hasher.finalize().into(),
                 received_at: Utc::now(),
             });
@@ -635,7 +663,7 @@ impl NativeChaoxingInventoryTransport {
             .header(COOKIE, session.header_value()?)
             .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
             .header(REFERER, referer.as_str())
-            .header("x-requested-with", "XMLHttpRequest")
+            .header("x-requested-with", EXAM_REQUESTED_WITH)
             .form(form.fields())
             .send()
             .await
@@ -1035,6 +1063,66 @@ impl ChaoxingSubmissionTransport for NativeChaoxingInventoryTransport {
         let form = ChaoxingSubmissionForm::parse(document.as_str(), identity, plan)?;
         self.post_work_submission_once(&session, &referer, &form)
             .await
+    }
+
+    async fn prepare_exam_submission(
+        &self,
+        context: &ProviderContext,
+        artifact: ChaoxingExamQuestionArtifact,
+        draft: &asterism_domain::SubmissionDraft,
+    ) -> ProviderResult<ChaoxingExamSubmissionCommand> {
+        let (session, _) = self.session_for_operation(context).await?;
+        let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Exam submission requires one identity Cookie",
+            )
+        })?;
+        let mut entropy = [0_u8; 32];
+        OsRng.fill_bytes(&mut entropy);
+        ChaoxingExamSubmissionCommand::try_new(artifact, draft, user_id, entropy, Utc::now())
+    }
+
+    async fn submit_exam(
+        &self,
+        context: &ProviderContext,
+        command: &ChaoxingExamSubmissionCommand,
+    ) -> ProviderResult<ChaoxingExamSubmissionResponse> {
+        // Resolve authentication before dispatch, then issue the frozen POST
+        // exactly once. Any send/body ambiguity is returned to Core unchanged.
+        let (session, _) = self.session_for_operation(context).await?;
+        let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Exam submission requires one identity Cookie",
+            )
+        })?;
+        if !command.belongs_to_user(user_id) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Exam identity Cookie changed after request preparation",
+            ));
+        }
+        let mut url = static_url(EXAM_SUBMISSION_BASE)?;
+        {
+            let mut query = url.query_pairs_mut();
+            for (name, value) in command.query() {
+                query.append_pair(name, value);
+            }
+        }
+        let response = self
+            .client
+            .post(url)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
+            .header("x-requested-with", "XMLHttpRequest")
+            .form(command.body())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        validate_response_status(&response)?;
+        let body = read_response_body(response).await?;
+        parse_exam_submission_response(body.as_str(), command.is_final(), Utc::now())
     }
 }
 

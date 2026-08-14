@@ -10,14 +10,14 @@ source modules even when their assessments share field names or HTML shapes.
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
-| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls plus signed interval-based Video progress, idempotence and fresh-card verification are offline-covered; Live and Chapter Work remain pending |
+| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls plus signed interval-based Video progress, idempotence and fresh-card verification are offline-covered; Live remains pending |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text must be parsed after removing scripts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, Exam remains list-level until dedicated detail fixtures |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
-| QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks with a structural `goTest` entry now use a separate cover -> one-shot start -> attempt-bound mobile Question path, while exam-code/face/captcha gates return typed BrowserRequired |
-| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts; pending Exam now has a separate value-free form preview for donor `type/typeName`, choice, true/false and fill-blank field families. Exam one-shot answer/save/submit execution remains a distinct active family and is not routed through Work's payload or mutation transport |
-| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work independently refreshes seven cards and confirms only exact task completion, retaining per-Question facts as Unverified when no answer readback exists |
+| QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
+| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts. Exam has a separate value-free preview and durable one-operation-at-a-time native chain: donor signature and request digest are frozen before dispatch, each accepted answer save advances one cursor and rotates `enc`/timing state, and the final submit yields only a Receipt. No Exam mutation is routed through Work payloads or replayed after ambiguity |
+| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards; Exam refreshes the exact list identity after final submit. Task-level Completed may confirm the submission while per-Question facts remain Unverified when no answer readback exists |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
 | BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
 
@@ -120,8 +120,8 @@ policy and remains independently guarded.
   GET can create the attempt, authentication is resolved before the request and
   no ambiguous failure is renewed or replayed. Only the audited same-host
   `doHomeWorkNew` redirect and exact course/class/knowledge/job binding are
-  accepted. Submission and result verification remain active work; Exam still
-  requires its distinct attempt-start family and browser gates.
+  accepted. Exam retains its distinct attempt-start/submission family and
+  browser gates.
 - The same fresh pending independent Work state now advertises
   `SubmissionBuild`, `SubmissionExecute` and `SubmissionVerify` together for
   the native subset. Build remains value-free. Execute currently accepts only
@@ -148,17 +148,28 @@ policy and remains independently guarded.
   read-only discovery and requires the encrypted command digest to remain
   identical. Core records the operation type/request digest first; the Native
   transport then sends it once, validates the resulting `examAnswerId` and
-  dynamic `enc`, and fetches the bounded mobile Question page. The normalized
+  dynamic `enc`, and fetches the complete bounded mobile preview. The preview's
+  newly rotated `enc` and timing fields replace start-page state. The normalized
   Question set and a minimal encrypted attempt artifact are materialized
   atomically; neither HTML nor answer content is persisted. Ambiguous start
   errors remain locked rather than replayed. Exam-code, face and captcha gates
   return typed `HumanRequired` pending their BrowserBridge/Capture command path.
-  Exam remains separate from Work payload and submission semantics.
+- Pending Exam tasks now also advertise `SubmissionExecute` and
+  `SubmissionVerify`. The immutable Draft and encrypted v2 attempt artifact bind
+  the complete ordered Question set and exact save cursor. The Provider freezes
+  CxKitty-compatible `pos/rd/value/_edt` signature parameters and the complete
+  form/query digest before Core marks each operation issued. Accepted temporary
+  saves must return monotonic `lastUpdate|encRemain|enc` state and atomically
+  rotate the continuation; after every Question is saved, one separate final
+  submit returns a Receipt. Fresh exact Exam inventory must report Completed
+  before verification confirms the Task; it does not invent per-Question
+  correctness. An ambiguous temporary save stays locked, while an ambiguous
+  final submit may be recovered only from a fresh Completed list state.
 
 ## Completion boundary
 
-Chaoxing is complete only when all audited donor abilities—including Chapter
-Work, Exam detail/question/answer/submission, Live, QR, captcha/face handling
+Chaoxing is complete only when all audited donor abilities—including remaining
+Exam detail/result variants, Live, QR, captcha/face handling
 and required BrowserBridge/Capture fallbacks—have code and all currently
 executable verification. A native or parser milestone may be reported but does
 not stop development. Immutable Drafts, exact attempt binding, receipt/readback

@@ -47,6 +47,7 @@ const FORWARDED_FORM_FIELDS: &[&str] = &[
 pub(crate) enum SubmissionModule {
     IndependentWork,
     ChapterWork,
+    Exam,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,6 +86,12 @@ impl<'a> WorkSubmissionIdentity<'a> {
                     *class,
                     Some(*knowledge),
                 )
+            }
+            ["exam", course, class, exam] => {
+                valid_component(Some(course))?;
+                valid_component(Some(class))?;
+                valid_component(Some(exam))?;
+                (SubmissionModule::Exam, *course, *class, None)
             }
             _ => {
                 return Err(unsupported(

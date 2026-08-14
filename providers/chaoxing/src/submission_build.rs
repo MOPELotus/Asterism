@@ -105,7 +105,7 @@ impl SubmissionBuildCapability for ChaoxingSubmissionBuild {
                     "Chaoxing Work preview received inconsistent Question bindings",
                 ));
             }
-            validate_answer_shape(question, &selected.answer)?;
+            validate_answer_shape(task_kind, question, &selected.answer)?;
             if task_kind == SubmissionTaskKind::Exam {
                 fields.extend([
                     SubmissionPayloadFieldPreview {
@@ -168,7 +168,11 @@ impl SubmissionBuildCapability for ChaoxingSubmissionBuild {
     }
 }
 
-fn validate_answer_shape(question: &Question, answer: &NormalizedAnswer) -> ProviderResult<()> {
+fn validate_answer_shape(
+    task_kind: SubmissionTaskKind,
+    question: &Question,
+    answer: &NormalizedAnswer,
+) -> ProviderResult<()> {
     match (question.kind, answer) {
         (QuestionKind::SingleChoice, NormalizedAnswer::Selections(values))
             if values.len() == 1 && executable_selections_exist(question, values) =>
@@ -182,7 +186,11 @@ fn validate_answer_shape(question: &Question, answer: &NormalizedAnswer) -> Prov
         }
         (QuestionKind::TrueFalse, NormalizedAnswer::Boolean(_)) => Ok(()),
         (QuestionKind::FillBlank, NormalizedAnswer::Texts(values)) if !values.is_empty() => Ok(()),
-        (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) if values.len() == 1 => Ok(()),
+        (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values))
+            if values.len() == 1 && task_kind != SubmissionTaskKind::Exam =>
+        {
+            Ok(())
+        }
         (
             QuestionKind::Matching
             | QuestionKind::Ordering

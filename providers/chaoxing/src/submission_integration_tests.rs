@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use asterism_domain::{
@@ -12,20 +12,29 @@ use asterism_domain::{
 use asterism_provider_api::{
     CourseInventoryCapability, ExecutionEventSink, ProviderContext, ProviderError,
     ProviderErrorKind, ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
-    ProviderResult, ProviderRouteContext, RemoteCourse, SubmissionBuildCapability,
+    ProviderResult, ProviderRouteContext, ProviderSubmissionStepOutcome, RemoteCourse,
+    ResolvedProviderQuestionSessionContinuation, SubmissionBuildCapability,
     SubmissionExecuteCapability, SubmissionVerifyCapability,
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use zeroize::Zeroizing;
 
 use crate::{
     ChaoxingChapterResourceDocument, ChaoxingChapterResourceRequest, ChaoxingChapterWorkTarget,
-    ChaoxingCourseRoute, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
-    ChaoxingSubmissionBuild, ChaoxingSubmissionExecute, ChaoxingSubmissionPlan,
-    ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport, ChaoxingSubmissionVerify,
-    ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
-    ChaoxingWorkVerificationRoute, metadata::development_metadata,
-    parse_chapter_work_question_page, parse_work_preview_question_page,
+    ChaoxingCourseRoute, ChaoxingExamQuestionArtifact, ChaoxingExamQuestionRequest,
+    ChaoxingExamStartCommand, ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
+    ChaoxingInventoryDocument, ChaoxingInventoryTransport, ChaoxingSubmissionBuild,
+    ChaoxingSubmissionExecute, ChaoxingSubmissionPlan, ChaoxingSubmissionTransport,
+    ChaoxingSubmissionVerificationTransport, ChaoxingSubmissionVerify, ChaoxingWorkDetailRequest,
+    ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute,
+    exam_attempt::{
+        CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE, CHAOXING_EXAM_QUESTIONS_READY_PHASE,
+        ChaoxingExamAttemptMaterial, parse_exam_cover,
+    },
+    metadata::development_metadata,
+    parse_chapter_work_question_page, parse_exam_question_page, parse_exam_submission_response,
+    parse_work_preview_question_page,
     runtime_settings::runtime_settings_schema,
 };
 
@@ -40,6 +49,16 @@ const CHAPTER_CARDS: &str =
     include_str!("../../../fixtures/providers/chaoxing/resources/cards-mixed.html");
 const CHAPTER_QUESTIONS: &str =
     include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
+const EXAM_LIST: &str = include_str!("../../../fixtures/providers/chaoxing/exam/list-mixed.html");
+const EXAM_COVER: &str = include_str!("../../../fixtures/providers/chaoxing/exam/cover-ready.html");
+const EXAM_QUESTIONS: &str =
+    include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
+const EXAM_SAVE_1: &str =
+    include_str!("../../../fixtures/providers/chaoxing/exam/submit-save-1.json");
+const EXAM_SAVE_2: &str =
+    include_str!("../../../fixtures/providers/chaoxing/exam/submit-save-2.json");
+const EXAM_FINAL: &str =
+    include_str!("../../../fixtures/providers/chaoxing/exam/submit-final.json");
 
 #[derive(Debug)]
 struct FixtureCourses {
@@ -84,6 +103,8 @@ struct FixturePlatform {
     inventories: AtomicUsize,
     submissions: AtomicUsize,
     verifications: AtomicUsize,
+    exam_steps: AtomicUsize,
+    exam_completed: AtomicBool,
 }
 
 #[async_trait]
@@ -140,7 +161,12 @@ impl ChaoxingInventoryTransport for FixturePlatform {
         _context: &ProviderContext,
         _route: ChaoxingCourseRoute<'_>,
     ) -> ProviderResult<ChaoxingInventoryDocument> {
-        Err(unexpected_call())
+        let document = if self.exam_completed.load(Ordering::Relaxed) {
+            EXAM_LIST.replacen("待做", "已完成", 1)
+        } else {
+            EXAM_LIST.to_owned()
+        };
+        ChaoxingInventoryDocument::try_new(document)
     }
 
     async fn fetch_work_detail_states(
@@ -194,6 +220,33 @@ impl ChaoxingSubmissionTransport for FixturePlatform {
             ]
         );
         Ok(receipt())
+    }
+
+    async fn prepare_exam_submission(
+        &self,
+        _context: &ProviderContext,
+        artifact: ChaoxingExamQuestionArtifact,
+        draft: &SubmissionDraft,
+    ) -> ProviderResult<ChaoxingExamSubmissionCommand> {
+        ChaoxingExamSubmissionCommand::try_new(artifact, draft, "9001", [11; 32], Utc::now())
+    }
+
+    async fn submit_exam(
+        &self,
+        _context: &ProviderContext,
+        command: &ChaoxingExamSubmissionCommand,
+    ) -> ProviderResult<ChaoxingExamSubmissionResponse> {
+        let step = self.exam_steps.fetch_add(1, Ordering::Relaxed);
+        let document = match (step, command.is_final()) {
+            (0, false) => EXAM_SAVE_1,
+            (1, false) => EXAM_SAVE_2,
+            (2, true) => {
+                self.exam_completed.store(true, Ordering::Relaxed);
+                EXAM_FINAL
+            }
+            _ => return Err(unexpected_call()),
+        };
+        parse_exam_submission_response(document, command.is_final(), Utc::now())
     }
 }
 
@@ -352,6 +405,103 @@ async fn stale_preview_fails_before_the_mutation_slot() {
     assert_eq!(platform.inventories.load(Ordering::Relaxed), 0);
 }
 
+#[tokio::test]
+async fn exam_session_rotates_saves_then_verifies_the_terminal_inventory() {
+    let context = context();
+    let courses = Arc::new(FixtureCourses::new());
+    let platform = Arc::new(FixturePlatform::default());
+    let execute =
+        ChaoxingSubmissionExecute::try_new(courses.clone(), platform.clone(), platform.clone())
+            .unwrap();
+    let verify =
+        ChaoxingSubmissionVerify::try_new(courses, platform.clone(), platform.clone()).unwrap();
+    let (draft, artifact) = exam_draft_and_artifact().await;
+    let encoded = artifact.encode().unwrap();
+    let first_digest = encoded.digest();
+    let first_value = encoded.into_secret_value();
+    let (_, first) =
+        execute_exam_step(&execute, &context, &draft, first_value, first_digest, 1).await;
+    let ProviderSubmissionStepOutcome::Continue {
+        continuation,
+        response_digest,
+        ..
+    } = first
+    else {
+        panic!("first Exam save did not rotate its continuation");
+    };
+    assert_ne!(response_digest, [0; 32]);
+    let (_, second_digest, _, second_value, _) = continuation.into_parts();
+    let (_, second) =
+        execute_exam_step(&execute, &context, &draft, second_value, second_digest, 2).await;
+    let ProviderSubmissionStepOutcome::Continue { continuation, .. } = second else {
+        panic!("second Exam save did not rotate its continuation");
+    };
+    let (_, final_digest, _, final_value, _) = continuation.into_parts();
+    let (final_value, terminal) =
+        execute_exam_step(&execute, &context, &draft, final_value, final_digest, 3).await;
+    let ProviderSubmissionStepOutcome::Submitted { receipt, .. } = terminal else {
+        panic!("Exam final submit did not return a terminal receipt");
+    };
+    assert_eq!(platform.exam_steps.load(Ordering::Relaxed), 3);
+    assert!(platform.exam_completed.load(Ordering::Relaxed));
+
+    let snapshot = verify
+        .verify_submission_with_session(
+            &context,
+            "exam:100:200:exam-1",
+            &draft,
+            Some(&receipt),
+            ResolvedProviderQuestionSessionContinuation {
+                continuation_type: CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE,
+                continuation_digest: final_digest,
+                phase: CHAOXING_EXAM_QUESTIONS_READY_PHASE,
+                revision: 3,
+                value: &final_value,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+    assert_eq!(
+        snapshot.remote_state,
+        Some(asterism_domain::RemoteState::Completed)
+    );
+    assert!(
+        snapshot.questions.iter().all(|question| {
+            question.status == SubmissionQuestionVerificationStatus::Unverified
+        })
+    );
+}
+
+async fn execute_exam_step(
+    execute: &ChaoxingSubmissionExecute,
+    context: &ProviderContext,
+    draft: &SubmissionDraft,
+    value: asterism_secrets::SecretValue,
+    continuation_digest: [u8; 32],
+    revision: u32,
+) -> (asterism_secrets::SecretValue, ProviderSubmissionStepOutcome) {
+    let operation = execute
+        .prepare_submission_operation(
+            context,
+            "exam:100:200:exam-1",
+            draft,
+            ResolvedProviderQuestionSessionContinuation {
+                continuation_type: CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE,
+                continuation_digest,
+                phase: CHAOXING_EXAM_QUESTIONS_READY_PHASE,
+                revision,
+                value: &value,
+            },
+            &runtime_settings_schema().resolve(None, None, None).unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("Exam session must prepare one operation");
+    let outcome = operation.execute(context, &NoopEvents).await.unwrap();
+    (value, outcome)
+}
+
 async fn draft() -> SubmissionDraft {
     let task_id = TaskId::new();
     let mut questions = parse_work_preview_question_page(WORK_QUESTIONS)
@@ -458,6 +608,82 @@ async fn chapter_draft() -> SubmissionDraft {
         payload_preview: preview,
         created_at: Utc::now(),
     }
+}
+
+async fn exam_draft_and_artifact() -> (SubmissionDraft, ChaoxingExamQuestionArtifact) {
+    let task_id = TaskId::new();
+    let questions = parse_exam_question_page(EXAM_QUESTIONS)
+        .unwrap()
+        .into_iter()
+        .take(2)
+        .map(|question| question.to_question(task_id).unwrap())
+        .collect::<Vec<_>>();
+    let selected_answers = vec![
+        selected(
+            questions[0].id,
+            NormalizedAnswer::Selections(vec!["A".to_owned()]),
+        ),
+        selected(questions[1].id, NormalizedAnswer::Boolean(true)),
+    ];
+    let preview = ChaoxingSubmissionBuild::try_new()
+        .unwrap()
+        .build_submission_preview(
+            &context(),
+            "exam:100:200:exam-1",
+            &questions,
+            &selected_answers,
+        )
+        .await
+        .unwrap();
+    let draft = SubmissionDraft {
+        id: SubmissionDraftId::new(),
+        task_id,
+        question_snapshot_id: QuestionSnapshotId::new(),
+        provider_id: ProviderId::new("chaoxing").unwrap(),
+        provider_version: development_metadata().unwrap().implementation_version,
+        items: questions
+            .into_iter()
+            .zip(selected_answers)
+            .map(|(question, selected)| SubmissionDraftItem { question, selected })
+            .collect(),
+        payload_preview: preview,
+        created_at: Utc::now(),
+    };
+    let course = FixtureCourses::new()
+        .list_courses(&context())
+        .await
+        .unwrap()
+        .remove(0);
+    let route = ChaoxingCourseRoute::from_remote_course(&course).unwrap();
+    let request = ChaoxingExamQuestionRequest::try_new(
+        route,
+        "exam:100:200:exam-1",
+        "goTest('100','exam-1',0,'SAFE_TIME','paper-1',false,'SAFE_ENC_TASK')",
+    )
+    .unwrap();
+    let start = ChaoxingExamStartCommand::from_cover(
+        task_id,
+        "exam:100:200:exam-1",
+        &request,
+        parse_exam_cover(EXAM_COVER).unwrap(),
+    )
+    .unwrap();
+    let material = ChaoxingExamAttemptMaterial {
+        exam_answer_id: Zeroizing::new("answer-1".to_owned()),
+        enc: Zeroizing::new("SAFE_PREVIEW_ENC".to_owned()),
+        enc_remain_time: 3_588,
+        remain_time: 3_600,
+        last_update_time: 1_700_000_000_500,
+    };
+    let questions = draft
+        .items
+        .iter()
+        .map(|item| item.question.clone())
+        .collect::<Vec<_>>();
+    let artifact =
+        ChaoxingExamQuestionArtifact::from_materialization(task_id, &start, material, &questions)
+            .unwrap();
+    (draft, artifact)
 }
 
 fn selected(question_id: asterism_domain::QuestionId, answer: NormalizedAnswer) -> SelectedAnswer {
