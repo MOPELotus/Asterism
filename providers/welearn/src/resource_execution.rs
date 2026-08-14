@@ -490,8 +490,9 @@ mod tests {
 
     use super::*;
     use crate::runtime_settings::{
-        RESOURCE_SCORE_MAX_PERCENT_KEY, RESOURCE_SCORE_MIN_PERCENT_KEY, RESOURCE_SCORE_MODE_KEY,
-        RESOURCE_SCORE_PERCENT_KEY, runtime_settings_schema,
+        RESOURCE_COMPLETION_SEQUENCE_KEY, RESOURCE_SCORE_MAX_PERCENT_KEY,
+        RESOURCE_SCORE_MIN_PERCENT_KEY, RESOURCE_SCORE_MODE_KEY, RESOURCE_SCORE_PERCENT_KEY,
+        runtime_settings_schema,
     };
     use asterism_domain::{
         AssessmentClass, ProviderAccountId, ProviderId, SecretId, SourceType, TaskId,
@@ -1085,10 +1086,16 @@ mod tests {
         let schema = runtime_settings_schema();
         let task = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
-            values: std::collections::BTreeMap::from([(
-                RESOURCE_SCORE_PERCENT_KEY.to_owned(),
-                ProviderSettingValue::Integer(82),
-            )]),
+            values: std::collections::BTreeMap::from([
+                (
+                    RESOURCE_SCORE_PERCENT_KEY.to_owned(),
+                    ProviderSettingValue::Integer(82),
+                ),
+                (
+                    RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("selected_score".to_owned()),
+                ),
+            ]),
         };
         ExecutionRequest {
             execution_id: asterism_domain::ExecutionId::new(),
@@ -1223,6 +1230,10 @@ mod tests {
                 (
                     RESOURCE_SCORE_MAX_PERCENT_KEY.to_owned(),
                     ProviderSettingValue::Integer(maximum),
+                ),
+                (
+                    RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("selected_score".to_owned()),
                 ),
             ]),
         };

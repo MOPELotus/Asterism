@@ -437,7 +437,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
         ProviderSettingScope::Task,
     ]);
     ProviderRuntimeSettingsSchema {
-        version: 15,
+        version: 16,
         definitions: vec![
             ProviderSettingDefinition {
                 key: PROVIDER_EXECUTION_CONCURRENCY_KEY.to_owned(),
@@ -636,7 +636,7 @@ pub(crate) fn runtime_settings_schema() -> ProviderRuntimeSettingsSchema {
                     ]),
                 },
                 default: ProviderSettingValue::Choice(
-                    RESOURCE_COMPLETION_SELECTED_SCORE.to_owned(),
+                    RESOURCE_COMPLETION_CURRENT_DONOR_DUAL_SAVE.to_owned(),
                 ),
                 scopes: provider_account_task_scopes.clone(),
                 core_behavior: None,
@@ -749,7 +749,8 @@ mod tests {
                 duration_heartbeat_interval_seconds: 60,
                 duration_protocol_mode: WellearnDurationProtocolMode::PreserveFresh,
                 resource_score: WellearnResourceScore::Fixed(82),
-                resource_completion_sequence: WellearnResourceCompletionSequence::SelectedScore,
+                resource_completion_sequence:
+                    WellearnResourceCompletionSequence::CurrentDonorDualSave100,
                 resource_completion_time_mode: WellearnResourceCompletionTimeMode::Auto,
                 resource_completion_cmi_format: WellearnResourceCompletionCmiFormat::Json,
                 resource_completion_write_mode: WellearnResourceCompletionWriteMode::SetThenSave,
@@ -865,7 +866,8 @@ mod tests {
                 duration_heartbeat_interval_seconds: 1,
                 duration_protocol_mode: WellearnDurationProtocolMode::ClientCounter,
                 resource_score: WellearnResourceScore::Fixed(100),
-                resource_completion_sequence: WellearnResourceCompletionSequence::SelectedScore,
+                resource_completion_sequence:
+                    WellearnResourceCompletionSequence::CurrentDonorDualSave100,
                 resource_completion_time_mode: WellearnResourceCompletionTimeMode::Auto,
                 resource_completion_cmi_format: WellearnResourceCompletionCmiFormat::Json,
                 resource_completion_write_mode: WellearnResourceCompletionWriteMode::SetThenSave,
