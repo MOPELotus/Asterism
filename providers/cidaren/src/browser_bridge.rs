@@ -6,9 +6,9 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     BrowserBridgeCapability, BrowserBridgeCredentialResult, BrowserBridgeCredentialResultRequest,
-    BrowserBridgeReadSource, BrowserSessionSpec, CredentialReplacement, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
-    TaskDetailCapability,
+    BrowserBridgeReadSource, BrowserBridgeResultDisposition, BrowserSessionSpec,
+    CredentialReplacement, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
+    ProviderMetadata, ProviderResult, TaskDetailCapability,
 };
 use asterism_secrets::SecretValue;
 use async_trait::async_trait;
@@ -521,6 +521,14 @@ impl BrowserBridgeCapability for CidarenBrowserBridge {
         })
     }
 
+    fn browser_bridge_result_disposition(
+        &self,
+        result_type: &str,
+    ) -> Option<BrowserBridgeResultDisposition> {
+        (result_type == crate::CIDAREN_CAPTURE_RESULT_TYPE)
+            .then_some(BrowserBridgeResultDisposition::CredentialTerminal)
+    }
+
     async fn complete_browser_bridge_credential_result(
         &self,
         context: &ProviderContext,
@@ -788,6 +796,27 @@ mod tests {
                 .kind,
             ProviderErrorKind::ProtocolDrift
         );
+    }
+
+    #[test]
+    fn result_disposition_accepts_only_exact_capture_result_type() {
+        let capability = bridge(true);
+        assert_eq!(
+            capability.browser_bridge_result_disposition(crate::CIDAREN_CAPTURE_RESULT_TYPE),
+            Some(BrowserBridgeResultDisposition::CredentialTerminal)
+        );
+        for result_type in [
+            "",
+            "cidaren.capture.snapshot",
+            "cidaren.capture.snapshot.result.extra",
+            "CIDAREN.CAPTURE.SNAPSHOT.RESULT",
+            "uai.capture.snapshot.result",
+        ] {
+            assert_eq!(
+                capability.browser_bridge_result_disposition(result_type),
+                None
+            );
+        }
     }
 
     #[tokio::test]
