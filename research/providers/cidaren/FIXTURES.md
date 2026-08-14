@@ -312,6 +312,11 @@ placeholder identities, result codes, status values and pagination shape.
   the Task goal while per-Question answer history stays explicitly Unverified;
   a terminal receipt with incomplete readback remains Pending, and stale
   Draft/preview/state combinations fail closed.
+- Coverage regression tests freeze Cidaren's no-partial-policy boundary:
+  complete one-Question Answer and explicit Skip Drafts use 1000/1000 with no
+  unanswered IDs, while a generic Domain-valid 50% Draft is rejected before
+  remote verification. SubmissionExecute applies the same shared predicate
+  before any Task read or mutation.
 - No fixture fabricates a history/result/retake endpoint. The full donor sweep
   found no per-Question correctness readback, passing threshold or retake
   eligibility shape; `chance_num` remains current-Question data. Shared corpus

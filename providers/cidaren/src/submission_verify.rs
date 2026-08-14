@@ -13,7 +13,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
 
-use crate::{CidarenSubmissionBuild, CidarenTaskScoreTransport, metadata::development_metadata};
+use crate::{
+    CidarenSubmissionBuild, CidarenTaskScoreTransport, metadata::development_metadata,
+    submission_build::has_complete_answer_coverage,
+};
 
 /// Fresh task-level verification for a completed Cidaren answer lifecycle.
 ///
@@ -181,6 +184,7 @@ fn validate_draft(
         || draft.provider_id != metadata.id
         || draft.provider_version != metadata.implementation_version
         || draft.items.len() != 1
+        || !has_complete_answer_coverage(&draft.answer_coverage, draft.items.len())
         || draft.items[0].question.task_id != draft.task_id
         || draft.items[0]
             .question
@@ -385,6 +389,36 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.status, SubmissionVerificationStatus::Pending);
         assert_eq!(snapshot.progress_percent, Some(35));
+    }
+
+    #[tokio::test]
+    async fn partial_coverage_is_rejected_before_remote_verification() {
+        let mut draft = draft().await;
+        draft.answer_coverage = SubmissionAnswerCoverage {
+            total_question_count: 2,
+            minimum_coverage_millis: 500,
+            unanswered_question_ids: vec![asterism_domain::QuestionId::new()],
+        };
+        draft.validate().unwrap();
+        let verifier = CidarenSubmissionVerify::try_new(
+            Arc::new(FixtureDetail {
+                state: RemoteState::Completed,
+                progress: 100,
+            }),
+            Arc::new(FixtureScore {
+                earned_milli_points: None,
+                fail: false,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            verifier
+                .verify_submission(&context(), "class-task:2002", &draft, None)
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
     }
 
     #[tokio::test]

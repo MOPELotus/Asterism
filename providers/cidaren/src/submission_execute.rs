@@ -22,6 +22,7 @@ use crate::{
     CidarenDurableStepOutcome, CidarenIssuedCommand, CidarenPreQuestionArtifact,
     CidarenQuestionArtifact, CidarenQuestionInventory, CidarenRuntimeSettings,
     CidarenSubmissionBuild, metadata::development_metadata,
+    submission_build::has_complete_answer_coverage,
 };
 
 /// Durable post-materialization assessment executor.
@@ -70,6 +71,11 @@ impl CidarenSubmissionExecute {
                 "Cidaren submission execution requires one current Question",
             ));
         };
+        if !has_complete_answer_coverage(&draft.answer_coverage, draft.items.len()) {
+            return Err(invalid_input(
+                "Cidaren submission execution requires complete answer coverage",
+            ));
+        }
         let expected = self
             .preview
             .build_submission_preview(

@@ -682,6 +682,16 @@ branches to `SkipAnswer` before the answer encoder. If an answer has already
 entered ReadyToVerify/ReadyToAdvance, replacing it with Skip cannot reconstruct
 the immutable relation queue and fails closed.
 
+Cidaren exposes no donor setting or wire behavior for partial submission. Its
+sequential protocol always binds one current Question to one immutable Draft;
+an explicit Skip is still a complete, reviewable intent for that Question, not
+an unanswered snapshot member. After generic Domain validation, both
+SubmissionExecute and SubmissionVerify therefore require coverage 1000/1000,
+an empty unanswered-ID set and `total_question_count == items.len()`. A
+structurally valid generic partial Draft is rejected before preview rebuilding,
+fresh remote reads or mutations. This Provider constraint is independent of
+Chaoxing's evidenced partial-submit policy and adds no Cidaren runtime setting.
+
 After an accepted post-materialization operation, the Provider classifies the
 state once. A rotated token for the same Question yields Continue with a new
 artifact revision. A newly parsed Question yields `NextQuestion` material for

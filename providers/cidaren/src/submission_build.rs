@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::{
-    NormalizedAnswer, Question, QuestionKind, SelectedAnswer, SubmissionPayloadEncoding,
-    SubmissionPayloadFieldPreview, SubmissionPayloadPreview,
+    NormalizedAnswer, Question, QuestionKind, SelectedAnswer, SubmissionAnswerCoverage,
+    SubmissionPayloadEncoding, SubmissionPayloadFieldPreview, SubmissionPayloadPreview,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
@@ -14,6 +14,15 @@ use serde_json::Value;
 use crate::metadata::development_metadata;
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 768;
+
+pub(crate) fn has_complete_answer_coverage(
+    coverage: &SubmissionAnswerCoverage,
+    answered_question_count: usize,
+) -> bool {
+    coverage.minimum_coverage_millis == 1_000
+        && coverage.unanswered_question_ids.is_empty()
+        && usize::try_from(coverage.total_question_count) == Ok(answered_question_count)
+}
 
 /// Credential-free Cidaren preview for one current attempt Question.
 ///
@@ -280,6 +289,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn cidaren_accepts_only_complete_answer_coverage() {
+        let mut coverage = SubmissionAnswerCoverage {
+            total_question_count: 1,
+            minimum_coverage_millis: 1_000,
+            unanswered_question_ids: Vec::new(),
+        };
+        assert!(has_complete_answer_coverage(&coverage, 1));
+
+        coverage.minimum_coverage_millis = 999;
+        assert!(!has_complete_answer_coverage(&coverage, 1));
+        coverage.minimum_coverage_millis = 1_000;
+        coverage.total_question_count = 2;
+        assert!(!has_complete_answer_coverage(&coverage, 1));
+        coverage.total_question_count = 1;
+        coverage
+            .unanswered_question_ids
+            .push(asterism_domain::QuestionId::new());
+        assert!(!has_complete_answer_coverage(&coverage, 1));
+    }
 
     #[tokio::test]
     async fn single_and_text_previews_contain_no_executable_values() {

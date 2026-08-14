@@ -574,6 +574,25 @@ gate. The authenticated-browser, live-account, authorized-mutation and mode-73
 evidence blockers remain exact. This completes Cidaren's one-time full sweep;
 future checkpoints resume ordinary branch/release/issue delta review.
 
+### 2026-08-15 complete-answer-coverage boundary
+
+The three recorded donor refs and tag sets were rechecked before and after this
+incremental checkpoint. They remain `ularch/master@bce9559`, public latest
+tag/release `1.5.4@7e29ee4`, `MOPELotus/master@a74b4a2` and historical
+`main@1409858`; the public issue update ordering remains headed by the already
+audited 112/113 cluster. No new commit, tag, release, issue shape, route or
+setting entered the capability audit.
+
+Core's immutable Draft can now represent a complete answered/unanswered
+snapshot partition for Providers with evidenced partial submission. The full
+Cidaren donor sweep found no such setting or behavior: each assessment step
+has one current Question and requires an explicit Answer or explicit Skip.
+Cidaren now enforces that evidence boundary after generic Draft validation and
+before any execution/verification I/O: coverage must be exactly 1000/1000,
+unanswered IDs must be empty and total count must equal the Draft item count.
+A generic Domain-valid 50% Draft is fixture-covered and fails closed. This
+adds no Cidaren partial policy or runtime setting.
+
 ## Check procedure
 
 For the next checkpoint:
