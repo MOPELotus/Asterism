@@ -16,6 +16,7 @@ pub enum WellearnBatchFlow {
     YzbrhDuration,
     AutoCompletion,
     AutoDuration,
+    AutoLegacyDuration,
 }
 
 /// Donor dispatch behavior that the shared parent/child execution layer must
@@ -56,7 +57,9 @@ impl WellearnBatchFlow {
             Self::FanyuchangCompletion | Self::FanyuchangDuration | Self::YzbrhDuration => {
                 WellearnBatchDispatch::PerChildConcurrent
             }
-            Self::YzbrhCompletion | Self::AutoCompletion => WellearnBatchDispatch::Sequential,
+            Self::YzbrhCompletion | Self::AutoCompletion | Self::AutoLegacyDuration => {
+                WellearnBatchDispatch::Sequential
+            }
             Self::AutoDuration => WellearnBatchDispatch::BoundedThreadPool,
         }
     }
@@ -67,7 +70,8 @@ impl WellearnBatchFlow {
             | Self::FanyuchangCompletion
             | Self::FanyuchangDuration
             | Self::YzbrhCompletion
-            | Self::YzbrhDuration => WellearnBatchTargetStrategy::PerChild,
+            | Self::YzbrhDuration
+            | Self::AutoLegacyDuration => WellearnBatchTargetStrategy::PerChild,
             Self::AutoDuration => WellearnBatchTargetStrategy::AggregateEqualFloor,
         }
     }
@@ -90,7 +94,10 @@ impl WellearnBatchFlow {
     const fn is_duration(self) -> bool {
         matches!(
             self,
-            Self::FanyuchangDuration | Self::YzbrhDuration | Self::AutoDuration
+            Self::FanyuchangDuration
+                | Self::YzbrhDuration
+                | Self::AutoDuration
+                | Self::AutoLegacyDuration
         )
     }
 
@@ -716,6 +723,26 @@ mod tests {
     }
 
     #[test]
+    fn auto_legacy_duration_is_visible_sequential_and_per_child() {
+        let plan = build_batch_plan(&tasks(), WellearnBatchFlow::AutoLegacyDuration, None).unwrap();
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| entry.remote_task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["sco:1001:301", "sco:1001:302"]
+        );
+        assert_eq!(plan.dispatch, WellearnBatchDispatch::Sequential);
+        assert_eq!(plan.target_strategy, WellearnBatchTargetStrategy::PerChild);
+        assert_eq!(plan.aggregate_duration_seconds, None);
+        assert!(
+            plan.entries
+                .iter()
+                .all(|entry| entry.target_seconds.is_none())
+        );
+    }
+
+    #[test]
     fn auto_duration_preserves_zero_floor_targets_and_remainder() {
         let template = tasks().remove(0);
         let mut many = Vec::with_capacity(61);
@@ -893,6 +920,10 @@ mod tests {
             WellearnBatchDispatch::BoundedThreadPool
         );
         assert_eq!(
+            WellearnBatchFlow::AutoLegacyDuration.dispatch(),
+            WellearnBatchDispatch::Sequential
+        );
+        assert_eq!(
             WellearnBatchFlow::AutoCompletion.target_strategy(),
             WellearnBatchTargetStrategy::PerChild
         );
@@ -902,6 +933,10 @@ mod tests {
         );
         assert_eq!(
             WellearnBatchFlow::YzbrhDuration.target_strategy(),
+            WellearnBatchTargetStrategy::PerChild
+        );
+        assert_eq!(
+            WellearnBatchFlow::AutoLegacyDuration.target_strategy(),
             WellearnBatchTargetStrategy::PerChild
         );
     }

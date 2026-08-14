@@ -413,6 +413,7 @@ orchestration semantics are:
 | YZBRH duration | one Unit or every Unit; every returned SCO is retained, including hidden and completed rows | fixed seconds or one inclusive uniform-range duration sampled independently for each selected SCO | one concurrently created coroutine per SCO; each coroutine owns its read/start/network-keep/save lifecycle |
 | Auto_WeLearn completion | one or several Units; hidden SCOs and any SCO outside the raw `iscomplete` contains `未` branch are skipped | fixed score or one inclusive uniform-range score sampled independently for each remaining SCO | Units and SCOs are processed sequentially |
 | Auto_WeLearn duration | one or several Units; all visible SCOs are first collected into one membership set | sample `actual_minutes = max(1, configured_minutes + uniform(-range,+range))` once from configured 1–300 and offset 0–30 minute UI bounds, then give every child `floor(actual_minutes * 60 / child_count)` seconds; the remainder is deliberately discarded | bounded thread pool, configured from 1 through 100 |
+| Auto_WeLearn single-file duration | one Unit or every Unit; hidden SCOs are skipped while completed visible SCOs remain | fixed seconds or one inclusive uniform-range duration sampled independently for each visible SCO | Units and SCOs are processed sequentially |
 
 These are orchestration semantics over the already implemented native SCO
 operations, not new WELearn endpoints. In particular, Auto's minutes value is
@@ -433,13 +434,14 @@ and visibility fact before filtering, rejects cross-Course input and freezes
 the exact parent Course identity in the resulting plan.
 
 The same Auto_WeLearn revision also retains the original single-file
-`WeLearn.py` entry point. Its completion and duration routes deliberately keep
-hidden/already-completed SCOs, sample one target per child and launch one
-thread per child; these are the same wire and target semantics as the current
-Fanyuchang-compatible profiles and are represented by
-`FanyuchangCompletion`/`FanyuchangDuration`, rather than silently discarded as
-an obsolete capability. The modular `ui/workers.py` flow remains the source
-for the distinct Auto completion and aggregate-duration filters above.
+`WeLearn.py` entry point. Its completion route has the same sequential,
+visible-and-unfinished membership and per-child score semantics as
+`AutoCompletion`. Its duration route skips hidden SCOs but keeps completed
+visible rows, samples seconds per child, processes every child sequentially and
+ends with the bare implicit-server save; `AutoLegacyDuration` preserves this
+distinct flow. The modular `ui/workers.py` route remains the source for the
+aggregate-duration `AutoDuration` thread-pool flow and its completion-bearing
+save-only composite.
 
 `WellearnBatchPlan.dispatch` records the donor dispatch contract needed by the
 shared durable parent/child layer: per-child concurrent, sequential, or
