@@ -450,6 +450,12 @@ acceptance boolean and continues the configured write plan, but still requires
 the exact fresh CMI goal. A malformed response, transport failure or other
 ambiguous outcome stops immediately as HumanRequired. Thus a receipt remains
 diagnostic evidence rather than success.
+The returned transport document must nevertheless describe the exact frozen
+call shape: a submitted plan records start, set-then-save records one set
+receipt, selected-score records one save and current dual-save records two.
+Missing or extra receipt slots fail `Internal` before CMI parsing, while a
+present `false` receipt remains valid diagnostic evidence and does not replace
+fresh readback verification.
 The
 goal-bound `ExecutionVerify` implementation receives Core's same frozen
 ExecutionRequest, repeats the full TaskDetail identity rebind and calls only a

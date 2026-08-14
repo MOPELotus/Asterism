@@ -184,6 +184,9 @@ only structural field names, response codes and bounded placeholder shapes.
   completion-bearing save-only tuple and treats
   per-call acceptance as a receipt, never the success predicate; an explicit
   rejection may continue to the donor's next write, while ambiguity stops.
+- Transport documents must expose exactly the frozen start/set/save receipt
+  slots. Missing or extra slots fail before CMI parsing, but present `false`
+  receipts remain diagnostic and can pass only through exact fresh readback.
 - ResourceExecution freezes the current full/simple-Referer or historical
   minimal/task-Referer mutation profile, applies its endpoint and Referer to
   baseline/start/set/save/verification, and never combines profile halves into

@@ -64,6 +64,43 @@ impl WellearnResourceExecutionDocuments {
             save_acceptances,
         }
     }
+
+    fn validate_for_plan(&self, plan: WellearnResourceExecutionPlan) -> ProviderResult<()> {
+        if !self.mutation_submitted {
+            if self.after.is_some()
+                || self.started
+                || self.start_accepted.is_some()
+                || self.set_accepted.is_some()
+                || !self.save_acceptances.is_empty()
+            {
+                return Err(invalid_resource_documents());
+            }
+            return Ok(());
+        }
+
+        let expects_set =
+            plan.write_mode == crate::WellearnResourceCompletionWriteMode::SetThenSave;
+        let expected_saves = match plan.sequence {
+            WellearnResourceCompletionSequence::SelectedScore => 1,
+            WellearnResourceCompletionSequence::CurrentDonorDualSave100 => 2,
+        };
+        if self.after.is_none()
+            || !self.started
+            || self.start_accepted.is_none()
+            || self.set_accepted.is_some() != expects_set
+            || self.save_acceptances.len() != expected_saves
+        {
+            return Err(invalid_resource_documents());
+        }
+        Ok(())
+    }
+}
+
+fn invalid_resource_documents() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn resource transport returned receipts inconsistent with the frozen plan",
+    )
 }
 
 /// Immutable donor completion wire plan selected from one frozen execution.
@@ -287,6 +324,7 @@ impl TaskExecutionCapability for WellearnResourceExecution {
             .transport
             .complete_resource(context, &course_id, &sco_id, plan)
             .await?;
+        documents.validate_for_plan(plan)?;
         let before = parse_mutation_cmi_baseline(documents.before.as_str())?;
         let already_completed = !documents.mutation_submitted;
         if already_completed {
@@ -663,12 +701,20 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
+    enum FixtureReceiptShape {
+        #[default]
+        Exact,
+        Malformed,
+    }
+
+    #[derive(Debug, Default)]
     struct FixtureTransport {
         calls: Mutex<Vec<CompletionCall>>,
         verifications: Mutex<Vec<(String, String)>>,
         already_completed: bool,
         drift_score: bool,
         explicit_rejections: bool,
+        receipt_shape: FixtureReceiptShape,
         baseline: FixtureBaseline,
     }
 
@@ -723,13 +769,22 @@ mod tests {
                 FixtureBaseline::Initialized => BEFORE,
                 FixtureBaseline::Uninitialized => "学习数据不正确，请先开始学习",
             };
+            let malformed_receipts = matches!(self.receipt_shape, FixtureReceiptShape::Malformed);
             Ok(WellearnResourceExecutionDocuments::submitted(
                 WellearnCmiDocument::try_new(before).unwrap(),
                 WellearnCmiDocument::try_new(after).unwrap(),
-                true,
+                !malformed_receipts,
                 accepted,
-                set_accepted,
-                vec![accepted; save_count],
+                if malformed_receipts {
+                    None
+                } else {
+                    set_accepted
+                },
+                if malformed_receipts {
+                    Vec::new()
+                } else {
+                    vec![accepted; save_count]
+                },
             ))
         }
 
@@ -932,6 +987,24 @@ mod tests {
             outcome.result_sanitized["verification"],
             "provider_fresh_cmi"
         );
+    }
+
+    #[tokio::test]
+    async fn transport_receipts_must_match_the_frozen_mutation_shape() {
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            Arc::new(FixtureTransport {
+                receipt_shape: FixtureReceiptShape::Malformed,
+                ..FixtureTransport::default()
+            }),
+        )
+        .unwrap();
+
+        let error = execution
+            .execute(&context(), &current_donor_request(), &FixtureEvents)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
     }
 
     #[tokio::test]
