@@ -14,7 +14,8 @@ use crate::{
     execution_selection::uniform_u64,
     metadata::development_metadata,
     runtime_settings::{
-        WellearnDurationProtocolMode, WellearnDurationTarget, WellearnRuntimeSettings,
+        MAX_DURATION_REPORT_SECONDS, MIN_DURATION_REPORT_SECONDS, WellearnDurationProtocolMode,
+        WellearnDurationTarget, WellearnRuntimeSettings,
     },
     task_detail::validate_fresh_execution_detail,
 };
@@ -87,6 +88,37 @@ pub struct WellearnDurationReportPlan {
     pub duration_seconds: u64,
     pub heartbeat_interval_seconds: u64,
     pub protocol_mode: WellearnDurationProtocolMode,
+}
+
+impl WellearnDurationReportPlan {
+    /// Validates the complete bounded donor cadence before any lifecycle I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when duration bounds or the protocol-specific
+    /// heartbeat interval do not match audited behavior.
+    pub fn validate(self) -> ProviderResult<()> {
+        if !(MIN_DURATION_REPORT_SECONDS..=MAX_DURATION_REPORT_SECONDS)
+            .contains(&self.duration_seconds)
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn duration plan contains an out-of-range target",
+            ));
+        }
+        let evidenced_interval = match self.protocol_mode {
+            WellearnDurationProtocolMode::ClientCounter => 1,
+            WellearnDurationProtocolMode::PreserveFresh
+            | WellearnDurationProtocolMode::ImplicitServer => 60,
+        };
+        if self.heartbeat_interval_seconds != evidenced_interval {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn duration plan contains a protocol/interval mismatch",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// High-level transport boundary for an atomic read → optional start → keep →
@@ -174,6 +206,12 @@ impl TaskExecutionCapability for WellearnDurationReport {
         let (course_id, sco_id) = parse_sco_identity(&request.remote_task_id)?;
         let settings = WellearnRuntimeSettings::resolve(&request.runtime_settings)?;
         let duration_seconds = select_duration(settings.duration_report, request);
+        let plan = WellearnDurationReportPlan {
+            duration_seconds,
+            heartbeat_interval_seconds: settings.duration_heartbeat_interval_seconds,
+            protocol_mode: settings.duration_protocol_mode,
+        };
+        plan.validate()?;
         let detail = self
             .details
             .task_detail(context, &request.remote_task_id)
@@ -191,17 +229,7 @@ impl TaskExecutionCapability for WellearnDurationReport {
         )?;
         let documents = self
             .transport
-            .report_duration(
-                context,
-                &course_id,
-                &sco_id,
-                WellearnDurationReportPlan {
-                    duration_seconds,
-                    heartbeat_interval_seconds: settings.duration_heartbeat_interval_seconds,
-                    protocol_mode: settings.duration_protocol_mode,
-                },
-                events,
-            )
+            .report_duration(context, &course_id, &sco_id, plan, events)
             .await?;
         let before = parse_cmi_snapshot(documents.before.as_str())?;
         let after = parse_cmi_snapshot(documents.after.as_str())?;
@@ -540,6 +568,53 @@ mod tests {
             self.logs.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+    }
+
+    #[test]
+    fn duration_plan_binds_every_protocol_to_its_audited_cadence() {
+        for (protocol_mode, heartbeat_interval_seconds) in [
+            (WellearnDurationProtocolMode::PreserveFresh, 60),
+            (WellearnDurationProtocolMode::ClientCounter, 1),
+            (WellearnDurationProtocolMode::ImplicitServer, 60),
+        ] {
+            WellearnDurationReportPlan {
+                duration_seconds: 600,
+                heartbeat_interval_seconds,
+                protocol_mode,
+            }
+            .validate()
+            .unwrap();
+        }
+
+        let valid = WellearnDurationReportPlan {
+            duration_seconds: 600,
+            heartbeat_interval_seconds: 60,
+            protocol_mode: WellearnDurationProtocolMode::PreserveFresh,
+        };
+        assert!(
+            WellearnDurationReportPlan {
+                duration_seconds: 0,
+                ..valid
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            WellearnDurationReportPlan {
+                duration_seconds: MAX_DURATION_REPORT_SECONDS + 1,
+                ..valid
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            WellearnDurationReportPlan {
+                heartbeat_interval_seconds: 1,
+                ..valid
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[tokio::test]

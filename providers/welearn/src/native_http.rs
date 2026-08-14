@@ -25,10 +25,7 @@ use crate::{
     },
     course_context::{parse_course_context, parse_course_context_for_id},
     course_inventory::course_id_from_remote,
-    runtime_settings::{
-        LEGACY_DURATION_REQUEST_INTERVAL_SECONDS, MAX_DURATION_HEARTBEAT_SECONDS,
-        MAX_DURATION_REPORT_SECONDS, MIN_DURATION_HEARTBEAT_SECONDS, MIN_DURATION_REPORT_SECONDS,
-    },
+    runtime_settings::LEGACY_DURATION_REQUEST_INTERVAL_SECONDS,
     task_inventory::unit_count,
 };
 
@@ -604,31 +601,12 @@ impl WellearnDurationReportTransport for NativeWellearnInventoryTransport {
         plan: crate::WellearnDurationReportPlan,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnDurationReportDocuments> {
+        plan.validate()?;
         let crate::WellearnDurationReportPlan {
             duration_seconds,
             heartbeat_interval_seconds,
             protocol_mode,
         } = plan;
-        if !(MIN_DURATION_REPORT_SECONDS..=MAX_DURATION_REPORT_SECONDS).contains(&duration_seconds)
-            || !(MIN_DURATION_HEARTBEAT_SECONDS..=MAX_DURATION_HEARTBEAT_SECONDS)
-                .contains(&heartbeat_interval_seconds)
-        {
-            return Err(ProviderError::new(
-                ProviderErrorKind::Internal,
-                "WELearn duration transport received out-of-range runtime settings",
-            ));
-        }
-        let evidenced_heartbeat_interval = match protocol_mode {
-            crate::WellearnDurationProtocolMode::ClientCounter => 1,
-            crate::WellearnDurationProtocolMode::PreserveFresh
-            | crate::WellearnDurationProtocolMode::ImplicitServer => 60,
-        };
-        if heartbeat_interval_seconds != evidenced_heartbeat_interval {
-            return Err(ProviderError::new(
-                ProviderErrorKind::Internal,
-                "WELearn duration transport received a protocol/interval mismatch",
-            ));
-        }
         let endpoint = duration_endpoint(protocol_mode);
         let (mut session, mut renewed) = self.session_for_operation(context).await?;
         if protocol_mode == crate::WellearnDurationProtocolMode::PreserveFresh {

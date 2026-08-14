@@ -194,6 +194,8 @@ only structural field names, response codes and bounded placeholder shapes.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.
+- Duration plan tests reject out-of-range targets and every protocol/cadence
+  mismatch at TaskExecution and native entry before fresh detail or session I/O.
 - The preservation-mode schedule sends an initial keep and one keep per full
   interval, while a trailing partial interval adds elapsed time but no
   unevidenced final keep.

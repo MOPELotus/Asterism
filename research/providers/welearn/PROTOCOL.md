@@ -308,6 +308,10 @@ audited values: current Fanyuchang's `client_counter` requires 1 second and
 YZBRH `preserve_fresh` plus Auto `implicit_server` require 60 seconds. The
 schema exposes only `{1,60}` and the runtime binds each value to its exact wire
 mode instead of advertising unevidenced 2–59 or 61–90 second variants.
+`WellearnDurationReportPlan::validate` is the shared Provider authority for
+those bounds: TaskExecution calls it before fresh TaskDetail, and native
+transport calls it again before resolving a session. Invalid restored or
+directly supplied plans therefore produce no read or mutation I/O.
 Auto's current UI accepts a 1–300 minute aggregate with a 0–30 minute random
 offset, so its frozen `max(1, configured + offset)` budget can assign the full
 evidenced 330 minutes to one visible SCO. Conservative defaults remain 600 and
