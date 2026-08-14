@@ -624,5 +624,8 @@ mutation-backed `QuestionInventory` adapter is registered and fixture-covered;
 it materializes normalized Questions directly rather than inventing a
 read-only `QuestionParse` route the donor does not expose. The remaining shared
 work is Main-owned Engine/API orchestration and the durable
-post-materialization `SubmissionExecute` path. This is a shared contract
-boundary, not a Provider capability exclusion.
+post-materialization `SubmissionExecute` path. That shared step contract must
+keep Answer and Skip intents distinct: mode 73 has no evidenced two-answer
+Verify encoding, while the donor's `SkipAnswer` route is already implemented;
+an empty or `Unknown` selected answer is not an acceptable substitute. This is
+a shared contract boundary, not a Provider capability exclusion.

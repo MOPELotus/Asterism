@@ -155,7 +155,8 @@ The current checkpoint (not a completion boundary):
 
 The remaining work is Main-owned Engine/API orchestration of the registered
 pre-Question adapter, durable post-materialization QuestionSession execution
-for SubmissionExecute, shared execution for the alternate
+for SubmissionExecute (including an explicit Skip intent that does not invent
+a `SelectedAnswer`), shared execution for the alternate
 Capture/BrowserBridge helper paths and live validation.
 Fresh post-mutation verification and the durable one-shot External OAuth path
 are already implemented. A checkpoint or Core Gap is not a Provider stopping

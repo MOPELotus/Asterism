@@ -73,11 +73,11 @@ pub enum CidarenAttemptFlowStatus {
 
 /// Provider-private, single-step Cidaren attempt lifecycle.
 ///
-/// This machine deliberately does not implement a public Core capability yet:
-/// Core still needs a durable attempt/session contract capable of persisting
-/// every `Issued` marker. It nevertheless freezes the exact safe transition
-/// semantics so future integration cannot batch matching answers, persist a
-/// topic code in a Draft, or replay an ambiguous mutation.
+/// The pre-Question subset is consumed by the public `QuestionInventory`
+/// adapter. Post-materialization Verify/advance/skip edges remain available
+/// through this Provider-private surface until Core's `QuestionSession` step
+/// contract persists every `Issued` marker. The machine prevents matching
+/// batches, topic codes in Drafts and ambiguous mutation replay in both paths.
 pub struct CidarenAttemptFlow {
     binding: CidarenAssessmentBinding,
     context_binding: [u8; 32],
@@ -2224,11 +2224,17 @@ mod tests {
             flow.current_question().unwrap().kind,
             QuestionKind::FillBlank
         );
+        let materialization = flow.current_question_materialization().unwrap().unwrap();
+        let recovered = recovered_context(&context);
+        let (mut flow, question, verified_steps) =
+            restore_materialization(&recovered, materialization, None, None);
+        assert_eq!(question.kind, QuestionKind::FillBlank);
+        assert_eq!(verified_steps, 0);
 
         let outcome = flow
             .issue_skip(&settings(), request_at())
             .unwrap()
-            .execute(transport.clone(), &context)
+            .execute(transport.clone(), &recovered)
             .await
             .unwrap();
         flow.accept(outcome).unwrap();
