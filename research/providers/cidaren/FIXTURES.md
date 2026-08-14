@@ -175,6 +175,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Legacy response decoding is bounded and exact-version only; `jv=99` requires
   a fresh account-bound Capture context and zeroizes crypto JSON, key and
   plaintext buffers.
+- Parsed Capture result envelopes cannot be cloned. Consuming one moves its
+  token and crypto JSON directly into the zeroizing snapshot while replacing
+  the source event with an empty value before its own Drop cleanup.
 - `topic_code` is absent from serialized Question fixtures and immutable
   Drafts. The `cidaren.question-attempt.v2` Provider artifact is bounded,
   zeroizing and stable-digest covered for Core's encrypted continuation store;

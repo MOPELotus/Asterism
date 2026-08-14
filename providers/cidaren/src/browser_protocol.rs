@@ -173,7 +173,7 @@ impl Drop for CidarenBrowserCommandEnvelope {
     }
 }
 
-#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[derive(Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CidarenBrowserEvent {
     CaptureSnapshot {
@@ -191,7 +191,7 @@ impl fmt::Debug for CidarenBrowserEvent {
     }
 }
 
-#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[derive(Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CidarenBrowserEventEnvelope {
     pub version: u32,
@@ -261,12 +261,21 @@ impl CidarenBrowserEventEnvelope {
     /// Returns a typed error when the result is foreign to the command or
     /// contains invalid Capture material.
     pub fn into_capture_snapshot(
-        self,
+        mut self,
         command: &CidarenBrowserCommandEnvelope,
         observed_origin: &str,
     ) -> ProviderResult<CidarenCaptureSnapshot> {
         self.validate_for_command(command, observed_origin)?;
-        let event = self.event.clone();
+        let event = std::mem::replace(
+            &mut self.event,
+            CidarenBrowserEvent::CaptureSnapshot {
+                user_token: None,
+                user_token_source: None,
+                login_info: None,
+                login_info_source: None,
+                user_session: None,
+            },
+        );
         let CidarenBrowserEvent::CaptureSnapshot {
             user_token,
             user_token_source,
