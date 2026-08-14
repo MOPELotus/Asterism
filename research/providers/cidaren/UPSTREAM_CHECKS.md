@@ -364,6 +364,35 @@ failure paths; candidate validation borrows the immutable Question before any
 owned copy. All 137 Cidaren Provider tests, all-target strict clippy, package
 formatting and scoped diff checks passed.
 
+The public 1.5.4 Release asset was then audited rather than treating its tag as
+a sufficient proxy. `Easy_Cidaren1_5_4.zip` is 103,462,537 bytes and its local
+SHA-256 exactly matched the GitHub asset digest
+`526011a4ccd14cc38887a663d54a5c78c33d8ea3d48e6c424a32128b6d0d8aca`.
+It is a Python 3.12 PyInstaller bundle. The executable was not run; its outer
+CArchive and embedded PYZ were enumerated and their donor-owned code objects
+were read with a version-matched archive reader.
+
+The packaged token helper differs from the current default branch only by
+using direct console output where master now uses the donor logger. Proxy
+save/restore, certificate import, request-header `UserToken` observation and
+token-file output are otherwise the same. The executable's learning-platform
+surface contains the already mapped `Student/Main`, `StudyTask/List`,
+`StudyTask/Info`, Course-page/SearchWord/StudyWordInfo reads,
+`ClassTask/PageTask`, task score reads, five assessment mutations and legacy
+`jv` transforms. No additional platform origin, route, authentication flow,
+Capture field or mutation appeared.
+
+Two packaged modules are absent from the 1.5.4 tag source:
+`api.cdr_status` and its UUID helper. Bytecode inspection confirmed that login
+checks a donor-operated `https://cdr.660916.xyz/block` UUID list, while task
+success/failure posts task name, result, duration and score to `/commit` with
+fail-open telemetry errors. This is an external donor-operator
+telemetry/device-block policy, not a Cidaren learning-platform capability. It
+is recorded but not mapped into Provider API. Conversely, tag source contains
+the standalone `api.translate` helper but the packaged executable omits it;
+there is still no executable donor translation capability to port. This
+release-asset delta therefore required documentation, not Provider behavior.
+
 ## Check procedure
 
 For the next checkpoint:

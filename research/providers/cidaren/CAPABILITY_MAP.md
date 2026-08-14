@@ -196,8 +196,9 @@ platform-facing surface maps as follows:
 | response decoder | fixed-index `jv=2_*`/owner `3_1021`, public span/chunk `3_1021/3_2265/3_2277`, owner `jv=99` | all exact transforms implemented with bounded unique-result semantics and authenticated crypto context for `jv=99` |
 | capture helpers | public proxy-observed token-only `UserToken`; owner `UserToken` plus `CDR_LOGIN_INFO` | Both exact recipes, validation and stored-session paths are ordered and registered; actual system-proxy/XWeb acquisition remains a shared helper-execution gap, while OAuth uses the implemented random-marker callback path |
 
-Donor update checks, GUI controls, logging/export, completion sound and the
-unrelated Gitee access-log probe do not express Cidaren platform protocol
-capabilities. The unused Google-translate helper has no executable caller.
-They are recorded here to make the audit exhaustive, not treated as deferred
-Provider abilities.
+Donor update checks, GUI controls, logging/export, completion sound, the
+unrelated Gitee access-log probe and release-only `cdr.660916.xyz`
+telemetry/device-block service do not express Cidaren platform protocol
+capabilities. The unused Google-translate helper has no source caller and is
+not present in the packaged 1.5.4 executable. They are recorded here to make
+the audit exhaustive, not treated as deferred Provider abilities.
