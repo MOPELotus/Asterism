@@ -134,10 +134,13 @@ bounded command/result validation and the exact token-only credential shape.
 Before issuing a command, `CidarenBrowserBridge::capture_snapshot_command`
 freshly calls the existing TaskDetail capability and requires the returned
 Task to advertise `BrowserBridge`, the exact visible Cidaren origin and a
-non-headless session. It then delegates bounded nonce/frame/Task/sequence
-validation to the typed command constructor. This keeps fresh rediscovery and
-identity rebinding in the Provider while leaving browser startup, access-token
-authentication, durable sequence consumption and credential commit to Core.
+non-headless session. Browser policy revision 2 also freezes the audited
+`https://app.vocabgo.com/student/` start URL; its exact origin must remain the
+sole allowed origin. Command issue repeats the start URL/origin/headless check,
+then delegates bounded nonce/frame/Task/sequence validation to the typed command
+constructor. This keeps fresh rediscovery and identity rebinding in the
+Provider while leaving browser startup, access-token authentication, durable
+sequence consumption and credential commit to Core.
 The matching `parse_capture_snapshot_result` method repeats that fresh Task
 check before accepting the result, then delegates exact nonce/frame/Task/
 sequence and recipe validation to the typed parser. A stale Task cannot cause

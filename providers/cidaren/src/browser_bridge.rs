@@ -23,6 +23,7 @@ use crate::{
 };
 
 const CIDAREN_ORIGIN: &str = "https://app.vocabgo.com";
+const CIDAREN_STUDENT_START_URL: &str = "https://app.vocabgo.com/student/";
 const MAX_REMOTE_COMPONENT_BYTES: usize = 256;
 
 /// Account-isolated visible browser boundary for the Cidaren H5 client.
@@ -152,7 +153,10 @@ impl CidarenBrowserBridge {
         mode: CidarenCaptureMode,
     ) -> ProviderResult<CidarenBrowserCommandEnvelope> {
         let spec = self.browser_session_spec(context, remote_task_id).await?;
-        if spec.allowed_origins != [CIDAREN_ORIGIN] || spec.headless {
+        if spec.start_url != CIDAREN_STUDENT_START_URL
+            || spec.allowed_origins != [CIDAREN_ORIGIN]
+            || spec.headless
+        {
             return Err(ProviderError::new(
                 ProviderErrorKind::ProtocolDrift,
                 "Cidaren BrowserBridge policy cannot issue a Capture command",
@@ -503,8 +507,9 @@ impl BrowserBridgeCapability for CidarenBrowserBridge {
             ));
         }
         Ok(BrowserSessionSpec {
-            version: 1,
+            version: 2,
             isolation_key: isolation_key(context, remote_task_id),
+            start_url: CIDAREN_STUDENT_START_URL.to_owned(),
             allowed_origins: vec![CIDAREN_ORIGIN.to_owned()],
             // WeChat authorization and browser-storage capture both require a
             // user-visible browsing context in the audited donor flow.
@@ -651,10 +656,16 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(class.isolation_key, study.isolation_key);
+        assert_eq!(class.version, 2);
+        assert_eq!(class.version, study.version);
+        assert_eq!(class.start_url, CIDAREN_STUDENT_START_URL);
+        assert_eq!(class.start_url, study.start_url);
         assert_eq!(class.allowed_origins, study.allowed_origins);
         assert_eq!(class.headless, study.headless);
         assert_eq!(class.allowed_origins, [CIDAREN_ORIGIN]);
         assert!(!class.headless);
+        class.validate().unwrap();
+        study.validate().unwrap();
         assert_ne!(
             class.isolation_key,
             capability
