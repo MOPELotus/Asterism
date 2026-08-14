@@ -417,7 +417,12 @@ zeroizing Provider artifact and encrypted at rest by Core. The session digest
 binds the exact Core Task, remote Group/Question, position, Question content
 fingerprint, ordered attachment set and canonical routes; decode revalidates
 the schema, digest, every identity, URL normalization, kind and recomputed
-attachment ID before a source can be exposed. Embedded WEBVTT is parsed with bounded
+attachment ID before a source can be exposed. UAI's Provider-specific parse
+adapter creates the normalized Question and optional encoded artifact from the
+same cached parser entry, so the route cannot be recovered from a later or
+foreign read; media-free Questions return no continuation. The shared
+Provider/Engine adapter still needs to route this richer result into snapshot
+plus QuestionSession persistence. Embedded WEBVTT is parsed with bounded
 input/output, strips its header, cue ordinals and timestamp rows, normalizes
 only cue text into transcript metadata and is excluded from the display stem. The
 current donor sends its default authorization/cookie header set through its

@@ -68,7 +68,10 @@ under another Task, and rejection of non-HTTPS or literal-IP routes. Durable
 artifact fixtures cover deterministic encoding, redacted debug output, exact
 Task/Group/Question/position/content-fingerprint binding, ordered attachment
 set equality, URL/kind/attachment-ID recomputation, unknown fields, digest
-substitution and the encoded-size ceiling. Persisted Domain Questions never
+substitution and the encoded-size ceiling. Parser-adapter coverage additionally
+requires the Question and artifact to derive from the same ephemeral entry,
+redacts the combined result and returns no artifact for media-free Questions.
+Persisted Domain Questions never
 contain a fetch URL; only Core's encrypted QuestionSession continuation can
 retain the Provider-private route. DNS/private-range resolution,
 redirect handling and host-scoped authenticated media fetching remain the

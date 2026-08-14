@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    EncodedUaiQuestionArtifact, UaiQuestionArtifact,
     encrypted::{ZeroizingJsonValue, decrypt_unipus_payload},
     metadata::development_metadata,
     task_type::{audited_question_kind, audited_reply_kind, supports_audited_question_type},
@@ -169,6 +170,66 @@ impl UaiQuestionRead {
         );
         Ok(references)
     }
+
+    fn consume_parsed_question(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        question: &RemoteQuestionRef,
+    ) -> ProviderResult<UaiQuestionParseResult> {
+        let key = QuestionAttemptKey::new(context, remote_task_id);
+        let mut attempts = self
+            .attempts
+            .lock()
+            .map_err(|_| internal("UAI Question attempt cache lock is unavailable"))?;
+        let attempt = attempts.get(&key).ok_or_else(question_attempt_changed)?;
+        if attempt.created_at.elapsed() >= QUESTION_ATTEMPT_TTL {
+            attempts.remove(&key);
+            return Err(question_attempt_changed());
+        }
+        let parsed = attempt
+            .questions
+            .iter()
+            .find(|parsed| parsed.matches_reference(question))
+            .cloned()
+            .ok_or_else(question_attempt_changed)?;
+        let is_last = usize::try_from(question.position)
+            .is_ok_and(|position| position == attempt.questions.len());
+        let result = UaiQuestionParseResult::from_parsed(&parsed, task_id)?;
+        if is_last {
+            attempts.remove(&key);
+        }
+        Ok(result)
+    }
+
+    /// Parses one cached Question and, when it contains donor media routes,
+    /// returns the matching encrypted continuation for a Core
+    /// `QuestionSession` in the same cache-consumption step.
+    ///
+    /// # Errors
+    ///
+    /// Applies the same context, route, reference and attempt freshness gates
+    /// as the shared `QuestionParseCapability`, plus exact artifact binding.
+    pub fn parse_question_with_artifact(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        question: &RemoteQuestionRef,
+    ) -> ProviderResult<UaiQuestionParseResult> {
+        validate_context(context, &self.metadata)?;
+        GroupIdentity::parse(remote_task_id)?;
+        question
+            .validate()
+            .map_err(|_| invalid_response("UAI Question reference is invalid"))?;
+        if question.route_context.get("content_kind") != Some("encrypted_v3") {
+            return Err(invalid_response(
+                "UAI Question reference has a mismatched content kind",
+            ));
+        }
+        self.consume_parsed_question(context, task_id, remote_task_id, question)
+    }
 }
 
 impl fmt::Debug for UaiQuestionRead {
@@ -214,39 +275,53 @@ impl QuestionParseCapability for UaiQuestionRead {
         remote_task_id: &str,
         question: &RemoteQuestionRef,
     ) -> ProviderResult<Question> {
-        validate_context(context, &self.metadata)?;
-        GroupIdentity::parse(remote_task_id)?;
-        question
-            .validate()
-            .map_err(|_| invalid_response("UAI Question reference is invalid"))?;
-        if question.route_context.get("content_kind") != Some("encrypted_v3") {
-            return Err(invalid_response(
-                "UAI Question reference has a mismatched content kind",
-            ));
-        }
-        let key = QuestionAttemptKey::new(context, remote_task_id);
-        let mut attempts = self
-            .attempts
-            .lock()
-            .map_err(|_| internal("UAI Question attempt cache lock is unavailable"))?;
-        let attempt = attempts.get(&key).ok_or_else(question_attempt_changed)?;
-        if attempt.created_at.elapsed() >= QUESTION_ATTEMPT_TTL {
-            attempts.remove(&key);
-            return Err(question_attempt_changed());
-        }
-        let parsed = attempt
-            .questions
-            .iter()
-            .find(|parsed| parsed.matches_reference(question))
-            .cloned()
-            .ok_or_else(question_attempt_changed)?;
-        let is_last = usize::try_from(question.position)
-            .is_ok_and(|position| position == attempt.questions.len());
-        let normalized = parsed.to_question(task_id)?;
-        if is_last {
-            attempts.remove(&key);
-        }
-        Ok(normalized)
+        self.parse_question_with_artifact(context, task_id, remote_task_id, question)
+            .map(UaiQuestionParseResult::into_question)
+    }
+}
+
+/// One normalized Question plus the optional encrypted Provider continuation
+/// produced from the exact same ephemeral parser entry.
+pub struct UaiQuestionParseResult {
+    question: Question,
+    artifact: Option<EncodedUaiQuestionArtifact>,
+}
+
+impl UaiQuestionParseResult {
+    fn from_parsed(parsed: &ParsedUaiQuestion, task_id: TaskId) -> ProviderResult<Self> {
+        let question = parsed.to_question(task_id)?;
+        let artifact = if parsed.media_sources().is_empty() {
+            None
+        } else {
+            Some(UaiQuestionArtifact::from_parsed(parsed, &question)?.encode()?)
+        };
+        Ok(Self { question, artifact })
+    }
+
+    pub fn question(&self) -> &Question {
+        &self.question
+    }
+
+    pub fn artifact(&self) -> Option<&EncodedUaiQuestionArtifact> {
+        self.artifact.as_ref()
+    }
+
+    pub fn into_question(self) -> Question {
+        self.question
+    }
+
+    pub fn into_parts(self) -> (Question, Option<EncodedUaiQuestionArtifact>) {
+        (self.question, self.artifact)
+    }
+}
+
+impl fmt::Debug for UaiQuestionParseResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiQuestionParseResult")
+            .field("question", &self.question)
+            .field("artifact", &self.artifact.as_ref().map(|_| "[REDACTED]"))
+            .finish()
     }
 }
 
@@ -1539,6 +1614,8 @@ mod tests {
         assert!(!encoded.contains("k1234567"));
         assert!(!encoded.contains("must_be_dropped"));
         assert!(!encoded.contains("answer"));
+        let result = UaiQuestionParseResult::from_parsed(&questions[0], TaskId::new()).unwrap();
+        assert!(result.artifact().is_none());
     }
 
     #[test]
@@ -1866,6 +1943,27 @@ mod tests {
         let encoded = serde_json::to_string(&question).unwrap();
         assert!(!encoded.contains("media.example.edu"));
         assert!(encoded.contains("uai-media-v1:"));
+
+        let result = UaiQuestionParseResult::from_parsed(&parsed, question.task_id).unwrap();
+        assert_eq!(result.question().task_id, question.task_id);
+        assert_eq!(
+            result.question().content_fingerprint().unwrap(),
+            question.content_fingerprint().unwrap()
+        );
+        assert!(result.artifact().is_some());
+        assert!(!format!("{result:?}").contains("media.example.edu"));
+        let (bound_question, artifact) = result.into_parts();
+        let artifact = artifact.unwrap();
+        let digest = artifact.digest();
+        let value = artifact.into_secret_value();
+        let restored = UaiQuestionArtifact::decode_bound(
+            &value,
+            digest,
+            "group:2001:unit-1:group-media",
+            &bound_question,
+        )
+        .unwrap();
+        assert_eq!(restored.media_sources().len(), 2);
 
         let same_url = json!({"contents":[{"path":"https://media.example.edu/listening.mp3"}]});
         let first = question_media(

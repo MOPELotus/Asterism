@@ -102,8 +102,8 @@ pub use provider::{
     build_development_provider_with_renewal, build_development_provider_with_stored_session,
 };
 pub use question::{
-    ParsedUaiQuestion, UaiQuestionDocument, UaiQuestionMediaSource, UaiQuestionRead,
-    UaiQuestionTransport, parse_question_content,
+    ParsedUaiQuestion, UaiQuestionDocument, UaiQuestionMediaSource, UaiQuestionParseResult,
+    UaiQuestionRead, UaiQuestionTransport, parse_question_content,
 };
 pub use question_artifact::{
     EncodedUaiQuestionArtifact, UAI_QUESTION_ARTIFACT_PHASE, UAI_QUESTION_ARTIFACT_TYPE,
