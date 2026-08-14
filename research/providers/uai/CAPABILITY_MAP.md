@@ -137,7 +137,8 @@ checkpoint, not a Provider completion boundary. It:
     scoped Tab/Task active tests, projected-handle-only click flow, bounded
     popup/video residence or DOM-free Ping. Recipe fields are private,
     compile-time-only, exactly revalidated and Debug-redacted. A consuming
-    cursor-result adapter now binds exact Intermediate/ExecutionTerminal type,
+    cursor-result adapter declares exact closed singleton Intermediate and
+    ExecutionTerminal result sets (and no credential result), then binds type,
     Core session/sequence/time/result digest, both persisted artifact digests,
     fresh Task/settings/batch and recovered cursor stage. Intermediate yields
     only one immutable next transition; ExecutionTerminal yields only a

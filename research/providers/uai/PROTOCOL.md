@@ -512,12 +512,14 @@ valid `ResidenceTarget` can complete as `uai.browser.residence.result`, and
 that terminal receipt still requires independent fresh DurationRead. Either
 digest remains replay/correlation metadata, not acceptance evidence.
 
-The declared shared result disposition now has one consuming Provider-private
-adapter instead of leaving callers to choose those two parsers and cursor
-transitions independently. It first maps only exact `uai.browser.event` to
-`Intermediate` and exact `uai.browser.residence.result` to
-`ExecutionTerminal`; unknown, command, credential or near-match types fail
-before fresh reads. The selected inbox must match the issued exchange's Core
+The declared shared result disposition and closed result-type sets now have one
+consuming Provider-private adapter instead of leaving callers to choose those
+two parsers and cursor transitions independently. UAI declares no credential
+result, exactly `[uai.browser.event]` as `Intermediate` and exactly
+`[uai.browser.residence.result]` as `ExecutionTerminal`; unknown, command,
+credential or near-match types fail before fresh reads. The registry-visible
+sets, classifier and strict inbox share that exact mapping. The selected inbox
+must match the issued exchange's Core
 session, sequence, receive time and exact secret-byte digest. Only then does
 UAI fresh-rebuild the Task/settings Browser plan, digest-decode the persisted
 command, digest-decode and batch/plan/command-rebind the independent cursor,

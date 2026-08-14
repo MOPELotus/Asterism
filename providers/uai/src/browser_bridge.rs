@@ -125,6 +125,8 @@ pub const UAI_BROWSER_EVENT_TYPE: &str = "uai.browser.event";
 pub const UAI_BROWSER_RESIDENCE_RESULT_TYPE: &str = "uai.browser.residence.result";
 /// Stable Core runtime-state type for the encrypted accumulated cursor.
 pub const UAI_BROWSER_CURSOR_STATE_TYPE: &str = "uai.browser.cursor.v4";
+const UAI_BROWSER_INTERMEDIATE_RESULT_TYPES: [&str; 1] = [UAI_BROWSER_EVENT_TYPE];
+const UAI_BROWSER_EXECUTION_RESULT_TYPES: [&str; 1] = [UAI_BROWSER_RESIDENCE_RESULT_TYPE];
 
 fn uai_browser_result_disposition(result_type: &str) -> Option<BrowserBridgeResultDisposition> {
     match result_type {
@@ -4813,6 +4815,14 @@ impl BrowserBridgeCapability for UaiBrowserBridge {
     ) -> Option<BrowserBridgeResultDisposition> {
         uai_browser_result_disposition(result_type)
     }
+
+    fn browser_bridge_intermediate_result_types(&self) -> &'static [&'static str] {
+        &UAI_BROWSER_INTERMEDIATE_RESULT_TYPES
+    }
+
+    fn browser_bridge_execution_result_types(&self) -> &'static [&'static str] {
+        &UAI_BROWSER_EXECUTION_RESULT_TYPES
+    }
 }
 
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
@@ -5044,6 +5054,19 @@ mod tests {
     #[test]
     fn result_disposition_accepts_only_exact_uai_result_types() {
         let capability = browser_bridge();
+        assert!(
+            capability
+                .browser_bridge_credential_result_types()
+                .is_empty()
+        );
+        assert_eq!(
+            capability.browser_bridge_intermediate_result_types(),
+            [UAI_BROWSER_EVENT_TYPE]
+        );
+        assert_eq!(
+            capability.browser_bridge_execution_result_types(),
+            [UAI_BROWSER_RESIDENCE_RESULT_TYPE]
+        );
         assert_eq!(
             capability.browser_bridge_result_disposition(UAI_BROWSER_EVENT_TYPE),
             Some(BrowserBridgeResultDisposition::Intermediate)
@@ -5060,6 +5083,16 @@ mod tests {
             "UAI.BROWSER.RESIDENCE.RESULT",
             "cidaren.capture.snapshot.result",
         ] {
+            assert!(
+                !capability
+                    .browser_bridge_intermediate_result_types()
+                    .contains(&result_type)
+            );
+            assert!(
+                !capability
+                    .browser_bridge_execution_result_types()
+                    .contains(&result_type)
+            );
             assert_eq!(
                 capability.browser_bridge_result_disposition(result_type),
                 None
@@ -5069,6 +5102,7 @@ mod tests {
 
     #[test]
     fn result_inbox_classification_binds_exact_disposition_session_and_digest() {
+        let capability = browser_bridge();
         let session_id = BrowserBridgeSessionId::new();
         let issued_at = chrono::Utc::now();
         let exchange = BrowserBridgeExchange::issue(
@@ -5089,28 +5123,36 @@ mod tests {
             received_at: issued_at + chrono::Duration::seconds(1),
         };
 
-        let event = UaiBrowserResultInbox::try_new(
-            &exchange,
-            metadata(UAI_BROWSER_EVENT_TYPE),
-            SecretValue::new(bytes.to_vec()),
-        )
-        .unwrap();
-        assert_eq!(
-            event.disposition(),
-            BrowserBridgeResultDisposition::Intermediate
-        );
-        assert!(format!("{event:?}").contains("[REDACTED]"));
-        let terminal = UaiBrowserResultInbox::try_new(
-            &exchange,
-            metadata(UAI_BROWSER_RESIDENCE_RESULT_TYPE),
-            SecretValue::new(bytes.to_vec()),
-        )
-        .unwrap();
-        assert_eq!(
-            terminal.disposition(),
-            BrowserBridgeResultDisposition::ExecutionTerminal
-        );
-        assert!(format!("{terminal:?}").contains("[REDACTED]"));
+        let declared = capability
+            .browser_bridge_intermediate_result_types()
+            .iter()
+            .map(|result_type| (*result_type, BrowserBridgeResultDisposition::Intermediate))
+            .chain(
+                capability
+                    .browser_bridge_execution_result_types()
+                    .iter()
+                    .map(|result_type| {
+                        (
+                            *result_type,
+                            BrowserBridgeResultDisposition::ExecutionTerminal,
+                        )
+                    }),
+            );
+        for (result_type, disposition) in declared {
+            assert_eq!(
+                capability.browser_bridge_result_disposition(result_type),
+                Some(disposition)
+            );
+            let inbox = UaiBrowserResultInbox::try_new(
+                &exchange,
+                metadata(result_type),
+                SecretValue::new(bytes.to_vec()),
+            )
+            .unwrap();
+            assert_eq!(inbox.disposition(), disposition);
+            assert_eq!(inbox.metadata().result_type, result_type);
+            assert!(format!("{inbox:?}").contains("[REDACTED]"));
+        }
 
         let mut foreign_session = metadata(UAI_BROWSER_EVENT_TYPE);
         foreign_session.session_id = BrowserBridgeSessionId::new();
@@ -5128,16 +5170,25 @@ mod tests {
                 ProviderErrorKind::ProtocolDrift
             );
         }
-        assert_eq!(
-            UaiBrowserResultInbox::try_new(
-                &exchange,
-                metadata(UAI_BROWSER_COMMAND_TYPE),
-                SecretValue::new(bytes.to_vec()),
-            )
-            .unwrap_err()
-            .kind,
-            ProviderErrorKind::ProtocolDrift
-        );
+        for unknown in [
+            "",
+            UAI_BROWSER_COMMAND_TYPE,
+            "uai.browser.event.extra",
+            "uai.browser.residence",
+            "UAI.BROWSER.RESIDENCE.RESULT",
+            "cidaren.capture.snapshot.result",
+        ] {
+            assert_eq!(
+                UaiBrowserResultInbox::try_new(
+                    &exchange,
+                    metadata(unknown),
+                    SecretValue::new(bytes.to_vec()),
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
     }
 
     #[tokio::test]
