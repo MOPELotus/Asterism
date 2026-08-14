@@ -241,6 +241,9 @@ placeholder identities, result codes, status values and pagination shape.
   Unicode-escape layer before extracting a prototype.
 - Phrase and example evidence are not merged; completion evidence fetches only
   prefix-matching words which need the example fallback.
+- Word-evidence parsing owns word/meaning/example clones behind cleanup guards;
+  a later duplicate, missing translation or collection-bound failure clears
+  every already accepted field and the rejected replacement value.
 - Donor random/fixed-third/last-word fallbacks are stable, low-confidence and
   explicitly identified in answer provenance. Nested sentence fixtures also
   distinguish top-level evidence loading/order from flattened children:

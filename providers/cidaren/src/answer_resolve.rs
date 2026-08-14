@@ -41,10 +41,6 @@ impl Drop for CidarenWordEvidence {
     fn drop(&mut self) {
         self.word.zeroize();
         self.meanings.iter_mut().for_each(Zeroize::zeroize);
-        for example in &mut self.examples {
-            example.english.zeroize();
-            example.chinese.zeroize();
-        }
     }
 }
 
@@ -52,6 +48,36 @@ struct CidarenExampleEvidence {
     english: String,
     chinese: String,
     use_kind: CidarenEvidenceUse,
+}
+
+impl Drop for CidarenExampleEvidence {
+    fn drop(&mut self) {
+        self.english.zeroize();
+        self.chinese.zeroize();
+    }
+}
+
+struct ParsedWordEvidence {
+    word: String,
+    meanings: Vec<String>,
+    examples: Vec<CidarenExampleEvidence>,
+}
+
+impl ParsedWordEvidence {
+    fn finish(mut self) -> CidarenWordEvidence {
+        CidarenWordEvidence {
+            word: std::mem::take(&mut self.word),
+            meanings: std::mem::take(&mut self.meanings),
+            examples: std::mem::take(&mut self.examples),
+        }
+    }
+}
+
+impl Drop for ParsedWordEvidence {
+    fn drop(&mut self) {
+        self.word.zeroize();
+        self.meanings.iter_mut().for_each(Zeroize::zeroize);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,21 +125,26 @@ impl CidarenAnswerEvidence {
             if !valid_text(word, MAX_WORD_BYTES) || !normalized_words.insert(word.to_lowercase()) {
                 word_list.iter_mut().for_each(Zeroize::zeroize);
                 zeroize_aliases(&mut aliases);
+                zeroize_string_set(&mut normalized_words);
                 return Err(invalid_response(
                     "Cidaren answer evidence contains an invalid or duplicate word",
                 ));
             }
         }
+        zeroize_string_set(&mut normalized_words);
         let mut by_word = BTreeMap::new();
         for info in word_infos {
-            let key = info.word.to_lowercase();
-            if by_word.insert(key, info).is_some() {
+            let mut key = info.word.to_lowercase();
+            if by_word.contains_key(&key) {
+                key.zeroize();
                 word_list.iter_mut().for_each(Zeroize::zeroize);
                 zeroize_aliases(&mut aliases);
+                zeroize_word_map(&mut by_word);
                 return Err(invalid_response(
                     "Cidaren answer evidence contains duplicate word info",
                 ));
             }
+            by_word.insert(key, info);
         }
         let mut unique_aliases = BTreeSet::new();
         if aliases.len() > MAX_WORDS
@@ -126,6 +157,7 @@ impl CidarenAnswerEvidence {
         {
             word_list.iter_mut().for_each(Zeroize::zeroize);
             zeroize_aliases(&mut aliases);
+            zeroize_word_map(&mut by_word);
             return Err(invalid_response(
                 "Cidaren answer evidence contains an invalid prototype alias",
             ));
@@ -138,13 +170,15 @@ impl CidarenAnswerEvidence {
     }
 
     fn info(&self, word: &str) -> Option<&CidarenWordEvidence> {
-        let key = word.to_lowercase();
-        self.by_word.get(&key).or_else(|| {
+        let mut key = word.to_lowercase();
+        let result = self.by_word.get(&key).or_else(|| {
             self.aliases
                 .iter()
                 .find_map(|(alias, target)| (alias == &key).then_some(target))
                 .and_then(|target| self.by_word.get(target))
-        })
+        });
+        key.zeroize();
+        result
     }
 
     fn contains_task_word(&self, word: &str) -> bool {
@@ -168,6 +202,7 @@ impl Drop for CidarenAnswerEvidence {
     fn drop(&mut self) {
         self.word_list.iter_mut().for_each(Zeroize::zeroize);
         zeroize_aliases(&mut self.aliases);
+        zeroize_word_map(&mut self.by_word);
     }
 }
 
@@ -175,6 +210,18 @@ fn zeroize_aliases(aliases: &mut [(String, String)]) {
     for (alias, target) in aliases {
         alias.zeroize();
         target.zeroize();
+    }
+}
+
+fn zeroize_string_set(values: &mut BTreeSet<String>) {
+    for mut value in std::mem::take(values) {
+        value.zeroize();
+    }
+}
+
+fn zeroize_word_map(values: &mut BTreeMap<String, CidarenWordEvidence>) {
+    for (mut key, _) in std::mem::take(values) {
+        key.zeroize();
     }
 }
 
@@ -189,9 +236,11 @@ pub fn parse_word_evidence(payload: &Value) -> ProviderResult<CidarenWordEvidenc
     let object = payload
         .as_object()
         .ok_or_else(|| protocol_drift("Cidaren word-info payload is not an object"))?;
-    let word = required_text(object.get("word"), MAX_WORD_BYTES, "word")?;
-    let mut meanings = Vec::new();
-    let mut examples = Vec::new();
+    let mut parsed = ParsedWordEvidence {
+        word: required_text(object.get("word"), MAX_WORD_BYTES, "word")?,
+        meanings: Vec::new(),
+        examples: Vec::new(),
+    };
     let means_entries = optional_evidence_array(object.get("means"), "mean")?;
     let option_entries = optional_evidence_array(object.get("options"), "option")?;
     if let Some(entries) = means_entries.filter(|entries| !entries.is_empty()) {
@@ -201,7 +250,7 @@ pub fn parse_word_evidence(payload: &Value) -> ProviderResult<CidarenWordEvidenc
             ));
         }
         for entry in entries {
-            parse_means_entry(entry, &mut meanings, &mut examples)?;
+            parse_means_entry(entry, &mut parsed.meanings, &mut parsed.examples)?;
         }
     } else if let Some(entries) = option_entries {
         if entries.len() > MAX_MEANINGS {
@@ -210,23 +259,19 @@ pub fn parse_word_evidence(payload: &Value) -> ProviderResult<CidarenWordEvidenc
             ));
         }
         for entry in entries {
-            parse_options_entry(entry, &mut meanings, &mut examples)?;
+            parse_options_entry(entry, &mut parsed.meanings, &mut parsed.examples)?;
         }
     } else if means_entries.is_none() {
         return Err(protocol_drift(
             "Cidaren word-info payload has no audited meaning family",
         ));
     }
-    if meanings.len() > MAX_MEANINGS || examples.len() > MAX_EXAMPLES {
+    if parsed.meanings.len() > MAX_MEANINGS || parsed.examples.len() > MAX_EXAMPLES {
         return Err(invalid_response(
             "Cidaren word-info payload exceeds the evidence limit",
         ));
     }
-    Ok(CidarenWordEvidence {
-        word,
-        meanings,
-        examples,
-    })
+    Ok(parsed.finish())
 }
 
 fn optional_evidence_array<'a>(
@@ -643,11 +688,18 @@ fn parse_means_entry(
         .get("mean")
         .and_then(Value::as_array)
         .ok_or_else(|| protocol_drift("Cidaren means entry has no mean array"))?;
-    let meaning = parts
-        .iter()
-        .map(|part| required_text(Some(part), MAX_TEXT_BYTES, "meaning part"))
-        .collect::<ProviderResult<Vec<_>>>()?
-        .join(" ");
+    let mut meaning_parts = Vec::with_capacity(parts.len());
+    for part in parts {
+        match required_text(Some(part), MAX_TEXT_BYTES, "meaning part") {
+            Ok(part) => meaning_parts.push(part),
+            Err(error) => {
+                meaning_parts.iter_mut().for_each(Zeroize::zeroize);
+                return Err(error);
+            }
+        }
+    }
+    let meaning = meaning_parts.join(" ");
+    meaning_parts.iter_mut().for_each(Zeroize::zeroize);
     push_unique_meaning(meanings, meaning)?;
     if let Some(usages) = object.get("usages").and_then(Value::as_array) {
         for usage in usages {
@@ -676,7 +728,7 @@ fn parse_options_entry(
         .and_then(Value::as_object)
         .ok_or_else(|| protocol_drift("Cidaren word option has no content object"))?;
     let meaning = required_text(content.get("mean"), MAX_TEXT_BYTES, "option meaning")?;
-    push_unique_meaning(meanings, remove_chinese_parenthetical(&meaning))?;
+    push_unique_meaning(meanings, remove_chinese_parenthetical(meaning))?;
     parse_example_array(
         content.get("usage_infos"),
         examples,
@@ -708,21 +760,28 @@ fn parse_example_array(
         let entry = entry
             .as_object()
             .ok_or_else(|| protocol_drift("Cidaren word example is not an object"))?;
+        let mut english = zeroize::Zeroizing::new(required_text(
+            entry.get("sen_content"),
+            MAX_TEXT_BYTES,
+            "example text",
+        )?);
+        let chinese = required_text(
+            entry.get("sen_mean_cn"),
+            MAX_TEXT_BYTES,
+            "example translation",
+        )?;
         examples.push(CidarenExampleEvidence {
-            english: required_text(entry.get("sen_content"), MAX_TEXT_BYTES, "example text")?,
-            chinese: required_text(
-                entry.get("sen_mean_cn"),
-                MAX_TEXT_BYTES,
-                "example translation",
-            )?,
+            english: std::mem::take(&mut *english),
+            chinese,
             use_kind,
         });
     }
     Ok(())
 }
 
-fn push_unique_meaning(meanings: &mut Vec<String>, meaning: String) -> ProviderResult<()> {
+fn push_unique_meaning(meanings: &mut Vec<String>, mut meaning: String) -> ProviderResult<()> {
     if meanings.len() >= MAX_MEANINGS || meanings.contains(&meaning) {
+        meaning.zeroize();
         return Err(protocol_drift(
             "Cidaren word info contains duplicate or excessive meanings",
         ));
@@ -798,18 +857,20 @@ fn semantic_chars(value: &str) -> Vec<char> {
         .collect()
 }
 
-fn remove_chinese_parenthetical(value: &str) -> String {
+fn remove_chinese_parenthetical(mut value: String) -> String {
     let Some(start) = value.find('（') else {
-        return value.to_owned();
+        return value;
     };
     let Some(end_offset) = value[start..].find('）') else {
-        return value.to_owned();
+        return value;
     };
     let end = start + end_offset + '）'.len_utf8();
-    format!("{}{}", &value[..start], &value[end..])
+    let normalized = format!("{}{}", &value[..start], &value[end..])
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    value.zeroize();
+    normalized
 }
 
 fn required_text(
