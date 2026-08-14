@@ -5,10 +5,11 @@ use asterism_provider_api::{
     BrowserBridgeCapability, BrowserSessionSpec, ProviderContext, ProviderError, ProviderErrorKind,
     ProviderIdentity, ProviderMetadata, ProviderResult, RemoteTaskDetail, TaskDetailCapability,
 };
+use asterism_secrets::SecretValue;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     metadata::development_metadata,
@@ -27,6 +28,7 @@ const MAX_VIDEO_SECONDS: u64 = 30 * 60;
 const MAX_BROWSER_RESULT_BYTES: usize = 64 * 1_024;
 const MAX_BROWSER_RESULT_LABEL_BYTES: usize = 512;
 const MAX_BROWSER_MESSAGE_BYTES: usize = 1_024 * 1_024;
+const MAX_BROWSER_COMMAND_BYTES: usize = 64 * 1_024;
 const MAX_BROWSER_BINDING_BYTES: usize = 256;
 const MAX_BROWSER_MENU_LABEL_BYTES: usize = 512;
 const BROWSER_MENU_HANDLE_PREFIX: &str = "uai-menu-v1-";
@@ -38,6 +40,34 @@ pub const UAI_BROWSER_COMMAND_TYPE: &str = "uai.browser.command";
 pub const UAI_BROWSER_EVENT_TYPE: &str = "uai.browser.event";
 /// Stable Core `BrowserBridge` exchange type for one terminal residence result.
 pub const UAI_BROWSER_RESIDENCE_RESULT_TYPE: &str = "uai.browser.residence.result";
+
+/// Encrypted-at-rest UAI command material required to validate a browser
+/// result after process recovery. Only the digest belongs in the ordinary
+/// durable exchange ledger.
+pub struct EncodedUaiBrowserCommandArtifact {
+    value: SecretValue,
+    digest: [u8; 32],
+}
+
+impl EncodedUaiBrowserCommandArtifact {
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub fn into_secret_value(self) -> SecretValue {
+        self.value
+    }
+}
+
+impl fmt::Debug for EncodedUaiBrowserCommandArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncodedUaiBrowserCommandArtifact")
+            .field("value", &"[REDACTED]")
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -652,14 +682,99 @@ impl UaiBrowserCommandEnvelope {
     /// Returns a typed error when the command is foreign to the frozen plan or
     /// serialization unexpectedly fails.
     pub fn exchange_digest(&self, plan: &UaiBrowserResidencePlan) -> ProviderResult<[u8; 32]> {
+        Ok(self.encode_artifact(plan)?.digest())
+    }
+
+    /// Encodes one validated exact command for Core's encrypted recovery
+    /// boundary. Session nonce, frame and opaque handles never enter the
+    /// ordinary exchange row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if command validation, serialization or size
+    /// bounds fail.
+    pub fn encode_artifact(
+        &self,
+        plan: &UaiBrowserResidencePlan,
+    ) -> ProviderResult<EncodedUaiBrowserCommandArtifact> {
         self.validate_for_plan(plan)?;
-        let encoded = serde_json::to_vec(self).map_err(|_| {
+        let mut encoded = Zeroizing::new(serde_json::to_vec(self).map_err(|_| {
             ProviderError::new(
                 ProviderErrorKind::InvalidResponse,
-                "UAI BrowserBridge command cannot be hashed",
+                "UAI BrowserBridge command cannot be encoded",
+            )
+        })?);
+        if encoded.is_empty() || encoded.len() > MAX_BROWSER_COMMAND_BYTES {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge command artifact is empty or oversized",
+            ));
+        }
+        let digest = Sha256::digest(encoded.as_slice()).into();
+        let value = SecretValue::new(std::mem::take(&mut *encoded));
+        Ok(EncodedUaiBrowserCommandArtifact { value, digest })
+    }
+
+    /// Resolves an encrypted issued command and repeats every independent
+    /// browser-session binding before a re-delivered result can be parsed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for digest/schema drift or a foreign plan,
+    /// session, origin, frame, Task or command sequence.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the durable digest and each browser transport authority are independent recovery bindings"
+    )]
+    pub fn decode_artifact_bound(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+        plan: &UaiBrowserResidencePlan,
+        expected_session_nonce: &str,
+        expected_origin: &str,
+        expected_frame_id: &str,
+        expected_sequence: u32,
+    ) -> ProviderResult<Self> {
+        plan.validate()?;
+        validate_browser_binding(
+            plan,
+            expected_session_nonce,
+            expected_frame_id,
+            expected_origin,
+        )?;
+        let bytes = value.expose_secret();
+        if bytes.is_empty() || bytes.len() > MAX_BROWSER_COMMAND_BYTES {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge command artifact is empty or oversized",
+            ));
+        }
+        let actual_digest: [u8; 32] = Sha256::digest(bytes).into();
+        if actual_digest != expected_digest {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI BrowserBridge command artifact digest changed",
+            ));
+        }
+        let command: Self = serde_json::from_slice(bytes).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI BrowserBridge command artifact schema changed",
             )
         })?;
-        Ok(Sha256::digest(encoded).into())
+        command.validate_for_plan(plan)?;
+        if command.session_nonce != expected_session_nonce
+            || command.origin != expected_origin
+            || command.frame_id != expected_frame_id
+            || command.remote_task_id != plan.target_remote_task_id
+            || command.sequence != expected_sequence
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI BrowserBridge command artifact binding is stale or foreign",
+            ));
+        }
+        Ok(command)
     }
 
     /// Builds the bounded equivalent of the donor's `SCAN` command.
@@ -2138,6 +2253,109 @@ mod tests {
                 &plan,
                 &ping,
                 IPUB_ORIGIN,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn encrypted_command_artifact_rebinds_every_recovery_authority() {
+        let plan = residence_plan(false);
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, "nonce-42", UCONTENT_ORIGIN, "frame-1")
+                .unwrap();
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            "Read the passage".to_owned(),
+            true,
+        )
+        .unwrap();
+        let target = plan.select_target_task_entry(&binding, &[task]).unwrap();
+        let command =
+            UaiBrowserCommandEnvelope::residence_target(&plan, &binding, 9, &target).unwrap();
+        let fixture =
+            include_str!("../../../fixtures/providers/uai/browser/residence-target-command.json")
+                .replace("{{target_task_handle}}", &target.entry().handle);
+        let fixture_command: UaiBrowserCommandEnvelope = serde_json::from_str(&fixture).unwrap();
+        assert_eq!(fixture_command, command);
+
+        let artifact = command.encode_artifact(&plan).unwrap();
+        let digest = artifact.digest();
+        assert_eq!(digest, command.exchange_digest(&plan).unwrap());
+        let debug = format!("{artifact:?}");
+        assert!(!debug.contains("nonce-42"));
+        assert!(!debug.contains(&target.entry().handle));
+        let value = artifact.into_secret_value();
+        let restored = UaiBrowserCommandEnvelope::decode_artifact_bound(
+            &value,
+            digest,
+            &plan,
+            "nonce-42",
+            UCONTENT_ORIGIN,
+            "frame-1",
+            9,
+        )
+        .unwrap();
+        assert_eq!(restored, command);
+        assert!(
+            UaiBrowserCommandEnvelope::decode_artifact_bound(
+                &value,
+                [9; 32],
+                &plan,
+                "nonce-42",
+                UCONTENT_ORIGIN,
+                "frame-1",
+                9,
+            )
+            .is_err()
+        );
+        for (nonce, origin, frame, sequence) in [
+            ("nonce-foreign", UCONTENT_ORIGIN, "frame-1", 9),
+            ("nonce-42", IPUB_ORIGIN, "frame-1", 9),
+            ("nonce-42", UCONTENT_ORIGIN, "frame-foreign", 9),
+            ("nonce-42", UCONTENT_ORIGIN, "frame-1", 10),
+        ] {
+            assert_eq!(
+                UaiBrowserCommandEnvelope::decode_artifact_bound(
+                    &value, digest, &plan, nonce, origin, frame, sequence,
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::RemoteChanged
+            );
+        }
+        let mut malformed: serde_json::Value =
+            serde_json::from_slice(value.expose_secret()).unwrap();
+        malformed["unexpected"] = serde_json::json!(true);
+        let malformed = asterism_secrets::SecretValue::new(serde_json::to_vec(&malformed).unwrap());
+        assert_eq!(
+            UaiBrowserCommandEnvelope::decode_artifact_bound(
+                &malformed,
+                Sha256::digest(malformed.expose_secret()).into(),
+                &plan,
+                "nonce-42",
+                UCONTENT_ORIGIN,
+                "frame-1",
+                9,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        let oversized =
+            asterism_secrets::SecretValue::new(vec![b'x'; MAX_BROWSER_COMMAND_BYTES + 1]);
+        assert!(
+            UaiBrowserCommandEnvelope::decode_artifact_bound(
+                &oversized,
+                Sha256::digest(oversized.expose_secret()).into(),
+                &plan,
+                "nonce-42",
+                UCONTENT_ORIGIN,
+                "frame-1",
+                9,
             )
             .is_err()
         );

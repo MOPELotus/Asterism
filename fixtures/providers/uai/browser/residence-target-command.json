@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "session_nonce": "nonce-42",
+  "origin": "https://ucontent.unipus.cn",
+  "frame_id": "frame-1",
+  "remote_task_id": "group:2001:unit-1:group-1",
+  "sequence": 9,
+  "command": {
+    "kind": "residence_target",
+    "task_handle": "{{target_task_handle}}",
+    "seconds": 1200,
+    "play_video": false
+  }
+}

@@ -338,10 +338,15 @@ Core's durable exchange ledger now receives only the stable message types
 `uai.browser.command`, `uai.browser.event` and
 `uai.browser.residence.result`, plus SHA-256 digests of the validated typed
 command or bounded raw result. UAI command/event/residence JSON, browser labels,
-session nonce and opaque handles remain outside Domain storage. The Provider
-must still parse and validate the exact plan, Task, origin, frame and sequence
-before Core records a terminal result; the digest is replay/correlation
-metadata, not acceptance evidence.
+session nonce and opaque handles remain outside ordinary Domain storage. Before
+dispatch, the exact bounded command can be moved into a redacted `SecretValue`
+artifact whose digest is the ledger command digest. After process recovery the
+Provider decodes that artifact only when its bytes still match the issued
+digest and its fresh plan, nonce, origin, frame, Task and sequence all match;
+the command payload cannot be reconstructed from digest-only state or replaced
+by a helper. The Provider must still parse and validate the exact command and
+transport-observed result origin before Core records a terminal result; either
+digest remains replay/correlation metadata, not acceptance evidence.
 
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.
