@@ -417,6 +417,17 @@ one selected-range budget rather than a per-Unit value despite the current UI
 log text calling it “每单元”; the worker collects every selected Unit before it
 samples and divides the budget.
 
+Current Fanyuchang also preserves the exact comma-separated Unit input order:
+an explicit `3,1` selection fetches and appends Unit 3 before Unit 1. Empty
+selected Units are skipped after their bounded `scoLeaves` read but remain part
+of the selection attempt. Auto's checkbox UI yields response-order selected
+Units, while YZBRH supports one Unit or response-order all Units. The Provider
+therefore parses a separate bounded `WellearnUnitObservation` inventory and
+`WellearnBatchUnitSelection`; `build_selected_batch_plan` retains explicit
+selection order and selected-but-empty Units while sorting SCOs only within
+each selected Unit's response order. It rebinds every child Unit title, code
+and visibility fact before filtering.
+
 The same Auto_WeLearn revision also retains the original single-file
 `WeLearn.py` entry point. Its completion and duration routes deliberately keep
 hidden/already-completed SCOs, sample one target per child and launch one
@@ -442,17 +453,18 @@ Provider must preserve that zero target rather than silently rounding it up.
 The shared DurationReport contract still needs an explicit decision for
 zero-target children.
 
-Asterism currently retains Unit index/title/code in each fresh Task observation
-and exposes per-Task runtime settings, but Unit is not yet a shared first-class
-selection scope and execution creation is single-Task. The complete donor
-behavior therefore requires Core/API to freeze the selected Unit/all-task set,
-the donor-flow discriminator, selection-time membership and visibility facts,
-derive and persist each child target, apply provider/account concurrency, and
-recover children independently. The Provider must not create its own task
-scheduler or silently recompute the distribution after a crash. Auto's integer
-division remainder and the one sampled aggregate budget are frozen attempt
-facts; a rescan that adds, removes or changes visibility of SCOs must not
-redistribute an already scheduled batch.
+Asterism now retains a Provider-private bounded Unit observation list, exact
+selection kind/order and selected-but-empty Units in addition to Unit facts on
+each fresh Task. Unit is not yet a shared first-class selection scope and
+execution creation is single-Task. The complete donor behavior therefore
+requires Core/API to persist those Provider plan facts with the donor-flow
+discriminator, selection-time SCO membership and visibility facts, derive and
+persist each child target, apply provider/account concurrency, and recover
+children independently. The Provider must not create its own task scheduler or
+silently recompute the distribution after a crash. Auto's integer division
+remainder and the one sampled aggregate budget are frozen attempt facts; a
+rescan that adds, removes or changes visibility of SCOs must not redistribute
+an already scheduled batch.
 
 ## Sanitization and routing
 

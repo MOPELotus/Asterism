@@ -14,7 +14,7 @@
 | Assessment/exercise behavior | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Audited donors do not expose Question/Answer endpoints; their exercise behavior is the direct SCO completion/progress/score preset mapped to `ResourceExecution`, now implemented offline/native-boundary; audit remains open to new evidence |
 | Result verification | Fresh Course/SCO/CMI reads | FromScratch | DurationReport verifies preservation plus changed time; ResourceExecution implements goal-bound `verify_execution` over the frozen settings and exact completion/progress/score tuple, so Core recovery fresh-reads without replay |
 | BrowserBridge / Capture | Fanyuchang 2026 Cookie mode + SSO browser implementation + 2026-08-13 public login audit | Reference | Capture recipes v4/v5 separate five exact navigation origins from the sole WELearn credential-read origin, distinguish assisted versus external-browser-OAuth acquisition, and require the current loader's exact `GET /ajax/authCourse.aspx?action=gmc` to receive `200 application/json` before resolving the Cookie. The helper enforces that response gate, so the audited anonymous `200 text/html` login script cannot complete Capture; native Course parsing remains final authority. Manual captcha/SMS and QQ/WeChat/Apple navigation are evidenced; exact third-party choice and callback live validation remain pending, while no Task BrowserBridge behavior exists in the donors |
-| Unit/all-task bulk orchestration | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Provider now exposes a pure bounded `WellearnBatchPlan` boundary that freezes response-order SCO membership, separate Unit visibility and raw SCO visibility observations, merged visibility, completion observations, donor-specific filtering, explicit dispatch and target-allocation semantics, and Auto's one aggregate budget plus discarded remainder. Current Fanyuchang and YZBRH duration retain hidden/completed rows; YZBRH and Auto completion filter to the donor's broad raw `iscomplete` contains `未` branch and resolve fixed/random targets per child; Auto duration keeps visible SCOs and preserves donor-exact floor targets, including zero-second children when the aggregate is smaller than the selected count; Auto's legacy single-file route is covered by the Fanyuchang-compatible profiles. Shared Core/API still need first-class Unit/selection scopes, zero-target child semantics and durable parent/child Execution creation/recovery; the Provider plan does not schedule or persist children |
+| Unit/all-task bulk orchestration | Fanyuchang 2026 + YZBRH + Auto_WeLearn | Reference | Provider now exposes bounded Unit observations and a pure `WellearnBatchPlan` boundary that freezes all/explicit selection kind, Fanyuchang's exact explicit Unit order, selected-but-empty Units, response-order SCO membership, separate Unit/raw-SCO/merged visibility, completion observations, donor-specific filtering, dispatch and target allocation, plus Auto's aggregate budget and discarded remainder. Current Fanyuchang and YZBRH duration retain hidden/completed rows; YZBRH and Auto completion filter to the broad raw `iscomplete` contains `未` branch; Auto duration keeps visible SCOs and preserves donor-exact floor targets including zero-second children. Shared Core/API still need a durable Unit/selection contract, zero-target child semantics and parent/child Execution creation/recovery; the Provider plan does not schedule or persist children |
 
 ## Implementation checkpoint
 
@@ -141,15 +141,14 @@ completion-time `auto` observes Core's immutable plan/position and selects
 fresh-time for that exact second step. Current mutation authority remains the
 singleton step, and malformed plan bindings fail before transport.
 
-One donor-level orchestration contract remains a shared Core gap. The donors
-accept selected Units or all Units as a batch, but their membership and target
-rules differ. Current Fanyuchang keeps hidden/completed SCO rows and samples
-per-SCO targets; YZBRH also derives each target independently; Auto_WeLearn
-filters visible SCOs, samples one aggregate minute budget, floors one equal
-per-child share and discards the integer-division remainder. Unit identity,
-donor-flow selection, frozen batch membership, derived child targets and
-crash-safe parent/child Execution creation belong in Core/API rather than a
-Provider-private scheduler.
+One donor-level orchestration contract remains a shared Core gap. The Provider
+now freezes bounded Unit identity, all/explicit selection, explicit order,
+selected-but-empty Units, donor flow, SCO membership and target facts. Core/API
+must durably persist that plan and create/recover its child Executions rather
+than asking the Provider to schedule them. Current Fanyuchang keeps
+hidden/completed SCO rows and samples per-SCO targets; YZBRH also derives each
+target independently; Auto_WeLearn filters visible SCOs, samples one aggregate
+minute budget, floors one equal per-child share and discards the remainder.
 Immutable Core Execution identity now makes donor-style per-Execution random
 duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
 persisted capability-step plan covers the duration-then-completion composite.

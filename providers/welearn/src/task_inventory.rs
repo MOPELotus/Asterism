@@ -18,12 +18,17 @@ const MAX_UNITS: usize = 512;
 const MAX_TASKS: usize = 8_192;
 const MAX_TITLE_BYTES: usize = 512;
 
+/// One bounded Unit observation from the fresh `courseunits` response.
+///
+/// Units remain Provider-private selection facts rather than shared Tasks. A
+/// batch plan retains them separately so an explicitly selected empty Unit is
+/// not lost merely because it produced no `scoLeaves` rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct WellearnUnit {
-    index: u32,
-    title: String,
-    code: Option<String>,
-    visible: bool,
+pub struct WellearnUnitObservation {
+    pub index: u32,
+    pub title: String,
+    pub code: Option<String>,
+    pub visible: bool,
 }
 
 /// One bounded, sanitized `scoLeaves` response bound to its zero-based Unit
@@ -85,7 +90,7 @@ pub fn parse_task_inventory(
     leaves_documents: &[WellearnScoLeavesDocument],
 ) -> ProviderResult<Vec<RemoteTask>> {
     let course_id = course_id_from_remote(course)?;
-    let units = parse_units(units_document)?;
+    let units = parse_unit_inventory(units_document)?;
     if leaves_documents.len() != units.len() {
         return Err(protocol_drift(
             "WELearn Task inventory does not contain one SCO response per Unit",
@@ -140,7 +145,13 @@ pub fn parse_task_inventory(
     Ok(tasks.into_values().collect())
 }
 
-fn parse_units(document: &str) -> ProviderResult<Vec<WellearnUnit>> {
+/// Parses the bounded Unit selection surface from `courseunits`.
+///
+/// # Errors
+///
+/// Returns a typed invalid-response or protocol-drift error for malformed,
+/// oversized or incomplete Unit observations.
+pub fn parse_unit_inventory(document: &str) -> ProviderResult<Vec<WellearnUnitObservation>> {
     if document.is_empty() || document.len() > MAX_UNIT_DOCUMENT_BYTES {
         return Err(invalid_response(
             "WELearn Unit inventory is empty or exceeds the size limit",
@@ -163,7 +174,7 @@ fn parse_units(document: &str) -> ProviderResult<Vec<WellearnUnit>> {
             let object = row.as_object().ok_or_else(|| {
                 protocol_drift("WELearn Unit inventory contains a non-object row")
             })?;
-            Ok(WellearnUnit {
+            Ok(WellearnUnitObservation {
                 index: u32::try_from(index)
                     .map_err(|_| invalid_response("WELearn Unit index exceeds the limit"))?,
                 title: required_text(object.get("unitname"), MAX_TITLE_BYTES, "Unit title")?,
@@ -175,13 +186,13 @@ fn parse_units(document: &str) -> ProviderResult<Vec<WellearnUnit>> {
 }
 
 pub(crate) fn unit_count(document: &str) -> ProviderResult<usize> {
-    parse_units(document).map(|units| units.len())
+    parse_unit_inventory(document).map(|units| units.len())
 }
 
 fn parse_leaves(
     course: &RemoteCourse,
     course_id: &str,
-    unit: &WellearnUnit,
+    unit: &WellearnUnitObservation,
     document: &str,
 ) -> ProviderResult<Vec<RemoteTask>> {
     let root: Value = serde_json::from_str(document)
@@ -395,6 +406,28 @@ mod tests {
         assert_eq!(
             tasks[2].normalized["completion_observation"],
             serde_json::json!("completed")
+        );
+    }
+
+    #[test]
+    fn unit_parser_preserves_selection_identity_and_visibility() {
+        let units = parse_unit_inventory(UNITS).unwrap();
+        assert_eq!(
+            units,
+            [
+                WellearnUnitObservation {
+                    index: 0,
+                    title: "Unit 1 Getting Started".to_owned(),
+                    code: Some("U1".to_owned()),
+                    visible: true,
+                },
+                WellearnUnitObservation {
+                    index: 1,
+                    title: "Unit 2 Locked".to_owned(),
+                    code: Some("U2".to_owned()),
+                    visible: false,
+                },
+            ]
         );
     }
 

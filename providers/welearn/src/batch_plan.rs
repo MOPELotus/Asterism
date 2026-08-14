@@ -1,8 +1,10 @@
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::{RemoteState, TaskCapability};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTask};
+
+use crate::WellearnUnitObservation;
 
 /// Audited donor batch flow. This is a pure membership/target boundary; it
 /// does not create or schedule Core executions.
@@ -35,6 +37,15 @@ pub enum WellearnBatchTargetStrategy {
     PerChild,
     SharedConfigured,
     AggregateEqualFloor,
+}
+
+/// Unit selection shape frozen before donor-specific SCO filtering. Explicit
+/// indices preserve the caller's order, which current Fanyuchang accepts for
+/// comma-separated multi-Unit selections.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WellearnBatchUnitSelection {
+    All,
+    Explicit(Vec<u32>),
 }
 
 const MAX_BATCH_TASKS: usize = 8_192;
@@ -114,6 +125,8 @@ pub struct WellearnBatchPlan {
     pub flow: WellearnBatchFlow,
     pub dispatch: WellearnBatchDispatch,
     pub target_strategy: WellearnBatchTargetStrategy,
+    pub selection: WellearnBatchUnitSelection,
+    pub selected_units: Vec<WellearnUnitObservation>,
     pub entries: Vec<WellearnBatchEntry>,
     pub aggregate_duration_seconds: Option<u64>,
     pub discarded_remainder_seconds: u64,
@@ -140,6 +153,44 @@ pub fn build_batch_plan(
     flow: WellearnBatchFlow,
     auto_duration_minutes: Option<u64>,
 ) -> ProviderResult<WellearnBatchPlan> {
+    let units = derive_unit_observations(tasks)?;
+    build_selected_batch_plan(
+        tasks,
+        &units,
+        WellearnBatchUnitSelection::All,
+        flow,
+        auto_duration_minutes,
+    )
+}
+
+/// Builds a donor batch plan from a complete fresh SCO inventory and an exact
+/// fresh Unit selection. Selected Unit order and empty selected Units remain
+/// immutable plan facts even though only eligible SCOs become child entries.
+///
+/// # Errors
+///
+/// Returns a typed error when Unit observations or selection are empty,
+/// oversized, duplicated or inconsistent with the supplied SCO inventory, in
+/// addition to the task and target errors documented by [`build_batch_plan`].
+///
+/// # Panics
+///
+/// Internal `expect` calls are guarded by complete normalized SCO checks and
+/// validated Auto-duration input before membership planning reaches them.
+#[allow(clippy::too_many_lines)]
+pub fn build_selected_batch_plan(
+    tasks: &[RemoteTask],
+    units: &[WellearnUnitObservation],
+    selection: WellearnBatchUnitSelection,
+    flow: WellearnBatchFlow,
+    auto_duration_minutes: Option<u64>,
+) -> ProviderResult<WellearnBatchPlan> {
+    let selected_units = select_units(units, &selection)?;
+    let selected_ordinals = selected_units
+        .iter()
+        .enumerate()
+        .map(|(ordinal, unit)| (unit.index, ordinal))
+        .collect::<BTreeMap<_, _>>();
     if tasks.is_empty() {
         return Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
@@ -221,8 +272,31 @@ pub fn build_batch_plan(
         }
     }
 
-    let mut ordered = tasks.iter().collect::<Vec<_>>();
-    ordered.sort_by(|left, right| compare_task_order(left, right));
+    let known_units = units
+        .iter()
+        .map(|unit| (unit.index, unit))
+        .collect::<BTreeMap<_, _>>();
+    let mut ordered = tasks
+        .iter()
+        .filter(|task| {
+            normalized_u32(task, "unit_index")
+                .is_some_and(|index| selected_ordinals.contains_key(&index))
+        })
+        .collect::<Vec<_>>();
+    for task in &ordered {
+        validate_task_unit_observation(task, &known_units)?;
+    }
+    for task in tasks {
+        let unit_index = normalized_u32(task, "unit_index")
+            .expect("validated complete normalized observation above");
+        if !known_units.contains_key(&unit_index) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn batch task references an unknown Unit observation",
+            ));
+        }
+    }
+    ordered.sort_by(|left, right| compare_selected_task_order(left, right, &selected_ordinals));
     let mut entries = Vec::with_capacity(ordered.len());
     for task in ordered {
         let visible = normalized_bool(task, "visible")
@@ -313,16 +387,174 @@ pub fn build_batch_plan(
         flow,
         dispatch: flow.dispatch(),
         target_strategy: flow.target_strategy(),
+        selection,
+        selected_units,
         entries,
         aggregate_duration_seconds,
         discarded_remainder_seconds,
     })
 }
 
-fn compare_task_order(left: &RemoteTask, right: &RemoteTask) -> Ordering {
-    normalized_u32(left, "unit_index")
-        .unwrap_or(u32::MAX)
-        .cmp(&normalized_u32(right, "unit_index").unwrap_or(u32::MAX))
+fn select_units(
+    units: &[WellearnUnitObservation],
+    selection: &WellearnBatchUnitSelection,
+) -> ProviderResult<Vec<WellearnUnitObservation>> {
+    if units.is_empty() || units.len() > 512 {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "WELearn batch Unit inventory is empty or exceeds the item limit",
+        ));
+    }
+    let mut known = BTreeMap::new();
+    for (ordinal, unit) in units.iter().enumerate() {
+        if unit.title.is_empty()
+            || unit.title.len() > 512
+            || unit.title.chars().any(char::is_control)
+            || unit.code.as_ref().is_some_and(|code| {
+                code.is_empty() || code.len() > 512 || code.chars().any(char::is_control)
+            })
+            || usize::try_from(unit.index).ok() != Some(ordinal)
+            || known.insert(unit.index, unit).is_some()
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn batch Unit inventory contains an invalid or duplicate observation",
+            ));
+        }
+    }
+    let indices = match selection {
+        WellearnBatchUnitSelection::All => units.iter().map(|unit| unit.index).collect(),
+        WellearnBatchUnitSelection::Explicit(indices) => indices.clone(),
+    };
+    if indices.is_empty() || indices.len() > units.len() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "WELearn batch Unit selection is empty or exceeds the fresh inventory",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    indices
+        .into_iter()
+        .map(|index| {
+            if !seen.insert(index) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "WELearn batch Unit selection contains a duplicate index",
+                ));
+            }
+            known
+                .get(&index)
+                .map(|unit| (*unit).clone())
+                .ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::RemoteChanged,
+                        "WELearn batch Unit selection references a missing fresh Unit",
+                    )
+                })
+        })
+        .collect()
+}
+
+fn validate_task_unit_observation(
+    task: &RemoteTask,
+    known_units: &BTreeMap<u32, &WellearnUnitObservation>,
+) -> ProviderResult<()> {
+    let unit_index = normalized_u32(task, "unit_index")
+        .expect("validated complete normalized observation above");
+    let unit = known_units.get(&unit_index).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "WELearn batch task references an unknown Unit observation",
+        )
+    })?;
+    let title = task
+        .normalized
+        .get("unit_title")
+        .and_then(serde_json::Value::as_str);
+    let code = task
+        .normalized
+        .get("unit_code")
+        .and_then(serde_json::Value::as_str);
+    if title != Some(unit.title.as_str())
+        || code != unit.code.as_deref()
+        || normalized_bool(task, "unit_visible") != Some(unit.visible)
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "WELearn batch task no longer matches its fresh Unit observation",
+        ));
+    }
+    Ok(())
+}
+
+fn derive_unit_observations(tasks: &[RemoteTask]) -> ProviderResult<Vec<WellearnUnitObservation>> {
+    let mut units = BTreeMap::new();
+    for task in tasks {
+        let index = normalized_u32(task, "unit_index").ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn batch task has no Unit index",
+            )
+        })?;
+        let title = task
+            .normalized
+            .get("unit_title")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "WELearn batch task has no Unit title",
+                )
+            })?
+            .to_owned();
+        let code = match task.normalized.get("unit_code") {
+            Some(serde_json::Value::Null) | None => None,
+            Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.clone()),
+            _ => {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "WELearn batch task has an invalid Unit code",
+                ));
+            }
+        };
+        let visible = normalized_bool(task, "unit_visible").ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn batch task has no Unit visibility",
+            )
+        })?;
+        let observation = WellearnUnitObservation {
+            index,
+            title,
+            code,
+            visible,
+        };
+        if let Some(existing) = units.insert(index, observation.clone())
+            && existing != observation
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "WELearn batch tasks disagree about one Unit observation",
+            ));
+        }
+    }
+    Ok(units.into_values().collect())
+}
+
+fn compare_selected_task_order(
+    left: &RemoteTask,
+    right: &RemoteTask,
+    selected_ordinals: &BTreeMap<u32, usize>,
+) -> Ordering {
+    let left_unit = normalized_u32(left, "unit_index")
+        .and_then(|index| selected_ordinals.get(&index).copied())
+        .unwrap_or(usize::MAX);
+    let right_unit = normalized_u32(right, "unit_index")
+        .and_then(|index| selected_ordinals.get(&index).copied())
+        .unwrap_or(usize::MAX);
+    left_unit
+        .cmp(&right_unit)
         .then_with(|| {
             normalized_usize(left, "sco_index")
                 .unwrap_or(usize::MAX)
@@ -377,7 +609,10 @@ fn normalized_completion(task: &RemoteTask) -> Option<RemoteState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{WellearnScoLeavesDocument, parse_course_inventory, parse_task_inventory};
+    use crate::{
+        WellearnScoLeavesDocument, parse_course_inventory, parse_task_inventory,
+        parse_unit_inventory,
+    };
 
     const COURSES: &str =
         include_str!("../../../fixtures/providers/welearn/courses/list-mixed.json");
@@ -405,6 +640,10 @@ mod tests {
         tasks[1].remote_state = RemoteState::Pending;
         tasks[1].normalized["completion_observation"] = serde_json::json!("pending");
         tasks
+    }
+
+    fn units() -> Vec<WellearnUnitObservation> {
+        parse_unit_inventory(UNITS).unwrap()
     }
 
     #[test]
@@ -492,6 +731,98 @@ mod tests {
             plan.entries
                 .iter()
                 .all(|entry| entry.target_seconds == Some(0))
+        );
+    }
+
+    #[test]
+    fn explicit_selection_preserves_fanyuchang_unit_order() {
+        let plan = build_selected_batch_plan(
+            &tasks(),
+            &units(),
+            WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+            WellearnBatchFlow::FanyuchangCompletion,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.selected_units
+                .iter()
+                .map(|unit| unit.index)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| entry.remote_task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["sco:1001:401", "sco:1001:301", "sco:1001:302"]
+        );
+    }
+
+    #[test]
+    fn selected_empty_unit_remains_a_frozen_plan_fact() {
+        let mut units = units();
+        units.push(WellearnUnitObservation {
+            index: 2,
+            title: "Unit 3 Empty".to_owned(),
+            code: Some("U3".to_owned()),
+            visible: true,
+        });
+        let plan = build_selected_batch_plan(
+            &tasks(),
+            &units,
+            WellearnBatchUnitSelection::Explicit(vec![2, 0]),
+            WellearnBatchFlow::FanyuchangDuration,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.selected_units
+                .iter()
+                .map(|unit| unit.index)
+                .collect::<Vec<_>>(),
+            [2, 0]
+        );
+        assert!(plan.entries.iter().all(|entry| entry.unit_index == 0));
+    }
+
+    #[test]
+    fn selection_rejects_duplicates_missing_units_and_unit_drift() {
+        let tasks = tasks();
+        let units = units();
+        assert!(
+            build_selected_batch_plan(
+                &tasks,
+                &units,
+                WellearnBatchUnitSelection::Explicit(vec![0, 0]),
+                WellearnBatchFlow::FanyuchangCompletion,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            build_selected_batch_plan(
+                &tasks,
+                &units,
+                WellearnBatchUnitSelection::Explicit(vec![2]),
+                WellearnBatchFlow::FanyuchangCompletion,
+                None,
+            )
+            .is_err()
+        );
+
+        let mut drifted = units;
+        drifted[0].title = "Changed title".to_owned();
+        assert!(
+            build_selected_batch_plan(
+                &tasks,
+                &drifted,
+                WellearnBatchUnitSelection::All,
+                WellearnBatchFlow::FanyuchangCompletion,
+                None,
+            )
+            .is_err()
         );
     }
 

@@ -1,10 +1,10 @@
 # WELearn upstream sources
 
-Audit date: 2026-08-13
+Audit date: 2026-08-14
 
-Default-branch heads were rechecked on 2026-08-13 and still match all three
+Default-branch heads, tags and releases were rechecked on 2026-08-14 and still match all three
 pinned revisions below; no new donor capability surface was introduced.
-The same date's read-only public SSO audit observed the current static bundle,
+The 2026-08-13 read-only public SSO audit observed the current static bundle,
 the host/path of unauthenticated external-login redirects, and the exact
 Course-list login-script response produced with anonymous prelogin Cookies; no
 account, credential, challenge answer or callback was used.
@@ -35,8 +35,10 @@ returned the same heads; the subsequent duration-wire, browser-auth, exact
 batch-semantics, heartbeat-receipt and heartbeat-cadence checks did as well. These
 revisions remain reproducible snapshots; future
 checkpoints must fetch again rather than treating them as permanent bounds.
-The latest post-hardening refresh again found no donor revision, tag/release
-or capability delta.
+The 2026-08-14 post-selection-boundary refresh again found no donor revision,
+tag/release or capability delta. Fanyuchang still exposes only `v4.0.0` and its
+matching older release; YZBRH and Auto_WeLearn still expose neither tags nor
+GitHub releases.
 
 ## Source selection
 

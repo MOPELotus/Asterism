@@ -33,7 +33,8 @@ pub use authentication::{
 };
 pub use batch_plan::{
     WellearnBatchDispatch, WellearnBatchEntry, WellearnBatchFlow, WellearnBatchPlan,
-    WellearnBatchTargetStrategy, build_batch_plan,
+    WellearnBatchTargetStrategy, WellearnBatchUnitSelection, build_batch_plan,
+    build_selected_batch_plan,
 };
 pub use cmi::{
     WellearnCmiDocument, WellearnCmiSnapshot, WellearnCmiTransport, WellearnTaskProgress,
@@ -71,3 +72,4 @@ pub use runtime_settings::{
 pub use stored_session::StoredWellearnSessionResolver;
 pub use task_detail::WellearnTaskDetail;
 pub use task_inventory::{WellearnScoLeavesDocument, parse_task_inventory};
+pub use task_inventory::{WellearnUnitObservation, parse_unit_inventory};
