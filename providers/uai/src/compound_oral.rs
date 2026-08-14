@@ -1068,8 +1068,8 @@ mod tests {
     use asterism_domain::{
         AnswerCandidateId, AnswerPair, AnswerSource, AssessmentClass, NormalizedAnswer, ProviderId,
         Question, QuestionId, QuestionKind, QuestionSnapshotId, RemoteState, SelectedAnswer,
-        SourceType, SubmissionDraftId, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
-        SubmissionPayloadPreview, TaskId,
+        SourceType, SubmissionAnswerCoverage, SubmissionDraftId, SubmissionPayloadEncoding,
+        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, TaskId,
     };
     use asterism_provider_api::{RemoteTask, RemoteTaskDetail};
     use serde_json::json;
@@ -1521,6 +1521,11 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("uai").unwrap(),
             provider_version: env!("CARGO_PKG_VERSION").to_owned(),
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 1,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: vec![asterism_domain::SubmissionDraftItem {
                 selected: SelectedAnswer {
                     candidate_id: AnswerCandidateId::new(),

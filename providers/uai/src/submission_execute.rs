@@ -1406,8 +1406,8 @@ mod tests {
 
     use asterism_domain::{
         AnswerCandidateId, AnswerPair, AnswerSource, ProviderAccountId, ProviderId,
-        QuestionSnapshotId, SecretId, SelectedAnswer, SubmissionDraftId, SubmissionDraftItem,
-        TaskId,
+        QuestionSnapshotId, SecretId, SelectedAnswer, SubmissionAnswerCoverage, SubmissionDraftId,
+        SubmissionDraftItem, TaskId,
     };
     use asterism_provider_api::{ProviderExecutionLog, ProviderProgress, RemoteTaskDetail};
 
@@ -2210,6 +2210,11 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("uai").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 1,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: vec![SubmissionDraftItem { question, selected }],
             payload_preview: preview,
             created_at: Utc::now(),
@@ -2281,6 +2286,11 @@ mod tests {
                 question_snapshot_id: QuestionSnapshotId::new(),
                 provider_id: ProviderId::new("uai").unwrap(),
                 provider_version: development_metadata().unwrap().implementation_version,
+                answer_coverage: SubmissionAnswerCoverage {
+                    total_question_count: 1,
+                    minimum_coverage_millis: 1_000,
+                    unanswered_question_ids: Vec::new(),
+                },
                 items: vec![SubmissionDraftItem { question, selected }],
                 payload_preview: preview,
                 created_at: Utc::now(),
@@ -2344,6 +2354,11 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("uai").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: u32::try_from(items.len()).unwrap(),
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items,
             payload_preview: preview,
             created_at: Utc::now(),
@@ -2395,6 +2410,11 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("uai").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 1,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: vec![SubmissionDraftItem { question, selected }],
             payload_preview: preview,
             created_at: Utc::now(),
@@ -2586,6 +2606,11 @@ mod tests {
             question_snapshot_id: QuestionSnapshotId::new(),
             provider_id: ProviderId::new("uai").unwrap(),
             provider_version: development_metadata().unwrap().implementation_version,
+            answer_coverage: SubmissionAnswerCoverage {
+                total_question_count: 1,
+                minimum_coverage_millis: 1_000,
+                unanswered_question_ids: Vec::new(),
+            },
             items: vec![SubmissionDraftItem { question, selected }],
             payload_preview: preview,
             created_at: Utc::now(),
