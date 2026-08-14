@@ -427,9 +427,12 @@ fresh Unit/Section/Micro target. The Provider then returns a new immutable
 cursor plus sequence-next `ClickMenu`; the old cursor remains unchanged, and
 the new cursor binds the prior raw result sequence/digest and exact click
 command digest before it can be encrypted or issued. Replacing the completed
-exchange command digest fails before advancing. Later Click/Menu/Tab/Task and
-residence transitions remain incremental Provider work around the shared
-dispatcher.
+exchange command digest fails before advancing. An accepted completed
+`ClickMenu` then replaces the prior-result authority with its own exact raw
+digest and returns sequence-next `ScanPage(Tab)` plus an immutable
+`ScanningTabs` cursor. A rejected/foreign click cannot advance. Later Tab/Task
+snapshot, residence and control transitions remain incremental Provider work
+around the shared dispatcher.
 
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.

@@ -298,6 +298,64 @@ impl UaiBrowserResidenceCursor {
         })
     }
 
+    /// Advances one accepted target menu click to the bounded Tab scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error unless this cursor owns the exact `ClickMenu`
+    /// command and its completed event exchange proves that same opaque handle
+    /// was accepted.
+    pub fn advance_menu_click(
+        &self,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+        completed: &UaiBrowserEventExchangeCompleted,
+    ) -> ProviderResult<UaiBrowserCursorAdvance> {
+        self.validate_for_command(batch, plan, command)?;
+        if self.stage != UaiBrowserCursorStage::ClickingMenu
+            || !matches!(&command.command, UaiBrowserCommand::ClickMenu { .. })
+        {
+            return Err(stale_cursor());
+        }
+        let result_digest = completed_event_digest(self, command, completed)?;
+        completed
+            .event()
+            .validate_for_command(plan, command, &completed.event().origin)?;
+        if !matches!(
+            &completed.event().event,
+            UaiBrowserEvent::ClickResult { .. }
+        ) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI accumulated cursor requires a completed menu-click event",
+            ));
+        }
+        let binding = UaiBrowserSessionBinding::try_new(
+            plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )?;
+        let next_sequence = command.sequence.checked_add(1).ok_or_else(invalid_cursor)?;
+        let next_command = UaiBrowserCommandEnvelope::scan_page(
+            plan,
+            &binding,
+            next_sequence,
+            UaiBrowserPageScope::Tab,
+        )?;
+        let mut next = self.clone();
+        next.stage = UaiBrowserCursorStage::ScanningTabs;
+        next.prior_result_sequence = Some(command.sequence);
+        next.prior_result_digest = Some(result_digest);
+        next.next_command_digest = next_command.exchange_digest(plan)?;
+        next.validate_for_command(batch, plan, &next_command)?;
+        Ok(UaiBrowserCursorAdvance {
+            cursor: next,
+            command: next_command,
+        })
+    }
+
     /// Encodes this validated accumulated cursor for encrypted persistence.
     ///
     /// # Errors

@@ -3211,6 +3211,44 @@ mod tests {
         (batch, plan, command, cursor)
     }
 
+    fn completed_event(
+        plan: &UaiBrowserResidencePlan,
+        session_id: BrowserBridgeSessionId,
+        command: &UaiBrowserCommandEnvelope,
+        event: UaiBrowserEvent,
+        result_digest: [u8; 32],
+    ) -> UaiBrowserEventExchangeCompleted {
+        let event = UaiBrowserEventEnvelope {
+            version: command.version,
+            session_nonce: command.session_nonce.clone(),
+            origin: command.origin.clone(),
+            frame_id: command.frame_id.clone(),
+            remote_task_id: command.remote_task_id.clone(),
+            reply_to_sequence: command.sequence,
+            event,
+        };
+        event
+            .validate_for_command(plan, command, &command.origin)
+            .unwrap();
+        let issued_at = chrono::Utc::now();
+        let mut exchange = BrowserBridgeExchange::issue(
+            session_id,
+            u64::from(command.sequence),
+            UaiBrowserCommandEnvelope::exchange_type().to_owned(),
+            command.exchange_digest(plan).unwrap(),
+            issued_at,
+        )
+        .unwrap();
+        exchange
+            .complete(
+                UaiBrowserEventEnvelope::exchange_type().to_owned(),
+                result_digest,
+                issued_at + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        UaiBrowserEventExchangeCompleted { event, exchange }
+    }
+
     #[test]
     fn encrypted_accumulated_cursor_artifact_is_stable_redacted_and_recoverable() {
         let (batch, plan, command, cursor) = initial_residence_cursor("nonce-cursor");
@@ -3572,6 +3610,74 @@ mod tests {
                 .kind,
             ProviderErrorKind::ProtocolDrift
         );
+    }
+
+    #[test]
+    fn completed_menu_click_advances_cursor_to_tab_scan() {
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let (batch, plan, scan_command, cursor) = initial_residence_cursor(&session_nonce);
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, &session_nonce, UCONTENT_ORIGIN, "frame-1")
+                .unwrap();
+        let target = UaiBrowserMenuEntry::try_new(
+            &plan,
+            &binding,
+            0,
+            "Unit Z".to_owned(),
+            "Section Z".to_owned(),
+            "Micro Z".to_owned(),
+        )
+        .unwrap();
+        let target_handle = target.handle.clone();
+        let menu_completed = completed_event(
+            &plan,
+            session_id,
+            &scan_command,
+            UaiBrowserEvent::MenuList {
+                entries: vec![target],
+            },
+            [1; 32],
+        );
+        let menu_advance = cursor
+            .advance_menu_list(&batch, &plan, &scan_command, &menu_completed)
+            .unwrap();
+        let click_completed = completed_event(
+            &plan,
+            session_id,
+            menu_advance.command(),
+            UaiBrowserEvent::ClickResult {
+                handle: target_handle,
+                clicked: true,
+            },
+            [2; 32],
+        );
+        let tab_advance = menu_advance
+            .cursor()
+            .advance_menu_click(&batch, &plan, menu_advance.command(), &click_completed)
+            .unwrap();
+
+        assert_eq!(
+            tab_advance.cursor().stage(),
+            crate::UaiBrowserCursorStage::ScanningTabs
+        );
+        assert_eq!(tab_advance.cursor().prior_result_sequence(), Some(2));
+        assert_eq!(tab_advance.cursor().prior_result_digest(), Some([2; 32]));
+        assert_eq!(tab_advance.command().sequence, 3);
+        assert!(matches!(
+            tab_advance.command().command,
+            UaiBrowserCommand::ScanPage {
+                scope: UaiBrowserPageScope::Tab
+            }
+        ));
+        assert_eq!(
+            menu_advance.cursor().stage(),
+            crate::UaiBrowserCursorStage::ClickingMenu
+        );
+        tab_advance
+            .cursor()
+            .encode_artifact(&batch, &plan, tab_advance.command())
+            .unwrap();
     }
 
     #[tokio::test]
