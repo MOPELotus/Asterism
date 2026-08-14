@@ -5,8 +5,9 @@ use asterism_domain::{
     BrowserBridgeRuntimeStateMetadata, BrowserBridgeSessionId, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
-    BrowserBridgeCapability, BrowserSessionSpec, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderIdentity, ProviderMetadata, ProviderResult, RemoteTaskDetail, TaskDetailCapability,
+    BrowserBridgeCapability, BrowserBridgeResultDisposition, BrowserSessionSpec, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
+    RemoteTaskDetail, TaskDetailCapability,
 };
 use asterism_secrets::SecretValue;
 use async_trait::async_trait;
@@ -4513,6 +4514,19 @@ impl BrowserBridgeCapability for UaiBrowserBridge {
         })?;
         Ok(spec)
     }
+
+    fn browser_bridge_result_disposition(
+        &self,
+        result_type: &str,
+    ) -> Option<BrowserBridgeResultDisposition> {
+        match result_type {
+            UAI_BROWSER_EVENT_TYPE => Some(BrowserBridgeResultDisposition::Intermediate),
+            UAI_BROWSER_RESIDENCE_RESULT_TYPE => {
+                Some(BrowserBridgeResultDisposition::ExecutionTerminal)
+            }
+            _ => None,
+        }
+    }
 }
 
 fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> ProviderResult<()> {
@@ -4739,6 +4753,32 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+    }
+
+    #[test]
+    fn result_disposition_accepts_only_exact_uai_result_types() {
+        let capability = browser_bridge();
+        assert_eq!(
+            capability.browser_bridge_result_disposition(UAI_BROWSER_EVENT_TYPE),
+            Some(BrowserBridgeResultDisposition::Intermediate)
+        );
+        assert_eq!(
+            capability.browser_bridge_result_disposition(UAI_BROWSER_RESIDENCE_RESULT_TYPE),
+            Some(BrowserBridgeResultDisposition::ExecutionTerminal)
+        );
+        for result_type in [
+            "",
+            UAI_BROWSER_COMMAND_TYPE,
+            "uai.browser.event.extra",
+            "uai.browser.residence",
+            "UAI.BROWSER.RESIDENCE.RESULT",
+            "cidaren.capture.snapshot.result",
+        ] {
+            assert_eq!(
+                capability.browser_bridge_result_disposition(result_type),
+                None
+            );
+        }
     }
 
     #[tokio::test]
