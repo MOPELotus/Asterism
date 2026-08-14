@@ -258,6 +258,7 @@ pub(super) async fn get_task_questions(
             Arc::new(SqliteQuestionReadAttemptRepository::new(
                 state.database.clone(),
             )),
+            Arc::new(secret_store.clone()),
             Arc::new(secret_store),
         );
     }
@@ -330,20 +331,24 @@ pub(super) async fn resolve_provider_answer_candidates(
     let (task_id, snapshot_id) = parse_task_question_snapshot_ids(&task_id, &snapshot_id)?;
     let correlation_id = required_header(&headers, "x-request-id", 128)?;
     let answers = SqliteQuestionSnapshotRepository::new(state.database.clone());
-    let result = ProviderAnswerResolveService::new(
+    let mut service = ProviderAnswerResolveService::new(
         state.providers,
         SqliteTaskQueryRepository::new(state.database.clone()),
-        SqliteProviderAccountRepository::new(state.database),
+        SqliteProviderAccountRepository::new(state.database.clone()),
         answers,
-    )
-    .resolve(ResolveProviderAnswersCommand {
-        owner_id,
-        task_id,
-        question_snapshot_id: snapshot_id,
-        correlation_id: correlation_id.to_owned(),
-    })
-    .await
-    .map_err(map_provider_answer_resolve_error)?;
+    );
+    if let Some(secret_store) = state.secret_store {
+        service = service.with_question_session_artifacts(Arc::new(secret_store));
+    }
+    let result = service
+        .resolve(ResolveProviderAnswersCommand {
+            owner_id,
+            task_id,
+            question_snapshot_id: snapshot_id,
+            correlation_id: correlation_id.to_owned(),
+        })
+        .await
+        .map_err(map_provider_answer_resolve_error)?;
     Ok(crate::auth::no_store(
         Json(AnswerCandidatesResponse {
             task_id: result.task_id,
@@ -1346,6 +1351,7 @@ fn map_provider_answer_resolve_error(error: ProviderAnswerResolveError) -> ApiEr
             ProviderErrorKind::Internal => ApiError::internal(provider_error),
         },
         ProviderAnswerResolveError::Storage(error) => ApiError::internal(error),
+        ProviderAnswerResolveError::Secret(error) => ApiError::internal(error),
     }
 }
 

@@ -4,10 +4,14 @@ use asterism_domain::{
     AnswerCandidateId, AnswerSource, AuthState, ProviderId, QuestionSnapshotId, TaskCapability,
     TaskId, UserId,
 };
-use asterism_provider_api::{ProviderContext, ProviderError, ProviderRegistry};
+use asterism_provider_api::{
+    ProviderContext, ProviderError, ProviderRegistry, ResolvedProviderQuestionSessionContinuation,
+};
+use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
     AnswerCandidateRecord, AnswerCandidateRepository, ProviderAccountRuntimeRepository,
-    QuestionSnapshotRepository, StorageError, TaskQueryRepository,
+    QuestionSessionArtifactRepositoryFactory, QuestionSnapshotRepository,
+    ResolvedQuestionSessionContinuation, StorageError, TaskQueryRepository,
 };
 use chrono::Utc;
 
@@ -33,12 +37,26 @@ pub struct ProviderAnswerResolveResult {
     pub candidates: Vec<AnswerCandidateRecord>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProviderAnswerResolveService<Q, A, S> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
     answers: S,
+    question_sessions: Option<Arc<dyn QuestionSessionArtifactRepositoryFactory>>,
+}
+
+impl<Q, A, S> std::fmt::Debug for ProviderAnswerResolveService<Q, A, S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderAnswerResolveService")
+            .field("registry", &self.registry)
+            .field("tasks", &"configured")
+            .field("accounts", &"configured")
+            .field("answers", &"configured")
+            .field("question_sessions", &self.question_sessions.is_some())
+            .finish()
+    }
 }
 
 impl<Q, A, S> ProviderAnswerResolveService<Q, A, S> {
@@ -48,7 +66,17 @@ impl<Q, A, S> ProviderAnswerResolveService<Q, A, S> {
             tasks,
             accounts,
             answers,
+            question_sessions: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_question_session_artifacts(
+        mut self,
+        artifacts: Arc<dyn QuestionSessionArtifactRepositoryFactory>,
+    ) -> Self {
+        self.question_sessions = Some(artifacts);
+        self
     }
 }
 
@@ -114,8 +142,30 @@ where
             credential_refs: account.credential_refs,
             correlation_id: command.correlation_id,
         };
+        let access = SecretAccess {
+            actor: SecretActor::CoreService("answer-resolve"),
+            correlation_id: context.correlation_id.clone(),
+            reason: "Provider-native AnswerResolve QuestionSession artifact".to_owned(),
+        };
+        let resolved_session = if let Some(factory) = &self.question_sessions {
+            factory
+                .for_provider(account.provider_id.clone())
+                .resolve_active_question_session_continuation(
+                    command.owner_id,
+                    snapshot.id,
+                    &access,
+                )
+                .await?
+        } else {
+            None
+        };
         let candidates = resolver
-            .resolve_answers(&context, &task.remote_id, &snapshot.questions)
+            .resolve_answers_with_session(
+                &context,
+                &task.remote_id,
+                &snapshot.questions,
+                resolved_session.as_ref().map(provider_session_continuation),
+            )
             .await?;
         validate_candidates(&snapshot.questions, &candidates)?;
         let created_at = Utc::now();
@@ -138,6 +188,18 @@ where
             provider_version: entry.metadata.implementation_version.clone(),
             candidates: records,
         })
+    }
+}
+
+fn provider_session_continuation(
+    resolved: &ResolvedQuestionSessionContinuation,
+) -> ResolvedProviderQuestionSessionContinuation<'_> {
+    ResolvedProviderQuestionSessionContinuation {
+        continuation_type: &resolved.metadata.continuation_type,
+        continuation_digest: resolved.metadata.continuation_digest,
+        phase: &resolved.metadata.phase,
+        revision: resolved.metadata.revision,
+        value: &resolved.value,
     }
 }
 
@@ -200,6 +262,8 @@ pub enum ProviderAnswerResolveError {
     Provider(#[from] ProviderError),
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    Secret(#[from] SecretStoreError),
 }
 
 #[cfg(test)]

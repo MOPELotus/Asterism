@@ -1045,6 +1045,92 @@ pub trait QuestionParseCapability: ProviderIdentity {
         remote_task_id: &str,
         question: &RemoteQuestionRef,
     ) -> ProviderResult<Question>;
+
+    /// Parses one complete read-only inventory and optionally returns one
+    /// encrypted Provider continuation bound to the resulting immutable
+    /// Question set. Providers without runtime artifacts inherit the ordinary
+    /// per-reference parser path.
+    async fn parse_question_set(
+        &self,
+        context: &ProviderContext,
+        task_id: TaskId,
+        remote_task_id: &str,
+        references: &[RemoteQuestionRef],
+    ) -> ProviderResult<ProviderQuestionParseSet> {
+        let mut questions = Vec::with_capacity(references.len());
+        for reference in references {
+            questions.push(
+                self.parse_question(context, task_id, remote_task_id, reference)
+                    .await?,
+            );
+        }
+        ProviderQuestionParseSet::try_new(questions, None)
+    }
+}
+
+/// Complete output of the ordinary read-only Question parser. The optional
+/// continuation is encrypted by Core and never enters a normalized Question,
+/// Draft, API response or diagnostic output.
+pub struct ProviderQuestionParseSet {
+    questions: Vec<Question>,
+    artifact: Option<ProviderQuestionReadContinuation>,
+}
+
+impl ProviderQuestionParseSet {
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, invalid or duplicate Question output.
+    pub fn try_new(
+        questions: Vec<Question>,
+        artifact: Option<ProviderQuestionReadContinuation>,
+    ) -> ProviderResult<Self> {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut positions = std::collections::BTreeSet::new();
+        let mut remote_ids = std::collections::BTreeSet::new();
+        if questions.is_empty()
+            || questions.len() > MAX_QUESTION_READ_ITEMS
+            || questions.iter().any(|question| {
+                question.validate().is_err()
+                    || !ids.insert(question.id)
+                    || !positions.insert(question.position)
+                    || question
+                        .remote_question_id
+                        .as_ref()
+                        .is_some_and(|remote_id| !remote_ids.insert(remote_id.as_str()))
+            })
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider Question parse set is invalid",
+            ));
+        }
+        Ok(Self {
+            questions,
+            artifact,
+        })
+    }
+
+    pub fn questions(&self) -> &[Question] {
+        &self.questions
+    }
+
+    pub fn artifact(&self) -> Option<&ProviderQuestionReadContinuation> {
+        self.artifact.as_ref()
+    }
+
+    pub fn into_parts(self) -> (Vec<Question>, Option<ProviderQuestionReadContinuation>) {
+        (self.questions, self.artifact)
+    }
+}
+
+impl fmt::Debug for ProviderQuestionParseSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderQuestionParseSet")
+            .field("question_count", &self.questions.len())
+            .field("artifact", &self.artifact.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -1194,6 +1280,20 @@ pub trait AnswerResolveCapability: ProviderIdentity {
         remote_task_id: &str,
         questions: &[Question],
     ) -> ProviderResult<Vec<AnswerCandidate>>;
+
+    /// Resolves answers while exposing an optional encrypted continuation
+    /// attached to this exact immutable Question snapshot. Legacy and
+    /// artifact-free Providers continue through `resolve_answers`.
+    async fn resolve_answers_with_session(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        questions: &[Question],
+        _continuation: Option<ResolvedProviderQuestionSessionContinuation<'_>>,
+    ) -> ProviderResult<Vec<AnswerCandidate>> {
+        self.resolve_answers(context, remote_task_id, questions)
+            .await
+    }
 }
 
 /// Builds a bounded, credential-free description of the payload shape for an

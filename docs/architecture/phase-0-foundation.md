@@ -3242,3 +3242,25 @@ finishes the Execution. That terminal transition requires every registered
 operation to be accepted and the current continuation revision to be the
 rotation produced by the latest operation. Legacy submissions without a
 QuestionSession retain their existing one-shot Submit/verify path.
+
+## One-hundred-and-eighty-seventh Phase 0 slice
+
+The ordinary read-only Question path can now retain Provider runtime material
+without pretending that parsing was a pre-Question mutation. `QuestionParse`
+returns one complete validated set and an optional Provider-scoped encrypted
+continuation. Artifact-free Providers inherit the existing per-reference
+parser behavior unchanged.
+
+When an artifact exists, SQLite atomically persists the immutable
+`QuestionSnapshot`, an unclaimed `QuestionSession`, the encrypted artifact and
+its digest/type/phase metadata. A partial snapshot or plaintext route cannot
+escape if any binding or Secret write fails. The session remains bound to the
+owner, Provider account, Task, Provider version and exact snapshot, and the
+original short expiry is authoritative.
+
+Provider-native `AnswerResolve` may ask Core for the active artifact belonging
+to that exact owner and snapshot. Core decrypts it only through the
+Provider-scoped repository and passes a borrowed redacted continuation to the
+Provider method; Domain Questions, candidates, Drafts and API responses still
+contain no runtime URL, token or crypto material. Snapshots without an artifact
+continue through the legacy resolver method.

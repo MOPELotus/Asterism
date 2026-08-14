@@ -37,12 +37,13 @@ impl CidarenBrowserResultDocument {
     ///
     /// Returns a typed error for an empty or oversized document.
     pub fn try_new(document: String) -> ProviderResult<Self> {
+        let document = Zeroizing::new(document);
         if document.is_empty() || document.len() > MAX_BROWSER_DOCUMENT_BYTES {
             return Err(invalid_response(
                 "Cidaren BrowserBridge result is empty or oversized",
             ));
         }
-        Ok(Self(Zeroizing::new(document)))
+        Ok(Self(document))
     }
 
     pub(crate) fn as_str(&self) -> &str {

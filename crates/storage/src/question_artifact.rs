@@ -1,8 +1,8 @@
 use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
-    AuditRecordId, ExecutionAttemptId, ExecutionId, ProviderId, QuestionSessionId,
-    QuestionSessionState, SecretId, Timestamp, UserId,
+    AuditActor, AuditRecordId, ExecutionAttemptId, ExecutionId, ProviderId, QuestionSessionId,
+    QuestionSessionState, QuestionSnapshotId, SecretId, Timestamp, UserId,
 };
 use asterism_secrets::{
     SecretAccess, SecretActor, SecretPurpose, SecretRef, SecretStoreError, SecretValue,
@@ -14,10 +14,12 @@ use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
 use crate::{
     Database, QuestionSessionArtifactAttachRequest, QuestionSessionArtifactRepository,
-    QuestionSessionContinuation, QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
-    QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
-    QuestionSessionOperationIssueRequest, QuestionSessionOperationState,
-    ResolvedQuestionSessionContinuation, SecretKeyring,
+    QuestionSessionContinuation, QuestionSessionMaterializeRequest, QuestionSessionOperation,
+    QuestionSessionOperationAcceptRequest, QuestionSessionOperationFinishOutcome,
+    QuestionSessionOperationIssueOutcome, QuestionSessionOperationIssueRequest,
+    QuestionSessionOperationState, ResolvedQuestionSessionContinuation, SecretKeyring,
+    question::save_question_snapshot_in_transaction,
+    question_session::insert_question_session_in_transaction,
     secret::{
         authorize, decrypt, encrypt, fetch_secret, insert_secret_audit, insert_secret_blob,
         validate_secret,
@@ -59,6 +61,108 @@ impl SqliteQuestionSessionArtifactRepository {
 #[async_trait]
 #[allow(clippy::too_many_lines)]
 impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactRepository {
+    async fn materialize_question_session(
+        &self,
+        request: QuestionSessionMaterializeRequest<'_>,
+    ) -> Result<QuestionSessionContinuation, SecretStoreError> {
+        validate_label(request.artifact_phase)?;
+        validate_secret(&request.artifact)?;
+        let artifact_digest = digest(request.artifact.expose_secret());
+        request
+            .session
+            .validate()
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+        if request.session.state != QuestionSessionState::Active
+            || request.session.execution_id.is_some()
+            || request.session.provider_id != self.provider_id
+            || request.session.question_snapshot_id != request.snapshot.id
+            || request.session.task_id != request.snapshot.task_id
+            || request.session.provider_version != request.snapshot.provider_version
+            || request.session.artifact_digest != artifact_digest
+            || request.session.created_at != request.materialized_at
+            || request.snapshot.captured_at != request.materialized_at
+            || !label_belongs_to_provider(&self.provider_id, &request.session.artifact_type)
+            || !label_belongs_to_provider(&self.provider_id, request.artifact_phase)
+        {
+            return Err(SecretStoreError::InvalidValue);
+        }
+        authorize(request.session.owner_user_id, request.access)?;
+
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        save_question_snapshot_in_transaction(&mut transaction, request.snapshot)
+            .await
+            .map_err(storage_error)?;
+        insert_question_session_in_transaction(
+            &mut transaction,
+            request.session,
+            AuditActor::User(request.session.owner_user_id),
+            &request.access.correlation_id,
+        )
+        .await
+        .map_err(storage_error)?;
+
+        let (key_id, key) = self.keyring.active();
+        let secret = SecretRef {
+            id: SecretId::new(),
+            owner_user_id: request.session.owner_user_id,
+            purpose: SecretPurpose::BrowserJobCredential,
+            version: 1,
+            key_id: key_id.to_owned(),
+            created_at: request.materialized_at,
+            updated_at: request.materialized_at,
+        };
+        let (nonce, encrypted_data) = encrypt(key, &secret, request.artifact.expose_secret())?;
+        insert_secret_blob(&mut transaction, &secret, &nonce, &encrypted_data).await?;
+        sqlx::query(
+            "INSERT INTO question_session_continuations \
+             (session_id, execution_id, secret_blob_id, continuation_type, \
+              continuation_digest, phase, revision, created_at, updated_at) \
+             VALUES (?, NULL, ?, ?, ?, ?, 1, ?, ?)",
+        )
+        .bind(request.session.id.to_string())
+        .bind(secret.id.to_string())
+        .bind(&request.session.artifact_type)
+        .bind(artifact_digest.as_slice())
+        .bind(request.artifact_phase)
+        .bind(encode_timestamp(request.materialized_at))
+        .bind(encode_timestamp(request.materialized_at))
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        insert_secret_audit(
+            &mut transaction,
+            request.access,
+            "question_session_artifact_stored",
+            &secret,
+        )
+        .await
+        .map_err(storage_error)?;
+        let continuation = QuestionSessionContinuation {
+            session_id: request.session.id,
+            execution_id: None,
+            continuation_type: request.session.artifact_type.clone(),
+            continuation_digest: artifact_digest,
+            phase: request.artifact_phase.to_owned(),
+            revision: 1,
+            created_at: request.materialized_at,
+            updated_at: request.materialized_at,
+        };
+        insert_continuation_audit(
+            &mut transaction,
+            request.access,
+            "question_session_materialized",
+            &continuation,
+        )
+        .await?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(continuation)
+    }
+
     async fn attach_question_session_artifact(
         &self,
         request: QuestionSessionArtifactAttachRequest<'_>,
@@ -229,6 +333,83 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         Ok(Some(ResolvedQuestionSessionContinuation {
             metadata,
             latest_operation,
+            value: SecretValue::new(plaintext),
+        }))
+    }
+
+    async fn resolve_active_question_session_continuation(
+        &self,
+        owner_user_id: UserId,
+        question_snapshot_id: QuestionSnapshotId,
+        access: &SecretAccess,
+    ) -> Result<Option<ResolvedQuestionSessionContinuation>, SecretStoreError> {
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let Some(row) =
+            fetch_active_resolved_row(&mut transaction, owner_user_id, question_snapshot_id)
+                .await?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(None);
+        };
+        let provider_id = ProviderId::new(row_value!(row, "provider_id", String))
+            .map_err(|_| SecretStoreError::Storage)?;
+        let stored_owner: UserId = parse_id(row_value!(row, "owner_user_id"))?;
+        authorize(stored_owner, access)?;
+        if stored_owner != owner_user_id || provider_id != self.provider_id {
+            return Err(SecretStoreError::Unauthorized);
+        }
+        let session_state = decode_session_state(row_value!(row, "session_state"))?;
+        let expires_at = decode_timestamp(row_value!(row, "expires_at"))?;
+        if session_state != QuestionSessionState::Active
+            || row_value!(row, "session_execution_id", Option<&str>).is_some()
+            || expires_at <= Utc::now()
+        {
+            return Err(SecretStoreError::VersionConflict);
+        }
+        let metadata = decode_continuation(&row)?;
+        if metadata.execution_id.is_some() || metadata.revision != 1 {
+            return Err(SecretStoreError::VersionConflict);
+        }
+        let secret_id: SecretId = parse_id(row_value!(row, "secret_blob_id"))?;
+        let stored = fetch_secret(&mut transaction, secret_id).await?;
+        let secret = SecretRef {
+            id: secret_id,
+            owner_user_id: stored.owner_user_id,
+            purpose: stored.purpose,
+            version: stored.version,
+            key_id: stored.key_id.clone(),
+            created_at: stored.created_at,
+            updated_at: stored.updated_at,
+        };
+        if secret.owner_user_id != owner_user_id
+            || secret.purpose != SecretPurpose::BrowserJobCredential
+            || secret.version != metadata.revision
+            || secret.updated_at != metadata.updated_at
+        {
+            return Err(SecretStoreError::VersionConflict);
+        }
+        let key = self.keyring.get(&secret.key_id)?;
+        let plaintext = decrypt(key, &secret, &stored.nonce, &stored.encrypted_data)?;
+        if digest(&plaintext) != metadata.continuation_digest {
+            return Err(SecretStoreError::AuthenticationFailed);
+        }
+        insert_secret_audit(
+            &mut transaction,
+            access,
+            "question_session_continuation_accessed",
+            &secret,
+        )
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(Some(ResolvedQuestionSessionContinuation {
+            metadata,
+            latest_operation: None,
             value: SecretValue::new(plaintext),
         }))
     }
@@ -640,6 +821,29 @@ async fn fetch_resolved_row(
          WHERE continuation.execution_id = ?",
     )
     .bind(execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)
+}
+
+async fn fetch_active_resolved_row(
+    transaction: &mut Transaction<'_, Sqlite>,
+    owner_user_id: UserId,
+    question_snapshot_id: QuestionSnapshotId,
+) -> Result<Option<SqliteRow>, SecretStoreError> {
+    sqlx::query(
+        "SELECT continuation.session_id, continuation.execution_id, \
+                continuation.secret_blob_id, continuation.continuation_type, \
+                continuation.continuation_digest, continuation.phase, continuation.revision, \
+                continuation.created_at, continuation.updated_at, \
+                session.owner_user_id, session.provider_id, session.state AS session_state, \
+                session.execution_id AS session_execution_id, session.expires_at \
+         FROM question_session_continuations AS continuation \
+         INNER JOIN question_sessions AS session ON session.id = continuation.session_id \
+         WHERE session.owner_user_id = ? AND session.question_snapshot_id = ?",
+    )
+    .bind(owner_user_id.to_string())
+    .bind(question_snapshot_id.to_string())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(storage_error)
@@ -1112,15 +1316,101 @@ mod tests {
     use std::collections::BTreeMap;
 
     use asterism_domain::{
-        AuditActor, ProviderAccountId, QuestionSession, QuestionSnapshotId, TaskId,
+        AuditActor, ProviderAccountId, Question, QuestionKind, QuestionSession, QuestionSnapshotId,
+        TaskId,
     };
     use asterism_secrets::{SecretKey, SecretStoreError};
     use chrono::{Duration, Utc};
 
     use super::*;
     use crate::{
-        QuestionSessionClaimOutcome, QuestionSessionRepository, SqliteQuestionSessionRepository,
+        QuestionSessionClaimOutcome, QuestionSessionRepository, QuestionSnapshot,
+        QuestionSnapshotRepository, SqliteQuestionSessionRepository,
+        SqliteQuestionSnapshotRepository,
     };
+
+    #[tokio::test]
+    async fn read_only_materialization_atomically_exposes_artifact_to_core_resolution() {
+        let fixture = Fixture::new().await;
+        let question = Question {
+            id: asterism_domain::QuestionId::new(),
+            task_id: fixture.task,
+            remote_question_id: Some("media-question-1".to_owned()),
+            kind: QuestionKind::ShortAnswer,
+            stem: "Bound media Question".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({}),
+            position: 1,
+        };
+        let snapshot = QuestionSnapshot {
+            id: QuestionSnapshotId::new(),
+            task_id: fixture.task,
+            provider_id: fixture.provider.clone(),
+            provider_version: "exam-v1".to_owned(),
+            captured_at: fixture.now,
+            questions: vec![question],
+        };
+        let plaintext = b"bounded-media-route";
+        let session = QuestionSession::active(
+            fixture.owner,
+            fixture.account,
+            fixture.task,
+            fixture.provider.clone(),
+            "exam-v1".to_owned(),
+            snapshot.id,
+            "chaoxing.media-question.v1".to_owned(),
+            digest(plaintext),
+            fixture.now,
+            fixture.now + Duration::minutes(5),
+        )
+        .unwrap();
+        let user_access = SecretAccess {
+            actor: SecretActor::User(fixture.owner),
+            correlation_id: "read-only-materialize".to_owned(),
+            reason: "ordinary Question parse".to_owned(),
+        };
+        let continuation = fixture
+            .artifacts
+            .materialize_question_session(QuestionSessionMaterializeRequest {
+                snapshot: &snapshot,
+                session: &session,
+                artifact_phase: "chaoxing.media-ready",
+                artifact: SecretValue::new(plaintext.to_vec()),
+                materialized_at: fixture.now,
+                access: &user_access,
+            })
+            .await
+            .unwrap();
+        assert_eq!(continuation.session_id, session.id);
+        assert_eq!(continuation.execution_id, None);
+        assert_eq!(continuation.revision, 1);
+        assert_eq!(
+            SqliteQuestionSnapshotRepository::new(fixture.database.clone())
+                .find_owned_question_snapshot(fixture.owner, snapshot.id)
+                .await
+                .unwrap(),
+            Some(snapshot)
+        );
+
+        let resolved = fixture
+            .artifacts
+            .resolve_active_question_session_continuation(
+                fixture.owner,
+                session.question_snapshot_id,
+                &SecretAccess {
+                    actor: SecretActor::CoreService("answer-resolve"),
+                    correlation_id: "read-only-resolve-exact".to_owned(),
+                    reason: "Provider-native AnswerResolve".to_owned(),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.value.expose_secret(), plaintext);
+        assert_eq!(resolved.metadata.session_id, session.id);
+        assert!(resolved.latest_operation.is_none());
+    }
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]

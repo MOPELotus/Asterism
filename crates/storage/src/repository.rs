@@ -434,6 +434,16 @@ pub struct QuestionSessionArtifactAttachRequest<'a> {
     pub access: &'a SecretAccess,
 }
 
+#[derive(Debug)]
+pub struct QuestionSessionMaterializeRequest<'a> {
+    pub snapshot: &'a QuestionSnapshot,
+    pub session: &'a QuestionSession,
+    pub artifact_phase: &'a str,
+    pub artifact: SecretValue,
+    pub materialized_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuestionSessionOperationState {
     Issued,
@@ -503,6 +513,13 @@ pub enum QuestionSessionOperationFinishOutcome {
 /// implementation is permanently Provider-scoped at composition time.
 #[async_trait]
 pub trait QuestionSessionArtifactRepository: Send + Sync {
+    /// Atomically persists one ordinary read-only Question snapshot, its
+    /// unclaimed session and encrypted Provider artifact.
+    async fn materialize_question_session(
+        &self,
+        request: QuestionSessionMaterializeRequest<'_>,
+    ) -> Result<QuestionSessionContinuation, SecretStoreError>;
+
     async fn attach_question_session_artifact(
         &self,
         request: QuestionSessionArtifactAttachRequest<'_>,
@@ -511,6 +528,16 @@ pub trait QuestionSessionArtifactRepository: Send + Sync {
     async fn resolve_question_session_continuation(
         &self,
         execution_id: ExecutionId,
+        access: &SecretAccess,
+    ) -> Result<Option<ResolvedQuestionSessionContinuation>, SecretStoreError>;
+
+    /// Resolves a still-unclaimed artifact for one owner-scoped immutable
+    /// snapshot so Provider-native `AnswerResolve` can use it without exposing
+    /// plaintext through Domain or API types.
+    async fn resolve_active_question_session_continuation(
+        &self,
+        owner_user_id: UserId,
+        question_snapshot_id: QuestionSnapshotId,
         access: &SecretAccess,
     ) -> Result<Option<ResolvedQuestionSessionContinuation>, SecretStoreError>;
 

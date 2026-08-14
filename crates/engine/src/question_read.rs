@@ -1,9 +1,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use asterism_domain::{
-    AuditActor, AuthState, MAX_QUESTION_READ_ATTEMPT_TTL_SECONDS, ProviderAccount, ProviderId,
-    Question, QuestionKind, QuestionReadAttempt, QuestionReadAttemptId, QuestionReadAttemptState,
-    QuestionSession, QuestionSnapshotId, Task, TaskCapability, TaskId, Timestamp, UserId,
+    AuditActor, AuthState, MAX_QUESTION_READ_ATTEMPT_TTL_SECONDS, MAX_QUESTION_SESSION_TTL_SECONDS,
+    ProviderAccount, ProviderId, Question, QuestionKind, QuestionReadAttempt,
+    QuestionReadAttemptId, QuestionReadAttemptState, QuestionSession, QuestionSnapshotId, Task,
+    TaskCapability, TaskId, Timestamp, UserId,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderEntry, ProviderError, ProviderQuestionReadStepOutcome,
@@ -18,7 +19,8 @@ use asterism_storage::{
     QuestionReadMaterializeOutcome, QuestionReadMaterializeRequest,
     QuestionReadOperationAcceptRequest, QuestionReadOperationFinishOutcome,
     QuestionReadOperationIssueOutcome, QuestionReadOperationIssueRequest,
-    QuestionReadOperationState, QuestionSnapshot, QuestionSnapshotRepository, StorageError,
+    QuestionReadOperationState, QuestionSessionArtifactRepositoryFactory,
+    QuestionSessionMaterializeRequest, QuestionSnapshot, QuestionSnapshotRepository, StorageError,
     TaskQueryRepository,
 };
 use chrono::{Duration, Utc};
@@ -124,6 +126,7 @@ struct DurableQuestionReadDependencies {
     settings: Arc<dyn ProviderRuntimeSettingsRepository>,
     attempts: Arc<dyn QuestionReadAttemptRepository>,
     continuations: Arc<dyn QuestionReadContinuationRepositoryFactory>,
+    artifacts: Arc<dyn QuestionSessionArtifactRepositoryFactory>,
 }
 
 impl<Q, A, S> std::fmt::Debug for ProviderQuestionReadService<Q, A, S> {
@@ -156,11 +159,13 @@ impl<Q, A, S> ProviderQuestionReadService<Q, A, S> {
         settings: Arc<dyn ProviderRuntimeSettingsRepository>,
         attempts: Arc<dyn QuestionReadAttemptRepository>,
         continuations: Arc<dyn QuestionReadContinuationRepositoryFactory>,
+        artifacts: Arc<dyn QuestionSessionArtifactRepositoryFactory>,
     ) -> Self {
         self.durable = Some(DurableQuestionReadDependencies {
             settings,
             attempts,
             continuations,
+            artifacts,
         });
         self
     }
@@ -369,23 +374,79 @@ where
             .await?;
         validate_references(&references)?;
         references.sort_by_key(|reference| reference.position);
-        let mut questions = Vec::with_capacity(references.len());
-        for reference in &references {
-            let question = parser
-                .parse_question(&context, task.id, &task.remote_id, reference)
-                .await?;
-            validate_question_binding(&task, reference, &question)?;
-            questions.push(question);
+        let parsed = parser
+            .parse_question_set(&context, task.id, &task.remote_id, &references)
+            .await?;
+        let (questions, artifact) = parsed.into_parts();
+        if questions.len() != references.len() {
+            return Err(ProviderQuestionReadError::ProviderResponseInvalid);
         }
+        for (reference, question) in references.iter().zip(&questions) {
+            validate_question_binding(&task, reference, question)?;
+        }
+        validate_materialized_questions(task.id, &questions)?;
+        let captured_at = Utc::now();
         let snapshot = QuestionSnapshot {
             id: QuestionSnapshotId::new(),
             task_id: task.id,
             provider_id: account.provider_id.clone(),
             provider_version: entry.metadata.implementation_version.clone(),
-            captured_at: Utc::now(),
+            captured_at,
             questions: questions.clone(),
         };
-        self.snapshots.save_question_snapshot(&snapshot).await?;
+        if let Some(artifact) = artifact {
+            let durable = self
+                .durable
+                .as_ref()
+                .ok_or(ProviderQuestionReadError::DurableStateUnavailable)?;
+            let (artifact_type, expected_digest, phase, value, ttl_seconds) = artifact.into_parts();
+            let maximum_ttl = u64::try_from(MAX_QUESTION_SESSION_TTL_SECONDS)
+                .map_err(|_| ProviderQuestionReadError::ProviderResponseInvalid)?;
+            if ttl_seconds == 0 || ttl_seconds > maximum_ttl {
+                return Err(ProviderQuestionReadError::ProviderResponseInvalid);
+            }
+            let session = QuestionSession::active(
+                command.owner_id,
+                account.id,
+                task.id,
+                account.provider_id.clone(),
+                entry.metadata.implementation_version.clone(),
+                snapshot.id,
+                artifact_type.clone(),
+                expected_digest,
+                captured_at,
+                captured_at
+                    + Duration::seconds(
+                        i64::try_from(ttl_seconds)
+                            .map_err(|_| ProviderQuestionReadError::ProviderResponseInvalid)?,
+                    ),
+            )
+            .map_err(|_| ProviderQuestionReadError::ProviderResponseInvalid)?;
+            let access = question_read_access(command.owner_id, &command.correlation_id);
+            let persisted = durable
+                .artifacts
+                .for_provider(account.provider_id.clone())
+                .materialize_question_session(QuestionSessionMaterializeRequest {
+                    snapshot: &snapshot,
+                    session: &session,
+                    artifact_phase: &phase,
+                    artifact: value,
+                    materialized_at: captured_at,
+                    access: &access,
+                })
+                .await?;
+            if persisted.session_id != session.id
+                || persisted.execution_id.is_some()
+                || persisted.continuation_type != artifact_type
+                || persisted.continuation_digest != expected_digest
+                || persisted.phase != phase
+                || persisted.revision != 1
+            {
+                return Err(ProviderQuestionReadError::ProviderResponseInvalid);
+            }
+        } else {
+            self.snapshots.save_question_snapshot(&snapshot).await?;
+        }
         Ok(result_from_snapshot(snapshot))
     }
 
@@ -1238,6 +1299,7 @@ mod tests {
                 database.clone(),
             )),
             Arc::new(attempts.clone()),
+            Arc::new(secret_store.clone()),
             Arc::new(secret_store),
         );
         let result = service
