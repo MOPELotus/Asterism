@@ -135,6 +135,12 @@ fn parse_root(
             message_sanitized: message,
         });
     }
+    if code == 20_001 && message.as_deref() == Some("需要选词！") {
+        return Ok(CidarenAssessmentResponse::Receipt {
+            kind: CidarenAssessmentReceiptKind::WordSelectionRequired,
+            message_sanitized: message,
+        });
+    }
     if code != 1 && !(code == 20_001 && object.get("data").is_some_and(json_truthy)) {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidResponse,
@@ -183,6 +189,12 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
     if code == 20_004 {
         return Ok(CidarenAssessmentResponse::Receipt {
             kind: CidarenAssessmentReceiptKind::Completed,
+            message_sanitized: message,
+        });
+    }
+    if code == 20_001 && message.as_deref() == Some("需要选词！") {
+        return Ok(CidarenAssessmentResponse::Receipt {
+            kind: CidarenAssessmentReceiptKind::WordSelectionRequired,
             message_sanitized: message,
         });
     }
@@ -287,6 +299,26 @@ mod tests {
             assert!(matches!(
                 response,
                 CidarenAssessmentResponse::Receipt { kind, .. } if kind == expected
+            ));
+        }
+        let selection_required = serde_json::json!({
+            "code": 20001,
+            "msg": "需要选词！",
+            "data": null,
+            "jv": "0",
+            "cv": "0",
+        });
+        let encoded = serde_json::to_vec(&selection_required).unwrap();
+        for response in [
+            parse_assessment_response(&encoded, None).unwrap(),
+            parse_word_selection_response(&encoded).unwrap(),
+        ] {
+            assert!(matches!(
+                response,
+                CidarenAssessmentResponse::Receipt {
+                    kind: CidarenAssessmentReceiptKind::WordSelectionRequired,
+                    ..
+                }
             ));
         }
         for message in ["任务已完成！", "需要选词！"] {

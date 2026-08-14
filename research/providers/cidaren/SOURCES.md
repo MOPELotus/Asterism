@@ -1,6 +1,6 @@
 # Cidaren research sources
 
-Audit date: 2026-08-13. Revisions below are reproducible snapshots for this
+Audit date: 2026-08-14. Revisions below are reproducible snapshots for this
 checkpoint, not permanent pins. Default branches, tags/releases and key
 commits are rechecked before and after each meaningful Provider checkpoint;
 changes are recorded in [`UPSTREAM_CHECKS.md`](UPSTREAM_CHECKS.md) before an
@@ -40,6 +40,10 @@ not credentials or executable request material:
   `StudyTask/Info` response using the legacy `jv=2_1254` inserted-byte base64
   family; the published payload is evidence only and is not copied into a
   fixture;
+- [issue 72](https://github.com/ularch/Easy_Cidaren/issues/72) records the
+  exact remote-state response `code=20001`, `msg=需要选词！`, `data=null` from
+  `StartAnswer`; release 1.5.2 reported a fix even though the reopened shared
+  handler still expresses a truthy-data success condition;
 - [issue 106](https://github.com/ularch/Easy_Cidaren/issues/106) records the
   identity hazard around `task_id=-1`, so a class task must be rebound through
   its release identity before later operations;

@@ -599,6 +599,17 @@ impl CidarenAttemptFlow {
                     });
                     Ok(())
                 }
+                CidarenAssessmentResponse::Receipt {
+                    kind: CidarenAssessmentReceiptKind::WordSelectionRequired,
+                    message_sanitized,
+                } => {
+                    self.phase = Some(CidarenAttemptPhase::Receipt {
+                        kind: CidarenAssessmentReceiptKind::WordSelectionRequired,
+                        message_sanitized,
+                        received_at,
+                    });
+                    Ok(())
+                }
                 _ => Err(protocol_drift(
                     "Cidaren SubmitChoseWord returned an unexpected response",
                 )),
@@ -1336,6 +1347,42 @@ mod tests {
             *transport.operations.lock().unwrap(),
             [CidarenAttemptOperation::SubmitChoseWord]
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_word_selection_request_requires_fresh_plan() {
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([receipt(
+                CidarenAssessmentReceiptKind::WordSelectionRequired,
+            )])),
+            operations: Mutex::new(Vec::new()),
+        });
+        let context = context();
+        let (detail, plan) = word_selection_plan();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail,
+            Some(plan),
+        )
+        .unwrap();
+        let outcome = flow
+            .issue_word_selection()
+            .unwrap()
+            .execute(transport, &context)
+            .await
+            .unwrap();
+        flow.accept(outcome).unwrap();
+        assert_eq!(
+            flow.status(),
+            CidarenAttemptFlowStatus::Receipt(CidarenAssessmentReceiptKind::WordSelectionRequired)
+        );
+        assert!(flow.issue_start().is_err());
+
+        let (_, fresh_plan) = word_selection_plan();
+        flow.supply_word_selection(&detail, fresh_plan).unwrap();
+        assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToSelectWords);
     }
 
     #[tokio::test]

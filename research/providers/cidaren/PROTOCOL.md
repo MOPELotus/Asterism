@@ -441,14 +441,17 @@ success envelope but does not decode a next Question. Asterism therefore uses
 a separate bounded word-selection receipt parser. The ordinary assessment
 parser continues to require decoded `data`, preventing a generic success
 message from being mistaken for a valid Start/Verify/advance result. The
-shared donor handler accepts `code=1`, `code=20001` only when `data` has
-Python-truthy content, or terminal `code=20004`. The Provider mirrors that
-condition exactly: empty/null/false/zero `20001` data fails closed, while a
-terminal word-selection receipt closes the attempt and proceeds only to fresh
-verification instead of issuing an unnecessary `StartAnswer`. Localized
-completion/word-selection messages are classified only after that numeric
-success condition; a failure code cannot become a receipt by copying donor UI
-text.
+shared donor handler accepts `code=1`, `code=20001` when `data` has
+Python-truthy content, or terminal `code=20004`. Public issue 72 independently
+records one platform remote-state exception: `code=20001`, exact
+`msg=需要选词！`, `data=null` from `StartAnswer`. The Provider accepts only that
+exact code/message combination as `WordSelectionRequired`; other empty/null/
+false/zero `20001` data fails closed. The same typed receipt after
+`SubmitChoseWord` requires fresh word-plan rediscovery rather than issuing
+`StartAnswer`. A terminal selection receipt closes the attempt and proceeds
+only to fresh verification. Other localized completion/word-selection text is
+classified only after numeric success; `code=0` cannot become a receipt by
+copying donor UI text.
 
 Before `StartAnswer`, eligible learning Tasks build the donor's exact flat or
 self-built grouped word map from a fresh Task-bound inventory. After start,

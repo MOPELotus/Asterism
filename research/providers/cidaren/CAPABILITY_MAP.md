@@ -102,12 +102,13 @@ The current checkpoint (not a completion boundary):
 24. preserves the actual one-shot response observation time through outcome
     acceptance so delayed durable recovery cannot fabricate a later terminal
     receipt timestamp.
-25. mirrors the donor's compound response success condition for word
-    selection, rejecting empty `20001` payloads and retaining `20004` as a
+25. mirrors the donor's compound response success condition while retaining
+    public issue 72's exact `20001 + 需要选词！ + data=null` remote-state
+    exception; unrelated empty `20001` payloads fail closed and `20004` is a
     terminal receipt that cannot trigger another Start mutation.
-26. classifies localized terminal/word-selection text only after the donor's
-    numeric/data success gate, so remote failure text cannot manufacture a
-    receipt.
+26. classifies other localized terminal/word-selection text only after the
+    numeric/data success gate, so unrelated remote failure text cannot
+    manufacture a receipt.
 
 The remaining work is durable shared QuestionSession/Attempt registration for
 QuestionInventory/QuestionParse and SubmissionExecute, shared execution for

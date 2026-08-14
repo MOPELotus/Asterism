@@ -262,6 +262,16 @@ classification behind the numeric/data success gate. Previously a malformed
 become a receipt. Both assessment and word-selection parsers now reject that
 shape; terminal text remains acknowledgement context only.
 
+The issue-tracker refresh then found a necessary platform exception in public
+issue 72: `StartAnswer` returned exactly `code=20001`, `msg=需要选词！`,
+`data=null`; the maintainer marked it fixed in 1.5.2 even though the reopened
+shared handler still describes truthy-data success. Asterism now recognizes
+only that exact code/message tuple as typed `WordSelectionRequired`, while
+unrelated empty `20001` responses remain rejected. If it appears after a word
+selection submission, the attempt requires fresh Task/word-plan rediscovery
+before another selection and cannot proceed to Start. The Provider suite
+reached 120 passing tests with strict clippy clean.
+
 ## Check procedure
 
 For the next checkpoint:
