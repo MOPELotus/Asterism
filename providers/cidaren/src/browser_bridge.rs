@@ -401,13 +401,10 @@ impl CidarenBrowserBridge {
                 "Cidaren persisted Capture result metadata is stale or foreign",
             ));
         }
-        let document = CidarenBrowserResultDocument::try_from_secret_value(result_artifact)?;
-        if document.exchange_digest()? != result_metadata.result_digest {
-            return Err(ProviderError::new(
-                ProviderErrorKind::ProtocolDrift,
-                "Cidaren persisted Capture result digest changed",
-            ));
-        }
+        let document = CidarenBrowserResultDocument::try_from_secret_value(
+            result_artifact,
+            result_metadata.result_digest,
+        )?;
         self.complete_recovered_capture_snapshot_exchange(
             context,
             remote_task_id,

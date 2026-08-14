@@ -81,12 +81,23 @@ impl CidarenBrowserResultDocument {
     ///
     /// # Errors
     ///
-    /// Returns a typed error for an empty, oversized or non-UTF-8 artifact.
-    pub fn try_from_secret_value(value: &SecretValue) -> ProviderResult<Self> {
+    /// Returns a typed error for an empty, oversized or non-UTF-8 artifact, or
+    /// protocol drift when its exact bytes no longer match Core's persisted
+    /// digest.
+    pub fn try_from_secret_value(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+    ) -> ProviderResult<Self> {
         let mut bytes = Zeroizing::new(value.expose_secret().to_vec());
         if bytes.is_empty() || bytes.len() > MAX_BROWSER_DOCUMENT_BYTES {
             return Err(invalid_response(
                 "Cidaren BrowserBridge result artifact is empty or oversized",
+            ));
+        }
+        let actual_digest: [u8; 32] = Sha256::digest(bytes.as_slice()).into();
+        if actual_digest != expected_digest {
+            return Err(protocol_drift(
+                "Cidaren persisted Capture result digest changed",
             ));
         }
         let document = match String::from_utf8(std::mem::take(&mut *bytes)) {
@@ -924,15 +935,41 @@ mod tests {
 
         let persisted =
             SecretValue::new(document(CidarenCaptureMode::TokenOnly).as_bytes().to_vec());
-        let restored = CidarenBrowserResultDocument::try_from_secret_value(&persisted).unwrap();
+        let digest = persisted_digest(&persisted);
+        let restored =
+            CidarenBrowserResultDocument::try_from_secret_value(&persisted, digest).unwrap();
+        assert_eq!(restored.exchange_digest().unwrap(), digest);
         assert_eq!(
-            restored.exchange_digest().unwrap(),
-            persisted_digest(&persisted)
+            CidarenBrowserResultDocument::try_from_secret_value(&persisted, [9; 32])
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
         );
-        assert!(
-            CidarenBrowserResultDocument::try_from_secret_value(&SecretValue::new(vec![0xff]))
-                .is_err()
+
+        let invalid_utf8 = SecretValue::new(vec![0xff]);
+        assert_eq!(
+            CidarenBrowserResultDocument::try_from_secret_value(
+                &invalid_utf8,
+                persisted_digest(&invalid_utf8),
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::InvalidResponse
         );
+        for invalid in [
+            SecretValue::new(Vec::new()),
+            SecretValue::new(vec![b'x'; MAX_BROWSER_DOCUMENT_BYTES + 1]),
+        ] {
+            assert_eq!(
+                CidarenBrowserResultDocument::try_from_secret_value(
+                    &invalid,
+                    persisted_digest(&invalid),
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::InvalidResponse
+            );
+        }
     }
 
     fn persisted_digest(value: &SecretValue) -> [u8; 32] {

@@ -189,7 +189,9 @@ For durable recovery, Core first resolves the encrypted raw-result artifact
 together with its persisted `BrowserBridgeResultArtifactMetadata`. Cidaren
 copies those bytes only into the same bounded zeroizing owner, recomputes the
 exact digest, and rejects result-type, session, sequence, digest or receive-time
-drift before parsing. The terminal exchange completion time comes only from
+drift before parsing. Raw-byte digest validation precedes UTF-8 and JSON
+interpretation, so a tampered artifact cannot be misclassified as an ordinary
+malformed helper response. The terminal exchange completion time comes only from
 that persisted receipt metadata rather than an independently supplied caller
 timestamp.
 
