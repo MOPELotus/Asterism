@@ -425,6 +425,28 @@ check before loading answer evidence. No donor revision or protocol operation
 changed; this closes a shared-integration binding gap. All 139 Cidaren tests
 and all-target strict clippy passed.
 
+The post-materialization execution checkpoint again resolved
+`ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`, public
+`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`,
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and historical
+`github123666/main@1409858800f3c4bd27577a08049bf1f8d17a069c`; no upstream
+delta entered the work. Cidaren now advertises a session-aware
+SubmissionExecute slot, persists explicit Skip as a command intent, and maps
+accepted operations to same-Question continuation, intervening pre-Question
+continuation, next-Question materialization or terminal receipt without
+replay or fabricated artifacts. Fixture coverage includes mode-73 Skip to
+terminal completion, Verify/advance to a next Question, and a post-Question
+reading-card transition. A mid-attempt word-reselection recovery fixture also
+proves that the bounded next position survives both selection and StartAnswer
+artifact rotations instead of regressing to the first Question. All 144
+Cidaren tests, all-target strict clippy,
+formatting and scoped diff checks passed against the landed atomic shared
+transition contract. The three symbolic default branches, complete public tag
+refs and latest GitHub release metadata were refreshed again after that fix.
+Ularch remains on release `1.5.4` with the same asset size/digest, MOPELotus
+still has no release, and the historical donor remains on `v3.73` from
+2024-04-02; no revision, tag or release delta entered this checkpoint.
+
 ## Check procedure
 
 For the next checkpoint:

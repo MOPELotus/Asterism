@@ -39,6 +39,7 @@ mod score_read;
 mod stored_session;
 mod study_tasks;
 mod submission_build;
+mod submission_execute;
 mod submission_verify;
 mod task_read;
 
@@ -66,8 +67,9 @@ pub use assessment_response::{
 };
 pub use assessment_transport::{CidarenAssessmentTransport, CidarenAssessmentTransportOutcome};
 pub use attempt_flow::{
-    CidarenAttemptFlow, CidarenAttemptFlowStatus, CidarenAttemptOperation, CidarenIssuedCommand,
-    CidarenIssuedOutcome, CidarenPreQuestionContinuation, CidarenQuestionMaterialization,
+    CidarenAttemptFlow, CidarenAttemptFlowStatus, CidarenAttemptOperation,
+    CidarenDurableStepOutcome, CidarenIssuedCommand, CidarenIssuedOutcome,
+    CidarenPreQuestionContinuation, CidarenQuestionMaterialization,
 };
 pub use authentication::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenSessionResolver,
@@ -118,5 +120,6 @@ pub use score_read::CidarenTaskScoreTransport;
 pub use stored_session::StoredCidarenSessionResolver;
 pub use study_tasks::{parse_study_course, parse_study_task_inventory};
 pub use submission_build::CidarenSubmissionBuild;
+pub use submission_execute::CidarenSubmissionExecute;
 pub use submission_verify::CidarenSubmissionVerify;
 pub use task_read::{CidarenTaskDetail, CidarenTaskProgress};

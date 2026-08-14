@@ -9,10 +9,10 @@ use crate::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenBrowserBridge,
     CidarenClassTaskTransport, CidarenCourseInventory, CidarenDurationRead,
     CidarenQuestionInventory, CidarenSessionResolver, CidarenStudyTaskTransport,
-    CidarenSubmissionBuild, CidarenSubmissionVerify, CidarenTaskDetail, CidarenTaskInventory,
-    CidarenTaskProgress, CidarenTaskScoreTransport, metadata::development_metadata,
-    native_http::NativeCidarenTransport, runtime_settings::runtime_settings_schema,
-    stored_session::StoredCidarenSessionResolver,
+    CidarenSubmissionBuild, CidarenSubmissionExecute, CidarenSubmissionVerify, CidarenTaskDetail,
+    CidarenTaskInventory, CidarenTaskProgress, CidarenTaskScoreTransport,
+    metadata::development_metadata, native_http::NativeCidarenTransport,
+    runtime_settings::runtime_settings_schema, stored_session::StoredCidarenSessionResolver,
 };
 
 /// Composes the Development entry around injected token/session and complete
@@ -48,6 +48,9 @@ pub fn build_development_provider(
         answer_evidence_transport,
         assessment_transport,
     )?);
+    let submission_execute = Arc::new(CidarenSubmissionExecute::try_new(
+        question_inventory.clone(),
+    )?);
     let submission_verify = Arc::new(CidarenSubmissionVerify::try_new(
         task_detail.clone(),
         score_transport,
@@ -74,7 +77,7 @@ pub fn build_development_provider(
         question_parse: None,
         answer_resolve: Some(answer_resolve),
         submission_build: Some(Arc::new(CidarenSubmissionBuild::try_new()?)),
-        submission_execute: None,
+        submission_execute: Some(submission_execute),
         submission_verify: Some(submission_verify),
         task_execution: None,
         browser_bridge: Some(Arc::new(CidarenBrowserBridge::try_new(task_detail)?)),
@@ -316,7 +319,7 @@ mod tests {
         assert!(entry.question_inventory.is_some());
         assert!(entry.answer_resolve.is_some());
         assert!(entry.submission_build.is_some());
-        assert!(entry.submission_execute.is_none());
+        assert!(entry.submission_execute.is_some());
         assert!(entry.submission_verify.is_some());
         assert!(entry.browser_bridge.is_some());
         assert_eq!(entry.runtime_settings.version, 2);

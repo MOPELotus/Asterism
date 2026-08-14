@@ -508,8 +508,11 @@ after which no replay is possible. Unexpected response semantics enter a
 separate fail-closed terminal state. The pre-Question selection/start/reading
 subset is now exposed by the public `QuestionInventoryCapability` adapter and
 Core has durable storage/recovery for those issued edges. The post-
-materialization Verify/advance/skip subset remains Provider-private until the
-durable QuestionSession `SubmissionExecute` orchestration consumes it. Only
+materialization Verify/advance/skip subset is now exposed by a registered
+session-aware `SubmissionExecute` adapter. It freshly rebinds the Task,
+recomputes the immutable Draft preview and restores either the encrypted
+question artifact or an intervening pre-question artifact before freezing one
+exact command. Only
 the donor's terminal Completed acknowledgement can be
 projected into a bounded `SubmissionReceipt`; intermediate success and
 word-selection acknowledgements cannot, and even the terminal receipt remains
@@ -566,6 +569,22 @@ matching ledger operation with the exact non-zero result digest. An accepted
 Question, position and content fingerprint bindings stay immutable, and phase
 labels remain Provider-scoped as `cidaren.*`.
 
+Skip is a persistent `NormalizedAnswer::Skip` command intent, never an empty,
+Unknown or fabricated answer value. Its Draft preview has a distinct format
+containing only `skip.topic_code` and `skip.time_spent`; the execution adapter
+branches to `SkipAnswer` before the answer encoder. If an answer has already
+entered ReadyToVerify/ReadyToAdvance, replacing it with Skip cannot reconstruct
+the immutable relation queue and fails closed.
+
+After an accepted post-materialization operation, the Provider classifies the
+state once. A rotated token for the same Question yields Continue with a new
+artifact revision. A newly parsed Question yields `NextQuestion` material for
+an atomic old-session/new-snapshot transition. Reading cards or a repeated word
+selection requirement rotate to `cidaren.pre-question-attempt.v2` and continue
+one operation at a time until a real next Question appears. Definite Completed
+yields only its receipt/digest/time and no replacement artifact. Ambiguous
+transport has no donor readback and returns no recovery outcome.
+
 `StartAnswer` is a non-idempotent remote attempt mutation, not a harmless
 Question read. The Provider request/parser layers and public
 `QuestionInventoryCapability` pre-Question adapter are implemented. The
@@ -591,13 +610,17 @@ inconsistent count fails closed. No answer value or relation text is added to
 the artifact. This post-start artifact does not make `StartAnswer`
 replayable: the non-idempotent mutation before the first Question still needs
 the separate Main-owned pre-question AttemptSession and ambiguity recovery.
-The Provider now emits a bounded `cidaren.pre-question-attempt.v1` encrypted
+The Provider now emits a bounded `cidaren.pre-question-attempt.v2` encrypted
 artifact for that shared boundary. Its phases are
 `cidaren.ready-to-select-words`, `cidaren.ready-to-start` and
 `cidaren.reading-card`. The word-selection phase deliberately omits the
 potentially large word map and requires fresh Task-bound rediscovery on
-recovery; ready-to-start needs no secret payload; reading-card retains only its
-zeroizing topic code, stable card identity, sanitized stem, position and
+recovery. Both selection and ready-to-start retain the bounded position already
+chosen by the preceding step, preventing a mid-attempt reselection from
+returning to position 1. Legacy v1 ready artifacts lack enough information to
+distinguish initial from already advanced state and therefore fail closed
+instead of guessing or replaying a mutation. Reading-card retains only
+its zeroizing topic code, stable card identity, sanitized stem, position and
 optional progress. Decode repeats local/remote Task binding. A new audit
 correlation can therefore resume the same account/Task state without becoming
 part of its identity hash.
@@ -654,10 +677,12 @@ it materializes normalized Questions directly rather than inventing a
 read-only `QuestionParse` route the donor does not expose. Main-owned
 Engine/API orchestration now persists the pre-Question continuation, freezes
 each operation before execution and atomically materializes its Question
-snapshot through `GET /api/v1/tasks/{task_id}/questions`. The remaining shared
-work is the durable post-materialization `SubmissionExecute` path. That shared
-step contract must
-keep Answer and Skip intents distinct: mode 73 has no evidenced two-answer
-Verify encoding, while the donor's `SkipAnswer` route is already implemented;
-an empty or `Unknown` selected answer is not an acceptable substitute. This is
-a shared contract boundary, not a Provider capability exclusion.
+snapshot through `GET /api/v1/tasks/{task_id}/questions`. The durable
+post-materialization `SubmissionExecute` path uses the same operation ledger.
+Its explicit Answer and Skip intents remain distinct: mode 73 has no evidenced
+two-answer Verify encoding, while the donor's `SkipAnswer` route is
+implemented; an empty or `Unknown` selected answer is not an acceptable
+substitute. An accepted next Question atomically consumes the old session,
+persists the new immutable Snapshot/session and returns the Task to Ready for a
+new Draft. Definite completion closes the session without a fabricated
+artifact and proceeds to the separate fresh verification phase.

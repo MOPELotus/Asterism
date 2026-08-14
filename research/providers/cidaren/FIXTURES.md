@@ -257,6 +257,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Attempt tests freeze one-operation-at-a-time start/verify/advance/skip,
   sequential rotated tokens for matching, reading-card execution, word
   selection acknowledgement, ambiguity no-replay and semantic fail-closed.
+  A full post-Question reselection fixture persists the next position across
+  `SkipAnswer -> SubmitChoseWord -> StartAnswer` and materializes Question 2,
+  preventing recovery from silently returning to Question 1.
   A synthetic missing internal phase stays Debug-safe, reports `Invalid` and
   returns a typed Internal error instead of panicking or inventing a mutation.
   Issued start/verify/skip commands have no hidden preflight wait; verified

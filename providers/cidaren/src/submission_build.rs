@@ -68,36 +68,52 @@ impl SubmissionBuildCapability for CidarenSubmissionBuild {
         };
         validate_binding(question, selected, remote_task_id)?;
 
-        let mut fields = match (&question.kind, &selected.answer) {
+        let (format, mut fields) = match (&question.kind, &selected.answer) {
             (QuestionKind::SingleChoice, NormalizedAnswer::Selections(values))
                 if values.len() == 1 && valid_single_choice_id(question, &values[0]) =>
             {
-                verify_fields(question, None)
+                (
+                    "cidaren.answer-lifecycle.json.v1",
+                    verify_fields(question, None),
+                )
             }
-            (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) if values.len() == 1 => {
-                verify_fields(question, None)
-            }
+            (QuestionKind::ShortAnswer, NormalizedAnswer::Texts(values)) if values.len() == 1 => (
+                "cidaren.answer-lifecycle.json.v1",
+                verify_fields(question, None),
+            ),
             (QuestionKind::Matching, NormalizedAnswer::Pairs(pairs)) => {
                 validate_matching(question, pairs)?;
-                pairs
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(index, _)| verify_fields(question, Some(index)))
-                    .collect()
+                (
+                    "cidaren.answer-lifecycle.json.v1",
+                    pairs
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(index, _)| verify_fields(question, Some(index)))
+                        .collect(),
+                )
             }
+            (_, NormalizedAnswer::Skip) => (
+                "cidaren.skip-lifecycle.json.v1",
+                vec![
+                    preview_field(question, "skip.topic_code"),
+                    preview_field(question, "skip.time_spent"),
+                ],
+            ),
             _ => {
                 return Err(invalid_input(
                     "Cidaren selected answer does not match the Question mode",
                 ));
             }
         };
-        fields.extend([
-            preview_field(question, "advance.topic_code"),
-            preview_field(question, "advance.time_spent"),
-        ]);
+        if !matches!(&selected.answer, NormalizedAnswer::Skip) {
+            fields.extend([
+                preview_field(question, "advance.topic_code"),
+                preview_field(question, "advance.time_spent"),
+            ]);
+        }
         Ok(SubmissionPayloadPreview {
             encoding: SubmissionPayloadEncoding::Json,
-            format: "cidaren.answer-lifecycle.json.v1".to_owned(),
+            format: format.to_owned(),
             fields,
         })
     }
@@ -328,6 +344,25 @@ mod tests {
         assert_eq!(preview.fields.len(), 6);
         assert_eq!(preview.fields[0].field_name, "verify_answer[0].answer");
         assert_eq!(preview.fields[3].field_name, "verify_answer[1].topic_code");
+    }
+
+    #[tokio::test]
+    async fn skip_preview_is_explicit_and_contains_no_answer_or_advance() {
+        let capability = CidarenSubmissionBuild::try_new().unwrap();
+        let question = question(
+            QuestionKind::FillBlank,
+            Vec::new(),
+            &json!({"topic_mode": 73}),
+        );
+        let selected = selected_answer(&question, NormalizedAnswer::Skip);
+        let preview = capability
+            .build_submission_preview(&context(), "class-task:2002", &[question], &[selected])
+            .await
+            .unwrap();
+        assert_eq!(preview.format, "cidaren.skip-lifecycle.json.v1");
+        assert_eq!(preview.fields.len(), 2);
+        assert_eq!(preview.fields[0].field_name, "skip.topic_code");
+        assert_eq!(preview.fields[1].field_name, "skip.time_spent");
     }
 
     #[tokio::test]

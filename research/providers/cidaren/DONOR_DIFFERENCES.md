@@ -54,9 +54,9 @@ either Python donor.
 | Question and answer strategy | Single, matching, reading and text families; donor fallback behavior; current payload completed/total counters displayed as remote progress | Same plus current encrypted response support | Supplies crypto/login context only | Implemented privately with immutable Draft-safe answer evidence and bounded remote progress kept separate from local attempt position |
 | `SubmitChoseWord` | Yes | Yes | No | Implemented one-shot transport/state edge |
 | `StartAnswer` | Yes | Yes | No | Implemented as a non-idempotent attempt start and registered through the public QuestionInventory pre-Question adapter; durable Engine/API orchestration now persists and resumes the one-shot flow |
-| `VerifyAnswer` | Yes | Yes | No | Implemented sequentially, including rotated matching topic codes |
-| `SubmitAnswerAndSave` | Yes | Yes | No | Implemented one-shot advance |
-| `SkipAnswer` | Yes | Yes | No | Implemented distinct one-shot skip |
+| `VerifyAnswer` | Yes | Yes | No | Registered session-aware execution issues one relation at a time and rotates the same Question artifact after each accepted topic code |
+| `SubmitAnswerAndSave` | Yes | Yes | No | Registered one-shot advance maps intervening reading/selection phases to pre-Question continuation and a real next Question to atomic-transition material |
+| `SkipAnswer` | Yes | Yes | No | Registered distinct one-shot skip consumes only explicit persistent `NormalizedAnswer::Skip`; it never treats Unknown or an empty answer as permission |
 | Fresh submission verification | Reads task completion/score after run but has no answer history | Fresh task row available; no answer history | No | Fresh Task completion/progress/score implemented; per-Question result remains honestly Unverified |
 | Executable BrowserBridge | Donor operates in WeChat/browser context | Capture injects into authenticated H5 | Authorization URL can be rendered/copied/QR-displayed | Provider now has a typed, recipe-versioned CaptureSnapshot command/result with exact origin/frame/Task/sequence binding and `jv=99` validation. Core helper dispatch, durable one-shot correlation and credential commit remain a shared gap; no donor browser action replaces the native assessment mutations |
 

@@ -37,6 +37,7 @@ pub fn development_metadata() -> ProviderResult<ProviderMetadata> {
             ProviderCapability::QuestionInventory,
             ProviderCapability::AnswerResolve,
             ProviderCapability::SubmissionBuild,
+            ProviderCapability::SubmissionExecute,
             ProviderCapability::SubmissionVerify,
         ]),
         auth_methods: BTreeSet::from([
@@ -70,6 +71,7 @@ mod tests {
                 ProviderCapability::AnswerResolve,
                 ProviderCapability::DurationRead,
                 ProviderCapability::SubmissionBuild,
+                ProviderCapability::SubmissionExecute,
                 ProviderCapability::SubmissionVerify,
             ])
         );

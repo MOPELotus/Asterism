@@ -9,13 +9,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{CidarenAttemptProgress, ParsedCidarenReadingCard};
 
-pub const CIDAREN_PRE_QUESTION_ARTIFACT_TYPE: &str = "cidaren.pre-question-attempt.v1";
+pub const CIDAREN_PRE_QUESTION_ARTIFACT_TYPE: &str = "cidaren.pre-question-attempt.v2";
 pub const CIDAREN_READY_TO_SELECT_WORDS_PHASE: &str = "cidaren.ready-to-select-words";
 pub const CIDAREN_READY_TO_START_PHASE: &str = "cidaren.ready-to-start";
 pub const CIDAREN_READING_CARD_PHASE: &str = "cidaren.reading-card";
 
 const MAX_ARTIFACT_BYTES: usize = 128 * 1_024;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 768;
+const MAX_POSITION: u32 = 100_000;
 
 pub struct EncodedCidarenPreQuestionArtifact {
     value: SecretValue,
@@ -49,25 +50,29 @@ pub struct CidarenPreQuestionArtifact {
 }
 
 pub(crate) enum CidarenPreQuestionState {
-    ReadyToSelectWords,
-    ReadyToStart,
+    ReadyToSelectWords(u32),
+    ReadyToStart(u32),
     ReadingCard(ParsedCidarenReadingCard),
 }
 
 impl CidarenPreQuestionArtifact {
-    pub(crate) fn ready_to_select_words(task_id: TaskId, remote_task_id: &str) -> Self {
+    pub(crate) fn ready_to_select_words(
+        task_id: TaskId,
+        remote_task_id: &str,
+        position: u32,
+    ) -> Self {
         Self::new(
             task_id,
             remote_task_id,
-            CidarenPreQuestionState::ReadyToSelectWords,
+            CidarenPreQuestionState::ReadyToSelectWords(position),
         )
     }
 
-    pub(crate) fn ready_to_start(task_id: TaskId, remote_task_id: &str) -> Self {
+    pub(crate) fn ready_to_start(task_id: TaskId, remote_task_id: &str, position: u32) -> Self {
         Self::new(
             task_id,
             remote_task_id,
-            CidarenPreQuestionState::ReadyToStart,
+            CidarenPreQuestionState::ReadyToStart(position),
         )
     }
 
@@ -100,8 +105,8 @@ impl CidarenPreQuestionArtifact {
 
     pub const fn phase(&self) -> &'static str {
         match self.state {
-            CidarenPreQuestionState::ReadyToSelectWords => CIDAREN_READY_TO_SELECT_WORDS_PHASE,
-            CidarenPreQuestionState::ReadyToStart => CIDAREN_READY_TO_START_PHASE,
+            CidarenPreQuestionState::ReadyToSelectWords(_) => CIDAREN_READY_TO_SELECT_WORDS_PHASE,
+            CidarenPreQuestionState::ReadyToStart(_) => CIDAREN_READY_TO_START_PHASE,
             CidarenPreQuestionState::ReadingCard(_) => CIDAREN_READING_CARD_PHASE,
         }
     }
@@ -119,9 +124,20 @@ impl CidarenPreQuestionArtifact {
                 "Cidaren pre-Question artifact Task binding is invalid",
             ));
         }
+        if matches!(
+            self.state,
+            CidarenPreQuestionState::ReadyToSelectWords(position)
+                | CidarenPreQuestionState::ReadyToStart(position)
+                if !valid_position(position)
+        ) {
+            return Err(protocol_drift(
+                "Cidaren pre-Question artifact position is invalid",
+            ));
+        }
         let (topic_code, reading_card_id, stem_sanitized, position, progress) = match &self.state {
-            CidarenPreQuestionState::ReadyToSelectWords | CidarenPreQuestionState::ReadyToStart => {
-                (None, None, None, None, None)
+            CidarenPreQuestionState::ReadyToSelectWords(position)
+            | CidarenPreQuestionState::ReadyToStart(position) => {
+                (None, None, None, Some(*position), None)
             }
             CidarenPreQuestionState::ReadingCard(card) => (
                 Some(card.topic_code()),
@@ -192,11 +208,11 @@ impl CidarenPreQuestionArtifact {
         }
 
         let state = match wire.phase.as_str() {
-            CIDAREN_READY_TO_SELECT_WORDS_PHASE if wire.has_no_reading_card_fields() => {
-                CidarenPreQuestionState::ReadyToSelectWords
+            CIDAREN_READY_TO_SELECT_WORDS_PHASE if wire.has_no_ready_payload_fields() => {
+                CidarenPreQuestionState::ReadyToSelectWords(wire.ready_position()?)
             }
-            CIDAREN_READY_TO_START_PHASE if wire.has_no_reading_card_fields() => {
-                CidarenPreQuestionState::ReadyToStart
+            CIDAREN_READY_TO_START_PHASE if wire.has_no_ready_payload_fields() => {
+                CidarenPreQuestionState::ReadyToStart(wire.ready_position()?)
             }
             CIDAREN_READING_CARD_PHASE => {
                 let progress = match (wire.progress_completed, wire.progress_total) {
@@ -281,14 +297,29 @@ struct ArtifactWire {
 }
 
 impl ArtifactWire {
-    fn has_no_reading_card_fields(&self) -> bool {
+    fn has_no_ready_payload_fields(&self) -> bool {
         self.topic_code.is_none()
             && self.reading_card_id.is_none()
             && self.stem_sanitized.is_none()
-            && self.position.is_none()
             && self.progress_completed.is_none()
             && self.progress_total.is_none()
     }
+
+    fn ready_position(&self) -> ProviderResult<u32> {
+        let position = self.position.ok_or_else(|| {
+            protocol_drift("Cidaren pre-Question artifact has no position binding")
+        })?;
+        if !valid_position(position) {
+            return Err(protocol_drift(
+                "Cidaren pre-Question artifact position is invalid",
+            ));
+        }
+        Ok(position)
+    }
+}
+
+const fn valid_position(position: u32) -> bool {
+    position > 0 && position <= MAX_POSITION
 }
 
 fn valid_remote_task_id(value: &str) -> bool {
@@ -318,7 +349,8 @@ mod tests {
     #[test]
     fn pre_question_artifact_roundtrips_and_redacts_bindings() {
         let task_id = TaskId::new();
-        let artifact = CidarenPreQuestionArtifact::ready_to_select_words(task_id, REMOTE_TASK_ID);
+        let artifact =
+            CidarenPreQuestionArtifact::ready_to_select_words(task_id, REMOTE_TASK_ID, 9);
         assert_eq!(artifact.phase(), CIDAREN_READY_TO_SELECT_WORDS_PHASE);
         assert!(!format!("{artifact:?}").contains(REMOTE_TASK_ID));
 
@@ -332,11 +364,20 @@ mod tests {
 
         assert_eq!(decoded.phase(), CIDAREN_READY_TO_SELECT_WORDS_PHASE);
         assert!(!format!("{decoded:?}").contains(REMOTE_TASK_ID));
+        assert!(matches!(
+            decoded.into_state(),
+            CidarenPreQuestionState::ReadyToSelectWords(9)
+        ));
     }
 
     #[test]
     fn pre_question_artifact_rejects_unknown_and_phase_foreign_fields() {
         let task_id = TaskId::new();
+        assert!(
+            CidarenPreQuestionArtifact::ready_to_start(task_id, REMOTE_TASK_ID, 0)
+                .encode()
+                .is_err()
+        );
         let mut unknown = ready_wire(task_id, CIDAREN_READY_TO_START_PHASE);
         unknown
             .as_object_mut()
@@ -350,6 +391,15 @@ mod tests {
             json!("must-not-survive-ready-state"),
         );
         assert_decode_rejected(&foreign, task_id);
+
+        let mut zero_position = ready_wire(task_id, CIDAREN_READY_TO_START_PHASE);
+        zero_position
+            .as_object_mut()
+            .unwrap()
+            .insert("position".to_owned(), json!(0));
+        assert_decode_rejected(&zero_position, task_id);
+
+        assert_decode_rejected(&ready_wire(task_id, CIDAREN_READY_TO_START_PHASE), task_id);
 
         assert_decode_rejected(&ready_wire(task_id, "cidaren.unknown-phase"), task_id);
     }

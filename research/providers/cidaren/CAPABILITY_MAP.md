@@ -16,9 +16,9 @@ differences are frozen in [`DONOR_DIFFERENCES.md`](DONOR_DIFFERENCES.md).
 | DurationRead | Current donor + public issue 6 | PortSource | Registered and fresh-read for class/study Tasks with `time_spent`: non-zero public rows, millisecond epoch/duration fields in the same envelope and donor mutation values establish millisecond wire semantics; values are bounded to 100 years and truncated only at the Domain seconds boundary |
 | QuestionInventory / QuestionParse | Current donors + public issues 43/99 | PortSource | Fixed-index `jv=2_*`, both evidenced `jv=3_1021` transforms, public `jv=3_2265/3_2277` and current authenticated `jv=99` decoding plus strict single/matching/text/nested-tag parsing are offline-covered; conflicting `3_1021` candidates must yield one unique/equal JSON value. Public issue 99's donor-unsupported mode 73 is now parsed as a bounded two-blank Question with answer-count/word-length agreement, allowing the evidenced Skip path without guessing its unknown multi-answer wire encoding. The rotating `topic_code` remains absent from Domain Questions and Drafts; a stable Provider-private artifact binds it to local/remote Task, Question ID, position and content fingerprint for encrypted Core storage. Public-donor `topic_done_num/topic_total` remain an optional bounded remote progress observation distinct from local attempt position. The registered public QuestionInventory adapter prepares the initial encrypted state, freshly restores each phase, exposes only the frozen operation type/digest/delay, and maps accepted results to Continue, real-Question Materialize or definite Completed. Ambiguous recovery returns no result because no donor readback exists. Core/Engine/API now durably consume direct materialization through `GET /api/v1/tasks/{task_id}/questions`; the ordinary read-only QuestionParse slot is intentionally not fabricated |
 | AnswerResolve | Current donor | PortSource | Native task-bound inventory, `StudyWordInfo` and bounded `Course/SearchWord` prototype lookup are implemented and registered as a public capability. The session-aware Core hook requires the exact current `cidaren.question-attempt.v2` revision/type/phase, then decrypts and rebinds its digest, Task, Question identity, position and content fingerprint before any evidence read. Donor strategies resolve bidirectional meaning, ordered matching, separately-scoped phrase/example evidence and completion/example behavior; audited random/fixed-third/last-word failure fallbacks are retained with stable Draft-safe selection and explicit low confidence, including well-formed empty evidence families. Sentence modes load evidence once per top-level parent, preserve donor ordering, resolve exact nested child wire tags and retain the donor's third-parent fallback |
-| SubmissionBuild | Current donor | Reference | Registry-advertised one-current-Question immutable Draft preview is implemented for selection/text/matching; it exposes field names only and never persists topic codes, signatures or endpoints |
-| SubmissionExecute | Current donor | PortSource | Native transports plus a one-shot Provider-private state machine cover `SubmitChoseWord`, `StartAnswer`, sequential `VerifyAnswer`, `SubmitAnswerAndSave` and `SkipAnswer`. Issued/ambiguous/failed-closed states prevent replay, matching consumes each rotated token serially, verified-answer and reading-card advance commands carry distinct stable donor pre-execution residence times, and only a terminal Completed state can emit a bounded receipt for later fresh verification. Durable public execution awaits the shared AttemptStart/QuestionSession slot |
-| SubmissionVerify | Fresh class task/detail read + current public donor score read | FromScratch | The read-only verifier is implemented and registered independently of mutation execution. It is Draft/preview/task bound: a receipt or localized completion message is insufficient, fresh exact release/list completion is required, and the independently observed bounded 0-100 score is converted to Core thousandth-points when present. Per-Question status remains honestly `Unverified` because no answer-history endpoint is evidenced. SubmissionExecute remains paired with durable Core Attempt integration |
+| SubmissionBuild | Current donor | Reference | Registry-advertised one-current-Question immutable Draft preview is implemented for selection/text/matching and explicit Skip. Answer previews contain only Verify/advance field names; Skip has a distinct format with only `skip.topic_code` and `skip.time_spent`. Neither form persists topic codes, signatures, endpoints or answer values |
+| SubmissionExecute | Current donor | PortSource | Registered native execution plus a one-shot Provider state machine cover `SubmitChoseWord`, `StartAnswer`, sequential `VerifyAnswer`, `SubmitAnswerAndSave` and `SkipAnswer`. The session-aware adapter revalidates the immutable Draft preview, freshly rebinds the Task, restores either question or pre-question artifacts and freezes exactly one operation. Same-Question Verify rotates Continue; definite next Questions atomically consume the old session and create a new immutable Snapshot/session while returning the Task to Ready; reading-card/selection stages rotate the pre-question artifact; terminal Completed closes the session without inventing a continuation and proceeds to fresh verification. Issued/ambiguous/failed-closed states prevent replay and ambiguity recovery remains `None` |
+| SubmissionVerify | Fresh class task/detail read + current public donor score read | FromScratch | The read-only verifier is implemented and registered independently of mutation execution. It is Draft/preview/task bound: a receipt or localized completion message is insufficient, fresh exact release/list completion is required, and the independently observed bounded 0-100 score is converted to Core thousandth-points when present. Per-Question status remains honestly `Unverified` because no answer-history endpoint is evidenced. SubmissionExecute is integrated with durable Core Attempt/session transitions and verification remains a separate fresh phase |
 | Capture bootstrap | Current donors + PC WeChat XWeb audit | PortSource + Reference | Token-only and Composite ingestion plus separate bounded token-only request-header and Composite browser-storage recipes are implemented and advertised as ordered alternatives. Core freezes one exact version per bootstrap and never mixes their outputs. Cidaren validates a typed Provider-private `CaptureSnapshot` command/result for those recipes, including exact origin/frame/Task/sequence binding and `jv=99` context parsing, then converts only an exact token-only or atomic token+crypto replacement for the shared credential commit; the donor-observed but unused `CDR_USER_SESSION` is not persisted. The generic helper's isolated Edge/Chrome profile still cannot observe an authenticated PC WeChat XWeb storage context, so actual PC WeChat/system-proxy helper execution remains shared work rather than a false end-to-end claim. OAuth bootstrap no longer depends on XWeb/MITM: users can return the preserved random-marker callback URL from an audited WeChat device flow |
 | BrowserBridge | Current donor | PortSource | Provider policy is implemented and advertised for freshly rebound class/study Tasks: visible, account/task hash-isolated and restricted to `https://app.vocabgo.com`. The Provider has a typed CaptureSnapshot command/result boundary (TokenOnly v1 and Composite v2), fresh-Task command construction/result parsing and an immutable adapter to Core's durable one-shot ledger. It derives the command nonce from the exact Core session ID, freezes type/digest/sequence at issue, repeats fresh rebinding before acceptance and returns only zeroizing Provider-private Capture material plus terminal hash metadata. Core persists contiguous sequencing and idempotent result retry; public helper payload transport/dispatch and Capture credential commit remain shared gaps, so no executable start/action/result fallback is claimed yet. Cidaren assessment mutations remain native HTTP because no donor browser action for those routes was evidenced |
 
@@ -43,7 +43,7 @@ The current checkpoint (not a completion boundary):
    `study-task:{course_id}:{list_id}` for ordinary study Tasks, preserving
    `task_id` only as a fresh observation;
 9. compose Authentication, BrowserBridge, CourseInventory, TaskInventory,
-   TaskDetail, TaskProgressRead and SubmissionBuild slots into one
+   TaskDetail, TaskProgressRead, SubmissionBuild and SubmissionExecute slots into one
    registry-consistent Development entry;
 10. resolves exact Core account/reference-bound manual or Composite sessions
     and uses one shared non-redirecting HTTPS client for account validation and
@@ -57,7 +57,7 @@ The current checkpoint (not a completion boundary):
 13. decodes exact legacy base64/confusion variants and current `jv=99` through
     HKDF-SHA256/AES-256-GCM with bounded zeroized crypto material;
 14. advertises Capture-assisted authentication, BrowserBridge, AnswerResolve,
-    SubmissionBuild and SubmissionVerify, and parses current Questions without persisting
+    SubmissionBuild, SubmissionExecute and SubmissionVerify, and parses current Questions without persisting
     `topic_code`;
 15. freezes fresh binding and exact request/signature vectors for
     `StartAnswer`, `VerifyAnswer`, `SubmitAnswerAndSave`, `SkipAnswer` and
@@ -140,7 +140,7 @@ The current checkpoint (not a completion boundary):
     immutable Question binding and monotonically advancing verified-step
     checkpoint across every topic-code revision.
 32. encodes pre-Question selection/start/reading-card state as the bounded
-    `cidaren.pre-question-attempt.v1` artifact. Recovery rebinds local/remote
+    `cidaren.pre-question-attempt.v2` artifact. Recovery rebinds local/remote
     Task identity, requires a fresh word-selection plan instead of persisting
     its large map, restores reading-card progress and allows correlation to
     change because it remains audit metadata rather than execution identity.
@@ -166,12 +166,20 @@ The current checkpoint (not a completion boundary):
     and the initial current-Question phase are accepted; Provider decoding
     rechecks the continuation digest and complete Task/Question fingerprint
     before loading any remote answer evidence.
+36. registers the post-materialization SubmissionExecute adapter. A persistent
+    `NormalizedAnswer::Skip` intent reaches only `SkipAnswer`; ordinary answers
+    serially Verify then advance. Accepted results are classified once as a
+    same-session continuation, pre-question continuation, next-Question
+    materialization or terminal receipt, and ambiguity never authorizes replay.
+    Pre-Question reselection/start artifacts retain the bounded next position,
+    so a mid-attempt `WordSelectionRequired` response cannot regress recovery
+    to the first Question; legacy position-less v1 artifacts fail closed.
 
 The registered pre-Question adapter now runs through Main-owned durable
-Engine/API orchestration. The remaining shared work is post-materialization
-QuestionSession execution for SubmissionExecute (including an explicit Skip
-intent that does not invent a `SelectedAnswer`) and execution for the alternate
-Capture/BrowserBridge helper paths and live validation.
+Engine/API orchestration. Post-materialization QuestionSession execution now
+integrates explicit Skip, terminal-without-artifact and atomic next-Question
+transitions across Provider, Storage and Engine. Remaining shared work includes
+alternate Capture/BrowserBridge helper execution and live validation.
 Fresh post-mutation verification and the durable one-shot External OAuth path
 are already implemented. A checkpoint or Core Gap is not a Provider stopping
 condition.

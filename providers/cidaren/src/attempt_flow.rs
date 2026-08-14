@@ -306,6 +306,22 @@ impl fmt::Debug for CidarenPreQuestionContinuation {
     }
 }
 
+/// Exactly one durable result produced after an accepted Cidaren operation.
+///
+/// This Provider-private classification is shared by pre-Question discovery
+/// and post-materialization submission integration. It prevents either caller
+/// from inventing an empty continuation for terminal completion or treating a
+/// newly materialized Question as an ordinary same-session acknowledgement.
+#[derive(Debug)]
+pub enum CidarenDurableStepOutcome {
+    Question(CidarenQuestionMaterialization),
+    PreQuestion(CidarenPreQuestionContinuation),
+    Completed {
+        receipt: SubmissionReceipt,
+        response_digest: [u8; 32],
+    },
+}
+
 impl CidarenAttemptFlow {
     /// Creates an attempt from one fresh Core Task detail. An optional word
     /// selection plan must have been derived from the same stable Task ID.
@@ -368,14 +384,17 @@ impl CidarenAttemptFlow {
         validate_context(context)?;
         let binding = CidarenAssessmentBinding::from_fresh_detail(remote_task_id, detail)?;
         let phase = match (artifact.into_state(), fresh_word_selection) {
-            (CidarenPreQuestionState::ReadyToSelectWords, Some(plan))
+            (CidarenPreQuestionState::ReadyToSelectWords(position), Some(plan))
                 if plan.is_bound_to(remote_task_id) =>
             {
-                CidarenAttemptPhase::ReadyToSelectWords(plan)
+                (CidarenAttemptPhase::ReadyToSelectWords(plan), position)
             }
-            (CidarenPreQuestionState::ReadyToStart, None) => CidarenAttemptPhase::ReadyToStart,
+            (CidarenPreQuestionState::ReadyToStart(position), None) => {
+                (CidarenAttemptPhase::ReadyToStart, position)
+            }
             (CidarenPreQuestionState::ReadingCard(card), None) => {
-                CidarenAttemptPhase::CurrentReadingCard(card)
+                let position = card.position();
+                (CidarenAttemptPhase::CurrentReadingCard(card), position)
             }
             _ => {
                 return Err(remote_changed(
@@ -383,6 +402,7 @@ impl CidarenAttemptFlow {
                 ));
             }
         };
+        let (phase, position) = phase;
         let context_binding = context_binding(context);
         Ok(Self {
             binding,
@@ -390,10 +410,7 @@ impl CidarenAttemptFlow {
             flow_binding: flow_binding(context_binding, task_id, remote_task_id),
             remote_task_id: remote_task_id.to_owned(),
             task_id,
-            position: match &phase {
-                CidarenAttemptPhase::CurrentReadingCard(card) => card.position(),
-                _ => 1,
-            },
+            position,
             phase: Some(phase),
             last_response_binding: None,
         })
@@ -549,11 +566,14 @@ impl CidarenAttemptFlow {
                 CidarenPreQuestionArtifact::ready_to_select_words(
                     self.task_id,
                     &self.remote_task_id,
+                    self.position,
                 )
             }
-            CidarenAttemptPhase::ReadyToStart => {
-                CidarenPreQuestionArtifact::ready_to_start(self.task_id, &self.remote_task_id)
-            }
+            CidarenAttemptPhase::ReadyToStart => CidarenPreQuestionArtifact::ready_to_start(
+                self.task_id,
+                &self.remote_task_id,
+                self.position,
+            ),
             CidarenAttemptPhase::CurrentReadingCard(card) => {
                 CidarenPreQuestionArtifact::reading_card(self.task_id, &self.remote_task_id, card)?
             }
@@ -563,6 +583,7 @@ impl CidarenAttemptFlow {
             } => CidarenPreQuestionArtifact::ready_to_select_words(
                 self.task_id,
                 &self.remote_task_id,
+                self.position,
             ),
             _ => return Ok(None),
         };
@@ -1035,6 +1056,37 @@ impl CidarenAttemptFlow {
             ));
         }
         Ok(Some((receipt, binding.response_digest)))
+    }
+
+    /// Classifies one accepted operation into its only truthful durable
+    /// outcome. Initial continuations and in-flight/ambiguous states are not
+    /// accepted results and fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the current phase has no complete response
+    /// binding or cannot be represented by the durable Provider boundary.
+    pub fn accepted_step_outcome(&self) -> ProviderResult<CidarenDurableStepOutcome> {
+        if let Some(materialization) = self.current_question_materialization()? {
+            return Ok(CidarenDurableStepOutcome::Question(materialization));
+        }
+        if let Some(continuation) = self.pre_question_continuation()? {
+            if continuation.response_digest().is_none() || continuation.received_at().is_none() {
+                return Err(invalid_state(
+                    "Cidaren pre-Question result has no accepted response binding",
+                ));
+            }
+            return Ok(CidarenDurableStepOutcome::PreQuestion(continuation));
+        }
+        if let Some((receipt, response_digest)) = self.terminal_completion()? {
+            return Ok(CidarenDurableStepOutcome::Completed {
+                receipt,
+                response_digest,
+            });
+        }
+        Err(protocol_drift(
+            "Cidaren accepted operation produced no durable outcome",
+        ))
     }
 
     /// Accepts only a response produced by the exact issued command. Each
@@ -1729,6 +1781,10 @@ mod tests {
         assert_eq!(continuation.phase(), crate::CIDAREN_READY_TO_START_PHASE);
         assert!(continuation.response_digest().is_none());
         assert!(continuation.received_at().is_none());
+        assert_eq!(
+            flow.accepted_step_outcome().unwrap_err().kind,
+            ProviderErrorKind::InvalidResponse
+        );
         let artifact_digest = continuation.artifact().digest();
         let (artifact, _, _, _) = continuation.into_parts();
         let value = artifact.into_secret_value();
@@ -1742,6 +1798,10 @@ mod tests {
             .unwrap();
         flow.accept(outcome).unwrap();
         assert!(flow.current_question_materialization().unwrap().is_some());
+        assert!(matches!(
+            flow.accepted_step_outcome().unwrap(),
+            CidarenDurableStepOutcome::Question(_)
+        ));
 
         let decoded = CidarenPreQuestionArtifact::decode_bound(
             &value,
@@ -2062,6 +2122,13 @@ mod tests {
 
         flow.accept(outcome).unwrap();
         assert_eq!(flow.completion_receipt().unwrap().received_at, received_at);
+        let CidarenDurableStepOutcome::Completed {
+            response_digest, ..
+        } = flow.accepted_step_outcome().unwrap()
+        else {
+            panic!("expected terminal durable outcome");
+        };
+        assert_eq!(response_digest, [9; 32]);
     }
 
     #[tokio::test]
@@ -2195,6 +2262,10 @@ mod tests {
             .unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::CurrentReadingCard);
+        assert!(matches!(
+            flow.accepted_step_outcome().unwrap(),
+            CidarenDurableStepOutcome::PreQuestion(_)
+        ));
         let remote_progress = flow.current_remote_progress().unwrap();
         assert_eq!(remote_progress.completed(), 0);
         assert_eq!(remote_progress.total(), 2);

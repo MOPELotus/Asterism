@@ -15,10 +15,10 @@ use chrono::Utc;
 use crate::{
     CIDAREN_PRE_QUESTION_ARTIFACT_TYPE, CIDAREN_QUESTION_ARTIFACT_TYPE,
     CIDAREN_READY_TO_SELECT_WORDS_PHASE, CidarenAnswerEvidenceTransport,
-    CidarenAssessmentTransport, CidarenAttemptFlow, CidarenAttemptFlowStatus, CidarenIssuedCommand,
-    CidarenPreQuestionArtifact, CidarenPreQuestionContinuation, CidarenQuestionMaterialization,
-    CidarenRuntimeSettings, CidarenWordSelectionPlan, build_word_selection_plan,
-    metadata::development_metadata,
+    CidarenAssessmentTransport, CidarenAttemptFlow, CidarenAttemptFlowStatus,
+    CidarenDurableStepOutcome, CidarenIssuedCommand, CidarenPreQuestionArtifact,
+    CidarenPreQuestionContinuation, CidarenQuestionMaterialization, CidarenRuntimeSettings,
+    CidarenWordSelectionPlan, build_word_selection_plan, metadata::development_metadata,
 };
 
 const CONTINUATION_TTL_SECONDS: u64 = 30 * 60;
@@ -69,7 +69,7 @@ impl CidarenQuestionInventory {
         Ok((detail, selection))
     }
 
-    async fn fresh_detail_and_phase_selection(
+    pub(crate) async fn fresh_detail_and_phase_selection(
         &self,
         context: &ProviderContext,
         remote_task_id: &str,
@@ -84,6 +84,10 @@ impl CidarenQuestionInventory {
                 None,
             ))
         }
+    }
+
+    pub(crate) fn assessment_transport(&self) -> Arc<dyn CidarenAssessmentTransport> {
+        self.assessments.clone()
     }
 }
 
@@ -263,37 +267,34 @@ impl PreparedProviderQuestionReadOperation for PreparedCidarenQuestionReadOperat
         } = *self;
         let outcome = command.execute(assessments, context).await?;
         flow.accept(outcome)?;
-
-        if let Some(materialization) = flow.current_question_materialization()? {
-            return Ok(ProviderQuestionReadStepOutcome::Materialize(
-                map_question_materialization(&provider_id, materialization)?,
-            ));
+        match flow.accepted_step_outcome()? {
+            CidarenDurableStepOutcome::Question(materialization) => {
+                Ok(ProviderQuestionReadStepOutcome::Materialize(
+                    map_question_materialization(&provider_id, materialization)?,
+                ))
+            }
+            CidarenDurableStepOutcome::PreQuestion(continuation) => {
+                let (continuation, response_digest, received_at) =
+                    map_pre_question_continuation(&provider_id, continuation)?;
+                ProviderQuestionReadStepOutcome::continuing(
+                    continuation,
+                    response_digest.ok_or_else(|| {
+                        internal("Cidaren accepted continuation has no response digest")
+                    })?,
+                    received_at.ok_or_else(|| {
+                        internal("Cidaren accepted continuation has no response timestamp")
+                    })?,
+                )
+            }
+            CidarenDurableStepOutcome::Completed {
+                receipt,
+                response_digest,
+            } => ProviderQuestionReadStepOutcome::completed(receipt, response_digest),
         }
-        if let Some(continuation) = flow.pre_question_continuation()? {
-            let (continuation, response_digest, received_at) =
-                map_pre_question_continuation(&provider_id, continuation)?;
-            return ProviderQuestionReadStepOutcome::continuing(
-                continuation,
-                response_digest.ok_or_else(|| {
-                    internal("Cidaren accepted continuation has no response digest")
-                })?,
-                received_at.ok_or_else(|| {
-                    internal("Cidaren accepted continuation has no response timestamp")
-                })?,
-            );
-        }
-
-        if let Some((receipt, response_digest)) = flow.terminal_completion()? {
-            return ProviderQuestionReadStepOutcome::completed(receipt, response_digest);
-        }
-
-        Err(protocol_drift(
-            "Cidaren accepted operation produced no durable Question outcome",
-        ))
     }
 }
 
-fn map_pre_question_continuation(
+pub(crate) fn map_pre_question_continuation(
     provider_id: &ProviderId,
     continuation: CidarenPreQuestionContinuation,
 ) -> ProviderResult<(
@@ -323,7 +324,7 @@ fn map_pre_question_continuation(
     Ok((continuation, response_digest, received_at))
 }
 
-fn map_question_materialization(
+pub(crate) fn map_question_materialization(
     provider_id: &ProviderId,
     materialization: CidarenQuestionMaterialization,
 ) -> ProviderResult<ProviderQuestionMaterialization> {
@@ -376,8 +377,16 @@ fn protocol_drift(message: &'static str) -> ProviderError {
 mod tests {
     use std::{collections::VecDeque, sync::Mutex};
 
-    use asterism_domain::{AssessmentClass, ProviderAccountId, RemoteState, SecretId, SourceType};
-    use asterism_provider_api::RemoteTask;
+    use asterism_domain::{
+        AnswerCandidateId, AnswerSource, AssessmentClass, NormalizedAnswer, ProviderAccountId,
+        QuestionSnapshotId, RemoteState, SecretId, SelectedAnswer, SourceType, SubmissionDraft,
+        SubmissionDraftId, SubmissionDraftItem, TaskCapability,
+    };
+    use asterism_provider_api::{
+        ExecutionEventSink, ProviderExecutionLog, ProviderProgress, ProviderSubmissionStepOutcome,
+        RemoteTask, ResolvedProviderQuestionSessionContinuation, SubmissionBuildCapability,
+        SubmissionExecuteCapability,
+    };
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
 
@@ -385,8 +394,9 @@ mod tests {
     use crate::{
         CidarenAnswerEvidenceBinding, CidarenAssessmentResponse, CidarenAssessmentTransportOutcome,
         CidarenAttemptOperation, CidarenMutationRequest, CidarenStartAnswerRequest,
-        CidarenStudyTaskDocument, CidarenWordEvidence, CidarenWordInventory, CidarenWordLookup,
-        parse_assessment_response, parse_study_task_info_response, runtime_settings,
+        CidarenStudyTaskDocument, CidarenSubmissionBuild, CidarenSubmissionExecute,
+        CidarenWordEvidence, CidarenWordInventory, CidarenWordLookup, parse_assessment_response,
+        parse_study_task_info_response, runtime_settings,
     };
 
     const REMOTE_TASK_ID: &str = "class-task:2002";
@@ -396,6 +406,20 @@ mod tests {
         detail: RemoteTaskDetail,
         responses: Mutex<VecDeque<CidarenAssessmentResponse>>,
         operations: Mutex<Vec<CidarenAttemptOperation>>,
+    }
+
+    #[derive(Debug)]
+    struct NoopEvents;
+
+    #[async_trait]
+    impl ExecutionEventSink for NoopEvents {
+        async fn report(&self, _update: ProviderProgress) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
+            Ok(())
+        }
     }
 
     impl FixtureBoundaries {
@@ -682,6 +706,457 @@ mod tests {
         assert_ne!(response_digest, [0; 32]);
     }
 
+    #[tokio::test]
+    async fn materialized_mode_73_skip_executes_as_a_terminal_session_step() {
+        let boundaries = Arc::new(FixtureBoundaries::new(
+            detail("test", -1),
+            vec![
+                response(&serde_json::from_str(include_str!(
+                    "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
+                ))
+                .unwrap()),
+                CidarenAssessmentResponse::Receipt {
+                    kind: crate::CidarenAssessmentReceiptKind::Completed,
+                    message_sanitized: Some("synthetic completed".to_owned()),
+                },
+            ],
+        ));
+        let inventory = Arc::new(
+            CidarenQuestionInventory::try_new(
+                boundaries.clone(),
+                boundaries.clone(),
+                boundaries.clone(),
+            )
+            .unwrap(),
+        );
+        let execute = CidarenSubmissionExecute::try_new(inventory.clone()).unwrap();
+        let context = context();
+        let task_id = TaskId::new();
+        let settings = settings();
+        let initial = inventory
+            .prepare_question_read_attempt(&context, task_id, REMOTE_TASK_ID, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = prepare_operation(&inventory, &context, task_id, initial, &settings).await;
+        let ProviderQuestionReadStepOutcome::Materialize(materialization) =
+            prepared.execute(&context).await.unwrap()
+        else {
+            panic!("mode 73 must materialize before Skip");
+        };
+        let (questions, continuation, _, _) = materialization.into_parts();
+        let [question] = questions.as_slice() else {
+            panic!("Cidaren must materialize one current Question");
+        };
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer: NormalizedAnswer::Skip,
+            source: AnswerSource::Manual,
+            confidence: None,
+        };
+        let preview = CidarenSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context,
+                REMOTE_TASK_ID,
+                std::slice::from_ref(question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("cidaren").unwrap(),
+            provider_version: development_metadata().unwrap().implementation_version,
+            items: vec![SubmissionDraftItem {
+                question: question.clone(),
+                selected,
+            }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        };
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 1, &settings)
+                .await;
+        assert_eq!(prepared.operation_type(), "cidaren.skip-answer.v1");
+        let ProviderSubmissionStepOutcome::Submitted {
+            receipt,
+            response_digest,
+            ..
+        } = prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("definite Cidaren completion must close without a continuation");
+        };
+        assert_eq!(receipt.remote_status, "completed");
+        assert_ne!(response_digest, [0; 32]);
+        assert_eq!(
+            *boundaries.operations.lock().unwrap(),
+            [
+                CidarenAttemptOperation::StartAnswer,
+                CidarenAttemptOperation::SkipAnswer,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_answer_rotates_then_materializes_the_next_question() {
+        let mut next_question = question_payload();
+        next_question["topic_code"] = json!("next-topic-code");
+        let boundaries = Arc::new(FixtureBoundaries::new(
+            detail("test", -1),
+            vec![
+                response(&question_payload()),
+                response(&json!({"topic_code": "rotated-topic-code"})),
+                response(&next_question),
+            ],
+        ));
+        let inventory = Arc::new(
+            CidarenQuestionInventory::try_new(
+                boundaries.clone(),
+                boundaries.clone(),
+                boundaries.clone(),
+            )
+            .unwrap(),
+        );
+        let execute = CidarenSubmissionExecute::try_new(inventory.clone()).unwrap();
+        let context = context();
+        let task_id = TaskId::new();
+        let settings = settings();
+        let initial = inventory
+            .prepare_question_read_attempt(&context, task_id, REMOTE_TASK_ID, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = prepare_operation(&inventory, &context, task_id, initial, &settings).await;
+        let ProviderQuestionReadStepOutcome::Materialize(materialization) =
+            prepared.execute(&context).await.unwrap()
+        else {
+            panic!("StartAnswer must materialize the first Question");
+        };
+        let (questions, continuation, _, _) = materialization.into_parts();
+        let [question] = questions.as_slice() else {
+            panic!("Cidaren must materialize one current Question");
+        };
+        let first_question_id = question.id;
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer: NormalizedAnswer::Selections(vec!["n:1".to_owned()]),
+            source: AnswerSource::ProviderNative,
+            confidence: None,
+        };
+        let preview = CidarenSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context,
+                REMOTE_TASK_ID,
+                std::slice::from_ref(question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("cidaren").unwrap(),
+            provider_version: development_metadata().unwrap().implementation_version,
+            items: vec![SubmissionDraftItem {
+                question: question.clone(),
+                selected,
+            }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        };
+
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 1, &settings)
+                .await;
+        assert_eq!(prepared.operation_type(), "cidaren.verify-answer.v1");
+        let ProviderSubmissionStepOutcome::Continue { continuation, .. } =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("VerifyAnswer must rotate the same Question session");
+        };
+
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 2, &settings)
+                .await;
+        assert_eq!(
+            prepared.operation_type(),
+            "cidaren.submit-answer-and-save.v1"
+        );
+        let ProviderSubmissionStepOutcome::NextQuestion(next) =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("advance must materialize the next Question");
+        };
+        assert_eq!(next.questions().len(), 1);
+        assert_eq!(next.questions()[0].position, 2);
+        assert_ne!(next.questions()[0].id, first_question_id);
+        assert_eq!(
+            *boundaries.operations.lock().unwrap(),
+            [
+                CidarenAttemptOperation::StartAnswer,
+                CidarenAttemptOperation::VerifyAnswer,
+                CidarenAttemptOperation::SubmitAnswerAndSave,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture keeps both durable prepare/execute boundaries visible"
+    )]
+    async fn post_question_reading_card_rotates_artifact_before_next_question() {
+        let mut next_question = question_payload();
+        next_question["topic_code"] = json!("after-reading-topic-code");
+        let boundaries = Arc::new(FixtureBoundaries::new(
+            detail("test", -1),
+            vec![
+                response(&serde_json::from_str(include_str!(
+                    "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
+                ))
+                .unwrap()),
+                response(&reading_card_payload()),
+                response(&next_question),
+            ],
+        ));
+        let inventory = Arc::new(
+            CidarenQuestionInventory::try_new(
+                boundaries.clone(),
+                boundaries.clone(),
+                boundaries.clone(),
+            )
+            .unwrap(),
+        );
+        let execute = CidarenSubmissionExecute::try_new(inventory.clone()).unwrap();
+        let context = context();
+        let task_id = TaskId::new();
+        let settings = settings();
+        let initial = inventory
+            .prepare_question_read_attempt(&context, task_id, REMOTE_TASK_ID, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = prepare_operation(&inventory, &context, task_id, initial, &settings).await;
+        let ProviderQuestionReadStepOutcome::Materialize(materialization) =
+            prepared.execute(&context).await.unwrap()
+        else {
+            panic!("mode 73 must materialize before Skip");
+        };
+        let (questions, continuation, _, _) = materialization.into_parts();
+        let [question] = questions.as_slice() else {
+            panic!("Cidaren must materialize one current Question");
+        };
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer: NormalizedAnswer::Skip,
+            source: AnswerSource::Manual,
+            confidence: None,
+        };
+        let preview = CidarenSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context,
+                REMOTE_TASK_ID,
+                std::slice::from_ref(question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("cidaren").unwrap(),
+            provider_version: development_metadata().unwrap().implementation_version,
+            items: vec![SubmissionDraftItem {
+                question: question.clone(),
+                selected,
+            }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        };
+
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 1, &settings)
+                .await;
+        let ProviderSubmissionStepOutcome::Continue { continuation, .. } =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("reading card must rotate to a pre-Question continuation");
+        };
+        assert_eq!(
+            continuation.continuation_type(),
+            CIDAREN_PRE_QUESTION_ARTIFACT_TYPE
+        );
+        assert_eq!(continuation.phase(), crate::CIDAREN_READING_CARD_PHASE);
+
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 2, &settings)
+                .await;
+        assert_eq!(
+            prepared.operation_type(),
+            "cidaren.submit-answer-and-save.v1"
+        );
+        let ProviderSubmissionStepOutcome::NextQuestion(next) =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("reading-card advance must materialize the next Question");
+        };
+        assert_eq!(next.questions()[0].position, 3);
+        assert_eq!(
+            *boundaries.operations.lock().unwrap(),
+            [
+                CidarenAttemptOperation::StartAnswer,
+                CidarenAttemptOperation::SkipAnswer,
+                CidarenAttemptOperation::SubmitAnswerAndSave,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture keeps every persisted selection/start boundary visible"
+    )]
+    async fn mid_attempt_word_reselection_preserves_the_next_question_position() {
+        let mut next_question = question_payload();
+        next_question["topic_code"] = json!("after-reselection-topic-code");
+        let boundaries = Arc::new(FixtureBoundaries::new(
+            detail("learning", 92002),
+            vec![
+                CidarenAssessmentResponse::Receipt {
+                    kind: crate::CidarenAssessmentReceiptKind::Accepted,
+                    message_sanitized: None,
+                },
+                response(&serde_json::from_str(include_str!(
+                    "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
+                ))
+                .unwrap()),
+                CidarenAssessmentResponse::Receipt {
+                    kind: crate::CidarenAssessmentReceiptKind::WordSelectionRequired,
+                    message_sanitized: None,
+                },
+                CidarenAssessmentResponse::Receipt {
+                    kind: crate::CidarenAssessmentReceiptKind::Accepted,
+                    message_sanitized: None,
+                },
+                response(&next_question),
+            ],
+        ));
+        let inventory = Arc::new(
+            CidarenQuestionInventory::try_new(
+                boundaries.clone(),
+                boundaries.clone(),
+                boundaries.clone(),
+            )
+            .unwrap(),
+        );
+        let execute = CidarenSubmissionExecute::try_new(inventory.clone()).unwrap();
+        let context = context();
+        let task_id = TaskId::new();
+        let settings = settings();
+
+        let initial = inventory
+            .prepare_question_read_attempt(&context, task_id, REMOTE_TASK_ID, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = prepare_operation(&inventory, &context, task_id, initial, &settings).await;
+        let ProviderQuestionReadStepOutcome::Continue { continuation, .. } =
+            prepared.execute(&context).await.unwrap()
+        else {
+            panic!("word selection must rotate to StartAnswer");
+        };
+        let prepared =
+            prepare_operation(&inventory, &context, task_id, continuation, &settings).await;
+        let ProviderQuestionReadStepOutcome::Materialize(materialization) =
+            prepared.execute(&context).await.unwrap()
+        else {
+            panic!("StartAnswer must materialize the first Question");
+        };
+        let (questions, continuation, _, _) = materialization.into_parts();
+        let [question] = questions.as_slice() else {
+            panic!("Cidaren must materialize one current Question");
+        };
+        assert_eq!(question.position, 1);
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer: NormalizedAnswer::Skip,
+            source: AnswerSource::Manual,
+            confidence: None,
+        };
+        let preview = CidarenSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context,
+                REMOTE_TASK_ID,
+                std::slice::from_ref(question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("cidaren").unwrap(),
+            provider_version: development_metadata().unwrap().implementation_version,
+            items: vec![SubmissionDraftItem {
+                question: question.clone(),
+                selected,
+            }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        };
+
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 1, &settings)
+                .await;
+        let ProviderSubmissionStepOutcome::Continue { continuation, .. } =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("selection requirement must rotate after Skip");
+        };
+        assert_eq!(continuation.phase(), CIDAREN_READY_TO_SELECT_WORDS_PHASE);
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 2, &settings)
+                .await;
+        let ProviderSubmissionStepOutcome::Continue { continuation, .. } =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("accepted reselection must rotate to StartAnswer");
+        };
+        assert_eq!(continuation.phase(), crate::CIDAREN_READY_TO_START_PHASE);
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 3, &settings)
+                .await;
+        let ProviderSubmissionStepOutcome::NextQuestion(next) =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("post-reselection StartAnswer must materialize the next Question");
+        };
+        assert_eq!(next.questions()[0].position, 2);
+        assert_eq!(
+            *boundaries.operations.lock().unwrap(),
+            [
+                CidarenAttemptOperation::SubmitChoseWord,
+                CidarenAttemptOperation::StartAnswer,
+                CidarenAttemptOperation::SkipAnswer,
+                CidarenAttemptOperation::SubmitChoseWord,
+                CidarenAttemptOperation::StartAnswer,
+            ]
+        );
+    }
+
     async fn prepare_operation(
         capability: &CidarenQuestionInventory,
         context: &ProviderContext,
@@ -705,6 +1180,34 @@ mod tests {
                 settings,
             )
             .await
+            .unwrap()
+    }
+
+    async fn prepare_submission_operation(
+        capability: &CidarenSubmissionExecute,
+        context: &ProviderContext,
+        draft: &SubmissionDraft,
+        continuation: ProviderQuestionReadContinuation,
+        revision: u32,
+        settings: &ResolvedProviderRuntimeSettings,
+    ) -> Box<dyn asterism_provider_api::PreparedProviderSubmissionOperation> {
+        let (continuation_type, continuation_digest, phase, value, _) = continuation.into_parts();
+        capability
+            .prepare_submission_operation(
+                context,
+                REMOTE_TASK_ID,
+                draft,
+                ResolvedProviderQuestionSessionContinuation {
+                    continuation_type: &continuation_type,
+                    continuation_digest,
+                    phase: &phase,
+                    revision,
+                    value: &value,
+                },
+                settings,
+            )
+            .await
+            .unwrap()
             .unwrap()
     }
 
@@ -747,7 +1250,7 @@ mod tests {
                 opens_at: None,
                 due_at: None,
                 closes_at: None,
-                capabilities: Vec::new(),
+                capabilities: vec![TaskCapability::SubmissionExecute],
                 fingerprint: "synthetic-question-adapter".to_owned(),
                 normalized: normalized.clone(),
                 raw_sanitized: Map::new().into(),
