@@ -1080,6 +1080,24 @@ pub trait BrowserBridgeSessionRepository: Send + Sync {
         limit: u32,
     ) -> Result<Vec<PendingBrowserBridgeResult>, StorageError>;
 
+    /// Claims a bounded Provider/result-type inbox batch under one expiring
+    /// worker lease and increments each durable attempt exactly once.
+    async fn claim_pending_browser_bridge_results(
+        &self,
+        now: Timestamp,
+        provider_id: &ProviderId,
+        result_types: &[&str],
+        limit: u32,
+        worker_id: &str,
+        lease_expires_at: Timestamp,
+    ) -> Result<Vec<PendingBrowserBridgeResult>, StorageError>;
+
+    /// Releases a claimed result into a future retry or terminal dead letter.
+    async fn finish_browser_bridge_result_attempt(
+        &self,
+        request: BrowserBridgeResultAttemptFinishRequest<'_>,
+    ) -> Result<bool, StorageError>;
+
     async fn update_browser_bridge_session_for_owner(
         &self,
         session: &BrowserBridgeSession,
@@ -1100,8 +1118,20 @@ pub trait BrowserBridgeSessionRepository: Send + Sync {
 pub struct PendingBrowserBridgeResult {
     pub owner_user_id: UserId,
     pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
     pub provider_id: ProviderId,
     pub result_type: String,
+    pub attempt_no: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeResultAttemptFinishRequest<'a> {
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub worker_id: &'a str,
+    pub failed_at: Timestamp,
+    pub retry_at: Option<Timestamp>,
+    pub error_kind: &'a str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -8,10 +8,11 @@ use asterism_config::{
 };
 use asterism_domain::ProviderId;
 use asterism_engine::{
-    BrowserBridgeCredentialProcessor, BrowserBridgeCredentialTickReport, DispatchConfig,
-    DispatchReport, ExecutionRunnerConfig, ExecutionSchedulerConfig, ExecutionSchedulerTickReport,
-    ExecutionSchedulerWorker, FormalAssessmentPolicy, OutboxDispatcher, ProviderScanService,
-    ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedulerWorker,
+    BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorConfig,
+    BrowserBridgeCredentialTickReport, DispatchConfig, DispatchReport, ExecutionRunnerConfig,
+    ExecutionSchedulerConfig, ExecutionSchedulerTickReport, ExecutionSchedulerWorker,
+    FormalAssessmentPolicy, OutboxDispatcher, ProviderScanService, ScanSchedulerConfig,
+    ScanSchedulerTickReport, ScanSchedulerWorker,
 };
 use asterism_events::EventBus;
 use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
@@ -57,7 +58,6 @@ const OUTBOX_BATCH_SIZE: u32 = 128;
 const OUTBOX_CLAIM_TTL_SECONDS: u64 = 30;
 const OUTBOX_MAX_ATTEMPTS: u32 = 8;
 const OUTBOX_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
-const BROWSER_BRIDGE_CREDENTIAL_BATCH_SIZE: u32 = 32;
 const BROWSER_BRIDGE_CREDENTIAL_TICK_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(1);
 
@@ -142,6 +142,10 @@ struct Arguments {
 }
 
 #[tokio::main]
+#[allow(
+    clippy::too_many_lines,
+    reason = "daemon startup keeps migration, recovery, worker lifetimes and ordered shutdown visible"
+)]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -216,6 +220,7 @@ async fn main() -> anyhow::Result<()> {
         &database,
         providers,
         browser_bridge_secret_store,
+        &config,
         shutdown_receiver,
     );
 
@@ -550,6 +555,7 @@ fn start_browser_bridge_credential_processor(
     database: &Database,
     providers: Arc<ProviderRegistry>,
     secret_store: Option<SqliteSecretStore>,
+    config: &Config,
     shutdown: watch::Receiver<bool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let secret_store = secret_store?;
@@ -570,6 +576,13 @@ fn start_browser_bridge_credential_processor(
         database.clone(),
         providers,
         secret_store,
+        RetryPolicy {
+            max_attempts: config.scheduler.retry_max_attempts,
+            initial_delay_seconds: config.scheduler.retry_initial_delay_seconds,
+            multiplier: config.scheduler.retry_multiplier,
+            max_delay_seconds: config.scheduler.retry_max_delay_seconds,
+        },
+        std::time::Duration::from_secs(config.scheduler.claim_ttl_seconds),
         shutdown,
     )))
 }
@@ -578,6 +591,8 @@ async fn run_browser_bridge_credential_processor(
     database: Database,
     providers: Arc<ProviderRegistry>,
     secret_store: SqliteSecretStore,
+    retry_policy: RetryPolicy,
+    claim_ttl: std::time::Duration,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(BROWSER_BRIDGE_CREDENTIAL_TICK_INTERVAL);
@@ -619,17 +634,31 @@ async fn run_browser_bridge_credential_processor(
                 SqliteTaskQueryRepository::new(database.clone()),
                 SqliteProviderAccountRepository::new(database.clone()),
                 secret_store.clone(),
+                BrowserBridgeCredentialProcessorConfig {
+                    worker_id: format!(
+                        "asterismd-browser-credential-{}-{provider_id}",
+                        std::process::id()
+                    ),
+                    claim_ttl,
+                    retry_policy,
+                },
             );
-            match processor
-                .tick(chrono::Utc::now(), BROWSER_BRIDGE_CREDENTIAL_BATCH_SIZE)
-                .await
-            {
+            let Ok(processor) = processor else {
+                tracing::error!(
+                    provider = %provider_id,
+                    "BrowserBridge credential processor configuration is invalid"
+                );
+                continue;
+            };
+            match processor.tick(chrono::Utc::now()).await {
                 Ok(report) if report != BrowserBridgeCredentialTickReport::default() => {
                     tracing::info!(
                         provider = %provider_id,
                         selected = report.selected,
                         committed = report.committed,
                         conflicted = report.conflicted,
+                        retry_scheduled = report.retry_scheduled,
+                        dead_lettered = report.dead_lettered,
                         failed = report.failed,
                         "BrowserBridge credential processor tick completed"
                     );
@@ -867,6 +896,7 @@ mod tests {
             &database,
             providers,
             Some(store),
+            &config,
             shutdown_receiver,
         )
         .expect("Cidaren declares a credential-terminal BrowserBridge result");

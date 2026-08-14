@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use asterism_domain::{
     AuthMethod, BrowserBridgeExchange, BrowserBridgeExchangeState, BrowserBridgeSessionState,
@@ -8,12 +8,14 @@ use asterism_provider_api::{
     BrowserBridgeCredentialResultRequest, BrowserBridgeResultDisposition, ProviderContext,
     ProviderError, ProviderRegistry, SessionStatus,
 };
+use asterism_scheduler::{RetryPolicy, RetryPolicyError};
 use asterism_secrets::{
     CredentialAcquisition, CredentialBundle, SecretAccess, SecretActor, SecretStoreError,
 };
 use asterism_storage::{
     BrowserBridgeCommandArtifactRepository, BrowserBridgeCredentialCommitOutcome,
-    BrowserBridgeCredentialRepository, BrowserBridgeSessionRepository, ProviderAccountRepository,
+    BrowserBridgeCredentialRepository, BrowserBridgeResultAttemptFinishRequest,
+    BrowserBridgeSessionRepository, PendingBrowserBridgeResult, ProviderAccountRepository,
     ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository,
 };
 
@@ -239,10 +241,21 @@ pub struct BrowserBridgeCredentialProcessor<S, C, Q, A, R> {
     tasks: Q,
     accounts: A,
     credentials: R,
+    config: BrowserBridgeCredentialProcessorConfig,
 }
 
 impl<S, C, Q, A, R> BrowserBridgeCredentialProcessor<S, C, Q, A, R> {
-    pub const fn new(
+    /// Builds one Provider-scoped processor after validating its bounded claim
+    /// and retry policy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid worker identity, claim bounds, lease or retry policy.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Core-owned repositories and their fixed Provider scope remain explicit at composition"
+    )]
+    pub fn new(
         provider_id: ProviderId,
         registry: Arc<ProviderRegistry>,
         sessions: S,
@@ -250,8 +263,10 @@ impl<S, C, Q, A, R> BrowserBridgeCredentialProcessor<S, C, Q, A, R> {
         tasks: Q,
         accounts: A,
         credentials: R,
-    ) -> Self {
-        Self {
+        config: BrowserBridgeCredentialProcessorConfig,
+    ) -> Result<Self, BrowserBridgeCredentialProcessorError> {
+        config.validate()?;
+        Ok(Self {
             provider_id,
             registry,
             sessions,
@@ -259,7 +274,8 @@ impl<S, C, Q, A, R> BrowserBridgeCredentialProcessor<S, C, Q, A, R> {
             tasks,
             accounts,
             credentials,
-        }
+            config,
+        })
     }
 }
 
@@ -278,10 +294,13 @@ where
     ///
     /// Returns an error only when the bounded inbox cannot be selected or the
     /// Provider's terminal-result declaration is internally inconsistent.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "claim, recovery, validation, commit and durable failure classification remain explicit in one result-attempt flow"
+    )]
     pub async fn tick(
         &self,
         now: Timestamp,
-        limit: u32,
     ) -> Result<BrowserBridgeCredentialTickReport, BrowserBridgeCredentialProcessorError> {
         let entry = self.registry.get(&self.provider_id).ok_or_else(|| {
             BrowserBridgeCredentialProcessorError::ProviderNotRegistered(self.provider_id.clone())
@@ -303,9 +322,22 @@ where
                 ),
             );
         }
+        let lease_expires_at = now
+            .checked_add_signed(
+                chrono::Duration::from_std(self.config.claim_ttl)
+                    .map_err(|_| BrowserBridgeCredentialProcessorError::InvalidConfig)?,
+            )
+            .ok_or(BrowserBridgeCredentialProcessorError::InvalidConfig)?;
         let pending = self
             .sessions
-            .list_pending_browser_bridge_results(now, &self.provider_id, result_types, limit)
+            .claim_pending_browser_bridge_results(
+                now,
+                &self.provider_id,
+                result_types,
+                1,
+                &self.config.worker_id,
+                lease_expires_at,
+            )
             .await?;
         let mut report = BrowserBridgeCredentialTickReport {
             selected: u32::try_from(pending.len()).unwrap_or(u32::MAX),
@@ -329,7 +361,8 @@ where
             })
             .await;
             let Ok(recovery) = recovery else {
-                report.failed += 1;
+                self.record_failure(&candidate, now, "recovery", false, &mut report)
+                    .await;
                 continue;
             };
             let validated = BrowserBridgeCredentialValidationService::new(
@@ -344,7 +377,8 @@ where
             })
             .await;
             let Ok(validated) = validated else {
-                report.failed += 1;
+                self.record_failure(&candidate, now, "provider_validation", false, &mut report)
+                    .await;
                 continue;
             };
             let outcome = BrowserBridgeCredentialCommitService::new(self.credentials.clone())
@@ -363,11 +397,85 @@ where
                     BrowserBridgeCredentialCommitOutcome::AccessRejected
                     | BrowserBridgeCredentialCommitOutcome::BindingConflict
                     | BrowserBridgeCredentialCommitOutcome::SequenceConflict,
-                ) => report.conflicted += 1,
-                Err(_) => report.failed += 1,
+                ) => {
+                    report.conflicted += 1;
+                    self.record_failure(&candidate, now, "commit_conflict", true, &mut report)
+                        .await;
+                }
+                Err(_) => {
+                    self.record_failure(&candidate, now, "commit_storage", false, &mut report)
+                        .await;
+                }
             }
         }
         Ok(report)
+    }
+
+    async fn record_failure(
+        &self,
+        candidate: &PendingBrowserBridgeResult,
+        failed_at: Timestamp,
+        error_kind: &'static str,
+        force_dead_letter: bool,
+        report: &mut BrowserBridgeCredentialTickReport,
+    ) {
+        let delay = if force_dead_letter {
+            None
+        } else {
+            let Ok(delay) = self.config.retry_policy.delay_after(candidate.attempt_no) else {
+                report.failed += 1;
+                return;
+            };
+            delay
+        };
+        let retry_at = delay.and_then(|delay| {
+            chrono::Duration::from_std(delay)
+                .ok()
+                .and_then(|delay| failed_at.checked_add_signed(delay))
+        });
+        if delay.is_some() && retry_at.is_none() {
+            report.failed += 1;
+            return;
+        }
+        match self
+            .sessions
+            .finish_browser_bridge_result_attempt(BrowserBridgeResultAttemptFinishRequest {
+                session_id: candidate.session_id,
+                sequence: candidate.sequence,
+                worker_id: &self.config.worker_id,
+                failed_at,
+                retry_at,
+                error_kind,
+            })
+            .await
+        {
+            Ok(true) if retry_at.is_some() => report.retry_scheduled += 1,
+            Ok(true) => report.dead_lettered += 1,
+            Ok(false) | Err(_) => report.failed += 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeCredentialProcessorConfig {
+    pub worker_id: String,
+    pub claim_ttl: Duration,
+    pub retry_policy: RetryPolicy,
+}
+
+impl BrowserBridgeCredentialProcessorConfig {
+    fn validate(&self) -> Result<(), BrowserBridgeCredentialProcessorError> {
+        if self.worker_id.is_empty()
+            || self.worker_id.len() > 128
+            || self.worker_id.chars().any(char::is_control)
+            || self.claim_ttl.is_zero()
+            || self.claim_ttl > Duration::from_hours(1)
+            || self.retry_policy.max_attempts > 32
+        {
+            return Err(BrowserBridgeCredentialProcessorError::InvalidConfig);
+        }
+        self.retry_policy.validate()?;
+        Ok(())
     }
 }
 
@@ -376,11 +484,15 @@ pub struct BrowserBridgeCredentialTickReport {
     pub selected: u32,
     pub committed: u32,
     pub conflicted: u32,
+    pub retry_scheduled: u32,
+    pub dead_lettered: u32,
     pub failed: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserBridgeCredentialProcessorError {
+    #[error("BrowserBridge credential processor configuration is invalid")]
+    InvalidConfig,
     #[error("provider `{0}` is not registered")]
     ProviderNotRegistered(ProviderId),
     #[error("provider `{0}` exposes no BrowserBridge capability")]
@@ -389,6 +501,8 @@ pub enum BrowserBridgeCredentialProcessorError {
     InvalidResultTypeDeclaration(ProviderId),
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    RetryPolicy(#[from] RetryPolicyError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -444,6 +558,40 @@ mod tests {
     use sha2::Digest;
 
     use super::*;
+
+    #[test]
+    fn processor_configuration_bounds_claims_and_attempts() {
+        let valid = BrowserBridgeCredentialProcessorConfig {
+            worker_id: "browser-credential-test".to_owned(),
+            claim_ttl: std::time::Duration::from_secs(30),
+            retry_policy: RetryPolicy {
+                max_attempts: 5,
+                initial_delay_seconds: 1,
+                multiplier: 2,
+                max_delay_seconds: 30,
+            },
+        };
+        assert!(valid.validate().is_ok());
+        assert!(
+            BrowserBridgeCredentialProcessorConfig {
+                worker_id: String::new(),
+                ..valid.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            BrowserBridgeCredentialProcessorConfig {
+                retry_policy: RetryPolicy {
+                    max_attempts: 33,
+                    ..valid.retry_policy
+                },
+                ..valid
+            }
+            .validate()
+            .is_err()
+        );
+    }
 
     #[derive(Debug)]
     struct FakeProvider(ProviderMetadata);

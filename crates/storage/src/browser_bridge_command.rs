@@ -1045,8 +1045,9 @@ mod tests {
     use super::*;
     use crate::{
         BrowserBridgeCredentialCommitOutcome, BrowserBridgeCredentialCommitRequest,
-        BrowserBridgeCredentialRepository, BrowserBridgeSessionRepository,
-        PendingBrowserBridgeResult, SqliteBrowserBridgeSessionRepository, SqliteSecretStore,
+        BrowserBridgeCredentialRepository, BrowserBridgeResultAttemptFinishRequest,
+        BrowserBridgeSessionRepository, PendingBrowserBridgeResult,
+        SqliteBrowserBridgeSessionRepository, SqliteSecretStore,
     };
 
     #[tokio::test]
@@ -1643,10 +1644,137 @@ mod tests {
             [PendingBrowserBridgeResult {
                 owner_user_id: fixture.owner,
                 session_id: session.id,
+                sequence: 1,
                 provider_id: fixture.provider.clone(),
                 result_type: "cidaren.capture.snapshot.result".to_owned(),
+                attempt_no: 1,
             }]
         );
+        let first_claim = fixture
+            .session_repository
+            .claim_pending_browser_bridge_results(
+                completed_at,
+                &fixture.provider,
+                &["cidaren.capture.snapshot.result"],
+                10,
+                "worker-a",
+                completed_at + Duration::seconds(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_claim[0].attempt_no, 1);
+        assert!(
+            fixture
+                .session_repository
+                .claim_pending_browser_bridge_results(
+                    completed_at,
+                    &fixture.provider,
+                    &["cidaren.capture.snapshot.result"],
+                    10,
+                    "worker-b",
+                    completed_at + Duration::seconds(30),
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let recovered_at = completed_at + Duration::seconds(30);
+        let recovered_claim = fixture
+            .session_repository
+            .claim_pending_browser_bridge_results(
+                recovered_at,
+                &fixture.provider,
+                &["cidaren.capture.snapshot.result"],
+                10,
+                "worker-b",
+                recovered_at + Duration::seconds(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered_claim[0].attempt_no, 2);
+        let retry_at = recovered_at + Duration::seconds(5);
+        assert!(
+            fixture
+                .session_repository
+                .finish_browser_bridge_result_attempt(BrowserBridgeResultAttemptFinishRequest {
+                    session_id: session.id,
+                    sequence: 1,
+                    worker_id: "worker-b",
+                    failed_at: recovered_at,
+                    retry_at: Some(retry_at),
+                    error_kind: "provider_validation",
+                },)
+                .await
+                .unwrap()
+        );
+        assert!(
+            fixture
+                .session_repository
+                .list_pending_browser_bridge_results(
+                    retry_at - Duration::milliseconds(1),
+                    &fixture.provider,
+                    &["cidaren.capture.snapshot.result"],
+                    10,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let retry_claim = fixture
+            .session_repository
+            .claim_pending_browser_bridge_results(
+                retry_at,
+                &fixture.provider,
+                &["cidaren.capture.snapshot.result"],
+                10,
+                "worker-c",
+                retry_at + Duration::seconds(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry_claim[0].attempt_no, 3);
+        assert!(
+            fixture
+                .session_repository
+                .finish_browser_bridge_result_attempt(BrowserBridgeResultAttemptFinishRequest {
+                    session_id: session.id,
+                    sequence: 1,
+                    worker_id: "worker-c",
+                    failed_at: retry_at,
+                    retry_at: None,
+                    error_kind: "attempts_exhausted",
+                },)
+                .await
+                .unwrap()
+        );
+        assert!(
+            fixture
+                .session_repository
+                .list_pending_browser_bridge_results(
+                    retry_at + Duration::seconds(1),
+                    &fixture.provider,
+                    &["cidaren.capture.snapshot.result"],
+                    10,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let processing: (String, i64, Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT processing_state, attempt_count, claimed_by, next_attempt_at, \
+                        last_error_kind \
+                 FROM browser_bridge_result_artifacts WHERE session_id = ? AND sequence = 1",
+            )
+            .bind(session.id.to_string())
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+        assert_eq!(processing.0, "dead_letter");
+        assert_eq!(processing.1, 3);
+        assert_eq!(processing.2, None);
+        assert_eq!(processing.3, None);
+        assert_eq!(processing.4.as_deref(), Some("attempts_exhausted"));
         let mut completed = issued.clone();
         completed
             .complete(

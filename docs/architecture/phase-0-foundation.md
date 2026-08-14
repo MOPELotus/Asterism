@@ -3782,3 +3782,26 @@ result receipt remains a separate idempotent inbox operation, so an ambiguous
 response never causes credential validation or terminal mutation replay. The
 daemon runs this processor only when a keyring and an explicitly declaring
 Provider are configured; individual failures stay durable for a later tick.
+
+## Two-hundred-and-tenth Phase 0 slice
+
+BrowserBridge credential-result processing now has its own durable attempt
+ledger instead of relying on repeated inbox reads. A worker claims one
+Provider/result-type item per Provider tick under `BEGIN IMMEDIATE`, increments
+its attempt once and stores its identity plus an expiring lease. Another daemon
+cannot process the same result while that lease is live; after a crash, the expired
+claim becomes eligible for a fresh numbered attempt.
+
+Failed recovery, Provider validation and credential persistence use the shared
+bounded retry policy and persist the next-attempt time plus a non-secret error
+class. Exhausted attempts and binding/sequence conflicts become dead letters,
+which no longer occupy the pending query. Claim limits, lease duration,
+attempt budget, worker labels and error labels are all bounded and validated;
+the migration also caps persisted attempts independently of daemon config.
+
+The processing lease is deliberately separate from the helper access token
+and from the exchange itself. It grants no browser or secret authority, and a
+successful atomic credential/session commit remains the only path that marks
+the exchange completed. This preserves exact result receipt and restart
+recovery while preventing malformed terminal artifacts from creating a hot
+retry loop.

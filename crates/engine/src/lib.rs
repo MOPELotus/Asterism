@@ -54,10 +54,10 @@ pub use auth_session::{
     ExternalOauthCallbackRequest,
 };
 pub use browser_bridge_credential::{
-    BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorError,
-    BrowserBridgeCredentialTickReport, BrowserBridgeCredentialValidationError,
-    BrowserBridgeCredentialValidationService, ValidateBrowserBridgeCredentialCommand,
-    ValidatedBrowserBridgeCredential,
+    BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorConfig,
+    BrowserBridgeCredentialProcessorError, BrowserBridgeCredentialTickReport,
+    BrowserBridgeCredentialValidationError, BrowserBridgeCredentialValidationService,
+    ValidateBrowserBridgeCredentialCommand, ValidatedBrowserBridgeCredential,
 };
 pub use browser_bridge_session::{
     BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandDispatchService,

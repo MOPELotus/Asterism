@@ -12,8 +12,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction, sqlite::SqliteRow};
 
 use crate::{
-    BrowserBridgeExchangeRecord, BrowserBridgeRuntimeBindingRecord, BrowserBridgeSessionRepository,
-    Database, PendingBrowserBridgeResult, StorageError,
+    BrowserBridgeExchangeRecord, BrowserBridgeResultAttemptFinishRequest,
+    BrowserBridgeRuntimeBindingRecord, BrowserBridgeSessionRepository, Database,
+    PendingBrowserBridgeResult, StorageError,
 };
 
 const SESSION_SELECT: &str = "SELECT id, owner_user_id, provider_account_id, task_id, provider_id, \
@@ -22,6 +23,49 @@ const SESSION_SELECT: &str = "SELECT id, owner_user_id, provider_account_id, tas
 
 fn invalid_record(message: &str) -> StorageError {
     StorageError::InvalidData(message.to_owned())
+}
+
+fn validate_pending_selection(
+    provider_id: &ProviderId,
+    result_types: &[&str],
+    limit: u32,
+) -> Result<(), StorageError> {
+    if provider_id.as_str().is_empty()
+        || !(1..=100).contains(&limit)
+        || result_types.is_empty()
+        || result_types.len() > 16
+        || result_types.iter().any(|result_type| {
+            result_type.is_empty()
+                || result_type.len() > 128
+                || result_type.chars().any(char::is_control)
+        })
+    {
+        Err(StorageError::InvalidData(
+            "BrowserBridge pending-result selection is invalid".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_pending_result(row: &SqliteRow) -> Result<PendingBrowserBridgeResult, StorageError> {
+    let sequence = u64::try_from(row.get::<i64, _>("sequence"))
+        .map_err(|_| invalid_record("invalid pending BrowserBridge sequence"))?;
+    let attempt_count = u32::try_from(row.get::<i64, _>("attempt_count"))
+        .map_err(|_| invalid_record("invalid pending BrowserBridge attempt count"))?;
+    Ok(PendingBrowserBridgeResult {
+        owner_user_id: UserId::from_str(&row.get::<String, _>("owner_user_id"))
+            .map_err(|_| invalid_record("invalid pending BrowserBridge owner"))?,
+        session_id: BrowserBridgeSessionId::from_str(&row.get::<String, _>("session_id"))
+            .map_err(|_| invalid_record("invalid pending BrowserBridge session"))?,
+        sequence,
+        provider_id: ProviderId::new(row.get::<String, _>("provider_id"))
+            .map_err(|_| invalid_record("invalid pending BrowserBridge Provider"))?,
+        result_type: row.get("result_type"),
+        attempt_no: attempt_count
+            .checked_add(1)
+            .ok_or_else(|| invalid_record("invalid pending BrowserBridge attempt count"))?,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -107,22 +151,10 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
         result_types: &[&str],
         limit: u32,
     ) -> Result<Vec<PendingBrowserBridgeResult>, StorageError> {
-        if !(1..=100).contains(&limit)
-            || result_types.is_empty()
-            || result_types.len() > 16
-            || result_types.iter().any(|result_type| {
-                result_type.is_empty()
-                    || result_type.len() > 128
-                    || result_type.chars().any(char::is_control)
-            })
-        {
-            return Err(StorageError::InvalidData(
-                "BrowserBridge pending-result selection is invalid".to_owned(),
-            ));
-        }
+        validate_pending_selection(provider_id, result_types, limit)?;
         let mut query = QueryBuilder::<Sqlite>::new(
             "SELECT session.owner_user_id, session.id AS session_id, session.provider_id, \
-                    result.result_type \
+                    exchange.sequence, result.result_type, result.attempt_count \
              FROM browser_bridge_sessions AS session \
              JOIN browser_bridge_exchanges AS exchange ON exchange.session_id = session.id \
              JOIN browser_bridge_result_artifacts AS result \
@@ -135,7 +167,15 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
             .push_bind(encode_timestamp(now))
             .push(" AND session.provider_id = ")
             .push_bind(provider_id.as_str())
-            .push(" AND exchange.state = 'issued' AND result.result_type IN (");
+            .push(
+                " AND exchange.state = 'issued' AND result.attempt_count < 32 \
+                    AND (result.processing_state = 'pending' \
+                    OR (result.processing_state = 'retry' AND result.next_attempt_at <= ",
+            )
+            .push_bind(encode_timestamp(now))
+            .push(") OR (result.processing_state = 'processing' AND result.claim_expires_at <= ")
+            .push_bind(encode_timestamp(now))
+            .push(")) AND result.result_type IN (");
         {
             let mut separated = query.separated(", ");
             for result_type in result_types {
@@ -150,20 +190,152 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
             .fetch_all(self.database.pool())
             .await?
             .into_iter()
-            .map(|row| {
-                Ok(PendingBrowserBridgeResult {
-                    owner_user_id: UserId::from_str(&row.get::<String, _>("owner_user_id"))
-                        .map_err(|_| invalid_record("invalid pending BrowserBridge owner"))?,
-                    session_id: BrowserBridgeSessionId::from_str(
-                        &row.get::<String, _>("session_id"),
-                    )
-                    .map_err(|_| invalid_record("invalid pending BrowserBridge session"))?,
-                    provider_id: ProviderId::new(row.get::<String, _>("provider_id"))
-                        .map_err(|_| invalid_record("invalid pending BrowserBridge Provider"))?,
-                    result_type: row.get("result_type"),
-                })
-            })
+            .map(|row| decode_pending_result(&row))
             .collect()
+    }
+
+    async fn claim_pending_browser_bridge_results(
+        &self,
+        now: Timestamp,
+        provider_id: &ProviderId,
+        result_types: &[&str],
+        limit: u32,
+        worker_id: &str,
+        lease_expires_at: Timestamp,
+    ) -> Result<Vec<PendingBrowserBridgeResult>, StorageError> {
+        validate_pending_selection(provider_id, result_types, limit)?;
+        if worker_id.is_empty()
+            || worker_id.len() > 128
+            || worker_id.chars().any(char::is_control)
+            || lease_expires_at <= now
+            || lease_expires_at > now + chrono::Duration::hours(1)
+        {
+            return Err(StorageError::InvalidData(
+                "BrowserBridge result-processing lease is invalid".to_owned(),
+            ));
+        }
+        let now_text = encode_timestamp(now);
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(
+            "UPDATE browser_bridge_result_artifacts \
+             SET processing_state = 'dead_letter', claimed_by = NULL, claim_expires_at = NULL, \
+                 next_attempt_at = NULL, last_error_kind = 'attempt_budget_exhausted' \
+             WHERE processing_state = 'processing' AND attempt_count >= 32 \
+               AND claim_expires_at <= ? AND session_id IN ( \
+                   SELECT id FROM browser_bridge_sessions WHERE provider_id = ?)",
+        )
+        .bind(&now_text)
+        .bind(provider_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT session.owner_user_id, session.id AS session_id, session.provider_id, \
+                    exchange.sequence, result.result_type, result.attempt_count \
+             FROM browser_bridge_sessions AS session \
+             JOIN browser_bridge_exchanges AS exchange ON exchange.session_id = session.id \
+             JOIN browser_bridge_result_artifacts AS result \
+               ON result.session_id = exchange.session_id AND result.sequence = exchange.sequence \
+             WHERE session.state_json = ",
+        );
+        query
+            .push_bind(serde_json::to_string(&BrowserBridgeSessionState::Claimed)?)
+            .push(" AND session.expires_at > ")
+            .push_bind(&now_text)
+            .push(" AND session.provider_id = ")
+            .push_bind(provider_id.as_str())
+            .push(
+                " AND exchange.state = 'issued' AND result.attempt_count < 32 \
+                    AND (result.processing_state = 'pending' \
+                    OR (result.processing_state = 'retry' AND result.next_attempt_at <= ",
+            )
+            .push_bind(&now_text)
+            .push(") OR (result.processing_state = 'processing' AND result.claim_expires_at <= ")
+            .push_bind(&now_text)
+            .push(")) AND result.result_type IN (");
+        {
+            let mut separated = query.separated(", ");
+            for result_type in result_types {
+                separated.push_bind(result_type);
+            }
+        }
+        query
+            .push(") ORDER BY result.received_at, session.id, exchange.sequence LIMIT ")
+            .push_bind(i64::from(limit));
+        let rows = query.build().fetch_all(&mut *transaction).await?;
+        let mut claimed = Vec::with_capacity(rows.len());
+        for row in rows {
+            let candidate = decode_pending_result(&row)?;
+            let updated = sqlx::query(
+                "UPDATE browser_bridge_result_artifacts \
+                 SET processing_state = 'processing', attempt_count = attempt_count + 1, \
+                     claimed_by = ?, claim_expires_at = ?, next_attempt_at = NULL, \
+                     last_error_kind = NULL \
+                 WHERE session_id = ? AND sequence = ? AND attempt_count < 32 AND ( \
+                     processing_state = 'pending' \
+                     OR (processing_state = 'retry' AND next_attempt_at <= ?) \
+                     OR (processing_state = 'processing' AND claim_expires_at <= ?))",
+            )
+            .bind(worker_id)
+            .bind(encode_timestamp(lease_expires_at))
+            .bind(candidate.session_id.to_string())
+            .bind(
+                i64::try_from(candidate.sequence)
+                    .map_err(|_| invalid_record("invalid pending BrowserBridge sequence"))?,
+            )
+            .bind(&now_text)
+            .bind(&now_text)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() == 1 {
+                claimed.push(candidate);
+            }
+        }
+        transaction.commit().await?;
+        Ok(claimed)
+    }
+
+    async fn finish_browser_bridge_result_attempt(
+        &self,
+        request: BrowserBridgeResultAttemptFinishRequest<'_>,
+    ) -> Result<bool, StorageError> {
+        if request.sequence == 0
+            || request.worker_id.is_empty()
+            || request.worker_id.len() > 128
+            || request.worker_id.chars().any(char::is_control)
+            || request.error_kind.is_empty()
+            || request.error_kind.len() > 96
+            || request.error_kind.chars().any(char::is_control)
+            || request
+                .retry_at
+                .is_some_and(|retry_at| retry_at <= request.failed_at)
+        {
+            return Err(StorageError::InvalidData(
+                "BrowserBridge result-attempt completion is invalid".to_owned(),
+            ));
+        }
+        let state = if request.retry_at.is_some() {
+            "retry"
+        } else {
+            "dead_letter"
+        };
+        let updated = sqlx::query(
+            "UPDATE browser_bridge_result_artifacts \
+             SET processing_state = ?, claimed_by = NULL, claim_expires_at = NULL, \
+                 next_attempt_at = ?, last_error_kind = ? \
+             WHERE session_id = ? AND sequence = ? AND processing_state = 'processing' \
+               AND claimed_by = ?",
+        )
+        .bind(state)
+        .bind(request.retry_at.map(encode_timestamp))
+        .bind(request.error_kind)
+        .bind(request.session_id.to_string())
+        .bind(i64::try_from(request.sequence).map_err(|_| {
+            StorageError::InvalidData("BrowserBridge result sequence is invalid".to_owned())
+        })?)
+        .bind(request.worker_id)
+        .execute(self.database.pool())
+        .await?;
+        Ok(updated.rows_affected() == 1)
     }
 
     async fn claim_browser_bridge_session(
