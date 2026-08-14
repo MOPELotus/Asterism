@@ -8,6 +8,7 @@ mod auth_bootstrap_credential;
 mod auth_session;
 mod browser_bridge_credential;
 mod browser_bridge_session;
+mod browser_bridge_workflow;
 mod credential;
 mod execution_job;
 mod execution_request;
@@ -75,6 +76,10 @@ pub use browser_bridge_session::{
     BrowserBridgeSessionClaimRequest, BrowserBridgeSessionClaimed,
     BrowserBridgeSessionCreateRequest, BrowserBridgeSessionCreated, BrowserBridgeSessionSnapshot,
     BrowserBridgeWorkflowContextIssue, BrowserBridgeWorkflowPlanIssue,
+};
+pub use browser_bridge_workflow::{
+    BrowserBridgeWorkflowValidationError, BrowserBridgeWorkflowValidationService,
+    ValidateBrowserBridgeWorkflowCommand, ValidatedBrowserBridgeWorkflow,
 };
 pub use credential::{CredentialCommit, CredentialProvisionError, ProviderCredentialService};
 pub use execution_job::{

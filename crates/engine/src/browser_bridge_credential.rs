@@ -910,6 +910,7 @@ mod tests {
                     exchange: exchange.clone(),
                     command_artifact,
                     runtime_state: None,
+                    workflow_context: None,
                 },
                 result: Some(ResolvedBrowserBridgeResult {
                     exchange,
