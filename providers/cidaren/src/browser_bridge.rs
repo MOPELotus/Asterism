@@ -5,9 +5,10 @@ use asterism_domain::{
     BrowserBridgeSessionId, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
-    BrowserBridgeCapability, BrowserBridgeReadSource, BrowserSessionSpec, CredentialReplacement,
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
-    ProviderResult, TaskDetailCapability,
+    BrowserBridgeCapability, BrowserBridgeCredentialResult, BrowserBridgeCredentialResultRequest,
+    BrowserBridgeReadSource, BrowserSessionSpec, CredentialReplacement, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
+    TaskDetailCapability,
 };
 use asterism_secrets::SecretValue;
 use async_trait::async_trait;
@@ -519,6 +520,50 @@ impl BrowserBridgeCapability for CidarenBrowserBridge {
             headless: false,
         })
     }
+
+    async fn complete_browser_bridge_credential_result(
+        &self,
+        context: &ProviderContext,
+        request: BrowserBridgeCredentialResultRequest<'_>,
+    ) -> ProviderResult<BrowserBridgeCredentialResult> {
+        request.validate()?;
+        if request.issued_exchange.command_type != CidarenBrowserCommandEnvelope::exchange_type() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "Cidaren BrowserBridge command type is stale or foreign",
+            ));
+        }
+        let command = CidarenBrowserCommandEnvelope::decode_artifact_exchange_bound(
+            request.command_artifact,
+            request.issued_exchange.command_digest,
+            request.issued_exchange.session_id,
+            request.remote_task_id,
+            request.issued_exchange.sequence,
+        )?;
+        if request.runtime_binding.observed_origin != CIDAREN_ORIGIN
+            || command.frame_id != request.runtime_binding.frame_id
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Cidaren BrowserBridge runtime binding is stale or foreign",
+            ));
+        }
+        let mode = command.capture_mode();
+        let completed = self
+            .complete_persisted_capture_snapshot_exchange(
+                context,
+                request.remote_task_id,
+                request.issued_exchange,
+                request.command_artifact,
+                mode,
+                request.result_metadata,
+                request.result_artifact,
+                request.runtime_binding.observed_origin.as_str(),
+            )
+            .await?;
+        let (replacement, completed_exchange) = completed.into_credential_commit_parts()?;
+        BrowserBridgeCredentialResult::try_new(replacement, completed_exchange)
+    }
 }
 
 fn cidaren_browser_read_sources() -> Vec<BrowserBridgeReadSource> {
@@ -572,8 +617,8 @@ fn validate_task_identity(remote_task_id: &str) -> ProviderResult<()> {
 #[cfg(test)]
 mod tests {
     use asterism_domain::{
-        AssessmentClass, BrowserBridgeExchangeState, ProviderAccountId, ProviderId, RemoteState,
-        SecretId, SessionKind, SourceType,
+        AssessmentClass, BrowserBridgeExchangeState, BrowserBridgeRuntimeBinding,
+        ProviderAccountId, ProviderId, RemoteState, SecretId, SessionKind, SourceType,
     };
     use asterism_provider_api::{RemoteTask, RemoteTaskDetail};
     use asterism_secrets::SecretPurpose;
@@ -1060,6 +1105,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_credential_result_derives_composite_mode_and_rebinds_fresh_task() {
+        let fixture = recovered_capture_fixture().await;
+        let (result_artifact, result_metadata, runtime_binding) =
+            recovered_result_evidence(&fixture);
+        let accepted = fixture
+            .capability
+            .complete_browser_bridge_credential_result(
+                &fixture.context,
+                BrowserBridgeCredentialResultRequest {
+                    remote_task_id: "class-task:2002",
+                    issued_exchange: &fixture.exchange,
+                    command_artifact: &fixture.command_artifact,
+                    result_metadata: &result_metadata,
+                    result_artifact: &result_artifact,
+                    runtime_binding: &runtime_binding,
+                },
+            )
+            .await
+            .unwrap();
+        let debug = format!("{accepted:?}");
+        assert!(debug.contains("credential_count: 2"));
+        assert!(!debug.contains("synthetic-user-token"));
+        let (replacement, completed_exchange) = accepted.into_parts();
+        assert_eq!(replacement.session_kind, SessionKind::Composite);
+        assert_eq!(replacement.fields.len(), 2);
+        assert_eq!(
+            completed_exchange.completed_at,
+            Some(result_metadata.received_at)
+        );
+
+        assert_eq!(
+            bridge(false)
+                .complete_browser_bridge_credential_result(
+                    &fixture.context,
+                    BrowserBridgeCredentialResultRequest {
+                        remote_task_id: "class-task:2002",
+                        issued_exchange: &fixture.exchange,
+                        command_artifact: &fixture.command_artifact,
+                        result_metadata: &result_metadata,
+                        result_artifact: &result_artifact,
+                        runtime_binding: &runtime_binding,
+                    },
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_credential_result_cannot_take_recipe_authority_from_result() {
+        let fixture = recovered_capture_fixture().await;
+        let command = CidarenBrowserCommandEnvelope::capture_snapshot(
+            fixture.session_id.to_string(),
+            "frame-recovery".to_owned(),
+            "class-task:2002".to_owned(),
+            3,
+            CidarenCaptureMode::TokenOnly,
+        )
+        .unwrap();
+        let command_artifact = command.encode_artifact().unwrap();
+        let issued_exchange = BrowserBridgeExchange::issue(
+            fixture.session_id,
+            3,
+            CidarenBrowserCommandEnvelope::exchange_type().to_owned(),
+            command_artifact.digest(),
+            fixture.issued_at,
+        )
+        .unwrap();
+        let command_artifact = command_artifact.into_secret_value();
+        let (result_artifact, result_metadata, runtime_binding) =
+            recovered_result_evidence(&fixture);
+        let request = BrowserBridgeCredentialResultRequest {
+            remote_task_id: "class-task:2002",
+            issued_exchange: &issued_exchange,
+            command_artifact: &command_artifact,
+            result_metadata: &result_metadata,
+            result_artifact: &result_artifact,
+            runtime_binding: &runtime_binding,
+        };
+        request.validate().unwrap();
+        assert_eq!(
+            fixture
+                .capability
+                .complete_browser_bridge_credential_result(&fixture.context, request)
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_credential_result_rejects_runtime_and_request_drift() {
+        let fixture = recovered_capture_fixture().await;
+        let (result_artifact, result_metadata, runtime_binding) =
+            recovered_result_evidence(&fixture);
+        for (observed_origin, frame_id) in [
+            ("https://foreign.example", "frame-recovery"),
+            (CIDAREN_ORIGIN, "frame-foreign"),
+        ] {
+            let foreign_runtime = BrowserBridgeRuntimeBinding {
+                observed_origin: observed_origin.to_owned(),
+                frame_id: frame_id.to_owned(),
+                ..runtime_binding.clone()
+            };
+            let request = BrowserBridgeCredentialResultRequest {
+                remote_task_id: "class-task:2002",
+                issued_exchange: &fixture.exchange,
+                command_artifact: &fixture.command_artifact,
+                result_metadata: &result_metadata,
+                result_artifact: &result_artifact,
+                runtime_binding: &foreign_runtime,
+            };
+            request.validate().unwrap();
+            assert_eq!(
+                fixture
+                    .capability
+                    .complete_browser_bridge_credential_result(&fixture.context, request)
+                    .await
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::RemoteChanged
+            );
+        }
+
+        let invalid_metadata = BrowserBridgeResultArtifactMetadata {
+            result_digest: [9; 32],
+            ..result_metadata
+        };
+        assert_eq!(
+            fixture
+                .capability
+                .complete_browser_bridge_credential_result(
+                    &fixture.context,
+                    BrowserBridgeCredentialResultRequest {
+                        remote_task_id: "class-task:2002",
+                        issued_exchange: &fixture.exchange,
+                        command_artifact: &fixture.command_artifact,
+                        result_metadata: &invalid_metadata,
+                        result_artifact: &result_artifact,
+                        runtime_binding: &runtime_binding,
+                    },
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+    }
+
+    #[tokio::test]
     async fn typed_capture_exchange_rejects_unrepresentable_sequence_and_regressing_result() {
         let capability = bridge(true);
         let issued_at = Utc::now();
@@ -1164,5 +1362,31 @@ mod tests {
             command_artifact: command_artifact.into_secret_value(),
             document,
         }
+    }
+
+    fn recovered_result_evidence(
+        fixture: &RecoveredCaptureFixture,
+    ) -> (
+        SecretValue,
+        BrowserBridgeResultArtifactMetadata,
+        BrowserBridgeRuntimeBinding,
+    ) {
+        let result_digest = browser_event_exchange_digest(&fixture.document).unwrap();
+        (
+            SecretValue::new(fixture.document.as_bytes().to_vec()),
+            BrowserBridgeResultArtifactMetadata {
+                session_id: fixture.session_id,
+                sequence: 3,
+                result_type: crate::CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+                result_digest,
+                received_at: fixture.issued_at + Duration::seconds(1),
+            },
+            BrowserBridgeRuntimeBinding {
+                session_id: fixture.session_id,
+                observed_origin: CIDAREN_ORIGIN.to_owned(),
+                frame_id: "frame-recovery".to_owned(),
+                bound_at: fixture.issued_at,
+            },
+        )
     }
 }

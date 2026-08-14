@@ -235,6 +235,17 @@ malformed helper response. The terminal exchange completion time comes only from
 that persisted receipt metadata rather than an independently supplied caller
 timestamp.
 
+The shared `BrowserBridgeCapability` terminal hook is the runtime entry to this
+path. Cidaren first calls the shared request validator, then strictly decodes
+the digest-bound command artifact without accepting a caller-selected mode.
+Only that command's TokenOnly/Composite variant supplies recipe authority. The
+decoded session and Task remain bound to the issued exchange/request, while
+its origin and frame must exactly match the validated runtime observation.
+Cidaren then reuses persisted completion, including fresh context/Task policy
+rebinding, consumes the resulting credential replacement + completed exchange
+pair and returns it only through `BrowserBridgeCredentialResult::try_new`.
+Neither result JSON nor extra caller metadata can select or upgrade a recipe.
+
 `CidarenBrowserBridge::capture_snapshot_exchange` is the immutable Provider
 adapter to that ledger. It derives `session_nonce` from the exact
 `BrowserBridgeSessionId`, converts only a positive Provider-bounded sequence,

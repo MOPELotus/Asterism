@@ -180,6 +180,13 @@ placeholder identities, result codes, status values and pagination shape.
   Encrypted result restoration checks the persisted digest before UTF-8/JSON
   parsing: changed bytes are ProtocolDrift, while correctly digest-bound empty,
   oversized or non-UTF-8 artifacts retain their InvalidResponse classification.
+  Shared terminal-capability fixtures call request validation first, derive
+  Composite solely from the encrypted command artifact, require the exact
+  runtime origin/frame/session and fresh Task capability, and round-trip the
+  validated two-field credential replacement with its completed exchange.
+  A Composite result paired with a digest-valid TokenOnly command cannot
+  elevate the command recipe; foreign runtime bindings and receipt-digest
+  drift fail closed.
   Public-surface doctests keep command issue, persisted completion and paired
   credential commit available while proving raw result documents, envelopes,
   snapshots and parsers cannot be imported from the Provider crate.

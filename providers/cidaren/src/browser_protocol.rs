@@ -579,6 +579,29 @@ impl CidarenBrowserCommandEnvelope {
         expected_sequence: u64,
         expected_mode: CidarenCaptureMode,
     ) -> ProviderResult<Self> {
+        let command = Self::decode_artifact_exchange_bound(
+            value,
+            expected_digest,
+            expected_session_id,
+            expected_remote_task_id,
+            expected_sequence,
+        )?;
+        if command.capture_mode() != expected_mode {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Cidaren Capture command artifact recipe is stale or foreign",
+            ));
+        }
+        Ok(command)
+    }
+
+    pub(crate) fn decode_artifact_exchange_bound(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+        expected_session_id: BrowserBridgeSessionId,
+        expected_remote_task_id: &str,
+        expected_sequence: u64,
+    ) -> ProviderResult<Self> {
         let command = Self::decode_artifact(value, expected_digest)?;
         let expected_sequence = u32::try_from(expected_sequence).map_err(|_| {
             protocol_drift("Cidaren Capture command artifact sequence is unrepresentable")
@@ -586,10 +609,6 @@ impl CidarenBrowserCommandEnvelope {
         if command.session_nonce != expected_session_id.to_string()
             || command.remote_task_id != expected_remote_task_id
             || command.sequence != expected_sequence
-            || command.command
-                != (CidarenBrowserCommand::CaptureSnapshot {
-                    mode: expected_mode,
-                })
         {
             return Err(ProviderError::new(
                 ProviderErrorKind::RemoteChanged,
@@ -597,6 +616,12 @@ impl CidarenBrowserCommandEnvelope {
             ));
         }
         Ok(command)
+    }
+
+    pub(crate) const fn capture_mode(&self) -> CidarenCaptureMode {
+        match self.command {
+            CidarenBrowserCommand::CaptureSnapshot { mode } => mode,
+        }
     }
 
     fn decode_artifact(value: &SecretValue, expected_digest: [u8; 32]) -> ProviderResult<Self> {

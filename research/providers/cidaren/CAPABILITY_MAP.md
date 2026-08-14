@@ -213,6 +213,13 @@ The current checkpoint (not a completion boundary):
     validation rechecks every retained Debug-redacted binding, and no
     `CDR_USER_SESSION`, selector, script, duplicate or arbitrary field can be
     emitted.
+44. implements Core's terminal `BrowserBridgeCapability` credential-result
+    hook. Shared request validation runs first; Cidaren then derives the sole
+    TokenOnly/Composite authority from the digest-bound command, rebinds its
+    session/Task/origin/frame to the runtime observation, repeats fresh Task
+    policy validation through persisted completion and returns only a
+    `BrowserBridgeCredentialResult::try_new`-validated replacement + completed
+    exchange pair. Result bytes and caller metadata cannot select the recipe.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

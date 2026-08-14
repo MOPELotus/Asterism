@@ -12,6 +12,7 @@
 //! consumes validated credentials together with their terminal exchange.
 //!
 //! ```
+//! use asterism_provider_api::BrowserBridgeCapability;
 //! use asterism_provider_cidaren::{
 //!     CidarenBrowserBridge, CidarenBrowserCapturedValue, CidarenBrowserHelperAction,
 //!     CidarenBrowserHelperProjection, CidarenCaptureExchangeCompleted, CidarenCaptureMode,
@@ -20,6 +21,7 @@
 //!
 //! let _ = CidarenBrowserBridge::capture_snapshot_exchange;
 //! let _ = CidarenBrowserBridge::complete_persisted_capture_snapshot_exchange;
+//! let _ = <CidarenBrowserBridge as BrowserBridgeCapability>::complete_browser_bridge_credential_result;
 //! let _ = CidarenCaptureExchangeCompleted::into_credential_commit_parts;
 //! let _ = project_browser_helper_command;
 //! let _: Option<CidarenBrowserHelperAction> = None;
