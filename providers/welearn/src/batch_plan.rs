@@ -25,7 +25,6 @@ pub enum WellearnBatchFlow {
 pub enum WellearnBatchDispatch {
     PerChildConcurrent,
     Sequential,
-    SharedHeartbeat,
     BoundedThreadPool,
 }
 
@@ -54,11 +53,10 @@ const MAX_AUTO_DURATION_MINUTES: u64 = 330;
 impl WellearnBatchFlow {
     pub const fn dispatch(self) -> WellearnBatchDispatch {
         match self {
-            Self::FanyuchangCompletion | Self::FanyuchangDuration => {
+            Self::FanyuchangCompletion | Self::FanyuchangDuration | Self::YzbrhDuration => {
                 WellearnBatchDispatch::PerChildConcurrent
             }
             Self::YzbrhCompletion | Self::AutoCompletion => WellearnBatchDispatch::Sequential,
-            Self::YzbrhDuration => WellearnBatchDispatch::SharedHeartbeat,
             Self::AutoDuration => WellearnBatchDispatch::BoundedThreadPool,
         }
     }
@@ -687,7 +685,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["sco:1001:301", "sco:1001:302", "sco:1001:401"]
         );
-        assert_eq!(plan.dispatch, WellearnBatchDispatch::SharedHeartbeat);
+        assert_eq!(plan.dispatch, WellearnBatchDispatch::PerChildConcurrent);
         assert_eq!(plan.target_strategy, WellearnBatchTargetStrategy::PerChild);
     }
 
@@ -884,7 +882,7 @@ mod tests {
         );
         assert_eq!(
             WellearnBatchFlow::YzbrhDuration.dispatch(),
-            WellearnBatchDispatch::SharedHeartbeat
+            WellearnBatchDispatch::PerChildConcurrent
         );
         assert_eq!(
             WellearnBatchFlow::AutoCompletion.dispatch(),

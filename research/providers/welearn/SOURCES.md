@@ -16,7 +16,7 @@ pending.
 | Source | Revision | Updated | Use | Audited implementation surface | Live status |
 |---|---|---|---|---|---|
 | [`Fanyuchang2026/welearn-helper`](https://github.com/Fanyuchang2026/welearn-helper) | `afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2` | 2026-06-09 | Reference | Current SSO/OIDC password flow and interactive captcha/SMS/third-party browser behavior, Course/Unit/SCO discovery including deliberately unfiltered hidden/already-completed SCO execution, clamped-Gaussian selected score followed by an unconditional second `crate=100` save, duration heartbeat and concurrency behavior | Offline/native/Capture response-readiness helper boundary covered; OAuth callback and live learning validation pending |
-| [`YZBRH/Welearn_helper`](https://github.com/YZBRH/Welearn_helper) | `bd160e91d0452b8bf483087fbdd3bdd58d855e13` | 2025-12-25 | Reference | Redirect handling, TLS-client behavior, direct `setscoinfo`/save accuracy preset, CMI read, heartbeat and final save | Offline/native boundary covered; live pending |
+| [`YZBRH/Welearn_helper`](https://github.com/YZBRH/Welearn_helper) | `bd160e91d0452b8bf483087fbdd3bdd58d855e13` | 2025-12-25 | Reference | Redirect handling, TLS-client behavior, direct `setscoinfo`/save accuracy preset, CMI read, per-SCO concurrent heartbeat and final save | Offline/native boundary covered; live pending |
 | [`1q2w-c/Auto_WeLearn`](https://github.com/1q2w-c/Auto_WeLearn) | `85918caaccd93b73b1e41fe537b4e9a11377b759` | 2025-12-14 | Historical | Modular API boundary, multi-account management, fixed/random score UX, selected-Unit/all-task batch execution, aggregate duration-budget distribution and explicit 1–100 worker setting, concurrent completion and duration route cross-check | Protocol/settings cross-check covered; shared Unit/batch orchestration gap recorded |
 
 ## Upstream refresh
@@ -38,7 +38,10 @@ checkpoints must fetch again rather than treating them as permanent bounds.
 The 2026-08-14 post-selection-boundary refresh again found no donor revision,
 tag/release or capability delta. Fanyuchang still exposes only `v4.0.0` and its
 matching older release; YZBRH and Auto_WeLearn still expose neither tags nor
-GitHub releases.
+GitHub releases. A full YZBRH source recheck also confirmed its top-level
+`heartbeat()` is display-only: independently created `simulate()` coroutines
+own every network keep and final save, so no shared network-heartbeat dispatch
+exists.
 
 ## Source selection
 
