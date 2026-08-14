@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 asterism-domain = { path = "../../crates/domain" }
+asterism-provider-cidaren = { path = "../../providers/cidaren" }
 asterism-provider-api = { path = "../../crates/provider-api" }
 asterism-secrets = { path = "../../crates/secrets" }
 base64.workspace = true

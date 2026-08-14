@@ -254,8 +254,11 @@ impl CaptureClient {
             .await
             .context("failed to dispatch the BrowserBridge command; it must not be replayed")?;
         if response.status() == StatusCode::NOT_FOUND {
-            let _: serde_json::Value =
+            let error: ErrorResponse =
                 deserialize_response(response, &[StatusCode::NOT_FOUND]).await?;
+            if error.error.code != "browser_bridge_command_not_found" {
+                bail!("Asterism server returned an unexpected missing-command response");
+            }
             return Ok(None);
         }
         if response.status() != StatusCode::OK {
@@ -1565,7 +1568,9 @@ mod tests {
                                 return AxumResponse::builder()
                                     .status(StatusCode::NOT_FOUND)
                                     .header(CONTENT_TYPE, "application/json")
-                                    .body(Body::from(r#"{"code":"not_issued"}"#))
+                                    .body(Body::from(
+                                        r#"{"error":{"code":"browser_bridge_command_not_found","message":"not issued"}}"#,
+                                    ))
                                     .unwrap();
                             }
                             AxumResponse::builder()

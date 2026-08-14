@@ -3732,3 +3732,26 @@ dispatched.
 This supplies the waiting semantics for a long-lived local runner without
 inventing command replay. Provider result projection, DOM execution and Core's
 post-result orchestration remain separate typed boundaries.
+
+## Two-hundred-and-eighth Phase 0 slice
+
+The Capture library now links the Cidaren Provider's compiled helper contract
+instead of interpreting its command JSON. It transfers ownership of the Core
+command artifact into Cidaren's digest/session/origin/frame/sequence projector,
+then derives the requested browser read subset only from the resulting closed
+TokenOnly or Composite source enums.
+
+Each poll acquires a new stable-document read snapshot. The handler selects the
+first available UserToken alternative and, for Composite mode, the first
+login-info alternative from that same snapshot. It never combines values from
+different polls, rejects an origin/frame change after command projection and
+stops at the frozen session expiry. Missing facts cause a bounded local wait;
+unsafe or malformed facts fail through the Provider result validator.
+
+The completed local observation is encoded by Cidaren into its exact result
+type and zeroizing artifact before it returns to the shared inbox transport.
+TokenOnly cannot include storage context, Composite cannot omit login-info,
+and no Cookie, user-session, selector, script or arbitrary field is accepted.
+Core-side recovery, fresh Provider validation and the atomic result/credential
+commit remain the next orchestration boundary; this helper checkpoint does not
+claim server-side acceptance.
