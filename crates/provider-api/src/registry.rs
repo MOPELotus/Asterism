@@ -3,12 +3,13 @@ use std::{collections::BTreeMap, sync::Arc};
 use asterism_domain::ProviderId;
 
 use crate::{
-    AnswerResolveCapability, AuthenticationCapability, BrowserBridgeCapability,
-    BrowserBridgeResultDisposition, CourseInventoryCapability, DurationReadCapability,
-    ProviderCapability, ProviderMetadata, ProviderRuntimeSettingsSchema, ProviderSettingsError,
-    QuestionInventoryCapability, QuestionParseCapability, SubmissionBuildCapability,
-    SubmissionExecuteCapability, SubmissionVerifyCapability, TaskDetailCapability,
-    TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
+    AnswerHistoryHarvestCapability, AnswerResolveCapability, AuthenticationCapability,
+    BrowserBridgeCapability, BrowserBridgeResultDisposition, CourseInventoryCapability,
+    DurationReadCapability, ProviderCapability, ProviderIdentity, ProviderMetadata,
+    ProviderRuntimeSettingsSchema, ProviderSettingsError, QuestionInventoryCapability,
+    QuestionParseCapability, SubmissionBuildCapability, SubmissionExecuteCapability,
+    SubmissionVerifyCapability, TaskDetailCapability, TaskExecutionCapability,
+    TaskInventoryCapability, TaskProgressCapability,
 };
 
 const MAX_CAPTURE_RECIPE_ALTERNATIVES: usize = 8;
@@ -29,6 +30,7 @@ pub struct ProviderEntry {
     pub submission_build: Option<Arc<dyn SubmissionBuildCapability>>,
     pub submission_execute: Option<Arc<dyn SubmissionExecuteCapability>>,
     pub submission_verify: Option<Arc<dyn SubmissionVerifyCapability>>,
+    pub answer_history_harvest: Option<Arc<dyn AnswerHistoryHarvestCapability>>,
     pub task_execution: Option<Arc<dyn TaskExecutionCapability>>,
     pub browser_bridge: Option<Arc<dyn BrowserBridgeCapability>>,
 }
@@ -51,6 +53,10 @@ impl std::fmt::Debug for ProviderEntry {
             .field("submission_build", &self.submission_build.is_some())
             .field("submission_execute", &self.submission_execute.is_some())
             .field("submission_verify", &self.submission_verify.is_some())
+            .field(
+                "answer_history_harvest",
+                &self.answer_history_harvest.is_some(),
+            )
             .field("task_execution", &self.task_execution.is_some())
             .field("browser_bridge", &self.browser_bridge.is_some())
             .finish()
@@ -74,6 +80,7 @@ impl ProviderEntry {
             submission_build: None,
             submission_execute: None,
             submission_verify: None,
+            answer_history_harvest: None,
             task_execution: None,
             browser_bridge: None,
         }
@@ -179,6 +186,10 @@ impl ProviderEntry {
                 ProviderCapability::SubmissionVerify,
                 self.submission_verify.is_some(),
             ),
+            (
+                ProviderCapability::AnswerHistoryHarvest,
+                self.answer_history_harvest.is_some(),
+            ),
         ];
         for (capability, implemented) in checks {
             if self.metadata.advertises(capability) != implemented {
@@ -237,6 +248,7 @@ impl ProviderEntry {
     }
 
     fn validate_identities(&self) -> Result<(), RegistryError> {
+        self.validate_answer_history_identity()?;
         let identities = [
             (
                 "authentication",
@@ -313,14 +325,14 @@ impl ProviderEntry {
             (
                 "task_execution",
                 self.task_execution
-                    .as_ref()
-                    .map(|implementation| implementation.metadata()),
+                    .as_deref()
+                    .map(ProviderIdentity::metadata),
             ),
             (
                 "browser_bridge",
                 self.browser_bridge
-                    .as_ref()
-                    .map(|implementation| implementation.metadata()),
+                    .as_deref()
+                    .map(ProviderIdentity::metadata),
             ),
         ];
         for (slot, implementation) in identities {
@@ -332,6 +344,20 @@ impl ProviderEntry {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_answer_history_identity(&self) -> Result<(), RegistryError> {
+        if self
+            .answer_history_harvest
+            .as_ref()
+            .is_some_and(|implementation| implementation.metadata() != &self.metadata)
+        {
+            return Err(RegistryError::IdentityMismatch {
+                provider_id: self.metadata.id.clone(),
+                slot: "answer_history_harvest",
+            });
+        }
         Ok(())
     }
 }
@@ -461,8 +487,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        BrowserSessionSpec, ProviderContext, ProviderResult, RemoteCourse, RemoteQuestionRef,
-        RemoteTask, VerificationLevel,
+        AnswerHistoryCursor, AnswerHistoryPage, AnswerHistoryTaskRequest, BrowserSessionSpec,
+        ProviderAnswerHistoryTaskEvidence, ProviderContext, ProviderResult, RemoteCourse,
+        RemoteQuestionRef, RemoteTask, VerificationLevel,
     };
 
     #[derive(Debug)]
@@ -472,6 +499,11 @@ mod tests {
 
     #[derive(Debug)]
     struct FakeQuestionRead {
+        metadata: ProviderMetadata,
+    }
+
+    #[derive(Debug)]
+    struct FakeAnswerHistory {
         metadata: ProviderMetadata,
     }
 
@@ -526,6 +558,31 @@ mod tests {
     impl crate::ProviderIdentity for FakeQuestionRead {
         fn metadata(&self) -> &ProviderMetadata {
             &self.metadata
+        }
+    }
+
+    impl crate::ProviderIdentity for FakeAnswerHistory {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl AnswerHistoryHarvestCapability for FakeAnswerHistory {
+        async fn list_answer_history(
+            &self,
+            _context: &ProviderContext,
+            _cursor: Option<&AnswerHistoryCursor>,
+        ) -> ProviderResult<AnswerHistoryPage> {
+            unreachable!("registry identity test does not enumerate history")
+        }
+
+        async fn read_answer_history_task(
+            &self,
+            _context: &ProviderContext,
+            _request: &AnswerHistoryTaskRequest,
+        ) -> ProviderResult<ProviderAnswerHistoryTaskEvidence> {
+            unreachable!("registry identity test does not read history")
         }
     }
 
@@ -739,6 +796,28 @@ mod tests {
             registry.register(ProviderEntry::metadata_only(metadata)),
             Err(RegistryError::CapabilityMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn answer_history_advertisement_requires_the_exact_provider_slot() {
+        let mut advertised = metadata();
+        advertised
+            .capabilities
+            .insert(ProviderCapability::AnswerHistoryHarvest);
+        assert!(matches!(
+            ProviderRegistry::default().register(ProviderEntry::metadata_only(advertised.clone())),
+            Err(RegistryError::CapabilityMismatch {
+                capability: ProviderCapability::AnswerHistoryHarvest,
+                ..
+            })
+        ));
+
+        let implementation = Arc::new(FakeAnswerHistory {
+            metadata: advertised.clone(),
+        });
+        let mut entry = ProviderEntry::metadata_only(advertised);
+        entry.answer_history_harvest = Some(implementation);
+        ProviderRegistry::default().register(entry).unwrap();
     }
 
     #[test]

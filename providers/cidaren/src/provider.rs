@@ -79,6 +79,7 @@ pub fn build_development_provider(
         submission_build: Some(Arc::new(CidarenSubmissionBuild::try_new()?)),
         submission_execute: Some(submission_execute),
         submission_verify: Some(submission_verify),
+        answer_history_harvest: None,
         task_execution: None,
         browser_bridge: Some(Arc::new(CidarenBrowserBridge::try_new(task_detail)?)),
     })

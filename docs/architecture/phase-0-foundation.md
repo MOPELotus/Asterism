@@ -4045,3 +4045,19 @@ answer and Task bindings are validated before ingestion. Diagnostics expose
 only counts and digest markers, not stems or answers. The contract grants no
 submission, unlock or retake method; capability advertisement/registry wiring
 and the first evidenced Provider adapter remain the next slices.
+
+## Two-hundred-and-twenty-fourth Phase 0 slice
+
+The Provider registry now owns an explicit `AnswerHistoryHarvest` capability
+slot. Registration requires exact agreement between metadata advertisement and
+the trait implementation, and the implementation must return the same complete
+Provider metadata identity as every other slot. A metadata-only declaration,
+an unadvertised implementation or an implementation borrowed from another
+Provider fails registration.
+
+All existing Provider and test entries were migrated explicitly with no
+history slot, so unsupported platforms cannot accidentally turn the default
+bootstrap job into a false empty success. The generic scheduler also cannot
+claim these jobs outside their atomic harvest lifecycle. The next Provider
+slice may advertise the capability only where audited result/history protocol
+evidence can produce bounded pages and exact Task evidence.

@@ -155,6 +155,7 @@ pub fn build_development_provider(
         submission_build: Some(submission_build),
         submission_execute: Some(submission_execute),
         submission_verify: Some(submission_verify),
+        answer_history_harvest: None,
         task_execution: Some(resource_execution),
         browser_bridge: Some(browser_bridge),
     })

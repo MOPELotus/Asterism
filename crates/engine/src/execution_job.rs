@@ -5597,6 +5597,7 @@ mod tests {
                     submission_build: None,
                     submission_execute: Some(provider.clone()),
                     submission_verify: Some(provider.clone()),
+                    answer_history_harvest: None,
                     task_execution: Some(provider.clone()),
                     browser_bridge: None,
                 })

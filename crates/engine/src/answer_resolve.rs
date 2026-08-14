@@ -577,6 +577,7 @@ mod tests {
             submission_build: None,
             submission_execute: None,
             submission_verify: None,
+            answer_history_harvest: None,
             task_execution: None,
             browser_bridge: None,
         };

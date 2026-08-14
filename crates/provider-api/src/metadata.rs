@@ -51,6 +51,7 @@ pub enum ProviderCapability {
     SubmissionBuild,
     SubmissionExecute,
     SubmissionVerify,
+    AnswerHistoryHarvest,
     DurationRead,
     DurationReport,
     Discussion,

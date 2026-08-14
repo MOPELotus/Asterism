@@ -71,6 +71,7 @@ pub fn build_development_provider(
         submission_build: None,
         submission_execute: None,
         submission_verify: None,
+        answer_history_harvest: None,
         task_execution: Some(task_execution),
         browser_bridge: None,
     })
