@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use asterism_provider_api::{
-    CaptureReadiness, CaptureRecipe, CaptureScalarSource, CaptureValueSource,
+    BrowserSessionSpec, CaptureReadiness, CaptureRecipe, CaptureScalarSource, CaptureValueSource,
 };
 use asterism_secrets::SecretString;
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
@@ -31,6 +31,130 @@ pub struct ChromiumCapture {
     process: IsolatedBrowserProcess,
     target_id: String,
     cdp: CdpSession,
+}
+
+/// One stable top-level browser document observed under a frozen
+/// `BrowserSessionSpec` origin allowlist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeDocumentBinding {
+    pub observed_origin: String,
+    pub frame_id: String,
+}
+
+/// An isolated Chromium process prepared for typed `BrowserBridge` commands.
+/// This boundary launches and binds the document only; it does not interpret
+/// opaque Provider command artifacts.
+pub struct ChromiumBrowserBridge {
+    spec: BrowserSessionSpec,
+    process: IsolatedBrowserProcess,
+    target_id: String,
+    cdp: CdpSession,
+}
+
+impl std::fmt::Debug for ChromiumBrowserBridge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChromiumBrowserBridge")
+            .field("spec", &self.spec)
+            .field("target_id", &self.target_id)
+            .field("browser", &"running")
+            .field("cdp", &"attached")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChromiumBrowserBridge {
+    /// Launches the exact frozen `BrowserBridge` start route in an isolated
+    /// profile and attaches only to an allowlisted page target.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid specification/browser path, failed process launch,
+    /// unsafe `DevTools` endpoint, target drift or CDP initialization failure.
+    pub async fn launch(
+        spec: BrowserSessionSpec,
+        browser_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        spec.validate().context("BrowserBridge policy is invalid")?;
+        let profile = tempfile::Builder::new()
+            .prefix("asterism-browser-bridge-")
+            .tempdir()
+            .context("failed to create the isolated BrowserBridge profile")?;
+        let browser = launch_browser(&spec.start_url, profile.path(), browser_path, spec.headless)?;
+        let mut process = IsolatedBrowserProcess::new(browser, profile);
+        let profile_path = process.profile_path().to_path_buf();
+        let port = wait_for_devtools_port(process.browser_mut(), &profile_path).await?;
+        let target = wait_for_allowed_target(
+            process.browser_mut(),
+            port,
+            &spec.allowed_origins,
+            "BrowserBridge",
+        )
+        .await?;
+        let socket = CdpWebSocket::connect(&target.web_socket_debugger_url).await?;
+        let mut cdp = CdpSession::new(socket, BTreeSet::new());
+        initialize_cdp(&mut cdp).await?;
+        let mut bridge = Self {
+            spec,
+            process,
+            target_id: target.id,
+            cdp,
+        };
+        bridge.wait_for_initial_document().await?;
+        Ok(bridge)
+    }
+
+    /// Returns the current stable top-level origin/frame binding after
+    /// repeating the frozen navigation allowlist check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the browser exited, the document is missing or
+    /// navigation escaped the frozen policy.
+    pub async fn document_binding(&mut self) -> anyhow::Result<BrowserBridgeDocumentBinding> {
+        if self.process.browser_mut().try_wait()?.is_some() {
+            bail!("isolated BrowserBridge browser exited before document binding");
+        }
+        let document = current_document(&mut self.cdp, &self.spec.allowed_origins).await?;
+        Ok(BrowserBridgeDocumentBinding {
+            observed_origin: document.origin,
+            frame_id: document.frame_id,
+        })
+    }
+
+    /// Closes the isolated browser and reclaims its process tree/profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the browser process tree or profile cannot be
+    /// reclaimed.
+    pub async fn shutdown(mut self) -> anyhow::Result<()> {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.cdp.command("Browser.close", json!({})),
+        )
+        .await;
+        self.process.shutdown().await
+    }
+
+    async fn wait_for_initial_document(&mut self) -> anyhow::Result<()> {
+        let deadline = tokio::time::Instant::now() + BROWSER_START_TIMEOUT;
+        loop {
+            if self.process.browser_mut().try_wait()?.is_some() {
+                bail!("isolated BrowserBridge browser exited before its document was ready");
+            }
+            if current_document_candidate(&mut self.cdp, &self.spec.allowed_origins)
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("isolated BrowserBridge document did not become ready in time");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
 impl std::fmt::Debug for ChromiumCapture {
@@ -62,27 +186,23 @@ impl ChromiumCapture {
             .prefix("asterism-capture-")
             .tempdir()
             .context("failed to create the isolated browser profile")?;
-        let browser = launch_browser(&recipe.start_url, profile.path(), browser_path)?;
+        let browser = launch_browser(&recipe.start_url, profile.path(), browser_path, false)?;
         // Install the process-tree guard immediately after spawn. Startup can
         // fail before CDP exists, and `Child` alone does not terminate its
         // Chromium subprocesses when dropped.
         let mut process = IsolatedBrowserProcess::new(browser, profile);
         let profile_path = process.profile_path().to_path_buf();
         let port = wait_for_devtools_port(process.browser_mut(), &profile_path).await?;
-        let target = wait_for_recipe_target(process.browser_mut(), port, &recipe).await?;
-        let socket = CdpWebSocket::connect(&target.web_socket_debugger_url).await?;
-        let mut cdp = CdpSession::new(socket, &recipe);
-        cdp.command("Page.enable", json!({})).await?;
-        cdp.command(
-            "Network.enable",
-            json!({
-                "maxTotalBufferSize": 0,
-                "maxResourceBufferSize": 0,
-                "maxPostDataSize": 0
-            }),
+        let target = wait_for_allowed_target(
+            process.browser_mut(),
+            port,
+            &recipe.navigation_origins,
+            "Capture recipe",
         )
         .await?;
-        cdp.command("Runtime.enable", json!({})).await?;
+        let socket = CdpWebSocket::connect(&target.web_socket_debugger_url).await?;
+        let mut cdp = CdpSession::new(socket, declared_headers(&recipe));
+        initialize_cdp(&mut cdp).await?;
         let mut capture = Self {
             recipe,
             process,
@@ -175,52 +295,11 @@ impl ChromiumCapture {
     }
 
     async fn current_document(&mut self) -> anyhow::Result<DocumentBinding> {
-        self.current_document_candidate()
-            .await?
-            .context("DevTools frame-tree document is temporarily empty")
+        current_document(&mut self.cdp, &self.recipe.navigation_origins).await
     }
 
     async fn current_document_candidate(&mut self) -> anyhow::Result<Option<DocumentBinding>> {
-        let response = self.cdp.command("Page.getFrameTree", json!({})).await?;
-        let frame = response
-            .value()
-            .pointer("/result/frameTree/frame")
-            .and_then(Value::as_object)
-            .context("DevTools frame-tree response is invalid")?;
-        let loader_id = frame
-            .get("loaderId")
-            .and_then(Value::as_str)
-            .context("DevTools frame-tree has no loader ID")?;
-        if loader_id.is_empty() {
-            return Ok(None);
-        }
-        let loader_id = bounded_text(frame.get("loaderId"), 256)
-            .context("DevTools frame-tree has no bounded loader ID")?;
-        let frame_id = bounded_text(frame.get("id"), 256)
-            .context("DevTools frame-tree has no bounded frame ID")?;
-        let raw_url = frame
-            .get("url")
-            .and_then(Value::as_str)
-            .context("DevTools frame-tree has no URL")?;
-        if raw_url.is_empty() {
-            return Ok(None);
-        }
-        let url = bounded_text(frame.get("url"), 2_048)
-            .context("DevTools frame-tree has no bounded URL")?;
-        let origin = canonical_origin(&url).context("browser page URL has no safe HTTPS origin")?;
-        if !self
-            .recipe
-            .navigation_origins
-            .iter()
-            .any(|allowed| allowed == &origin)
-        {
-            bail!("browser navigated outside the Capture recipe origin allowlist");
-        }
-        Ok(Some(DocumentBinding {
-            loader_id,
-            frame_id,
-            origin,
-        }))
+        current_document_candidate(&mut self.cdp, &self.recipe.navigation_origins).await
     }
 
     async fn capture_storage(
@@ -378,6 +457,71 @@ struct DocumentBinding {
     origin: String,
 }
 
+async fn initialize_cdp(cdp: &mut CdpSession) -> anyhow::Result<()> {
+    cdp.command("Page.enable", json!({})).await?;
+    cdp.command(
+        "Network.enable",
+        json!({
+            "maxTotalBufferSize": 0,
+            "maxResourceBufferSize": 0,
+            "maxPostDataSize": 0
+        }),
+    )
+    .await?;
+    cdp.command("Runtime.enable", json!({})).await?;
+    Ok(())
+}
+
+async fn current_document(
+    cdp: &mut CdpSession,
+    allowed_origins: &[String],
+) -> anyhow::Result<DocumentBinding> {
+    current_document_candidate(cdp, allowed_origins)
+        .await?
+        .context("DevTools frame-tree document is temporarily empty")
+}
+
+async fn current_document_candidate(
+    cdp: &mut CdpSession,
+    allowed_origins: &[String],
+) -> anyhow::Result<Option<DocumentBinding>> {
+    let response = cdp.command("Page.getFrameTree", json!({})).await?;
+    let frame = response
+        .value()
+        .pointer("/result/frameTree/frame")
+        .and_then(Value::as_object)
+        .context("DevTools frame-tree response is invalid")?;
+    let loader_id = frame
+        .get("loaderId")
+        .and_then(Value::as_str)
+        .context("DevTools frame-tree has no loader ID")?;
+    if loader_id.is_empty() {
+        return Ok(None);
+    }
+    let loader_id = bounded_text(frame.get("loaderId"), 256)
+        .context("DevTools frame-tree has no bounded loader ID")?;
+    let frame_id = bounded_text(frame.get("id"), 256)
+        .context("DevTools frame-tree has no bounded frame ID")?;
+    let raw_url = frame
+        .get("url")
+        .and_then(Value::as_str)
+        .context("DevTools frame-tree has no URL")?;
+    if raw_url.is_empty() {
+        return Ok(None);
+    }
+    let url =
+        bounded_text(frame.get("url"), 2_048).context("DevTools frame-tree has no bounded URL")?;
+    let origin = canonical_origin(&url).context("browser page URL has no safe HTTPS origin")?;
+    if !allowed_origins.iter().any(|allowed| allowed == &origin) {
+        bail!("browser navigated outside the frozen origin allowlist");
+    }
+    Ok(Some(DocumentBinding {
+        loader_id,
+        frame_id,
+        origin,
+    }))
+}
+
 struct CdpSession {
     socket: CdpWebSocket,
     next_id: u64,
@@ -390,11 +534,11 @@ struct CdpSession {
 }
 
 impl CdpSession {
-    fn new(socket: CdpWebSocket, recipe: &CaptureRecipe) -> Self {
+    fn new(socket: CdpWebSocket, declared_headers: BTreeSet<(String, String)>) -> Self {
         Self {
             socket,
             next_id: 1,
-            declared_headers: declared_headers(recipe),
+            declared_headers,
             requests: BTreeMap::new(),
             pending_headers: BTreeMap::new(),
             observed_headers: BTreeMap::new(),
@@ -751,6 +895,7 @@ fn launch_browser(
     start_url: &str,
     profile: &Path,
     browser_path: Option<&Path>,
+    headless: bool,
 ) -> anyhow::Result<Child> {
     let browser = browser_path
         .map(Path::to_path_buf)
@@ -759,16 +904,20 @@ fn launch_browser(
     if browser_path.is_some() && !browser.is_file() {
         bail!("the explicit browser path is not a file");
     }
-    Command::new(browser)
-        .args([
-            "--remote-debugging-port=0",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-networking",
-            "--disable-component-update",
-            "--disable-sync",
-            "--new-window",
-        ])
+    let mut command = Command::new(browser);
+    command.args([
+        "--remote-debugging-port=0",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-sync",
+        "--new-window",
+    ]);
+    if headless {
+        command.arg("--headless=new");
+    }
+    command
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg(start_url)
         .stdin(Stdio::null())
@@ -866,10 +1015,11 @@ async fn wait_for_devtools_port(browser: &mut Child, profile: &Path) -> anyhow::
     }
 }
 
-async fn wait_for_recipe_target(
+async fn wait_for_allowed_target(
     browser: &mut Child,
     port: u16,
-    recipe: &CaptureRecipe,
+    allowed_origins: &[String],
+    boundary: &str,
 ) -> anyhow::Result<DevToolsTarget> {
     let client = Client::builder()
         .redirect(Policy::none())
@@ -883,7 +1033,7 @@ async fn wait_for_recipe_target(
             bail!("isolated Capture browser exited before its page target was ready");
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("isolated Capture browser did not expose the recipe page in time");
+            bail!("isolated browser did not expose the {boundary} page in time");
         }
         if let Ok(response) = client.get(&url).send().await
             && response.status() == StatusCode::OK
@@ -891,10 +1041,7 @@ async fn wait_for_recipe_target(
             && let Some(target) = targets.drain(..).find(|target| {
                 target.target_type == "page"
                     && canonical_origin(&target.url).is_some_and(|origin| {
-                        recipe
-                            .navigation_origins
-                            .iter()
-                            .any(|allowed| allowed == &origin)
+                        allowed_origins.iter().any(|allowed| allowed == &origin)
                     })
                     && !target.id.is_empty()
                     && !target.web_socket_debugger_url.is_empty()
@@ -1216,6 +1363,23 @@ mod tests {
         let document = browser.current_document().await.unwrap();
         assert_eq!(document.origin, "https://example.com");
         assert!(!document.loader_id.is_empty());
+        browser.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a locally installed Chromium browser and network access"]
+    async fn isolated_browser_bridge_returns_only_the_frozen_document_binding() {
+        let spec = BrowserSessionSpec {
+            version: 1,
+            start_url: "https://example.com/".to_owned(),
+            isolation_key: "browser-bridge-example".to_owned(),
+            allowed_origins: vec!["https://example.com".to_owned()],
+            headless: true,
+        };
+        let mut browser = ChromiumBrowserBridge::launch(spec, None).await.unwrap();
+        let binding = browser.document_binding().await.unwrap();
+        assert_eq!(binding.observed_origin, "https://example.com");
+        assert!(!binding.frame_id.is_empty());
         browser.shutdown().await.unwrap();
     }
 }

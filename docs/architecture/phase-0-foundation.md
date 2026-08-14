@@ -3666,3 +3666,24 @@ This closes the reusable helper-side HTTP transport, not Provider action
 execution. A subsequent slice must connect typed Provider command handling and
 actual DOM/browser actions to this stateful client; no arbitrary JSON or
 selector interpreter is introduced by the transport layer.
+
+## Two-hundred-and-fifth Phase 0 slice
+
+The Capture runtime can now launch a BrowserBridge session from the exact
+frozen `BrowserSessionSpec`. It validates the policy, creates a unique temporary
+profile, applies the Provider's visible/headless choice, opens only the exact
+credential-free start route and attaches DevTools solely to a page whose HTTPS
+origin is in the frozen allowlist.
+
+Capture and BrowserBridge now share one bounded CDP initialization and stable
+top-level document parser without sharing credential-read authority. The
+BrowserBridge path configures no declared header/storage/Cookie sources and
+returns only the current allowlisted origin plus bounded frame ID needed by the
+durable runtime-binding API. Every binding read repeats process liveness and
+navigation policy; an origin escape fails before command dispatch.
+
+Normal shutdown uses the existing bounded DevTools close and process-tree plus
+temporary-profile reclamation path. An ignored real-Chromium smoke test covers
+headless launch, exact target selection and origin/frame binding when a local
+browser and network are available. Typed Provider DOM action handlers remain
+the next layer; this slice does not execute opaque command JSON.

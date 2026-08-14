@@ -3,7 +3,7 @@ mod cdp_websocket;
 mod client;
 mod recipe;
 
-pub use browser::ChromiumCapture;
+pub use browser::{BrowserBridgeDocumentBinding, ChromiumBrowserBridge, ChromiumCapture};
 pub use client::{
     BrowserBridgeCommand, BrowserBridgeResultReceipt, BrowserBridgeRuntimeBindingReceipt,
     BrowserBridgeSessionSnapshot, CaptureClient, CaptureCredentialAccepted, CaptureCredentialField,
