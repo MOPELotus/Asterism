@@ -3571,3 +3571,24 @@ WELearn may now declare `DurationReport + ResourceExecution` as one call, but
 its profile/target and current-donor preserved-time goal still need their own
 durable Provider-private execution evidence before post-crash verification can
 prove the exact goal.
+
+## Two-hundred-and-first Phase 0 slice
+
+Provider execution planning can now return one optional credential-free private
+artifact together with its call groups. Core bounds the artifact type to the
+current Provider namespace, accepts only a sanitized JSON object of at most 64
+KiB, rejects credential-shaped keys, computes a domain-separated digest and
+redacts both payload and digest from `Debug` output.
+
+Migration 049 stores that exact Provider, type, digest, payload and capture time
+under the Execution primary key in the same scheduling transaction as the
+immutable capability calls and resolved runtime settings. Recovery reads repeat
+the Task-to-account Provider binding, require the capture time to equal the
+Execution creation time, reconstruct the bounded artifact and recompute its
+digest. Changed payload, type, Provider or digest fails closed.
+
+This artifact contains planning evidence, not credentials and not permission to
+mutate. It is not yet injected into `ExecutionRequest`; that remains a separate
+contract change so every Provider adapter must explicitly accept and validate
+the new frozen input. WELearn's atomic child plan and UAI's Course batch/start
+plan can use this boundary once their adapters implement that contract.

@@ -18,8 +18,9 @@ use asterism_domain::{
     Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
-    BrowserSessionSpec, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
-    ProviderRuntimeSettingsSchema, ProviderSettingScope, ResolvedProviderRuntimeSettings,
+    BrowserSessionSpec, ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource,
+    ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema, ProviderSettingScope,
+    ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
@@ -1458,6 +1459,7 @@ pub struct ExecutionScheduleRequest<'a> {
     /// One-based global plan positions which start a Provider call. The first
     /// value is always one and the sequence is strictly increasing.
     pub capability_call_starts: &'a [u8],
+    pub provider_plan_artifact: Option<&'a ProviderExecutionPlanArtifact>,
     pub billing: Option<ExecutionBillingReservation<'a>>,
     pub runtime_settings: Option<ExecutionRuntimeSettingsResolution<'a>>,
     pub expected_task_state: OrchestrationState,
@@ -1811,6 +1813,11 @@ pub trait ExecutionRepository: Send + Sync {
         &self,
         execution_id: ExecutionId,
     ) -> Result<Option<ExecutionRuntimeSettingsSnapshot>, StorageError>;
+
+    async fn find_execution_provider_plan_artifact(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ProviderExecutionPlanArtifact>, StorageError>;
 
     async fn start_attempt(
         &self,

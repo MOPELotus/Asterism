@@ -225,6 +225,7 @@ mod tests {
                 execution: &execution,
                 capability_plan: &execution.requested_capabilities,
                 capability_call_starts: &[1],
+                provider_plan_artifact: None,
                 billing: None,
                 runtime_settings: None,
                 expected_task_state: OrchestrationState::Ready,

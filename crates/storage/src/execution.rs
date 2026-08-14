@@ -8,8 +8,8 @@ use asterism_domain::{
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
-    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderSettingValue,
-    ResolvedProviderRuntimeSettings,
+    ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
+    ProviderSettingValue, ResolvedProviderRuntimeSettings,
 };
 use asterism_scheduler::ScheduledJobKind;
 use async_trait::async_trait;
@@ -200,6 +200,15 @@ impl ExecutionRepository for SqliteExecutionRepository {
             insert_runtime_settings_snapshot(&mut transaction, execution.id, resolution.snapshot)
                 .await?;
         }
+        if let Some(artifact) = request.provider_plan_artifact {
+            insert_provider_plan_artifact(
+                &mut transaction,
+                execution.id,
+                execution.created_at,
+                artifact,
+            )
+            .await?;
+        }
 
         if let Some(billing) = request.billing.as_ref() {
             insert_credit_reservation(&mut transaction, billing, request.correlation_id).await?;
@@ -276,6 +285,27 @@ impl ExecutionRepository for SqliteExecutionRepository {
         .as_ref()
         .map(decode_runtime_settings_snapshot)
         .transpose()
+    }
+
+    async fn find_execution_provider_plan_artifact(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ProviderExecutionPlanArtifact>, StorageError> {
+        let row = sqlx::query(
+            "SELECT plan.provider_id AS plan_provider_id, plan.artifact_type, \
+                    plan.artifact_digest, plan.payload_json, plan.captured_at, \
+                    execution.created_at AS execution_created_at, \
+                    account.provider_id AS actual_provider_id \
+             FROM execution_provider_plan_artifacts AS plan \
+             INNER JOIN executions AS execution ON execution.id = plan.execution_id \
+             INNER JOIN tasks AS task ON task.id = execution.task_id \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             WHERE plan.execution_id = ?",
+        )
+        .bind(execution_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        row.as_ref().map(decode_provider_plan_artifact).transpose()
     }
 
     async fn start_attempt(
@@ -2432,6 +2462,11 @@ fn validate_schedule_request(request: &ExecutionScheduleRequest<'_>) -> Result<(
             && valid_runtime_settings_snapshot(resolution.snapshot, execution.created_at)
             && resolution.snapshot.resolved.schema_version == resolution.schema.version
     });
+    let provider_plan_valid = request.provider_plan_artifact.is_none_or(|artifact| {
+        request
+            .runtime_settings
+            .is_some_and(|resolution| artifact.provider_id() == &resolution.snapshot.provider_id)
+    });
     let capability_plan_valid = request.capability_plan.len()
         == execution.requested_capabilities.len()
         && request
@@ -2475,6 +2510,7 @@ fn validate_schedule_request(request: &ExecutionScheduleRequest<'_>) -> Result<(
         || request.expected_task_state == OrchestrationState::Scheduled
         || !billing_valid
         || !runtime_settings_valid
+        || !provider_plan_valid
     {
         return Err(StorageError::InvalidData(
             "execution schedule request is invalid".to_owned(),
@@ -2762,6 +2798,65 @@ async fn insert_runtime_settings_snapshot(
     Ok(())
 }
 
+async fn insert_provider_plan_artifact(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    captured_at: Timestamp,
+    artifact: &ProviderExecutionPlanArtifact,
+) -> Result<(), StorageError> {
+    let payload_json = serde_json::to_string(artifact.payload_sanitized())?;
+    sqlx::query(
+        "INSERT INTO execution_provider_plan_artifacts \
+         (execution_id, provider_id, artifact_type, artifact_digest, payload_json, captured_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(execution_id.to_string())
+    .bind(artifact.provider_id().as_str())
+    .bind(artifact.artifact_type())
+    .bind(artifact.artifact_digest().as_slice())
+    .bind(payload_json)
+    .bind(encode_timestamp(captured_at))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn decode_provider_plan_artifact(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ProviderExecutionPlanArtifact, StorageError> {
+    let provider_id = ProviderId::new(row.try_get::<String, _>("plan_provider_id")?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let actual_provider_id = ProviderId::new(row.try_get::<String, _>("actual_provider_id")?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let captured_at = decode_timestamp(row.try_get("captured_at")?)?;
+    let execution_created_at = decode_timestamp(row.try_get("execution_created_at")?)?;
+    if provider_id != actual_provider_id || captured_at != execution_created_at {
+        return Err(StorageError::InvalidData(
+            "execution Provider plan binding is invalid".to_owned(),
+        ));
+    }
+    let artifact_type = row.try_get::<String, _>("artifact_type")?;
+    let payload_json = row.try_get::<String, _>("payload_json")?;
+    if payload_json.len() > 64 * 1_024 {
+        return Err(StorageError::InvalidData(
+            "execution Provider plan artifact is too large".to_owned(),
+        ));
+    }
+    let artifact = ProviderExecutionPlanArtifact::try_new(
+        provider_id,
+        artifact_type,
+        serde_json::from_str(&payload_json)?,
+    )
+    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let persisted_digest = decode_execution_digest(row.try_get("artifact_digest")?)?;
+    if artifact.artifact_digest() != persisted_digest {
+        return Err(StorageError::InvalidData(
+            "execution Provider plan artifact digest is invalid".to_owned(),
+        ));
+    }
+    Ok(artifact)
+}
+
 fn decode_runtime_settings_snapshot(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<ExecutionRuntimeSettingsSnapshot, StorageError> {
@@ -2849,6 +2944,11 @@ async fn insert_request_audit(
             "provider_revision": resolution.snapshot.provider_revision,
             "provider_account_revision": resolution.snapshot.provider_account_revision,
             "task_revision": resolution.snapshot.task_revision,
+        })),
+        "provider_plan": request.provider_plan_artifact.map(|artifact| serde_json::json!({
+            "provider_id": artifact.provider_id(),
+            "artifact_type": artifact.artifact_type(),
+            "artifact_digest": "[HASHED]",
         })),
     });
     sqlx::query(
@@ -3369,6 +3469,7 @@ mod tests {
             execution: &execution,
             capability_plan: &execution.requested_capabilities,
             capability_call_starts: &[1],
+            provider_plan_artifact: None,
             billing: None,
             runtime_settings: None,
             expected_task_state: OrchestrationState::Ready,
@@ -4100,6 +4201,63 @@ mod tests {
         assert!(audit_metadata.contains("\"schema_version\":2"));
         assert!(audit_metadata.contains("\"provider_revision\":7"));
         assert!(!audit_metadata.contains("execution.max_concurrency"));
+    }
+
+    #[tokio::test]
+    async fn scheduling_freezes_and_rechecks_provider_plan_artifact() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let execution = scheduled_execution(owner, task_id, now);
+        insert_provider_runtime_settings(&database, "test", 4).await;
+        let schema = runtime_settings_schema();
+        let snapshot = runtime_settings_snapshot(now, "test", 4);
+        let artifact = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new("test").unwrap(),
+            "test.atomic-child.v1",
+            serde_json::json!({"profile": "atomic", "target_seconds": 120}),
+        )
+        .unwrap();
+        let mut request = test_request(&execution, owner, "provider-plan-artifact");
+        request.runtime_settings = Some(ExecutionRuntimeSettingsResolution {
+            snapshot: &snapshot,
+            schema: &schema,
+        });
+        request.provider_plan_artifact = Some(&artifact);
+        repository.schedule_execution(request).await.unwrap();
+        assert_eq!(
+            repository
+                .find_execution_provider_plan_artifact(execution.id)
+                .await
+                .unwrap(),
+            Some(artifact)
+        );
+        let audit_metadata: String = sqlx::query_scalar(
+            "SELECT metadata_sanitized_json FROM audit_records \
+             WHERE resource_type = 'execution' AND resource_id = ?",
+        )
+        .bind(execution.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(audit_metadata.contains("test.atomic-child.v1"));
+        assert!(audit_metadata.contains("[HASHED]"));
+        assert!(!audit_metadata.contains("target_seconds"));
+
+        sqlx::query(
+            "UPDATE execution_provider_plan_artifacts SET artifact_digest = zeroblob(32) \
+             WHERE execution_id = ?",
+        )
+        .bind(execution.id.to_string())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        assert!(
+            repository
+                .find_execution_provider_plan_artifact(execution.id)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -4927,6 +5085,7 @@ mod tests {
             execution,
             capability_plan: &execution.requested_capabilities,
             capability_call_starts: &[1],
+            provider_plan_artifact: None,
             billing: None,
             runtime_settings: None,
             expected_task_state: OrchestrationState::Ready,
@@ -4948,6 +5107,7 @@ mod tests {
             execution,
             capability_plan: &execution.requested_capabilities,
             capability_call_starts: &[1],
+            provider_plan_artifact: None,
             billing: Some(ExecutionBillingReservation { quote, reservation }),
             runtime_settings: None,
             expected_task_state: OrchestrationState::Ready,

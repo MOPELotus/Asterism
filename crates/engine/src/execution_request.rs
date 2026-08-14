@@ -126,12 +126,13 @@ where
         let (runtime_settings, runtime_settings_schema) = self
             .resolve_runtime_settings(command.owner_id, &task, command.requested_at)
             .await?;
-        let (
+        let ResolvedExecutionContract {
             verification_required,
             capability_plan,
             capability_call_starts,
+            provider_plan_artifact,
             provider_state_exception,
-        ) = resolve_execution_contract(
+        } = resolve_execution_contract(
             &task,
             &command.requested_capabilities,
             &self.providers,
@@ -181,6 +182,7 @@ where
                 execution: &execution,
                 capability_plan: &capability_plan,
                 capability_call_starts: &capability_call_starts,
+                provider_plan_artifact: provider_plan_artifact.as_ref(),
                 billing: None,
                 runtime_settings: Some(ExecutionRuntimeSettingsResolution {
                     snapshot: &runtime_settings,
@@ -413,9 +415,15 @@ fn resolve_execution_contract(
     providers: &ProviderRegistry,
     provider_id: &asterism_domain::ProviderId,
     runtime_settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
-) -> Result<(bool, Vec<TaskCapability>, Vec<u8>, bool), ExecutionRequestError> {
+) -> Result<ResolvedExecutionContract, ExecutionRequestError> {
     if requested_capabilities == [TaskCapability::SubmissionExecute] {
-        return Ok((false, requested_capabilities.to_vec(), vec![1], false));
+        return Ok(ResolvedExecutionContract {
+            verification_required: false,
+            capability_plan: requested_capabilities.to_vec(),
+            capability_call_starts: vec![1],
+            provider_plan_artifact: None,
+            provider_state_exception: false,
+        });
     }
     let provider = providers
         .get(provider_id)
@@ -423,9 +431,13 @@ fn resolve_execution_contract(
     let Some(capability) = provider.task_execution.as_ref() else {
         return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
     };
-    let calls = capability
-        .execution_call_plan(requested_capabilities, runtime_settings)
+    let provider_plan = capability
+        .execution_plan_snapshot(requested_capabilities, runtime_settings)
         .map_err(|_| ExecutionRequestError::ExecutionVerificationUnavailable)?;
+    if provider_plan.provider_id() != provider_id {
+        return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
+    }
+    let calls = provider_plan.calls();
     if calls.is_empty()
         || calls.len() > 5
         || calls.iter().any(Vec::is_empty)
@@ -435,14 +447,14 @@ fn resolve_execution_contract(
     }
     let mut call_starts = Vec::with_capacity(calls.len());
     let mut next_position = 1_usize;
-    for call in &calls {
+    for call in calls {
         call_starts.push(
             u8::try_from(next_position)
                 .map_err(|_| ExecutionRequestError::ExecutionVerificationUnavailable)?,
         );
         next_position += call.len();
     }
-    let plan = calls.into_iter().flatten().collect::<Vec<_>>();
+    let plan = calls.iter().flatten().copied().collect::<Vec<_>>();
     if plan.len() != requested_capabilities.len()
         || plan
             .iter()
@@ -462,7 +474,21 @@ fn resolve_execution_contract(
         && capability.requires_execution_verification(requested_capabilities);
     let state_exception =
         capability.allows_execution_from_remote_state(requested_capabilities, task.remote_state);
-    Ok((verification, plan, call_starts, state_exception))
+    Ok(ResolvedExecutionContract {
+        verification_required: verification,
+        capability_plan: plan,
+        capability_call_starts: call_starts,
+        provider_plan_artifact: provider_plan.artifact().cloned(),
+        provider_state_exception: state_exception,
+    })
+}
+
+struct ResolvedExecutionContract {
+    verification_required: bool,
+    capability_plan: Vec<TaskCapability>,
+    capability_call_starts: Vec<u8>,
+    provider_plan_artifact: Option<asterism_provider_api::ProviderExecutionPlanArtifact>,
+    provider_state_exception: bool,
 }
 
 fn normalize_requested_capabilities(

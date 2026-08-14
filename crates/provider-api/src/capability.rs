@@ -1513,6 +1513,25 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         })
     }
 
+    /// Freezes the complete Provider execution plan selected only from inputs
+    /// already durable at scheduling time. The optional artifact is
+    /// credential-free Provider-private evidence, not executable authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid call groups or an unsafe Provider artifact.
+    fn execution_plan_snapshot(
+        &self,
+        requested_capabilities: &[TaskCapability],
+        runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<ProviderExecutionPlan> {
+        ProviderExecutionPlan::try_new(
+            self.metadata().id.clone(),
+            self.execution_call_plan(requested_capabilities, runtime_settings)?,
+            None,
+        )
+    }
+
     /// Declares whether this exact selected action set requires the Provider's
     /// goal-bound, read-only verification path. Task-level `ExecutionVerify`
     /// metadata only advertises that at least one action supports this path;
@@ -1541,6 +1560,155 @@ pub trait TaskExecutionCapability: ProviderIdentity {
             "Provider does not implement goal-bound execution verification",
         ))
     }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProviderExecutionPlanArtifact {
+    provider_id: ProviderId,
+    artifact_type: String,
+    artifact_digest: [u8; 32],
+    payload_sanitized: serde_json::Value,
+}
+
+impl ProviderExecutionPlanArtifact {
+    /// Creates bounded, credential-free Provider-private scheduling evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign/unsafe type, non-object payload, credential-shaped
+    /// keys, or an encoded payload larger than 64 KiB.
+    pub fn try_new(
+        provider_id: ProviderId,
+        artifact_type: impl Into<String>,
+        payload_sanitized: serde_json::Value,
+    ) -> ProviderResult<Self> {
+        let artifact_type = artifact_type.into();
+        let encoded = serde_json::to_vec(&payload_sanitized).map_err(|_| {
+            crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution plan artifact is invalid",
+            )
+        })?;
+        if !valid_provider_execution_artifact_type(&provider_id, &artifact_type)
+            || !payload_sanitized.is_object()
+            || encoded.is_empty()
+            || encoded.len() > 64 * 1_024
+            || contains_secret_key(&payload_sanitized)
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution plan artifact is invalid",
+            ));
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"asterism.provider-execution-plan-artifact.v1\0");
+        digest.update(provider_id.as_str().as_bytes());
+        digest.update(b"\0");
+        digest.update(artifact_type.as_bytes());
+        digest.update(b"\0");
+        digest.update(encoded);
+        Ok(Self {
+            provider_id,
+            artifact_type,
+            artifact_digest: digest.finalize().into(),
+            payload_sanitized,
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub fn artifact_type(&self) -> &str {
+        &self.artifact_type
+    }
+
+    pub const fn artifact_digest(&self) -> [u8; 32] {
+        self.artifact_digest
+    }
+
+    pub const fn payload_sanitized(&self) -> &serde_json::Value {
+        &self.payload_sanitized
+    }
+}
+
+impl fmt::Debug for ProviderExecutionPlanArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderExecutionPlanArtifact")
+            .field("provider_id", &self.provider_id)
+            .field("artifact_type", &self.artifact_type)
+            .field("artifact_digest", &"[HASHED]")
+            .field("payload_sanitized", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderExecutionPlan {
+    provider_id: ProviderId,
+    calls: Vec<Vec<TaskCapability>>,
+    artifact: Option<ProviderExecutionPlanArtifact>,
+}
+
+impl ProviderExecutionPlan {
+    /// # Errors
+    ///
+    /// Rejects empty, duplicate or oversized call groups and foreign artifacts.
+    pub fn try_new(
+        provider_id: ProviderId,
+        calls: Vec<Vec<TaskCapability>>,
+        artifact: Option<ProviderExecutionPlanArtifact>,
+    ) -> ProviderResult<Self> {
+        let flattened = calls.iter().flatten().copied().collect::<Vec<_>>();
+        if calls.is_empty()
+            || calls.len() > 5
+            || calls.iter().any(Vec::is_empty)
+            || flattened.len() > 5
+            || flattened
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != flattened.len()
+            || artifact
+                .as_ref()
+                .is_some_and(|artifact| artifact.provider_id != provider_id)
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution plan is invalid",
+            ));
+        }
+        Ok(Self {
+            provider_id,
+            calls,
+            artifact,
+        })
+    }
+
+    pub const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub fn calls(&self) -> &[Vec<TaskCapability>] {
+        &self.calls
+    }
+
+    pub const fn artifact(&self) -> Option<&ProviderExecutionPlanArtifact> {
+        self.artifact.as_ref()
+    }
+}
+
+fn valid_provider_execution_artifact_type(provider_id: &ProviderId, value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+        && value
+            .strip_prefix(provider_id.as_str())
+            .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -1702,6 +1870,70 @@ mod execution_mutation_tests {
         assert!(ExecutionMutationIssue::new(1, "welearn.atomic.start", [0; 32]).is_err());
         assert!(ExecutionMutationReceipt::new(100_001, [9; 32], true).is_err());
         assert!(ExecutionMutationReceipt::new(1, [0; 32], true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod provider_execution_plan_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_is_provider_bound_hashed_bounded_and_redacted() {
+        let provider_id = ProviderId::new("welearn").unwrap();
+        let artifact = ProviderExecutionPlanArtifact::try_new(
+            provider_id.clone(),
+            "welearn.atomic-child.v1",
+            serde_json::json!({
+                "profile": "fanyuchang_fresh_set_save_100",
+                "target_seconds": 120,
+            }),
+        )
+        .unwrap();
+        assert_eq!(artifact.provider_id(), &provider_id);
+        assert_ne!(artifact.artifact_digest(), [0; 32]);
+        let debug = format!("{artifact:?}");
+        assert!(debug.contains("[HASHED]"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("target_seconds"));
+
+        let changed = ProviderExecutionPlanArtifact::try_new(
+            provider_id.clone(),
+            "welearn.atomic-child.v1",
+            serde_json::json!({
+                "profile": "fanyuchang_fresh_set_save_100",
+                "target_seconds": 121,
+            }),
+        )
+        .unwrap();
+        assert_ne!(artifact.artifact_digest(), changed.artifact_digest());
+        assert!(
+            ProviderExecutionPlanArtifact::try_new(
+                provider_id.clone(),
+                "uai.atomic-child.v1",
+                serde_json::json!({"target_seconds": 120}),
+            )
+            .is_err()
+        );
+        assert!(
+            ProviderExecutionPlanArtifact::try_new(
+                provider_id.clone(),
+                "welearn.atomic-child.v1",
+                serde_json::json!({"access_token": "secret"}),
+            )
+            .is_err()
+        );
+
+        let plan = ProviderExecutionPlan::try_new(
+            provider_id,
+            vec![vec![
+                TaskCapability::DurationReport,
+                TaskCapability::ResourceExecution,
+            ]],
+            Some(artifact),
+        )
+        .unwrap();
+        assert_eq!(plan.calls().len(), 1);
+        assert!(plan.artifact().is_some());
     }
 }
 
