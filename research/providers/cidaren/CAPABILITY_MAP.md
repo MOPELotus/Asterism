@@ -174,6 +174,10 @@ The current checkpoint (not a completion boundary):
     Pre-Question reselection/start artifacts retain the bounded next position,
     so a mid-attempt `WordSelectionRequired` response cannot regress recovery
     to the first Question; legacy position-less v1 artifacts fail closed.
+37. exercises multi-relation matching through the registered durable adapter,
+    restoring the immutable Draft after each accepted Verify, requiring a new
+    topic-code digest before the next relation and advancing only after the
+    exact verified relation count reaches the Draft-bound answer length.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

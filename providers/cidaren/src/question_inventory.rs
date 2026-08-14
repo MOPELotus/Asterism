@@ -378,9 +378,9 @@ mod tests {
     use std::{collections::VecDeque, sync::Mutex};
 
     use asterism_domain::{
-        AnswerCandidateId, AnswerSource, AssessmentClass, NormalizedAnswer, ProviderAccountId,
-        QuestionSnapshotId, RemoteState, SecretId, SelectedAnswer, SourceType, SubmissionDraft,
-        SubmissionDraftId, SubmissionDraftItem, TaskCapability,
+        AnswerCandidateId, AnswerPair, AnswerSource, AssessmentClass, NormalizedAnswer,
+        ProviderAccountId, QuestionSnapshotId, RemoteState, SecretId, SelectedAnswer, SourceType,
+        SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, TaskCapability,
     };
     use asterism_provider_api::{
         ExecutionEventSink, ProviderExecutionLog, ProviderProgress, ProviderSubmissionStepOutcome,
@@ -910,6 +910,133 @@ mod tests {
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
+        reason = "the fixture keeps every durable matching relation boundary visible"
+    )]
+    async fn matching_relations_restore_each_rotated_token_before_terminal_advance() {
+        let boundaries = Arc::new(FixtureBoundaries::new(
+            detail("test", -1),
+            vec![
+                response(&matching_question_payload()),
+                response(&json!({"topic_code": "rotated-matching-one"})),
+                response(&json!({"topic_code": "rotated-matching-two"})),
+                CidarenAssessmentResponse::Receipt {
+                    kind: crate::CidarenAssessmentReceiptKind::Completed,
+                    message_sanitized: Some("synthetic completed".to_owned()),
+                },
+            ],
+        ));
+        let inventory = Arc::new(
+            CidarenQuestionInventory::try_new(
+                boundaries.clone(),
+                boundaries.clone(),
+                boundaries.clone(),
+            )
+            .unwrap(),
+        );
+        let execute = CidarenSubmissionExecute::try_new(inventory.clone()).unwrap();
+        let context = context();
+        let task_id = TaskId::new();
+        let settings = settings();
+        let initial = inventory
+            .prepare_question_read_attempt(&context, task_id, REMOTE_TASK_ID, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = prepare_operation(&inventory, &context, task_id, initial, &settings).await;
+        let ProviderQuestionReadStepOutcome::Materialize(materialization) =
+            prepared.execute(&context).await.unwrap()
+        else {
+            panic!("StartAnswer must materialize the matching Question");
+        };
+        let (questions, continuation, _, _) = materialization.into_parts();
+        let [question] = questions.as_slice() else {
+            panic!("Cidaren must materialize one current Question");
+        };
+        let selected = SelectedAnswer {
+            candidate_id: AnswerCandidateId::new(),
+            question_id: question.id,
+            answer: NormalizedAnswer::Pairs(vec![
+                AnswerPair {
+                    left: "alpha".to_owned(),
+                    right: "n:1".to_owned(),
+                },
+                AnswerPair {
+                    left: "beta".to_owned(),
+                    right: "n:0".to_owned(),
+                },
+            ]),
+            source: AnswerSource::ProviderNative,
+            confidence: None,
+        };
+        let preview = CidarenSubmissionBuild::try_new()
+            .unwrap()
+            .build_submission_preview(
+                &context,
+                REMOTE_TASK_ID,
+                std::slice::from_ref(question),
+                std::slice::from_ref(&selected),
+            )
+            .await
+            .unwrap();
+        let draft = SubmissionDraft {
+            id: SubmissionDraftId::new(),
+            task_id,
+            question_snapshot_id: QuestionSnapshotId::new(),
+            provider_id: ProviderId::new("cidaren").unwrap(),
+            provider_version: development_metadata().unwrap().implementation_version,
+            items: vec![SubmissionDraftItem {
+                question: question.clone(),
+                selected,
+            }],
+            payload_preview: preview,
+            created_at: Utc::now(),
+        };
+
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 1, &settings)
+                .await;
+        let ProviderSubmissionStepOutcome::Continue { continuation, .. } =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("first matching relation must rotate the session");
+        };
+        assert_eq!(continuation.phase(), crate::CIDAREN_READY_TO_VERIFY_PHASE);
+        let first_digest = continuation.continuation_digest();
+
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 2, &settings)
+                .await;
+        let ProviderSubmissionStepOutcome::Continue { continuation, .. } =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("second matching relation must rotate to advance");
+        };
+        assert_eq!(continuation.phase(), crate::CIDAREN_READY_TO_ADVANCE_PHASE);
+        assert_ne!(continuation.continuation_digest(), first_digest);
+
+        let prepared =
+            prepare_submission_operation(&execute, &context, &draft, continuation, 3, &settings)
+                .await;
+        let ProviderSubmissionStepOutcome::Submitted { receipt, .. } =
+            prepared.execute(&context, &NoopEvents).await.unwrap()
+        else {
+            panic!("terminal matching advance must submit without a continuation");
+        };
+        assert_eq!(receipt.remote_status, "completed");
+        assert_eq!(
+            *boundaries.operations.lock().unwrap(),
+            [
+                CidarenAttemptOperation::StartAnswer,
+                CidarenAttemptOperation::VerifyAnswer,
+                CidarenAttemptOperation::VerifyAnswer,
+                CidarenAttemptOperation::SubmitAnswerAndSave,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
         reason = "the fixture keeps both durable prepare/execute boundaries visible"
     )]
     async fn post_question_reading_card_rotates_artifact_before_next_question() {
@@ -1293,5 +1420,23 @@ mod tests {
             "../../../fixtures/providers/cidaren/questions/start-answer-single.json"
         ))
         .unwrap()
+    }
+
+    fn matching_question_payload() -> Value {
+        json!({
+            "topic_code": "matching-topic",
+            "topic_mode": 31,
+            "stem": {
+                "content": "Synthetic matching",
+                "remark": [
+                    {"relation": "alpha"},
+                    {"relation": "beta"}
+                ]
+            },
+            "options": [
+                {"answer_tag": 0, "content": "alpha", "sub_options": []},
+                {"answer_tag": 1, "content": "beta", "sub_options": []}
+            ]
+        })
     }
 }

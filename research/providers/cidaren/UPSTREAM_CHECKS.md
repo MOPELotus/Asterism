@@ -438,8 +438,9 @@ replay or fabricated artifacts. Fixture coverage includes mode-73 Skip to
 terminal completion, Verify/advance to a next Question, and a post-Question
 reading-card transition. A mid-attempt word-reselection recovery fixture also
 proves that the bounded next position survives both selection and StartAnswer
-artifact rotations instead of regressing to the first Question. All 144
-Cidaren tests, all-target strict clippy,
+artifact rotations instead of regressing to the first Question. A separate
+durable matching fixture restores the same immutable Draft through two token
+rotations before terminal advance. All 145 Cidaren tests, all-target strict clippy,
 formatting and scoped diff checks passed against the landed atomic shared
 transition contract. The three symbolic default branches, complete public tag
 refs and latest GitHub release metadata were refreshed again after that fix.

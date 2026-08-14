@@ -257,6 +257,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Attempt tests freeze one-operation-at-a-time start/verify/advance/skip,
   sequential rotated tokens for matching, reading-card execution, word
   selection acknowledgement, ambiguity no-replay and semantic fail-closed.
+  The registered SubmissionExecute adapter also restores a two-relation Draft
+  across both rotated-token revisions, reaches ReadyToAdvance only after the
+  second Verify and then accepts one terminal advance without a continuation.
   A full post-Question reselection fixture persists the next position across
   `SkipAnswer -> SubmitChoseWord -> StartAnswer` and materializes Question 2,
   preventing recovery from silently returning to Question 1.
