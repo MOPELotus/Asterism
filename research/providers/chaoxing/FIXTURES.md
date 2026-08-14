@@ -29,6 +29,8 @@ fixtures/providers/chaoxing/
     submission-editor.html
     submission-prompt.html
     submission-view.html
+    chapter-submission-editor.html
+    chapter-result.html
   exam/
     list-empty-script-keywords.html
     list-mixed.html
@@ -96,6 +98,17 @@ Chapter Work `form1` shape. Tests prove stale answer inputs and unknown fields
 are discarded, type codes and ordered fill text are encoded from the immutable
 Draft, the mutation occurs once, and a separate completed-card read confirms
 only task-level completion.
+
+`work/chapter-result.html` models the 2026-06 Chapter-test donor's completed
+`selectWorkQuestionYiPiYue` iframe with `singleQuesId[data=qid]`, localized
+Question types, visible `我的答案` / `正确答案`, and `最终成绩`. Parser tests prove
+complete ID/order/type/value binding for single-choice, multiple-choice and
+true/false, per-Question rejection rather than all-or-nothing status, exact
+fixed-point scores for 0, 82.5 and 99.999, and `None` when score is absent.
+Missing/extra/reordered/fill-blank facts stay Inconclusive; duplicate IDs and
+malformed, out-of-range or conflicting scores fail closed. The fixture is
+synthetic parser evidence and does not claim that Native HTTP can reach the
+iframe result route.
 
 The Exam fixtures cover the cover/start/full-preview attempt rotation and the
 separate CxKitty save/final acknowledgement shapes. They prove that each
@@ -189,3 +202,7 @@ every fixture before staging it.
   evidence is Inconclusive, duplicates fail closed, and hidden inputs/CSS are
   ignored. Optional result scores retain exact thousandths on every answer
   status and never become answer-consistency evidence.
+- Chapter Work result confirmation requires a fresh, bound
+  `selectWorkQuestionYiPiYue` iframe document in addition to the completed card.
+  The synthetic parser fixture does not satisfy the pending BrowserBridge/live
+  route validation requirement.

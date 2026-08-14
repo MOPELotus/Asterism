@@ -277,6 +277,20 @@ when the exact attachment is Completed. Per-Question facts stay Unverified when
 the card exposes no answer readback. Answer resolution and live validation
 remain active work; Exam keeps its separate attempt/gate/verification family.
 
+The 2026-06 Chapter-test donor separately records completed/waiting results in a
+`selectWorkQuestionYiPiYue` iframe. Its current DOM keeps each Question in
+`div.singleQuesId[data=qid]`, exposes a localized Question type and visible
+`我的答案` / `正确答案`, and reports `最终成绩`. The Provider-side result parser
+requires a complete unique QID set in immutable-Draft order, exact type and
+visible answer values for single-choice, multiple-choice and true/false. It
+emits per-Question Confirmed/Rejected facts and retains the independent 0-100
+score as fixed thousandths on any verification status. Missing, extra,
+reordered, fill/short-answer or unsupported evidence remains Inconclusive;
+duplicates and malformed or conflicting scores fail closed. The parser is an
+offline boundary only until Main's BrowserBridge can supply the fresh bound
+study-page iframe document. The completed card alone continues to produce only
+task-level confirmation.
+
 ## Native independent Work submission
 
 The primary donor names every answer field `answer{qid}` and every type field
@@ -398,6 +412,10 @@ cover this boundary; live account validation remains pending.
   form tokens never enter the Domain Question.
 - Browser visual selection is not proof of a saved answer. Hidden fields and the
   server-visible result must be checked after page handlers/AJAX settle.
+- Chapter Work's `selectWorkQuestionYiPiYue` result is iframe-bound. Until the
+  shared BrowserBridge binds course/class/knowledge/job and hands the fresh
+  document to the strict Provider parser, a completed card must not be upgraded
+  to per-Question verification.
 - HTTP 200 or a donor `status = true` response is not Asterism completion. Asterism
   must fetch the result/detail page and store a sanitized verification snapshot.
 - Captcha, face verification, exam codes, minimum-submit time, expired tasks,

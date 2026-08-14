@@ -426,6 +426,44 @@ impl Drop for ChaoxingWorkVerificationDocument {
     }
 }
 
+/// Zeroizing owner for one fresh Chapter Work result page obtained through the
+/// audited `selectWorkQuestionYiPiYue` iframe route.
+pub struct ChaoxingChapterWorkVerificationDocument {
+    document: String,
+}
+
+impl ChaoxingChapterWorkVerificationDocument {
+    /// Owns one bounded Chapter Work result document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-response error for empty or oversized pages.
+    pub fn try_new(document: String) -> ProviderResult<Self> {
+        if document.is_empty() || document.len() > MAX_RESPONSE_BYTES {
+            return Err(invalid_response(
+                "Chaoxing Chapter Work verification page is empty or exceeds the size limit",
+            ));
+        }
+        Ok(Self { document })
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.document
+    }
+}
+
+impl fmt::Debug for ChaoxingChapterWorkVerificationDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ChaoxingChapterWorkVerificationDocument([REDACTED])")
+    }
+}
+
+impl Drop for ChaoxingChapterWorkVerificationDocument {
+    fn drop(&mut self) {
+        self.document.zeroize();
+    }
+}
+
 /// Zeroizing owner for one strictly route-bound fresh Exam result page.
 pub struct ChaoxingExamVerificationDocument {
     document: String,
@@ -528,6 +566,84 @@ pub fn parse_verification_snapshot(
     }
 }
 
+/// Compares a fresh `selectWorkQuestionYiPiYue` result page with a Chapter
+/// Work Draft. Only the donor-observed single-choice, multiple-choice and
+/// true/false visible-answer grammar is eligible for exact confirmation.
+///
+/// # Errors
+///
+/// Returns typed errors for login pages, duplicate identities, malformed
+/// scores or invalid snapshots. Incomplete, reordered or unsupported result
+/// facts produce an Inconclusive snapshot.
+pub fn parse_chapter_work_verification_snapshot(
+    document: &ChaoxingChapterWorkVerificationDocument,
+    plan: &ChaoxingSubmissionPlan,
+    draft: &SubmissionDraft,
+) -> ProviderResult<SubmissionVerificationSnapshot> {
+    if plan.len() != draft.items.len() {
+        return Err(invalid_response(
+            "Chaoxing Chapter Work verification plan does not match its immutable Draft",
+        ));
+    }
+    let html = Html::parse_document(document.as_str());
+    reject_login_or_challenge(&html)?;
+    let score = parse_chapter_result_score(&html)?.map(|earned_milli_points| SubmissionScore {
+        earned_milli_points,
+        possible_milli_points: 100_000,
+    });
+    let Some(remote_answers) = parse_chapter_result_answers(&html)? else {
+        return chapter_result_inconclusive_snapshot(draft, score);
+    };
+    if remote_answers.len() != plan.len()
+        || draft.items.iter().enumerate().any(|(index, item)| {
+            item.question.position != u32::try_from(index + 1).unwrap_or(u32::MAX)
+        })
+    {
+        return chapter_result_inconclusive_snapshot(draft, score);
+    }
+    let planned = plan.answers().collect::<Vec<_>>();
+    if remote_answers
+        .iter()
+        .zip(&planned)
+        .any(|(actual, (remote_id, type_code, _))| {
+            actual.remote_id != *remote_id || actual.type_code != *type_code
+        })
+    {
+        return chapter_result_inconclusive_snapshot(draft, score);
+    }
+    let questions = remote_answers
+        .iter()
+        .zip(planned)
+        .zip(&draft.items)
+        .map(
+            |((actual, (_, _, expected)), item)| SubmissionQuestionVerification {
+                question_id: item.question.id,
+                status: if actual.value == expected {
+                    SubmissionQuestionVerificationStatus::Confirmed
+                } else {
+                    SubmissionQuestionVerificationStatus::Rejected
+                },
+            },
+        )
+        .collect::<Vec<_>>();
+    let status = if questions
+        .iter()
+        .all(|question| question.status == SubmissionQuestionVerificationStatus::Confirmed)
+    {
+        SubmissionVerificationStatus::Confirmed
+    } else {
+        SubmissionVerificationStatus::Rejected
+    };
+    validate_snapshot(SubmissionVerificationSnapshot {
+        status,
+        remote_state: Some(RemoteState::Completed),
+        score,
+        progress_percent: Some(100),
+        questions,
+        verified_at: Utc::now(),
+    })
+}
+
 /// Compares a fresh Exam result with every immutable Draft Question in exact
 /// DOM order. Score and list completion are never answer evidence.
 ///
@@ -614,6 +730,142 @@ fn exam_inconclusive_snapshot(
     let mut snapshot = inconclusive_snapshot(draft, RemoteState::Completed)?;
     snapshot.score = score;
     validate_snapshot(snapshot)
+}
+
+fn chapter_result_inconclusive_snapshot(
+    draft: &SubmissionDraft,
+    score: Option<SubmissionScore>,
+) -> ProviderResult<SubmissionVerificationSnapshot> {
+    let mut snapshot = inconclusive_snapshot(draft, RemoteState::Completed)?;
+    snapshot.score = score;
+    validate_snapshot(snapshot)
+}
+
+struct ChapterRemoteAnswer {
+    remote_id: String,
+    type_code: String,
+    value: String,
+}
+
+impl Drop for ChapterRemoteAnswer {
+    fn drop(&mut self) {
+        self.remote_id.zeroize();
+        self.type_code.zeroize();
+        self.value.zeroize();
+    }
+}
+
+fn parse_chapter_result_answers(html: &Html) -> ProviderResult<Option<Vec<ChapterRemoteAnswer>>> {
+    let mut answers = Vec::new();
+    let mut remote_ids = BTreeSet::new();
+    for question in html.select(&selector("div.singleQuesId")) {
+        let remote_id = question
+            .value()
+            .attr("data")
+            .map(str::trim)
+            .filter(|value| valid_question_id(value))
+            .ok_or_else(|| {
+                protocol_drift("Chaoxing Chapter Work result Question identity is invalid")
+            })?;
+        if !remote_ids.insert(remote_id.to_owned()) {
+            return Err(protocol_drift(
+                "Chaoxing Chapter Work result contains duplicate Question identity",
+            ));
+        }
+        let text = Zeroizing::new(normalized_text(question.text()));
+        let Some(type_code @ ("0" | "1" | "3")) = chapter_result_type(text.as_str()) else {
+            return Ok(None);
+        };
+        if !text.contains("我的答案") {
+            return Ok(None);
+        }
+        let value = parse_visible_answer(text.as_str(), type_code)?;
+        answers.push(ChapterRemoteAnswer {
+            remote_id: remote_id.to_owned(),
+            type_code: type_code.to_owned(),
+            value,
+        });
+    }
+    if answers.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(answers))
+    }
+}
+
+fn chapter_result_type(text: &str) -> Option<&'static str> {
+    let mut matches = [
+        ("【单选题】", "0"),
+        ("【多选题】", "1"),
+        ("【填空题】", "2"),
+        ("【判断题】", "3"),
+        ("【简答题】", "4"),
+    ]
+    .into_iter()
+    .filter_map(|(label, code)| text.contains(label).then_some(code));
+    let result = matches.next();
+    if matches.next().is_some() {
+        None
+    } else {
+        result
+    }
+}
+
+fn parse_chapter_result_score(html: &Html) -> ProviderResult<Option<u64>> {
+    let text = Zeroizing::new(normalized_text(html.root_element().text()));
+    let mut candidates = Vec::new();
+    for (start, _) in text.match_indices("最终成绩") {
+        let value = text[start + "最终成绩".len()..].trim_start();
+        let number_end = value
+            .bytes()
+            .position(|byte| !byte.is_ascii_digit() && byte != b'.')
+            .unwrap_or(value.len());
+        let number = &value[..number_end];
+        if number.is_empty() || !value[number_end..].trim_start().starts_with('分') {
+            return Err(protocol_drift(
+                "Chaoxing Chapter Work result contains an invalid final score",
+            ));
+        }
+        candidates.push(parse_chapter_score_milli(number)?);
+    }
+    let Some(score) = candidates.first().copied() else {
+        return Ok(None);
+    };
+    if candidates.iter().any(|candidate| *candidate != score) {
+        return Err(protocol_drift(
+            "Chaoxing Chapter Work result contains conflicting final scores",
+        ));
+    }
+    Ok(Some(u64::from(score)))
+}
+
+fn parse_chapter_score_milli(value: &str) -> ProviderResult<u32> {
+    let (whole, fraction) = value.split_once('.').map_or((value, ""), |parts| parts);
+    if whole.is_empty()
+        || whole.len() > 3
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 3
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(protocol_drift(
+            "Chaoxing Chapter Work result contains an invalid final score",
+        ));
+    }
+    let whole = whole.parse::<u32>().map_err(|_| {
+        protocol_drift("Chaoxing Chapter Work result contains an invalid final score")
+    })?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u32>().map_err(|_| {
+            protocol_drift("Chaoxing Chapter Work result contains an invalid final score")
+        })? * 10_u32.pow(u32::try_from(3 - fraction.len()).expect("bounded score precision"))
+    };
+    whole
+        .checked_mul(1_000)
+        .and_then(|whole| whole.checked_add(fraction))
+        .filter(|score| *score <= 100_000)
+        .ok_or_else(|| protocol_drift("Chaoxing Chapter Work result final score is out of range"))
 }
 
 struct ExamRemoteAnswer {
@@ -1184,6 +1436,8 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
     const CHAPTER_EDITOR: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/chapter-submission-editor.html");
+    const CHAPTER_RESULT: &str =
+        include_str!("../../../fixtures/providers/chaoxing/work/chapter-result.html");
     const EXAM_QUESTIONS: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
     const EXAM_RESULT: &str =
@@ -1285,6 +1539,104 @@ mod tests {
         let pending = parse_verification_snapshot(&editor, &plan, &draft).unwrap();
         assert_eq!(pending.status, SubmissionVerificationStatus::Pending);
         assert_eq!(pending.remote_state, Some(RemoteState::Pending));
+    }
+
+    #[tokio::test]
+    async fn chapter_result_projects_exact_answers_and_independent_score() {
+        let draft = chapter_result_draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let result =
+            ChaoxingChapterWorkVerificationDocument::try_new(CHAPTER_RESULT.to_owned()).unwrap();
+        let snapshot = parse_chapter_work_verification_snapshot(&result, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert_eq!(snapshot.remote_state, Some(RemoteState::Completed));
+        assert_eq!(snapshot.score.unwrap().earned_milli_points, 82_500);
+        assert!(snapshot.questions.iter().all(|question| {
+            question.status == SubmissionQuestionVerificationStatus::Confirmed
+        }));
+
+        let changed = CHAPTER_RESULT.replacen("我的答案：正确", "我的答案：错误", 1);
+        let changed = ChaoxingChapterWorkVerificationDocument::try_new(changed).unwrap();
+        let snapshot = parse_chapter_work_verification_snapshot(&changed, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Rejected);
+        assert_eq!(
+            snapshot
+                .questions
+                .iter()
+                .map(|question| question.status)
+                .collect::<Vec<_>>(),
+            [
+                SubmissionQuestionVerificationStatus::Confirmed,
+                SubmissionQuestionVerificationStatus::Confirmed,
+                SubmissionQuestionVerificationStatus::Rejected,
+            ]
+        );
+        assert_eq!(snapshot.score.unwrap().earned_milli_points, 82_500);
+
+        for (replacement, expected) in [("0", 0), ("99.999", 99_999)] {
+            let result = ChaoxingChapterWorkVerificationDocument::try_new(CHAPTER_RESULT.replacen(
+                "82.5",
+                replacement,
+                1,
+            ))
+            .unwrap();
+            let snapshot =
+                parse_chapter_work_verification_snapshot(&result, &plan, &draft).unwrap();
+            assert_eq!(snapshot.score.unwrap().earned_milli_points, expected);
+        }
+
+        let no_score =
+            CHAPTER_RESULT.replacen(r#"<p class="final-score">最终成绩 82.5 分</p>"#, "", 1);
+        let no_score = ChaoxingChapterWorkVerificationDocument::try_new(no_score).unwrap();
+        let snapshot = parse_chapter_work_verification_snapshot(&no_score, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert_eq!(snapshot.score, None);
+    }
+
+    #[tokio::test]
+    async fn chapter_result_drift_is_inconclusive_and_duplicates_fail_closed() {
+        let draft = chapter_result_draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let extra = CHAPTER_RESULT.replace(
+            "</main>",
+            r#"<div class="singleQuesId" data="work-q-extra"><span>【单选题】</span><p>我的答案：A</p></div></main>"#,
+        );
+        let reordered = CHAPTER_RESULT
+            .replace("work-q-1", "work-q-swap")
+            .replace("work-q-2", "work-q-1")
+            .replace("work-q-swap", "work-q-2");
+        for document in [
+            CHAPTER_RESULT.replacen("【单选题】", "【填空题】", 1),
+            CHAPTER_RESULT.replacen("我的答案：B", "已作答", 1),
+            CHAPTER_RESULT.replacen("work-q-1", "work-q-x", 1),
+            extra,
+            reordered,
+        ] {
+            let result = ChaoxingChapterWorkVerificationDocument::try_new(document).unwrap();
+            let snapshot =
+                parse_chapter_work_verification_snapshot(&result, &plan, &draft).unwrap();
+            assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
+            assert_eq!(snapshot.score.unwrap().earned_milli_points, 82_500);
+            assert!(snapshot.questions.iter().all(|question| {
+                question.status == SubmissionQuestionVerificationStatus::Unverified
+            }));
+        }
+
+        let duplicate = CHAPTER_RESULT.replace("work-q-2", "work-q-1");
+        let duplicate = ChaoxingChapterWorkVerificationDocument::try_new(duplicate).unwrap();
+        assert!(parse_chapter_work_verification_snapshot(&duplicate, &plan, &draft).is_err());
+
+        for document in [
+            CHAPTER_RESULT.replacen("82.5", "82.5000", 1),
+            CHAPTER_RESULT.replacen("82.5", "100.001", 1),
+            CHAPTER_RESULT.replace(
+                r#"<p class="final-score">最终成绩 82.5 分</p>"#,
+                r#"<p class="final-score">最终成绩 82.5 分</p><p>最终成绩 83 分</p>"#,
+            ),
+        ] {
+            let result = ChaoxingChapterWorkVerificationDocument::try_new(document).unwrap();
+            assert!(parse_chapter_work_verification_snapshot(&result, &plan, &draft).is_err());
+        }
     }
 
     #[tokio::test]
@@ -1462,6 +1814,15 @@ mod tests {
             payload_preview: preview,
             created_at: Utc::now(),
         }
+    }
+
+    async fn chapter_result_draft() -> SubmissionDraft {
+        let mut draft = chapter_draft().await;
+        draft.items.remove(2);
+        for (index, item) in draft.items.iter_mut().enumerate() {
+            item.question.position = u32::try_from(index + 1).unwrap();
+        }
+        draft
     }
 
     async fn chapter_draft() -> SubmissionDraft {
