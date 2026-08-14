@@ -567,12 +567,18 @@ submission:
 All are active implementation scope. The Provider-private discussion protocol
 now derives Course instance, class, curricula and current-user facts from fresh
 Course/detail/user-info reads; builds the exact topic/reply-page/reply-add
-bodies; bounds every page and response; zeroizes reply content; treats the add
-response as a receipt only; and can verify exact current-user plus exact content
-through paginated readback. Cross-Provider registration still requires a
-shared immutable discussion Draft/attempt contract so reply mutation, final
-Group completion and their two independent readbacks remain durably recoverable
-without ambiguous replay. Artifact handles and external
+bodies; bounds every page and response; binds each reply snapshot to the
+requested topic; zeroizes reply content; treats the add response as a receipt
+only; and can verify exact topic, current-user and content through paginated
+readback. That exact readback plus a fresh exact Task containing only one
+`discussion` module freezes a second, content-free completion plan with a hash
+of the verified reply. Native HTTP then refreshes Course instance and the exact
+incomplete available `tab_type=task` progress leaf before sending the donor's
+empty `submitType=2` Group mutation once. Its accepted version is a separate
+receipt and only fresh exact Group progress can confirm completion.
+Cross-Provider registration still requires a shared immutable discussion
+Draft/attempt contract so both mutations and their independent readbacks remain
+durably recoverable without ambiguous replay. Artifact handles and external
 AnswerResolve/media-source orchestration likewise require shared Core contracts
 for account/Task ownership and secret isolation. The Provider-private upload
 boundary now first re-reads exact TaskDetail and freezes the stable hierarchy,

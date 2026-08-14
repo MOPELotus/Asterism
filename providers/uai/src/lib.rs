@@ -69,10 +69,11 @@ pub use course_progress::{
     parse_course_progress,
 };
 pub use discussion::{
-    UaiDiscussionBinding, UaiDiscussionReply, UaiDiscussionReplyDraft, UaiDiscussionReplyPage,
-    UaiDiscussionTransport, build_discussion_reply_page_request, build_discussion_reply_request,
+    UaiDiscussionBinding, UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult,
+    UaiDiscussionReply, UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport,
+    build_discussion_reply_page_request, build_discussion_reply_request,
     build_discussion_topic_request, parse_discussion_binding, parse_discussion_reply_page,
-    parse_discussion_reply_receipt, parse_discussion_topic,
+    parse_discussion_reply_receipt, parse_discussion_topic, prepare_discussion_completion,
 };
 pub use duration::{
     UaiDurationDocument, UaiDurationTransport, UaiTaskDuration, parse_task_duration,

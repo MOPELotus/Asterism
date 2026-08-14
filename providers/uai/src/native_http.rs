@@ -21,13 +21,14 @@ use crate::{
     UaiAggregateProgressDocument, UaiAggregateProgressTransport, UaiAnswerDocument,
     UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport, UaiCoursePolicyDocument,
     UaiCoursePolicyTransport, UaiCourseProgressDocument, UaiDiscussionBinding,
-    UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument,
-    UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult,
-    UaiPresetCompletionTransport, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
-    UaiQuestionTransport, UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument,
-    UaiSubmissionTransport, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
-    UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport,
-    UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
+    UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult, UaiDiscussionReplyDraft,
+    UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument, UaiDurationTransport,
+    UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult, UaiPresetCompletionTransport,
+    UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
+    UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
+    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
+    UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport, UaiUploadedArtifact,
+    UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_discussion_reply_page_request, build_discussion_reply_request,
     build_discussion_topic_request, build_upload_multipart,
@@ -71,6 +72,7 @@ enum EmptyCompletionPreflight {
     Preset,
     ExitTicket,
     Oral,
+    Discussion,
 }
 
 /// Native, non-redirecting UAI read and submission transport.
@@ -628,6 +630,43 @@ impl NativeUaiInventoryTransport {
         .await
     }
 
+    async fn complete_discussion_with_session(
+        &self,
+        session: &UaiJwtSession,
+        plan: &UaiDiscussionCompletionPlan,
+    ) -> ProviderResult<UaiDiscussionCompletionResult> {
+        if plan.remote_task_id()
+            != format!(
+                "group:{}:{}:{}",
+                plan.course_resource_id(),
+                plan.unit_id(),
+                plan.group_id()
+            )
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI discussion completion hierarchy is foreign to its Task",
+            ));
+        }
+        self.complete_empty_with_session(
+            session,
+            plan.course_resource_id(),
+            plan.unit_id(),
+            plan.group_id(),
+            EmptyCompletionPreflight::Discussion,
+            None,
+        )
+        .await
+        .map(|result| match result {
+            UaiPresetCompletionResult::AlreadyCompleted => {
+                UaiDiscussionCompletionResult::AlreadyCompleted
+            }
+            UaiPresetCompletionResult::Submitted(receipt) => {
+                UaiDiscussionCompletionResult::Submitted(receipt)
+            }
+        })
+    }
+
     async fn complete_empty_with_session(
         &self,
         session: &UaiJwtSession,
@@ -842,7 +881,7 @@ impl NativeUaiInventoryTransport {
                 false,
             )
             .await?;
-        let page = parse_discussion_reply_page(&document, page_size);
+        let page = parse_discussion_reply_page(&document, topic_id, page_size);
         document.zeroize();
         page
     }
@@ -1460,6 +1499,21 @@ impl UaiDiscussionTransport for NativeUaiInventoryTransport {
                 let session = self.sessions.renew_session(context).await?;
                 self.submit_discussion_reply_with_session(&session, draft)
                     .await
+            }
+            result => result,
+        }
+    }
+
+    async fn complete_verified_discussion(
+        &self,
+        context: &ProviderContext,
+        plan: &UaiDiscussionCompletionPlan,
+    ) -> ProviderResult<UaiDiscussionCompletionResult> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.complete_discussion_with_session(&session, plan).await {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.complete_discussion_with_session(&session, plan).await
             }
             result => result,
         }
@@ -2232,9 +2286,9 @@ fn validate_empty_completion_progress_target_at(
     let snapshot = parse_group_progress(document, expected_unit_id, expected_group_id)?;
     let tab_type_matches = match preflight {
         EmptyCompletionPreflight::Preset => matches!(snapshot.tab_type(), Some("text" | "video")),
-        EmptyCompletionPreflight::ExitTicket | EmptyCompletionPreflight::Oral => {
-            snapshot.tab_type() == Some("task")
-        }
+        EmptyCompletionPreflight::ExitTicket
+        | EmptyCompletionPreflight::Oral
+        | EmptyCompletionPreflight::Discussion => snapshot.tab_type() == Some("task"),
     };
     if !tab_type_matches {
         return Err(ProviderError::new(
@@ -2248,6 +2302,9 @@ fn validate_empty_completion_progress_target_at(
                 }
                 EmptyCompletionPreflight::Oral => {
                     "UAI oral empty submission requires a fresh task progress leaf"
+                }
+                EmptyCompletionPreflight::Discussion => {
+                    "UAI discussion completion requires a fresh task progress leaf"
                 }
             },
         ));

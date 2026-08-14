@@ -5,6 +5,7 @@ use asterism_provider_api::{ProviderContext, ProviderError, ProviderErrorKind, P
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
@@ -48,6 +49,12 @@ pub trait UaiDiscussionTransport: Send + Sync {
         context: &ProviderContext,
         draft: &UaiDiscussionReplyDraft,
     ) -> ProviderResult<SubmissionReceipt>;
+
+    async fn complete_verified_discussion(
+        &self,
+        context: &ProviderContext,
+        plan: &UaiDiscussionCompletionPlan,
+    ) -> ProviderResult<UaiDiscussionCompletionResult>;
 }
 
 /// Fresh route and account facts required by the UAI discussion endpoints.
@@ -56,6 +63,7 @@ pub trait UaiDiscussionTransport: Send + Sync {
 /// reply Draft. It deliberately carries no credential or browser material.
 #[derive(Clone, Eq, PartialEq)]
 pub struct UaiDiscussionBinding {
+    course_resource: String,
     course_instance: String,
     group: String,
     class: String,
@@ -70,6 +78,7 @@ impl UaiDiscussionBinding {
     ///
     /// Rejects unbounded or unsafe route and identity values.
     pub fn try_new(
+        course_resource_id: &str,
         course_instance_id: &str,
         group_id: &str,
         class_id: &str,
@@ -77,6 +86,7 @@ impl UaiDiscussionBinding {
         current_user_id: &str,
     ) -> ProviderResult<Self> {
         Ok(Self {
+            course_resource: required_identifier(course_resource_id, "Course resource")?,
             course_instance: required_route_value(course_instance_id, "Course instance")?,
             group: required_identifier(group_id, "Group")?,
             class: optional_identifier(class_id, "class")?,
@@ -89,6 +99,10 @@ impl UaiDiscussionBinding {
         &self.group
     }
 
+    pub fn course_resource_id(&self) -> &str {
+        &self.course_resource
+    }
+
     pub fn current_user_id(&self) -> &str {
         &self.current_user
     }
@@ -98,6 +112,7 @@ impl fmt::Debug for UaiDiscussionBinding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UaiDiscussionBinding")
+            .field("course_resource", &self.course_resource)
             .field("course_instance", &"[ROUTE]")
             .field("group", &self.group)
             .field("class", &"[ROUTE]")
@@ -109,6 +124,7 @@ impl fmt::Debug for UaiDiscussionBinding {
 
 impl Drop for UaiDiscussionBinding {
     fn drop(&mut self) {
+        self.course_resource.zeroize();
         self.course_instance.zeroize();
         self.group.zeroize();
         self.class.zeroize();
@@ -222,6 +238,7 @@ impl Drop for UaiDiscussionReply {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct UaiDiscussionReplyPage {
+    topic_id: u64,
     replies: Vec<UaiDiscussionReply>,
     has_more: bool,
 }
@@ -230,6 +247,7 @@ impl fmt::Debug for UaiDiscussionReplyPage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UaiDiscussionReplyPage")
+            .field("topic_id", &self.topic_id)
             .field("reply_count", &self.replies.len())
             .field("has_more", &self.has_more)
             .finish()
@@ -237,6 +255,10 @@ impl fmt::Debug for UaiDiscussionReplyPage {
 }
 
 impl UaiDiscussionReplyPage {
+    pub const fn topic_id(&self) -> u64 {
+        self.topic_id
+    }
+
     pub fn replies(&self) -> &[UaiDiscussionReply] {
         &self.replies
     }
@@ -246,10 +268,179 @@ impl UaiDiscussionReplyPage {
     }
 
     pub fn contains_exact_reply(&self, draft: &UaiDiscussionReplyDraft) -> bool {
-        self.replies.iter().any(|reply| {
-            reply.create_id == draft.binding.current_user && reply.content == draft.content.as_str()
-        })
+        self.topic_id == draft.topic_id
+            && self.replies.iter().any(|reply| {
+                reply.create_id == draft.binding.current_user
+                    && reply.content == draft.content.as_str()
+            })
     }
+}
+
+/// Provider-private immutable authorization for the discussion Group's second
+/// mutation. It can be constructed only from an exact reply readback and one
+/// freshly rebound single-discussion Task.
+pub struct UaiDiscussionCompletionPlan {
+    remote_task_id: String,
+    task_fingerprint: String,
+    course_resource_id: String,
+    unit_id: String,
+    group_id: String,
+    topic_id: u64,
+    reply_digest: [u8; 32],
+    fingerprint: String,
+}
+
+impl UaiDiscussionCompletionPlan {
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub fn course_resource_id(&self) -> &str {
+        &self.course_resource_id
+    }
+
+    pub fn unit_id(&self) -> &str {
+        &self.unit_id
+    }
+
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    pub const fn topic_id(&self) -> u64 {
+        self.topic_id
+    }
+
+    pub const fn reply_digest(&self) -> [u8; 32] {
+        self.reply_digest
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
+impl fmt::Debug for UaiDiscussionCompletionPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiDiscussionCompletionPlan")
+            .field("remote_task_id", &self.remote_task_id)
+            .field("task_fingerprint", &self.task_fingerprint)
+            .field("course_resource_id", &self.course_resource_id)
+            .field("unit_id", &self.unit_id)
+            .field("group_id", &self.group_id)
+            .field("topic_id", &self.topic_id)
+            .field("reply_digest", &"[HASHED]")
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
+impl Drop for UaiDiscussionCompletionPlan {
+    fn drop(&mut self) {
+        self.remote_task_id.zeroize();
+        self.task_fingerprint.zeroize();
+        self.course_resource_id.zeroize();
+        self.unit_id.zeroize();
+        self.group_id.zeroize();
+        self.reply_digest.zeroize();
+        self.fingerprint.zeroize();
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UaiDiscussionCompletionResult {
+    AlreadyCompleted,
+    Submitted(SubmissionReceipt),
+}
+
+/// Freezes the donor's second discussion mutation only after an independently
+/// read reply page proves the exact current-user/content reply exists.
+///
+/// # Errors
+///
+/// Rejects a missing reply, foreign Task/binding, missing fresh fingerprint or
+/// any non-single discussion Group.
+pub fn prepare_discussion_completion(
+    detail: &asterism_provider_api::RemoteTaskDetail,
+    remote_task_id: &str,
+    draft: &UaiDiscussionReplyDraft,
+    verified_page: &UaiDiscussionReplyPage,
+) -> ProviderResult<UaiDiscussionCompletionPlan> {
+    if !verified_page.contains_exact_reply(draft) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI discussion completion requires exact reply readback",
+        ));
+    }
+    if detail.task.remote_id != remote_task_id || detail.task.fingerprint.is_empty() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI discussion Task changed before Group completion",
+        ));
+    }
+    let task = detail
+        .normalized_detail
+        .get("task")
+        .and_then(Value::as_object)
+        .ok_or_else(|| protocol_drift("UAI discussion completion has no normalized Task"))?;
+    if task.get("schema").and_then(Value::as_str) != Some("uai.group-task.v1")
+        || task.get("course_resource_id").and_then(Value::as_str)
+            != Some(draft.binding.course_resource.as_str())
+        || task.get("group_id").and_then(Value::as_str) != Some(draft.binding.group.as_str())
+        || task
+            .get("task_types")
+            .and_then(Value::as_array)
+            .is_none_or(|values| values.as_slice() != [Value::String("discussion".to_owned())])
+        || task.get("question_count").and_then(Value::as_u64) != Some(1)
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI final discussion completion requires one exact discussion module",
+        ));
+    }
+    let unit_id = task
+        .get("unit")
+        .and_then(Value::as_object)
+        .and_then(|unit| unit.get("id"))
+        .and_then(Value::as_str)
+        .and_then(|value| required_identifier(value, "Unit").ok())
+        .ok_or_else(|| protocol_drift("UAI discussion completion has no valid Unit identity"))?;
+    let expected_remote_task_id = format!(
+        "group:{}:{unit_id}:{}",
+        draft.binding.course_resource, draft.binding.group
+    );
+    if expected_remote_task_id != remote_task_id {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI discussion completion hierarchy is foreign to its Task",
+        ));
+    }
+    let mut reply_digest = Sha256::new();
+    reply_digest.update(b"asterism:uai:discussion-reply:v1\0");
+    reply_digest.update(draft.binding.current_user.as_bytes());
+    reply_digest.update(b"\0");
+    reply_digest.update(draft.topic_id.to_be_bytes());
+    reply_digest.update(b"\0");
+    reply_digest.update(draft.content.as_bytes());
+    let reply_digest: [u8; 32] = reply_digest.finalize().into();
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(b"asterism:uai:discussion-completion:v1\0");
+    fingerprint.update(remote_task_id.as_bytes());
+    fingerprint.update(b"\0");
+    fingerprint.update(detail.task.fingerprint.as_bytes());
+    fingerprint.update(b"\0");
+    fingerprint.update(reply_digest);
+    Ok(UaiDiscussionCompletionPlan {
+        remote_task_id: remote_task_id.to_owned(),
+        task_fingerprint: detail.task.fingerprint.clone(),
+        course_resource_id: draft.binding.course_resource.clone(),
+        unit_id,
+        group_id: draft.binding.group.clone(),
+        topic_id: draft.topic_id,
+        reply_digest,
+        fingerprint: format!("uai-discussion-complete-v1:{:x}", fingerprint.finalize()),
+    })
 }
 
 /// Derives the donor-required discussion route facts from fresh Course-list,
@@ -325,10 +516,13 @@ pub fn parse_discussion_binding(
             "UAI discussion Course-resource disappeared before execution",
         )
     })?;
-    let route =
-        parse_course_context_for_resource_id(expected_course_resource_id, course_detail_document)?;
+    let route = parse_course_context_for_resource_id(
+        expected_course_resource_id.clone(),
+        course_detail_document,
+    )?;
     let identity = parse_user_identity(user_info_document)?;
     UaiDiscussionBinding::try_new(
+        &expected_course_resource_id,
         route.course_instance_id(),
         expected_group_id,
         &class_id,
@@ -426,9 +620,13 @@ pub fn build_discussion_reply_page_request(
 /// oversized or structurally ambiguous reply pages.
 pub fn parse_discussion_reply_page(
     document: &str,
+    expected_topic_id: u64,
     requested_page_size: u32,
 ) -> ProviderResult<UaiDiscussionReplyPage> {
-    if requested_page_size == 0 || requested_page_size > MAX_DISCUSSION_PAGE_SIZE {
+    if expected_topic_id == 0
+        || requested_page_size == 0
+        || requested_page_size > MAX_DISCUSSION_PAGE_SIZE
+    {
         return Err(invalid_input(
             "UAI discussion reply page size is outside the bounded range",
         ));
@@ -480,6 +678,7 @@ pub fn parse_discussion_reply_page(
         });
     }
     Ok(UaiDiscussionReplyPage {
+        topic_id: expected_topic_id,
         has_more: rows.len() == requested_page_size as usize,
         replies,
     })
@@ -662,6 +861,9 @@ fn protocol_drift(message: impl Into<String>) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use asterism_domain::{AssessmentClass, RemoteState, SourceType};
+    use asterism_provider_api::{RemoteTask, RemoteTaskDetail};
+
     use super::*;
 
     const COURSES: &str = include_str!("../../../fixtures/providers/uai/courses/list-mixed.json");
@@ -674,6 +876,7 @@ mod tests {
     fn fresh_documents_derive_the_exact_discussion_binding() {
         let binding =
             parse_discussion_binding(COURSES, DETAIL, USER_INFO, "2001", "group-1").unwrap();
+        assert_eq!(binding.course_resource_id(), "2001");
         let body: Value =
             serde_json::from_str(&build_discussion_topic_request(&binding).unwrap()).unwrap();
         assert_eq!(body["courseId"], "course-v2:synthetic+rw+20260809");
@@ -717,6 +920,7 @@ mod tests {
 
         let page = parse_discussion_reply_page(
             r#"{"success":true,"value":{"replyContents":[{"replyId":9,"createId":"user-9","content":"bounded reply"}]}}"#,
+            42,
             20,
         )
         .unwrap();
@@ -753,6 +957,7 @@ mod tests {
         assert!(
             parse_discussion_reply_page(
                 r#"{"success":true,"value":{"replyContents":[{"createId":"user-9","content":""}]}}"#,
+                42,
                 20,
             )
             .is_err()
@@ -761,8 +966,74 @@ mod tests {
         assert!(UaiDiscussionReplyDraft::try_new(binding(), 0, "reply").is_err());
     }
 
+    #[test]
+    fn exact_reply_and_fresh_single_discussion_authorize_group_completion() {
+        let draft = UaiDiscussionReplyDraft::try_new(binding(), 42, "bounded reply").unwrap();
+        let page = parse_discussion_reply_page(
+            r#"{"success":true,"value":{"replyContents":[{"replyId":9,"createId":"user-9","content":"bounded reply"}]}}"#,
+            42,
+            20,
+        )
+        .unwrap();
+        let detail = discussion_detail(&["discussion"]);
+        let plan =
+            prepare_discussion_completion(&detail, "group:2001:unit-1:group-1", &draft, &page)
+                .unwrap();
+        assert_eq!(plan.course_resource_id(), "2001");
+        assert_eq!(plan.unit_id(), "unit-1");
+        assert_eq!(plan.group_id(), "group-1");
+        assert_eq!(plan.topic_id(), 42);
+        assert_ne!(plan.reply_digest(), [0; 32]);
+        assert!(
+            plan.fingerprint()
+                .starts_with("uai-discussion-complete-v1:")
+        );
+        assert!(!format!("{plan:?}").contains("bounded reply"));
+
+        let foreign_page = parse_discussion_reply_page(
+            r#"{"success":true,"value":{"replyContents":[{"replyId":9,"createId":"user-9","content":"other reply"}]}}"#,
+            42,
+            20,
+        )
+        .unwrap();
+        assert!(
+            prepare_discussion_completion(
+                &detail,
+                "group:2001:unit-1:group-1",
+                &draft,
+                &foreign_page,
+            )
+            .is_err()
+        );
+        let foreign_topic = parse_discussion_reply_page(
+            r#"{"success":true,"value":{"replyContents":[{"replyId":9,"createId":"user-9","content":"bounded reply"}]}}"#,
+            43,
+            20,
+        )
+        .unwrap();
+        assert!(
+            prepare_discussion_completion(
+                &detail,
+                "group:2001:unit-1:group-1",
+                &draft,
+                &foreign_topic,
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_discussion_completion(
+                &discussion_detail(&["discussion", "multichoice"]),
+                "group:2001:unit-1:group-1",
+                &draft,
+                &page,
+            )
+            .is_err()
+        );
+    }
+
     fn binding() -> UaiDiscussionBinding {
         UaiDiscussionBinding::try_new(
+            "2001",
             "course-v2:synthetic+rw",
             "group-1",
             "class-7",
@@ -770,5 +1041,39 @@ mod tests {
             "user-9",
         )
         .unwrap()
+    }
+
+    fn discussion_detail(task_types: &[&str]) -> RemoteTaskDetail {
+        let normalized = serde_json::json!({
+            "schema": "uai.group-task.v1",
+            "course_resource_id": "2001",
+            "unit": {"id": "unit-1", "title": "Unit 1"},
+            "section": {"id": "section-1", "title": "Section 1"},
+            "micro": {"id": "micro-1", "title": "Discussion"},
+            "group_id": "group-1",
+            "task_types": task_types,
+            "question_count": task_types.len(),
+        });
+        RemoteTaskDetail {
+            task: RemoteTask {
+                remote_id: "group:2001:unit-1:group-1".to_owned(),
+                course_remote_id: Some("course-resource:2001".to_owned()),
+                title: "Discuss".to_owned(),
+                source_type: SourceType::Resource,
+                assessment_class: AssessmentClass::Routine,
+                remote_state: RemoteState::Unknown,
+                opens_at: None,
+                due_at: None,
+                closes_at: None,
+                capabilities: Vec::new(),
+                fingerprint: "v1:discussion".to_owned(),
+                normalized: normalized.clone(),
+                raw_sanitized: serde_json::json!({"schema":"uai.group-task.raw.v1"}),
+            },
+            normalized_detail: serde_json::json!({
+                "schema": "uai.group-task-detail.v1",
+                "task": normalized,
+            }),
+        }
     }
 }
