@@ -3316,3 +3316,27 @@ then reads fresh Exam inventory. Only Completed confirms the submission; every
 Question remains Unverified without independent result-page answer evidence.
 Synthetic save/final fixtures and an end-to-end Provider operation-loop test
 cover the two continuation rotations, terminal receipt and fresh verification.
+
+## One-hundred-and-ninetieth Phase 0 slice
+
+BrowserBridge command authority now survives daemon restart without trusting a
+helper to echo Provider-private JSON. Core accepts the exact bounded command as
+a zeroizing `SecretValue`, verifies that its SHA-256 digest is the immutable
+exchange identity, and stores the exchange plus an XChaCha20-Poly1305 encrypted
+command artifact in one immediate SQLite transaction before dispatch.
+
+The encrypted repository is permanently scoped to one Provider at composition.
+Resolution repeats the persisted session's owner, Provider account, Task and
+Provider binding, authenticates the Core/Provider-runtime secret access, loads
+the exact sequence and verifies the decrypted bytes against the exchange
+digest. Missing artifacts from the earlier metadata-only schema, cross-Task
+lookups, ciphertext corruption and key mismatch all fail closed. Identical
+issuance is idempotent only when the encrypted artifact association already
+exists; a digest-only legacy row cannot be upgraded by an ambiguous retry.
+
+Migration 042 adds the restricted one-to-one Secret reference while preserving
+old rows for deterministic recovery decisions. Engine command issuance no
+longer exposes the metadata-only storage entry point. Provider-specific Cidaren
+Capture and UAI residence artifacts can now enter this shared boundary; helper
+dispatch, typed result transport and the atomic terminal-result/credential
+replacement transaction remain the next shared BrowserBridge slices.

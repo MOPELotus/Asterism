@@ -270,82 +270,6 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
         Ok(true)
     }
 
-    async fn issue_browser_bridge_exchange(
-        &self,
-        exchange: &BrowserBridgeExchange,
-        correlation_id: &str,
-    ) -> Result<BrowserBridgeExchangeRecord, StorageError> {
-        exchange
-            .validate()
-            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
-        if exchange.state != BrowserBridgeExchangeState::Issued {
-            return Err(StorageError::InvalidData(
-                "new BrowserBridge exchange must be issued".to_owned(),
-            ));
-        }
-        validate_correlation_id(correlation_id)?;
-        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
-        let Some(session) = find_claimed_session_for_exchange(
-            &mut transaction,
-            exchange.session_id,
-            exchange.issued_at,
-        )
-        .await?
-        else {
-            transaction.rollback().await?;
-            return Ok(BrowserBridgeExchangeRecord::AccessRejected);
-        };
-        let last_sequence: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(sequence) FROM browser_bridge_exchanges WHERE session_id = ?",
-        )
-        .bind(exchange.session_id.to_string())
-        .fetch_one(&mut *transaction)
-        .await?;
-        let expected = last_sequence.map_or(1, |value| value.saturating_add(1));
-        let sequence = i64::try_from(exchange.sequence)
-            .map_err(|_| StorageError::InvalidData("invalid exchange sequence".to_owned()))?;
-        if sequence != expected {
-            if let Some(existing) =
-                fetch_exchange(&mut transaction, exchange.session_id, sequence).await?
-            {
-                transaction.rollback().await?;
-                return Ok(
-                    if existing.command_type == exchange.command_type
-                        && existing.command_digest == exchange.command_digest
-                    {
-                        BrowserBridgeExchangeRecord::Duplicate(existing)
-                    } else {
-                        BrowserBridgeExchangeRecord::SequenceConflict
-                    },
-                );
-            }
-            transaction.rollback().await?;
-            return Ok(BrowserBridgeExchangeRecord::SequenceConflict);
-        }
-        sqlx::query(
-            "INSERT INTO browser_bridge_exchanges \
-             (session_id, sequence, command_type, command_digest, state, issued_at) \
-             VALUES (?, ?, ?, ?, 'issued', ?)",
-        )
-        .bind(exchange.session_id.to_string())
-        .bind(sequence)
-        .bind(&exchange.command_type)
-        .bind(exchange.command_digest.as_slice())
-        .bind(encode_timestamp(exchange.issued_at))
-        .execute(&mut *transaction)
-        .await?;
-        insert_exchange_audit(
-            &mut transaction,
-            correlation_id,
-            &session,
-            exchange,
-            "issued",
-        )
-        .await?;
-        transaction.commit().await?;
-        Ok(BrowserBridgeExchangeRecord::Inserted(exchange.clone()))
-    }
-
     async fn complete_browser_bridge_exchange(
         &self,
         exchange: &BrowserBridgeExchange,
@@ -459,7 +383,7 @@ async fn authenticate_session_for_exchange(
     }
 }
 
-async fn find_claimed_session_for_exchange(
+pub(crate) async fn find_claimed_session_for_exchange(
     transaction: &mut Transaction<'_, Sqlite>,
     session_id: BrowserBridgeSessionId,
     at: Timestamp,
@@ -485,7 +409,7 @@ async fn find_claimed_session_for_exchange(
     }
 }
 
-async fn fetch_exchange(
+pub(crate) async fn fetch_exchange(
     transaction: &mut Transaction<'_, Sqlite>,
     session_id: BrowserBridgeSessionId,
     sequence: i64,
@@ -541,7 +465,7 @@ async fn fetch_exchange(
     .transpose()
 }
 
-async fn insert_exchange_audit(
+pub(crate) async fn insert_exchange_audit(
     transaction: &mut Transaction<'_, Sqlite>,
     correlation_id: &str,
     session: &BrowserBridgeSession,
@@ -578,7 +502,7 @@ async fn insert_exchange_audit(
     Ok(())
 }
 
-async fn fetch_session(
+pub(crate) async fn fetch_session(
     transaction: &mut Transaction<'_, Sqlite>,
     session_id: BrowserBridgeSessionId,
 ) -> Result<Option<(BrowserBridgeSession, BrowserSessionSpec)>, StorageError> {
@@ -686,7 +610,7 @@ async fn ensure_binding(
     }
 }
 
-async fn binding_is_valid(
+pub(crate) async fn binding_is_valid(
     transaction: &mut Transaction<'_, Sqlite>,
     session: &BrowserBridgeSession,
 ) -> Result<bool, StorageError> {
@@ -893,7 +817,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    async fn exchange_is_contiguous_idempotent_and_result_bound() {
+    async fn exchange_completion_is_idempotent_and_result_bound() {
         let fixture = fixture().await;
         let now = Utc::now();
         let spec = spec();
@@ -934,22 +858,18 @@ mod tests {
             now + Duration::seconds(2),
         )
         .unwrap();
-        assert!(matches!(
-            fixture
-                .repository
-                .issue_browser_bridge_exchange(&issued, "exchange-issue")
-                .await
-                .unwrap(),
-            BrowserBridgeExchangeRecord::Inserted(_)
-        ));
-        assert!(matches!(
-            fixture
-                .repository
-                .issue_browser_bridge_exchange(&issued, "exchange-duplicate")
-                .await
-                .unwrap(),
-            BrowserBridgeExchangeRecord::Duplicate(_)
-        ));
+        sqlx::query(
+            "INSERT INTO browser_bridge_exchanges \
+             (session_id, sequence, command_type, command_digest, state, issued_at) \
+             VALUES (?, 1, ?, ?, 'issued', ?)",
+        )
+        .bind(session.id.to_string())
+        .bind(&issued.command_type)
+        .bind(issued.command_digest.as_slice())
+        .bind(encode_timestamp(issued.issued_at))
+        .execute(fixture.repository.database.pool())
+        .await
+        .unwrap();
         let mut completed = issued.clone();
         completed
             .complete(

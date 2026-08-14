@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 41);
+        assert_eq!(migration_count, 42);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -155,6 +155,16 @@ mod tests {
             .collect();
         assert!(names.contains(&"encrypted_data".to_owned()));
         assert!(!names.iter().any(|name| name == "plaintext"));
+
+        let exchange_columns = sqlx::query("PRAGMA table_info(browser_bridge_exchanges)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        assert!(
+            exchange_columns
+                .iter()
+                .any(|row| { row.get::<String, _>("name") == "command_secret_blob_id" })
+        );
 
         let question_sessions: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema \

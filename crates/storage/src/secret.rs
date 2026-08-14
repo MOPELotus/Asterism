@@ -151,6 +151,19 @@ impl SqliteSecretStore {
         )
     }
 
+    /// Builds a permanently Provider-scoped encrypted `BrowserBridge` command
+    /// repository. Core chooses the scope; Provider payloads cannot change it.
+    pub fn browser_bridge_commands(
+        &self,
+        provider_id: ProviderId,
+    ) -> crate::SqliteBrowserBridgeCommandArtifactRepository {
+        crate::SqliteBrowserBridgeCommandArtifactRepository::new(
+            self.database.clone(),
+            self.keyring.clone(),
+            provider_id,
+        )
+    }
+
     async fn replace_provider_credentials_internal(
         &self,
         request: CredentialSetCommit<'_>,

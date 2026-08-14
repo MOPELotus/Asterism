@@ -5,8 +5,14 @@ use asterism_domain::{
     Timestamp, UserId,
 };
 use asterism_provider_api::{BrowserSessionSpec, BrowserSessionSpecError};
-use asterism_secrets::SecretString;
-use asterism_storage::{BrowserBridgeExchangeRecord, BrowserBridgeSessionRepository, StorageError};
+use asterism_secrets::{SecretAccess, SecretStoreError, SecretString, SecretValue};
+use asterism_storage::{
+    BrowserBridgeCommandArtifactRepository,
+    BrowserBridgeCommandIssueRequest as StorageBrowserBridgeCommandIssueRequest,
+    BrowserBridgeCommandResolveRequest as StorageBrowserBridgeCommandResolveRequest,
+    BrowserBridgeExchangeRecord, BrowserBridgeSessionRepository, ResolvedBrowserBridgeCommand,
+    StorageError,
+};
 
 #[derive(Debug)]
 pub struct BrowserBridgeHelperSessionService<R> {
@@ -188,23 +194,6 @@ where
         Ok(BrowserBridgeSessionSnapshot { session, spec })
     }
 
-    /// Persists one Core-issued provider-validated command metadata record.
-    /// Provider payloads stay typed and in-process.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when metadata is invalid or persistence detects a
-    /// session binding/sequence conflict.
-    pub async fn issue_exchange(
-        &self,
-        request: BrowserBridgeExchangeIssueRequest,
-    ) -> Result<BrowserBridgeExchangeRecord, BrowserBridgeHelperSessionError> {
-        Ok(self
-            .repository
-            .issue_browser_bridge_exchange(&request.exchange, &request.correlation_id)
-            .await?)
-    }
-
     /// Completes one issued command with a typed provider result digest. A
     /// duplicate identical result is returned as `Duplicate`; a conflicting
     /// result is never replayed.
@@ -225,6 +214,67 @@ where
                 &access_digest,
                 &request.correlation_id,
             )
+            .await?)
+    }
+}
+
+/// Core-owned service for atomic encrypted `BrowserBridge` command issuance and
+/// exact-command recovery. The repository is Provider-scoped at composition.
+#[derive(Clone, Debug)]
+pub struct BrowserBridgeCommandService<R> {
+    repository: R,
+}
+
+impl<R> BrowserBridgeCommandService<R> {
+    pub const fn new(repository: R) -> Self {
+        Self { repository }
+    }
+}
+
+impl<R> BrowserBridgeCommandService<R>
+where
+    R: BrowserBridgeCommandArtifactRepository,
+{
+    /// Persists the immutable exchange and exact encrypted command in one
+    /// transaction before any helper dispatch can occur.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid command bytes, access, binding, or sequence conflicts.
+    pub async fn issue(
+        &self,
+        request: BrowserBridgeCommandIssueRequest,
+    ) -> Result<BrowserBridgeExchangeRecord, BrowserBridgeCommandServiceError> {
+        Ok(self
+            .repository
+            .issue_browser_bridge_command(StorageBrowserBridgeCommandIssueRequest {
+                exchange: &request.exchange,
+                command_artifact: request.command_artifact,
+                access: &request.access,
+            })
+            .await?)
+    }
+
+    /// Recovers one exact encrypted command only after re-binding its complete
+    /// owner/account/Task/Provider identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unauthorized, incomplete, tampered, or un-decryptable records.
+    pub async fn resolve(
+        &self,
+        request: BrowserBridgeCommandResolveRequest,
+    ) -> Result<Option<ResolvedBrowserBridgeCommand>, BrowserBridgeCommandServiceError> {
+        Ok(self
+            .repository
+            .resolve_browser_bridge_command(StorageBrowserBridgeCommandResolveRequest {
+                owner_user_id: request.owner_user_id,
+                provider_account_id: request.provider_account_id,
+                task_id: request.task_id,
+                session_id: request.session_id,
+                sequence: request.sequence,
+                access: &request.access,
+            })
             .await?)
     }
 }
@@ -287,10 +337,21 @@ pub struct BrowserBridgeSessionCancelRequest {
     pub correlation_id: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BrowserBridgeExchangeIssueRequest {
+#[derive(Debug)]
+pub struct BrowserBridgeCommandIssueRequest {
     pub exchange: BrowserBridgeExchange,
-    pub correlation_id: String,
+    pub command_artifact: SecretValue,
+    pub access: SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeCommandResolveRequest {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub task_id: TaskId,
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub access: SecretAccess,
 }
 
 #[derive(Debug)]
@@ -316,4 +377,10 @@ pub enum BrowserBridgeHelperSessionError {
     Spec(#[from] BrowserSessionSpecError),
     #[error(transparent)]
     Storage(#[from] StorageError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BrowserBridgeCommandServiceError {
+    #[error(transparent)]
+    SecretStore(#[from] SecretStoreError),
 }

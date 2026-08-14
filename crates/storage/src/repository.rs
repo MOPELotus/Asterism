@@ -1057,12 +1057,6 @@ pub trait BrowserBridgeSessionRepository: Send + Sync {
         correlation_id: &str,
     ) -> Result<bool, StorageError>;
 
-    async fn issue_browser_bridge_exchange(
-        &self,
-        exchange: &BrowserBridgeExchange,
-        correlation_id: &str,
-    ) -> Result<BrowserBridgeExchangeRecord, StorageError>;
-
     async fn complete_browser_bridge_exchange(
         &self,
         exchange: &BrowserBridgeExchange,
@@ -1077,6 +1071,45 @@ pub enum BrowserBridgeExchangeRecord {
     Duplicate(BrowserBridgeExchange),
     AccessRejected,
     SequenceConflict,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeCommandIssueRequest<'a> {
+    pub exchange: &'a BrowserBridgeExchange,
+    pub command_artifact: SecretValue,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeCommandResolveRequest<'a> {
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub task_id: TaskId,
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct ResolvedBrowserBridgeCommand {
+    pub exchange: BrowserBridgeExchange,
+    pub command_artifact: SecretValue,
+}
+
+/// Provider-scoped encrypted persistence for exact `BrowserBridge` commands.
+/// Issuance stores the immutable exchange and its command bytes atomically;
+/// resolution re-checks the complete owner/account/Task/Provider binding.
+#[async_trait]
+pub trait BrowserBridgeCommandArtifactRepository: Send + Sync {
+    async fn issue_browser_bridge_command(
+        &self,
+        request: BrowserBridgeCommandIssueRequest<'_>,
+    ) -> Result<BrowserBridgeExchangeRecord, SecretStoreError>;
+
+    async fn resolve_browser_bridge_command(
+        &self,
+        request: BrowserBridgeCommandResolveRequest<'_>,
+    ) -> Result<Option<ResolvedBrowserBridgeCommand>, SecretStoreError>;
 }
 
 #[derive(Debug)]

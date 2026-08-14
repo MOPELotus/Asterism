@@ -7,9 +7,10 @@ const MAX_MESSAGE_TYPE_BYTES: usize = 96;
 /// Durable metadata for one provider-owned `BrowserBridge` command/result pair.
 ///
 /// The provider payload remains outside the Core domain. Providers validate
-/// their typed payloads and persist only a stable digest here, allowing Core to
-/// enforce ordering, binding, recovery and replay protection without storing
-/// protocol-specific credentials or browser data.
+/// their typed payloads while Storage persists the exact frozen command as an
+/// encrypted, owner-bound artifact. This record carries only its stable digest
+/// so Core can enforce ordering, binding, recovery and replay protection
+/// without exposing protocol-specific credentials or browser data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BrowserBridgeExchange {
     pub session_id: BrowserBridgeSessionId,
