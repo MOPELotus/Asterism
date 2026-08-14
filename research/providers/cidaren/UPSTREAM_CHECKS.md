@@ -256,6 +256,12 @@ false `20001` data, preserve terminal selection as a receipt and never issue
 `StartAnswer` afterward. This is receipt handling, not verification. The
 Provider suite reached 119 passing tests with strict clippy clean.
 
+A follow-up on the same unchanged handler moved localized receipt-message
+classification behind the numeric/data success gate. Previously a malformed
+`code=0` response could copy the donor's completed/word-selection UI text and
+become a receipt. Both assessment and word-selection parsers now reject that
+shape; terminal text remains acknowledgement context only.
+
 ## Check procedure
 
 For the next checkpoint:

@@ -129,7 +129,19 @@ fn parse_root(
         .ok_or_else(|| protocol_drift("Cidaren assessment response has no numeric code"))?;
     let message = optional_message(object.get("msg"))?;
 
-    if message.as_deref() == Some("任务已完成！") || code == 20_004 {
+    if code == 20_004 {
+        return Ok(CidarenAssessmentResponse::Receipt {
+            kind: CidarenAssessmentReceiptKind::Completed,
+            message_sanitized: message,
+        });
+    }
+    if code != 1 && !(code == 20_001 && object.get("data").is_some_and(json_truthy)) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "Cidaren assessment endpoint returned a non-success code",
+        ));
+    }
+    if message.as_deref() == Some("任务已完成！") {
         return Ok(CidarenAssessmentResponse::Receipt {
             kind: CidarenAssessmentReceiptKind::Completed,
             message_sanitized: message,
@@ -140,12 +152,6 @@ fn parse_root(
             kind: CidarenAssessmentReceiptKind::WordSelectionRequired,
             message_sanitized: message,
         });
-    }
-    if code != 1 && !(code == 20_001 && object.get("data").is_some_and(json_truthy)) {
-        return Err(ProviderError::new(
-            ProviderErrorKind::InvalidResponse,
-            "Cidaren assessment endpoint returned a non-success code",
-        ));
     }
     let data = object
         .get("data")
@@ -174,7 +180,7 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
         .and_then(Value::as_i64)
         .ok_or_else(|| protocol_drift("Cidaren word-selection response has no numeric code"))?;
     let message = optional_message(object.get("msg"))?;
-    if message.as_deref() == Some("任务已完成！") || code == 20_004 {
+    if code == 20_004 {
         return Ok(CidarenAssessmentResponse::Receipt {
             kind: CidarenAssessmentReceiptKind::Completed,
             message_sanitized: message,
@@ -185,6 +191,12 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
             ProviderErrorKind::InvalidResponse,
             "Cidaren word-selection endpoint returned a non-success code",
         ));
+    }
+    if message.as_deref() == Some("任务已完成！") {
+        return Ok(CidarenAssessmentResponse::Receipt {
+            kind: CidarenAssessmentReceiptKind::Completed,
+            message_sanitized: message,
+        });
     }
     Ok(CidarenAssessmentResponse::Receipt {
         kind: CidarenAssessmentReceiptKind::Accepted,
@@ -276,6 +288,29 @@ mod tests {
                 response,
                 CidarenAssessmentResponse::Receipt { kind, .. } if kind == expected
             ));
+        }
+        for message in ["任务已完成！", "需要选词！"] {
+            assert!(
+                parse_assessment_response(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "code": 0,
+                        "msg": message,
+                    }))
+                    .unwrap(),
+                    None,
+                )
+                .is_err()
+            );
+            assert!(
+                parse_word_selection_response(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "code": 0,
+                        "msg": message,
+                    }))
+                    .unwrap(),
+                )
+                .is_err()
+            );
         }
     }
 

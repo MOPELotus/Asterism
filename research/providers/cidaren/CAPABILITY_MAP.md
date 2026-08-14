@@ -105,6 +105,9 @@ The current checkpoint (not a completion boundary):
 25. mirrors the donor's compound response success condition for word
     selection, rejecting empty `20001` payloads and retaining `20004` as a
     terminal receipt that cannot trigger another Start mutation.
+26. classifies localized terminal/word-selection text only after the donor's
+    numeric/data success gate, so remote failure text cannot manufacture a
+    receipt.
 
 The remaining work is durable shared QuestionSession/Attempt registration for
 QuestionInventory/QuestionParse and SubmissionExecute, shared execution for
