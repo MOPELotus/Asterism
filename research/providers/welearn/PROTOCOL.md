@@ -426,7 +426,8 @@ therefore parses a separate bounded `WellearnUnitObservation` inventory and
 `WellearnBatchUnitSelection`; `build_selected_batch_plan` retains explicit
 selection order and selected-but-empty Units while sorting SCOs only within
 each selected Unit's response order. It rebinds every child Unit title, code
-and visibility fact before filtering.
+and visibility fact before filtering, rejects cross-Course input and freezes
+the exact parent Course identity in the resulting plan.
 
 The same Auto_WeLearn revision also retains the original single-file
 `WeLearn.py` entry point. Its completion and duration routes deliberately keep

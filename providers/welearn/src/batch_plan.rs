@@ -122,6 +122,7 @@ pub struct WellearnBatchEntry {
 /// is intentionally retained for Auto's integer division semantics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WellearnBatchPlan {
+    pub course_remote_id: String,
     pub flow: WellearnBatchFlow,
     pub dispatch: WellearnBatchDispatch,
     pub target_strategy: WellearnBatchTargetStrategy,
@@ -225,6 +226,7 @@ pub fn build_selected_batch_plan(
                 "WELearn batch selection has no Course binding",
             )
         })?;
+    let course_remote_id = course_remote_id.to_owned();
     let mut seen_remote_ids = BTreeSet::new();
     for task in tasks {
         if !seen_remote_ids.insert(task.remote_id.as_str()) {
@@ -233,7 +235,7 @@ pub fn build_selected_batch_plan(
                 "WELearn batch selection contains a duplicate SCO identity",
             ));
         }
-        if task.course_remote_id.as_deref() != Some(course_remote_id) {
+        if task.course_remote_id.as_deref() != Some(course_remote_id.as_str()) {
             return Err(ProviderError::new(
                 ProviderErrorKind::RemoteChanged,
                 "WELearn batch selection spans multiple Courses",
@@ -384,6 +386,7 @@ pub fn build_selected_batch_plan(
         ));
     }
     Ok(WellearnBatchPlan {
+        course_remote_id,
         flow,
         dispatch: flow.dispatch(),
         target_strategy: flow.target_strategy(),
@@ -758,6 +761,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["sco:1001:401", "sco:1001:301", "sco:1001:302"]
         );
+        assert_eq!(plan.course_remote_id, "course:1001");
     }
 
     #[test]
