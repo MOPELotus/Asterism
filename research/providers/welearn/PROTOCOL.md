@@ -470,6 +470,18 @@ zero: its save-only completion request carries no CMI time document, so such a
 predicate would be invented rather than evidenced. Explicit negative mutation
 receipts remain diagnostics and cannot weaken or strengthen the fresh-CMI goal.
 
+Durable mutation persistence crosses a deliberately narrow Provider boundary.
+`WellearnAtomicMutationKind` has stable operation strings for start,
+counter/implicit keep, set and save. `WellearnAtomicMutationIssue` contains only
+the 1-based ordinal, kind and request digest; the matching receipt contains only
+ordinal, response digest and explicit acceptance. Ordinals are bounded through
+100,000, digests must be nonzero SHA-256-sized values, and Debug never renders
+their bytes. `WellearnAtomicMutationSink` owns asynchronous issue and receipt
+calls while Core's Execution/attempt/lease/worker facts stay hidden in its
+adapter. A duplicate issue must fail closed rather than return success to a new
+native session. The value/trait contract is implemented, but transport wiring
+and canonical request/response digest generation remain the next checkpoint.
+
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or
 submit individual answers. Their user-facing “exercise accuracy” choice is a
