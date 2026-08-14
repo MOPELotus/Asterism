@@ -430,9 +430,12 @@ command digest before it can be encrypted or issued. Replacing the completed
 exchange command digest fails before advancing. An accepted completed
 `ClickMenu` then replaces the prior-result authority with its own exact raw
 digest and returns sequence-next `ScanPage(Tab)` plus an immutable
-`ScanningTabs` cursor. A rejected/foreign click cannot advance. Later Tab/Task
-snapshot, residence and control transitions remain incremental Provider work
-around the shared dispatcher.
+`ScanningTabs` cursor. A rejected/foreign click cannot advance. The completed
+Tab scan freezes its validated ordered snapshot. A non-empty snapshot selects
+only ordinal zero for sequence-next `ClickTab`, while an empty Tab list moves
+directly to `ScanPage(Task)` without inventing a click. Later Tab traversal,
+Task snapshot, residence and control transitions remain incremental Provider
+work around the shared dispatcher.
 
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.

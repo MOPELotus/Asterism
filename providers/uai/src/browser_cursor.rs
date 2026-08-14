@@ -356,6 +356,91 @@ impl UaiBrowserResidenceCursor {
         })
     }
 
+    /// Freezes one bounded Tab snapshot and selects its first traversal action.
+    ///
+    /// A page without Tabs proceeds directly to Task enumeration. Otherwise
+    /// the first ordered snapshot handle is the only authorized click.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error unless this cursor owns the exact Tab scan and
+    /// its completed event contains a validated ordered Tab snapshot.
+    pub fn advance_tab_list(
+        &self,
+        batch: &UaiCourseResidenceBatchPlan,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+        completed: &UaiBrowserEventExchangeCompleted,
+    ) -> ProviderResult<UaiBrowserCursorAdvance> {
+        self.validate_for_command(batch, plan, command)?;
+        if self.stage != UaiBrowserCursorStage::ScanningTabs
+            || !matches!(
+                &command.command,
+                UaiBrowserCommand::ScanPage {
+                    scope: UaiBrowserPageScope::Tab
+                }
+            )
+        {
+            return Err(stale_cursor());
+        }
+        let result_digest = completed_event_digest(self, command, completed)?;
+        completed
+            .event()
+            .validate_for_command(plan, command, &completed.event().origin)?;
+        let UaiBrowserEvent::PageList {
+            scope: UaiBrowserPageScope::Tab,
+            entries,
+        } = &completed.event().event
+        else {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI accumulated cursor requires a completed Tab-list event",
+            ));
+        };
+        let binding = UaiBrowserSessionBinding::try_new(
+            plan,
+            &command.session_nonce,
+            &command.origin,
+            &command.frame_id,
+        )?;
+        let next_sequence = command.sequence.checked_add(1).ok_or_else(invalid_cursor)?;
+        let (stage, current_tab_ordinal, next_tab_ordinal, next_command) =
+            if let Some(first) = entries.first() {
+                (
+                    UaiBrowserCursorStage::ClickingTab,
+                    Some(first.ordinal),
+                    first.ordinal.checked_add(1).ok_or_else(invalid_cursor)?,
+                    UaiBrowserCommandEnvelope::click_tab(plan, &binding, next_sequence, first)?,
+                )
+            } else {
+                (
+                    UaiBrowserCursorStage::ScanningTasks,
+                    None,
+                    0,
+                    UaiBrowserCommandEnvelope::scan_page(
+                        plan,
+                        &binding,
+                        next_sequence,
+                        UaiBrowserPageScope::Task,
+                    )?,
+                )
+            };
+        let mut next = self.clone();
+        next.stage = stage;
+        next.tab_snapshot.clone_from(entries);
+        next.next_tab_ordinal = next_tab_ordinal;
+        next.current_tab_ordinal = current_tab_ordinal;
+        next.task_snapshot.clear();
+        next.prior_result_sequence = Some(command.sequence);
+        next.prior_result_digest = Some(result_digest);
+        next.next_command_digest = next_command.exchange_digest(plan)?;
+        next.validate_for_command(batch, plan, &next_command)?;
+        Ok(UaiBrowserCursorAdvance {
+            cursor: next,
+            command: next_command,
+        })
+    }
+
     /// Encodes this validated accumulated cursor for encrypted persistence.
     ///
     /// # Errors
