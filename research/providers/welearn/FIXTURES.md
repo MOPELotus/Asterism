@@ -188,6 +188,9 @@ only structural field names, response codes and bounded placeholder shapes.
   minimal/task-Referer mutation profile, applies its endpoint and Referer to
   baseline/start/set/save/verification, and never combines profile halves into
   an unevidenced request.
+- Resource execution plans accept only the four complete audited current,
+  legacy and atomic-final wire profiles. Cross-donor combinations fail both at
+  TaskExecution preparation and the native transport boundary before I/O.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.

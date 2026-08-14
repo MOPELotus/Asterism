@@ -77,6 +77,73 @@ pub struct WellearnResourceExecutionPlan {
     pub mutation_profile: crate::WellearnResourceMutationProfile,
 }
 
+impl WellearnResourceExecutionPlan {
+    /// Rejects combinations that do not match one complete audited donor wire
+    /// profile before any non-idempotent transport call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when independently resolved settings mix
+    /// fields from different donor profiles.
+    pub fn validate(self) -> ProviderResult<()> {
+        use crate::{
+            WellearnResourceCompletionCmiFormat::{InteractionInfoSuffix, Json},
+            WellearnResourceCompletionSequence::{CurrentDonorDualSave100, SelectedScore},
+            WellearnResourceCompletionTimeMode::{PreserveFreshTime, ZeroTime},
+            WellearnResourceCompletionWriteMode::{SaveOnly, SetThenSave},
+            WellearnResourceMutationProfile::{CurrentFullSimpleReferer, LegacyMinimalTaskReferer},
+        };
+
+        let profile = (
+            self.score_percent,
+            self.sequence,
+            self.time_mode,
+            self.cmi_format,
+            self.write_mode,
+            self.mutation_profile,
+        );
+        let audited = matches!(
+            profile,
+            (
+                0..=100,
+                CurrentDonorDualSave100,
+                ZeroTime,
+                Json,
+                SetThenSave,
+                CurrentFullSimpleReferer,
+            ) | (
+                100,
+                SelectedScore,
+                PreserveFreshTime,
+                Json,
+                SetThenSave,
+                CurrentFullSimpleReferer,
+            ) | (
+                0..=100,
+                SelectedScore,
+                ZeroTime,
+                InteractionInfoSuffix,
+                SetThenSave,
+                LegacyMinimalTaskReferer,
+            ) | (
+                0,
+                SelectedScore,
+                ZeroTime,
+                InteractionInfoSuffix,
+                SaveOnly,
+                LegacyMinimalTaskReferer,
+            )
+        );
+        if !audited {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn resource execution plan mixes incompatible donor wire facts",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Native boundary for the donor-audited SCO completion preset.
 ///
 /// Implementations may renew only before the first mutation and must never
@@ -174,6 +241,15 @@ impl TaskExecutionCapability for WellearnResourceExecution {
             .final_score(selected_score_percent);
         let completion_time_mode =
             effective_completion_time_mode(settings.resource_completion_time_mode, request);
+        let plan = WellearnResourceExecutionPlan {
+            score_percent: selected_score_percent,
+            sequence: settings.resource_completion_sequence,
+            time_mode: completion_time_mode,
+            cmi_format: settings.resource_completion_cmi_format,
+            write_mode: settings.resource_completion_write_mode,
+            mutation_profile: settings.resource_mutation_profile,
+        };
+        plan.validate()?;
         let detail = self
             .details
             .task_detail(context, &request.remote_task_id)
@@ -209,19 +285,7 @@ impl TaskExecutionCapability for WellearnResourceExecution {
 
         let documents = self
             .transport
-            .complete_resource(
-                context,
-                &course_id,
-                &sco_id,
-                WellearnResourceExecutionPlan {
-                    score_percent: selected_score_percent,
-                    sequence: settings.resource_completion_sequence,
-                    time_mode: completion_time_mode,
-                    cmi_format: settings.resource_completion_cmi_format,
-                    write_mode: settings.resource_completion_write_mode,
-                    mutation_profile: settings.resource_mutation_profile,
-                },
-            )
+            .complete_resource(context, &course_id, &sco_id, plan)
             .await?;
         let before = parse_mutation_cmi_baseline(documents.before.as_str())?;
         let already_completed = !documents.mutation_submitted;
@@ -318,6 +382,15 @@ impl TaskExecutionCapability for WellearnResourceExecution {
             .final_score(selected_score_percent);
         let completion_time_mode =
             effective_completion_time_mode(settings.resource_completion_time_mode, request);
+        WellearnResourceExecutionPlan {
+            score_percent: selected_score_percent,
+            sequence: settings.resource_completion_sequence,
+            time_mode: completion_time_mode,
+            cmi_format: settings.resource_completion_cmi_format,
+            write_mode: settings.resource_completion_write_mode,
+            mutation_profile: settings.resource_mutation_profile,
+        }
+        .validate()?;
         let detail = self
             .details
             .task_detail(context, &request.remote_task_id)
@@ -693,6 +766,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn execution_plan_accepts_only_complete_audited_donor_profiles() {
+        use crate::{
+            WellearnResourceCompletionCmiFormat::{InteractionInfoSuffix, Json},
+            WellearnResourceCompletionSequence::{CurrentDonorDualSave100, SelectedScore},
+            WellearnResourceCompletionTimeMode::{PreserveFreshTime, ZeroTime},
+            WellearnResourceCompletionWriteMode::{SaveOnly, SetThenSave},
+            WellearnResourceMutationProfile::{CurrentFullSimpleReferer, LegacyMinimalTaskReferer},
+        };
+
+        let current_completion = WellearnResourceExecutionPlan {
+            score_percent: 82,
+            sequence: CurrentDonorDualSave100,
+            time_mode: ZeroTime,
+            cmi_format: Json,
+            write_mode: SetThenSave,
+            mutation_profile: CurrentFullSimpleReferer,
+        };
+        let current_duration_final = WellearnResourceExecutionPlan {
+            score_percent: 100,
+            sequence: SelectedScore,
+            time_mode: PreserveFreshTime,
+            ..current_completion
+        };
+        let legacy_completion = WellearnResourceExecutionPlan {
+            score_percent: 82,
+            sequence: SelectedScore,
+            time_mode: ZeroTime,
+            cmi_format: InteractionInfoSuffix,
+            write_mode: SetThenSave,
+            mutation_profile: LegacyMinimalTaskReferer,
+        };
+        let auto_duration_final = WellearnResourceExecutionPlan {
+            score_percent: 0,
+            write_mode: SaveOnly,
+            ..legacy_completion
+        };
+        for plan in [
+            current_completion,
+            current_duration_final,
+            legacy_completion,
+            auto_duration_final,
+        ] {
+            plan.validate().unwrap();
+        }
+
+        let mixed_save_only = WellearnResourceExecutionPlan {
+            write_mode: SaveOnly,
+            ..current_completion
+        };
+        assert_eq!(
+            mixed_save_only.validate().unwrap_err().kind,
+            ProviderErrorKind::Internal
+        );
+        let wrong_atomic_score = WellearnResourceExecutionPlan {
+            score_percent: 99,
+            ..current_duration_final
+        };
+        assert!(wrong_atomic_score.validate().is_err());
+        let legacy_without_suffix = WellearnResourceExecutionPlan {
+            cmi_format: Json,
+            ..legacy_completion
+        };
+        assert!(legacy_without_suffix.validate().is_err());
+    }
+
     #[tokio::test]
     async fn resource_execution_binds_fresh_detail_and_verifies_exact_cmi_goal() {
         let transport = Arc::new(FixtureTransport::default());
@@ -717,9 +856,9 @@ mod tests {
                 82,
                 WellearnResourceCompletionSequence::SelectedScore,
                 WellearnResourceCompletionTimeMode::ZeroTime,
-                WellearnResourceCompletionCmiFormat::Json,
+                WellearnResourceCompletionCmiFormat::InteractionInfoSuffix,
                 crate::WellearnResourceCompletionWriteMode::SetThenSave,
-                crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer,
+                crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer,
             )]
         );
     }
@@ -998,9 +1137,9 @@ mod tests {
                 82,
                 WellearnResourceCompletionSequence::SelectedScore,
                 WellearnResourceCompletionTimeMode::ZeroTime,
-                WellearnResourceCompletionCmiFormat::Json,
+                WellearnResourceCompletionCmiFormat::InteractionInfoSuffix,
                 crate::WellearnResourceCompletionWriteMode::SetThenSave,
-                crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer,
+                crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer,
             )]
         );
     }
@@ -1096,6 +1235,14 @@ mod tests {
                     RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
                     ProviderSettingValue::Choice("selected_score".to_owned()),
                 ),
+                (
+                    crate::runtime_settings::RESOURCE_COMPLETION_CMI_FORMAT_KEY.to_owned(),
+                    ProviderSettingValue::Choice("interaction_info_suffix".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_MUTATION_PROFILE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("legacy_minimal_task_referer".to_owned()),
+                ),
             ]),
         };
         ExecutionRequest {
@@ -1145,10 +1292,20 @@ mod tests {
         let schema = runtime_settings_schema();
         let task = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
-            values: std::collections::BTreeMap::from([(
-                crate::runtime_settings::RESOURCE_COMPLETION_TIME_MODE_KEY.to_owned(),
-                ProviderSettingValue::Choice("preserve_fresh_time".to_owned()),
-            )]),
+            values: std::collections::BTreeMap::from([
+                (
+                    RESOURCE_SCORE_PERCENT_KEY.to_owned(),
+                    ProviderSettingValue::Integer(100),
+                ),
+                (
+                    RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("selected_score".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_COMPLETION_TIME_MODE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("preserve_fresh_time".to_owned()),
+                ),
+            ]),
         };
         ExecutionRequest {
             execution_id: asterism_domain::ExecutionId::new(),
@@ -1166,10 +1323,32 @@ mod tests {
         let schema = runtime_settings_schema();
         let task = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
-            values: std::collections::BTreeMap::from([(
-                crate::runtime_settings::RESOURCE_COMPLETION_WRITE_MODE_KEY.to_owned(),
-                ProviderSettingValue::Choice("save_only".to_owned()),
-            )]),
+            values: std::collections::BTreeMap::from([
+                (
+                    RESOURCE_SCORE_PERCENT_KEY.to_owned(),
+                    ProviderSettingValue::Integer(0),
+                ),
+                (
+                    RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("selected_score".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_COMPLETION_TIME_MODE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("zero_time".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_COMPLETION_CMI_FORMAT_KEY.to_owned(),
+                    ProviderSettingValue::Choice("interaction_info_suffix".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_COMPLETION_WRITE_MODE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("save_only".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_MUTATION_PROFILE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("legacy_minimal_task_referer".to_owned()),
+                ),
+            ]),
         };
         ExecutionRequest {
             execution_id: asterism_domain::ExecutionId::new(),
@@ -1187,10 +1366,24 @@ mod tests {
         let schema = runtime_settings_schema();
         let task = ProviderRuntimeSettingsPatch {
             schema_version: schema.version,
-            values: std::collections::BTreeMap::from([(
-                crate::runtime_settings::RESOURCE_MUTATION_PROFILE_KEY.to_owned(),
-                ProviderSettingValue::Choice("legacy_minimal_task_referer".to_owned()),
-            )]),
+            values: std::collections::BTreeMap::from([
+                (
+                    RESOURCE_SCORE_PERCENT_KEY.to_owned(),
+                    ProviderSettingValue::Integer(82),
+                ),
+                (
+                    RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("selected_score".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_COMPLETION_CMI_FORMAT_KEY.to_owned(),
+                    ProviderSettingValue::Choice("interaction_info_suffix".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_MUTATION_PROFILE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("legacy_minimal_task_referer".to_owned()),
+                ),
+            ]),
         };
         ExecutionRequest {
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
@@ -1200,6 +1393,19 @@ mod tests {
 
     fn composite_resource_request() -> ExecutionRequest {
         let schema = runtime_settings_schema();
+        let task = ProviderRuntimeSettingsPatch {
+            schema_version: schema.version,
+            values: std::collections::BTreeMap::from([
+                (
+                    RESOURCE_SCORE_PERCENT_KEY.to_owned(),
+                    ProviderSettingValue::Integer(100),
+                ),
+                (
+                    RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("selected_score".to_owned()),
+                ),
+            ]),
+        };
         ExecutionRequest {
             execution_id: asterism_domain::ExecutionId::new(),
             task_id: TaskId::new(),
@@ -1211,7 +1417,7 @@ mod tests {
                 TaskCapability::ResourceExecution,
             ],
             capability_step_position: 2,
-            runtime_settings: schema.resolve(None, None, None).unwrap(),
+            runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
         }
     }
 
@@ -1235,6 +1441,14 @@ mod tests {
                 (
                     RESOURCE_COMPLETION_SEQUENCE_KEY.to_owned(),
                     ProviderSettingValue::Choice("selected_score".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_COMPLETION_CMI_FORMAT_KEY.to_owned(),
+                    ProviderSettingValue::Choice("interaction_info_suffix".to_owned()),
+                ),
+                (
+                    crate::runtime_settings::RESOURCE_MUTATION_PROFILE_KEY.to_owned(),
+                    ProviderSettingValue::Choice("legacy_minimal_task_referer".to_owned()),
                 ),
             ]),
         };

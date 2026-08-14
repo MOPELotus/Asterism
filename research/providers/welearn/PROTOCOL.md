@@ -383,6 +383,16 @@ standalone completion selects `zero_time`. An explicit task setting keeps the
 Auto modular zero-time final tuple representable. These settings freeze the
 wire facts but do not grant cross-step mutation authority.
 
+The resolved fields are not independently executable. Before fresh TaskDetail
+or native I/O, `WellearnResourceExecutionPlan::validate` accepts only four
+complete donor profiles: current Fanyuchang zero-time JSON set plus dual-save;
+its score-100 fresh-time JSON set plus one save duration final; legacy
+zero-time interaction-suffix set plus selected-score save; or Auto's legacy
+score-0 zero-time save-only duration final. The native transport repeats this
+validation before session resolution. A cross-donor endpoint, CMI envelope,
+time mode, write family, score or save sequence fails `Internal` and sends no
+mutation. This does not grant the two atomic profiles singleton authority.
+
 `WellearnBatchExecutionShape::AtomicDurationCompletion` now marks current
 Fanyuchang duration and modular Auto duration and requires both child
 capabilities. Core still needs one durable atomic/current-step authority and

@@ -395,6 +395,7 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
         sco_id: &str,
         plan: crate::WellearnResourceExecutionPlan,
     ) -> ProviderResult<WellearnResourceExecutionDocuments> {
+        plan.validate()?;
         let crate::WellearnResourceExecutionPlan {
             score_percent,
             sequence,
