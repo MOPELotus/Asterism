@@ -116,7 +116,6 @@ fn validate_request(
     if request.provider_attempt_digest == [0; 32]
         || request.result_digest == [0; 32]
         || request.candidates.is_empty()
-        || request.evidence.is_empty()
     {
         return Err(invalid_import());
     }
@@ -169,7 +168,7 @@ fn validate_request(
         }
         used_candidates.insert(evidence.source_candidate_id.expect("checked Some"));
     }
-    if used_candidates != candidate_ids {
+    if !used_candidates.is_subset(&candidate_ids) {
         return Err(invalid_import());
     }
     Ok(ValidatedImport {
@@ -558,6 +557,24 @@ mod tests {
                 .is_err()
         );
         assert_counts(&fixture.database, (0, 0, 0, 0, 0)).await;
+    }
+
+    #[tokio::test]
+    async fn unverified_submitted_candidates_remain_private_without_corpus_projection() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteAnswerHistoryIngestionRepository::new(fixture.database.clone());
+        let mut bundle = fixture.bundle([5; 32], [6; 32]);
+        bundle.evidence.clear();
+        let outcome = repository
+            .ingest_answer_history_task(fixture.request(&bundle, [5; 32], [6; 32]))
+            .await
+            .unwrap();
+        let AnswerHistoryIngestOutcome::Inserted(record) = outcome else {
+            panic!("first unverified import must insert")
+        };
+        assert_eq!(record.candidate_count, 2);
+        assert_eq!(record.evidence_count, 0);
+        assert_counts(&fixture.database, (1, 2, 0, 0, 1)).await;
     }
 
     async fn assert_counts(database: &Database, expected: (i64, i64, i64, i64, i64)) {
