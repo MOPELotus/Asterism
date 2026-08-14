@@ -347,13 +347,7 @@ impl Drop for ParsedCidarenAttemptQuestion {
         self.remote_id.zeroize();
         self.stem.zeroize();
         zeroize_json(&mut self.metadata_sanitized);
-        for option in &mut self.options {
-            option.id.zeroize();
-            if let Some(content) = &mut option.content {
-                content.zeroize();
-            }
-            zeroize_json(&mut option.metadata_sanitized);
-        }
+        zeroize_question_options(&mut self.options);
     }
 }
 
@@ -384,33 +378,44 @@ pub fn parse_attempt_question(
         .as_object()
         .ok_or_else(|| protocol_drift("Cidaren attempt payload is not an object"))?;
     let remote_progress = parse_remote_progress(object)?;
-    let mut topic_code =
-        required_text(object.get("topic_code"), MAX_TOPIC_CODE_BYTES, "topic code")?;
+    let topic_code = Zeroizing::new(required_text(
+        object.get("topic_code"),
+        MAX_TOPIC_CODE_BYTES,
+        "topic code",
+    )?);
     let mode = object
         .get("topic_mode")
         .and_then(Value::as_i64)
         .ok_or_else(|| protocol_drift("Cidaren attempt payload has no topic mode"))?;
-    let kind = question_kind(mode).inspect_err(|_| topic_code.zeroize())?;
+    let kind = question_kind(mode)?;
     let stem_object = object
         .get("stem")
         .and_then(Value::as_object)
         .ok_or_else(|| protocol_drift("Cidaren attempt payload has no stem object"))?;
-    let stem = parse_stem(stem_object).inspect_err(|_| topic_code.zeroize())?;
-    let options =
-        parse_options(object.get("options"), kind).inspect_err(|_| topic_code.zeroize())?;
-    let metadata_sanitized =
-        sanitized_metadata(object, remote_task_id, mode, kind, &stem, &options)
-            .inspect_err(|_| topic_code.zeroize())?;
-    let remote_id = question_remote_id(mode, &stem, &options, &metadata_sanitized)
-        .inspect_err(|_| topic_code.zeroize())?;
+    let mut stem = Zeroizing::new(parse_stem(stem_object)?);
+    let options = ZeroizingQuestionOptions::new(parse_options(object.get("options"), kind)?);
+    let metadata_sanitized = ZeroizingQuestionMetadata::new(sanitized_metadata(
+        object,
+        remote_task_id,
+        mode,
+        kind,
+        stem.as_str(),
+        options.as_slice(),
+    )?);
+    let remote_id = question_remote_id(
+        mode,
+        stem.as_str(),
+        options.as_slice(),
+        metadata_sanitized.as_value(),
+    )?;
     let parsed = ParsedCidarenAttemptQuestion {
-        topic_code: Zeroizing::new(topic_code),
+        topic_code,
         remote_task_id: remote_task_id.to_owned(),
         remote_id,
         kind,
-        stem,
-        options,
-        metadata_sanitized,
+        stem: std::mem::take(&mut *stem),
+        options: options.finish(),
+        metadata_sanitized: metadata_sanitized.finish(),
         position,
         remote_progress,
     };
@@ -456,18 +461,22 @@ fn parse_reading_card(
         .get("stem")
         .and_then(Value::as_object)
         .ok_or_else(|| protocol_drift("Cidaren reading-card payload has no stem object"))?;
-    let stem_sanitized = parse_stem(stem_object)?;
-    let material = serde_json::to_vec(&json!({
+    let mut stem_sanitized = Zeroizing::new(parse_stem(stem_object)?);
+    let mut identity = json!({
         "remote_task_id": remote_task_id,
         "topic_mode": 0,
-        "stem": stem_sanitized,
-    }))
-    .map_err(|_| invalid_response("Cidaren reading-card identity cannot be encoded"))?;
-    let remote_id = format!("reading-card:{:x}", Sha256::digest(material));
+        "stem": stem_sanitized.as_str(),
+    });
+    let material = serde_json::to_vec(&identity);
+    zeroize_json(&mut identity);
+    let mut material = material
+        .map_err(|_| invalid_response("Cidaren reading-card identity cannot be encoded"))?;
+    let remote_id = format!("reading-card:{:x}", Sha256::digest(&material));
+    material.zeroize();
     let card = ParsedCidarenReadingCard {
         topic_code,
         remote_id,
-        stem_sanitized,
+        stem_sanitized: std::mem::take(&mut *stem_sanitized),
         position,
         remote_progress,
     };
@@ -588,15 +597,18 @@ fn parse_options(value: Option<&Value>, kind: QuestionKind) -> ProviderResult<Ve
     {
         return Err(invalid_response("Cidaren Question option count is invalid"));
     }
-    let mut options = Vec::new();
-    let mut ids = BTreeSet::new();
+    let mut options = ZeroizingQuestionOptions::new(Vec::new());
+    let mut ids = ZeroizingOptionIds::default();
     for (top_level_index, entry) in entries.iter().enumerate() {
         let entry = entry
             .as_object()
             .ok_or_else(|| protocol_drift("Cidaren Question contains a non-object option"))?;
-        let parent_content =
-            required_text(entry.get("content"), MAX_OPTION_BYTES, "option content")?;
-        let parent_tag = answer_tag(entry.get("answer_tag"))?;
+        let parent_content = Zeroizing::new(required_text(
+            entry.get("content"),
+            MAX_OPTION_BYTES,
+            "option content",
+        )?);
+        let parent_tag = Zeroizing::new(answer_tag(entry.get("answer_tag"))?);
         let sub_options = match entry.get("sub_options") {
             None | Some(Value::Null) => None,
             Some(Value::Array(values)) if values.is_empty() => None,
@@ -608,70 +620,72 @@ fn parse_options(value: Option<&Value>, kind: QuestionKind) -> ProviderResult<Ve
             }
         };
         if let Some(sub_options) = sub_options {
-            let parent_wire = parent_tag.strip_prefix("s:").ok_or_else(|| {
+            let parent_wire = parent_tag.as_str().strip_prefix("s:").ok_or_else(|| {
                 protocol_drift("Cidaren nested option has a non-string parent tag")
             })?;
             for sub_option in sub_options {
                 let sub_option = sub_option.as_object().ok_or_else(|| {
                     protocol_drift("Cidaren Question contains a non-object sub-option")
                 })?;
-                let content = required_text(
+                let content = Zeroizing::new(required_text(
                     sub_option.get("content"),
                     MAX_OPTION_BYTES,
                     "sub-option content",
-                )?;
-                let child_tag = raw_answer_tag(sub_option.get("answer_tag"))?;
-                let combined = format!("s:{parent_wire}{child_tag}");
+                )?);
+                let child_tag = Zeroizing::new(raw_answer_tag(sub_option.get("answer_tag"))?);
+                let combined = format!("s:{parent_wire}{}", child_tag.as_str());
                 push_option(
-                    &mut options,
+                    options.as_mut_vec(),
                     &mut ids,
                     combined,
-                    format!("{parent_content} — {content}"),
+                    format!("{} — {}", parent_content.as_str(), content.as_str()),
                     OptionSemantics {
                         nested: true,
                         top_level_index,
-                        top_level_content: &parent_content,
-                        wire_content: &content,
-                        parent_answer_id: &parent_tag,
+                        top_level_content: parent_content.as_str(),
+                        wire_content: content.as_str(),
+                        parent_answer_id: parent_tag.as_str(),
                     },
                 )?;
             }
         } else {
-            let answer_id = parent_tag.clone();
+            let answer_id = parent_tag.to_string();
             push_option(
-                &mut options,
+                options.as_mut_vec(),
                 &mut ids,
                 answer_id,
-                parent_content.clone(),
+                parent_content.to_string(),
                 OptionSemantics {
                     nested: false,
                     top_level_index,
-                    top_level_content: &parent_content,
-                    wire_content: &parent_content,
-                    parent_answer_id: &parent_tag,
+                    top_level_content: parent_content.as_str(),
+                    wire_content: parent_content.as_str(),
+                    parent_answer_id: parent_tag.as_str(),
                 },
             )?;
         }
     }
-    if options.len() > MAX_OPTIONS
-        || (options.is_empty()
+    if options.as_slice().len() > MAX_OPTIONS
+        || (options.as_slice().is_empty()
             && !matches!(kind, QuestionKind::ShortAnswer | QuestionKind::FillBlank))
     {
         return Err(invalid_response(
             "Cidaren flattened Question options exceed the limit",
         ));
     }
-    Ok(options)
+    Ok(options.finish())
 }
 
 fn push_option(
     options: &mut Vec<QuestionOption>,
-    ids: &mut BTreeSet<String>,
-    id: String,
-    content: String,
+    ids: &mut ZeroizingOptionIds,
+    mut id: String,
+    mut content: String,
     semantics: OptionSemantics<'_>,
 ) -> ProviderResult<()> {
-    if options.len() >= MAX_OPTIONS || id.len() > MAX_ANSWER_TAG_BYTES || !ids.insert(id.clone()) {
+    if options.len() >= MAX_OPTIONS || id.len() > MAX_ANSWER_TAG_BYTES || !ids.insert(&id) {
+        id.zeroize();
+        content.zeroize();
         return Err(protocol_drift(
             "Cidaren Question contains a duplicate or oversized answer tag",
         ));
@@ -689,6 +703,86 @@ fn push_option(
         }),
     });
     Ok(())
+}
+
+struct ZeroizingQuestionOptions(Vec<QuestionOption>);
+
+impl ZeroizingQuestionOptions {
+    const fn new(options: Vec<QuestionOption>) -> Self {
+        Self(options)
+    }
+
+    fn as_slice(&self) -> &[QuestionOption] {
+        &self.0
+    }
+
+    fn as_mut_vec(&mut self) -> &mut Vec<QuestionOption> {
+        &mut self.0
+    }
+
+    fn finish(mut self) -> Vec<QuestionOption> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for ZeroizingQuestionOptions {
+    fn drop(&mut self) {
+        zeroize_question_options(&mut self.0);
+    }
+}
+
+#[derive(Default)]
+struct ZeroizingOptionIds(BTreeSet<String>);
+
+impl ZeroizingOptionIds {
+    fn insert(&mut self, value: &str) -> bool {
+        if self.0.contains(value) {
+            false
+        } else {
+            self.0.insert(value.to_owned());
+            true
+        }
+    }
+}
+
+impl Drop for ZeroizingOptionIds {
+    fn drop(&mut self) {
+        for mut value in std::mem::take(&mut self.0) {
+            value.zeroize();
+        }
+    }
+}
+
+struct ZeroizingQuestionMetadata(Value);
+
+impl ZeroizingQuestionMetadata {
+    const fn new(value: Value) -> Self {
+        Self(value)
+    }
+
+    const fn as_value(&self) -> &Value {
+        &self.0
+    }
+
+    fn finish(mut self) -> Value {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for ZeroizingQuestionMetadata {
+    fn drop(&mut self) {
+        zeroize_json(&mut self.0);
+    }
+}
+
+fn zeroize_question_options(options: &mut [QuestionOption]) {
+    for option in options {
+        option.id.zeroize();
+        if let Some(content) = &mut option.content {
+            content.zeroize();
+        }
+        zeroize_json(&mut option.metadata_sanitized);
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -205,6 +205,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Optional `topic_done_num/topic_total` are bounded integers, completed never
   exceeds total, missing legacy payloads remain valid, and the counters neither
   alter Question fingerprints nor drive the local mutation position.
+- Question parsing keeps partial stem/options/metadata and duplicate-ID sets
+  behind zeroizing guards until the complete normalized Question validates.
+  Reading-card identity JSON and hash material are cleared immediately.
 - Request-vector tests freeze `StartAnswer`, `VerifyAnswer`,
   `SubmitAnswerAndSave`, `SkipAnswer` and `SubmitChoseWord` field/sign order.
 - Mutation serialization consumes and recursively clears its temporary JSON
