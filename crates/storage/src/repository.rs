@@ -9,11 +9,12 @@ use asterism_domain::{
     BrowserBridgeSessionId, CreditAccount, CreditReservation, CreditReservationId,
     CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt, ExecutionAttemptId,
     ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress, ExecutionStage,
-    ExecutionState, ExternalOauthPending, LogLevel, OrchestrationState, PriceQuote,
-    ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
-    Question, QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId,
-    QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId,
-    SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
+    ExecutionState, ExternalOauthPending, GlobalAnswerCorpusEntryId, GlobalCorpusQuestionAsset,
+    GlobalSemanticAnswer, LogLevel, OrchestrationState, PriceQuote, PrivateAnswerEvidence,
+    PrivateAnswerEvidenceId, ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId,
+    ProviderRuntimeSettingsId, Question, QuestionContentFingerprint, QuestionReadAttempt,
+    QuestionReadAttemptId, QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken,
+    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
     SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
     Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
@@ -33,6 +34,54 @@ use crate::JobFailureDisposition;
 use crate::{
     CreditGrant, CreditGrantOutcome, FailureDisposition, LeaseAcquireOutcome, OutboxRecord,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnswerEvidenceProjectionState {
+    Projected,
+    Unmatched(asterism_domain::UnmatchedEvidenceReason),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnswerEvidenceRecord {
+    pub private_evidence_id: PrivateAnswerEvidenceId,
+    pub corpus_entry_id: Option<GlobalAnswerCorpusEntryId>,
+    pub projection_state: AnswerEvidenceProjectionState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AnswerEvidenceRecordOutcome {
+    Inserted(AnswerEvidenceRecord),
+    Duplicate(AnswerEvidenceRecord),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlobalAnswerCorpusEvidence {
+    pub corpus_entry_id: GlobalAnswerCorpusEntryId,
+    pub question_content_fingerprint: QuestionContentFingerprint,
+    pub question: GlobalCorpusQuestionAsset,
+    pub answer: GlobalSemanticAnswer,
+    pub official_evidence_count: u64,
+    pub verified_historical_evidence_count: u64,
+    pub negative_evidence_count: u64,
+    pub first_seen_at: Timestamp,
+    pub last_seen_at: Timestamp,
+    pub last_verified_at: Option<Timestamp>,
+}
+
+/// Durable two-layer Answer Evidence boundary. Private provenance is accepted
+/// here, while reads expose only the identity-free global projection.
+#[async_trait]
+pub trait AnswerEvidenceRepository: Send + Sync {
+    async fn record_answer_evidence(
+        &self,
+        evidence: &PrivateAnswerEvidence,
+    ) -> Result<AnswerEvidenceRecordOutcome, StorageError>;
+
+    async fn list_global_answer_corpus_evidence(
+        &self,
+        question_content_fingerprint: &QuestionContentFingerprint,
+    ) -> Result<Vec<GlobalAnswerCorpusEvidence>, StorageError>;
+}
 
 /// Persistence contract consumed by task services. It intentionally contains no
 /// `SQLite` types.

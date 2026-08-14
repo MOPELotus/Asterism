@@ -3946,3 +3946,24 @@ audited schema declares 900 by default. Migration 053 persists the frozen
 partition. Storage compares it with the real snapshot Question IDs on both
 write and read, so a changed count or foreign unanswered ID fails closed before
 the Draft can be scheduled or recovered.
+
+## Two-hundred-and-nineteenth Phase 0 slice
+
+Answer Evidence now has a durable two-layer Core boundary. A private evidence
+record retains its exact owner, Provider account, Course, Task, immutable
+Question snapshot, candidate, execution Attempt, verification digest and
+sanitized provenance. Storage rechecks those bindings against the original
+Question, candidate and Attempt in one immediate transaction; a foreign owner,
+account, Task, Question or Attempt leaves no private or global partial write.
+
+Safely representable evidence is projected into an identity-free global Corpus
+entry containing only the exact Question content fingerprint, sanitized
+semantic Question asset and semantic answer. Snapshot-local option IDs are
+rebound to option content, and choice selections are canonicalized in Question
+order. Official, verified historical and negative evidence have independent
+counts. A stable source-fact digest makes retries idempotent without treating a
+second owner's corroborating evidence as a duplicate. Unsupported compound or
+context-dependent shapes remain durable explicit unmatched evidence instead of
+being guessed or discarded. Migration 054 persists both layers and their exact
+projection link; the public Corpus read model exposes no owner, QQ, account,
+Course, Task, snapshot, candidate, Attempt or private provenance identity.

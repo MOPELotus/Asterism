@@ -1,6 +1,7 @@
 //! `SQLite` adapter for Asterism's repository boundary.
 
 mod admin;
+mod answer_evidence;
 mod auth_bootstrap;
 mod auth_session;
 mod browser_bridge;
@@ -29,6 +30,7 @@ mod task_lifecycle;
 mod user;
 
 pub use admin::SqliteAdminRepository;
+pub use answer_evidence::SqliteAnswerEvidenceRepository;
 pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
 pub use browser_bridge::SqliteBrowserBridgeSessionRepository;
@@ -47,8 +49,10 @@ pub use question_read_continuation::SqliteQuestionReadContinuationRepository;
 pub use question_session::SqliteQuestionSessionRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
-    AnswerCacheRepository, AnswerCandidateRecord, AnswerCandidateRepository, AuditFilter,
-    AuditPage, AuditQueryRepository, AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
+    AnswerCacheRepository, AnswerCandidateRecord, AnswerCandidateRepository,
+    AnswerEvidenceProjectionState, AnswerEvidenceRecord, AnswerEvidenceRecordOutcome,
+    AnswerEvidenceRepository, AuditFilter, AuditPage, AuditQueryRepository,
+    AuthBootstrapClientEventRecord, AuthBootstrapCredentialCommit,
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, BrowserBridgeCommandArtifactRepository,
@@ -74,8 +78,8 @@ pub use repository::{
     ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
     ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
     ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, ExternalOauthClaim, OutboxRepository,
-    PendingBrowserBridgeResult, PriorAnswerEvidence, ProviderAccountRepository,
+    ExecutionVerificationRecoveryRepository, ExternalOauthClaim, GlobalAnswerCorpusEvidence,
+    OutboxRepository, PendingBrowserBridgeResult, PriorAnswerEvidence, ProviderAccountRepository,
     ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
     ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
     ProviderRuntimeSettingsWriteOutcome, ProviderRuntimeSettingsWriteRequest,

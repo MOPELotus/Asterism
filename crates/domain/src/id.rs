@@ -64,6 +64,8 @@ entity_id!(QuestionSnapshotId);
 entity_id!(QuestionReadAttemptId);
 entity_id!(QuestionSessionId);
 entity_id!(AnswerCandidateId);
+entity_id!(PrivateAnswerEvidenceId);
+entity_id!(GlobalAnswerCorpusEntryId);
 entity_id!(SubmissionDraftId);
 entity_id!(SubmissionResultId);
 entity_id!(ExecutionId);

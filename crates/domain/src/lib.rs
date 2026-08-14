@@ -1,6 +1,7 @@
 //! Asterism's persistence- and transport-independent domain model.
 
 pub mod account;
+pub mod answer_evidence;
 pub mod answer_resolution;
 pub mod audit;
 pub mod auth;
@@ -21,6 +22,11 @@ pub mod task;
 pub mod user;
 
 pub use account::{Course, ProviderAccount, ProviderId};
+pub use answer_evidence::{
+    AnswerEvidenceClass, CorpusProjectionEligibility, GlobalCorpusQuestionAsset,
+    GlobalCorpusQuestionOption, GlobalSemanticAnswer, PrivateAnswerEvidence,
+    PrivateAnswerEvidenceValidationError, UnmatchedEvidenceReason,
+};
 pub use answer_resolution::{
     AnswerResolutionDecision, AnswerResolutionPlan, AnswerResolutionStatus,
     AnswerResolutionValidationError,
