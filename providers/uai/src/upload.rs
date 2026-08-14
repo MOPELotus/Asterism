@@ -1,15 +1,19 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::SubmissionReceipt;
+use asterism_domain::{SubmissionReceipt, Timestamp};
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, TaskDetailCapability,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::encrypted::ZeroizingJsonValue;
+use crate::{
+    encrypted::ZeroizingJsonValue, submission_execute::valid_submission_version,
+    submission_verify::bound_verification_state,
+};
 
 const MAX_UPLOAD_GRANT_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_UPLOAD_RESPONSE_BYTES: usize = 64 * 1_024;
@@ -17,6 +21,8 @@ const MAX_UPLOAD_TOKEN_BYTES: usize = 8 * 1_024;
 const MAX_UPLOAD_KEY_BYTES: usize = 1_024;
 const MAX_UPLOAD_ARTIFACT_BYTES: usize = 64 * 1_024 * 1_024;
 const MAX_UPLOAD_SUBMISSION_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_UPLOAD_VERIFICATION_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_UPLOAD_NESTED_ANSWER_BYTES: usize = 1_024 * 1_024;
 const MINIMAL_MP3_BYTES: usize = 4_096;
 
 /// Provider-private boundary for the audited grant, object-store and final
@@ -43,6 +49,13 @@ pub trait UaiUploadTransport: Send + Sync {
         context: &ProviderContext,
         submission: &UaiUploadSubmission,
     ) -> ProviderResult<SubmissionReceipt>;
+
+    async fn verify_uploaded_artifact(
+        &self,
+        context: &ProviderContext,
+        submission: &UaiUploadSubmission,
+        receipt: &SubmissionReceipt,
+    ) -> ProviderResult<UaiUploadVerification>;
 }
 
 /// Short-lived CMS/object-store authorization returned by UAI.
@@ -406,6 +419,58 @@ impl Drop for UaiUploadSubmission {
         self.artifact_digest.zeroize();
         self.upload_intent_fingerprint.zeroize();
         self.fingerprint.zeroize();
+    }
+}
+
+/// Exact receipt-versioned confirmation that the remote user-module retains
+/// the immutable uploaded object key. It deliberately does not claim Task
+/// completion; fresh progress remains a separate authority.
+pub struct UaiUploadVerification {
+    remote_task_id: String,
+    artifact_digest: String,
+    submission_version: String,
+    verified_at: Timestamp,
+}
+
+impl UaiUploadVerification {
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub fn artifact_digest(&self) -> &str {
+        &self.artifact_digest
+    }
+
+    pub fn submission_version(&self) -> &str {
+        &self.submission_version
+    }
+
+    pub const fn verified_at(&self) -> Timestamp {
+        self.verified_at
+    }
+
+    pub const fn requires_fresh_progress_read(&self) -> bool {
+        true
+    }
+}
+
+impl fmt::Debug for UaiUploadVerification {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiUploadVerification")
+            .field("remote_task_id", &self.remote_task_id)
+            .field("artifact_digest", &self.artifact_digest)
+            .field("submission_version", &self.submission_version)
+            .field("verified_at", &self.verified_at)
+            .finish()
+    }
+}
+
+impl Drop for UaiUploadVerification {
+    fn drop(&mut self) {
+        self.remote_task_id.zeroize();
+        self.artifact_digest.zeroize();
+        self.submission_version.zeroize();
     }
 }
 
@@ -894,6 +959,145 @@ pub(crate) fn build_upload_submission_body(
     Ok(encoded)
 }
 
+/// Verifies one uploaded key through the exact receipt-versioned user-module
+/// readback. This proves answer persistence only, not Group completion.
+///
+/// # Errors
+///
+/// Rejects an invalid receipt, malformed/foreign route state, any non-zero or
+/// duplicate module identity, incomplete child or changed object key.
+pub fn parse_upload_verification(
+    document: &str,
+    submission: &UaiUploadSubmission,
+    receipt: &SubmissionReceipt,
+) -> ProviderResult<UaiUploadVerification> {
+    receipt
+        .validate()
+        .map_err(|_| invalid_response("UAI upload verification receipt is invalid"))?;
+    let version = receipt
+        .provider_trace_id
+        .as_deref()
+        .filter(|value| receipt.remote_status == "accepted" && valid_submission_version(value))
+        .ok_or_else(|| {
+            invalid_response("UAI upload verification requires an accepted version receipt")
+        })?;
+    if document.is_empty() || document.len() > MAX_UPLOAD_VERIFICATION_BYTES {
+        return Err(invalid_response(
+            "UAI upload verification response is empty or oversized",
+        ));
+    }
+    let response = ZeroizingJsonValue::new(
+        serde_json::from_str(document)
+            .map_err(|_| invalid_response("UAI upload verification response is not valid JSON"))?,
+    );
+    let state = bound_verification_state(response.as_value(), submission.group_id(), version)?;
+    validate_upload_question_data(state, submission.expose_file_key())?;
+    Ok(UaiUploadVerification {
+        remote_task_id: submission.remote_task_id.clone(),
+        artifact_digest: submission.artifact_digest.clone(),
+        submission_version: version.to_owned(),
+        verified_at: Utc::now(),
+    })
+}
+
+fn validate_upload_question_data(
+    state: &serde_json::Map<String, Value>,
+    expected_file_key: &str,
+) -> ProviderResult<()> {
+    let question_data = state
+        .get("quesData")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_UPLOAD_VERIFICATION_BYTES)
+        .ok_or_else(|| protocol_drift("UAI upload verification has no bounded Question data"))?;
+    let questions = ZeroizingJsonValue::new(
+        serde_json::from_str(question_data)
+            .map_err(|_| invalid_response("UAI upload Question readback is not valid JSON"))?,
+    );
+    let entries = questions
+        .as_value()
+        .as_array()
+        .filter(|entries| entries.len() == 1)
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI upload readback does not contain one exact module",
+            )
+        })?;
+    let entry = entries[0]
+        .as_object()
+        .ok_or_else(|| protocol_drift("UAI upload readback module is not an object"))?;
+    let instance_is_zero = match entry.get("instanceId") {
+        Some(Value::String(value)) => value == "0",
+        Some(Value::Number(value)) => value.as_u64() == Some(0),
+        _ => false,
+    };
+    if !instance_is_zero {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI upload readback module identity changed",
+        ));
+    }
+    validate_upload_readback_entry(entry, expected_file_key)
+}
+
+fn validate_upload_readback_entry(
+    entry: &serde_json::Map<String, Value>,
+    expected_file_key: &str,
+) -> ProviderResult<()> {
+    let context = entry
+        .get("context")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 64 * 1_024)
+        .ok_or_else(|| protocol_drift("UAI upload readback has no bounded context"))?;
+    let context = ZeroizingJsonValue::new(
+        serde_json::from_str(context)
+            .map_err(|_| invalid_response("UAI upload readback context is not valid JSON"))?,
+    );
+    if context.as_value().get("state").and_then(Value::as_str) != Some("submitted") {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI upload readback is not submitted",
+        ));
+    }
+    let answer = entry
+        .get("answer")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_UPLOAD_NESTED_ANSWER_BYTES)
+        .ok_or_else(|| protocol_drift("UAI upload readback has no bounded answer"))?;
+    let answer = ZeroizingJsonValue::new(
+        serde_json::from_str(answer)
+            .map_err(|_| invalid_response("UAI upload readback answer is not valid JSON"))?,
+    );
+    let children = answer
+        .as_value()
+        .get("children")
+        .and_then(Value::as_array)
+        .filter(|children| children.len() == 1)
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI upload readback does not contain one exact answer child",
+            )
+        })?;
+    let child = children[0]
+        .as_object()
+        .ok_or_else(|| protocol_drift("UAI upload readback child is not an object"))?;
+    let values = child
+        .get("value")
+        .and_then(Value::as_array)
+        .filter(|values| values.len() == 1)
+        .ok_or_else(|| protocol_drift("UAI upload readback child has no exact value"))?;
+    if child.get("isDone").and_then(Value::as_bool) != Some(true)
+        || values[0].as_str() != Some(expected_file_key)
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI upload readback differs from the immutable uploaded artifact",
+        ));
+    }
+    Ok(())
+}
+
 fn safe_remote_component(value: Option<&Value>, label: &'static str) -> ProviderResult<String> {
     value
         .and_then(Value::as_str)
@@ -1130,6 +1334,79 @@ mod tests {
         assert!(build_upload_submission(&compound_detail, &compound_uploaded).is_err());
     }
 
+    #[test]
+    fn receipt_versioned_upload_readback_requires_exact_completed_key() {
+        let submission = fixture_submission();
+        let receipt = SubmissionReceipt {
+            remote_status: "accepted".to_owned(),
+            message_sanitized: Some("synthetic accepted upload".to_owned()),
+            provider_trace_id: Some("upload-v1".to_owned()),
+            received_at: Utc::now(),
+        };
+        let answer = serde_json::json!({
+            "value": [],
+            "children": [{"value": [submission.expose_file_key()], "isDone": true}],
+            "progress": {},
+            "record": {"url": ""},
+        })
+        .to_string();
+        let questions = serde_json::json!([{
+            "instanceId": "0",
+            "answer": answer,
+            "context": "{\"state\":\"submitted\"}",
+        }])
+        .to_string();
+        let document = serde_json::json!({
+            "success": true,
+            "code": 0,
+            "data": {
+                "course": "course-instance-1",
+                "module": "group-upload-upload-v1",
+                "state": {
+                    "version": "upload-v1",
+                    "quesData": questions,
+                    "__EXTEND_DATA__": {"__SUBMIT_INFO__": {
+                        "course_id": "course-instance-1",
+                        "group_id": "group-upload",
+                        "version": "upload-v1"
+                    }}
+                }
+            }
+        })
+        .to_string();
+        let verified = parse_upload_verification(&document, &submission, &receipt).unwrap();
+        assert_eq!(verified.remote_task_id(), submission.remote_task_id());
+        assert_eq!(verified.artifact_digest(), submission.artifact_digest());
+        assert_eq!(verified.submission_version(), "upload-v1");
+        assert!(verified.requires_fresh_progress_read());
+        assert!(!format!("{verified:?}").contains(submission.expose_file_key()));
+
+        assert!(
+            parse_upload_verification(
+                &document.replace("course/42/nothing.mp3", "other/key.mp3"),
+                &submission,
+                &receipt,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_upload_verification(
+                &document.replace(
+                    "\\\"instanceId\\\":\\\"0\\\"",
+                    "\\\"instanceId\\\":\\\"1\\\"",
+                ),
+                &submission,
+                &receipt,
+            )
+            .is_err()
+        );
+        let mut receipt_without_version = receipt;
+        receipt_without_version.provider_trace_id = None;
+        assert!(
+            parse_upload_verification(&document, &submission, &receipt_without_version).is_err()
+        );
+    }
+
     fn fixture_intent(artifact: &UaiUploadArtifact) -> UaiUploadIntent {
         let artifact_digest = artifact.digest();
         UaiUploadIntent {
@@ -1142,6 +1419,21 @@ mod tests {
             artifact_digest,
             fingerprint: "uai-upload-v1:fixture".to_owned(),
         }
+    }
+
+    fn fixture_submission() -> UaiUploadSubmission {
+        let artifact = UaiUploadArtifact::donor_minimal_mp3();
+        let detail = upload_detail(&["multiFileUpload"]);
+        let intent =
+            build_upload_intent(&detail, "group:2001:unit-1:group-upload", &artifact).unwrap();
+        let grant = parse_upload_grant(
+            r#"{"code":200,"upToken":"secret-upload-token","fileKey":"course/42/nothing.mp3"}"#,
+            &intent,
+        )
+        .unwrap();
+        let uploaded =
+            UaiUploadedArtifact::from_grant(&grant, "course/42/nothing.mp3".to_owned()).unwrap();
+        build_upload_submission(&detail, &uploaded).unwrap()
     }
 
     fn upload_detail(task_types: &[&str]) -> RemoteTaskDetail {

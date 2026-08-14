@@ -228,7 +228,7 @@ pub fn parse_verification_snapshot(
     Ok(snapshot)
 }
 
-fn bound_verification_state<'a>(
+pub(crate) fn bound_verification_state<'a>(
     response: &'a Value,
     expected_group_id: &str,
     expected_version: &str,

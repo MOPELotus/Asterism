@@ -27,8 +27,8 @@ use crate::{
     UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
     UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
     UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
-    UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport, UaiUploadedArtifact,
-    UaiVerificationDocument, UaiVerificationTransport,
+    UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification,
+    UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
     build_discussion_reply_page_request, build_discussion_reply_request,
     build_discussion_topic_request, build_upload_multipart,
@@ -40,8 +40,9 @@ use crate::{
     parse_course_context, parse_course_progress, parse_discussion_binding,
     parse_discussion_reply_page, parse_discussion_reply_receipt, parse_discussion_topic,
     parse_group_progress, parse_submission_receipt, parse_task_inventory, parse_upload_grant,
-    parse_upload_result,
+    parse_upload_result, parse_upload_verification,
     progress::validate_progress_route_binding,
+    submission_execute::valid_submission_version,
     submission_verify::validate_verification_course_binding,
     task_inventory::parse_task_tree_unit_ids,
     upload::build_upload_submission_body,
@@ -1069,6 +1070,33 @@ impl NativeUaiInventoryTransport {
         parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
     }
 
+    async fn verify_uploaded_artifact_with_session(
+        &self,
+        session: &UaiJwtSession,
+        submission: &UaiUploadSubmission,
+        receipt: &SubmissionReceipt,
+    ) -> ProviderResult<UaiUploadVerification> {
+        let version = receipt
+            .provider_trace_id
+            .as_deref()
+            .filter(|value| receipt.remote_status == "accepted" && valid_submission_version(value))
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "UAI upload verification requires an accepted version receipt",
+                )
+            })?;
+        let document = self
+            .fetch_verification_with_session(
+                session,
+                submission.course_resource_id(),
+                submission.group_id(),
+                version,
+            )
+            .await?;
+        parse_upload_verification(document.as_str(), submission, receipt)
+    }
+
     async fn fetch_verification_with_session(
         &self,
         session: &UaiJwtSession,
@@ -1565,6 +1593,26 @@ impl UaiUploadTransport for NativeUaiInventoryTransport {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 let session = self.sessions.renew_session(context).await?;
                 self.submit_uploaded_artifact_with_session(&session, submission)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn verify_uploaded_artifact(
+        &self,
+        context: &ProviderContext,
+        submission: &UaiUploadSubmission,
+        receipt: &SubmissionReceipt,
+    ) -> ProviderResult<UaiUploadVerification> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .verify_uploaded_artifact_with_session(&session, submission, receipt)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.verify_uploaded_artifact_with_session(&session, submission, receipt)
                     .await
             }
             result => result,

@@ -608,9 +608,19 @@ available `tab_type=task` Unit-progress leaf. A version-bearing response is a
 receipt only. The key-bearing body and route identities stay in zeroizing
 owners, and an ambiguous mutation is not replayed.
 
+The accepted final receipt supplies the only permitted user-module version.
+Native verification refreshes and binds the Course route, then requires exact
+`{groupId}-{version}` module and submit-info state. The upload-specific parser
+accepts exactly one numeric/string-zero `instanceId`, submitted context and one
+completed child whose sole value equals the immutable uploaded key. Any missing
+receipt, changed key, extra module/child/value or unsubmitted state fails
+closed. This confirms answer persistence only and still requires a separate
+fresh exact Group progress read for completion.
+
 The donor's mixed `multichoice,multiFileUpload` flow is one atomic Group
 submission. Asterism therefore refuses to submit only its upload half; durable
 Artifact plus Submission Draft integration must carry both answers together.
-Receipt-versioned uploaded-key readback and the shared artifact lifecycle also
-remain active Core work. A grant, object-store response or accepted final
-receipt alone is never Group completion evidence.
+The shared artifact lifecycle, durable attempt registration and mixed Draft
+composition remain active Core work. A grant, object-store response, accepted
+final receipt or even exact uploaded-key readback alone is never Group
+completion evidence.
