@@ -224,6 +224,151 @@ pub struct WellearnBatchPlan {
     pub discarded_remainder_seconds: u64,
 }
 
+/// Explicit parent authority required before a fresh atomic Course batch can
+/// be planned. None of these facts may be inferred from one child Task.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WellearnAtomicBatchPlanningAuthority {
+    course_remote_id: String,
+    flow: WellearnBatchFlow,
+    selection: WellearnBatchUnitSelection,
+    expected_remote_task_id: String,
+    frozen_fanyuchang_target_seconds: Option<u64>,
+    frozen_auto_duration_minutes: Option<u64>,
+}
+
+impl WellearnAtomicBatchPlanningAuthority {
+    /// Freezes one complete parent selection and target authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error unless the flow is one of the two atomic
+    /// donor flows, Course/SCO identity is valid, selection is bounded and
+    /// exactly one flow-specific target input is present.
+    pub fn try_new(
+        course_remote_id: impl Into<String>,
+        flow: WellearnBatchFlow,
+        selection: WellearnBatchUnitSelection,
+        expected_remote_task_id: impl Into<String>,
+        frozen_fanyuchang_target_seconds: Option<u64>,
+        frozen_auto_duration_minutes: Option<u64>,
+    ) -> ProviderResult<Self> {
+        let authority = Self {
+            course_remote_id: course_remote_id.into(),
+            flow,
+            selection,
+            expected_remote_task_id: expected_remote_task_id.into(),
+            frozen_fanyuchang_target_seconds,
+            frozen_auto_duration_minutes,
+        };
+        authority.validate()?;
+        Ok(authority)
+    }
+
+    pub fn course_remote_id(&self) -> &str {
+        self.course_remote_id.as_str()
+    }
+
+    pub const fn flow(&self) -> WellearnBatchFlow {
+        self.flow
+    }
+
+    pub const fn selection(&self) -> &WellearnBatchUnitSelection {
+        &self.selection
+    }
+
+    pub fn expected_remote_task_id(&self) -> &str {
+        self.expected_remote_task_id.as_str()
+    }
+
+    pub const fn frozen_fanyuchang_target_seconds(&self) -> Option<u64> {
+        self.frozen_fanyuchang_target_seconds
+    }
+
+    pub const fn frozen_auto_duration_minutes(&self) -> Option<u64> {
+        self.frozen_auto_duration_minutes
+    }
+
+    /// Revalidates restored parent authority without fresh I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for identity, selection, flow or target drift.
+    pub fn validate(&self) -> ProviderResult<()> {
+        split_batch_identity(
+            self.course_remote_id.as_str(),
+            self.expected_remote_task_id.as_str(),
+        )?;
+        if let WellearnBatchUnitSelection::Explicit(indices) = &self.selection
+            && (indices.is_empty()
+                || indices.len() > 512
+                || indices.iter().any(|index| *index >= 512)
+                || indices.iter().copied().collect::<BTreeSet<_>>().len() != indices.len())
+        {
+            return Err(invalid_atomic_planning_authority());
+        }
+        let valid = match self.flow {
+            WellearnBatchFlow::FanyuchangDuration => {
+                self.frozen_auto_duration_minutes.is_none()
+                    && self.frozen_fanyuchang_target_seconds.is_some_and(|target| {
+                        crate::WellearnAtomicDurationCompletionPlan::try_new(
+                            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
+                            target,
+                        )
+                        .is_ok()
+                    })
+            }
+            WellearnBatchFlow::AutoDuration => {
+                self.frozen_fanyuchang_target_seconds.is_none()
+                    && self
+                        .frozen_auto_duration_minutes
+                        .is_some_and(|minutes| (1..=MAX_AUTO_DURATION_MINUTES).contains(&minutes))
+            }
+            WellearnBatchFlow::FanyuchangCompletion
+            | WellearnBatchFlow::YzbrhCompletion
+            | WellearnBatchFlow::YzbrhDuration
+            | WellearnBatchFlow::AutoCompletion
+            | WellearnBatchFlow::AutoLegacyDuration => false,
+        };
+        if !valid
+            || self.flow.execution_shape() != WellearnBatchExecutionShape::AtomicDurationCompletion
+        {
+            return Err(invalid_atomic_planning_authority());
+        }
+        Ok(())
+    }
+}
+
+/// One fresh full-inventory rebuild plus its exact atomic child projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WellearnPreparedAtomicChildPlan {
+    batch_plan: WellearnBatchPlan,
+    entry_index: usize,
+    child_plan: WellearnAtomicChildPlan,
+}
+
+impl WellearnPreparedAtomicChildPlan {
+    pub const fn batch_plan(&self) -> &WellearnBatchPlan {
+        &self.batch_plan
+    }
+
+    pub const fn entry_index(&self) -> usize {
+        self.entry_index
+    }
+
+    pub const fn child_plan(&self) -> &WellearnAtomicChildPlan {
+        &self.child_plan
+    }
+
+    /// Converts the rebound exact child into Core's generic immutable artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns the child plan's typed validation or artifact conversion error.
+    pub fn provider_plan_artifact(&self) -> ProviderResult<ProviderExecutionPlanArtifact> {
+        self.child_plan.to_provider_execution_plan_artifact()
+    }
+}
+
 /// Versioned Provider-private payload for one exact atomic batch child.
 ///
 /// Core may persist the bounded serialized value but does not interpret its
@@ -554,6 +699,71 @@ pub fn materialize_atomic_child_plan(
     };
     plan.validate()?;
     Ok(plan)
+}
+
+/// Rebuilds one complete atomic batch from a fresh Course Unit/SCO inventory
+/// and projects the exact authorized child without guessing parent selection.
+///
+/// The caller owns read-only fresh discovery. This pure boundary requires its
+/// explicit parent authority, rebuilds the full selected batch once, locates
+/// the expected Task by stable remote identity and binds the resulting child
+/// to the rebuilt batch before returning.
+///
+/// # Errors
+///
+/// Returns a typed error for invalid authority or fresh inventory, parent
+/// Course drift, a missing/ineligible child, target drift or artifact failure.
+pub fn prepare_atomic_child_plan_from_fresh_inventory(
+    fresh_tasks: &[RemoteTask],
+    fresh_units: &[WellearnUnitObservation],
+    authority: &WellearnAtomicBatchPlanningAuthority,
+) -> ProviderResult<WellearnPreparedAtomicChildPlan> {
+    authority.validate()?;
+    let batch_plan = build_selected_batch_plan(
+        fresh_tasks,
+        fresh_units,
+        authority.selection.clone(),
+        authority.flow,
+        authority.frozen_auto_duration_minutes,
+    )?;
+    if batch_plan.course_remote_id != authority.course_remote_id {
+        return Err(atomic_planning_remote_changed());
+    }
+    let entry_index = batch_plan
+        .entries
+        .iter()
+        .position(|entry| entry.remote_task_id == authority.expected_remote_task_id)
+        .ok_or_else(atomic_planning_remote_changed)?;
+    let child_plan = materialize_atomic_child_plan(
+        &batch_plan,
+        entry_index,
+        authority.frozen_fanyuchang_target_seconds,
+    )?;
+    child_plan.validate_for_batch_entry(
+        &batch_plan,
+        entry_index,
+        authority.frozen_fanyuchang_target_seconds,
+    )?;
+    child_plan.to_provider_execution_plan_artifact()?;
+    Ok(WellearnPreparedAtomicChildPlan {
+        batch_plan,
+        entry_index,
+        child_plan,
+    })
+}
+
+fn invalid_atomic_planning_authority() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn atomic batch planning authority is incomplete or inconsistent",
+    )
+}
+
+fn atomic_planning_remote_changed() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::RemoteChanged,
+        "WELearn fresh atomic batch no longer contains the authorized Course child",
+    )
 }
 
 fn invalid_atomic_child_plan() -> ProviderError {
@@ -1731,6 +1941,178 @@ mod tests {
             .unwrap(),
             plan
         );
+    }
+
+    #[test]
+    fn fresh_atomic_planning_rebuilds_exact_ordered_fanyuchang_selection() {
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+            "sco:1001:301",
+            Some(37),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&tasks(), &units(), &authority).unwrap();
+
+        assert_eq!(authority.course_remote_id(), "course:1001");
+        assert_eq!(authority.flow(), WellearnBatchFlow::FanyuchangDuration);
+        assert_eq!(
+            authority.selection(),
+            &WellearnBatchUnitSelection::Explicit(vec![1, 0])
+        );
+        assert_eq!(authority.expected_remote_task_id(), "sco:1001:301");
+        assert_eq!(authority.frozen_fanyuchang_target_seconds(), Some(37));
+        assert_eq!(authority.frozen_auto_duration_minutes(), None);
+        assert_eq!(
+            prepared.batch_plan().selection,
+            WellearnBatchUnitSelection::Explicit(vec![1, 0])
+        );
+        assert_eq!(
+            prepared
+                .batch_plan()
+                .selected_units
+                .iter()
+                .map(|unit| unit.index)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+        assert_eq!(prepared.entry_index(), 1);
+        assert_eq!(prepared.child_plan().remote_task_id(), "sco:1001:301");
+        assert_eq!(prepared.child_plan().target_seconds(), 37);
+        let artifact = prepared.provider_plan_artifact().unwrap();
+        assert_eq!(
+            WellearnAtomicChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact,
+                prepared.batch_plan(),
+                prepared.entry_index(),
+                Some(37),
+            )
+            .unwrap(),
+            prepared.child_plan().clone()
+        );
+    }
+
+    #[test]
+    fn fresh_atomic_planning_preserves_auto_zero_floor_from_full_membership() {
+        let template = tasks().remove(0);
+        let mut many = Vec::with_capacity(61);
+        for index in 0..61_usize {
+            let mut task = template.clone();
+            task.remote_id = format!("sco:1001:planning-{index}");
+            task.normalized["sco_id"] = serde_json::json!(format!("planning-{index}"));
+            task.normalized["sco_index"] = serde_json::json!(index);
+            many.push(task);
+        }
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::AutoDuration,
+            WellearnBatchUnitSelection::Explicit(vec![0]),
+            "sco:1001:planning-60",
+            None,
+            Some(1),
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&many, &units(), &authority).unwrap();
+
+        assert_eq!(prepared.batch_plan().entries.len(), 61);
+        assert_eq!(prepared.batch_plan().aggregate_duration_seconds, Some(60));
+        assert_eq!(prepared.child_plan().target_seconds(), 0);
+        assert_eq!(
+            prepared
+                .provider_plan_artifact()
+                .unwrap()
+                .payload_sanitized()["target_seconds"],
+            0
+        );
+    }
+
+    #[test]
+    fn atomic_planning_authority_rejects_singleton_or_incomplete_inputs() {
+        for flow in [
+            WellearnBatchFlow::FanyuchangCompletion,
+            WellearnBatchFlow::YzbrhCompletion,
+            WellearnBatchFlow::YzbrhDuration,
+            WellearnBatchFlow::AutoCompletion,
+            WellearnBatchFlow::AutoLegacyDuration,
+        ] {
+            assert!(
+                WellearnAtomicBatchPlanningAuthority::try_new(
+                    "course:1001",
+                    flow,
+                    WellearnBatchUnitSelection::All,
+                    "sco:1001:301",
+                    Some(1),
+                    None,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            WellearnAtomicBatchPlanningAuthority::try_new(
+                "course:1001",
+                WellearnBatchFlow::FanyuchangDuration,
+                WellearnBatchUnitSelection::All,
+                "sco:1001:301",
+                None,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            WellearnAtomicBatchPlanningAuthority::try_new(
+                "course:1001",
+                WellearnBatchFlow::AutoDuration,
+                WellearnBatchUnitSelection::All,
+                "sco:1001:301",
+                Some(1),
+                Some(1),
+            )
+            .is_err()
+        );
+        assert!(
+            WellearnAtomicBatchPlanningAuthority::try_new(
+                "course:1001",
+                WellearnBatchFlow::AutoDuration,
+                WellearnBatchUnitSelection::Explicit(vec![0, 0]),
+                "sco:1001:301",
+                None,
+                Some(1),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fresh_atomic_planning_never_infers_unselected_or_missing_child() {
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::Explicit(vec![0]),
+            "sco:1001:401",
+            Some(10),
+            None,
+        )
+        .unwrap();
+        let error = prepare_atomic_child_plan_from_fresh_inventory(&tasks(), &units(), &authority)
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:missing",
+            Some(10),
+            None,
+        )
+        .unwrap();
+        let error = prepare_atomic_child_plan_from_fresh_inventory(&tasks(), &units(), &authority)
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
     }
 
     #[test]

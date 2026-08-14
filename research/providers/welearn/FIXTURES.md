@@ -220,6 +220,12 @@ only structural field names, response codes and bounded placeholder shapes.
   preserve Auto's zero target, and verify Debug redaction. Foreign provider or
   type, another valid ordinal, wrong frozen target and drifted batch facts all
   fail before a child plan can be restored.
+- Fresh atomic-planning fixtures require explicit parent Course, atomic flow,
+  ordered Unit selection, expected child and exact target authority. They prove
+  reversed Fanyuchang Unit order is preserved, a complete 61-child Auto
+  membership yields and retains zero-second children, and singleton flows,
+  duplicate/missing selection, missing target, unselected child or disappeared
+  child cannot be guessed into a plan.
 - Native atomic transport tests bind current duration/completion to the
   query-uid endpoint and simple Referer, while Auto binds its duration phase to
   plain endpoint/simple Referer and switches only final completion to the

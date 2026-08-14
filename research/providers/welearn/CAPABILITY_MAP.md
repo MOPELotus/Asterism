@@ -207,6 +207,12 @@ and rejects all singleton flows and restored tuple drift. It now converts to
 Core's credential-free `welearn.atomic-child.v1` execution-plan artifact under
 the stricter local 1 KiB bound; recovery checks provider/type and fully rebinds
 the payload to the validated batch, expected ordinal and frozen target.
+An independent fresh planning boundary now accepts explicit parent Course,
+atomic flow, ordered Unit selection, expected child and frozen Fany/Auto target
+authority, rebuilds one complete fresh Unit/SCO batch, and produces the exact
+child artifact without scheduling. The shared single-Task async planning hook
+does not carry those parent/selection/membership facts and therefore remains
+unimplemented for WELearn rather than inferring them from one Task.
 Immutable Core Execution identity now makes donor-style per-Execution random
 duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
 persisted capability-step plan still needs the atomic duration-completion
