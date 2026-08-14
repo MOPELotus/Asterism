@@ -405,6 +405,11 @@ score-0 zero-time save-only duration final. The native transport repeats this
 validation before session resolution. A cross-donor endpoint, CMI envelope,
 time mode, write family, score or save sequence fails `Internal` and sends no
 mutation. This does not grant the two atomic profiles singleton authority.
+`WellearnResourceExecutionPlan::requires_atomic_authority` identifies those two
+profiles after validation. The current singleton TaskExecution boundary rejects
+them before fresh detail or transport, while native encoding and non-mutating
+goal verification remain available for the shared atomic executor and recovery
+path. They are active Core-contract work, not removed Provider capabilities.
 
 `WellearnBatchExecutionShape::AtomicDurationCompletion` now marks current
 Fanyuchang duration and modular Auto duration and requires both child

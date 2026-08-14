@@ -179,6 +179,33 @@ impl WellearnResourceExecutionPlan {
         }
         Ok(())
     }
+
+    /// Whether this is only the final phase of a donor's one-start atomic
+    /// duration-completion operation.
+    pub const fn requires_atomic_authority(self) -> bool {
+        matches!(
+            (
+                self.score_percent,
+                self.sequence,
+                self.time_mode,
+                self.write_mode,
+                self.mutation_profile,
+            ),
+            (
+                100,
+                WellearnResourceCompletionSequence::SelectedScore,
+                WellearnResourceCompletionTimeMode::PreserveFreshTime,
+                crate::WellearnResourceCompletionWriteMode::SetThenSave,
+                crate::WellearnResourceMutationProfile::CurrentFullSimpleReferer,
+            ) | (
+                0,
+                WellearnResourceCompletionSequence::SelectedScore,
+                WellearnResourceCompletionTimeMode::ZeroTime,
+                crate::WellearnResourceCompletionWriteMode::SaveOnly,
+                crate::WellearnResourceMutationProfile::LegacyMinimalTaskReferer,
+            )
+        )
+    }
 }
 
 /// Native boundary for the donor-audited SCO completion preset.
@@ -287,6 +314,11 @@ impl TaskExecutionCapability for WellearnResourceExecution {
             mutation_profile: settings.resource_mutation_profile,
         };
         plan.validate()?;
+        if plan.requires_atomic_authority() {
+            return Err(unsupported(
+                "WELearn atomic duration-completion final requires shared atomic authority",
+            ));
+        }
         let detail = self
             .details
             .task_detail(context, &request.remote_task_id)
@@ -866,6 +898,10 @@ mod tests {
         ] {
             plan.validate().unwrap();
         }
+        assert!(!current_completion.requires_atomic_authority());
+        assert!(current_duration_final.requires_atomic_authority());
+        assert!(!legacy_completion.requires_atomic_authority());
+        assert!(auto_duration_final.requires_atomic_authority());
 
         let mixed_save_only = WellearnResourceExecutionPlan {
             write_mode: SaveOnly,
@@ -1008,28 +1044,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_only_mode_omits_set_receipt_and_still_verifies_the_goal() {
+    async fn save_only_atomic_final_requires_shared_authority() {
         let transport = Arc::new(FixtureTransport::default());
         let execution = WellearnResourceExecution::try_new(
             Arc::new(FixtureDetail { visible: true }),
             transport.clone(),
         )
         .unwrap();
-        let outcome = execution
+        let error = execution
             .execute(&context(), &save_only_request(), &FixtureEvents)
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert!(outcome.verified);
-        assert_eq!(
-            outcome.result_sanitized["completion_write_mode"],
-            "save_only"
-        );
-        assert!(outcome.result_sanitized["set_accepted"].is_null());
-        assert_eq!(
-            transport.calls.lock().unwrap()[0].6,
-            crate::WellearnResourceCompletionWriteMode::SaveOnly
-        );
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+        assert!(transport.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1176,6 +1204,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn atomic_final_remains_available_to_read_only_recovery_verification() {
+        let transport = Arc::new(FixtureTransport::default());
+        let execution = WellearnResourceExecution::try_new(
+            Arc::new(FixtureDetail { visible: true }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        let error = execution
+            .verify_execution(&context(), &save_only_request())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::RemoteChanged);
+        assert!(transport.calls.lock().unwrap().is_empty());
+        assert_eq!(transport.verifications.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn score_drift_fails_closed_and_hidden_fresh_task_remains_executable() {
         let drift = WellearnResourceExecution::try_new(
             Arc::new(FixtureDetail { visible: true }),
@@ -1218,54 +1264,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duration_then_completion_preserves_fresh_cmi_times() {
+    async fn fresh_time_atomic_final_requires_shared_authority() {
         let transport = Arc::new(FixtureTransport::default());
         let execution = WellearnResourceExecution::try_new(
             Arc::new(FixtureDetail { visible: true }),
             transport.clone(),
         )
         .unwrap();
-        let outcome = execution
+        let error = execution
             .execute(&context(), &preserved_time_request(), &FixtureEvents)
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(
-            outcome.result_sanitized["completion_time_mode"],
-            "preserve_fresh_time"
-        );
-        assert_eq!(outcome.result_sanitized["time_preservation_verified"], true);
-        assert_eq!(
-            transport.calls.lock().unwrap()[0].4,
-            WellearnResourceCompletionTimeMode::PreserveFreshTime
-        );
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+        assert!(transport.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn auto_time_mode_uses_immutable_duration_then_resource_step_context() {
+    async fn auto_time_atomic_step_context_still_requires_shared_authority() {
         let transport = Arc::new(FixtureTransport::default());
         let execution = WellearnResourceExecution::try_new(
             Arc::new(FixtureDetail { visible: true }),
             transport.clone(),
         )
         .unwrap();
-        let outcome = execution
+        let error = execution
             .execute(&context(), &composite_resource_request(), &FixtureEvents)
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(
-            outcome.result_sanitized["configured_completion_time_mode"],
-            "auto"
-        );
-        assert_eq!(
-            outcome.result_sanitized["completion_time_mode"],
-            "preserve_fresh_time"
-        );
-        assert_eq!(
-            transport.calls.lock().unwrap()[0].4,
-            WellearnResourceCompletionTimeMode::PreserveFreshTime
-        );
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+        assert!(transport.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

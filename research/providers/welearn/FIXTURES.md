@@ -173,8 +173,9 @@ only structural field names, response codes and bounded placeholder shapes.
 - ResourceExecution requires fresh identity rebind, exact completion/progress/
   selected-score readback and goal-bound recovery with no mutation replay.
 - ResourceExecution exposes ordinary zero-time and donor fresh-time CMI facts
-  separately; standalone preservation-mode tests verify both time fields, but
-  do not claim the split call reproduces the pending atomic donor lifecycle.
+  separately. Atomic-final plans and native encoding retain both time fields,
+  while singleton TaskExecution rejects them before transport until shared
+  one-start authority exists; read-only recovery verification remains enabled.
 - ResourceExecution accepts the exact uninitialized marker for zero-time or
   save-only completion, but fresh-time mode rejects it before start because no
   real session/total-time fields exist to preserve.
@@ -216,7 +217,8 @@ only structural field names, response codes and bounded placeholder shapes.
   valid slots; missing, extra or impossible slots fail before CMI parsing.
 - Completion `auto` tests freeze fresh-time versus zero-time facts and reject a
   malformed plan binding before Provider transport; immutable plan context is
-  not authority to execute the pending atomic duration-completion flow.
+  not authority to execute the atomic duration-completion flow, and both exact
+  atomic-final shapes fail closed at singleton TaskExecution.
 - Batch tests mark Fanyuchang duration and modular Auto duration as
   `AtomicDurationCompletion`, require both child capabilities and keep YZBRH/
   Auto single-file singleton duration separate.
