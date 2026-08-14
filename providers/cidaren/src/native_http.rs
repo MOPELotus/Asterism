@@ -140,15 +140,13 @@ impl NativeCidarenTransport {
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error, ResponseRoute::OauthLogin))?;
-        let mut document = read_json_response(
+        let document = read_json_response(
             response,
             ResponseRoute::OauthLogin,
             MAX_OAUTH_RESPONSE_BYTES,
         )
         .await?;
-        let material = bootstrap.complete(document.as_bytes().to_vec());
-        document.zeroize();
-        let material = material?;
+        let material = bootstrap.complete(document.into_bytes())?;
         let session = material.token_session()?;
         self.validate_oauth_session(&session, client_context)
             .await?;

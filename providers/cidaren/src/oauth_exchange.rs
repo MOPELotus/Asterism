@@ -286,11 +286,11 @@ impl CidarenOauthBootstrap {
         )?;
         let server_public_key =
             PublicKey::from_public_key_der(&server_public_key).map_err(|_| protocol_drift())?;
-        let salt = Zeroizing::new(decode_bounded_base64(
+        let salt = decode_bounded_base64(
             handshake.get("salt"),
             MAX_HANDSHAKE_FIELD_BYTES,
             protocol_drift,
-        )?);
+        )?;
         let shared_secret = self.private_key.diffie_hellman(&server_public_key);
         let shared_secret = Zeroizing::new(shared_secret.raw_secret_bytes().to_vec());
         let hkdf = Hkdf::<Sha256>::new(Some(salt.as_slice()), shared_secret.as_slice());
@@ -311,13 +311,13 @@ impl CidarenOauthBootstrap {
         if iv.len() != AES_GCM_NONCE_BYTES {
             return Err(invalid_login_response());
         }
-        let ciphertext = Zeroizing::new(decode_bounded_base64(
+        let ciphertext = decode_bounded_base64(
             payload
                 .get("cipher_text")
                 .or_else(|| payload.get("cipherText")),
             MAX_LOGIN_CIPHERTEXT_BYTES,
             invalid_login_response,
-        )?);
+        )?;
         let cipher =
             Aes256Gcm::new_from_slice(key.as_slice()).map_err(|_| internal_crypto_error())?;
         let plaintext = cipher
@@ -495,7 +495,7 @@ fn decode_bounded_base64(
     value: Option<&Value>,
     maximum: usize,
     error: fn() -> ProviderError,
-) -> ProviderResult<Vec<u8>> {
+) -> ProviderResult<Zeroizing<Vec<u8>>> {
     let encoded = value
         .and_then(Value::as_str)
         .filter(|value| {
@@ -505,7 +505,7 @@ fn decode_bounded_base64(
                 && !value.bytes().any(|byte| byte.is_ascii_whitespace())
         })
         .ok_or_else(error)?;
-    let decoded = STANDARD.decode(encoded).map_err(|_| error())?;
+    let decoded = Zeroizing::new(STANDARD.decode(encoded).map_err(|_| error())?);
     if decoded.is_empty() || decoded.len() > maximum {
         Err(error())
     } else {

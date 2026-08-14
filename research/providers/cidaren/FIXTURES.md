@@ -178,6 +178,9 @@ placeholder identities, result codes, status values and pagination shape.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.
+- Native OAuth moves the bounded response String directly into the consuming
+  bootstrap without a second byte copy. All decoded handshake/payload fields
+  are zeroizing from the base64 boundary, including rejected-length paths.
 - Parsed Capture result envelopes cannot be cloned. Consuming one moves its
   token and crypto JSON directly into the zeroizing snapshot while replacing
   the source event with an empty value before its own Drop cleanup.
