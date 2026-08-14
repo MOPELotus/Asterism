@@ -166,6 +166,9 @@ sequence and selected Capture recipe before returning the typed command. The
 issued wrapper can be consumed only into command + artifact + exchange, while
 the completed wrapper yields snapshot + terminal exchange, so future Core
 wiring need not discard durable metadata to obtain helper or credential data.
+The wrapper deliberately has no consuming snapshot-only escape hatch. It can
+also convert directly into credential replacement + terminal exchange, which
+is the Provider-owned input pair for Main's atomic result/credential commit.
 `complete_recovered_capture_snapshot_exchange` is the post-crash Provider
 entry: it accepts only a valid Issued exchange, resolves the encrypted command
 against that exchange and Core's selected recipe, then delegates to the same

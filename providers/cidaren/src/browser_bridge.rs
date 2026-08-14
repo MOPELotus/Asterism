@@ -5,8 +5,9 @@ use asterism_domain::{
     Timestamp,
 };
 use asterism_provider_api::{
-    BrowserBridgeCapability, BrowserSessionSpec, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderIdentity, ProviderMetadata, ProviderResult, TaskDetailCapability,
+    BrowserBridgeCapability, BrowserSessionSpec, CredentialReplacement, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
+    TaskDetailCapability,
 };
 use asterism_secrets::SecretValue;
 use async_trait::async_trait;
@@ -87,15 +88,29 @@ impl CidarenCaptureExchangeCompleted {
         &self.exchange
     }
 
-    pub fn into_snapshot(self) -> CidarenCaptureSnapshot {
-        self.snapshot
-    }
-
     /// Transfers the zeroizing credential material together with the exact
     /// completed ledger metadata so acceptance cannot silently discard either
     /// half of the result.
     pub fn into_parts(self) -> (CidarenCaptureSnapshot, BrowserBridgeExchange) {
         (self.snapshot, self.exchange)
+    }
+
+    /// Converts the validated Capture material while retaining the exact
+    /// completed ledger row in the same consuming handoff.
+    ///
+    /// Core can use this pair as the input to one atomic result/credential
+    /// transaction; there is no consuming path that yields secrets while
+    /// silently discarding the exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if the validated snapshot lost one of its
+    /// required source bindings before conversion.
+    pub fn into_credential_commit_parts(
+        self,
+    ) -> ProviderResult<(CredentialReplacement, BrowserBridgeExchange)> {
+        let (snapshot, exchange) = self.into_parts();
+        Ok((snapshot.into_credential_replacement()?, exchange))
     }
 }
 
@@ -499,9 +514,10 @@ fn valid_component(value: &str) -> bool {
 mod tests {
     use asterism_domain::{
         AssessmentClass, BrowserBridgeExchangeState, ProviderAccountId, ProviderId, RemoteState,
-        SecretId, SourceType,
+        SecretId, SessionKind, SourceType,
     };
     use asterism_provider_api::{RemoteTask, RemoteTaskDetail};
+    use asterism_secrets::SecretPurpose;
     use chrono::{Duration, Utc};
 
     use super::*;
@@ -862,6 +878,21 @@ mod tests {
         assert_eq!(
             completed.snapshot().login_info_source(),
             Some(crate::CidarenCaptureStorageSource::LocalStorage)
+        );
+        let (replacement, completed_exchange) = completed.into_credential_commit_parts().unwrap();
+        assert_eq!(replacement.session_kind, SessionKind::Composite);
+        assert_eq!(replacement.fields.len(), 2);
+        assert_eq!(
+            replacement.fields[0].purpose,
+            SecretPurpose::ProviderAccessToken
+        );
+        assert_eq!(
+            replacement.fields[1].purpose,
+            SecretPurpose::ProviderCompositeSession
+        );
+        assert_eq!(
+            completed_exchange.state,
+            BrowserBridgeExchangeState::Completed
         );
     }
 

@@ -444,10 +444,13 @@ rotations before terminal advance. Provider-side BrowserBridge preparation now
 also freezes a zeroizing command artifact and proves exact recovery rebinding
 without trusting helper echoes. A recovered-result adapter now reconstructs
 command authority from only that encrypted artifact plus the persisted Issued
-exchange before accepting a helper result. All 147 Cidaren tests, all-target strict clippy,
-formatting and scoped diff checks passed against the landed atomic shared
-transition contract. The three symbolic default branches, complete public tag
-refs and latest GitHub release metadata were refreshed again after that fix.
+exchange before accepting a helper result. The completed adapter has no
+snapshot-only consuming path and can hand Core an exact credential
+replacement + terminal exchange pair for its atomic commit. All 147 Cidaren
+tests, all-target strict clippy, formatting and scoped diff checks passed
+against the landed atomic shared transition contract. The three symbolic
+default branches, complete public tag refs and latest GitHub release metadata
+were refreshed again after that fix.
 Ularch remains on release `1.5.4` with the same asset size/digest, MOPELotus
 still has no release, and the historical donor remains on `v3.73` from
 2024-04-02. The complete Ularch issue listing was also refreshed; issue 112
