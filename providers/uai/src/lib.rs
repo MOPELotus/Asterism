@@ -115,6 +115,6 @@ pub use task_detail::UaiTaskDetail;
 pub use task_inventory::parse_task_inventory;
 pub use upload::{
     UaiMultipartUpload, UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadPreparation,
-    UaiUploadTransport, UaiUploadedArtifact, build_upload_multipart, parse_upload_grant,
-    parse_upload_result,
+    UaiUploadSubmission, UaiUploadTransport, UaiUploadedArtifact, build_upload_multipart,
+    parse_upload_grant, parse_upload_result,
 };

@@ -1,6 +1,6 @@
 # UAI research sources
 
-Audit dates: 2026-08-09, 2026-08-11 and 2026-08-13. Recorded revisions are
+Audit dates: 2026-08-09, 2026-08-11, 2026-08-13 and 2026-08-14. Recorded revisions are
 reproducible implementation snapshots; each checkpoint also refreshes default
 branches, tags/releases and relevant protocol commits for incremental audit.
 
@@ -58,6 +58,9 @@ reproducible audit snapshots, not permanent update ceilings.
 The same four default branches and tag tips were fetched and confirmed at zero
 delta again after the independent Course-progress checkpoint and the Micro
 progress identity checkpoint on 2026-08-13.
+All four default branches and tags were queried again at the BrowserBridge
+exchange-ledger checkpoint on 2026-08-14. The same four revisions remained the
+remote HEADs and no new tag appeared, so this checkpoint has no upstream delta.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
@@ -144,3 +147,12 @@ children and serializes their exact judge labels. Asterism combines those
 compatible facts: content determines the typed answer shape, all answer rows
 are retained, and an all-`video-popup` plan uses type 2 rather than the empty
 preset body.
+
+The Apache donor's single `multiFileUpload` path explicitly obtains the CMS
+grant, uploads one MP3, then submits `instanceId=0` with one completed child
+whose value array contains the returned object key. Its compound
+`multichoice,multiFileUpload` path submits both modules together. Asterism maps
+the single-upload child into the current Rust donor's minimal ordered
+question/judge envelope and fresh Course publish version, without copying the
+Apache donor's fabricated score maps. The compound form remains atomic and
+cannot be decomposed into an upload mutation plus a later unrelated answer.

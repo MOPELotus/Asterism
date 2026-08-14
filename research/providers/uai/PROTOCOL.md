@@ -585,10 +585,26 @@ before multipart emission. Token and artifact bytes stay in zeroizing owners,
 audio/mpeg artifacts are bounded to 64 MiB, the multipart request has fixed
 fields for the audited Qiniu origin, and the object-store response must repeat
 the granted file key. A successful response becomes a strong uploaded-artifact
-owner retaining remote Task, Course/Group, positional upload module, exact key,
-artifact digest and intent fingerprint; its route data is redacted in debug and
-zeroized on drop. It also preserves the donor's
-4 KiB minimal-MP3 artifact as an explicit option. Durable artifact handles and
-the final immutable `multiFileUpload` answer submission remain shared
-integration work; a grant or object-store response alone is never Group
-completion evidence.
+owner retaining remote Task, Task fingerprint, Course/Unit/Group, positional
+upload module, exact key, artifact digest and intent fingerprint; its route
+data is redacted in debug and zeroized on drop. It also preserves the donor's
+4 KiB minimal-MP3 artifact as an explicit option.
+
+For a Group containing only one `multiFileUpload`, the Provider re-reads exact
+Task detail after object upload and requires the same Task fingerprint,
+Course/Unit/Group identities, upload position 1 and current positive Course
+publish version. The immutable Provider-private final plan uses the donor's
+`instanceId=0` with one completed child whose `value` is the exact uploaded
+key. The outer minimal question/judge body uses the fresh publish version and
+is built only inside the native mutation boundary. Immediately before the
+single POST, native HTTP refreshes Course instance and the exact incomplete,
+available `tab_type=task` Unit-progress leaf. A version-bearing response is a
+receipt only. The key-bearing body and route identities stay in zeroizing
+owners, and an ambiguous mutation is not replayed.
+
+The donor's mixed `multichoice,multiFileUpload` flow is one atomic Group
+submission. Asterism therefore refuses to submit only its upload half; durable
+Artifact plus Submission Draft integration must carry both answers together.
+Receipt-versioned uploaded-key readback and the shared artifact lifecycle also
+remain active Core work. A grant, object-store response or accepted final
+receipt alone is never Group completion evidence.

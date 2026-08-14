@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use asterism_domain::SubmissionReceipt;
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, TaskDetailCapability,
 };
@@ -15,10 +16,12 @@ const MAX_UPLOAD_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_UPLOAD_TOKEN_BYTES: usize = 8 * 1_024;
 const MAX_UPLOAD_KEY_BYTES: usize = 1_024;
 const MAX_UPLOAD_ARTIFACT_BYTES: usize = 64 * 1_024 * 1_024;
+const MAX_UPLOAD_SUBMISSION_BYTES: usize = 4 * 1_024 * 1_024;
 const MINIMAL_MP3_BYTES: usize = 4_096;
 
-/// Provider-private boundary for the first two stages of the audited upload
-/// flow. Shared Core still owns the durable artifact/attempt state machine.
+/// Provider-private boundary for the audited grant, object-store and final
+/// single-upload mutation stages. Shared Core still owns the durable
+/// artifact/attempt state machine.
 #[async_trait]
 pub trait UaiUploadTransport: Send + Sync {
     async fn request_upload_grant(
@@ -34,6 +37,12 @@ pub trait UaiUploadTransport: Send + Sync {
         grant: &UaiUploadGrant,
         artifact: &UaiUploadArtifact,
     ) -> ProviderResult<UaiUploadedArtifact>;
+
+    async fn submit_uploaded_artifact(
+        &self,
+        context: &ProviderContext,
+        submission: &UaiUploadSubmission,
+    ) -> ProviderResult<SubmissionReceipt>;
 }
 
 /// Short-lived CMS/object-store authorization returned by UAI.
@@ -43,7 +52,9 @@ pub struct UaiUploadGrant {
     intent_fingerprint: String,
     artifact_digest: String,
     remote_task_id: String,
+    task_fingerprint: String,
     course_resource_id: String,
+    unit_id: String,
     group_id: String,
     upload_position: u32,
 }
@@ -78,7 +89,9 @@ impl fmt::Debug for UaiUploadGrant {
             .field("intent_fingerprint", &self.intent_fingerprint)
             .field("artifact_digest", &self.artifact_digest)
             .field("remote_task_id", &self.remote_task_id)
+            .field("task_fingerprint", &self.task_fingerprint)
             .field("course_resource_id", &self.course_resource_id)
+            .field("unit_id", &self.unit_id)
             .field("group_id", &self.group_id)
             .field("upload_position", &self.upload_position)
             .finish()
@@ -91,16 +104,20 @@ impl Drop for UaiUploadGrant {
         self.intent_fingerprint.zeroize();
         self.artifact_digest.zeroize();
         self.remote_task_id.zeroize();
+        self.task_fingerprint.zeroize();
         self.course_resource_id.zeroize();
+        self.unit_id.zeroize();
         self.group_id.zeroize();
     }
 }
 
 /// Exact object-store result retaining the immutable Task/module/artifact
-/// binding required by a future upload-answer Draft.
+/// binding required by the final Provider plan and future shared Draft.
 pub struct UaiUploadedArtifact {
     remote_task_id: String,
+    task_fingerprint: String,
     course_resource_id: String,
+    unit_id: String,
     group_id: String,
     upload_position: u32,
     file_key: String,
@@ -115,6 +132,10 @@ impl UaiUploadedArtifact {
 
     pub fn group_id(&self) -> &str {
         &self.group_id
+    }
+
+    pub fn unit_id(&self) -> &str {
+        &self.unit_id
     }
 
     pub const fn upload_position(&self) -> u32 {
@@ -145,7 +166,9 @@ impl UaiUploadedArtifact {
         }
         Ok(Self {
             remote_task_id: grant.remote_task_id.clone(),
+            task_fingerprint: grant.task_fingerprint.clone(),
             course_resource_id: grant.course_resource_id.clone(),
+            unit_id: grant.unit_id.clone(),
             group_id: grant.group_id.clone(),
             upload_position: grant.upload_position,
             file_key: returned_file_key,
@@ -160,7 +183,9 @@ impl fmt::Debug for UaiUploadedArtifact {
         formatter
             .debug_struct("UaiUploadedArtifact")
             .field("remote_task_id", &self.remote_task_id)
+            .field("task_fingerprint", &self.task_fingerprint)
             .field("course_resource_id", &self.course_resource_id)
+            .field("unit_id", &self.unit_id)
             .field("group_id", &self.group_id)
             .field("upload_position", &self.upload_position)
             .field("file_key", &"[ROUTE]")
@@ -173,7 +198,9 @@ impl fmt::Debug for UaiUploadedArtifact {
 impl Drop for UaiUploadedArtifact {
     fn drop(&mut self) {
         self.remote_task_id.zeroize();
+        self.task_fingerprint.zeroize();
         self.course_resource_id.zeroize();
+        self.unit_id.zeroize();
         self.group_id.zeroize();
         self.file_key.zeroize();
         self.artifact_digest.zeroize();
@@ -187,6 +214,7 @@ pub struct UaiUploadIntent {
     remote_task_id: String,
     task_fingerprint: String,
     course_resource_id: String,
+    unit_id: String,
     group_id: String,
     upload_position: u32,
     artifact_digest: String,
@@ -204,6 +232,10 @@ impl UaiUploadIntent {
 
     pub fn group_id(&self) -> &str {
         &self.group_id
+    }
+
+    pub fn unit_id(&self) -> &str {
+        &self.unit_id
     }
 
     pub const fn upload_position(&self) -> u32 {
@@ -226,6 +258,7 @@ impl fmt::Debug for UaiUploadIntent {
             .field("remote_task_id", &self.remote_task_id)
             .field("task_fingerprint", &self.task_fingerprint)
             .field("course_resource_id", &self.course_resource_id)
+            .field("unit_id", &self.unit_id)
             .field("group_id", &self.group_id)
             .field("upload_position", &self.upload_position)
             .field("artifact_digest", &self.artifact_digest)
@@ -261,6 +294,27 @@ impl UaiUploadPreparation {
         let detail = self.details.task_detail(context, remote_task_id).await?;
         build_upload_intent(&detail, remote_task_id, artifact)
     }
+
+    /// Re-discovers the exact single upload Group after object storage has
+    /// accepted the artifact, then freezes the one native submission plan.
+    /// Compound upload Groups deliberately require the shared Artifact plus
+    /// Submission Draft contract so their other answers remain atomic.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the Task, fingerprint, upload position,
+    /// Course publish version or artifact binding changed.
+    pub async fn prepare_submission(
+        &self,
+        context: &ProviderContext,
+        uploaded: &UaiUploadedArtifact,
+    ) -> ProviderResult<UaiUploadSubmission> {
+        let detail = self
+            .details
+            .task_detail(context, uploaded.remote_task_id())
+            .await?;
+        build_upload_submission(&detail, uploaded)
+    }
 }
 
 impl fmt::Debug for UaiUploadPreparation {
@@ -269,6 +323,89 @@ impl fmt::Debug for UaiUploadPreparation {
             .debug_struct("UaiUploadPreparation")
             .field("details", &"configured")
             .finish()
+    }
+}
+
+/// Provider-private immutable final mutation plan for one single
+/// `multiFileUpload` Group. It carries no account credential or Course-instance
+/// route; the native transport resolves both immediately before mutation.
+pub struct UaiUploadSubmission {
+    remote_task_id: String,
+    course_resource_id: String,
+    unit_id: String,
+    group_id: String,
+    file_key: String,
+    artifact_digest: String,
+    upload_intent_fingerprint: String,
+    course_publish_version: u64,
+    fingerprint: String,
+}
+
+impl UaiUploadSubmission {
+    pub fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub fn course_resource_id(&self) -> &str {
+        &self.course_resource_id
+    }
+
+    pub fn unit_id(&self) -> &str {
+        &self.unit_id
+    }
+
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    pub fn artifact_digest(&self) -> &str {
+        &self.artifact_digest
+    }
+
+    pub fn upload_intent_fingerprint(&self) -> &str {
+        &self.upload_intent_fingerprint
+    }
+
+    pub const fn course_publish_version(&self) -> u64 {
+        self.course_publish_version
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub(crate) fn expose_file_key(&self) -> &str {
+        &self.file_key
+    }
+}
+
+impl fmt::Debug for UaiUploadSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiUploadSubmission")
+            .field("remote_task_id", &self.remote_task_id)
+            .field("course_resource_id", &self.course_resource_id)
+            .field("unit_id", &self.unit_id)
+            .field("group_id", &self.group_id)
+            .field("file_key", &"[ROUTE]")
+            .field("artifact_digest", &self.artifact_digest)
+            .field("upload_intent_fingerprint", &self.upload_intent_fingerprint)
+            .field("course_publish_version", &self.course_publish_version)
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
+impl Drop for UaiUploadSubmission {
+    fn drop(&mut self) {
+        self.remote_task_id.zeroize();
+        self.course_resource_id.zeroize();
+        self.unit_id.zeroize();
+        self.group_id.zeroize();
+        self.file_key.zeroize();
+        self.artifact_digest.zeroize();
+        self.upload_intent_fingerprint.zeroize();
+        self.fingerprint.zeroize();
     }
 }
 
@@ -436,7 +573,9 @@ pub fn parse_upload_grant(
         intent_fingerprint: intent.fingerprint.clone(),
         artifact_digest: intent.artifact_digest.clone(),
         remote_task_id: intent.remote_task_id.clone(),
+        task_fingerprint: intent.task_fingerprint.clone(),
         course_resource_id: intent.course_resource_id.clone(),
+        unit_id: intent.unit_id.clone(),
         group_id: intent.group_id.clone(),
         upload_position: intent.upload_position,
     })
@@ -534,16 +673,13 @@ fn build_upload_intent(
         ));
     }
     let course_resource_id = safe_remote_component(task.get("course_resource_id"), "Course")?;
+    let unit_id = task
+        .get("unit")
+        .and_then(Value::as_object)
+        .and_then(|unit| safe_remote_component(unit.get("id"), "Unit").ok())
+        .ok_or_else(|| protocol_drift("UAI fresh upload Task has no valid Unit identity"))?;
     let group_id = safe_remote_component(task.get("group_id"), "Group")?;
-    let expected_remote_task_id = format!(
-        "group:{course_resource_id}:{}:{group_id}",
-        task.get("unit")
-            .and_then(Value::as_object)
-            .and_then(|unit| unit.get("id"))
-            .and_then(Value::as_str)
-            .filter(|value| is_remote_component(value))
-            .ok_or_else(|| protocol_drift("UAI fresh upload Task has no valid Unit identity"))?
-    );
+    let expected_remote_task_id = format!("group:{course_resource_id}:{unit_id}:{group_id}");
     if expected_remote_task_id != remote_task_id {
         return Err(ProviderError::new(
             ProviderErrorKind::RemoteChanged,
@@ -593,11 +729,169 @@ fn build_upload_intent(
         remote_task_id: remote_task_id.to_owned(),
         task_fingerprint: detail.task.fingerprint.clone(),
         course_resource_id,
+        unit_id,
         group_id,
         upload_position,
         artifact_digest,
         fingerprint,
     })
+}
+
+fn build_upload_submission(
+    detail: &asterism_provider_api::RemoteTaskDetail,
+    uploaded: &UaiUploadedArtifact,
+) -> ProviderResult<UaiUploadSubmission> {
+    if detail.task.remote_id != uploaded.remote_task_id
+        || detail.task.fingerprint != uploaded.task_fingerprint
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI upload Task changed after object storage",
+        ));
+    }
+    let task = detail
+        .normalized_detail
+        .get("task")
+        .and_then(Value::as_object)
+        .ok_or_else(|| protocol_drift("UAI fresh upload submission has no normalized Task"))?;
+    if task.get("schema").and_then(Value::as_str) != Some("uai.group-task.v1")
+        || task.get("course_resource_id").and_then(Value::as_str)
+            != Some(uploaded.course_resource_id.as_str())
+        || task
+            .get("unit")
+            .and_then(Value::as_object)
+            .and_then(|unit| unit.get("id"))
+            .and_then(Value::as_str)
+            != Some(uploaded.unit_id.as_str())
+        || task.get("group_id").and_then(Value::as_str) != Some(uploaded.group_id.as_str())
+        || uploaded.upload_position != 1
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI upload submission identity changed after object storage",
+        ));
+    }
+    let task_types = task
+        .get("task_types")
+        .and_then(Value::as_array)
+        .ok_or_else(|| protocol_drift("UAI upload submission has no Task type array"))?;
+    if task_types.as_slice() != [Value::String("multiFileUpload".to_owned())]
+        || task.get("question_count").and_then(Value::as_u64) != Some(1)
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "UAI final upload submission requires one single multiFileUpload module",
+        ));
+    }
+    let course_publish_version = task
+        .get("course_publish_version")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0 && i64::try_from(*value).is_ok())
+        .ok_or_else(|| {
+            protocol_drift("UAI final upload submission has no current Course publish version")
+        })?;
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:upload-submission:v1\0");
+    digest.update(uploaded.remote_task_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(uploaded.task_fingerprint.as_bytes());
+    digest.update(b"\0");
+    digest.update(uploaded.intent_fingerprint.as_bytes());
+    digest.update(b"\0");
+    digest.update(uploaded.artifact_digest.as_bytes());
+    digest.update(b"\0");
+    digest.update(uploaded.file_key.as_bytes());
+    digest.update(b"\0");
+    digest.update(course_publish_version.to_be_bytes());
+    Ok(UaiUploadSubmission {
+        remote_task_id: uploaded.remote_task_id.clone(),
+        course_resource_id: uploaded.course_resource_id.clone(),
+        unit_id: uploaded.unit_id.clone(),
+        group_id: uploaded.group_id.clone(),
+        file_key: uploaded.file_key.clone(),
+        artifact_digest: uploaded.artifact_digest.clone(),
+        upload_intent_fingerprint: uploaded.intent_fingerprint.clone(),
+        course_publish_version,
+        fingerprint: format!("uai-upload-submit-v1:{:x}", digest.finalize()),
+    })
+}
+
+/// Builds the donor-audited upload answer inside the native mutation boundary.
+/// The Apache donor provides the `instanceId=0`/file-key child semantics while
+/// the current Rust donor provides the minimal question/judge envelope and
+/// fresh Course publish-version binding.
+pub(crate) fn build_upload_submission_body(
+    submission: &UaiUploadSubmission,
+    course_instance_id: &str,
+    open_id: &str,
+) -> ProviderResult<Zeroizing<String>> {
+    if !is_remote_component(course_instance_id)
+        || open_id.is_empty()
+        || open_id.len() > 8 * 1_024
+        || open_id.chars().any(char::is_control)
+    {
+        return Err(invalid_input(
+            "UAI upload submission route identity is invalid",
+        ));
+    }
+    let inner_answer = Zeroizing::new(
+        serde_json::to_string(&serde_json::json!({
+            "value": [],
+            "children": [{
+                "value": [submission.expose_file_key()],
+                "isDone": true,
+                "isRight": true,
+                "replyCategory": "objective",
+            }],
+            "progress": {},
+            "record": {"url": ""},
+        }))
+        .map_err(|_| invalid_response("UAI upload answer cannot be serialized"))?,
+    );
+    let judges = Zeroizing::new(
+        serde_json::to_string(&[serde_json::json!({
+            "value": submission.expose_file_key(),
+            "question_type": "multiFileUpload",
+            "reply_type": "multiFileUpload",
+            "versions": {
+                "course": submission.course_publish_version,
+                "group": 1,
+                "template": 1,
+                "answer": 3,
+                "content": 0,
+            },
+            "payloads": [],
+        })])
+        .map_err(|_| invalid_response("UAI upload judge cannot be serialized"))?,
+    );
+    let body = ZeroizingJsonValue::new(serde_json::json!({
+        "quesDatas": [{
+            "instanceId": "0",
+            "answer": inner_answer.as_str(),
+            "context": "{\"state\":\"submitted\"}",
+            "contextVersion": 1,
+            "answerVersion": 1,
+        }],
+        "groupId": submission.group_id,
+        "isCompleted": [true],
+        "thirdPartyJudges": judges.as_str(),
+        "submitType": 1,
+        "hideLoading": false,
+        "associationGroupId": "",
+        "courseId": course_instance_id,
+        "openId": open_id,
+        "version": "default",
+    }));
+    let encoded = Zeroizing::new(
+        serde_json::to_string(body.as_value())
+            .map_err(|_| invalid_response("UAI upload submission cannot be serialized"))?,
+    );
+    if encoded.is_empty() || encoded.len() > MAX_UPLOAD_SUBMISSION_BYTES {
+        return Err(invalid_response(
+            "UAI upload submission body exceeds the size limit",
+        ));
+    }
+    Ok(encoded)
 }
 
 fn safe_remote_component(value: Option<&Value>, label: &'static str) -> ProviderResult<String> {
@@ -776,12 +1070,73 @@ mod tests {
         assert!(UaiUploadedArtifact::from_grant(&grant, "other/key.mp3".to_owned()).is_err());
     }
 
+    #[test]
+    fn single_upload_builds_one_fresh_publish_bound_submission() {
+        let artifact = UaiUploadArtifact::donor_minimal_mp3();
+        let detail = upload_detail(&["multiFileUpload"]);
+        let intent =
+            build_upload_intent(&detail, "group:2001:unit-1:group-upload", &artifact).unwrap();
+        let grant = parse_upload_grant(
+            r#"{"code":200,"upToken":"secret-upload-token","fileKey":"course/42/nothing.mp3"}"#,
+            &intent,
+        )
+        .unwrap();
+        let uploaded =
+            UaiUploadedArtifact::from_grant(&grant, "course/42/nothing.mp3".to_owned()).unwrap();
+        let submission = build_upload_submission(&detail, &uploaded).unwrap();
+        assert_eq!(submission.unit_id(), "unit-1");
+        assert_eq!(submission.course_publish_version(), 123_290);
+        assert_eq!(submission.artifact_digest(), artifact.digest());
+        assert_eq!(submission.upload_intent_fingerprint(), intent.fingerprint());
+        assert!(
+            submission
+                .fingerprint()
+                .starts_with("uai-upload-submit-v1:")
+        );
+        assert!(!format!("{submission:?}").contains("course/42/nothing.mp3"));
+
+        let body =
+            build_upload_submission_body(&submission, "course-instance-1", "openid-1").unwrap();
+        let parsed: Value = serde_json::from_str(body.as_str()).unwrap();
+        assert_eq!(parsed["groupId"], "group-upload");
+        assert_eq!(parsed["quesDatas"][0]["instanceId"], "0");
+        assert_eq!(parsed["isCompleted"], serde_json::json!([true]));
+        let answer: Value =
+            serde_json::from_str(parsed["quesDatas"][0]["answer"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            answer["children"][0]["value"],
+            serde_json::json!(["course/42/nothing.mp3"])
+        );
+        let judges: Value =
+            serde_json::from_str(parsed["thirdPartyJudges"].as_str().unwrap()).unwrap();
+        assert_eq!(judges[0]["question_type"], "multiFileUpload");
+        assert_eq!(judges[0]["versions"]["course"], 123_290);
+
+        let compound_detail = upload_detail(&["multichoice", "multiFileUpload"]);
+        let compound_intent = build_upload_intent(
+            &compound_detail,
+            "group:2001:unit-1:group-upload",
+            &artifact,
+        )
+        .unwrap();
+        let compound_grant = parse_upload_grant(
+            r#"{"code":200,"upToken":"secret-upload-token","fileKey":"course/42/nothing.mp3"}"#,
+            &compound_intent,
+        )
+        .unwrap();
+        let compound_uploaded =
+            UaiUploadedArtifact::from_grant(&compound_grant, compound_grant.file_key().to_owned())
+                .unwrap();
+        assert!(build_upload_submission(&compound_detail, &compound_uploaded).is_err());
+    }
+
     fn fixture_intent(artifact: &UaiUploadArtifact) -> UaiUploadIntent {
         let artifact_digest = artifact.digest();
         UaiUploadIntent {
             remote_task_id: "group:2001:unit-1:group-upload".to_owned(),
             task_fingerprint: "v1:upload".to_owned(),
             course_resource_id: "2001".to_owned(),
+            unit_id: "unit-1".to_owned(),
             group_id: "group-upload".to_owned(),
             upload_position: 1,
             artifact_digest,
@@ -797,6 +1152,7 @@ mod tests {
             "section": {"id": "section-1", "title": "Section 1"},
             "micro": {"id": "micro-1", "title": "Speaking"},
             "group_id": "group-upload",
+            "course_publish_version": 123_290,
             "task_types": task_types,
             "question_count": task_types.len(),
         });
