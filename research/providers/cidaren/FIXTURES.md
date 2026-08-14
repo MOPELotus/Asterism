@@ -164,12 +164,19 @@ placeholder identities, result codes, status values and pagination shape.
   A recovered-exchange fixture drops the in-memory issued wrapper, resolves
   only the encrypted artifact plus persisted exchange, rejects a foreign
   recipe and then completes the exact Composite result through fresh rebinding.
-  Helper projection fixtures consume the same encrypted command bytes and
+  Helper projection fixtures transfer ownership of the same encrypted command
+  bytes and confirm the opaque owner is consumed before dispatch. They
   independently bind the actual origin/frame plus Core session/sequence. They
   freeze TokenOnly's request-header-only source and Composite's exact five-
   source union, while rejecting digest/binding drift, unknown fields/modes,
   invalid Task identities, arbitrary selector/script commands and size drift
   before any DOM handler exists.
+  Result-construction fixtures map those source enums to Core's exact read
+  authorities, retain all dispatch bindings only in Debug-redacted zeroizing
+  owners, and round-trip bounded TokenOnly and Composite artifacts through the
+  existing result validator. Empty, reordered, wrong-role, extra, non-UTF-8,
+  malformed and oversized captured values fail closed; emitted bytes contain
+  no `user_session`, selector, script or arbitrary helper field.
   Encrypted result restoration checks the persisted digest before UTF-8/JSON
   parsing: changed bytes are ProtocolDrift, while correctly digest-bound empty,
   oversized or non-UTF-8 artifacts retain their InvalidResponse classification.

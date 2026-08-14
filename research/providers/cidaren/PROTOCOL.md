@@ -125,8 +125,9 @@ mutations; no donor evidence justifies inventing a BrowserBridge replacement
 for those routes.
 
 Before a helper-side handler may inspect any browser state,
-`project_browser_helper_command` authenticates the bounded `SecretValue`
-against Core's command digest and strictly decodes the deny-unknown-fields JSON.
+`project_browser_helper_command` consumes the bounded `SecretValue`,
+authenticates it against Core's command digest, strictly decodes the
+deny-unknown-fields JSON and immediately drops the opaque owner.
 It independently binds the BrowserBridge session ID, actual page origin,
 actual frame and `u64` dispatch sequence; validates the mode/revision pair and
 the exact class/study Task identity grammar; and returns no echoed command
@@ -135,6 +136,20 @@ fields. Its closed output is only `CaptureSnapshotTokenOnly` or
 request header. Composite permits that header or local/session
 `CDR_USER_TOKEN`, and requires local/session `CDR_LOGIN_INFO` alternatives.
 There is no selector, script or generic DOM action in the input or projection.
+
+Each closed Capture source maps directly to one shared
+`BrowserBridgeReadSource`; the runtime consumes Provider-owned
+origin/header/storage-key authority instead of duplicating those literals.
+After reading, the projection is consumed to build the exact
+`cidaren.capture.snapshot.result` artifact. It retains the authenticated
+session/origin/frame/Task/sequence bindings in zeroizing, Debug-redacted owners
+and accepts only the projected ordered source shape: TokenOnly is exactly the
+request-header `UserToken`, while Composite is exactly one allowed `UserToken`
+followed by one allowed `CDR_LOGIN_INFO`. Missing, reordered, duplicate, extra
+or foreign sources fail closed. Existing event validation checks the
+reconstructed result before bounded zeroizing serialization and digesting;
+the constructor cannot emit `CDR_USER_SESSION`, selectors, scripts or arbitrary
+JSON fields.
 
 The public helper lifecycle above is evidence for a shared local-helper
 dispatcher, not Provider-owned process or proxy management. Such a dispatcher

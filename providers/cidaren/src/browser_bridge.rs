@@ -15,9 +15,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     browser_protocol::{
-        CidarenBrowserCommandEnvelope, CidarenBrowserEventEnvelope, CidarenBrowserResultDocument,
-        CidarenCaptureMode, CidarenCaptureSnapshot, EncodedCidarenBrowserCommandArtifact,
-        parse_browser_event, valid_remote_task_id,
+        CidarenBrowserCaptureSource, CidarenBrowserCommandEnvelope, CidarenBrowserEventEnvelope,
+        CidarenBrowserResultDocument, CidarenCaptureMode, CidarenCaptureSnapshot,
+        EncodedCidarenBrowserCommandArtifact, parse_browser_event, valid_remote_task_id,
     },
     metadata::development_metadata,
 };
@@ -522,28 +522,15 @@ impl BrowserBridgeCapability for CidarenBrowserBridge {
 }
 
 fn cidaren_browser_read_sources() -> Vec<BrowserBridgeReadSource> {
-    vec![
-        BrowserBridgeReadSource::RequestHeader {
-            origin: CIDAREN_ORIGIN.to_owned(),
-            name: "usertoken".to_owned(),
-        },
-        BrowserBridgeReadSource::LocalStorage {
-            origin: CIDAREN_ORIGIN.to_owned(),
-            key: "CDR_USER_TOKEN".to_owned(),
-        },
-        BrowserBridgeReadSource::SessionStorage {
-            origin: CIDAREN_ORIGIN.to_owned(),
-            key: "CDR_USER_TOKEN".to_owned(),
-        },
-        BrowserBridgeReadSource::LocalStorage {
-            origin: CIDAREN_ORIGIN.to_owned(),
-            key: "CDR_LOGIN_INFO".to_owned(),
-        },
-        BrowserBridgeReadSource::SessionStorage {
-            origin: CIDAREN_ORIGIN.to_owned(),
-            key: "CDR_LOGIN_INFO".to_owned(),
-        },
+    [
+        CidarenBrowserCaptureSource::RequestHeaderUserToken,
+        CidarenBrowserCaptureSource::LocalStorageUserToken,
+        CidarenBrowserCaptureSource::SessionStorageUserToken,
+        CidarenBrowserCaptureSource::LocalStorageLoginInfo,
+        CidarenBrowserCaptureSource::SessionStorageLoginInfo,
     ]
+    .map(CidarenBrowserCaptureSource::into_read_source)
+    .into()
 }
 
 fn isolation_key(context: &ProviderContext, remote_task_id: &str) -> String {

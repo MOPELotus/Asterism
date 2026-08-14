@@ -205,6 +205,14 @@ The current checkpoint (not a completion boundary):
     actual origin/frame, sequence and Cidaren Task grammar are rebound without
     helper echoes; output is only TokenOnly/Composite CaptureSnapshot plus each
     mode's fixed audited source alternatives, never a selector or script.
+43. maps every closed helper source directly onto Core's exact read-source
+    authority, then consumes the projection and ordered captured secrets into
+    one bounded, zeroizing `cidaren.capture.snapshot.result` artifact. TokenOnly
+    accepts only request-header `UserToken`; Composite requires one allowed
+    `UserToken` followed by one allowed `CDR_LOGIN_INFO`. Existing event
+    validation rechecks every retained Debug-redacted binding, and no
+    `CDR_USER_SESSION`, selector, script, duplicate or arbitrary field can be
+    emitted.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

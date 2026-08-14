@@ -13,8 +13,9 @@
 //!
 //! ```
 //! use asterism_provider_cidaren::{
-//!     CidarenBrowserBridge, CidarenBrowserHelperAction, CidarenBrowserHelperProjection,
-//!     CidarenCaptureExchangeCompleted, CidarenCaptureMode, project_browser_helper_command,
+//!     CidarenBrowserBridge, CidarenBrowserCapturedValue, CidarenBrowserHelperAction,
+//!     CidarenBrowserHelperProjection, CidarenCaptureExchangeCompleted, CidarenCaptureMode,
+//!     EncodedCidarenBrowserResultArtifact, project_browser_helper_command,
 //! };
 //!
 //! let _ = CidarenBrowserBridge::capture_snapshot_exchange;
@@ -23,6 +24,8 @@
 //! let _ = project_browser_helper_command;
 //! let _: Option<CidarenBrowserHelperAction> = None;
 //! let _: Option<CidarenBrowserHelperProjection> = None;
+//! let _: Option<CidarenBrowserCapturedValue> = None;
+//! let _: Option<EncodedCidarenBrowserResultArtifact> = None;
 //! let _: CidarenCaptureMode = CidarenCaptureMode::Composite;
 //! ```
 //!
@@ -108,8 +111,9 @@ pub use browser_bridge::{
 };
 pub use browser_protocol::{
     CIDAREN_CAPTURE_COMMAND_TYPE, CIDAREN_CAPTURE_RESULT_TYPE, CidarenBrowserCaptureSource,
-    CidarenBrowserCommand, CidarenBrowserCommandEnvelope, CidarenBrowserHelperAction,
-    CidarenBrowserHelperProjection, CidarenCaptureMode, EncodedCidarenBrowserCommandArtifact,
+    CidarenBrowserCapturedValue, CidarenBrowserCommand, CidarenBrowserCommandEnvelope,
+    CidarenBrowserHelperAction, CidarenBrowserHelperProjection, CidarenCaptureMode,
+    EncodedCidarenBrowserCommandArtifact, EncodedCidarenBrowserResultArtifact,
     project_browser_helper_command,
 };
 pub use capture_recipe::{cidaren_capture_recipe_v2, cidaren_token_capture_recipe_v1};
