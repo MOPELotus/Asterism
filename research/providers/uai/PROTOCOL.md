@@ -341,8 +341,13 @@ counts, residence budgets, video ceilings and popup retries must all be
 bounded and cancellation-aware.
 
 The Provider issues a freshly Task-bound BrowserSessionSpec restricted to
-`ucontent.unipus.cn` and `ipub.unipus.cn` and independently re-reads the exact
-Group detail before creating a versioned private residence plan. Plan v2 binds
+`ucontent.unipus.cn` and `ipub.unipus.cn`. Session policy v2 now carries the
+exact credential-free HTTPS `browser_start_url_from_detail` result from that
+same fresh Group read; its `ucontent` origin must be one of those exact allowed
+origins, and its only query fact is the fresh public CourseResource `cid`.
+Cookie/JWT/openid material remains isolated session state and never enters the
+route. The Provider independently re-reads the exact Group detail before
+creating a versioned private residence plan. Plan v2 binds
 the normalized Unit/Section/Micro/Task labels and freezes the four audited discovery families, exact current
 iframe/Tab/Task/popup/video selector sets, the exact iframe scan timing above,
 a 2048-Micro/64-Tab/128-Task ceiling, bounded popup retries, 3-second DOM polls, the 30-minute donor video ceiling,

@@ -2591,16 +2591,23 @@ impl BrowserBridgeCapability for UaiBrowserBridge {
                 "UAI fresh Task does not authorize a BrowserBridge session",
             ));
         }
-
-        Ok(BrowserSessionSpec {
-            version: 1,
+        let spec = BrowserSessionSpec {
+            version: 2,
+            start_url: browser_start_url_from_detail(&detail)?,
             isolation_key: isolation_key(context, remote_task_id),
             allowed_origins: vec![UCONTENT_ORIGIN.to_owned(), IPUB_ORIGIN.to_owned()],
             // The audited donor depends on a real rendered page, DOM events,
             // iframe messaging and media state. Do not silently substitute a
             // headless-only execution mode before that boundary is verified.
             headless: false,
-        })
+        };
+        spec.validate().map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge session policy is invalid or unbounded",
+            )
+        })?;
+        Ok(spec)
     }
 }
 
@@ -2754,6 +2761,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(first, same);
+        assert_eq!(first.version, 2);
+        assert_eq!(
+            first.start_url,
+            "https://ucontent.unipus.cn/_explorationpc_default/pc.html?cid=2001"
+        );
+        assert!(first.validate().is_ok());
+        assert_eq!(first.digest(), same.digest());
         assert_ne!(first.isolation_key, other.isolation_key);
         assert_eq!(
             first.allowed_origins,
@@ -2766,6 +2780,8 @@ mod tests {
                 .contains(&context.account_id.to_string())
         );
         assert!(!first.isolation_key.contains("group-1"));
+        assert!(!first.start_url.contains("token"));
+        assert!(!first.start_url.contains("openid"));
     }
 
     #[tokio::test]
