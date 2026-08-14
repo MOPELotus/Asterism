@@ -317,6 +317,21 @@ from the immutable selected answer, removes the accepted prefix and rejects
 every count/phase/selection disagreement. No new donor route or revision delta
 was involved.
 
+On 2026-08-14 the integration checkpoint again resolved
+`MOPELotus/master` at `a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1`,
+`ularch/master` at `bce9559f536ebbdad791f41ed4e111b30accb05d`,
+latest public tag `1.5.4` at `7e29ee43692f4c0807fae8cf7f74a5a674793097`
+and historical `github123666/main` at
+`1409858800f3c4bd27577a08049bf1f8d17a069c`; no branch or tag delta was
+present. A complete Python call-site search across all three snapshots also
+confirmed that `api/translate.py` has no importer or caller: modes 51-54 use
+only the task word inventory and `word_examples`, so the dormant standalone
+Google helper does not add an executable donor capability. Main-owned durable
+Question-read orchestration now drives the registered mutation-backed adapter,
+persists each frozen operation before execution and atomically materializes the
+first real Question for the public task endpoint. All 135 Cidaren Provider
+tests passed against that shared integration.
+
 ## Check procedure
 
 For the next checkpoint:

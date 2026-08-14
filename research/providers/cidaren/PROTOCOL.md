@@ -622,9 +622,12 @@ verification recomputes the immutable preview, rebinds the Task and reads
 completion/progress/score without replaying any mutation. The public
 mutation-backed `QuestionInventory` adapter is registered and fixture-covered;
 it materializes normalized Questions directly rather than inventing a
-read-only `QuestionParse` route the donor does not expose. The remaining shared
-work is Main-owned Engine/API orchestration and the durable
-post-materialization `SubmissionExecute` path. That shared step contract must
+read-only `QuestionParse` route the donor does not expose. Main-owned
+Engine/API orchestration now persists the pre-Question continuation, freezes
+each operation before execution and atomically materializes its Question
+snapshot through `GET /api/v1/tasks/{task_id}/questions`. The remaining shared
+work is the durable post-materialization `SubmissionExecute` path. That shared
+step contract must
 keep Answer and Skip intents distinct: mode 73 has no evidenced two-answer
 Verify encoding, while the donor's `SkipAnswer` route is already implemented;
 an empty or `Unknown` selected answer is not an acceptable substitute. This is

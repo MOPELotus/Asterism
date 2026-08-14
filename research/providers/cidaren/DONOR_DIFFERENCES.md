@@ -53,7 +53,7 @@ either Python donor.
 | Word inventory/evidence | `StudyTask/Info`, Course page, `StudyWordInfo`, `SearchWord` | Same, with encrypted lookup fix | Supplies crypto needed by current responses | Implemented |
 | Question and answer strategy | Single, matching, reading and text families; donor fallback behavior; current payload completed/total counters displayed as remote progress | Same plus current encrypted response support | Supplies crypto/login context only | Implemented privately with immutable Draft-safe answer evidence and bounded remote progress kept separate from local attempt position |
 | `SubmitChoseWord` | Yes | Yes | No | Implemented one-shot transport/state edge |
-| `StartAnswer` | Yes | Yes | No | Implemented as a non-idempotent attempt start and registered through the public QuestionInventory pre-Question adapter; durable Engine/API orchestration is Main-owned work |
+| `StartAnswer` | Yes | Yes | No | Implemented as a non-idempotent attempt start and registered through the public QuestionInventory pre-Question adapter; durable Engine/API orchestration now persists and resumes the one-shot flow |
 | `VerifyAnswer` | Yes | Yes | No | Implemented sequentially, including rotated matching topic codes |
 | `SubmitAnswerAndSave` | Yes | Yes | No | Implemented one-shot advance |
 | `SkipAnswer` | Yes | Yes | No | Implemented distinct one-shot skip |
