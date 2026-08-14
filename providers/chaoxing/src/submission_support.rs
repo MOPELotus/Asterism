@@ -4,8 +4,8 @@ use std::{
 };
 
 use asterism_domain::{
-    AnswerCandidate, AnswerConfidence, AnswerSource, NormalizedAnswer, Question, QuestionKind,
-    RemoteState, SubmissionDraft, SubmissionQuestionVerification,
+    AnswerCandidate, AnswerConfidence, AnswerSource, NormalizedAnswer, Question, QuestionId,
+    QuestionKind, RemoteState, SubmissionDraft, SubmissionQuestionVerification,
     SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionScore,
     SubmissionVerificationSnapshot, SubmissionVerificationStatus,
 };
@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::json;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::inventory::parse_exam_detail_facts;
+use crate::inventory::{contains_javascript_call, parse_exam_detail_facts};
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 640;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
@@ -466,6 +466,105 @@ impl Drop for ChaoxingChapterWorkVerificationDocument {
     }
 }
 
+/// Provider-local comparison between one submitted answer and the official
+/// answer shown on the same bound Chapter Work result page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChaoxingChapterWorkAnswerJudgement {
+    MatchesOfficial,
+    DiffersFromOfficial,
+}
+
+/// The exact donor retake entry observed on a completed Chapter Work result.
+/// This is a read-only fact and does not authorize or execute the mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChaoxingChapterWorkRetakeEntry {
+    RedoTest,
+}
+
+/// Bound answer facts for one supported Question on a completed Chapter Work
+/// result. Answer values are deliberately omitted from `Debug` output.
+#[derive(Clone, PartialEq)]
+pub struct ChaoxingChapterWorkQuestionEvidence {
+    question_id: QuestionId,
+    submitted_answer: NormalizedAnswer,
+    official_answer: NormalizedAnswer,
+    judgement: ChaoxingChapterWorkAnswerJudgement,
+}
+
+impl ChaoxingChapterWorkQuestionEvidence {
+    pub const fn question_id(&self) -> QuestionId {
+        self.question_id
+    }
+
+    pub const fn submitted_answer(&self) -> &NormalizedAnswer {
+        &self.submitted_answer
+    }
+
+    pub const fn official_answer(&self) -> &NormalizedAnswer {
+        &self.official_answer
+    }
+
+    pub const fn judgement(&self) -> ChaoxingChapterWorkAnswerJudgement {
+        self.judgement
+    }
+
+    pub const fn submitted_answer_label(&self) -> &'static str {
+        "我的答案"
+    }
+
+    pub const fn official_answer_label(&self) -> &'static str {
+        "正确答案"
+    }
+}
+
+impl fmt::Debug for ChaoxingChapterWorkQuestionEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingChapterWorkQuestionEvidence")
+            .field("question_id", &self.question_id)
+            .field("submitted_answer", &"[REDACTED]")
+            .field("official_answer", &"[REDACTED]")
+            .field("judgement", &self.judgement)
+            .finish()
+    }
+}
+
+/// Complete supported answer, score and retake facts from one read-only
+/// Chapter Work result page. This Provider-local value carries no owner,
+/// account, Course or Attempt identity; Core must supply those bindings when a
+/// shared harvest capability is introduced.
+#[derive(Clone, PartialEq)]
+pub struct ChaoxingChapterWorkResultEvidence {
+    score: Option<SubmissionScore>,
+    retake_entry: Option<ChaoxingChapterWorkRetakeEntry>,
+    questions: Vec<ChaoxingChapterWorkQuestionEvidence>,
+}
+
+impl ChaoxingChapterWorkResultEvidence {
+    pub const fn score(&self) -> Option<SubmissionScore> {
+        self.score
+    }
+
+    pub const fn retake_entry(&self) -> Option<ChaoxingChapterWorkRetakeEntry> {
+        self.retake_entry
+    }
+
+    pub fn questions(&self) -> &[ChaoxingChapterWorkQuestionEvidence] {
+        &self.questions
+    }
+}
+
+impl fmt::Debug for ChaoxingChapterWorkResultEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingChapterWorkResultEvidence")
+            .field("score", &self.score)
+            .field("retake_entry", &self.retake_entry)
+            .field("question_count", &self.questions.len())
+            .finish()
+    }
+}
+
 /// Zeroizing owner for one strictly route-bound fresh Exam result page.
 pub struct ChaoxingExamVerificationDocument {
     document: String,
@@ -725,6 +824,104 @@ pub fn parse_chapter_work_answer_candidates(
             Ok(candidate)
         })
         .collect()
+}
+
+/// Parses complete supported historical answer facts from one already
+/// completed Chapter Work result without navigating to or invoking `redoTest`.
+/// Submitted and official answers remain distinct even when they match.
+///
+/// # Errors
+///
+/// Returns typed errors for login/challenge pages, incomplete answer labels,
+/// unsupported result types, invalid option bindings or Question-set drift.
+pub fn parse_chapter_work_result_evidence(
+    document: &ChaoxingChapterWorkVerificationDocument,
+    questions: &[Question],
+) -> ProviderResult<ChaoxingChapterWorkResultEvidence> {
+    if questions.is_empty() {
+        return Err(invalid_response(
+            "Chaoxing Chapter Work result evidence requires Questions",
+        ));
+    }
+    let html = Html::parse_document(document.as_str());
+    reject_login_or_challenge(&html)?;
+    let Some(submitted) = parse_chapter_result_answers(&html, "我的答案")? else {
+        return Err(unsupported(
+            "Chaoxing Chapter Work result has no complete supported submitted answers",
+        ));
+    };
+    let Some(official) = parse_chapter_result_answers(&html, "正确答案")? else {
+        return Err(unsupported(
+            "Chaoxing Chapter Work result has no complete supported official answers",
+        ));
+    };
+    if submitted.len() != questions.len()
+        || official.len() != questions.len()
+        || questions.iter().enumerate().any(|(index, question)| {
+            question.position != u32::try_from(index + 1).unwrap_or(u32::MAX)
+                || question.validate().is_err()
+        })
+    {
+        return Err(remote_changed(
+            "Chaoxing Chapter Work result-evidence Question set changed",
+        ));
+    }
+    let questions = submitted
+        .iter()
+        .zip(&official)
+        .zip(questions)
+        .map(|((submitted, official), question)| {
+            let remote_id = question
+                .remote_question_id
+                .as_deref()
+                .filter(|value| valid_question_id(value))
+                .ok_or_else(|| {
+                    invalid_response(
+                        "Chaoxing Chapter Work result-evidence Question identity is invalid",
+                    )
+                })?;
+            let type_code = provider_type_code(question.kind, &question.metadata_sanitized)?;
+            if submitted.remote_id != remote_id
+                || official.remote_id != remote_id
+                || submitted.type_code != type_code
+                || official.type_code != type_code
+            {
+                return Err(remote_changed(
+                    "Chaoxing Chapter Work result-evidence binding changed",
+                ));
+            }
+            let submitted_answer = chapter_standard_answer(question, submitted)?;
+            let official_answer = chapter_standard_answer(question, official)?;
+            let judgement = if submitted_answer == official_answer {
+                ChaoxingChapterWorkAnswerJudgement::MatchesOfficial
+            } else {
+                ChaoxingChapterWorkAnswerJudgement::DiffersFromOfficial
+            };
+            Ok(ChaoxingChapterWorkQuestionEvidence {
+                question_id: question.id,
+                submitted_answer,
+                official_answer,
+                judgement,
+            })
+        })
+        .collect::<ProviderResult<Vec<_>>>()?;
+    let score = parse_chapter_result_score(&html)?.map(|earned_milli_points| SubmissionScore {
+        earned_milli_points,
+        possible_milli_points: 100_000,
+    });
+    let retake_entry = html
+        .select(&selector("[onclick]"))
+        .any(|node| {
+            node.value()
+                .attr("onclick")
+                .is_some_and(|value| contains_javascript_call(value, "redotest"))
+        })
+        .then_some(ChaoxingChapterWorkRetakeEntry::RedoTest);
+    Ok(ChaoxingChapterWorkResultEvidence {
+        score,
+        retake_entry,
+        questions,
+    })
 }
 
 /// Compares a fresh Exam result with every immutable Draft Question in exact
@@ -1565,6 +1762,8 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/work/chapter-submission-editor.html");
     const CHAPTER_RESULT: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/chapter-result.html");
+    const CHAPTER_HISTORY_RESULT: &str =
+        include_str!("../../../fixtures/providers/chaoxing/work/chapter-history-result.html");
     const EXAM_QUESTIONS: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/exam-mobile-mixed.html");
     const EXAM_RESULT: &str =
@@ -1826,6 +2025,95 @@ mod tests {
                 .kind,
             ProviderErrorKind::RemoteChanged
         );
+    }
+
+    #[tokio::test]
+    async fn chapter_history_keeps_submitted_official_score_and_retake_facts_separate() {
+        let draft = chapter_result_draft().await;
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        let result =
+            ChaoxingChapterWorkVerificationDocument::try_new(CHAPTER_HISTORY_RESULT.to_owned())
+                .unwrap();
+        let evidence = parse_chapter_work_result_evidence(&result, &questions).unwrap();
+        assert_eq!(
+            evidence.score(),
+            Some(SubmissionScore {
+                earned_milli_points: 60_000,
+                possible_milli_points: 100_000,
+            })
+        );
+        assert_eq!(
+            evidence.retake_entry(),
+            Some(ChaoxingChapterWorkRetakeEntry::RedoTest)
+        );
+        assert_eq!(evidence.questions().len(), 3);
+        assert_eq!(evidence.questions()[0].question_id(), questions[0].id);
+        assert_eq!(
+            evidence.questions()[0].submitted_answer(),
+            &NormalizedAnswer::Selections(vec!["A".to_owned()])
+        );
+        assert_eq!(
+            evidence.questions()[0].official_answer(),
+            &NormalizedAnswer::Selections(vec!["B".to_owned()])
+        );
+        assert_eq!(
+            evidence.questions()[0].judgement(),
+            ChaoxingChapterWorkAnswerJudgement::DiffersFromOfficial
+        );
+        assert_eq!(
+            evidence.questions()[1].judgement(),
+            ChaoxingChapterWorkAnswerJudgement::MatchesOfficial
+        );
+        assert_eq!(
+            evidence.questions()[2].submitted_answer(),
+            &NormalizedAnswer::Boolean(false)
+        );
+        assert_eq!(
+            evidence.questions()[2].official_answer(),
+            &NormalizedAnswer::Boolean(true)
+        );
+        assert_eq!(evidence.questions()[0].submitted_answer_label(), "我的答案");
+        assert_eq!(evidence.questions()[0].official_answer_label(), "正确答案");
+        let debug = format!("{evidence:?}");
+        assert!(!debug.contains("Selections"));
+        assert!(!debug.contains("synthetic-work"));
+
+        let lookalike = ChaoxingChapterWorkVerificationDocument::try_new(
+            CHAPTER_HISTORY_RESULT.replace("redoTest(", "notRedoTest("),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_chapter_work_result_evidence(&lookalike, &questions)
+                .unwrap()
+                .retake_entry(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn chapter_history_requires_both_bound_answer_labels() {
+        let draft = chapter_result_draft().await;
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        for document in [
+            CHAPTER_HISTORY_RESULT.replacen("我的答案：A", "答案未显示", 1),
+            CHAPTER_HISTORY_RESULT.replacen("正确答案：B", "答案待公布", 1),
+        ] {
+            let document = ChaoxingChapterWorkVerificationDocument::try_new(document).unwrap();
+            assert_eq!(
+                parse_chapter_work_result_evidence(&document, &questions)
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::UnsupportedTask
+            );
+        }
     }
 
     #[tokio::test]

@@ -119,6 +119,16 @@ provenance. Missing standard answers, reordered Questions and unknown options
 fail closed. No test advertises `AnswerResolve`, clicks `redoTest` or treats the
 synthetic iframe as live route evidence.
 
+`work/chapter-history-result.html` is a separate synthetic read-only history
+fixture. It contains one matching and two differing submitted/official answer
+pairs, an exact fixed-point score and a structural `redoTest(...)` entry. The
+Provider-local result-evidence parser keeps `我的答案`, `正确答案`, their
+per-Question equality judgement, score and retake entry as distinct facts; its
+`Debug` output redacts answer values. Missing either answer label fails closed,
+and a lookalike `notRedoTest(...)` handler does not create retake availability.
+The fixture neither grants mutation authority nor proves BrowserBridge access
+to a live historical result.
+
 Capability-level tests wrap the same bounded fixture with a fake fresh
 TaskDetail and result transport. They prove that the typed resolver emits three
 bound ProviderNative candidates only after exact completed

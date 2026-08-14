@@ -719,7 +719,7 @@ fn exam_retake_available(row: ElementRef<'_>) -> bool {
         })
 }
 
-fn contains_javascript_call(value: &str, function: &str) -> bool {
+pub(crate) fn contains_javascript_call(value: &str, function: &str) -> bool {
     let value = value.as_bytes();
     value
         .windows(function.len())

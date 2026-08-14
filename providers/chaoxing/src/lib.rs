@@ -65,10 +65,13 @@ pub use stored_session::StoredChaoxingSessionResolver;
 pub use submission_build::ChaoxingSubmissionBuild;
 pub use submission_execute::{ChaoxingSubmissionExecute, ChaoxingSubmissionTransport};
 pub use submission_support::{
+    ChaoxingChapterWorkAnswerJudgement, ChaoxingChapterWorkQuestionEvidence,
+    ChaoxingChapterWorkResultEvidence, ChaoxingChapterWorkRetakeEntry,
     ChaoxingChapterWorkVerificationDocument, ChaoxingExamVerificationDocument,
     ChaoxingSubmissionPlan, ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute,
-    parse_chapter_work_answer_candidates, parse_chapter_work_verification_snapshot,
-    parse_exam_verification_snapshot, parse_submission_receipt, parse_verification_snapshot,
+    parse_chapter_work_answer_candidates, parse_chapter_work_result_evidence,
+    parse_chapter_work_verification_snapshot, parse_exam_verification_snapshot,
+    parse_submission_receipt, parse_verification_snapshot,
 };
 pub use submission_verify::{ChaoxingSubmissionVerificationTransport, ChaoxingSubmissionVerify};
 pub use task_detail::ChaoxingTaskDetail;

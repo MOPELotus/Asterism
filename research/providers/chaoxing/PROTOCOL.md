@@ -557,6 +557,16 @@ source. Normal SubmissionVerify may append the same evidence incrementally.
 The owner-level corpus, evidence status and bootstrap lifecycle are Main-owned
 and are not represented by the current `AnswerCandidate` contract.
 
+The Provider now exposes a typed but unregistered Chapter Work history parser
+over the already bounded `selectWorkQuestionYiPiYue` document. For the supported
+0/1/3 subset it requires complete QID/order/type/current-option binding and both
+visible labels, then returns the submitted value, official value, exact
+per-Question equality judgement, fixed-point score and an optional exact
+`redoTest(...)` entry. It does not construct Private Evidence, infer owner or
+Attempt identity, classify an overall score as per-Question evidence, or invoke
+the retake. Answer values are redacted from `Debug`. Shared bootstrap ingestion
+must add owner/account/course/task/attempt and result-digest bindings later.
+
 Strict Completion stops after independently verified completion. Score
 Improvement evaluates fresh score and result-route retake eligibility under a
 separate bounded policy. Chapter `redoTest` and formal Exam `reTest` create new

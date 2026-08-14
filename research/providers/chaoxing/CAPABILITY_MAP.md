@@ -243,6 +243,11 @@ contracts:
 - first account binding defaults to bounded read-only historical bootstrap, and
   normal `SubmissionVerify` contributes incremental evidence, but neither
   lifecycle exists in the shared capability/storage model yet;
+- a Provider-local Chapter history parser now closes the supported result-DOM
+  fact boundary: it keeps submitted and official answers, their exact
+  per-Question equality judgement, fixed-point score and structural `redoTest`
+  entry separate. It is not a registered harvest/retake capability and carries
+  no inferred owner/Attempt identity;
 - Strict Completion and Score Improvement are independent default-enabled
   state machines. A score-improvement retake needs an explicit capability,
   fresh snapshot/Draft, bounded attempt authority and exact result-proven
