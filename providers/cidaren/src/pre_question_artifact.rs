@@ -306,3 +306,145 @@ fn invalid_response(message: &'static str) -> ProviderError {
 fn protocol_drift(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    const REMOTE_TASK_ID: &str = "class-task:2002";
+
+    #[test]
+    fn pre_question_artifact_roundtrips_and_redacts_bindings() {
+        let task_id = TaskId::new();
+        let artifact = CidarenPreQuestionArtifact::ready_to_select_words(task_id, REMOTE_TASK_ID);
+        assert_eq!(artifact.phase(), CIDAREN_READY_TO_SELECT_WORDS_PHASE);
+        assert!(!format!("{artifact:?}").contains(REMOTE_TASK_ID));
+
+        let encoded = artifact.encode().unwrap();
+        let digest = encoded.digest();
+        assert!(!format!("{encoded:?}").contains(REMOTE_TASK_ID));
+        let value = encoded.into_secret_value();
+        let decoded =
+            CidarenPreQuestionArtifact::decode_bound(&value, digest, task_id, REMOTE_TASK_ID)
+                .unwrap();
+
+        assert_eq!(decoded.phase(), CIDAREN_READY_TO_SELECT_WORDS_PHASE);
+        assert!(!format!("{decoded:?}").contains(REMOTE_TASK_ID));
+    }
+
+    #[test]
+    fn pre_question_artifact_rejects_unknown_and_phase_foreign_fields() {
+        let task_id = TaskId::new();
+        let mut unknown = ready_wire(task_id, CIDAREN_READY_TO_START_PHASE);
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_owned(), json!(true));
+        assert_decode_rejected(unknown, task_id);
+
+        let mut foreign = ready_wire(task_id, CIDAREN_READY_TO_START_PHASE);
+        foreign.as_object_mut().unwrap().insert(
+            "topic_code".to_owned(),
+            json!("must-not-survive-ready-state"),
+        );
+        assert_decode_rejected(foreign, task_id);
+
+        assert_decode_rejected(ready_wire(task_id, "cidaren.unknown-phase"), task_id);
+    }
+
+    #[test]
+    fn reading_card_artifact_rejects_incomplete_and_invalid_progress() {
+        let task_id = TaskId::new();
+        let mut incomplete = reading_wire(task_id);
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .insert("progress_completed".to_owned(), json!(1));
+        assert_decode_rejected(incomplete, task_id);
+
+        let mut reversed = reading_wire(task_id);
+        reversed
+            .as_object_mut()
+            .unwrap()
+            .insert("progress_completed".to_owned(), json!(2));
+        reversed
+            .as_object_mut()
+            .unwrap()
+            .insert("progress_total".to_owned(), json!(1));
+        assert_decode_rejected(reversed, task_id);
+
+        let mut zero_total = reading_wire(task_id);
+        zero_total
+            .as_object_mut()
+            .unwrap()
+            .insert("progress_completed".to_owned(), json!(0));
+        zero_total
+            .as_object_mut()
+            .unwrap()
+            .insert("progress_total".to_owned(), json!(0));
+        assert_decode_rejected(zero_total, task_id);
+    }
+
+    #[test]
+    fn pre_question_artifact_rejects_invalid_reading_shape_and_oversized_input() {
+        let task_id = TaskId::new();
+        let mut invalid_card = reading_wire(task_id);
+        invalid_card
+            .as_object_mut()
+            .unwrap()
+            .insert("reading_card_id".to_owned(), json!("question:foreign"));
+        assert_decode_rejected(invalid_card, task_id);
+
+        let oversized = SecretValue::new(vec![b'x'; MAX_ARTIFACT_BYTES + 1]);
+        assert!(
+            CidarenPreQuestionArtifact::decode_bound(
+                &oversized,
+                Sha256::digest(oversized.expose_secret()).into(),
+                task_id,
+                REMOTE_TASK_ID,
+            )
+            .is_err()
+        );
+    }
+
+    fn ready_wire(task_id: TaskId, phase: &str) -> Value {
+        json!({
+            "schema": CIDAREN_PRE_QUESTION_ARTIFACT_TYPE,
+            "task_id": task_id.to_string(),
+            "remote_task_id": REMOTE_TASK_ID,
+            "phase": phase,
+            "topic_code": null,
+            "reading_card_id": null,
+            "stem_sanitized": null,
+            "position": null,
+            "progress_completed": null,
+            "progress_total": null
+        })
+    }
+
+    fn reading_wire(task_id: TaskId) -> Value {
+        json!({
+            "schema": CIDAREN_PRE_QUESTION_ARTIFACT_TYPE,
+            "task_id": task_id.to_string(),
+            "remote_task_id": REMOTE_TASK_ID,
+            "phase": CIDAREN_READING_CARD_PHASE,
+            "topic_code": "synthetic-topic-code",
+            "reading_card_id": "reading-card:0123456789abcdef",
+            "stem_sanitized": "Synthetic reading card",
+            "position": 1,
+            "progress_completed": null,
+            "progress_total": null
+        })
+    }
+
+    fn assert_decode_rejected(wire: Value, task_id: TaskId) {
+        let value = SecretValue::new(serde_json::to_vec(&wire).unwrap());
+        let digest = Sha256::digest(value.expose_secret()).into();
+        assert!(
+            CidarenPreQuestionArtifact::decode_bound(&value, digest, task_id, REMOTE_TASK_ID,)
+                .is_err()
+        );
+    }
+}
