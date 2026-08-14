@@ -629,8 +629,9 @@ pub fn parse_study_task_info_response(
             "Cidaren StudyTask/Info response was bound to a Course-page route",
         ));
     };
-    let mut payload = decode_success_envelope(document, crypto, "StudyTask/Info")?;
+    let payload = decode_success_envelope(document, crypto, "StudyTask/Info")?;
     let object = payload
+        .as_value()
         .as_object()
         .ok_or_else(|| protocol_drift("Cidaren StudyTask/Info data is not an object"))?;
     let exist_little_task = object
@@ -639,7 +640,6 @@ pub fn parse_study_task_info_response(
         .map(|value| required_small_u8(Some(value), "small-task state"))
         .transpose()?;
     let words = parse_word_locations(object.get("word_list"), list_id.as_deref())?;
-    zeroize_json(&mut payload);
     Ok(CidarenWordInventory {
         course_id: course_id.clone(),
         words,
@@ -668,10 +668,11 @@ pub fn parse_course_page_response(
             "Cidaren Course-page response is empty or exceeds the size limit",
         ));
     }
-    let mut payload: Value = serde_json::from_slice(document)
-        .map_err(|_| invalid_response("Cidaren Course-page response is not valid JSON"))?;
-    let words = parse_word_locations(Some(&payload), None)?;
-    zeroize_json(&mut payload);
+    let payload = ZeroizingJsonValue::new(
+        serde_json::from_slice(document)
+            .map_err(|_| invalid_response("Cidaren Course-page response is not valid JSON"))?,
+    );
+    let words = parse_word_locations(Some(payload.as_value()), None)?;
     Ok(CidarenWordInventory {
         course_id: course_id.clone(),
         words,
@@ -691,22 +692,20 @@ pub fn parse_word_info_response(
     lookup: &CidarenWordLookup,
     crypto: Option<&CidarenCryptoContext>,
 ) -> ProviderResult<CidarenWordEvidence> {
-    let mut payload = decode_success_envelope(document, crypto, "StudyWordInfo")?;
+    let payload = decode_success_envelope(document, crypto, "StudyWordInfo")?;
     let object = payload
+        .as_value()
         .as_object()
         .ok_or_else(|| protocol_drift("Cidaren word-info data is not an object"))?;
     if required_component(object.get("course_id"), "Course ID")? != lookup.course_id
         || required_component(object.get("list_id"), "list ID")? != lookup.list_id
         || required_text(object.get("word"), "word")? != lookup.word
     {
-        zeroize_json(&mut payload);
         return Err(remote_changed(
             "Cidaren word-info response changed its inventory binding",
         ));
     }
-    let parsed = parse_word_evidence(&payload);
-    zeroize_json(&mut payload);
-    parsed
+    parse_word_evidence(payload.as_value())
 }
 
 /// Parses the donor's HTML-wrapped word-prototype result. Absence of a span is
@@ -722,13 +721,15 @@ pub fn parse_word_prototype_response(document: &[u8]) -> ProviderResult<Option<S
             "Cidaren SearchWord response is empty or exceeds the size limit",
         ));
     }
-    let mut root: Value = serde_json::from_slice(document)
-        .map_err(|_| invalid_response("Cidaren SearchWord response is not valid JSON"))?;
+    let root = ZeroizingJsonValue::new(
+        serde_json::from_slice(document)
+            .map_err(|_| invalid_response("Cidaren SearchWord response is not valid JSON"))?,
+    );
     let object = root
+        .as_value()
         .as_object()
         .ok_or_else(|| protocol_drift("Cidaren SearchWord response is not an object"))?;
     if object.get("code").and_then(Value::as_i64) != Some(1) {
-        zeroize_json(&mut root);
         return Err(invalid_response(
             "Cidaren SearchWord endpoint returned a non-success code",
         ));
@@ -760,7 +761,6 @@ pub fn parse_word_prototype_response(document: &[u8]) -> ProviderResult<Option<S
         })
         .filter(|value| valid_word(value))
         .map(ToOwned::to_owned);
-    zeroize_json(&mut root);
     Ok(prototype)
 }
 
@@ -821,19 +821,21 @@ fn decode_success_envelope(
     document: &[u8],
     crypto: Option<&CidarenCryptoContext>,
     label: &'static str,
-) -> ProviderResult<Value> {
+) -> ProviderResult<ZeroizingJsonValue> {
     if document.is_empty() || document.len() > MAX_DOCUMENT_BYTES {
         return Err(invalid_response(format!(
             "Cidaren {label} response is empty or exceeds the size limit"
         )));
     }
-    let mut root: Value = serde_json::from_slice(document)
-        .map_err(|_| invalid_response(format!("Cidaren {label} response is not valid JSON")))?;
+    let root =
+        ZeroizingJsonValue::new(serde_json::from_slice(document).map_err(|_| {
+            invalid_response(format!("Cidaren {label} response is not valid JSON"))
+        })?);
     let object = root
+        .as_value()
         .as_object()
         .ok_or_else(|| protocol_drift(format!("Cidaren {label} response is not an object")))?;
     if object.get("code").and_then(Value::as_i64) != Some(1) {
-        zeroize_json(&mut root);
         return Err(invalid_response(format!(
             "Cidaren {label} endpoint returned a non-success code"
         )));
@@ -846,15 +848,30 @@ fn decode_success_envelope(
         None | Some(Value::Null) => "0",
         Some(Value::String(value)) if !value.is_empty() && value.len() <= 64 => value,
         _ => {
-            zeroize_json(&mut root);
             return Err(protocol_drift(format!(
                 "Cidaren {label} response has an invalid jv"
             )));
         }
     };
-    let decoded = decode_response_data(data, jv, crypto);
-    zeroize_json(&mut root);
-    decoded
+    decode_response_data(data, jv, crypto).map(ZeroizingJsonValue::new)
+}
+
+struct ZeroizingJsonValue(Value);
+
+impl ZeroizingJsonValue {
+    const fn new(value: Value) -> Self {
+        Self(value)
+    }
+
+    const fn as_value(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl Drop for ZeroizingJsonValue {
+    fn drop(&mut self) {
+        zeroize_json(&mut self.0);
+    }
 }
 
 fn parse_word_locations(

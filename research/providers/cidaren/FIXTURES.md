@@ -183,6 +183,9 @@ placeholder identities, result codes, status values and pagination shape.
 - `Student/Main` token validation and selected-Course extraction wrap the
   complete `user_info` JSON tree in an RAII zeroizing owner, including every
   malformed, rejected and early-return path.
+- Task word inventory, CoursePage, word-info and SearchWord response trees use
+  the same RAII cleanup rule; parser drift and nested lookup failures cannot
+  bypass answer-evidence zeroization through an early `?` return.
 - Encrypted pre/post-Question wire decoders move validated one-time fields
   into runtime artifacts instead of cloning them. Parser restoration wraps
   topic codes and binding strings in zeroizing owners before its first
