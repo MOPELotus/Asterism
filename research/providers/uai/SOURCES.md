@@ -154,7 +154,10 @@ The Apache donor's single `multiFileUpload` path explicitly obtains the CMS
 grant, uploads one MP3, then submits `instanceId=0` with one completed child
 whose value array contains the returned object key. Its compound
 `multichoice,multiFileUpload` path submits both modules together. Asterism maps
-the single-upload child into the current Rust donor's minimal ordered
+the donor's camel-case type to that exact canonical spelling at the Task-tree
+boundary; the general lowercase normalization must not turn it into an
+unreachable `multifileupload` before either upload gate. The single-upload
+child maps into the current Rust donor's minimal ordered
 question/judge envelope and fresh Course publish version, without copying the
 Apache donor's fabricated score maps. The compound form remains atomic and
 cannot be decomposed into an upload mutation plus a later unrelated answer.

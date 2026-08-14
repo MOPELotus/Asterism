@@ -604,8 +604,11 @@ Draft/attempt contract so both mutations and their independent readbacks remain
 durably recoverable without ambiguous replay. Artifact handles and external
 AnswerResolve/media-source orchestration likewise require shared Core contracts
 for account/Task ownership and secret isolation. The Provider-private upload
-boundary now first re-reads exact TaskDetail and freezes the stable hierarchy,
-Task fingerprint, unique positional `multiFileUpload` module and selected
+boundary starts by canonicalizing the platform's camel-case
+`multiFileUpload` label at Task-tree parsing; ordinary UAI labels remain
+lowercase, but this label is never stored as an unreachable
+`multifileupload`. It then re-reads exact TaskDetail and freezes the stable
+hierarchy, Task fingerprint, unique positional upload module and selected
 artifact digest into an upload intent. CMS grant acquisition accepts that
 intent rather than raw Course/Group strings, then fresh-binds Course
 resource/detail and current app user before requesting the exact token route.

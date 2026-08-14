@@ -491,7 +491,7 @@ fn task_types(value: Option<&Value>) -> ProviderResult<Vec<String>> {
         .ok_or_else(|| protocol_drift("UAI Group Task base field is not text"))?;
     let mut result = Vec::new();
     for item in value.split(',') {
-        let item = item.trim().to_ascii_lowercase();
+        let item = canonical_task_type(item.trim());
         if item.is_empty()
             || item.len() > MAX_TASK_TYPE_BYTES
             || !item
@@ -510,6 +510,15 @@ fn task_types(value: Option<&Value>) -> ProviderResult<Vec<String>> {
         }
     }
     Ok(result)
+}
+
+fn canonical_task_type(value: &str) -> String {
+    let normalized = value.to_ascii_lowercase();
+    if normalized == "multifileupload" {
+        "multiFileUpload".to_owned()
+    } else {
+        normalized
+    }
 }
 
 fn question_count(value: Option<&Value>) -> ProviderResult<Option<u32>> {
@@ -606,6 +615,29 @@ mod tests {
         );
         let tasks = parse_task_inventory(&course, &context, &tree).unwrap();
         assert_eq!(tasks[0].normalized["course_publish_version"], 123_290);
+    }
+
+    #[test]
+    fn parser_preserves_the_donor_upload_type_for_native_gates() {
+        assert_eq!(canonical_task_type("MULTIFILEUPLOAD"), "multiFileUpload");
+        let course = parse_course_inventory(COURSES).unwrap().remove(0);
+        let context = parse_course_context(&course, DETAIL).unwrap();
+        let single = TREE.replace("rich-text-read", "multiFileUpload");
+        let tasks = parse_task_inventory(&course, &context, &single).unwrap();
+        assert_eq!(
+            tasks[0].normalized["task_types"],
+            serde_json::json!(["multiFileUpload"])
+        );
+
+        let compound = TREE.replace(
+            r#"\"base\":\"rich-text-read\",\"question_num\":1"#,
+            r#"\"base\":\"multichoice,multiFileUpload\",\"question_num\":2"#,
+        );
+        let tasks = parse_task_inventory(&course, &context, &compound).unwrap();
+        assert_eq!(
+            tasks[0].normalized["task_types"],
+            serde_json::json!(["multichoice", "multiFileUpload"])
+        );
     }
 
     #[test]
