@@ -780,7 +780,10 @@ fn parse_example_array(
 }
 
 fn push_unique_meaning(meanings: &mut Vec<String>, mut meaning: String) -> ProviderResult<()> {
-    if meanings.len() >= MAX_MEANINGS || meanings.contains(&meaning) {
+    if !valid_text(&meaning, MAX_TEXT_BYTES)
+        || meanings.len() >= MAX_MEANINGS
+        || meanings.contains(&meaning)
+    {
         meaning.zeroize();
         return Err(protocol_drift(
             "Cidaren word info contains duplicate or excessive meanings",
@@ -958,6 +961,28 @@ mod tests {
             candidate.provenance_sanitized["strategy"],
             "donor-random-choice-stable"
         );
+    }
+
+    #[test]
+    fn malformed_meaning_content_fails_closed() {
+        for payload in [
+            json!({
+                "word": "alpha",
+                "means": [{"mean": [], "usages": []}]
+            }),
+            json!({
+                "word": "alpha",
+                "means": [],
+                "options": [{
+                    "content": {"mean": "（）", "usage_infos": [], "example": []}
+                }]
+            }),
+        ] {
+            assert_eq!(
+                parse_word_evidence(&payload).unwrap_err().kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
     }
 
     #[test]

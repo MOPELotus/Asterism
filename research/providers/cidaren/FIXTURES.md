@@ -244,6 +244,8 @@ placeholder identities, result codes, status values and pagination shape.
 - Word-evidence parsing owns word/meaning/example clones behind cleanup guards;
   a later duplicate, missing translation or collection-bound failure clears
   every already accepted field and the rejected replacement value.
+- Empty meaning parts and option meanings reduced to empty text after removing
+  Chinese parentheticals are protocol drift, never valid answer evidence.
 - Donor random/fixed-third/last-word fallbacks are stable, low-confidence and
   explicitly identified in answer provenance. Nested sentence fixtures also
   distinguish top-level evidence loading/order from flattened children:
