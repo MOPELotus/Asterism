@@ -57,11 +57,13 @@ implementation treats `code=0` with a non-empty `extraCheck.vcToken` as a
 continuation challenge, not as a redirect-ready success.
 
 The native transport covers deterministic password form encoding, bounded
-login-envelope classification and a strict `https://sso.sflep.com/idsvr/`
-callback allowlist. It follows at most twelve redirects manually with the shared
-non-redirecting client; every hop must remain HTTPS on exactly
-`welearn.sflep.com` or `sso.sflep.com`. `returnUrl` must be unique, bounded and
-point to the expected OIDC callback shape.
+login-envelope classification, exact
+`https://sso.sflep.com/idsvr/transfer.html` extraction and exact
+`/idsvr/connect/authorize/callback` success binding. It follows at most twelve
+redirects manually with the shared non-redirecting client; every hop must
+remain HTTPS on exactly `welearn.sflep.com` or `sso.sflep.com`. `returnUrl`
+must be unique, bounded and point to the expected relative OIDC callback shape;
+another path on either trusted host still fails closed.
 
 Set-Cookie values are collected in a bounded redacted jar. Only `sflep.com`,
 `sso.sflep.com` and `welearn.sflep.com` scopes are accepted; domain and path

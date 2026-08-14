@@ -42,6 +42,10 @@ GitHub releases. A full YZBRH source recheck also confirmed its top-level
 `heartbeat()` is display-only: independently created `simulate()` coroutines
 own every network keep and final save, so no shared network-heartbeat dispatch
 exists.
+The post-mutation-baseline checkpoint on 2026-08-14 repeated default-head,
+tag and GitHub-release queries after porting YZBRH's explicit uninitialized-CMI
+branch. All three revisions and release surfaces remained unchanged, so that
+control-flow correction introduced no new pinned revision.
 
 ## Source selection
 

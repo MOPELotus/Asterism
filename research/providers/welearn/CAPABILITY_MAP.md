@@ -2,7 +2,7 @@
 
 | Asterism capability | Primary evidence | Use | Current decision |
 |---|---|---|---|
-| Authentication | Fanyuchang 2026 | Reference | Native Password/OIDC, ImportedCookie, Capture-assisted Cookie and external-browser-OAuth Cookie validation are offline/native-boundary covered; immutable Capture v4/v5 alternatives distinguish assisted versus external-provider acquisition while keeping captcha/SMS/OAuth state browser-local; scoped redirects/Cookies and typed captcha/SMS outcomes; live pending |
+| Authentication | Fanyuchang 2026 | Reference | Native Password/OIDC, ImportedCookie, Capture-assisted Cookie and external-browser-OAuth Cookie validation are offline/native-boundary covered; native redirects bind the exact SSO transfer and authorize-callback paths, immutable Capture v4/v5 alternatives distinguish assisted versus external-provider acquisition while keeping captcha/SMS/OAuth state browser-local; scoped Cookies and typed captcha/SMS outcomes; live pending |
 | Stored session validation | Fanyuchang 2026 | Reference | Core-scoped Cookie resolution, authenticated Course-list validation and atomic Password/Composite renewal are native-boundary covered; live pending |
 | CourseInventory | Fanyuchang 2026 + YZBRH | Reference | Native authenticated `authCourse.aspx?action=gmc` read is implemented behind shared NetworkProfile; live pending |
 | TaskInventory | Fanyuchang 2026 + YZBRH | Reference | Native Course page → POST `courseunits` with GET compatibility only after explicit 404/405 → one `scoLeaves` response per Unit is implemented all-or-nothing; live pending |

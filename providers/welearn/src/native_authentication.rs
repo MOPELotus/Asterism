@@ -27,6 +27,7 @@ const PRELOGIN_URL: &str = "https://welearn.sflep.com/user/prelogin.aspx?loginre
 const LOGIN_URL: &str = "https://sso.sflep.com/idsvr/account/login";
 const LOGIN_ORIGIN: &str = "https://sso.sflep.com";
 const LOGIN_REFERER: &str = "https://sso.sflep.com/idsvr/login.html";
+const TRANSFER_PATH: &str = "/idsvr/transfer.html";
 const COURSE_LIST_URL: &str = "https://welearn.sflep.com/ajax/authCourse.aspx?action=gmc";
 const MAX_REDIRECTS: usize = 12;
 const MAX_LOGIN_RESPONSE_BYTES: usize = 64 * 1_024;
@@ -209,7 +210,14 @@ fn extract_return_route(url: &Url) -> ProviderResult<SensitiveReturnRoute> {
         .filter(|(key, _)| key.eq_ignore_ascii_case("returnUrl"))
         .map(|(_, value)| value.into_owned());
     let mut route = values.next().ok_or_else(invalid_login_response)?;
-    if values.next().is_some()
+    if url.scheme() != "https"
+        || url.host_str() != Some("sso.sflep.com")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != TRANSFER_PATH
+        || url.fragment().is_some()
+        || values.next().is_some()
         || route.is_empty()
         || route.len() > MAX_RETURN_ROUTE_BYTES
         || route.chars().any(char::is_control)
@@ -535,6 +543,13 @@ mod tests {
         )
         .unwrap();
         assert!(extract_return_route(&duplicate).is_err());
+        for invalid in [
+            "https://sso.sflep.com/idsvr/login.html?returnUrl=%2Fconnect%2Fauthorize%2Fcallback%3Fa%3D1",
+            "https://welearn.sflep.com/idsvr/transfer.html?returnUrl=%2Fconnect%2Fauthorize%2Fcallback%3Fa%3D1",
+            "https://sso.sflep.com/idsvr/transfer.html/extra?returnUrl=%2Fconnect%2Fauthorize%2Fcallback%3Fa%3D1",
+        ] {
+            assert!(extract_return_route(&Url::parse(invalid).unwrap()).is_err());
+        }
     }
 
     #[test]

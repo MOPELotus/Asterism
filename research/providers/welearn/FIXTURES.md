@@ -27,9 +27,11 @@ fixtures/providers/welearn/
   cmi/resource-completion-cmi.expected.json
 ```
 
-The Auth fixtures cover bounded response classification, strict callback
-allowlisting and `HumanRequired` separation without retaining callback/token
-material. The SMS fixture uses the audited `code=0 + extraCheck.vcToken`
+The Auth fixtures cover bounded response classification, exact
+`/idsvr/transfer.html` and `/idsvr/connect/authorize/callback` route binding,
+and `HumanRequired` separation without retaining callback/token material.
+Wrong paths on the trusted SSO host and callback-prefix lookalikes fail closed.
+The SMS fixture uses the audited `code=0 + extraCheck.vcToken`
 continuation shape and must never be classified as redirect-ready success.
 `anonymous-course-list-login.html` is the sanitized 2026-08-13 public response
 returned by the Course-list endpoint to an anonymous prelogin session; native

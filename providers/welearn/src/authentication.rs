@@ -30,7 +30,7 @@ const SSO_ORIGIN: &str = "https://sso.sflep.com";
 const QQ_OAUTH_ORIGIN: &str = "https://graph.qq.com";
 const WECHAT_OAUTH_ORIGIN: &str = "https://open.weixin.qq.com";
 const APPLE_OAUTH_ORIGIN: &str = "https://appleid.apple.com";
-const SSO_CALLBACK_PREFIX: &str = "/idsvr/";
+const SSO_CALLBACK_PATH: &str = "/idsvr/connect/authorize/callback";
 const WELEARN_ORIGIN: &str = "https://welearn.sflep.com";
 const WELEARN_CAPTURE_START_URL: &str = "https://welearn.sflep.com/user/prelogin.aspx?loginret=http%3a%2f%2fwelearn.sflep.com%2fuser%2floginredirect.aspx";
 
@@ -620,7 +620,7 @@ fn validate_login_redirect(mut value: String) -> ProviderResult<WellearnLoginRed
         && url.port().is_none()
         && url.username().is_empty()
         && url.password().is_none()
-        && url.path().starts_with(SSO_CALLBACK_PREFIX)
+        && url.path() == SSO_CALLBACK_PATH
         && url.query().is_some()
         && url.fragment().is_none()
         && value.starts_with(SSO_ORIGIN);
@@ -852,6 +852,8 @@ mod tests {
         for invalid in [
             br#"{"code":0,"data":"https://evil.example/idsvr/callback?code=x"}"#.as_slice(),
             br#"{"code":0,"data":"https://user@sso.sflep.com/idsvr/callback?code=x"}"#,
+            br#"{"code":0,"data":"https://sso.sflep.com/idsvr/other?code=x"}"#,
+            br#"{"code":0,"data":"https://sso.sflep.com/idsvr/connect/authorize/callback-extra?code=x"}"#,
             br#"{"code":0,"data":"//evil.example/callback?code=x"}"#,
             br#"{"code":0,"data":"/connect/callback"}"#,
             br#"{"data":"/connect/callback?code=x"}"#,

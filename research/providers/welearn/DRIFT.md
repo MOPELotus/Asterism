@@ -2,7 +2,7 @@
 
 | Risk | Static evidence | Required response |
 |---|---|---|
-| OIDC authorize/return shape changes | 2025 and 2026 donors construct/extract `rturl` differently | Parse redirects structurally, allowlist hosts and fixture each observed variant |
+| OIDC authorize/return shape changes | Current donor reaches exact `/idsvr/transfer.html`, extracts one `/connect/authorize/callback?...` `rturl`, then receives exact `/idsvr/connect/authorize/callback?...` after login; older donors construct/extract the route differently | Bind the current transfer and callback paths exactly, reject another path even on the trusted SSO host, and add a sanitized fixture before widening |
 | OIDC introduces another trusted host or redirect count grows | The audited flow currently stays on two hosts and completes within a short chain | Fail closed at the host/redirect bound; expand only from sanitized current evidence |
 | SSO Cookie domain/path layout changes | Current native boundary accepts only three audited domains and applies path scoping | Treat rejected scope or missing authenticated Course read as protocol drift, never relax from an error body alone |
 | Course path alternates between `/student` and `/2019/student` | Donors mix both paths | Treat one as current only after live comparison; do not scatter hard-coded paths |
