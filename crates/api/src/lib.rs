@@ -2337,7 +2337,7 @@ mod tests {
         SubmissionPayloadFieldPreview, SubmissionPayloadPreview, SubmissionQuestionVerification,
         SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult,
         SubmissionResultId, SubmissionResultStatus, SubmissionScore,
-        SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId,
+        SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId, UserId,
     };
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, BrowserBridgeCapability, BrowserSessionSpec,
@@ -2352,8 +2352,8 @@ mod tests {
     use asterism_secrets::{CredentialBundle, SecretAccess, SecretActor, SecretKey, SecretValue};
     use asterism_storage::{
         AnswerCandidateRecord, AnswerCandidateRepository, QuestionSnapshot,
-        QuestionSnapshotRepository, SecretKeyring, SqliteQuestionSnapshotRepository,
-        SubmissionDraftRepository, SubmissionResultRepository,
+        QuestionSnapshotRepository, SecretKeyring, SqliteBrowserBridgeSessionRepository,
+        SqliteQuestionSnapshotRepository, SubmissionDraftRepository, SubmissionResultRepository,
     };
     use async_trait::async_trait;
     use axum::{
@@ -4543,6 +4543,42 @@ mod tests {
         .await
         .unwrap();
 
+        let owner_id = UserId::from_str(
+            &sqlx::query_scalar::<_, String>("SELECT id FROM users LIMIT 1")
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let recovered = asterism_engine::BrowserBridgeRuntimeRecoveryService::new(
+            SqliteBrowserBridgeSessionRepository::new(database.clone()),
+            secret_store.browser_bridge_commands(ProviderId::new("provider-alpha").unwrap()),
+        )
+        .recover(asterism_engine::BrowserBridgeRuntimeRecoveryRequest {
+            owner_user_id: owner_id,
+            session_id: BrowserBridgeSessionId::from_str(&session_id).unwrap(),
+            access: SecretAccess {
+                actor: SecretActor::CoreService("browser-bridge-recovery-test"),
+                correlation_id: "browser-bridge-runtime-recover".to_owned(),
+                reason: "recover API transport fixture".to_owned(),
+            },
+        })
+        .await
+        .unwrap();
+        assert_eq!(recovered.binding.frame_id, "top-frame:1");
+        let recovered = recovered.latest.unwrap();
+        assert_eq!(recovered.command.command_artifact.expose_secret(), command);
+        assert_eq!(
+            recovered
+                .command
+                .runtime_state
+                .unwrap()
+                .state_artifact
+                .expose_secret(),
+            runtime_state
+        );
+        assert!(recovered.result.is_none());
+
         let command_path = format!("/api/v1/browser-bridge/sessions/{session_id}/commands/1");
         let dispatched = app
             .clone()
@@ -4610,6 +4646,28 @@ mod tests {
         assert_eq!(receipt["sequence"], 1);
         assert_eq!(receipt["duplicate"], false);
         assert_eq!(receipt["result_digest"].as_str().unwrap().len(), 64);
+
+        let recovered = asterism_engine::BrowserBridgeRuntimeRecoveryService::new(
+            SqliteBrowserBridgeSessionRepository::new(database.clone()),
+            secret_store.browser_bridge_commands(ProviderId::new("provider-alpha").unwrap()),
+        )
+        .recover(asterism_engine::BrowserBridgeRuntimeRecoveryRequest {
+            owner_user_id: owner_id,
+            session_id: BrowserBridgeSessionId::from_str(&session_id).unwrap(),
+            access: SecretAccess {
+                actor: SecretActor::CoreService("browser-bridge-result-recovery-test"),
+                correlation_id: "browser-bridge-result-recover".to_owned(),
+                reason: "recover received API result fixture".to_owned(),
+            },
+        })
+        .await
+        .unwrap()
+        .latest
+        .unwrap();
+        assert_eq!(
+            recovered.result.unwrap().result_artifact.expose_secret(),
+            raw_result
+        );
 
         let duplicate = app
             .clone()

@@ -1122,6 +1122,22 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(inserted, BrowserBridgeExchangeRecord::Inserted(_)));
+        assert_eq!(
+            fixture
+                .session_repository
+                .find_latest_browser_bridge_exchange(fixture.owner, session.id)
+                .await
+                .unwrap(),
+            Some(issued.clone())
+        );
+        assert!(
+            fixture
+                .session_repository
+                .find_latest_browser_bridge_exchange(UserId::new(), session.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let duplicate = fixture
             .command_repository
             .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {

@@ -1063,6 +1063,12 @@ pub trait BrowserBridgeSessionRepository: Send + Sync {
         session_id: BrowserBridgeSessionId,
     ) -> Result<Option<BrowserBridgeRuntimeBinding>, StorageError>;
 
+    async fn find_latest_browser_bridge_exchange(
+        &self,
+        owner_user_id: UserId,
+        session_id: BrowserBridgeSessionId,
+    ) -> Result<Option<BrowserBridgeExchange>, StorageError>;
+
     async fn update_browser_bridge_session_for_owner(
         &self,
         session: &BrowserBridgeSession,

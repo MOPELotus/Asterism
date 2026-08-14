@@ -1,10 +1,10 @@
 use asterism_auth::{OpaqueTokenService, TokenError};
 use asterism_domain::{
-    AuditActor, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
-    BrowserBridgeRuntimeBinding, BrowserBridgeRuntimeBindingError,
-    BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession, BrowserBridgeSessionCreate,
-    BrowserBridgeSessionError, BrowserBridgeSessionId, ProviderAccountId, ProviderId, TaskId,
-    Timestamp, UserId,
+    AuditActor, BrowserBridgeExchange, BrowserBridgeExchangeState,
+    BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
+    BrowserBridgeRuntimeBindingError, BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession,
+    BrowserBridgeSessionCreate, BrowserBridgeSessionError, BrowserBridgeSessionId,
+    ProviderAccountId, ProviderId, TaskId, Timestamp, UserId,
 };
 use asterism_provider_api::{BrowserSessionSpec, BrowserSessionSpecError};
 use asterism_secrets::{
@@ -317,6 +317,114 @@ where
     }
 }
 
+/// Reconstructs one owner-scoped `BrowserBridge` runtime after restart without
+/// asking the helper to echo Provider command or cursor state.
+#[derive(Clone, Debug)]
+pub struct BrowserBridgeRuntimeRecoveryService<S, C> {
+    sessions: S,
+    commands: C,
+}
+
+impl<S, C> BrowserBridgeRuntimeRecoveryService<S, C> {
+    pub const fn new(sessions: S, commands: C) -> Self {
+        Self { sessions, commands }
+    }
+}
+
+impl<S, C> BrowserBridgeRuntimeRecoveryService<S, C>
+where
+    S: BrowserBridgeSessionRepository,
+    C: BrowserBridgeCommandArtifactRepository,
+{
+    /// Loads the frozen session policy and runtime binding, then resolves the
+    /// latest exact command, optional Provider state and optional raw result.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on missing runtime identity, partial encrypted artifacts,
+    /// cross-binding metadata or a terminal exchange without its raw result.
+    pub async fn recover(
+        &self,
+        request: BrowserBridgeRuntimeRecoveryRequest,
+    ) -> Result<BrowserBridgeRuntimeRecoverySnapshot, BrowserBridgeRuntimeRecoveryError> {
+        let (session, spec) = self
+            .sessions
+            .find_browser_bridge_session(request.owner_user_id, request.session_id)
+            .await?
+            .ok_or(BrowserBridgeRuntimeRecoveryError::SessionNotFound(
+                request.session_id,
+            ))?;
+        let binding = self
+            .sessions
+            .find_browser_bridge_runtime_binding(request.owner_user_id, request.session_id)
+            .await?
+            .ok_or(BrowserBridgeRuntimeRecoveryError::RuntimeBindingMissing(
+                request.session_id,
+            ))?;
+        let latest_exchange = self
+            .sessions
+            .find_latest_browser_bridge_exchange(request.owner_user_id, request.session_id)
+            .await?;
+        let latest = if let Some(exchange) = latest_exchange {
+            let command = self
+                .commands
+                .resolve_browser_bridge_command(StorageBrowserBridgeCommandResolveRequest {
+                    owner_user_id: session.owner_user_id,
+                    provider_account_id: session.provider_account_id,
+                    task_id: session.task_id,
+                    session_id: session.id,
+                    sequence: exchange.sequence,
+                    access: &request.access,
+                })
+                .await?
+                .ok_or(BrowserBridgeRuntimeRecoveryError::CommandArtifactMissing)?;
+            if command.exchange != exchange {
+                return Err(BrowserBridgeRuntimeRecoveryError::ExchangeMismatch);
+            }
+            let result = self
+                .commands
+                .resolve_browser_bridge_result(StorageBrowserBridgeResultResolveRequest {
+                    owner_user_id: session.owner_user_id,
+                    provider_account_id: session.provider_account_id,
+                    task_id: session.task_id,
+                    session_id: session.id,
+                    sequence: exchange.sequence,
+                    access: &request.access,
+                })
+                .await?;
+            if result
+                .as_ref()
+                .is_some_and(|result| result.exchange != exchange)
+            {
+                return Err(BrowserBridgeRuntimeRecoveryError::ExchangeMismatch);
+            }
+            if exchange.state != BrowserBridgeExchangeState::Issued && result.is_none() {
+                return Err(BrowserBridgeRuntimeRecoveryError::ResultArtifactMissing);
+            }
+            Some(BrowserBridgeRecoveredExchange { command, result })
+        } else {
+            None
+        };
+        let recovered_exchange = latest
+            .as_ref()
+            .map(|latest| latest.command.exchange.clone());
+        if self
+            .sessions
+            .find_latest_browser_bridge_exchange(request.owner_user_id, request.session_id)
+            .await?
+            != recovered_exchange
+        {
+            return Err(BrowserBridgeRuntimeRecoveryError::ExchangeMismatch);
+        }
+        Ok(BrowserBridgeRuntimeRecoverySnapshot {
+            session,
+            spec,
+            binding,
+            latest,
+        })
+    }
+}
+
 /// Core-owned one-shot helper dispatch boundary. The access token is checked
 /// in the same Storage transaction that permanently records first dispatch,
 /// so an ambiguous HTTP retry cannot replay the browser command.
@@ -577,6 +685,27 @@ pub struct BrowserBridgeCommandResolveRequest {
     pub access: SecretAccess,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserBridgeRuntimeRecoveryRequest {
+    pub owner_user_id: UserId,
+    pub session_id: BrowserBridgeSessionId,
+    pub access: SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeRuntimeRecoverySnapshot {
+    pub session: BrowserBridgeSession,
+    pub spec: BrowserSessionSpec,
+    pub binding: BrowserBridgeRuntimeBinding,
+    pub latest: Option<BrowserBridgeRecoveredExchange>,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeRecoveredExchange {
+    pub command: ResolvedBrowserBridgeCommand,
+    pub result: Option<ResolvedBrowserBridgeResult>,
+}
+
 #[derive(Debug)]
 pub struct BrowserBridgeCommandDispatchRequest {
     pub session_id: BrowserBridgeSessionId,
@@ -643,6 +772,24 @@ pub enum BrowserBridgeHelperSessionError {
 pub enum BrowserBridgeCommandServiceError {
     #[error(transparent)]
     SecretStore(#[from] SecretStoreError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BrowserBridgeRuntimeRecoveryError {
+    #[error("BrowserBridge session `{0}` does not exist for this owner")]
+    SessionNotFound(BrowserBridgeSessionId),
+    #[error("BrowserBridge session `{0}` has no durable runtime binding")]
+    RuntimeBindingMissing(BrowserBridgeSessionId),
+    #[error("latest BrowserBridge command artifact is missing")]
+    CommandArtifactMissing,
+    #[error("terminal BrowserBridge exchange has no durable raw result")]
+    ResultArtifactMissing,
+    #[error("BrowserBridge runtime recovery artifacts disagree on exchange identity")]
+    ExchangeMismatch,
+    #[error(transparent)]
+    SecretStore(#[from] SecretStoreError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
 }
 
 #[derive(Debug, thiserror::Error)]

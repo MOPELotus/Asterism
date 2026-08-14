@@ -3477,3 +3477,24 @@ The sidecar is not a scheduler or authority by itself. UAI still requires Core
 to freeze the Course batch owner and start ordinal, then rebuild fresh ordered
 inventory before its Provider can validate the cursor and issue sequence `n+1`.
 Cidaren commands need no sidecar and retain the existing command-only shape.
+
+## One-hundred-and-ninety-seventh Phase 0 slice
+
+Core can now reconstruct the latest BrowserBridge runtime as one owner-scoped
+snapshot. Storage resolves the latest exchange sequence only after rebinding the
+session owner, Provider account, Task and Provider. Engine combines that record
+with the frozen session policy, immutable origin/frame binding, exact encrypted
+command, optional Provider-private state and optional encrypted raw result.
+
+Recovery fails closed when a runtime binding, command artifact or terminal raw
+result is missing, or when any resolved artifact names a different exchange.
+An issued exchange may legitimately have no result while the helper is still
+running; it may also have a durably received result awaiting Provider parsing.
+A terminal exchange must retain the raw result that justified Provider
+acceptance. No access token, command bytes or cursor is reconstructed from
+helper input.
+
+This snapshot supplies deterministic process-restart ownership but does not
+advance a Provider state machine. A Provider adapter must still freshly rebuild
+and validate its protocol authority, then either accept the prior result and
+issue the exact next sequence or stop for typed recovery/human handling.

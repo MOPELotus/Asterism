@@ -301,6 +301,43 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
         Ok(Some(binding))
     }
 
+    async fn find_latest_browser_bridge_exchange(
+        &self,
+        owner_user_id: UserId,
+        session_id: BrowserBridgeSessionId,
+    ) -> Result<Option<BrowserBridgeExchange>, StorageError> {
+        let mut transaction = self.database.pool().begin().await?;
+        let Some((session, _)) = fetch_session(&mut transaction, session_id).await? else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        if session.owner_user_id != owner_user_id
+            || !binding_is_valid(&mut transaction, &session).await?
+        {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let latest_sequence: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM browser_bridge_exchanges WHERE session_id = ?",
+        )
+        .bind(session_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let Some(latest_sequence) = latest_sequence else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let exchange = fetch_exchange(&mut transaction, session_id, latest_sequence).await?;
+        transaction.commit().await?;
+        exchange
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "latest BrowserBridge exchange sequence has no record".to_owned(),
+                )
+            })
+            .map(Some)
+    }
+
     async fn update_browser_bridge_session_for_owner(
         &self,
         session: &BrowserBridgeSession,
