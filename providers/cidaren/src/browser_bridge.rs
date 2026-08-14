@@ -1,8 +1,8 @@
 use std::{fmt, sync::Arc};
 
 use asterism_domain::{
-    BrowserBridgeExchange, BrowserBridgeExchangeState, BrowserBridgeSessionId, TaskCapability,
-    Timestamp,
+    BrowserBridgeExchange, BrowserBridgeExchangeState, BrowserBridgeResultArtifactMetadata,
+    BrowserBridgeSessionId, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
     BrowserBridgeCapability, BrowserSessionSpec, CredentialReplacement, ProviderContext,
@@ -364,6 +364,63 @@ impl CidarenBrowserBridge {
         .await
     }
 
+    /// Completes a Core-persisted helper result only after rebinding its
+    /// encrypted bytes to the exact result metadata recorded at receipt time.
+    ///
+    /// Storage authenticates the encrypted artifact, while the Provider still
+    /// owns protocol authority: the result type, session, sequence, digest and
+    /// observation time must all match before Cidaren parses credential data.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for invalid or foreign result metadata, artifact
+    /// digest drift, command recovery drift, stale Task state or invalid JSON.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "command and result artifacts retain separate durable bindings during recovery"
+    )]
+    pub async fn complete_persisted_capture_snapshot_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        issued_exchange: &BrowserBridgeExchange,
+        command_artifact: &SecretValue,
+        mode: CidarenCaptureMode,
+        result_metadata: &BrowserBridgeResultArtifactMetadata,
+        result_artifact: &SecretValue,
+        observed_origin: &str,
+    ) -> ProviderResult<CidarenCaptureExchangeCompleted> {
+        if result_metadata.validate().is_err()
+            || result_metadata.session_id != issued_exchange.session_id
+            || result_metadata.sequence != issued_exchange.sequence
+            || result_metadata.result_type != crate::CidarenBrowserEventEnvelope::exchange_type()
+            || result_metadata.received_at < issued_exchange.issued_at
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "Cidaren persisted Capture result metadata is stale or foreign",
+            ));
+        }
+        let document = CidarenBrowserResultDocument::try_from_secret_value(result_artifact)?;
+        if document.exchange_digest()? != result_metadata.result_digest {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "Cidaren persisted Capture result digest changed",
+            ));
+        }
+        self.complete_recovered_capture_snapshot_exchange(
+            context,
+            remote_task_id,
+            issued_exchange,
+            command_artifact,
+            mode,
+            document,
+            observed_origin,
+            result_metadata.received_at,
+        )
+        .await
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the resolved command and its result observation retain independent recovery bindings"
@@ -526,6 +583,16 @@ mod tests {
     struct FixtureDetail {
         metadata: ProviderMetadata,
         advertised: bool,
+    }
+
+    struct RecoveredCaptureFixture {
+        capability: CidarenBrowserBridge,
+        context: ProviderContext,
+        session_id: BrowserBridgeSessionId,
+        issued_at: Timestamp,
+        exchange: BrowserBridgeExchange,
+        command_artifact: SecretValue,
+        document: String,
     }
 
     impl ProviderIdentity for FixtureDetail {
@@ -815,65 +882,117 @@ mod tests {
 
     #[tokio::test]
     async fn recovered_capture_exchange_resolves_command_authority_before_result() {
-        let capability = bridge(true);
-        let context = context();
-        let session_id = BrowserBridgeSessionId::new();
-        let issued_at = Utc::now();
-        let issued = capability
-            .capture_snapshot_exchange(
-                &context,
-                "class-task:2002",
-                session_id,
-                "frame-recovery".to_owned(),
-                3,
-                CidarenCaptureMode::Composite,
-                issued_at,
-            )
-            .await
-            .unwrap();
-        let (_, artifact, exchange) = issued.into_parts();
-        let artifact = artifact.into_secret_value();
-        let document = include_str!(
-            "../../../fixtures/providers/cidaren/browser/capture-snapshot-composite.json"
-        )
-        .replace("synthetic-session-nonce", &session_id.to_string())
-        .replace("frame-1", "frame-recovery")
-        .replace("\"reply_to_sequence\": 1", "\"reply_to_sequence\": 3");
+        let fixture = recovered_capture_fixture().await;
 
         assert_eq!(
-            capability
+            fixture
+                .capability
                 .complete_recovered_capture_snapshot_exchange(
-                    &context,
+                    &fixture.context,
                     "class-task:2002",
-                    &exchange,
-                    &artifact,
+                    &fixture.exchange,
+                    &fixture.command_artifact,
                     CidarenCaptureMode::TokenOnly,
-                    CidarenBrowserResultDocument::try_new(document.clone()).unwrap(),
+                    CidarenBrowserResultDocument::try_new(fixture.document).unwrap(),
                     CIDAREN_ORIGIN,
-                    issued_at + Duration::seconds(1),
+                    fixture.issued_at + Duration::seconds(1),
                 )
                 .await
                 .unwrap_err()
                 .kind,
             ProviderErrorKind::RemoteChanged
         );
+    }
 
-        let completed = capability
-            .complete_recovered_capture_snapshot_exchange(
-                &context,
+    #[tokio::test]
+    async fn persisted_capture_result_rejects_receipt_metadata_drift() {
+        let fixture = recovered_capture_fixture().await;
+        let result_digest = crate::browser_event_exchange_digest(&fixture.document).unwrap();
+        let result_artifact = SecretValue::new(fixture.document.into_bytes());
+        let result_metadata = BrowserBridgeResultArtifactMetadata {
+            session_id: fixture.session_id,
+            sequence: 3,
+            result_type: crate::CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+            result_digest,
+            received_at: fixture.issued_at + Duration::seconds(1),
+        };
+
+        for foreign_metadata in [
+            BrowserBridgeResultArtifactMetadata {
+                session_id: BrowserBridgeSessionId::new(),
+                ..result_metadata.clone()
+            },
+            BrowserBridgeResultArtifactMetadata {
+                sequence: 4,
+                ..result_metadata.clone()
+            },
+            BrowserBridgeResultArtifactMetadata {
+                result_type: "cidaren.foreign.result".to_owned(),
+                ..result_metadata.clone()
+            },
+            BrowserBridgeResultArtifactMetadata {
+                result_digest: [9; 32],
+                ..result_metadata.clone()
+            },
+            BrowserBridgeResultArtifactMetadata {
+                received_at: fixture.issued_at - Duration::seconds(1),
+                ..result_metadata.clone()
+            },
+        ] {
+            assert_eq!(
+                fixture
+                    .capability
+                    .complete_persisted_capture_snapshot_exchange(
+                        &fixture.context,
+                        "class-task:2002",
+                        &fixture.exchange,
+                        &fixture.command_artifact,
+                        CidarenCaptureMode::Composite,
+                        &foreign_metadata,
+                        &result_artifact,
+                        CIDAREN_ORIGIN,
+                    )
+                    .await
+                    .unwrap_err()
+                    .kind,
+                ProviderErrorKind::ProtocolDrift
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_capture_result_uses_core_receipt_and_commits_exact_pair() {
+        let fixture = recovered_capture_fixture().await;
+        let result_digest = crate::browser_event_exchange_digest(&fixture.document).unwrap();
+        let result_artifact = SecretValue::new(fixture.document.into_bytes());
+        let result_metadata = BrowserBridgeResultArtifactMetadata {
+            session_id: fixture.session_id,
+            sequence: 3,
+            result_type: crate::CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+            result_digest,
+            received_at: fixture.issued_at + Duration::seconds(1),
+        };
+        let completed = fixture
+            .capability
+            .complete_persisted_capture_snapshot_exchange(
+                &fixture.context,
                 "class-task:2002",
-                &exchange,
-                &artifact,
+                &fixture.exchange,
+                &fixture.command_artifact,
                 CidarenCaptureMode::Composite,
-                CidarenBrowserResultDocument::try_new(document).unwrap(),
+                &result_metadata,
+                &result_artifact,
                 CIDAREN_ORIGIN,
-                issued_at + Duration::seconds(1),
             )
             .await
             .unwrap();
         assert_eq!(
             completed.exchange().state,
             BrowserBridgeExchangeState::Completed
+        );
+        assert_eq!(
+            completed.exchange().completed_at,
+            Some(result_metadata.received_at)
         );
         assert_eq!(
             completed.snapshot().login_info_source(),
@@ -965,6 +1084,41 @@ mod tests {
             account_id: ProviderAccountId::new(),
             credential_refs: vec![SecretId::new()],
             correlation_id: "cidaren-browser-bridge-test".to_owned(),
+        }
+    }
+
+    async fn recovered_capture_fixture() -> RecoveredCaptureFixture {
+        let capability = bridge(true);
+        let context = context();
+        let session_id = BrowserBridgeSessionId::new();
+        let issued_at = Utc::now();
+        let issued = capability
+            .capture_snapshot_exchange(
+                &context,
+                "class-task:2002",
+                session_id,
+                "frame-recovery".to_owned(),
+                3,
+                CidarenCaptureMode::Composite,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let (_, command_artifact, exchange) = issued.into_parts();
+        let document = include_str!(
+            "../../../fixtures/providers/cidaren/browser/capture-snapshot-composite.json"
+        )
+        .replace("synthetic-session-nonce", &session_id.to_string())
+        .replace("frame-1", "frame-recovery")
+        .replace("\"reply_to_sequence\": 1", "\"reply_to_sequence\": 3");
+        RecoveredCaptureFixture {
+            capability,
+            context,
+            session_id,
+            issued_at,
+            exchange,
+            command_artifact: command_artifact.into_secret_value(),
+            document,
         }
     }
 }

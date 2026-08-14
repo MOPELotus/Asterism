@@ -75,6 +75,32 @@ impl CidarenBrowserResultDocument {
         Ok(Self(document))
     }
 
+    /// Copies one Core-resolved encrypted result into the Provider's bounded,
+    /// zeroizing UTF-8 owner. The source remains owned and cleared by Core;
+    /// this copy is consumed by Cidaren parsing and cleared on every exit path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for an empty, oversized or non-UTF-8 artifact.
+    pub fn try_from_secret_value(value: &SecretValue) -> ProviderResult<Self> {
+        let mut bytes = Zeroizing::new(value.expose_secret().to_vec());
+        if bytes.is_empty() || bytes.len() > MAX_BROWSER_DOCUMENT_BYTES {
+            return Err(invalid_response(
+                "Cidaren BrowserBridge result artifact is empty or oversized",
+            ));
+        }
+        let document = match String::from_utf8(std::mem::take(&mut *bytes)) {
+            Ok(document) => document,
+            Err(error) => {
+                let _invalid = Zeroizing::new(error.into_bytes());
+                return Err(invalid_response(
+                    "Cidaren BrowserBridge result artifact is not UTF-8",
+                ));
+            }
+        };
+        Self::try_new(document)
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -884,10 +910,10 @@ mod tests {
 
     #[test]
     fn owned_result_document_is_bounded_and_redacted() {
-        let document =
+        let owned_document =
             CidarenBrowserResultDocument::try_new(document(CidarenCaptureMode::Composite)).unwrap();
-        assert_ne!(document.exchange_digest().unwrap(), [0; 32]);
-        let debug = format!("{document:?}");
+        assert_ne!(owned_document.exchange_digest().unwrap(), [0; 32]);
+        let debug = format!("{owned_document:?}");
         assert!(debug.contains("REDACTED"));
         assert!(!debug.contains("synthetic-user-token"));
         assert!(CidarenBrowserResultDocument::try_new(String::new()).is_err());
@@ -895,6 +921,22 @@ mod tests {
             CidarenBrowserResultDocument::try_new("x".repeat(MAX_BROWSER_DOCUMENT_BYTES + 1))
                 .is_err()
         );
+
+        let persisted =
+            SecretValue::new(document(CidarenCaptureMode::TokenOnly).as_bytes().to_vec());
+        let restored = CidarenBrowserResultDocument::try_from_secret_value(&persisted).unwrap();
+        assert_eq!(
+            restored.exchange_digest().unwrap(),
+            persisted_digest(&persisted)
+        );
+        assert!(
+            CidarenBrowserResultDocument::try_from_secret_value(&SecretValue::new(vec![0xff]))
+                .is_err()
+        );
+    }
+
+    fn persisted_digest(value: &SecretValue) -> [u8; 32] {
+        Sha256::digest(value.expose_secret()).into()
     }
 
     #[test]

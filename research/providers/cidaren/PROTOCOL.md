@@ -185,6 +185,13 @@ The high-level Provider adapter accepts the raw result only as an owned,
 bounded `CidarenBrowserResultDocument`. Its contents are unavailable through
 Debug or the public API, and the consumed transport buffer is zeroized after
 parse/digest/completion even when fresh rebinding or exchange completion fails.
+For durable recovery, Core first resolves the encrypted raw-result artifact
+together with its persisted `BrowserBridgeResultArtifactMetadata`. Cidaren
+copies those bytes only into the same bounded zeroizing owner, recomputes the
+exact digest, and rejects result-type, session, sequence, digest or receive-time
+drift before parsing. The terminal exchange completion time comes only from
+that persisted receipt metadata rather than an independently supplied caller
+timestamp.
 
 `CidarenBrowserBridge::capture_snapshot_exchange` is the immutable Provider
 adapter to that ledger. It derives `session_nonce` from the exact
@@ -193,9 +200,11 @@ and constructs the issued record from the validated command rather than
 accepting caller-supplied type or digest metadata. The matching
 `complete_capture_snapshot_exchange` repeats the fresh Task and policy check,
 parses the typed result, hashes that exact bounded document and returns a
-terminal copy of the same exchange. The zeroizing snapshot stays separate for
-Capture credential commit. This closes command/record mismatch inside the
-Provider. The registered shared trait currently exposes only
+terminal copy of the same exchange. The persisted recovery variant additionally
+rebinds Core's encrypted command and result artifacts before invoking that same
+parser. The zeroizing snapshot stays separate for Capture credential commit.
+This closes command/result-record mismatch inside the Provider. The registered
+shared trait currently exposes only
 `browser_session_spec`, so Core still needs a bounded Provider-generic opaque
 command/result boundary before the helper can dispatch this JSON, accept the
 owned credential-bearing result and atomically commit its replacement.
