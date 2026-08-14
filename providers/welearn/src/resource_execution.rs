@@ -561,6 +561,7 @@ mod tests {
                         TaskCapability::ProgressRead,
                         TaskCapability::ResourceExecution,
                         TaskCapability::ExecutionVerify,
+                        TaskCapability::DurationRead,
                         TaskCapability::DurationReport,
                     ],
                     fingerprint: crate::task_inventory::task_fingerprint(&normalized).unwrap(),

@@ -411,7 +411,11 @@ boundary recomputes the inventory's versioned normalized-Task fingerprint and
 rejects a stale or substituted snapshot before trusting its route facts. It
 also reprojects public `remote_state` from the same normalized visibility and
 completion observations, including the hidden-to-`NotOpen` rule, so execution
-cannot consume contradictory state and membership facts. If
+cannot consume contradictory state and membership facts. The fresh Task must
+also retain exactly the inventory-owned `ProgressRead`, `ResourceExecution`,
+`ExecutionVerify`, `DurationRead` and `DurationReport` capabilities; missing,
+duplicate or unevidenced Question/Answer/Submission/Browser capabilities fail
+before transport. If
 the baseline CMI is already Completed with the exact frozen score, it skips all
 mutation and verifies that fact. The exact donor uninitialized marker cannot
 prove that preflight, but zero-time/set-then-save and save-only plans may

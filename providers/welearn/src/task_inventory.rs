@@ -18,6 +18,14 @@ const MAX_UNITS: usize = 512;
 const MAX_TASKS: usize = 8_192;
 const MAX_TITLE_BYTES: usize = 512;
 
+pub(crate) const WELLEARN_TASK_CAPABILITIES: [TaskCapability; 5] = [
+    TaskCapability::ProgressRead,
+    TaskCapability::ResourceExecution,
+    TaskCapability::ExecutionVerify,
+    TaskCapability::DurationRead,
+    TaskCapability::DurationReport,
+];
+
 /// One bounded Unit observation from the fresh `courseunits` response.
 ///
 /// Units remain Provider-private selection facts rather than shared Tasks. A
@@ -233,13 +241,6 @@ fn parse_leaves(
         let remote_state = task_remote_state(&normalized).ok_or_else(|| {
             protocol_drift("WELearn normalized Task has inconsistent state observations")
         })?;
-        let capabilities = vec![
-            TaskCapability::ProgressRead,
-            TaskCapability::ResourceExecution,
-            TaskCapability::ExecutionVerify,
-            TaskCapability::DurationRead,
-            TaskCapability::DurationReport,
-        ];
         tasks.push(RemoteTask {
             remote_id,
             course_remote_id: Some(course.remote_id.clone()),
@@ -250,7 +251,7 @@ fn parse_leaves(
             opens_at: None,
             due_at: None,
             closes_at: None,
-            capabilities,
+            capabilities: WELLEARN_TASK_CAPABILITIES.to_vec(),
             fingerprint: task_fingerprint(&normalized)?,
             normalized,
             raw_sanitized: serde_json::json!({

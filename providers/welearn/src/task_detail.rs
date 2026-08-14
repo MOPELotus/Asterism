@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     metadata::development_metadata,
-    task_inventory::{task_fingerprint, task_remote_state},
+    task_inventory::{WELLEARN_TASK_CAPABILITIES, task_fingerprint, task_remote_state},
 };
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
@@ -41,13 +41,13 @@ pub(crate) fn validate_fresh_execution_detail(
         ));
     }
     if detail.task.source_type != SourceType::Resource
+        || detail.task.capabilities.len() != WELLEARN_TASK_CAPABILITIES.len()
+        || WELLEARN_TASK_CAPABILITIES
+            .iter()
+            .any(|capability| !detail.task.capabilities.contains(capability))
         || required_capabilities
             .iter()
             .any(|capability| !detail.task.capabilities.contains(capability))
-        || detail
-            .task
-            .capabilities
-            .contains(&TaskCapability::SubmissionExecute)
     {
         return Err(ProviderError::new(
             ProviderErrorKind::UnsupportedTask,
@@ -465,6 +465,46 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+    }
+
+    #[tokio::test]
+    async fn execution_rebind_requires_the_exact_inventory_capability_set() {
+        let inventory = Arc::new(FixtureInventory::new());
+        let capability = WellearnTaskDetail::try_new(inventory.clone(), inventory).unwrap();
+        let detail = capability
+            .task_detail(&context(), "sco:1001:301")
+            .await
+            .unwrap();
+
+        let mut extra = detail.clone();
+        extra
+            .task
+            .capabilities
+            .push(TaskCapability::QuestionInventory);
+        let error = validate_fresh_execution_detail(
+            &extra,
+            "sco:1001:301",
+            "1001",
+            "301",
+            &[TaskCapability::ResourceExecution],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+
+        let mut incomplete = detail;
+        incomplete
+            .task
+            .capabilities
+            .retain(|capability| *capability != TaskCapability::DurationRead);
+        let error = validate_fresh_execution_detail(
+            &incomplete,
+            "sco:1001:301",
+            "1001",
+            "301",
+            &[TaskCapability::ResourceExecution],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
     }
 
     fn context() -> ProviderContext {

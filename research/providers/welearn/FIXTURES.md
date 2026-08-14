@@ -162,6 +162,9 @@ only structural field names, response codes and bounded placeholder shapes.
 - Fresh execution rebind reprojects public `remote_state` from normalized
   visibility and completion observations; hidden Tasks must be `NotOpen`, and
   every contradictory public state fails before transport.
+- Fresh SCOs retain exactly the five inventory-owned read, resource execution,
+  verification and duration capabilities. Rebind rejects missing, duplicate or
+  unevidenced extra capabilities even when the current step needs only a subset.
 - Duration reporting preserves completion, progress, score and success status;
   any drift rejects the entire execution outcome.
 - A successful mutation response is insufficient unless fresh CMI changes a raw
