@@ -219,6 +219,13 @@ authority, rebuilds one complete fresh Unit/SCO batch, and produces the exact
 child artifact without scheduling. The shared single-Task async planning hook
 does not carry those parent/selection/membership facts and therefore remains
 unimplemented for WELearn rather than inferring them from one Task.
+The parent authority itself now has a credential-free, versioned v1 encoding
+bounded to 4 KiB. Restore rejects unknown fields, version drift, malformed or
+duplicate Unit selections, cross-flow target mixtures and an Auto `actual`
+minute value that does not equal its frozen configured/range/offset derivation.
+This closes the Provider-owned persistence representation only; Core still has
+to choose where the opaque parent authority lives and atomically bind it to the
+parent attempt and all child artifacts.
 Immutable Core Execution identity now makes donor-style per-Execution random
 duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
 persisted capability-step plan still needs the atomic duration-completion

@@ -106,6 +106,14 @@ before parent planning. No answer-evidence fixture exists because the complete
 donor sweep exposed no historical result, per-Question answer, grading,
 threshold or retake document to sanitize.
 
+Parent-authority serialization tests cover both atomic donor target families,
+exact v1 field names, the complete Auto budget tuple, maximum 512-index Unit
+selection and bounded round trips. Negative cases reject empty/oversized bytes,
+unknown fields, version changes, duplicate Unit indices, cross-flow target
+mixtures and an `actual_minutes` value that disagrees with the frozen
+base/range/offset. These are inline value fixtures because the artifact is a
+Provider-owned persistence schema, not a remote WELearn response.
+
 ## Required live-sanitized fixtures
 
 ```text

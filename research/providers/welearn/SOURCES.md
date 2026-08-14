@@ -75,6 +75,11 @@ YZBRH `main` remains `bd160e91d0452b8bf483087fbdd3bdd58d855e13`, and
 Auto_WeLearn `master` remains `85918caaccd93b73b1e41fe537b4e9a11377b759`;
 both still expose no tags or GitHub releases. No revision, release, protocol or
 capability delta was available to port at this checkpoint.
+The 2026-08-15 parent-authority persistence checkpoint repeated default-head,
+tag and GitHub-release queries before implementation. The same three revisions
+and release surfaces remain current, so the checkpoint adds only a bounded
+clean-room representation of already-audited batch semantics; it does not claim
+new upstream protocol evidence.
 
 ## Source selection
 

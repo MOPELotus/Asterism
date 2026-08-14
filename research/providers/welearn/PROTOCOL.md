@@ -683,8 +683,13 @@ valid plan for another child, never authorizes recovery.
 `WellearnAtomicBatchPlanningAuthority` now expresses the minimum input that
 cannot be recovered from one Task: parent remote Course, exact donor flow,
 ordered all/explicit Unit selection, expected child remote identity, and either
-one already-frozen Fanyuchang child target or Auto's once-sampled aggregate
-minutes. `prepare_atomic_child_plan_from_fresh_inventory` accepts that authority
+one already-frozen Fanyuchang child target or Auto's complete configured base,
+random range, sampled signed offset and derived aggregate. The authority has a
+credential-free v1 JSON encoding bounded to 4 KiB. Decode uses private wire
+types, denies unknown fields, checks the version and derived Auto aggregate,
+then re-enters the ordinary strict constructor so serialized Unit/flow/target
+facts cannot bypass semantic validation.
+`prepare_atomic_child_plan_from_fresh_inventory` accepts that authority
 plus one complete fresh Unit/SCO inventory, rebuilds the selected batch once,
 locates the expected child without widening selection, then materializes and
 rebinds its Core artifact. It is a pure Provider boundary and performs no I/O
@@ -700,6 +705,9 @@ one fresh complete Course scan second, one Provider batch build third, then an
 atomic Core transaction that persists the parent plan and creates every child
 with its exact artifact. Independently invoking the hook after each child Task
 already exists could rescan different membership and redistribute Auto targets.
+The new Provider encoding supplies the opaque persistence payload for the first
+step, but does not select a parent Execution ID, write Storage, create children
+or grant mutation authority; those bindings remain the same shared Core Gap.
 
 `WellearnBatchPlan.target_strategy` records the corresponding target boundary:
 Fanyuchang, YZBRH and Auto completion resolve score or duration targets per

@@ -85,6 +85,8 @@ const MAX_AUTO_CONFIGURED_DURATION_MINUTES: u16 = 300;
 const MAX_AUTO_DURATION_RANDOM_RANGE_MINUTES: u8 = 30;
 const MAX_AUTO_DURATION_MINUTES: u64 = 330;
 const MAX_BATCH_ID_COMPONENT_BYTES: usize = 128;
+const WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_VERSION: u16 = 1;
+const MAX_ATOMIC_BATCH_PLANNING_AUTHORITY_BYTES: usize = 4_096;
 const WELLEARN_ATOMIC_CHILD_PLAN_VERSION: u16 = 1;
 const MAX_ATOMIC_CHILD_PLAN_BYTES: usize = 1_024;
 
@@ -305,6 +307,115 @@ pub struct WellearnAtomicBatchPlanningAuthority {
     frozen_auto_duration_budget: Option<WellearnAutoDurationBudget>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnAutoDurationBudgetWire {
+    #[serde(rename = "configured_minutes")]
+    configured: u16,
+    #[serde(rename = "random_range_minutes")]
+    random_range: u8,
+    #[serde(rename = "sampled_offset_minutes")]
+    sampled_offset: i16,
+    #[serde(rename = "actual_minutes")]
+    actual: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WellearnBatchUnitSelectionWire {
+    All,
+    Explicit(Vec<u32>),
+}
+
+impl From<&WellearnBatchUnitSelection> for WellearnBatchUnitSelectionWire {
+    fn from(selection: &WellearnBatchUnitSelection) -> Self {
+        match selection {
+            WellearnBatchUnitSelection::All => Self::All,
+            WellearnBatchUnitSelection::Explicit(indices) => Self::Explicit(indices.clone()),
+        }
+    }
+}
+
+impl From<WellearnBatchUnitSelectionWire> for WellearnBatchUnitSelection {
+    fn from(selection: WellearnBatchUnitSelectionWire) -> Self {
+        match selection {
+            WellearnBatchUnitSelectionWire::All => Self::All,
+            WellearnBatchUnitSelectionWire::Explicit(indices) => Self::Explicit(indices),
+        }
+    }
+}
+
+impl From<WellearnAutoDurationBudget> for WellearnAutoDurationBudgetWire {
+    fn from(budget: WellearnAutoDurationBudget) -> Self {
+        Self {
+            configured: budget.configured_minutes(),
+            random_range: budget.random_range_minutes(),
+            sampled_offset: budget.sampled_offset_minutes(),
+            actual: budget.actual_minutes(),
+        }
+    }
+}
+
+impl TryFrom<WellearnAutoDurationBudgetWire> for WellearnAutoDurationBudget {
+    type Error = ProviderError;
+
+    fn try_from(wire: WellearnAutoDurationBudgetWire) -> Result<Self, Self::Error> {
+        let budget = Self::try_new(wire.configured, wire.random_range, wire.sampled_offset)?;
+        if budget.actual_minutes() != wire.actual {
+            return Err(invalid_serialized_atomic_planning_authority());
+        }
+        Ok(budget)
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnAtomicBatchPlanningAuthorityWire {
+    version: u16,
+    course_remote_id: String,
+    flow: WellearnBatchFlow,
+    selection: WellearnBatchUnitSelectionWire,
+    expected_remote_task_id: String,
+    frozen_fanyuchang_target_seconds: Option<u64>,
+    frozen_auto_duration_budget: Option<WellearnAutoDurationBudgetWire>,
+}
+
+impl From<&WellearnAtomicBatchPlanningAuthority> for WellearnAtomicBatchPlanningAuthorityWire {
+    fn from(authority: &WellearnAtomicBatchPlanningAuthority) -> Self {
+        Self {
+            version: WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_VERSION,
+            course_remote_id: authority.course_remote_id.clone(),
+            flow: authority.flow,
+            selection: WellearnBatchUnitSelectionWire::from(&authority.selection),
+            expected_remote_task_id: authority.expected_remote_task_id.clone(),
+            frozen_fanyuchang_target_seconds: authority.frozen_fanyuchang_target_seconds,
+            frozen_auto_duration_budget: authority.frozen_auto_duration_budget.map(Into::into),
+        }
+    }
+}
+
+impl TryFrom<WellearnAtomicBatchPlanningAuthorityWire> for WellearnAtomicBatchPlanningAuthority {
+    type Error = ProviderError;
+
+    fn try_from(wire: WellearnAtomicBatchPlanningAuthorityWire) -> Result<Self, Self::Error> {
+        if wire.version != WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_VERSION {
+            return Err(invalid_serialized_atomic_planning_authority());
+        }
+        let auto_budget = wire
+            .frozen_auto_duration_budget
+            .map(WellearnAutoDurationBudget::try_from)
+            .transpose()?;
+        Self::try_new(
+            wire.course_remote_id,
+            wire.flow,
+            wire.selection.into(),
+            wire.expected_remote_task_id,
+            wire.frozen_fanyuchang_target_seconds,
+            auto_budget,
+        )
+    }
+}
+
 impl WellearnAtomicBatchPlanningAuthority {
     /// Freezes one complete parent selection and target authority.
     ///
@@ -360,6 +471,38 @@ impl WellearnAtomicBatchPlanningAuthority {
     pub fn frozen_auto_duration_minutes(&self) -> Option<u64> {
         self.frozen_auto_duration_budget
             .map(|budget| u64::from(budget.actual_minutes()))
+    }
+
+    /// Encodes this credential-free parent authority using the bounded v1
+    /// `WELearn` schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the authority no longer validates or
+    /// exceeds the Provider's serialized size bound.
+    pub fn encode(&self) -> ProviderResult<Vec<u8>> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(&WellearnAtomicBatchPlanningAuthorityWire::from(self))
+            .map_err(|_| invalid_serialized_atomic_planning_authority())?;
+        if encoded.len() > MAX_ATOMIC_BATCH_PLANNING_AUTHORITY_BYTES {
+            return Err(invalid_serialized_atomic_planning_authority());
+        }
+        Ok(encoded)
+    }
+
+    /// Restores and fully revalidates one bounded v1 parent authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for malformed, oversized, version-drifted or
+    /// semantically inconsistent authority bytes.
+    pub fn decode(encoded: &[u8]) -> ProviderResult<Self> {
+        if encoded.is_empty() || encoded.len() > MAX_ATOMIC_BATCH_PLANNING_AUTHORITY_BYTES {
+            return Err(invalid_serialized_atomic_planning_authority());
+        }
+        let wire: WellearnAtomicBatchPlanningAuthorityWire = serde_json::from_slice(encoded)
+            .map_err(|_| invalid_serialized_atomic_planning_authority())?;
+        Self::try_from(wire).map_err(|_| invalid_serialized_atomic_planning_authority())
     }
 
     /// Revalidates restored parent authority without fresh I/O.
@@ -876,6 +1019,13 @@ fn invalid_atomic_planning_authority() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
         "WELearn atomic batch planning authority is incomplete or inconsistent",
+    )
+}
+
+fn invalid_serialized_atomic_planning_authority() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn serialized atomic batch planning authority is invalid",
     )
 }
 
@@ -2283,6 +2433,147 @@ mod tests {
         ] {
             assert!(invalid.is_err());
         }
+    }
+
+    #[test]
+    fn atomic_parent_authority_round_trips_every_donor_target_shape() {
+        let fanyuchang = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+            "sco:1001:301",
+            Some(37),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            WellearnAtomicBatchPlanningAuthority::decode(&fanyuchang.encode().unwrap()).unwrap(),
+            fanyuchang
+        );
+
+        let auto = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::AutoDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            None,
+            Some(WellearnAutoDurationBudget::try_new(60, 5, -5).unwrap()),
+        )
+        .unwrap();
+        let encoded = auto.encode().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "course_remote_id",
+                "expected_remote_task_id",
+                "flow",
+                "frozen_auto_duration_budget",
+                "frozen_fanyuchang_target_seconds",
+                "selection",
+                "version",
+            ])
+        );
+        assert_eq!(
+            value["frozen_auto_duration_budget"]["configured_minutes"],
+            60
+        );
+        assert_eq!(
+            value["frozen_auto_duration_budget"]["random_range_minutes"],
+            5
+        );
+        assert_eq!(
+            value["frozen_auto_duration_budget"]["sampled_offset_minutes"],
+            -5
+        );
+        assert_eq!(value["frozen_auto_duration_budget"]["actual_minutes"], 55);
+        assert_eq!(
+            WellearnAtomicBatchPlanningAuthority::decode(&encoded).unwrap(),
+            auto
+        );
+    }
+
+    #[test]
+    fn atomic_parent_authority_decode_rejects_schema_and_semantic_drift() {
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::AutoDuration,
+            WellearnBatchUnitSelection::Explicit(vec![0, 1]),
+            "sco:1001:301",
+            None,
+            Some(WellearnAutoDurationBudget::try_new(60, 5, -5).unwrap()),
+        )
+        .unwrap();
+        let original: serde_json::Value =
+            serde_json::from_slice(&authority.encode().unwrap()).unwrap();
+
+        let mut drifted = original.clone();
+        drifted["version"] = serde_json::json!(2);
+        assert!(
+            WellearnAtomicBatchPlanningAuthority::decode(&serde_json::to_vec(&drifted).unwrap())
+                .is_err()
+        );
+
+        let mut drifted = original.clone();
+        drifted["frozen_auto_duration_budget"]["actual_minutes"] = serde_json::json!(56);
+        assert!(
+            WellearnAtomicBatchPlanningAuthority::decode(&serde_json::to_vec(&drifted).unwrap())
+                .is_err()
+        );
+
+        let mut drifted = original.clone();
+        drifted["flow"] = serde_json::json!("fanyuchang_duration");
+        assert!(
+            WellearnAtomicBatchPlanningAuthority::decode(&serde_json::to_vec(&drifted).unwrap())
+                .is_err()
+        );
+
+        let mut drifted = original.clone();
+        drifted["selection"] = serde_json::json!({"explicit": [0, 0]});
+        assert!(
+            WellearnAtomicBatchPlanningAuthority::decode(&serde_json::to_vec(&drifted).unwrap())
+                .is_err()
+        );
+
+        let mut drifted = original;
+        drifted["unknown"] = serde_json::json!(true);
+        assert!(
+            WellearnAtomicBatchPlanningAuthority::decode(&serde_json::to_vec(&drifted).unwrap())
+                .is_err()
+        );
+        assert!(WellearnAtomicBatchPlanningAuthority::decode(&[]).is_err());
+        assert!(
+            WellearnAtomicBatchPlanningAuthority::decode(&vec![
+                b'x';
+                MAX_ATOMIC_BATCH_PLANNING_AUTHORITY_BYTES
+                    + 1
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn atomic_parent_authority_maximum_selection_stays_within_local_bound() {
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::Explicit((0..512).collect()),
+            "sco:1001:301",
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let encoded = authority.encode().unwrap();
+        assert!(encoded.len() <= MAX_ATOMIC_BATCH_PLANNING_AUTHORITY_BYTES);
+        assert_eq!(
+            WellearnAtomicBatchPlanningAuthority::decode(&encoded).unwrap(),
+            authority
+        );
     }
 
     #[test]
