@@ -126,13 +126,18 @@ where
         let (runtime_settings, runtime_settings_schema) = self
             .resolve_runtime_settings(command.owner_id, &task, command.requested_at)
             .await?;
-        let (verification_required, capability_plan, provider_state_exception) =
-            resolve_execution_contract(
-                &task,
-                &command.requested_capabilities,
-                &self.providers,
-                &runtime_settings.provider_id,
-            )?;
+        let (
+            verification_required,
+            capability_plan,
+            capability_call_starts,
+            provider_state_exception,
+        ) = resolve_execution_contract(
+            &task,
+            &command.requested_capabilities,
+            &self.providers,
+            &runtime_settings.provider_id,
+            &runtime_settings.resolved,
+        )?;
         if !remote_state_is_executable(
             &task,
             &command.requested_capabilities,
@@ -175,6 +180,7 @@ where
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
                 capability_plan: &capability_plan,
+                capability_call_starts: &capability_call_starts,
                 billing: None,
                 runtime_settings: Some(ExecutionRuntimeSettingsResolution {
                     snapshot: &runtime_settings,
@@ -406,9 +412,10 @@ fn resolve_execution_contract(
     requested_capabilities: &[TaskCapability],
     providers: &ProviderRegistry,
     provider_id: &asterism_domain::ProviderId,
-) -> Result<(bool, Vec<TaskCapability>, bool), ExecutionRequestError> {
+    runtime_settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+) -> Result<(bool, Vec<TaskCapability>, Vec<u8>, bool), ExecutionRequestError> {
     if requested_capabilities == [TaskCapability::SubmissionExecute] {
-        return Ok((false, requested_capabilities.to_vec(), false));
+        return Ok((false, requested_capabilities.to_vec(), vec![1], false));
     }
     let provider = providers
         .get(provider_id)
@@ -416,9 +423,26 @@ fn resolve_execution_contract(
     let Some(capability) = provider.task_execution.as_ref() else {
         return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
     };
-    let plan = capability
-        .execution_plan(requested_capabilities)
+    let calls = capability
+        .execution_call_plan(requested_capabilities, runtime_settings)
         .map_err(|_| ExecutionRequestError::ExecutionVerificationUnavailable)?;
+    if calls.is_empty()
+        || calls.len() > 5
+        || calls.iter().any(Vec::is_empty)
+        || calls.iter().map(Vec::len).sum::<usize>() > 5
+    {
+        return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
+    }
+    let mut call_starts = Vec::with_capacity(calls.len());
+    let mut next_position = 1_usize;
+    for call in &calls {
+        call_starts.push(
+            u8::try_from(next_position)
+                .map_err(|_| ExecutionRequestError::ExecutionVerificationUnavailable)?,
+        );
+        next_position += call.len();
+    }
+    let plan = calls.into_iter().flatten().collect::<Vec<_>>();
     if plan.len() != requested_capabilities.len()
         || plan
             .iter()
@@ -438,7 +462,7 @@ fn resolve_execution_contract(
         && capability.requires_execution_verification(requested_capabilities);
     let state_exception =
         capability.allows_execution_from_remote_state(requested_capabilities, task.remote_state);
-    Ok((verification, plan, state_exception))
+    Ok((verification, plan, call_starts, state_exception))
 }
 
 fn normalize_requested_capabilities(

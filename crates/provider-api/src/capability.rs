@@ -1492,6 +1492,27 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         }
     }
 
+    /// Groups the exact execution plan into durable Provider-call boundaries.
+    /// The default preserves the historical one-capability-per-call behavior.
+    /// Providers may group adjacent capabilities only when one evidenced
+    /// remote transaction implements and verifies the whole group atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed error as [`Self::execution_plan`] when the
+    /// capability selection is unsupported.
+    fn execution_call_plan(
+        &self,
+        requested_capabilities: &[TaskCapability],
+        _runtime_settings: &ResolvedProviderRuntimeSettings,
+    ) -> ProviderResult<Vec<Vec<TaskCapability>>> {
+        self.execution_plan(requested_capabilities).map(|plan| {
+            plan.into_iter()
+                .map(|capability| vec![capability])
+                .collect()
+        })
+    }
+
     /// Declares whether this exact selected action set requires the Provider's
     /// goal-bound, read-only verification path. Task-level `ExecutionVerify`
     /// metadata only advertises that at least one action supports this path;
@@ -2075,16 +2096,17 @@ impl ExecutionRequest {
     /// Validates that active mutation authority is an exact, bounded slice of
     /// the immutable execution plan and that the current step is unambiguous.
     pub fn has_valid_capability_step(&self) -> bool {
+        let Some(start) = usize::from(self.capability_step_position).checked_sub(1) else {
+            return false;
+        };
+        let Some(end) = start.checked_add(self.requested_capabilities.len()) else {
+            return false;
+        };
         !self.requested_capabilities.is_empty()
             && !self.capability_plan.is_empty()
             && self.capability_plan.len() <= 5
-            && usize::from(self.capability_step_position) <= self.capability_plan.len()
-            && self.capability_step_position != 0
-            && (self.capability_plan.len() == 1
-                && self.requested_capabilities == self.capability_plan
-                || self.requested_capabilities.len() == 1
-                    && self.capability_plan[usize::from(self.capability_step_position) - 1]
-                        == self.requested_capabilities[0])
+            && end <= self.capability_plan.len()
+            && self.capability_plan[start..end] == self.requested_capabilities
     }
 }
 
@@ -2122,6 +2144,11 @@ mod execution_request_tests {
         let mut broad_authority = request();
         broad_authority.requested_capabilities = broad_authority.capability_plan.clone();
         assert!(!broad_authority.has_valid_capability_step());
+
+        let mut atomic_group = request();
+        atomic_group.capability_step_position = 1;
+        atomic_group.requested_capabilities = atomic_group.capability_plan.clone();
+        assert!(atomic_group.has_valid_capability_step());
 
         let mut missing_plan = request();
         missing_plan.capability_plan.clear();

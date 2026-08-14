@@ -1455,6 +1455,9 @@ pub struct ExecutionScheduleRequest<'a> {
     /// Exact Provider-approved phase order. This is persisted atomically with
     /// the Execution and must be a permutation of `requested_capabilities`.
     pub capability_plan: &'a [TaskCapability],
+    /// One-based global plan positions which start a Provider call. The first
+    /// value is always one and the sequence is strictly increasing.
+    pub capability_call_starts: &'a [u8],
     pub billing: Option<ExecutionBillingReservation<'a>>,
     pub runtime_settings: Option<ExecutionRuntimeSettingsResolution<'a>>,
     pub expected_task_state: OrchestrationState,
@@ -1476,6 +1479,8 @@ pub enum ExecutionCapabilityStepState {
 pub struct ExecutionCapabilityStep {
     pub execution_id: ExecutionId,
     pub position: u8,
+    pub call_position: u8,
+    pub call_member_position: u8,
     pub capability: TaskCapability,
     pub state: ExecutionCapabilityStepState,
     pub issued_attempt_id: Option<ExecutionAttemptId>,
@@ -1500,6 +1505,18 @@ pub enum ExecutionCapabilityStepIssueOutcome {
     AlreadyIssued,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExecutionCapabilityCallMutation<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub call_position: u8,
+    pub capabilities: &'a [TaskCapability],
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
 /// Durable phase boundary for a composite Provider execution. A phase is
 /// marked issued before the remote mutation, preventing crash recovery from
 /// replaying a possibly accepted non-idempotent request.
@@ -1518,6 +1535,16 @@ pub trait ExecutionCapabilityStepRepository: Send + Sync {
     async fn succeed_execution_capability_step(
         &self,
         request: ExecutionCapabilityStepMutation<'_>,
+    ) -> Result<(), StorageError>;
+
+    async fn issue_execution_capability_call(
+        &self,
+        request: ExecutionCapabilityCallMutation<'_>,
+    ) -> Result<ExecutionCapabilityStepIssueOutcome, StorageError>;
+
+    async fn succeed_execution_capability_call(
+        &self,
+        request: ExecutionCapabilityCallMutation<'_>,
     ) -> Result<(), StorageError>;
 }
 

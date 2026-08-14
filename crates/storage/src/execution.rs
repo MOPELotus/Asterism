@@ -28,14 +28,15 @@ use crate::{
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
     ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionBillingReservation,
-    ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
-    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLogAppendRequest,
-    ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionQuestionStepFinishRequest,
-    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionRuntimeSettingsResolution,
-    ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome, ExecutionScheduleRequest,
-    ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, StorageError,
-    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
-    SubmissionResultRepository, VerificationRecoveryStartRequest,
+    ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
+    ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
+    ExecutionCapabilityStepState, ExecutionLogAppendRequest, ExecutionProgressUpdate,
+    ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
+    ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
+    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionSubmissionRepository,
+    ExecutionVerificationRecoveryRepository, StorageError, SubmissionDraftRepository,
+    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
+    VerificationRecoveryStartRequest,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage, SqliteQuestionSnapshotRepository};
 
@@ -169,16 +170,30 @@ impl ExecutionRepository for SqliteExecutionRepository {
             return Ok(ExecutionScheduleOutcome::SubmissionDraftConflict);
         }
 
+        let mut call_index = 0_usize;
+        let mut call_member_index = 0_usize;
         for (index, capability) in request.capability_plan.iter().copied().enumerate() {
+            if request
+                .capability_call_starts
+                .get(call_index + 1)
+                .is_some_and(|start| usize::from(*start) == index + 1)
+            {
+                call_index += 1;
+                call_member_index = 0;
+            }
             sqlx::query(
                 "INSERT INTO execution_capability_steps \
-                 (execution_id, position, capability, state) VALUES (?, ?, ?, 'pending')",
+                 (execution_id, position, call_position, call_member_position, capability, state) \
+                 VALUES (?, ?, ?, ?, ?, 'pending')",
             )
             .bind(execution.id.to_string())
             .bind(i64::try_from(index + 1).expect("capability plan is bounded"))
+            .bind(i64::try_from(call_index + 1).expect("capability calls are bounded"))
+            .bind(i64::try_from(call_member_index + 1).expect("capability call is bounded"))
             .bind(enum_name(capability)?)
             .execute(&mut *transaction)
             .await?;
+            call_member_index += 1;
         }
 
         if let Some(resolution) = request.runtime_settings {
@@ -546,7 +561,7 @@ impl ExecutionCapabilityStepRepository for SqliteExecutionRepository {
         execution_id: ExecutionId,
     ) -> Result<Vec<ExecutionCapabilityStep>, StorageError> {
         let rows = sqlx::query(
-            "SELECT execution_id, position, capability, state, issued_attempt_id, \
+            "SELECT execution_id, position, call_position, call_member_position, capability, state, issued_attempt_id, \
                     issued_at, succeeded_at FROM execution_capability_steps \
              WHERE execution_id = ? ORDER BY position",
         )
@@ -651,6 +666,124 @@ impl ExecutionCapabilityStepRepository for SqliteExecutionRepository {
         .await?
         .rows_affected();
         if changed != 1 {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn issue_execution_capability_call(
+        &self,
+        request: ExecutionCapabilityCallMutation<'_>,
+    ) -> Result<ExecutionCapabilityStepIssueOutcome, StorageError> {
+        validate_capability_call_mutation(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let active = find_active_attempt(&mut transaction, request.execution_id).await?;
+        if active.id != request.attempt_id {
+            return Err(StorageError::ExecutionAttemptNotActive);
+        }
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT state, issued_attempt_id FROM execution_capability_steps \
+             WHERE execution_id = ? AND call_position = ? ORDER BY call_member_position",
+        )
+        .bind(request.execution_id.to_string())
+        .bind(i64::from(request.call_position))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let persisted_capabilities = find_capability_call(
+            &mut transaction,
+            request.execution_id,
+            request.call_position,
+        )
+        .await?;
+        if persisted_capabilities != request.capabilities {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        let attempt_id = request.attempt_id.to_string();
+        if !rows.is_empty()
+            && rows
+                .iter()
+                .all(|(state, issued)| state == "issued" && issued.as_deref() == Some(&attempt_id))
+        {
+            transaction.rollback().await?;
+            return Ok(ExecutionCapabilityStepIssueOutcome::AlreadyIssued);
+        }
+        if rows.len() != request.capabilities.len()
+            || rows
+                .iter()
+                .any(|(state, issued)| state != "pending" || issued.is_some())
+        {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        let changed = sqlx::query(
+            "UPDATE execution_capability_steps SET state = 'issued', issued_attempt_id = ?, issued_at = ? \
+             WHERE execution_id = ? AND call_position = ? AND state = 'pending' \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM execution_capability_steps AS earlier \
+                 WHERE earlier.execution_id = execution_capability_steps.execution_id \
+                   AND earlier.call_position < execution_capability_steps.call_position \
+                   AND earlier.state != 'succeeded')",
+        )
+        .bind(&attempt_id)
+        .bind(encode_timestamp(request.at))
+        .bind(request.execution_id.to_string())
+        .bind(i64::from(request.call_position))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != u64::try_from(request.capabilities.len()).expect("call length is bounded") {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        transaction.commit().await?;
+        Ok(ExecutionCapabilityStepIssueOutcome::Issued)
+    }
+
+    async fn succeed_execution_capability_call(
+        &self,
+        request: ExecutionCapabilityCallMutation<'_>,
+    ) -> Result<(), StorageError> {
+        validate_capability_call_mutation(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let persisted_capabilities = find_capability_call(
+            &mut transaction,
+            request.execution_id,
+            request.call_position,
+        )
+        .await?;
+        if persisted_capabilities != request.capabilities {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        let changed = sqlx::query(
+            "UPDATE execution_capability_steps SET state = 'succeeded', succeeded_at = ? \
+             WHERE execution_id = ? AND call_position = ? AND state = 'issued' \
+               AND issued_attempt_id = ?",
+        )
+        .bind(encode_timestamp(request.at))
+        .bind(request.execution_id.to_string())
+        .bind(i64::from(request.call_position))
+        .bind(request.attempt_id.to_string())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != u64::try_from(request.capabilities.len()).expect("call length is bounded") {
             return Err(StorageError::ExecutionStateConflict);
         }
         transaction.commit().await?;
@@ -2311,9 +2444,21 @@ fn validate_schedule_request(request: &ExecutionScheduleRequest<'_>) -> Result<(
                 .iter()
                 .copied()
                 .collect::<std::collections::BTreeSet<_>>();
+    let capability_calls_valid = !request.capability_call_starts.is_empty()
+        && request.capability_call_starts[0] == 1
+        && request.capability_call_starts.len() <= request.capability_plan.len()
+        && request
+            .capability_call_starts
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && request
+            .capability_call_starts
+            .iter()
+            .all(|position| usize::from(*position) <= request.capability_plan.len());
     if execution.state != ExecutionState::Scheduled
         || !valid_requested_capabilities(&execution.requested_capabilities)
         || !capability_plan_valid
+        || !capability_calls_valid
         || execution
             .requested_capabilities
             .contains(&TaskCapability::SubmissionExecute)
@@ -2865,6 +3010,15 @@ fn decode_capability_step(
         position: u8::try_from(row.try_get::<i64, _>("position")?).map_err(|_| {
             StorageError::InvalidData("execution capability step position is invalid".to_owned())
         })?,
+        call_position: u8::try_from(row.try_get::<i64, _>("call_position")?).map_err(|_| {
+            StorageError::InvalidData("execution capability call position is invalid".to_owned())
+        })?,
+        call_member_position: u8::try_from(row.try_get::<i64, _>("call_member_position")?)
+            .map_err(|_| {
+                StorageError::InvalidData(
+                    "execution capability call member position is invalid".to_owned(),
+                )
+            })?,
         capability: decode_enum(row.try_get("capability")?)?,
         state,
         issued_attempt_id: row
@@ -2875,6 +3029,47 @@ fn decode_capability_step(
         issued_at: decode_optional_timestamp(row.try_get("issued_at")?)?,
         succeeded_at: decode_optional_timestamp(row.try_get("succeeded_at")?)?,
     })
+}
+
+async fn find_capability_call(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    call_position: u8,
+) -> Result<Vec<TaskCapability>, StorageError> {
+    let capabilities: Vec<String> = sqlx::query_scalar(
+        "SELECT capability FROM execution_capability_steps \
+         WHERE execution_id = ? AND call_position = ? ORDER BY call_member_position",
+    )
+    .bind(execution_id.to_string())
+    .bind(i64::from(call_position))
+    .fetch_all(&mut **transaction)
+    .await?;
+    capabilities
+        .iter()
+        .map(|capability| decode_enum(capability))
+        .collect()
+}
+
+fn validate_capability_call_mutation(
+    request: &ExecutionCapabilityCallMutation<'_>,
+) -> Result<(), StorageError> {
+    validate_worker_token(request.worker_id, request.correlation_id)?;
+    if !(1..=5).contains(&request.call_position)
+        || request.capabilities.is_empty()
+        || request.capabilities.len() > 5
+        || request
+            .capabilities
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != request.capabilities.len()
+    {
+        return Err(StorageError::InvalidData(
+            "execution capability call mutation is invalid".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 async fn select_atomic_mutation(
@@ -3173,6 +3368,7 @@ mod tests {
         let request = || ExecutionScheduleRequest {
             execution: &execution,
             capability_plan: &execution.requested_capabilities,
+            capability_call_starts: &[1],
             billing: None,
             runtime_settings: None,
             expected_task_state: OrchestrationState::Ready,
@@ -3233,6 +3429,7 @@ mod tests {
         ];
         let mut request = test_request(&execution, owner, "composite-capabilities");
         request.capability_plan = &plan;
+        request.capability_call_starts = &[1, 2];
         assert!(matches!(
             repository.schedule_execution(request).await.unwrap(),
             ExecutionScheduleOutcome::Created(_)
@@ -3297,6 +3494,99 @@ mod tests {
             .unwrap();
         repository
             .succeed_execution_capability_step(mutation(TaskCapability::ResourceExecution, 5))
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .find_execution_capability_steps(execution.id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|step| step.state == ExecutionCapabilityStepState::Succeeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn grouped_capability_call_is_issued_and_succeeded_as_one_boundary() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let mut execution = scheduled_execution(owner, task_id, now);
+        execution.requested_capabilities = vec![
+            TaskCapability::ResourceExecution,
+            TaskCapability::DurationReport,
+        ];
+        let plan = [
+            TaskCapability::DurationReport,
+            TaskCapability::ResourceExecution,
+        ];
+        let mut schedule = test_request(&execution, owner, "grouped-capabilities");
+        schedule.capability_plan = &plan;
+        schedule.capability_call_starts = &[1];
+        repository.schedule_execution(schedule).await.unwrap();
+        let steps = repository
+            .find_execution_capability_steps(execution.id)
+            .await
+            .unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].call_position, 1);
+        assert_eq!(steps[0].call_member_position, 1);
+        assert_eq!(steps[1].call_position, 1);
+        assert_eq!(steps[1].call_member_position, 2);
+
+        let job_id = claim_execution(&database, &execution, "group-worker", now).await;
+        let attempt = repository
+            .start_attempt(ExecutionAttemptStartRequest {
+                execution_id: execution.id,
+                scheduler_job_id: job_id,
+                worker_id: "group-worker",
+                at: now + chrono::Duration::seconds(1),
+                correlation_id: "group-attempt",
+            })
+            .await
+            .unwrap();
+        let mutation = |seconds| ExecutionCapabilityCallMutation {
+            execution_id: execution.id,
+            attempt_id: attempt.id,
+            call_position: 1,
+            capabilities: &plan,
+            scheduler_job_id: job_id,
+            worker_id: "group-worker",
+            correlation_id: "group-call",
+            at: now + chrono::Duration::seconds(seconds),
+        };
+        let mut wrong = mutation(2);
+        wrong.capabilities = &plan[..1];
+        assert!(
+            repository
+                .issue_execution_capability_call(wrong)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            repository
+                .issue_execution_capability_call(mutation(2))
+                .await
+                .unwrap(),
+            ExecutionCapabilityStepIssueOutcome::Issued
+        );
+        assert_eq!(
+            repository
+                .issue_execution_capability_call(mutation(3))
+                .await
+                .unwrap(),
+            ExecutionCapabilityStepIssueOutcome::AlreadyIssued
+        );
+        let mut wrong = mutation(4);
+        wrong.capabilities = &plan[..1];
+        assert!(
+            repository
+                .succeed_execution_capability_call(wrong)
+                .await
+                .is_err()
+        );
+        repository
+            .succeed_execution_capability_call(mutation(4))
             .await
             .unwrap();
         assert!(
@@ -4636,6 +4926,7 @@ mod tests {
         ExecutionScheduleRequest {
             execution,
             capability_plan: &execution.requested_capabilities,
+            capability_call_starts: &[1],
             billing: None,
             runtime_settings: None,
             expected_task_state: OrchestrationState::Ready,
@@ -4656,6 +4947,7 @@ mod tests {
         ExecutionScheduleRequest {
             execution,
             capability_plan: &execution.requested_capabilities,
+            capability_call_starts: &[1],
             billing: Some(ExecutionBillingReservation { quote, reservation }),
             runtime_settings: None,
             expected_task_state: OrchestrationState::Ready,

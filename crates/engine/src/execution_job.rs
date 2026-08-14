@@ -33,17 +33,18 @@ use asterism_storage::{
     ExecutionAtomicMutationIssueOutcome, ExecutionAtomicMutationIssueRequest,
     ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,
     ExecutionAtomicMutationRepository, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
-    ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
-    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
-    ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest,
-    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, LeaseAcquireOutcome, ProviderAccountRuntimeRepository,
-    QuestionSessionArtifactRepository, QuestionSessionArtifactRepositoryFactory,
-    QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
-    QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
-    QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
-    QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionTransition,
-    QuestionSnapshot, ResolvedQuestionSessionContinuation, SchedulerRepository, StorageError,
+    ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
+    ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
+    ExecutionCapabilityStepState, ExecutionLeaseRepository, ExecutionLogAppendRequest,
+    ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
+    ExecutionRepository, ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository,
+    LeaseAcquireOutcome, ProviderAccountRuntimeRepository, QuestionSessionArtifactRepository,
+    QuestionSessionArtifactRepositoryFactory, QuestionSessionNextMaterializeOutcome,
+    QuestionSessionNextMaterializeRequest, QuestionSessionOperation,
+    QuestionSessionOperationAcceptRequest, QuestionSessionOperationFinishOutcome,
+    QuestionSessionOperationIssueOutcome, QuestionSessionOperationIssueRequest,
+    QuestionSessionOperationState, QuestionSessionTransition, QuestionSnapshot,
+    ResolvedQuestionSessionContinuation, SchedulerRepository, StorageError,
     SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, TaskRuntimeRepository,
     VerificationRecoveryStartRequest,
 };
@@ -504,9 +505,21 @@ where
                 .await;
         }
         let capability_plan = steps.iter().map(|step| step.capability).collect::<Vec<_>>();
-        let Some(step) = steps
+        let Some(calls) = capability_calls(&steps) else {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::Internal),
+                    None,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        };
+        let Some(call) = calls
             .iter()
-            .find(|step| step.state != ExecutionCapabilityStepState::Succeeded)
+            .find(|call| call.state != ExecutionCapabilityStepState::Succeeded)
         else {
             return self
                 .finish_recovery(
@@ -519,12 +532,12 @@ where
                 )
                 .await;
         };
-        if step.state == ExecutionCapabilityStepState::Pending {
+        if call.state == ExecutionCapabilityStepState::Pending {
             return self
                 .continue_composite_after_recovery(job, now, correlation_id)
                 .await;
         }
-        let Some(attempt_id) = step.issued_attempt_id else {
+        let Some(attempt_id) = call.issued_attempt_id else {
             return self
                 .finish_recovery(
                     job,
@@ -540,9 +553,9 @@ where
             .prepare_provider_call(
                 execution.id,
                 task,
-                &[step.capability],
+                &call.capabilities,
                 &capability_plan,
-                step.position,
+                call.first_step_position,
                 correlation_id,
             )
             .await?
@@ -598,20 +611,35 @@ where
                     &verification,
                 ) =>
             {
-                self.executions
-                    .succeed_execution_capability_step(ExecutionCapabilityStepMutation {
-                        execution_id,
-                        attempt_id,
-                        capability: step.capability,
-                        scheduler_job_id: job.id,
-                        worker_id: claimed_worker(job)?,
-                        correlation_id,
-                        at: finished_at,
-                    })
-                    .await?;
-                if steps
+                if call.capabilities.len() == 1 {
+                    self.executions
+                        .succeed_execution_capability_step(ExecutionCapabilityStepMutation {
+                            execution_id,
+                            attempt_id,
+                            capability: call.capabilities[0],
+                            scheduler_job_id: job.id,
+                            worker_id: claimed_worker(job)?,
+                            correlation_id,
+                            at: finished_at,
+                        })
+                        .await?;
+                } else {
+                    self.executions
+                        .succeed_execution_capability_call(ExecutionCapabilityCallMutation {
+                            execution_id,
+                            attempt_id,
+                            call_position: call.position,
+                            capabilities: &call.capabilities,
+                            scheduler_job_id: job.id,
+                            worker_id: claimed_worker(job)?,
+                            correlation_id,
+                            at: finished_at,
+                        })
+                        .await?;
+                }
+                if calls
                     .iter()
-                    .all(|candidate| candidate.position <= step.position)
+                    .all(|candidate| candidate.position <= call.position)
                 {
                     self.finish_recovery(
                         job,
@@ -1615,11 +1643,23 @@ where
                 .await;
         }
         let capability_plan = steps.iter().map(|step| step.capability).collect::<Vec<_>>();
-        for step in &steps {
-            if step.state == ExecutionCapabilityStepState::Succeeded {
+        let Some(calls) = capability_calls(&steps) else {
+            return self
+                .finish_failure(
+                    job,
+                    attempt,
+                    ProviderErrorClass::Internal,
+                    FailureDisposition::HumanRequired,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        };
+        for call in &calls {
+            if call.state == ExecutionCapabilityStepState::Succeeded {
                 continue;
             }
-            if step.state != ExecutionCapabilityStepState::Pending {
+            if call.state != ExecutionCapabilityStepState::Pending {
                 return self
                     .begin_verification_recovery(
                         job,
@@ -1633,9 +1673,9 @@ where
                 .prepare_provider_call(
                     execution.id,
                     task,
-                    &[step.capability],
+                    &call.capabilities,
                     &capability_plan,
-                    step.position,
+                    call.first_step_position,
                     correlation_id,
                 )
                 .await?
@@ -1690,18 +1730,32 @@ where
                     .await;
             }
             let issued_at = Utc::now().max(now);
-            let issue = self
-                .executions
-                .issue_execution_capability_step(ExecutionCapabilityStepMutation {
-                    execution_id: execution.id,
-                    attempt_id: attempt.id,
-                    capability: step.capability,
-                    scheduler_job_id: job.id,
-                    worker_id: claimed_worker(job)?,
-                    correlation_id,
-                    at: issued_at,
-                })
-                .await?;
+            let issue = if call.capabilities.len() == 1 {
+                self.executions
+                    .issue_execution_capability_step(ExecutionCapabilityStepMutation {
+                        execution_id: execution.id,
+                        attempt_id: attempt.id,
+                        capability: call.capabilities[0],
+                        scheduler_job_id: job.id,
+                        worker_id: claimed_worker(job)?,
+                        correlation_id,
+                        at: issued_at,
+                    })
+                    .await?
+            } else {
+                self.executions
+                    .issue_execution_capability_call(ExecutionCapabilityCallMutation {
+                        execution_id: execution.id,
+                        attempt_id: attempt.id,
+                        call_position: call.position,
+                        capabilities: &call.capabilities,
+                        scheduler_job_id: job.id,
+                        worker_id: claimed_worker(job)?,
+                        correlation_id,
+                        at: issued_at,
+                    })
+                    .await?
+            };
             if issue != ExecutionCapabilityStepIssueOutcome::Issued {
                 return self
                     .begin_verification_recovery(
@@ -1810,17 +1864,33 @@ where
                     )
                     .await;
             }
-            self.executions
-                .succeed_execution_capability_step(ExecutionCapabilityStepMutation {
-                    execution_id: execution.id,
-                    attempt_id: attempt.id,
-                    capability: step.capability,
-                    scheduler_job_id: job.id,
-                    worker_id: claimed_worker(job)?,
-                    correlation_id,
-                    at: Utc::now().max(issued_at),
-                })
-                .await?;
+            let succeeded_at = Utc::now().max(issued_at);
+            if call.capabilities.len() == 1 {
+                self.executions
+                    .succeed_execution_capability_step(ExecutionCapabilityStepMutation {
+                        execution_id: execution.id,
+                        attempt_id: attempt.id,
+                        capability: call.capabilities[0],
+                        scheduler_job_id: job.id,
+                        worker_id: claimed_worker(job)?,
+                        correlation_id,
+                        at: succeeded_at,
+                    })
+                    .await?;
+            } else {
+                self.executions
+                    .succeed_execution_capability_call(ExecutionCapabilityCallMutation {
+                        execution_id: execution.id,
+                        attempt_id: attempt.id,
+                        call_position: call.position,
+                        capabilities: &call.capabilities,
+                        scheduler_job_id: job.id,
+                        worker_id: claimed_worker(job)?,
+                        correlation_id,
+                        at: succeeded_at,
+                    })
+                    .await?;
+            }
         }
         self.finish_success(
             job,
@@ -3664,9 +3734,6 @@ fn execution_verification(
     if !task.capabilities.contains(&TaskCapability::ExecutionVerify) {
         return Ok(false);
     }
-    if execution_capabilities.len() != 1 {
-        return Err(unsupported_execution_verification());
-    }
     if !capability.requires_execution_verification(execution_capabilities) {
         return Ok(false);
     }
@@ -3707,6 +3774,45 @@ fn capability_steps_match_execution(
                 .iter()
                 .copied()
                 .collect::<std::collections::BTreeSet<_>>()
+        && capability_calls(steps).is_some()
+}
+
+#[derive(Clone, Debug)]
+struct ExecutionCapabilityCall {
+    position: u8,
+    first_step_position: u8,
+    capabilities: Vec<TaskCapability>,
+    state: ExecutionCapabilityStepState,
+    issued_attempt_id: Option<asterism_domain::ExecutionAttemptId>,
+}
+
+fn capability_calls(steps: &[ExecutionCapabilityStep]) -> Option<Vec<ExecutionCapabilityCall>> {
+    let mut calls = Vec::<ExecutionCapabilityCall>::new();
+    for step in steps {
+        if usize::from(step.call_position) == calls.len() + 1 {
+            if step.call_member_position != 1 {
+                return None;
+            }
+            calls.push(ExecutionCapabilityCall {
+                position: step.call_position,
+                first_step_position: step.position,
+                capabilities: vec![step.capability],
+                state: step.state,
+                issued_attempt_id: step.issued_attempt_id,
+            });
+            continue;
+        }
+        let call = calls.last_mut()?;
+        if step.call_position != call.position
+            || usize::from(step.call_member_position) != call.capabilities.len() + 1
+            || step.state != call.state
+            || step.issued_attempt_id != call.issued_attempt_id
+        {
+            return None;
+        }
+        call.capabilities.push(step.capability);
+    }
+    (!calls.is_empty()).then_some(calls)
 }
 
 fn execution_goal_verified(
@@ -4104,6 +4210,8 @@ mod tests {
             requested_capabilities: &[TaskCapability],
         ) -> bool {
             requested_capabilities == [TaskCapability::ResourceExecution]
+                || self.behavior == ProviderBehavior::CompositeSuccess
+                    && requested_capabilities.len() == 2
         }
 
         async fn execute(
@@ -4836,6 +4944,34 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn atomic_composite_call_executes_and_verifies_once() {
+        let fixture = Fixture::atomic_composite().await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+        let steps: Vec<(i64, i64, String)> = sqlx::query_as(
+            "SELECT call_position, call_member_position, state \
+             FROM execution_capability_steps WHERE execution_id = ? ORDER BY position",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_all(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                (1, 1, "succeeded".to_owned()),
+                (1, 2, "succeeded".to_owned()),
+            ]
+        );
+    }
+
     #[test]
     fn verified_duration_goal_does_not_invent_a_completion_state() {
         assert!(execution_goal_verified(
@@ -5523,15 +5659,30 @@ mod tests {
             {
                 sqlx::query(
                     "INSERT INTO execution_capability_steps \
-                     (execution_id, position, capability, state) VALUES (?, ?, ?, 'pending')",
+                     (execution_id, position, call_position, call_member_position, capability, state) \
+                     VALUES (?, ?, ?, 1, ?, 'pending')",
                 )
                 .bind(fixture.execution_id.to_string())
+                .bind(position)
                 .bind(position)
                 .bind(capability)
                 .execute(fixture.database.pool())
                 .await
                 .unwrap();
             }
+            fixture
+        }
+
+        async fn atomic_composite() -> Self {
+            let fixture = Self::composite().await;
+            sqlx::query(
+                "UPDATE execution_capability_steps \
+                 SET call_position = 1, call_member_position = position WHERE execution_id = ?",
+            )
+            .bind(fixture.execution_id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
             fixture
         }
 
@@ -5910,6 +6061,7 @@ mod tests {
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
                 capability_plan: &execution.requested_capabilities,
+                capability_call_starts: &[1],
                 billing: None,
                 runtime_settings: Some(ExecutionRuntimeSettingsResolution {
                     snapshot: &runtime_settings,

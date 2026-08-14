@@ -3542,3 +3542,32 @@ sanitized sink error. A receipt persistence failure is treated as potentially
 post-mutation and therefore ambiguous. WELearn can now adapt its Provider-owned
 atomic duration sink to this generic boundary; registration remains blocked
 until every start/keep/set/save transition actually uses it.
+
+## Two-hundredth Phase 0 slice
+
+Composite execution now freezes Provider call boundaries independently from
+capability order. `TaskExecutionCapability` resolves groups from the selected
+capabilities and already frozen runtime settings, and may group adjacent
+capabilities only when those scheduling-time inputs uniquely select one
+evidenced remote transaction implementing the whole group. It may not guess
+from capabilities when a fresh Provider detail or batch profile would change
+the flow. Core validates that the flattened groups are an exact permutation of
+the authorized selection, then persists each step's call and member positions
+atomically with the Execution. Migration 048 backfills every older step as its
+own call.
+
+Storage issues or succeeds every member of a grouped call in one immediate
+transaction under the same active attempt, scheduler claim and worker lease.
+No member may become issued alone, a later call remains blocked until every
+earlier call succeeded, and a changed group shape fails closed. Engine derives
+the exact contiguous capability slice from those durable rows, invokes the
+Provider once, requires the Provider's explicit whole-group verification
+contract when advertised, and marks all members successful together.
+
+Recovery never reconstructs group authority from current Provider defaults.
+An issued grouped call is reloaded from the frozen rows and can only take the
+read-only whole-group verification path; it is not automatically invoked again.
+WELearn may now declare `DurationReport + ResourceExecution` as one call, but
+its profile/target and current-donor preserved-time goal still need their own
+durable Provider-private execution evidence before post-crash verification can
+prove the exact goal.

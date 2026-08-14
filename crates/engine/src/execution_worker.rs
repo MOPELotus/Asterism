@@ -224,6 +224,7 @@ mod tests {
             .schedule_execution(ExecutionScheduleRequest {
                 execution: &execution,
                 capability_plan: &execution.requested_capabilities,
+                capability_call_starts: &[1],
                 billing: None,
                 runtime_settings: None,
                 expected_task_state: OrchestrationState::Ready,
