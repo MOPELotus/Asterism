@@ -980,6 +980,38 @@ mod tests {
     }
 
     #[test]
+    fn committed_capture_command_fixtures_are_canonical_recovery_artifacts() {
+        for (fixture, expected) in [
+            (
+                include_str!(
+                    "../../../fixtures/providers/cidaren/browser/capture-command-token-only.json"
+                ),
+                command(CidarenCaptureMode::TokenOnly),
+            ),
+            (
+                include_str!(
+                    "../../../fixtures/providers/cidaren/browser/capture-command-composite.json"
+                ),
+                command(CidarenCaptureMode::Composite),
+            ),
+        ] {
+            let parsed: CidarenBrowserCommandEnvelope = serde_json::from_str(fixture).unwrap();
+            assert_eq!(parsed, expected);
+            parsed.validate().unwrap();
+
+            let canonical = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(canonical, fixture.trim_end());
+            let artifact = parsed.encode_artifact().unwrap();
+            let expected_digest: [u8; 32] = Sha256::digest(canonical.as_bytes()).into();
+            assert_eq!(artifact.digest(), expected_digest);
+            assert_eq!(
+                artifact.into_secret_value().expose_secret(),
+                canonical.as_bytes()
+            );
+        }
+    }
+
+    #[test]
     fn capture_snapshot_converts_only_evidenced_credential_fields() {
         let token_command = command(CidarenCaptureMode::TokenOnly);
         let token_replacement = parse_browser_event(

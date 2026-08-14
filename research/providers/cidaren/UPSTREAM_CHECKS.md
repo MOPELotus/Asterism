@@ -446,7 +446,9 @@ without trusting helper echoes. A recovered-result adapter now reconstructs
 command authority from only that encrypted artifact plus the persisted Issued
 exchange before accepting a helper result. The completed adapter has no
 snapshot-only consuming path and can hand Core an exact credential
-replacement + terminal exchange pair for its atomic commit. All 147 Cidaren
+replacement + terminal exchange pair for its atomic commit. Exact compact
+TokenOnly/Composite command fixtures now freeze the same bytes used by helper
+dispatch, encrypted recovery and the command digest. All 148 Cidaren
 tests, all-target strict clippy, formatting and scoped diff checks passed
 against the landed atomic shared transition contract. The three symbolic
 default branches, complete public tag refs and latest GitHub release metadata

@@ -174,6 +174,9 @@ entry: it accepts only a valid Issued exchange, resolves the encrypted command
 against that exchange and Core's selected recipe, then delegates to the same
 fresh Task binding and owned result-document completion path as an in-process
 exchange.
+Committed TokenOnly/Composite command fixtures are byte-identical to the
+compact JSON stored in the encrypted artifact and hashed into the exchange;
+helper dispatch and recovery therefore cannot evolve separate wire shapes.
 The high-level Provider adapter accepts the raw result only as an owned,
 bounded `CidarenBrowserResultDocument`. Its contents are unavailable through
 Debug or the public API, and the consumed transport buffer is zeroized after
