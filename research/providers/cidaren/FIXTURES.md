@@ -178,6 +178,10 @@ placeholder identities, result codes, status values and pagination shape.
 - Parsed Capture result envelopes cannot be cloned. Consuming one moves its
   token and crypto JSON directly into the zeroizing snapshot while replacing
   the source event with an empty value before its own Drop cleanup.
+- Encrypted pre/post-Question wire decoders move validated one-time fields
+  into runtime artifacts instead of cloning them. Parser restoration wraps
+  topic codes and binding strings in zeroizing owners before its first
+  fallible validation, so malformed recovery clears inputs as well.
 - `topic_code` is absent from serialized Question fixtures and immutable
   Drafts. The `cidaren.question-attempt.v2` Provider artifact is bounded,
   zeroizing and stable-digest covered for Core's encrypted continuation store;

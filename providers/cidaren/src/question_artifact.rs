@@ -188,7 +188,7 @@ impl CidarenQuestionArtifact {
         expected_question
             .validate()
             .map_err(|_| invalid_response("Cidaren artifact Question is invalid"))?;
-        let wire: ArtifactWire = serde_json::from_slice(bytes)
+        let mut wire: ArtifactWire = serde_json::from_slice(bytes)
             .map_err(|_| protocol_drift("Cidaren Question artifact schema is invalid"))?;
         let expected_fingerprint = expected_question
             .content_fingerprint()
@@ -217,12 +217,12 @@ impl CidarenQuestionArtifact {
         }
 
         Ok(Self {
-            task_id: Zeroizing::new(wire.task_id.clone()),
-            remote_task_id: Zeroizing::new(wire.remote_task_id.clone()),
-            remote_question_id: Zeroizing::new(wire.remote_question_id.clone()),
+            task_id: Zeroizing::new(std::mem::take(&mut wire.task_id)),
+            remote_task_id: Zeroizing::new(std::mem::take(&mut wire.remote_task_id)),
+            remote_question_id: Zeroizing::new(std::mem::take(&mut wire.remote_question_id)),
             position: wire.position,
-            question_fingerprint: Zeroizing::new(wire.question_fingerprint.clone()),
-            topic_code: Zeroizing::new(wire.topic_code.clone()),
+            question_fingerprint: Zeroizing::new(std::mem::take(&mut wire.question_fingerprint)),
+            topic_code: Zeroizing::new(std::mem::take(&mut wire.topic_code)),
             verified_steps: wire.verified_steps,
         })
     }

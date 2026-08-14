@@ -131,6 +131,9 @@ impl ParsedCidarenReadingCard {
         position: u32,
         remote_progress: Option<CidarenAttemptProgress>,
     ) -> ProviderResult<Self> {
+        let topic_code = Zeroizing::new(topic_code);
+        let mut remote_id = Zeroizing::new(remote_id);
+        let mut stem_sanitized = Zeroizing::new(stem_sanitized);
         if !valid_optional_text(&topic_code, MAX_TOPIC_CODE_BYTES)
             || !valid_optional_text(&remote_id, MAX_REMOTE_STEP_ID_BYTES)
             || !remote_id.starts_with("reading-card:")
@@ -143,9 +146,9 @@ impl ParsedCidarenReadingCard {
             ));
         }
         Ok(Self {
-            topic_code: Zeroizing::new(topic_code),
-            remote_id,
-            stem_sanitized,
+            topic_code,
+            remote_id: std::mem::take(&mut *remote_id),
+            stem_sanitized: std::mem::take(&mut *stem_sanitized),
             position,
             remote_progress,
         })
@@ -210,6 +213,8 @@ impl ParsedCidarenAttemptQuestion {
         remote_task_id: String,
         question: &Question,
     ) -> ProviderResult<Self> {
+        let topic_code = Zeroizing::new(topic_code);
+        let mut remote_task_id = Zeroizing::new(remote_task_id);
         question
             .validate()
             .map_err(|_| invalid_response("Cidaren restored Question is invalid"))?;
@@ -229,8 +234,8 @@ impl ParsedCidarenAttemptQuestion {
             ));
         }
         let parsed = Self {
-            topic_code: Zeroizing::new(topic_code),
-            remote_task_id,
+            topic_code,
+            remote_task_id: std::mem::take(&mut *remote_task_id),
             remote_id: remote_id.to_owned(),
             kind: question.kind,
             stem: question.stem.clone(),

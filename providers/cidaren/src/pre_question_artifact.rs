@@ -179,7 +179,7 @@ impl CidarenPreQuestionArtifact {
                 "Cidaren pre-Question artifact digest does not match its attempt",
             ));
         }
-        let wire: ArtifactWire = serde_json::from_slice(bytes)
+        let mut wire: ArtifactWire = serde_json::from_slice(bytes)
             .map_err(|_| protocol_drift("Cidaren pre-Question artifact schema is invalid"))?;
         if wire.schema != CIDAREN_PRE_QUESTION_ARTIFACT_TYPE
             || wire.task_id != expected_task_id.to_string()
@@ -211,13 +211,13 @@ impl CidarenPreQuestionArtifact {
                     }
                 };
                 CidarenPreQuestionState::ReadingCard(ParsedCidarenReadingCard::from_artifact(
-                    wire.topic_code.clone().ok_or_else(|| {
+                    wire.topic_code.take().ok_or_else(|| {
                         protocol_drift("Cidaren reading-card artifact has no topic code")
                     })?,
-                    wire.reading_card_id.clone().ok_or_else(|| {
+                    wire.reading_card_id.take().ok_or_else(|| {
                         protocol_drift("Cidaren reading-card artifact has no identity")
                     })?,
-                    wire.stem_sanitized.clone().ok_or_else(|| {
+                    wire.stem_sanitized.take().ok_or_else(|| {
                         protocol_drift("Cidaren reading-card artifact has no stem")
                     })?,
                     wire.position.ok_or_else(|| {
