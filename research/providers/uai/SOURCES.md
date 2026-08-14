@@ -126,6 +126,10 @@ The same remote HEADs and tag sets were queried after the consuming
 result-inbox owner checkpoint on 2026-08-14 and remained unchanged; no
 incremental Provider protocol delta was present.
 
+All four remote HEADs and tag sets were checked once more after binding Core
+result-inbox metadata to the consuming UAI owners on 2026-08-14; they remained
+unchanged.
+
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
 `https://ucontent.unipus.cn/_explorationpc_default/pc.html` as the browser

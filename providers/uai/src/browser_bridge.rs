@@ -1,8 +1,8 @@
 use std::{fmt, sync::Arc};
 
 use asterism_domain::{
-    BrowserBridgeExchange, BrowserBridgeExchangeState, BrowserBridgeRuntimeStateMetadata,
-    BrowserBridgeSessionId, TaskCapability, Timestamp,
+    BrowserBridgeExchange, BrowserBridgeExchangeState, BrowserBridgeResultArtifactMetadata,
+    BrowserBridgeRuntimeStateMetadata, BrowserBridgeSessionId, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
     BrowserBridgeCapability, BrowserSessionSpec, ProviderContext, ProviderError, ProviderErrorKind,
@@ -454,6 +454,45 @@ impl fmt::Debug for UaiBrowserEventDocument {
     }
 }
 
+/// Core result-inbox metadata and raw event bytes validated as one owner.
+#[derive(Debug)]
+pub struct UaiBrowserEventInbox {
+    metadata: BrowserBridgeResultArtifactMetadata,
+    document: UaiBrowserEventDocument,
+}
+
+impl UaiBrowserEventInbox {
+    /// Consumes one Core-resolved raw event and binds it to the exact issued
+    /// UAI exchange before any fresh Provider read.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign result type/session/sequence/time, changed raw bytes or
+    /// an invalid bounded UTF-8 event document.
+    pub fn try_new(
+        issued_exchange: &BrowserBridgeExchange,
+        metadata: BrowserBridgeResultArtifactMetadata,
+        result_artifact: SecretValue,
+    ) -> ProviderResult<Self> {
+        validate_result_inbox(
+            issued_exchange,
+            &metadata,
+            UAI_BROWSER_EVENT_TYPE,
+            &result_artifact,
+        )?;
+        let document = UaiBrowserEventDocument::try_from_secret_value(result_artifact)?;
+        Ok(Self { metadata, document })
+    }
+
+    pub const fn metadata(&self) -> &BrowserBridgeResultArtifactMetadata {
+        &self.metadata
+    }
+
+    pub fn into_parts(self) -> (UaiBrowserEventDocument, BrowserBridgeResultArtifactMetadata) {
+        (self.document, self.metadata)
+    }
+}
+
 /// Owned bounded terminal `BrowserBridge` residence result. It remains an
 /// observation requiring independent fresh duration readback.
 pub struct UaiBrowserResidenceResultDocument(SecretValue);
@@ -524,6 +563,50 @@ impl fmt::Debug for UaiBrowserResidenceResultDocument {
             .field("bytes", &self.0.expose_secret().len())
             .field("contents", &"[REDACTED]")
             .finish()
+    }
+}
+
+/// Core result-inbox metadata and terminal residence bytes validated together.
+#[derive(Debug)]
+pub struct UaiBrowserResidenceInbox {
+    metadata: BrowserBridgeResultArtifactMetadata,
+    document: UaiBrowserResidenceResultDocument,
+}
+
+impl UaiBrowserResidenceInbox {
+    /// Consumes one Core-resolved terminal result and binds it to the exact
+    /// issued UAI exchange before any fresh Provider read.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign result type/session/sequence/time, changed raw bytes or
+    /// an invalid bounded UTF-8 residence document.
+    pub fn try_new(
+        issued_exchange: &BrowserBridgeExchange,
+        metadata: BrowserBridgeResultArtifactMetadata,
+        result_artifact: SecretValue,
+    ) -> ProviderResult<Self> {
+        validate_result_inbox(
+            issued_exchange,
+            &metadata,
+            UAI_BROWSER_RESIDENCE_RESULT_TYPE,
+            &result_artifact,
+        )?;
+        let document = UaiBrowserResidenceResultDocument::try_from_secret_value(result_artifact)?;
+        Ok(Self { metadata, document })
+    }
+
+    pub const fn metadata(&self) -> &BrowserBridgeResultArtifactMetadata {
+        &self.metadata
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        UaiBrowserResidenceResultDocument,
+        BrowserBridgeResultArtifactMetadata,
+    ) {
+        (self.document, self.metadata)
     }
 }
 
@@ -2648,6 +2731,31 @@ fn validate_issued_exchange(exchange: &BrowserBridgeExchange) -> ProviderResult<
         return Err(ProviderError::new(
             ProviderErrorKind::ProtocolDrift,
             "UAI recovered BrowserBridge exchange is stale or foreign",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_result_inbox(
+    issued_exchange: &BrowserBridgeExchange,
+    metadata: &BrowserBridgeResultArtifactMetadata,
+    expected_result_type: &str,
+    result_artifact: &SecretValue,
+) -> ProviderResult<()> {
+    let result_digest: [u8; 32] = Sha256::digest(result_artifact.expose_secret()).into();
+    if issued_exchange.validate().is_err()
+        || issued_exchange.state != BrowserBridgeExchangeState::Issued
+        || issued_exchange.command_type != UAI_BROWSER_COMMAND_TYPE
+        || metadata.validate().is_err()
+        || metadata.session_id != issued_exchange.session_id
+        || metadata.sequence != issued_exchange.sequence
+        || metadata.result_type != expected_result_type
+        || metadata.received_at < issued_exchange.issued_at
+        || metadata.result_digest != result_digest
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "UAI BrowserBridge result inbox is stale, changed or foreign",
         ));
     }
     Ok(())
@@ -4933,6 +5041,34 @@ mod tests {
 
         let (_dispatched, artifact, exchange) = issued.into_parts();
         let artifact = artifact.into_secret_value();
+        let received_at = issued_at + chrono::Duration::seconds(2);
+        let metadata = BrowserBridgeResultArtifactMetadata {
+            session_id,
+            sequence: 7,
+            result_type: UAI_BROWSER_EVENT_TYPE.to_owned(),
+            result_digest: browser_event_exchange_digest(&event_fixture).unwrap(),
+            received_at,
+        };
+        let mut wrong_type = metadata.clone();
+        wrong_type.result_type = UAI_BROWSER_RESIDENCE_RESULT_TYPE.to_owned();
+        assert_eq!(
+            UaiBrowserEventInbox::try_new(
+                &exchange,
+                wrong_type,
+                SecretValue::new(event_fixture.clone().into_bytes()),
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        let inbox = UaiBrowserEventInbox::try_new(
+            &exchange,
+            metadata,
+            SecretValue::new(event_fixture.into_bytes()),
+        )
+        .unwrap();
+        assert_eq!(inbox.metadata().received_at, received_at);
+        let (document, metadata) = inbox.into_parts();
         let recovered = bridge
             .complete_recovered_event_exchange(
                 &context,
@@ -4940,9 +5076,9 @@ mod tests {
                 &settings,
                 &exchange,
                 &artifact,
-                UaiBrowserEventDocument::try_new(event_fixture).unwrap(),
+                document,
                 UCONTENT_ORIGIN,
-                issued_at + chrono::Duration::seconds(2),
+                metadata.received_at,
             )
             .await
             .unwrap();
@@ -5044,8 +5180,35 @@ mod tests {
             include_str!("../../../fixtures/providers/uai/browser/residence-target-result.json")
                 .replace("{{session_nonce}}", &session_nonce)
                 .replace("{{target_task_handle}}", &target.entry().handle);
-        let document = UaiBrowserResidenceResultDocument::try_new(fixture).unwrap();
-        let result_digest = document.exchange_digest().unwrap();
+        let result_digest = browser_residence_exchange_digest(&fixture).unwrap();
+        let received_at = issued_at + chrono::Duration::seconds(1);
+        let metadata = BrowserBridgeResultArtifactMetadata {
+            session_id,
+            sequence: 9,
+            result_type: UAI_BROWSER_RESIDENCE_RESULT_TYPE.to_owned(),
+            result_digest,
+            received_at,
+        };
+        let mut wrong_digest = metadata.clone();
+        wrong_digest.result_digest = [9; 32];
+        assert_eq!(
+            UaiBrowserResidenceInbox::try_new(
+                &exchange,
+                wrong_digest,
+                SecretValue::new(fixture.clone().into_bytes()),
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        let inbox = UaiBrowserResidenceInbox::try_new(
+            &exchange,
+            metadata,
+            SecretValue::new(fixture.into_bytes()),
+        )
+        .unwrap();
+        assert_eq!(inbox.metadata().result_digest, result_digest);
+        let (document, metadata) = inbox.into_parts();
         let completed = bridge
             .complete_recovered_residence_exchange(
                 &context,
@@ -5055,7 +5218,7 @@ mod tests {
                 &artifact.into_secret_value(),
                 document,
                 UCONTENT_ORIGIN,
-                issued_at + chrono::Duration::seconds(1),
+                metadata.received_at,
             )
             .await
             .unwrap();
