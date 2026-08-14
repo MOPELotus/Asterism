@@ -4,11 +4,11 @@ use asterism_domain::ProviderId;
 
 use crate::{
     AnswerResolveCapability, AuthenticationCapability, BrowserBridgeCapability,
-    CourseInventoryCapability, DurationReadCapability, ProviderCapability, ProviderMetadata,
-    ProviderRuntimeSettingsSchema, ProviderSettingsError, QuestionInventoryCapability,
-    QuestionParseCapability, SubmissionBuildCapability, SubmissionExecuteCapability,
-    SubmissionVerifyCapability, TaskDetailCapability, TaskExecutionCapability,
-    TaskInventoryCapability, TaskProgressCapability,
+    BrowserBridgeResultDisposition, CourseInventoryCapability, DurationReadCapability,
+    ProviderCapability, ProviderMetadata, ProviderRuntimeSettingsSchema, ProviderSettingsError,
+    QuestionInventoryCapability, QuestionParseCapability, SubmissionBuildCapability,
+    SubmissionExecuteCapability, SubmissionVerifyCapability, TaskDetailCapability,
+    TaskExecutionCapability, TaskInventoryCapability, TaskProgressCapability,
 };
 
 const MAX_CAPTURE_RECIPE_ALTERNATIVES: usize = 8;
@@ -224,6 +224,15 @@ impl ProviderEntry {
                 capability: ProviderCapability::BrowserBridge,
             });
         }
+        if self
+            .browser_bridge
+            .as_deref()
+            .is_some_and(|capability| !valid_browser_bridge_result_types(capability))
+        {
+            return Err(RegistryError::InvalidBrowserBridgeResultTypes {
+                provider_id: self.metadata.id.clone(),
+            });
+        }
         Ok(())
     }
 
@@ -327,6 +336,43 @@ impl ProviderEntry {
     }
 }
 
+fn valid_browser_bridge_result_types(capability: &dyn BrowserBridgeCapability) -> bool {
+    let sets = [
+        (
+            BrowserBridgeResultDisposition::CredentialTerminal,
+            capability.browser_bridge_credential_result_types(),
+        ),
+        (
+            BrowserBridgeResultDisposition::Intermediate,
+            capability.browser_bridge_intermediate_result_types(),
+        ),
+        (
+            BrowserBridgeResultDisposition::ExecutionTerminal,
+            capability.browser_bridge_execution_result_types(),
+        ),
+    ];
+    let mut declared = Vec::new();
+    for (disposition, result_types) in sets {
+        if result_types.len() > 16 {
+            return false;
+        }
+        for result_type in result_types {
+            if result_type.is_empty()
+                || result_type.len() > 128
+                || !result_type.is_ascii()
+                || result_type.trim() != *result_type
+                || result_type.chars().any(char::is_control)
+                || declared.contains(result_type)
+                || capability.browser_bridge_result_disposition(result_type) != Some(disposition)
+            {
+                return false;
+            }
+            declared.push(*result_type);
+        }
+    }
+    true
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ProviderRegistry {
     entries: BTreeMap<ProviderId, ProviderEntry>,
@@ -383,6 +429,8 @@ pub enum RegistryError {
         "provider `{provider_id}` execution verification requires both task execution and progress read"
     )]
     ExecutionVerificationMismatch { provider_id: ProviderId },
+    #[error("provider `{provider_id}` has invalid BrowserBridge result type declarations")]
+    InvalidBrowserBridgeResultTypes { provider_id: ProviderId },
     #[error("provider `{provider_id}` has a mismatched implementation in `{slot}`")]
     IdentityMismatch {
         provider_id: ProviderId,
@@ -413,8 +461,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ProviderContext, ProviderResult, RemoteCourse, RemoteQuestionRef, RemoteTask,
-        VerificationLevel,
+        BrowserSessionSpec, ProviderContext, ProviderResult, RemoteCourse, RemoteQuestionRef,
+        RemoteTask, VerificationLevel,
     };
 
     #[derive(Debug)]
@@ -425,6 +473,54 @@ mod tests {
     #[derive(Debug)]
     struct FakeQuestionRead {
         metadata: ProviderMetadata,
+    }
+
+    #[derive(Debug)]
+    struct FakeBrowserBridge {
+        metadata: ProviderMetadata,
+        duplicate_declaration: bool,
+    }
+
+    impl crate::ProviderIdentity for FakeBrowserBridge {
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.metadata
+        }
+    }
+
+    #[async_trait]
+    impl BrowserBridgeCapability for FakeBrowserBridge {
+        async fn browser_session_spec(
+            &self,
+            _context: &ProviderContext,
+            _remote_task_id: &str,
+        ) -> ProviderResult<BrowserSessionSpec> {
+            unreachable!("registry declaration test does not create a browser session")
+        }
+
+        fn browser_bridge_result_disposition(
+            &self,
+            result_type: &str,
+        ) -> Option<BrowserBridgeResultDisposition> {
+            match result_type {
+                "chaoxing.browser.event" => Some(BrowserBridgeResultDisposition::Intermediate),
+                "chaoxing.browser.terminal" => {
+                    Some(BrowserBridgeResultDisposition::ExecutionTerminal)
+                }
+                _ => None,
+            }
+        }
+
+        fn browser_bridge_intermediate_result_types(&self) -> &'static [&'static str] {
+            &["chaoxing.browser.event"]
+        }
+
+        fn browser_bridge_execution_result_types(&self) -> &'static [&'static str] {
+            if self.duplicate_declaration {
+                &["chaoxing.browser.event"]
+            } else {
+                &["chaoxing.browser.terminal"]
+            }
+        }
     }
 
     impl crate::ProviderIdentity for FakeQuestionRead {
@@ -563,6 +659,31 @@ mod tests {
                 .display_name,
             "chaoxing"
         );
+    }
+
+    #[test]
+    fn registry_requires_unique_disposition_matched_browser_result_types() {
+        let browser_entry = |duplicate_declaration| {
+            let mut metadata = metadata();
+            metadata
+                .capabilities
+                .insert(ProviderCapability::BrowserBridge);
+            let browser = Arc::new(FakeBrowserBridge {
+                metadata: metadata.clone(),
+                duplicate_declaration,
+            });
+            let mut entry = ProviderEntry::metadata_only(metadata);
+            entry.browser_bridge = Some(browser);
+            entry
+        };
+        let mut registry = ProviderRegistry::default();
+        registry.register(browser_entry(false)).unwrap();
+
+        let mut invalid_registry = ProviderRegistry::default();
+        assert!(matches!(
+            invalid_registry.register(browser_entry(true)),
+            Err(RegistryError::InvalidBrowserBridgeResultTypes { .. })
+        ));
     }
 
     #[test]

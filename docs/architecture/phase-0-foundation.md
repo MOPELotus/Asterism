@@ -3822,3 +3822,19 @@ from future claims while its helper token remains usable. Retryable failures
 continue to release only the processing lease and persist `next_attempt_at`;
 they deliberately keep the short-lived claimed session available for the next
 bounded attempt.
+
+## Two-hundred-and-twelfth Phase 0 slice
+
+The BrowserBridge Provider contract now declares three separate closed result
+type sets: credential terminal, intermediate workflow event and execution
+terminal. Provider registration validates each set as bounded ASCII labels,
+requires global uniqueness across the three dispositions and calls the
+Provider classifier for every declaration. A type cannot therefore be selected
+as an intermediate inbox in Storage while the same Provider classifies it as a
+terminal credential or execution result.
+
+Empty sets preserve Providers whose browser path does not use that result
+stage. Unknown types remain outside all Core workers. This declaration layer is
+the prerequisite for adding the UAI cursor-result processor: SQL can select
+only the exact intermediate and execution-terminal types without allowing an
+unknown or credential result to occupy its bounded claim window.

@@ -2006,6 +2006,18 @@ pub trait BrowserBridgeCapability: ProviderIdentity {
         &[]
     }
 
+    /// Enumerates the exact non-terminal result types that advance a durable
+    /// Provider browser workflow to another command.
+    fn browser_bridge_intermediate_result_types(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Enumerates the exact result types that end browser mutation and require
+    /// independent execution verification before Core can accept success.
+    fn browser_bridge_execution_result_types(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Validates one recovered terminal credential result. Providers whose
     /// `BrowserBridge` workflow does not replace credentials remain fail-closed.
     async fn complete_browser_bridge_credential_result(
