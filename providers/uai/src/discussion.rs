@@ -181,6 +181,30 @@ impl UaiDiscussionReplyDraft {
     pub fn expose_content(&self) -> &str {
         self.content.as_str()
     }
+
+    /// Stable identity for Core to register before the non-idempotent reply
+    /// request leaves the process. It binds every fresh route/account fact,
+    /// topic and exact content without exposing them.
+    pub fn request_digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"asterism:uai:discussion-reply-request:v1\0");
+        digest.update(self.binding.course_resource.as_bytes());
+        digest.update(b"\0");
+        digest.update(self.binding.course_instance.as_bytes());
+        digest.update(b"\0");
+        digest.update(self.binding.group.as_bytes());
+        digest.update(b"\0");
+        digest.update(self.binding.class.as_bytes());
+        digest.update(b"\0");
+        digest.update(self.binding.curricula.as_bytes());
+        digest.update(b"\0");
+        digest.update(self.binding.current_user.as_bytes());
+        digest.update(b"\0");
+        digest.update(self.topic_id.to_be_bytes());
+        digest.update(b"\0");
+        digest.update(self.content.as_bytes());
+        digest.finalize().into()
+    }
 }
 
 impl fmt::Debug for UaiDiscussionReplyDraft {
@@ -287,6 +311,7 @@ pub struct UaiDiscussionCompletionPlan {
     group_id: String,
     topic_id: u64,
     reply_digest: [u8; 32],
+    request_digest: [u8; 32],
     fingerprint: String,
 }
 
@@ -315,6 +340,11 @@ impl UaiDiscussionCompletionPlan {
         self.reply_digest
     }
 
+    /// Stable identity for the separately issued Group completion mutation.
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
@@ -331,6 +361,7 @@ impl fmt::Debug for UaiDiscussionCompletionPlan {
             .field("group_id", &self.group_id)
             .field("topic_id", &self.topic_id)
             .field("reply_digest", &"[HASHED]")
+            .field("request_digest", &"[HASHED]")
             .field("fingerprint", &self.fingerprint)
             .finish()
     }
@@ -344,6 +375,7 @@ impl Drop for UaiDiscussionCompletionPlan {
         self.unit_id.zeroize();
         self.group_id.zeroize();
         self.reply_digest.zeroize();
+        self.request_digest.zeroize();
         self.fingerprint.zeroize();
     }
 }
@@ -424,13 +456,22 @@ pub fn prepare_discussion_completion(
     reply_digest.update(b"\0");
     reply_digest.update(draft.content.as_bytes());
     let reply_digest: [u8; 32] = reply_digest.finalize().into();
-    let mut fingerprint = Sha256::new();
-    fingerprint.update(b"asterism:uai:discussion-completion:v1\0");
-    fingerprint.update(remote_task_id.as_bytes());
-    fingerprint.update(b"\0");
-    fingerprint.update(detail.task.fingerprint.as_bytes());
-    fingerprint.update(b"\0");
-    fingerprint.update(reply_digest);
+    let mut request_digest = Sha256::new();
+    request_digest.update(b"asterism:uai:discussion-completion-request:v1\0");
+    request_digest.update(remote_task_id.as_bytes());
+    request_digest.update(b"\0");
+    request_digest.update(detail.task.fingerprint.as_bytes());
+    request_digest.update(b"\0");
+    request_digest.update(draft.binding.course_resource.as_bytes());
+    request_digest.update(b"\0");
+    request_digest.update(unit_id.as_bytes());
+    request_digest.update(b"\0");
+    request_digest.update(draft.binding.group.as_bytes());
+    request_digest.update(b"\0");
+    request_digest.update(draft.topic_id.to_be_bytes());
+    request_digest.update(b"\0");
+    request_digest.update(reply_digest);
+    let request_digest: [u8; 32] = request_digest.finalize().into();
     Ok(UaiDiscussionCompletionPlan {
         remote_task_id: remote_task_id.to_owned(),
         task_fingerprint: detail.task.fingerprint.clone(),
@@ -439,8 +480,19 @@ pub fn prepare_discussion_completion(
         group_id: draft.binding.group.clone(),
         topic_id: draft.topic_id,
         reply_digest,
-        fingerprint: format!("uai-discussion-complete-v1:{:x}", fingerprint.finalize()),
+        request_digest,
+        fingerprint: format!("uai-discussion-complete-v1:{}", hex_digest(request_digest)),
     })
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 /// Derives the donor-required discussion route facts from fresh Course-list,
@@ -911,6 +963,21 @@ mod tests {
     #[test]
     fn reply_draft_request_and_exact_readback_are_bound_and_redacted() {
         let draft = UaiDiscussionReplyDraft::try_new(binding(), 42, "  bounded reply  ").unwrap();
+        let request_digest = draft.request_digest();
+        assert_ne!(request_digest, [0; 32]);
+        assert_eq!(draft.request_digest(), request_digest);
+        assert_ne!(
+            UaiDiscussionReplyDraft::try_new(binding(), 43, "bounded reply")
+                .unwrap()
+                .request_digest(),
+            request_digest
+        );
+        assert_ne!(
+            UaiDiscussionReplyDraft::try_new(binding(), 42, "changed reply")
+                .unwrap()
+                .request_digest(),
+            request_digest
+        );
         assert!(!format!("{draft:?}").contains("bounded reply"));
         let body: Value =
             serde_json::from_str(&build_discussion_reply_request(&draft).unwrap()).unwrap();
@@ -984,9 +1051,16 @@ mod tests {
         assert_eq!(plan.group_id(), "group-1");
         assert_eq!(plan.topic_id(), 42);
         assert_ne!(plan.reply_digest(), [0; 32]);
+        assert_ne!(plan.request_digest(), [0; 32]);
         assert!(
             plan.fingerprint()
                 .starts_with("uai-discussion-complete-v1:")
+        );
+        assert_eq!(
+            plan.fingerprint()
+                .strip_prefix("uai-discussion-complete-v1:")
+                .unwrap(),
+            hex_digest(plan.request_digest())
         );
         assert!(!format!("{plan:?}").contains("bounded reply"));
 

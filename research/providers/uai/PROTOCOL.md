@@ -587,9 +587,12 @@ Course/detail/user-info reads; builds the exact topic/reply-page/reply-add
 bodies; bounds every page and response; binds each reply snapshot to the
 requested topic; zeroizes reply content; treats the add response as a receipt
 only; and can verify exact topic, current-user and content through paginated
-readback. That exact readback plus a fresh exact Task containing only one
+readback. Before reply dispatch, its stable request digest binds the complete
+fresh Course/class/curricula/current-user/Group route, topic and exact content
+without persisting them in audit metadata. That exact readback plus a fresh exact Task containing only one
 `discussion` module freezes a second, content-free completion plan with a hash
-of the verified reply. Native HTTP then refreshes Course instance and the exact
+of the verified reply. A second request digest independently binds that reply
+hash to the fresh Task fingerprint, hierarchy and topic. Native HTTP then refreshes Course instance and the exact
 incomplete available `tab_type=task` progress leaf before sending the donor's
 empty `submitType=2` Group mutation once. Its accepted version is a separate
 receipt and only fresh exact Group progress can confirm completion.
