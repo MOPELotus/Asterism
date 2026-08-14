@@ -1,23 +1,25 @@
 use std::{fmt, net::SocketAddr, str::FromStr};
 
 use asterism_domain::{
-    BrowserBridgeResultArtifactMetadata, BrowserBridgeSession, BrowserBridgeSessionError,
-    BrowserBridgeSessionId, BrowserBridgeSessionState, ProviderId, TaskId, Timestamp,
+    BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding, BrowserBridgeSession,
+    BrowserBridgeSessionError, BrowserBridgeSessionId, BrowserBridgeSessionState, ProviderId,
+    TaskId, Timestamp,
 };
 use asterism_engine::{
     BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandDispatchService,
     BrowserBridgeHelperSessionError, BrowserBridgeHelperSessionService,
     BrowserBridgeResultArtifactService, BrowserBridgeResultReceiveRequest,
-    BrowserBridgeSessionAccessRequest, BrowserBridgeSessionCancelRequest,
-    BrowserBridgeSessionClaimRequest, BrowserBridgeSessionCreateRequest,
-    ProviderTaskBrowserSessionService, ReadTaskBrowserSessionCommand,
+    BrowserBridgeRuntimeBindRequest, BrowserBridgeSessionAccessRequest,
+    BrowserBridgeSessionCancelRequest, BrowserBridgeSessionClaimRequest,
+    BrowserBridgeSessionCreateRequest, ProviderTaskBrowserSessionService,
+    ReadTaskBrowserSessionCommand,
 };
 use asterism_provider_api::BrowserSessionSpec;
 use asterism_secrets::{SecretAccess, SecretActor, SecretString, SecretValue};
 use asterism_storage::{
     BrowserBridgeCommandDispatchRecord, BrowserBridgeResultArtifactRecord,
-    SqliteBrowserBridgeSessionRepository, SqliteProviderAccountRepository,
-    SqliteTaskQueryRepository,
+    BrowserBridgeRuntimeBindingRecord, SqliteBrowserBridgeSessionRepository,
+    SqliteProviderAccountRepository, SqliteTaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -28,7 +30,7 @@ use axum::{
 };
 use bytes::Bytes as OwnedBytes;
 use chrono::{Duration, Utc};
-use serde::{Serialize, ser::SerializeStruct};
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -187,6 +189,53 @@ pub(super) async fn get_browser_bridge_snapshot(
         Json(BrowserBridgeSessionSnapshotResponse {
             session: BrowserBridgeSessionResponse::from(&snapshot.session),
             spec: snapshot.spec,
+        })
+        .into_response(),
+    ))
+}
+
+pub(super) async fn bind_browser_bridge_runtime(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<BrowserBridgeRuntimeBindingRequest>,
+) -> Result<Response, ApiError> {
+    let session_id = parse_session_id(&session_id)?;
+    let access_token =
+        bridge_authorization(&headers).ok_or_else(ApiError::invalid_browser_bridge_token)?;
+    let record = bridge_service(&state)?
+        .bind_runtime(BrowserBridgeRuntimeBindRequest {
+            binding: BrowserBridgeRuntimeBinding {
+                session_id,
+                observed_origin: request.observed_origin,
+                frame_id: request.frame_id,
+                bound_at: Utc::now(),
+            },
+            access_token,
+            correlation_id: request_id(&headers)?.to_owned(),
+        })
+        .await
+        .map_err(map_bridge_error)?;
+    let (binding, duplicate) = match record {
+        BrowserBridgeRuntimeBindingRecord::Bound(binding) => (binding, false),
+        BrowserBridgeRuntimeBindingRecord::Duplicate(binding) => (binding, true),
+        BrowserBridgeRuntimeBindingRecord::AccessRejected => {
+            return Err(ApiError::invalid_browser_bridge_token());
+        }
+        BrowserBridgeRuntimeBindingRecord::Conflict => {
+            return Err(ApiError::conflict(
+                "browser_bridge_runtime_binding_conflict",
+                "the BrowserBridge runtime origin or frame conflicts with durable session state",
+            ));
+        }
+    };
+    Ok(crate::auth::no_store(
+        Json(BrowserBridgeRuntimeBindingResponse {
+            session_id: binding.session_id,
+            observed_origin: binding.observed_origin,
+            frame_id: binding.frame_id,
+            bound_at: binding.bound_at,
+            duplicate,
         })
         .into_response(),
     ))
@@ -532,6 +581,9 @@ fn map_bridge_error(error: BrowserBridgeHelperSessionError) -> ApiError {
             | BrowserBridgeSessionError::RevisionExhausted),
         ) => ApiError::conflict("browser_bridge_session_conflict", error.to_string()),
         BrowserBridgeHelperSessionError::Domain(error) => ApiError::internal(error),
+        BrowserBridgeHelperSessionError::RuntimeBinding(error) => {
+            ApiError::bad_request("invalid_browser_bridge_runtime_binding", error.to_string())
+        }
         BrowserBridgeHelperSessionError::Spec(error) => ApiError::internal(error),
         BrowserBridgeHelperSessionError::Storage(error) => ApiError::internal(error),
     }
@@ -574,6 +626,22 @@ impl From<&BrowserBridgeSession> for BrowserBridgeSessionResponse {
 struct BrowserBridgeSessionSnapshotResponse {
     session: BrowserBridgeSessionResponse,
     spec: BrowserSessionSpec,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BrowserBridgeRuntimeBindingRequest {
+    observed_origin: String,
+    frame_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct BrowserBridgeRuntimeBindingResponse {
+    session_id: BrowserBridgeSessionId,
+    observed_origin: String,
+    frame_id: String,
+    bound_at: Timestamp,
+    duplicate: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

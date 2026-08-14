@@ -1,6 +1,7 @@
 import type {
   BuildSubmissionDraftResponse,
   ApproveTaskResponse,
+  BindBrowserBridgeRuntimeResponse,
   CurrentIdentityResponse,
   GetExecutionResponse,
   GetOwnCreditAccountResponse,
@@ -133,6 +134,18 @@ export type BrowserBridgeResultReceiptContractIsTyped = Assert<
     result_digest: string;
     result_type: string;
     sequence: number;
+    session_id: string;
+  }
+    ? true
+    : false
+>;
+
+export type BrowserBridgeRuntimeBindingContractIsTyped = Assert<
+  BindBrowserBridgeRuntimeResponse extends {
+    bound_at: string;
+    duplicate: boolean;
+    frame_id: string;
+    observed_origin: string;
     session_id: string;
   }
     ? true

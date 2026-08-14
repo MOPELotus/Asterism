@@ -25,6 +25,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("claimBrowserBridgeSession", "BrowserBridgeClaimResponse"),
     ("pollBrowserBridgeSnapshot", "BrowserBridgeSnapshotResponse"),
     (
+        "bindBrowserBridgeRuntime",
+        "BrowserBridgeRuntimeBindingResponse",
+    ),
+    (
         "receiveBrowserBridgeResult",
         "BrowserBridgeResultReceiptResponse",
     ),
@@ -868,6 +872,35 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                     "result_type": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[a-z0-9._-]+$"},
                     "result_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                     "received_at": timestamp(),
+                    "duplicate": {"type": "boolean"}
+                }),
+            ),
+        ),
+        (
+            "BrowserBridgeRuntimeBindingRequest",
+            object(
+                &["observed_origin", "frame_id"],
+                json!({
+                    "observed_origin": {"type": "string", "format": "uri", "pattern": "^https://", "maxLength": 256},
+                    "frame_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:-]+$"}
+                }),
+            ),
+        ),
+        (
+            "BrowserBridgeRuntimeBindingResponse",
+            object(
+                &[
+                    "session_id",
+                    "observed_origin",
+                    "frame_id",
+                    "bound_at",
+                    "duplicate",
+                ],
+                json!({
+                    "session_id": uuid(),
+                    "observed_origin": {"type": "string", "format": "uri", "pattern": "^https://", "maxLength": 256},
+                    "frame_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:-]+$"},
+                    "bound_at": timestamp(),
                     "duplicate": {"type": "boolean"}
                 }),
             ),

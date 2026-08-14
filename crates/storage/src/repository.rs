@@ -5,16 +5,17 @@ use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor, AuditRecord,
     AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId, AuthSession,
     AuthSessionId, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
-    BrowserBridgeSession, BrowserBridgeSessionId, CreditAccount, CreditReservation,
-    CreditReservationId, CreditTransaction, CreditTransactionId, Execution, ExecutionAttempt,
-    ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent, ExecutionProgress,
-    ExecutionStage, ExecutionState, ExternalOauthPending, LogLevel, OrchestrationState, PriceQuote,
-    ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
-    Question, QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId,
-    QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId,
-    SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
-    SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
-    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
+    BrowserBridgeRuntimeBinding, BrowserBridgeSession, BrowserBridgeSessionId, CreditAccount,
+    CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId, Execution,
+    ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent,
+    ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending, LogLevel,
+    OrchestrationState, PriceQuote, ProviderAccount, ProviderAccountId, ProviderErrorClass,
+    ProviderId, ProviderRuntimeSettingsId, Question, QuestionContentFingerprint,
+    QuestionReadAttempt, QuestionReadAttemptId, QuestionSession, QuestionSnapshotId, ScheduleId,
+    ServiceToken, ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId,
+    SubmissionResult, SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId,
+    TaskLifecycleAction, Timestamp, User, UserId, UserProfile, UserStatus, WebSession,
+    WebSessionId,
 };
 use asterism_provider_api::{
     BrowserSessionSpec, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
@@ -1049,6 +1050,19 @@ pub trait BrowserBridgeSessionRepository: Send + Sync {
         authenticated_at: Timestamp,
     ) -> Result<Option<(BrowserBridgeSession, BrowserSessionSpec)>, StorageError>;
 
+    async fn bind_browser_bridge_runtime(
+        &self,
+        binding: &BrowserBridgeRuntimeBinding,
+        access_token_digest: &TokenDigest,
+        correlation_id: &str,
+    ) -> Result<BrowserBridgeRuntimeBindingRecord, StorageError>;
+
+    async fn find_browser_bridge_runtime_binding(
+        &self,
+        owner_user_id: UserId,
+        session_id: BrowserBridgeSessionId,
+    ) -> Result<Option<BrowserBridgeRuntimeBinding>, StorageError>;
+
     async fn update_browser_bridge_session_for_owner(
         &self,
         session: &BrowserBridgeSession,
@@ -1063,6 +1077,14 @@ pub trait BrowserBridgeSessionRepository: Send + Sync {
         access_token_digest: &TokenDigest,
         correlation_id: &str,
     ) -> Result<BrowserBridgeExchangeRecord, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserBridgeRuntimeBindingRecord {
+    Bound(BrowserBridgeRuntimeBinding),
+    Duplicate(BrowserBridgeRuntimeBinding),
+    AccessRejected,
+    Conflict,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

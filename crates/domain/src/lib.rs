@@ -42,8 +42,9 @@ pub use automation::{
     InheritanceMode, PlanScope, SchedulePolicy,
 };
 pub use browser_bridge::{
-    BrowserBridgeSession, BrowserBridgeSessionCreate, BrowserBridgeSessionError,
-    BrowserBridgeSessionState, MAX_BROWSER_BRIDGE_SESSION_TTL_SECONDS,
+    BrowserBridgeRuntimeBinding, BrowserBridgeRuntimeBindingError, BrowserBridgeSession,
+    BrowserBridgeSessionCreate, BrowserBridgeSessionError, BrowserBridgeSessionState,
+    MAX_BROWSER_BRIDGE_SESSION_TTL_SECONDS,
 };
 pub use browser_bridge_exchange::{
     BrowserBridgeExchange, BrowserBridgeExchangeError, BrowserBridgeExchangeState,

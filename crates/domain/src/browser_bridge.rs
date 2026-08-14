@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BrowserBridgeSessionId, ProviderAccountId, ProviderId, TaskId, Timestamp, UserId};
 
+const MAX_BROWSER_BRIDGE_ORIGIN_BYTES: usize = 256;
+const MAX_BROWSER_BRIDGE_FRAME_ID_BYTES: usize = 256;
+
 pub const MAX_BROWSER_BRIDGE_SESSION_TTL_SECONDS: i64 = 12 * 60 * 60;
 const MAX_PROVIDER_VERSION_BYTES: usize = 64;
 
@@ -14,6 +17,52 @@ pub enum BrowserBridgeSessionState {
     Failed,
     Expired,
     Cancelled,
+}
+
+/// Immutable browser document identity observed by one claimed helper.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BrowserBridgeRuntimeBinding {
+    pub session_id: BrowserBridgeSessionId,
+    pub observed_origin: String,
+    pub frame_id: String,
+    pub bound_at: Timestamp,
+}
+
+impl BrowserBridgeRuntimeBinding {
+    /// Validates bounded credential-free runtime identity syntax. Storage also
+    /// requires the origin to belong to the frozen session specification.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-HTTPS origins and unsafe or unbounded frame identifiers.
+    pub fn validate(&self) -> Result<(), BrowserBridgeRuntimeBindingError> {
+        let authority = self
+            .observed_origin
+            .strip_prefix("https://")
+            .ok_or(BrowserBridgeRuntimeBindingError::Invalid)?;
+        if self.observed_origin.len() > MAX_BROWSER_BRIDGE_ORIGIN_BYTES
+            || authority.is_empty()
+            || !self.observed_origin.is_ascii()
+            || authority
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'?' | b'#' | b'@'))
+            || self.frame_id.is_empty()
+            || self.frame_id.len() > MAX_BROWSER_BRIDGE_FRAME_ID_BYTES
+            || !self.frame_id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+        {
+            Err(BrowserBridgeRuntimeBindingError::Invalid)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum BrowserBridgeRuntimeBindingError {
+    #[error("BrowserBridge runtime origin or frame binding is invalid")]
+    Invalid,
 }
 
 /// Durable, credential-free binding for one `BrowserBridge` helper session.
@@ -277,6 +326,32 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use super::*;
+
+    #[test]
+    fn runtime_binding_requires_exact_https_origin_and_safe_frame() {
+        let now = Utc::now();
+        let binding = BrowserBridgeRuntimeBinding {
+            session_id: BrowserBridgeSessionId::new(),
+            observed_origin: "https://provider.example".to_owned(),
+            frame_id: "top-frame:1".to_owned(),
+            bound_at: now,
+        };
+        assert_eq!(binding.validate(), Ok(()));
+
+        let mut routed_origin = binding.clone();
+        routed_origin.observed_origin.push_str("/task");
+        assert_eq!(
+            routed_origin.validate(),
+            Err(BrowserBridgeRuntimeBindingError::Invalid)
+        );
+
+        let mut unsafe_frame = binding;
+        unsafe_frame.frame_id = "top frame".to_owned();
+        assert_eq!(
+            unsafe_frame.validate(),
+            Err(BrowserBridgeRuntimeBindingError::Invalid)
+        );
+    }
 
     #[test]
     fn helper_claims_once_and_terminal_states_never_reopen() {

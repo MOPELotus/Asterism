@@ -3,15 +3,18 @@ use std::str::FromStr;
 use asterism_auth::TokenDigest;
 use asterism_domain::{
     AuditActor, AuditRecordId, BrowserBridgeExchange, BrowserBridgeExchangeState,
-    BrowserBridgeSession, BrowserBridgeSessionId, BrowserBridgeSessionState, ProviderAccountId,
-    ProviderId, TaskId, Timestamp, UserId,
+    BrowserBridgeRuntimeBinding, BrowserBridgeSession, BrowserBridgeSessionId,
+    BrowserBridgeSessionState, ProviderAccountId, ProviderId, TaskId, Timestamp, UserId,
 };
 use asterism_provider_api::BrowserSessionSpec;
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
-use crate::{BrowserBridgeExchangeRecord, BrowserBridgeSessionRepository, Database, StorageError};
+use crate::{
+    BrowserBridgeExchangeRecord, BrowserBridgeRuntimeBindingRecord, BrowserBridgeSessionRepository,
+    Database, StorageError,
+};
 
 const SESSION_SELECT: &str = "SELECT id, owner_user_id, provider_account_id, task_id, provider_id, \
     provider_version, spec_version, spec_digest, spec_json, state_json, revision, expires_at, \
@@ -194,6 +197,108 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
         }
         transaction.commit().await?;
         Ok(Some((session, spec)))
+    }
+
+    async fn bind_browser_bridge_runtime(
+        &self,
+        binding: &BrowserBridgeRuntimeBinding,
+        access_token_digest: &TokenDigest,
+        correlation_id: &str,
+    ) -> Result<BrowserBridgeRuntimeBindingRecord, StorageError> {
+        binding
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        validate_correlation_id(correlation_id)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let query = format!(
+            "{SESSION_SELECT} WHERE id = ? AND access_token_hash = ? \
+             AND pairing_token_hash IS NULL AND state_json = ? AND expires_at > ?"
+        );
+        let Some(row) = sqlx::query(&query)
+            .bind(binding.session_id.to_string())
+            .bind(access_token_digest.as_bytes().as_slice())
+            .bind(serde_json::to_string(&BrowserBridgeSessionState::Claimed)?)
+            .bind(encode_timestamp(binding.bound_at))
+            .fetch_optional(&mut *transaction)
+            .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(BrowserBridgeRuntimeBindingRecord::AccessRejected);
+        };
+        let (session, spec) = decode_session(&row)?;
+        if session
+            .claimed_at
+            .is_none_or(|claimed_at| binding.bound_at < claimed_at)
+            || !spec
+                .allowed_origins
+                .iter()
+                .any(|origin| origin == &binding.observed_origin)
+            || !binding_matches_session(binding, &session)
+        {
+            transaction.rollback().await?;
+            return Ok(BrowserBridgeRuntimeBindingRecord::Conflict);
+        }
+        ensure_binding(&mut transaction, &session).await?;
+        if let Some(existing) = fetch_runtime_binding(&mut transaction, binding.session_id).await? {
+            transaction.rollback().await?;
+            return Ok(
+                if existing.observed_origin == binding.observed_origin
+                    && existing.frame_id == binding.frame_id
+                {
+                    BrowserBridgeRuntimeBindingRecord::Duplicate(existing)
+                } else {
+                    BrowserBridgeRuntimeBindingRecord::Conflict
+                },
+            );
+        }
+        sqlx::query(
+            "INSERT INTO browser_bridge_runtime_bindings \
+             (session_id, observed_origin, frame_id, bound_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(binding.session_id.to_string())
+        .bind(&binding.observed_origin)
+        .bind(&binding.frame_id)
+        .bind(encode_timestamp(binding.bound_at))
+        .execute(&mut *transaction)
+        .await?;
+        insert_runtime_binding_audit(&mut transaction, binding, correlation_id).await?;
+        transaction.commit().await?;
+        Ok(BrowserBridgeRuntimeBindingRecord::Bound(binding.clone()))
+    }
+
+    async fn find_browser_bridge_runtime_binding(
+        &self,
+        owner_user_id: UserId,
+        session_id: BrowserBridgeSessionId,
+    ) -> Result<Option<BrowserBridgeRuntimeBinding>, StorageError> {
+        let Some(row) = sqlx::query(
+            "SELECT runtime.session_id, runtime.observed_origin, runtime.frame_id, \
+                    runtime.bound_at, sessions.spec_json \
+             FROM browser_bridge_runtime_bindings runtime \
+             JOIN browser_bridge_sessions sessions ON sessions.id = runtime.session_id \
+             WHERE runtime.session_id = ? AND sessions.owner_user_id = ?",
+        )
+        .bind(session_id.to_string())
+        .bind(owner_user_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?
+        else {
+            return Ok(None);
+        };
+        let binding = decode_runtime_binding(&row)?;
+        let spec: BrowserSessionSpec = serde_json::from_str(&row.get::<String, _>("spec_json"))?;
+        spec.validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if !spec
+            .allowed_origins
+            .iter()
+            .any(|origin| origin == &binding.observed_origin)
+        {
+            return Err(StorageError::InvalidData(
+                "BrowserBridge runtime origin is outside the frozen policy".to_owned(),
+            ));
+        }
+        Ok(Some(binding))
     }
 
     async fn update_browser_bridge_session_for_owner(
@@ -516,6 +621,35 @@ pub(crate) async fn insert_exchange_audit(
     Ok(())
 }
 
+async fn insert_runtime_binding_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    binding: &BrowserBridgeRuntimeBinding,
+    correlation_id: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'browser_bridge', ?, 'browser_bridge_runtime_bound', \
+          'browser_bridge_session', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(binding.bound_at))
+    .bind(binding.session_id.to_string())
+    .bind(binding.session_id.to_string())
+    .bind(correlation_id)
+    .bind(
+        serde_json::json!({
+            "observed_origin": binding.observed_origin,
+            "frame_id": binding.frame_id,
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn fetch_session(
     transaction: &mut Transaction<'_, Sqlite>,
     session_id: BrowserBridgeSessionId,
@@ -528,6 +662,43 @@ pub(crate) async fn fetch_session(
         .as_ref()
         .map(decode_session)
         .transpose()
+}
+
+pub(crate) async fn fetch_runtime_binding(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: BrowserBridgeSessionId,
+) -> Result<Option<BrowserBridgeRuntimeBinding>, StorageError> {
+    sqlx::query(
+        "SELECT session_id, observed_origin, frame_id, bound_at \
+         FROM browser_bridge_runtime_bindings WHERE session_id = ?",
+    )
+    .bind(session_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .as_ref()
+    .map(decode_runtime_binding)
+    .transpose()
+}
+
+fn decode_runtime_binding(row: &SqliteRow) -> Result<BrowserBridgeRuntimeBinding, StorageError> {
+    let binding = BrowserBridgeRuntimeBinding {
+        session_id: BrowserBridgeSessionId::from_str(&row.get::<String, _>("session_id"))
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        observed_origin: row.get("observed_origin"),
+        frame_id: row.get("frame_id"),
+        bound_at: decode_timestamp(&row.get::<String, _>("bound_at"))?,
+    };
+    binding
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    Ok(binding)
+}
+
+fn binding_matches_session(
+    binding: &BrowserBridgeRuntimeBinding,
+    session: &BrowserBridgeSession,
+) -> bool {
+    binding.session_id == session.id
 }
 
 fn validate_initial_session(
@@ -781,6 +952,103 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_binding_is_access_scoped_first_writer_wins_and_owner_readable() {
+        let fixture = fixture().await;
+        let now = Utc::now();
+        let spec = spec();
+        let session = session(&fixture, &spec, now);
+        let pairing_tokens = OpaqueTokenService::new("ast_bridge_pair").unwrap();
+        let (pairing, pairing_digest) = pairing_tokens.generate();
+        let access_tokens = OpaqueTokenService::new("ast_bridge").unwrap();
+        let (_, access_digest) = access_tokens.generate();
+        fixture
+            .repository
+            .create_browser_bridge_session(
+                &session,
+                &spec,
+                &pairing_digest,
+                AuditActor::User(fixture.owner),
+                "runtime-create",
+            )
+            .await
+            .unwrap();
+        fixture
+            .repository
+            .claim_browser_bridge_session(
+                session.id,
+                &pairing_tokens.digest(&pairing),
+                &access_digest,
+                now + Duration::seconds(1),
+                "runtime-claim",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let binding = BrowserBridgeRuntimeBinding {
+            session_id: session.id,
+            observed_origin: "https://provider.example".to_owned(),
+            frame_id: "top-frame:1".to_owned(),
+            bound_at: now + Duration::seconds(2),
+        };
+        let (_, wrong_access) = access_tokens.generate();
+        assert_eq!(
+            fixture
+                .repository
+                .bind_browser_bridge_runtime(&binding, &wrong_access, "runtime-wrong-access")
+                .await
+                .unwrap(),
+            BrowserBridgeRuntimeBindingRecord::AccessRejected
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .bind_browser_bridge_runtime(&binding, &access_digest, "runtime-bind")
+                .await
+                .unwrap(),
+            BrowserBridgeRuntimeBindingRecord::Bound(binding.clone())
+        );
+
+        let mut identical_retry = binding.clone();
+        identical_retry.bound_at = now + Duration::seconds(3);
+        assert_eq!(
+            fixture
+                .repository
+                .bind_browser_bridge_runtime(&identical_retry, &access_digest, "runtime-duplicate",)
+                .await
+                .unwrap(),
+            BrowserBridgeRuntimeBindingRecord::Duplicate(binding.clone())
+        );
+
+        let mut conflict = identical_retry;
+        conflict.frame_id = "foreign-frame".to_owned();
+        assert_eq!(
+            fixture
+                .repository
+                .bind_browser_bridge_runtime(&conflict, &access_digest, "runtime-conflict")
+                .await
+                .unwrap(),
+            BrowserBridgeRuntimeBindingRecord::Conflict
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .find_browser_bridge_runtime_binding(fixture.owner, session.id)
+                .await
+                .unwrap(),
+            Some(binding)
+        );
+        assert!(
+            fixture
+                .repository
+                .find_browser_bridge_runtime_binding(UserId::new(), session.id)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

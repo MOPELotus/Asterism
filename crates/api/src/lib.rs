@@ -228,6 +228,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(browser_bridge::get_browser_bridge_snapshot),
         )
         .route(
+            "/api/v1/browser-bridge/sessions/{session_id}/binding",
+            axum::routing::put(browser_bridge::bind_browser_bridge_runtime),
+        )
+        .route(
             "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}",
             get(browser_bridge::dispatch_browser_bridge_command),
         )
@@ -1016,6 +1020,13 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/browser-bridge/sessions/{session_id}/binding".to_owned(),
+            browser_bridge_binding_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}".to_owned(),
             browser_bridge_command_path(),
         );
@@ -1662,6 +1673,26 @@ fn browser_bridge_snapshot_path() -> Value {
             "200": {"description": "Exact claimed session and frozen credential-free policy"},
             "400": {"description": "Invalid session ID"},
             "401": {"description": "Session-scoped BrowserBridge access token is invalid or expired"}
+        }
+    }})
+}
+
+fn browser_bridge_binding_path() -> Value {
+    json!({"put": {
+        "operationId": "bindBrowserBridgeRuntime",
+        "description": "Authenticates the claimed helper and freezes its first exact browser origin/frame identity. Identical retries return the original binding; a conflicting second writer never replaces it.",
+        "security": [{"browserBridgeAuth": []}],
+        "parameters": [
+            {"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "requestBody": {"required": true, "content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/BrowserBridgeRuntimeBindingRequest"}}
+        }},
+        "responses": {
+            "200": {"description": "First durable runtime binding or identical retry"},
+            "400": {"description": "Invalid session, origin, frame or request ID"},
+            "401": {"description": "Session-scoped BrowserBridge access token is invalid or expired"},
+            "409": {"description": "Runtime origin or frame conflicts with the frozen policy or first writer"}
         }
     }})
 }
@@ -4408,6 +4439,74 @@ mod tests {
         assert_eq!(snapshot.status(), StatusCode::OK);
         assert_eq!(response_json(snapshot).await["session"]["id"], session_id);
 
+        let binding_path = format!("/api/v1/browser-bridge/sessions/{session_id}/binding");
+        let binding_body = json!({
+            "observed_origin": "https://provider-alpha.example",
+            "frame_id": "top-frame:1"
+        });
+        let bound = app
+            .clone()
+            .oneshot(
+                Request::put(&binding_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "browser-bridge-runtime-bind")
+                    .body(Body::from(binding_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bound.status(), StatusCode::OK);
+        let bound = response_json(bound).await;
+        assert_eq!(bound["session_id"], session_id);
+        assert_eq!(bound["duplicate"], false);
+
+        let duplicate_binding = app
+            .clone()
+            .oneshot(
+                Request::put(&binding_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "browser-bridge-runtime-duplicate")
+                    .body(Body::from(binding_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate_binding.status(), StatusCode::OK);
+        let duplicate_binding = response_json(duplicate_binding).await;
+        assert_eq!(duplicate_binding["duplicate"], true);
+        assert_eq!(duplicate_binding["bound_at"], bound["bound_at"]);
+
+        let conflicting_binding = app
+            .clone()
+            .oneshot(
+                Request::put(&binding_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "browser-bridge-runtime-conflict")
+                    .body(Body::from(
+                        json!({
+                            "observed_origin": "https://provider-alpha.example",
+                            "frame_id": "foreign-frame"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflicting_binding.status(), StatusCode::CONFLICT);
+
         let command = br#"{"version":1,"kind":"capture_snapshot"}"#;
         let issued_at = Utc::now();
         let exchange = BrowserBridgeExchange::issue(
@@ -6423,6 +6522,7 @@ mod tests {
             "/api/v1/browser-bridge/sessions/{session_id}",
             "/api/v1/browser-bridge/sessions/{session_id}/claim",
             "/api/v1/browser-bridge/sessions/{session_id}/snapshot",
+            "/api/v1/browser-bridge/sessions/{session_id}/binding",
             "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}",
             "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}/result",
             "/api/v1/service-tokens",

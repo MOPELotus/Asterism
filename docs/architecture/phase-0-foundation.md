@@ -3431,3 +3431,26 @@ session specification, and no browser action can run until Core has durably
 issued and one-shot dispatched its exact encrypted command. Provider policy
 versions advance when adopting the new route binding so old and new session
 shapes cannot be mistaken for one another.
+
+## One-hundred-and-ninety-fifth Phase 0 slice
+
+The helper's actual browser document identity is now a separate immutable fact.
+After consuming the pairing token and opening the frozen start route, the helper
+may bind one exact HTTPS origin and one bounded opaque frame ID through its
+session-scoped access token. Migration 045 stores the first origin/frame pair
+with its observation time under the session primary key. Storage authenticates
+the still-live claimed session, repeats the owner/account/Task/Provider binding,
+requires the origin to belong to the frozen policy and writes an Audit record in
+the same immediate transaction.
+
+An identical retry returns the original observation time. A foreign token,
+changed frame, changed origin, pre-claim timestamp or navigation outside the
+allowlist cannot replace the first writer. Owner-scoped recovery can read the
+binding after restart, but the helper cannot choose another session or mutate
+the Provider policy. Exact command issuance now requires this durable runtime
+binding to exist, ensuring Provider command construction never relies on a
+caller-only frame or origin value.
+
+The runtime binding still grants no remote mutation by itself. It carries no
+credential, command bytes or completion state; every browser action remains an
+independent encrypted exchange that Core persists before its one-shot dispatch.

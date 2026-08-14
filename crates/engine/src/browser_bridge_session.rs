@@ -1,6 +1,7 @@
 use asterism_auth::{OpaqueTokenService, TokenError};
 use asterism_domain::{
-    AuditActor, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata, BrowserBridgeSession,
+    AuditActor, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
+    BrowserBridgeRuntimeBinding, BrowserBridgeRuntimeBindingError, BrowserBridgeSession,
     BrowserBridgeSessionCreate, BrowserBridgeSessionError, BrowserBridgeSessionId,
     ProviderAccountId, ProviderId, TaskId, Timestamp, UserId,
 };
@@ -19,8 +20,8 @@ use asterism_storage::{
     BrowserBridgeResultArtifactRecord,
     BrowserBridgeResultReceiveRequest as StorageBrowserBridgeResultReceiveRequest,
     BrowserBridgeResultResolveRequest as StorageBrowserBridgeResultResolveRequest,
-    BrowserBridgeSessionRepository, ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult,
-    StorageError,
+    BrowserBridgeRuntimeBindingRecord, BrowserBridgeSessionRepository,
+    ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, StorageError,
 };
 
 #[derive(Debug)]
@@ -160,6 +161,25 @@ where
             .await?
             .ok_or(BrowserBridgeHelperSessionError::AccessRejected)?;
         Ok(BrowserBridgeSessionSnapshot { session, spec })
+    }
+
+    /// Authenticates one helper and durably freezes the first observed browser
+    /// origin/frame identity. Identical retries recover the original record;
+    /// a different second writer never replaces it.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid runtime syntax or a failed atomic repository write.
+    pub async fn bind_runtime(
+        &self,
+        request: BrowserBridgeRuntimeBindRequest,
+    ) -> Result<BrowserBridgeRuntimeBindingRecord, BrowserBridgeHelperSessionError> {
+        request.binding.validate()?;
+        let access_digest = self.access_tokens.digest(&request.access_token);
+        Ok(self
+            .repository
+            .bind_browser_bridge_runtime(&request.binding, &access_digest, &request.correlation_id)
+            .await?)
     }
 
     /// Cancels one owner-scoped live helper session and invalidates all tokens.
@@ -502,6 +522,13 @@ pub struct BrowserBridgeSessionAccessRequest {
     pub authenticated_at: Timestamp,
 }
 
+#[derive(Debug)]
+pub struct BrowserBridgeRuntimeBindRequest {
+    pub binding: BrowserBridgeRuntimeBinding,
+    pub access_token: SecretString,
+    pub correlation_id: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BrowserBridgeSessionSnapshot {
     pub session: BrowserBridgeSession,
@@ -588,6 +615,8 @@ pub enum BrowserBridgeHelperSessionError {
     RevisionConflict(BrowserBridgeSessionId),
     #[error(transparent)]
     Domain(#[from] BrowserBridgeSessionError),
+    #[error(transparent)]
+    RuntimeBinding(#[from] BrowserBridgeRuntimeBindingError),
     #[error(transparent)]
     Spec(#[from] BrowserSessionSpecError),
     #[error(transparent)]

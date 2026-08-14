@@ -20,8 +20,8 @@ use crate::{
     BrowserBridgeResultResolveRequest, Database, ResolvedBrowserBridgeCommand,
     ResolvedBrowserBridgeResult, SecretKeyring,
     browser_bridge::{
-        authenticate_session_for_exchange, binding_is_valid, fetch_exchange, fetch_session,
-        find_claimed_session_for_exchange, insert_exchange_audit,
+        authenticate_session_for_exchange, binding_is_valid, fetch_exchange, fetch_runtime_binding,
+        fetch_session, find_claimed_session_for_exchange, insert_exchange_audit,
     },
     secret::{
         authorize, decrypt, encrypt, fetch_secret, insert_secret_audit, insert_secret_blob,
@@ -92,6 +92,14 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
             &self.provider_id,
             request.access,
         )?;
+        if fetch_runtime_binding(&mut transaction, request.exchange.session_id)
+            .await
+            .map_err(storage_error)?
+            .is_none()
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeExchangeRecord::SequenceConflict);
+        }
 
         let sequence =
             i64::try_from(request.exchange.sequence).map_err(|_| SecretStoreError::InvalidValue)?;
@@ -302,6 +310,14 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
             &self.provider_id,
             request.access,
         )?;
+        if fetch_runtime_binding(&mut transaction, request.session_id)
+            .await
+            .map_err(storage_error)?
+            .is_none()
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCommandDispatchRecord::SequenceConflict);
+        }
         let Some(exchange) = fetch_exchange(&mut transaction, request.session_id, sequence)
             .await
             .map_err(storage_error)?
@@ -815,9 +831,9 @@ mod tests {
 
     use asterism_auth::OpaqueTokenService;
     use asterism_domain::{
-        AuditActor, AuthMethod, AuthState, BrowserBridgeExchange, BrowserBridgeSession,
-        BrowserBridgeSessionCreate, BrowserBridgeSessionState, ProviderAccountId, Role,
-        SessionKind, TaskId, UserId,
+        AuditActor, AuthMethod, AuthState, BrowserBridgeExchange, BrowserBridgeRuntimeBinding,
+        BrowserBridgeSession, BrowserBridgeSessionCreate, BrowserBridgeSessionState,
+        ProviderAccountId, Role, SessionKind, TaskId, UserId,
     };
     use asterism_provider_api::BrowserSessionSpec;
     use asterism_secrets::{
@@ -849,6 +865,40 @@ mod tests {
         )
         .unwrap();
         let access = Fixture::access();
+        sqlx::query("DELETE FROM browser_bridge_runtime_bindings WHERE session_id = ?")
+            .bind(session.id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .command_repository
+                .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
+                    exchange: &issued,
+                    command_artifact: SecretValue::new(command.to_vec()),
+                    access: &access,
+                })
+                .await
+                .unwrap(),
+            BrowserBridgeExchangeRecord::SequenceConflict
+        );
+        assert!(matches!(
+            fixture
+                .session_repository
+                .bind_browser_bridge_runtime(
+                    &BrowserBridgeRuntimeBinding {
+                        session_id: session.id,
+                        observed_origin: "https://www.cidaren.com".to_owned(),
+                        frame_id: "top-frame:1".to_owned(),
+                        bound_at: now + Duration::seconds(2),
+                    },
+                    &access_digest,
+                    "command-session-rebind",
+                )
+                .await
+                .unwrap(),
+            crate::BrowserBridgeRuntimeBindingRecord::Bound(_)
+        ));
         let inserted = fixture
             .command_repository
             .issue_browser_bridge_command(BrowserBridgeCommandIssueRequest {
@@ -931,6 +981,40 @@ mod tests {
                 )
                 .await,
             BrowserBridgeCommandDispatchRecord::AccessRejected
+        ));
+        sqlx::query("DELETE FROM browser_bridge_runtime_bindings WHERE session_id = ?")
+            .bind(session.id.to_string())
+            .execute(fixture.database.pool())
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .dispatch_command(
+                    &session,
+                    1,
+                    &access_digest,
+                    &access,
+                    now + Duration::milliseconds(2_400),
+                )
+                .await,
+            BrowserBridgeCommandDispatchRecord::SequenceConflict
+        ));
+        assert!(matches!(
+            fixture
+                .session_repository
+                .bind_browser_bridge_runtime(
+                    &BrowserBridgeRuntimeBinding {
+                        session_id: session.id,
+                        observed_origin: "https://www.cidaren.com".to_owned(),
+                        frame_id: "top-frame:1".to_owned(),
+                        bound_at: now + Duration::milliseconds(2_400),
+                    },
+                    &access_digest,
+                    "command-session-dispatch-rebind",
+                )
+                .await
+                .unwrap(),
+            crate::BrowserBridgeRuntimeBindingRecord::Bound(_)
         ));
         assert!(matches!(
             fixture
@@ -1451,6 +1535,22 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+            assert!(matches!(
+                self.session_repository
+                    .bind_browser_bridge_runtime(
+                        &BrowserBridgeRuntimeBinding {
+                            session_id: session.id,
+                            observed_origin: "https://www.cidaren.com".to_owned(),
+                            frame_id: "top-frame:1".to_owned(),
+                            bound_at: now + Duration::seconds(2),
+                        },
+                        &access_digest,
+                        "command-session-bind",
+                    )
+                    .await
+                    .unwrap(),
+                crate::BrowserBridgeRuntimeBindingRecord::Bound(_)
+            ));
             (claimed.0, access_digest)
         }
 
