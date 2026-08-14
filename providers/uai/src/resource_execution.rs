@@ -84,6 +84,16 @@ pub trait UaiPresetCompletionTransport: Send + Sync {
         group_id: &str,
     ) -> ProviderResult<UaiPresetCompletionResult>;
 
+    /// Completes one exact `discussion` Group with the donor's direct empty
+    /// marker body, independently of the reply-and-readback workflow.
+    async fn complete_discussion_empty_marker(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiPresetCompletionResult>;
+
     /// Submits the donor-configured empty-answer shape for one exact oral
     /// Group. This is intentionally distinct from no-Question completion.
     async fn complete_oral_empty(
@@ -100,6 +110,7 @@ pub trait UaiPresetCompletionTransport: Send + Sync {
 enum EmptyCompletionKind {
     Preset,
     ExitTicket,
+    DiscussionEmptyMarker,
     Oral {
         task_type: OralTaskType,
         question_count: u32,
@@ -128,6 +139,7 @@ impl EmptyCompletionKind {
         match self {
             Self::Preset => "preset",
             Self::ExitTicket => "exit_ticket",
+            Self::DiscussionEmptyMarker => "discussion_empty_marker",
             Self::Oral { .. } => "oral_empty",
         }
     }
@@ -136,6 +148,9 @@ impl EmptyCompletionKind {
         match self {
             Self::Preset => "纯学习任务已通过新鲜详情校验，准备核验并按需提交完成标记",
             Self::ExitTicket => "出口问卷已通过新鲜详情校验，准备核验并提交 donor 定义的空完成标记",
+            Self::DiscussionEmptyMarker => {
+                "讨论任务已通过新鲜详情校验，准备提交 donor 定义的直接空标记"
+            }
             Self::Oral { .. } => "口语任务已通过新鲜详情校验，准备核验并提交 donor 定义的空答案",
         }
     }
@@ -193,6 +208,16 @@ impl UaiResourceExecution {
             EmptyCompletionKind::ExitTicket => {
                 self.transport
                     .complete_exit_ticket(
+                        context,
+                        &identity.course_resource,
+                        &identity.unit,
+                        &identity.group,
+                    )
+                    .await
+            }
+            EmptyCompletionKind::DiscussionEmptyMarker => {
+                self.transport
+                    .complete_discussion_empty_marker(
                         context,
                         &identity.course_resource,
                         &identity.unit,
@@ -415,6 +440,8 @@ fn empty_completion_kind(
         Some(EmptyCompletionKind::Preset)
     } else if task_types == ["exit-ticket"] {
         Some(EmptyCompletionKind::ExitTicket)
+    } else if task_types == ["discussion"] && question_count == Some(1) {
+        Some(EmptyCompletionKind::DiscussionEmptyMarker)
     } else {
         let task_type = match task_types {
             [task_type] if task_type == "oral-sentence" => OralTaskType::Sentence,
@@ -765,6 +792,36 @@ mod tests {
             }))
         }
 
+        async fn complete_discussion_empty_marker(
+            &self,
+            _context: &ProviderContext,
+            course_resource_id: &str,
+            unit_id: &str,
+            group_id: &str,
+        ) -> ProviderResult<UaiPresetCompletionResult> {
+            self.calls.lock().unwrap().push((
+                course_resource_id.to_owned(),
+                unit_id.to_owned(),
+                group_id.to_owned(),
+                "discussion_empty_marker",
+            ));
+            if self.fail {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "synthetic ambiguous mutation failure",
+                ));
+            }
+            if self.already_completed {
+                return Ok(UaiPresetCompletionResult::AlreadyCompleted);
+            }
+            Ok(UaiPresetCompletionResult::Submitted(SubmissionReceipt {
+                remote_status: "accepted".to_owned(),
+                message_sanitized: Some("accepted for verification".to_owned()),
+                provider_trace_id: Some("submit-version-42".to_owned()),
+                received_at: Utc::now(),
+            }))
+        }
+
         async fn complete_oral_empty(
             &self,
             _context: &ProviderContext,
@@ -976,7 +1033,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_group_fails_before_preset_mutation() {
+    async fn donor_discussion_empty_marker_uses_its_direct_execution_path() {
         let transport = Arc::new(FixtureTransport::default());
         let execution = UaiResourceExecution::try_new(
             Arc::new(FixtureDetail {
@@ -986,13 +1043,24 @@ mod tests {
             transport.clone(),
         )
         .unwrap();
-        let error = execution
+        let outcome = execution
             .execute(&context(), &request(), &FixtureEvents)
             .await
-            .expect_err("discussion must not inherit preset completion");
+            .unwrap();
 
-        assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
-        assert!(transport.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            outcome.result_sanitized["resource_kind"],
+            "discussion_empty_marker"
+        );
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            &[(
+                "2001".to_owned(),
+                "unit-1".to_owned(),
+                "group-1".to_owned(),
+                "discussion_empty_marker",
+            )]
+        );
     }
 
     #[tokio::test]

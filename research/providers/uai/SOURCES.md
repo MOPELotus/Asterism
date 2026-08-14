@@ -149,8 +149,8 @@ Asterism maps that exact semantic to ShortAnswer. The Apache donor audit
 additionally confirms the objective label set
 `material-banked-cloze`, `basic-scoop-content`,
 `basic-scoop-content-dropdown`, `fillblank-scoop-dropdown`, `sequence`,
-`translation` and `revise-mistake`, plus discussion topic/reply APIs,
-exit-ticket/oral empty submission and CMS-token/object-store upload. These are
+`translation` and `revise-mistake`, plus discussion direct empty marking and
+topic/reply APIs, exit-ticket/oral empty submission and CMS-token/object-store upload. These are
 implementation scope. Where the shared Core cannot yet express a reply draft,
 artifact handle or external resolver, that is a Core Gap rather than a Provider
 policy exclusion.

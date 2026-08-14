@@ -635,6 +635,24 @@ impl NativeUaiInventoryTransport {
         .await
     }
 
+    async fn complete_discussion_empty_marker_with_session(
+        &self,
+        session: &UaiJwtSession,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        self.complete_empty_with_session(
+            session,
+            course_resource_id,
+            unit_id,
+            group_id,
+            EmptyCompletionPreflight::Discussion,
+            None,
+        )
+        .await
+    }
+
     async fn complete_discussion_with_session(
         &self,
         session: &UaiJwtSession,
@@ -653,13 +671,11 @@ impl NativeUaiInventoryTransport {
                 "UAI discussion completion hierarchy is foreign to its Task",
             ));
         }
-        self.complete_empty_with_session(
+        self.complete_discussion_empty_marker_with_session(
             session,
             plan.course_resource_id(),
             plan.unit_id(),
             plan.group_id(),
-            EmptyCompletionPreflight::Discussion,
-            None,
         )
         .await
         .map(|result| match result {
@@ -1604,6 +1620,37 @@ impl UaiPresetCompletionTransport for NativeUaiInventoryTransport {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 let session = self.sessions.renew_session(context).await?;
                 self.complete_exit_ticket_with_session(
+                    &session,
+                    course_resource_id,
+                    unit_id,
+                    group_id,
+                )
+                .await
+            }
+            result => result,
+        }
+    }
+
+    async fn complete_discussion_empty_marker(
+        &self,
+        context: &ProviderContext,
+        course_resource_id: &str,
+        unit_id: &str,
+        group_id: &str,
+    ) -> ProviderResult<UaiPresetCompletionResult> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .complete_discussion_empty_marker_with_session(
+                &session,
+                course_resource_id,
+                unit_id,
+                group_id,
+            )
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.complete_discussion_empty_marker_with_session(
                     &session,
                     course_resource_id,
                     unit_id,
@@ -3229,6 +3276,16 @@ mod tests {
                 "unit-1",
                 "group-1",
                 EmptyCompletionPreflight::Oral,
+                within_window,
+            )
+            .unwrap()
+        );
+        assert!(
+            validate_empty_completion_progress_target_at(
+                &task,
+                "unit-1",
+                "group-1",
+                EmptyCompletionPreflight::Discussion,
                 within_window,
             )
             .unwrap()

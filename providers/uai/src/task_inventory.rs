@@ -877,14 +877,19 @@ mod tests {
                 .contains(&TaskCapability::ExecutionVerify)
         );
 
-        let unsupported = TREE
+        let discussion = TREE
             .replace("rich-text-read", "discussion")
             .replace("vocabulary,input", "single-choice");
-        let tasks = parse_task_inventory(&course, &context, &unsupported).unwrap();
+        let tasks = parse_task_inventory(&course, &context, &discussion).unwrap();
         assert!(
-            !tasks[0]
+            tasks[0]
                 .capabilities
                 .contains(&TaskCapability::ResourceExecution)
+        );
+        assert!(
+            tasks[0]
+                .capabilities
+                .contains(&TaskCapability::ExecutionVerify)
         );
         assert!(
             !tasks[1]
