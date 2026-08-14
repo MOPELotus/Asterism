@@ -2,7 +2,10 @@ use std::{borrow::Cow, fmt, sync::Arc};
 
 use asterism_domain::{HumanRequiredReason, TaskId};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
-use asterism_provider_api::{ProviderContext, ProviderError, ProviderErrorKind, ProviderResult};
+use asterism_provider_api::{
+    ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSink, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderResult,
+};
 use asterism_secrets::SecretString;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -30,11 +33,12 @@ use crate::{
     },
     parse_exam_submission_response, parse_submission_receipt,
     resource_execution::{
-        ChaoxingImmediateResourceTransport, ChaoxingVideoStatus, ChaoxingVideoTransport,
+        ChaoxingImmediateResourceTransport, ChaoxingLiveStatus, ChaoxingLiveTransport,
+        ChaoxingVideoStatus, ChaoxingVideoTransport, live_post_mutation_error,
     },
     resource_inventory::{
         ChaoxingChapterWorkTarget, ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
-        ChaoxingVideoResourceTarget, ChaoxingVideoRt,
+        ChaoxingLiveResourceTarget, ChaoxingVideoResourceTarget, ChaoxingVideoRt,
     },
     submission_support::ChaoxingSubmissionForm,
     task_inventory::{
@@ -56,6 +60,13 @@ const VIDEO_STATUS_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const VIDEO_REPORT_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const VIDEO_REFERER: &str =
     "https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2025-0725-1842";
+const LIVE_STATUS_BASE: &str = "https://mooc1.chaoxing.com/ananas/live/liveinfo";
+const LIVE_REPORT_BASE: &str = "https://zhibo.chaoxing.com/saveTimePc";
+const LIVE_REFERER: &str =
+    "https://mooc1.chaoxing.com/ananas/modules/live/index.html?v=2022-1214-1139";
+const LIVE_MUTATION_OPERATION: &str = "chaoxing.live.heartbeat";
+const LIVE_REQUEST_DIGEST_DOMAIN: &[u8] = b"asterism.chaoxing.live-request.v1\0";
+const LIVE_RESPONSE_DIGEST_DOMAIN: &[u8] = b"asterism.chaoxing.live-response.v1\0";
 const COURSE_LIST_REFERER: &str = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans";
 const EXAM_LIST_BASE: &str = "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list";
 const EXAM_COVER_BASE: &str = "https://mooc1-api.chaoxing.com/exam-ans/exam/phone/task-exam";
@@ -837,6 +848,82 @@ impl NativeChaoxingInventoryTransport {
         ))
     }
 
+    async fn live_status_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+        knowledge_id: &str,
+        target: &ChaoxingLiveResourceTarget,
+    ) -> ProviderResult<ChaoxingLiveStatus> {
+        let response = self
+            .client
+            .get(live_status_url(session, route, knowledge_id, target)?)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "application/json,text/plain,*/*")
+            .header(REFERER, LIVE_REFERER)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        validate_response_status(&response)?;
+        let body = read_response_body(response).await?;
+        let status: LiveStatusResponse = serde_json::from_str(body.as_str())
+            .map_err(|_| protocol_drift("Chaoxing Live status JSON is malformed"))?;
+        let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Chaoxing Live status requires an identity Cookie",
+            )
+        })?;
+        ChaoxingLiveStatus::try_new(status.temp.data.duration, user_id)
+    }
+
+    async fn report_live_progress_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+        target: &ChaoxingLiveResourceTarget,
+        status: &ChaoxingLiveStatus,
+        ordinal: u32,
+        mutations: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<bool> {
+        let url = live_report_url(session, route, target, status)?;
+        let request_digest = live_mutation_request_digest(ordinal, target.job_id(), &url)?;
+        let issue = ExecutionMutationIssue::new(ordinal, LIVE_MUTATION_OPERATION, request_digest)?;
+        mutations.issue(&issue).await.map_err(|error| {
+            if ordinal > 1 {
+                live_post_mutation_error(error)
+            } else {
+                error
+            }
+        })?;
+        let response = self
+            .client
+            .get(url)
+            .header(
+                COOKIE,
+                session.header_value().map_err(live_post_mutation_error)?,
+            )
+            .header(ACCEPT, "text/plain,*/*")
+            .header(REFERER, LIVE_REFERER)
+            .send()
+            .await
+            .map_err(|error| live_post_mutation_error(classify_reqwest_error(&error)))?;
+        validate_response_status(&response).map_err(live_post_mutation_error)?;
+        let body = read_live_mutation_body(response)
+            .await
+            .map_err(live_post_mutation_error)?;
+        let response_digest =
+            live_mutation_response_digest(body.as_str()).map_err(live_post_mutation_error)?;
+        let accepted = body.as_str().trim() == "@success";
+        let receipt = ExecutionMutationReceipt::new(ordinal, response_digest, accepted)
+            .map_err(live_post_mutation_error)?;
+        mutations
+            .record_receipt(receipt)
+            .await
+            .map_err(live_post_mutation_error)?;
+        Ok(accepted)
+    }
+
     async fn fetch_course_inventories_once(
         &self,
         session: &ChaoxingCookieSession,
@@ -1279,6 +1366,57 @@ impl ChaoxingVideoTransport for NativeChaoxingInventoryTransport {
 }
 
 #[async_trait]
+impl ChaoxingLiveTransport for NativeChaoxingInventoryTransport {
+    async fn live_status(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        knowledge_id: &str,
+        target: &ChaoxingLiveResourceTarget,
+    ) -> ProviderResult<ChaoxingLiveStatus> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .live_status_once(&session, route, knowledge_id, target)
+            .await
+        {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.live_status_once(&session, route, knowledge_id, target)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn report_live_progress(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        target: &ChaoxingLiveResourceTarget,
+        status: &ChaoxingLiveStatus,
+        ordinal: u32,
+        mutations: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<bool> {
+        let session = if ordinal == 1 {
+            self.session_for_operation(context).await?.0
+        } else {
+            self.sessions
+                .resolve_session(context)
+                .await
+                .map_err(live_post_mutation_error)?
+        };
+        let result = self
+            .report_live_progress_once(&session, route, target, status, ordinal, mutations)
+            .await;
+        if ordinal > 1 {
+            result.map_err(live_post_mutation_error)
+        } else {
+            result
+        }
+    }
+}
+
+#[async_trait]
 impl ChaoxingCourseInventoryTransport for NativeChaoxingInventoryTransport {
     async fn fetch_course_inventories(
         &self,
@@ -1321,6 +1459,21 @@ impl Drop for SensitiveVideoStatus {
 struct VideoReportResponse {
     #[serde(rename = "isPassed")]
     is_passed: bool,
+}
+
+#[derive(Deserialize)]
+struct LiveStatusResponse {
+    temp: LiveStatusTemp,
+}
+
+#[derive(Deserialize)]
+struct LiveStatusTemp {
+    data: LiveStatusData,
+}
+
+#[derive(Deserialize)]
+struct LiveStatusData {
+    duration: u64,
 }
 
 impl SensitiveHtml {
@@ -1623,6 +1776,112 @@ fn video_report_url(
     Ok(url)
 }
 
+fn live_status_url(
+    session: &ChaoxingCookieSession,
+    route: ChaoxingCourseRoute<'_>,
+    knowledge_id: &str,
+    target: &ChaoxingLiveResourceTarget,
+) -> ProviderResult<Url> {
+    let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Chaoxing Live status requires an identity Cookie",
+        )
+    })?;
+    let mut url = static_url(LIVE_STATUS_BASE)?;
+    url.query_pairs_mut()
+        .append_pair("liveid", target.live_id().expose_secret())
+        .append_pair("userid", user_id)
+        .append_pair("clazzid", route.class_id())
+        .append_pair("knowledgeid", knowledge_id)
+        .append_pair("courseid", route.course_id())
+        .append_pair(
+            "jobid",
+            target
+                .status_job_id()
+                .map_or("", SecretString::expose_secret),
+        )
+        .append_pair("ut", "s");
+    Ok(url)
+}
+
+fn live_report_url(
+    session: &ChaoxingCookieSession,
+    route: ChaoxingCourseRoute<'_>,
+    target: &ChaoxingLiveResourceTarget,
+    status: &ChaoxingLiveStatus,
+) -> ProviderResult<Url> {
+    let user_id = session.cookie_value(&["_uid", "UID"]).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Chaoxing Live heartbeat requires an identity Cookie",
+        )
+    })?;
+    if user_id != status.user_id().expose_secret() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Chaoxing Live session identity changed after status discovery",
+        ));
+    }
+    let timestamp = Utc::now().timestamp_millis().to_string();
+    let mut url = static_url(LIVE_REPORT_BASE)?;
+    url.query_pairs_mut()
+        .append_pair("streamName", target.stream_name().expose_secret())
+        .append_pair("vdoid", target.video_id().expose_secret())
+        .append_pair("userId", user_id)
+        .append_pair("isStart", "0")
+        .append_pair("t", &timestamp)
+        .append_pair("courseId", route.course_id());
+    Ok(url)
+}
+
+fn live_mutation_request_digest(ordinal: u32, job_id: &str, url: &Url) -> ProviderResult<[u8; 32]> {
+    if !(1..=100_000).contains(&ordinal)
+        || job_id.is_empty()
+        || job_id.len() > 128
+        || job_id.chars().any(char::is_control)
+        || url.scheme() != "https"
+        || url.host_str() != Some("zhibo.chaoxing.com")
+        || url.path() != "/saveTimePc"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.as_str().len() > 16 * 1_024
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Live mutation request identity is invalid",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(LIVE_REQUEST_DIGEST_DOMAIN);
+    hash.update(ordinal.to_be_bytes());
+    hash_live_component(&mut hash, b"GET")?;
+    hash_live_component(&mut hash, job_id.as_bytes())?;
+    hash_live_component(&mut hash, url.as_str().as_bytes())?;
+    hash_live_component(&mut hash, LIVE_REFERER.as_bytes())?;
+    Ok(hash.finalize().into())
+}
+
+fn live_mutation_response_digest(body: &str) -> ProviderResult<[u8; 32]> {
+    let mut hash = Sha256::new();
+    hash.update(LIVE_RESPONSE_DIGEST_DOMAIN);
+    hash_live_component(&mut hash, body.as_bytes())?;
+    Ok(hash.finalize().into())
+}
+
+fn hash_live_component(hash: &mut Sha256, value: &[u8]) -> ProviderResult<()> {
+    let length = u64::try_from(value.len()).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "Chaoxing Live mutation digest input is invalid",
+        )
+    })?;
+    hash.update(length.to_be_bytes());
+    hash.update(value);
+    Ok(())
+}
+
 fn build_url(base: &str, query: &[(&str, &str)]) -> ProviderResult<Url> {
     let mut url = static_url(base)?;
     url.query_pairs_mut().extend_pairs(query.iter().copied());
@@ -1855,7 +2114,18 @@ fn validate_html_response_head(response: &Response) -> ProviderResult<()> {
     Ok(())
 }
 
-async fn read_response_body(mut response: Response) -> ProviderResult<SensitiveHtml> {
+async fn read_response_body(response: Response) -> ProviderResult<SensitiveHtml> {
+    read_bounded_response_body(response, true).await
+}
+
+async fn read_live_mutation_body(response: Response) -> ProviderResult<SensitiveHtml> {
+    read_bounded_response_body(response, false).await
+}
+
+async fn read_bounded_response_body(
+    mut response: Response,
+    detect_login: bool,
+) -> ProviderResult<SensitiveHtml> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -1885,7 +2155,7 @@ async fn read_response_body(mut response: Response) -> ProviderResult<SensitiveH
             ));
         }
     };
-    if looks_like_login_page(&html) {
+    if detect_login && looks_like_login_page(&html) {
         let mut html = html;
         html.zeroize();
         return Err(ProviderError::new(
@@ -2027,6 +2297,70 @@ mod tests {
             !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
         }));
         assert!(!report.as_str().contains("SAFE_UF"));
+    }
+
+    #[test]
+    fn live_routes_and_digests_bind_every_heartbeat_identity() {
+        let session = ChaoxingCookieSession::try_new("_uid=777; uf=SAFE_UF").unwrap();
+        let course = course();
+        let route = ChaoxingCourseRoute::from_remote_course(&course).unwrap();
+        let scope = route.parser_scope().unwrap();
+        let target = crate::resource_inventory::locate_live_resource_target(
+            RESOURCE_MIXED,
+            &scope,
+            "4001",
+            0,
+            "resource:100:200:4001:job-live",
+        )
+        .unwrap()
+        .unwrap();
+        let status_url = live_status_url(&session, route, "4001", &target).unwrap();
+        assert_eq!(status_url.path(), "/ananas/live/liveinfo");
+        for (key, expected) in [
+            ("liveid", "PRIVATE_LIVE"),
+            ("userid", "777"),
+            ("clazzid", "200"),
+            ("knowledgeid", "4001"),
+            ("courseid", "100"),
+            ("jobid", "PRIVATE_LIVE_JOB"),
+            ("ut", "s"),
+        ] {
+            assert_eq!(query(&status_url, key).as_deref(), Some(expected), "{key}");
+        }
+
+        let status = ChaoxingLiveStatus::try_new(125, "777").unwrap();
+        let report = live_report_url(&session, route, &target, &status).unwrap();
+        assert_eq!(report.path(), "/saveTimePc");
+        for (key, expected) in [
+            ("streamName", "PRIVATE_STREAM"),
+            ("vdoid", "PRIVATE_VDOID"),
+            ("userId", "777"),
+            ("isStart", "0"),
+            ("courseId", "100"),
+        ] {
+            assert_eq!(query(&report, key).as_deref(), Some(expected), "{key}");
+        }
+        assert!(query(&report, "t").is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        }));
+        let first = live_mutation_request_digest(1, target.job_id(), &report).unwrap();
+        assert_eq!(
+            first,
+            live_mutation_request_digest(1, target.job_id(), &report).unwrap()
+        );
+        assert_ne!(
+            first,
+            live_mutation_request_digest(2, target.job_id(), &report).unwrap()
+        );
+        assert_ne!(
+            first,
+            live_mutation_request_digest(1, "job-live-other", &report).unwrap()
+        );
+        assert_ne!(first, live_mutation_response_digest("@success").unwrap());
+        assert!(!report.as_str().contains("SAFE_UF"));
+
+        let foreign = ChaoxingLiveStatus::try_new(125, "778").unwrap();
+        assert!(live_report_url(&session, route, &target, &foreign).is_err());
     }
 
     #[test]

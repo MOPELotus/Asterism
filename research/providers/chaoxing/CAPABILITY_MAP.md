@@ -10,7 +10,7 @@ source modules even when their assessments share field names or HTML shapes.
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
-| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls plus signed interval-based Video progress, idempotence and fresh-card verification are offline-covered. Live's `saveTimePc` loop remains blocked on a durable per-heartbeat mutation boundary that prevents ambiguous replay |
+| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls, signed interval-based Video progress and Live `liveinfo` -> durable `saveTimePc` heartbeats -> fresh ProgressRead verification are offline-covered; every Live heartbeat is issue/receipt ledgered and ambiguous outcomes are never replayed |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text is parsed after removing scripts, while bounded score and structural `reTest(...)` availability remain read-only facts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, while completed Exams with a strictly bound preview entry add fresh result score/retake provenance without enabling retake execution |
@@ -88,22 +88,26 @@ policy and remains independently guarded.
   reqwest.
 - Chaoxing stays at `Development`; the daemon keeps it absent by default and
   registers it only through the explicit local-validation opt-in.
-- Pending Document and Read cards now advertise task-level `ResourceExecution`.
-  The execution capability rediscovers the current course/cpi and Chapter card,
-  submits only a fresh zeroizing `jtoken`, then refetches all seven cards and
-  accepts success only when the remote attachment is completed. Live and
-  Chapter Work execution remain current audited implementation gaps; the
-  completed native Document/Read/Video slice is not a Provider stopping point.
+- Pending Document, Read and Live cards advertise task-level `ResourceExecution`.
+  The immediate Document/Read path rediscovers the current course/cpi and
+  Chapter card, submits only a fresh zeroizing `jtoken`, then refetches all seven
+  cards and accepts success only when the remote attachment is completed. Live
+  uses the separately ledgered duration/heartbeat path below. Chapter Work
+  execution remains on its immutable-Draft path; no resource kind is routed
+  through the wrong mutation family.
 - Document, Read, Video and Live advertise `ProgressRead`; the capability performs the
   same bounded course/chapter/card rediscovery without invoking the completion
   endpoint and returns only normalized remote state and percentage. This is the
   safe remote-fact input for crash recovery, not live-account verification.
-- The refreshed Samueli donor implements Live completion as repeated
-  `saveTimePc` mutations after a `liveinfo` duration read. Asterism does not
-  advertise Live `ResourceExecution` yet: the current task execution boundary
-  cannot durably ledger each heartbeat before send, so retry/recovery could
-  replay an ambiguous non-idempotent write. That is a Main-owned Core gap, not a
-  reason to suppress the independently safe Live `ProgressRead` capability.
+- Live execution resolves fresh card-only `liveId`, `streamName`, `vdoid` and
+  optional status job material, reads a strict bounded `liveinfo` duration, and
+  freezes the status `_uid` across the run. Every `saveTimePc` heartbeat records
+  its provider-namespaced ordinal and exact semantic request digest before send,
+  then records the exact response digest and accepted bit before the next
+  ordinal. Any ambiguous send, parse or receipt failure becomes HumanRequired
+  and is not renewed or replayed. The final proof is a separate fresh
+  `ProgressRead` whose exact resource must report Completed; the fixture does
+  not claim live-account validation.
 - Video execution now re-resolves fresh non-persisted Card metadata, obtains one
   bounded status/dtoken response, reports monotonic intervals with the donor
   signature, and accepts completion only after a fresh Card reports passed.
@@ -217,7 +221,7 @@ policy and remains independently guarded.
 
 Chaoxing is complete only when all audited donor abilities—including remaining
 Chapter Work result-route/answer-resolution/retake wiring, Exam detail/result
-variants, Live, QR, captcha/face handling
+variants, Live account validation, QR, captcha/face handling
 and required BrowserBridge/Capture fallbacks—have code and all currently
 executable verification. A native or parser milestone may be reported but does
 not stop development. Immutable Drafts, exact attempt binding, receipt/readback

@@ -57,6 +57,15 @@ pub(crate) struct ChaoxingVideoResourceTarget {
     attendance_duration_enc: Option<SecretString>,
 }
 
+pub(crate) struct ChaoxingLiveResourceTarget {
+    remote_state: RemoteState,
+    job_id: String,
+    live_id: SecretString,
+    stream_name: SecretString,
+    video_id: SecretString,
+    status_job_id: Option<SecretString>,
+}
+
 /// One fresh Chapter Work attempt target. Route credentials remain in memory,
 /// are redacted from diagnostics and are zeroized when the operation ends.
 #[must_use]
@@ -167,6 +176,49 @@ impl std::fmt::Debug for ChaoxingVideoResourceTarget {
             .field(
                 "attendance_duration_enc",
                 &self.attendance_duration_enc.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl ChaoxingLiveResourceTarget {
+    pub(crate) const fn remote_state(&self) -> RemoteState {
+        self.remote_state
+    }
+
+    pub(crate) fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
+    pub(crate) fn live_id(&self) -> &SecretString {
+        &self.live_id
+    }
+
+    pub(crate) fn stream_name(&self) -> &SecretString {
+        &self.stream_name
+    }
+
+    pub(crate) fn video_id(&self) -> &SecretString {
+        &self.video_id
+    }
+
+    pub(crate) fn status_job_id(&self) -> Option<&SecretString> {
+        self.status_job_id.as_ref()
+    }
+}
+
+impl std::fmt::Debug for ChaoxingLiveResourceTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChaoxingLiveResourceTarget")
+            .field("remote_state", &self.remote_state)
+            .field("job_id", &"[REDACTED]")
+            .field("live_id", &"[REDACTED]")
+            .field("stream_name", &"[REDACTED]")
+            .field("video_id", &"[REDACTED]")
+            .field(
+                "status_job_id",
+                &self.status_job_id.as_ref().map(|_| "[REDACTED]"),
             )
             .finish()
     }
@@ -465,6 +517,92 @@ pub(crate) fn locate_video_resource_target(
     Ok(found)
 }
 
+/// Locates one fresh Live target without persisting its route credentials.
+pub(crate) fn locate_live_resource_target(
+    html: &str,
+    scope: &ChaoxingCourseScope,
+    knowledge_id: &str,
+    card_index: u8,
+    remote_task_id: &str,
+) -> ProviderResult<Option<ChaoxingLiveResourceTarget>> {
+    if html.is_empty() || html.len() > MAX_CARD_DOCUMENT_BYTES {
+        return Err(invalid_response(
+            "Chaoxing chapter card document is empty or exceeds the size limit",
+        ));
+    }
+    validate_component(knowledge_id, "knowledge identity")?;
+    if card_index > MAX_CARD_INDEX {
+        return Err(protocol_drift(
+            "Chaoxing chapter card index exceeds the donor range",
+        ));
+    }
+    let prefix = format!(
+        "resource:{}:{}:{knowledge_id}:",
+        scope.course_id(),
+        scope.class_id()
+    );
+    let expected_task_id = remote_task_id
+        .strip_prefix(&prefix)
+        .ok_or_else(|| protocol_drift("Chaoxing Live target is outside the current scope"))?;
+    validate_component(expected_task_id, "resource identity")?;
+    if html.contains("章节未开放") {
+        return Ok(None);
+    }
+    let Some(root) = parse_card_root(html)? else {
+        return Ok(None);
+    };
+    let mut found = None;
+    for attachment in card_attachments(root.as_map())? {
+        let Some(task) = parse_resource_attachment(attachment, scope, knowledge_id, card_index)?
+        else {
+            continue;
+        };
+        if task.remote_id != remote_task_id {
+            continue;
+        }
+        if found.is_some() {
+            return Err(protocol_drift(
+                "Chaoxing chapter card contains a duplicate Live target",
+            ));
+        }
+        if task.normalized.get("resource_kind").and_then(Value::as_str) != Some("live") {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing resource kind is not a Live task",
+            ));
+        }
+        let card = attachment
+            .as_object()
+            .ok_or_else(|| protocol_drift("Chaoxing chapter attachment is not an object"))?;
+        let property = optional_object(card, "property")?;
+        let job_id = optional_string(card, "jobid")?
+            .filter(|job_id| *job_id == expected_task_id)
+            .ok_or_else(|| protocol_drift("Chaoxing Live has no matching job identity"))?
+            .to_owned();
+        found = Some(ChaoxingLiveResourceTarget {
+            remote_state: task.remote_state,
+            job_id,
+            live_id: SecretString::new(required_ephemeral_string(
+                property,
+                "liveId",
+                "Live identity",
+            )?),
+            stream_name: SecretString::new(required_ephemeral_string(
+                property,
+                "streamName",
+                "Live stream identity",
+            )?),
+            video_id: SecretString::new(required_ephemeral_string(
+                property,
+                "vdoid",
+                "Live video identity",
+            )?),
+            status_job_id: optional_ephemeral_secret(property, "_jobid")?,
+        });
+    }
+    Ok(found)
+}
+
 /// Locates one fresh Chapter Work route without persisting its attempt
 /// credentials. Callers must scan the complete bounded card set and reject a
 /// duplicate target across cards.
@@ -587,7 +725,7 @@ fn optional_ephemeral_secret(
         .map(|value| {
             if value.len() > MAX_EPHEMERAL_TOKEN_BYTES || value.chars().any(char::is_control) {
                 Err(protocol_drift(
-                    "Chaoxing Video optional report credential is invalid",
+                    "Chaoxing optional resource credential is invalid",
                 ))
             } else {
                 Ok(SecretString::new(value))
@@ -739,16 +877,14 @@ fn parse_resource_attachment(
                 TaskCapability::SubmissionExecute,
                 TaskCapability::SubmissionVerify,
             ],
-            ("document" | "read" | "video", RemoteState::Pending) => vec![
+            ("document" | "read" | "video" | "live", RemoteState::Pending) => vec![
                 TaskCapability::ProgressRead,
                 TaskCapability::ResourceExecution,
             ],
             ("document" | "read" | "video", RemoteState::Completed) => {
                 vec![TaskCapability::ProgressRead]
             }
-            ("live", RemoteState::Pending | RemoteState::Completed) => {
-                vec![TaskCapability::ProgressRead]
-            }
+            ("live", RemoteState::Completed) => vec![TaskCapability::ProgressRead],
             _ => Vec::new(),
         },
         fingerprint: fingerprint(&normalized)?,
@@ -1053,7 +1189,13 @@ mod tests {
             tasks
                 .iter()
                 .find(|task| task.remote_id.ends_with(":job-live"))
-                .is_some_and(|task| task.capabilities == [TaskCapability::ProgressRead])
+                .is_some_and(|task| {
+                    task.capabilities
+                        == [
+                            TaskCapability::ProgressRead,
+                            TaskCapability::ResourceExecution,
+                        ]
+                })
         );
         assert!(
             tasks
@@ -1273,6 +1415,59 @@ mod tests {
                 "4001",
                 0,
                 "resource:100:200:4001:job-read",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn live_locator_keeps_every_route_identity_ephemeral_and_bounded() {
+        let live = locate_live_resource_target(
+            CARDS_MIXED,
+            &scope(),
+            "4001",
+            0,
+            "resource:100:200:4001:job-live",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(live.remote_state(), RemoteState::Pending);
+        assert_eq!(live.job_id(), "job-live");
+        assert_eq!(live.live_id().expose_secret(), "PRIVATE_LIVE");
+        assert_eq!(live.stream_name().expose_secret(), "PRIVATE_STREAM");
+        assert_eq!(live.video_id().expose_secret(), "PRIVATE_VDOID");
+        assert_eq!(
+            live.status_job_id().unwrap().expose_secret(),
+            "PRIVATE_LIVE_JOB"
+        );
+        let debug = format!("{live:?}");
+        for private in [
+            "job-live",
+            "PRIVATE_LIVE",
+            "PRIVATE_STREAM",
+            "PRIVATE_VDOID",
+            "PRIVATE_LIVE_JOB",
+        ] {
+            assert!(!debug.contains(private));
+        }
+
+        assert!(
+            locate_live_resource_target(
+                &CARDS_MIXED.replace("\"streamName\":\"PRIVATE_STREAM\"", "\"streamName\":null"),
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:job-live",
+            )
+            .is_err()
+        );
+        assert!(
+            locate_live_resource_target(
+                CARDS_MIXED,
+                &scope(),
+                "4001",
+                0,
+                "resource:100:200:4001:job-video",
             )
             .is_err()
         );

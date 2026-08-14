@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
-use asterism_domain::{LogLevel, RemoteState, TaskCapability};
+use asterism_domain::{HumanRequiredReason, LogLevel, RemoteState, TaskCapability};
 use asterism_provider_api::{
-    CourseInventoryCapability, ExecutionEventSink, ExecutionOutcome, ExecutionRequest,
-    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog, ProviderIdentity,
-    ProviderMetadata, ProviderProgress, ProviderResult, RemoteCourse, RemoteProgress,
-    TaskExecutionCapability, TaskProgressCapability,
+    CourseInventoryCapability, ExecutionEventSink, ExecutionMutationSink, ExecutionOutcome,
+    ExecutionRequest, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
+    ProviderIdentity, ProviderMetadata, ProviderProgress, ProviderResult, RemoteCourse,
+    RemoteProgress, TaskExecutionCapability, TaskProgressCapability,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -16,8 +16,8 @@ use crate::{
     metadata::development_metadata,
     parse_chapter_inventory, parse_chapter_resource_inventory,
     resource_inventory::{
-        ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
-        ChaoxingVideoResourceTarget, locate_immediate_resource_target,
+        ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget, ChaoxingLiveResourceTarget,
+        ChaoxingVideoResourceTarget, locate_immediate_resource_target, locate_live_resource_target,
         locate_video_resource_target,
     },
     runtime_settings::ChaoxingRuntimeSettings,
@@ -106,8 +106,78 @@ pub(crate) trait ChaoxingVideoTransport: Send + Sync {
     ) -> ProviderResult<bool>;
 }
 
+pub(crate) struct ChaoxingLiveStatus {
+    duration_seconds: u64,
+    user_id: asterism_secrets::SecretString,
+}
+
+impl ChaoxingLiveStatus {
+    pub(crate) fn try_new(
+        duration_seconds: u64,
+        user_id: impl Into<String>,
+    ) -> ProviderResult<Self> {
+        let user_id = user_id.into();
+        if duration_seconds == 0
+            || duration_seconds > 24 * 60 * 60
+            || user_id.is_empty()
+            || user_id.len() > 4 * 1_024
+            || user_id.chars().any(char::is_control)
+        {
+            return Err(protocol_drift("Chaoxing Live status is invalid"));
+        }
+        Ok(Self {
+            duration_seconds,
+            user_id: asterism_secrets::SecretString::new(user_id),
+        })
+    }
+
+    pub(crate) const fn duration_seconds(&self) -> u64 {
+        self.duration_seconds
+    }
+
+    pub(crate) fn user_id(&self) -> &asterism_secrets::SecretString {
+        &self.user_id
+    }
+}
+
+impl fmt::Debug for ChaoxingLiveStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChaoxingLiveStatus")
+            .field("duration_seconds", &self.duration_seconds)
+            .field("user_id", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[async_trait]
+pub(crate) trait ChaoxingLiveTransport: Send + Sync {
+    async fn live_status(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        knowledge_id: &str,
+        target: &ChaoxingLiveResourceTarget,
+    ) -> ProviderResult<ChaoxingLiveStatus>;
+
+    async fn report_live_progress(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        target: &ChaoxingLiveResourceTarget,
+        status: &ChaoxingLiveStatus,
+        ordinal: u32,
+        mutations: &(dyn ExecutionMutationSink + Send + Sync),
+    ) -> ProviderResult<bool>;
+}
+
 #[async_trait]
 trait ChaoxingVideoSleeper: Send + Sync {
+    async fn sleep(&self, duration: Duration);
+}
+
+#[async_trait]
+trait ChaoxingLiveSleeper: Send + Sync {
     async fn sleep(&self, duration: Duration);
 }
 
@@ -121,13 +191,25 @@ impl ChaoxingVideoSleeper for TokioVideoSleeper {
     }
 }
 
+#[derive(Debug)]
+struct TokioLiveSleeper;
+
+#[async_trait]
+impl ChaoxingLiveSleeper for TokioLiveSleeper {
+    async fn sleep(&self, duration: Duration) {
+        tokio::time::sleep(duration).await;
+    }
+}
+
 pub struct ChaoxingResourceExecution {
     metadata: ProviderMetadata,
     courses: Arc<dyn CourseInventoryCapability>,
     inventory: Arc<dyn ChaoxingInventoryTransport>,
     immediate: Arc<dyn ChaoxingImmediateResourceTransport>,
     video: Arc<dyn ChaoxingVideoTransport>,
+    live: Arc<dyn ChaoxingLiveTransport>,
     video_sleeper: Arc<dyn ChaoxingVideoSleeper>,
+    live_sleeper: Arc<dyn ChaoxingLiveSleeper>,
 }
 
 impl ChaoxingResourceExecution {
@@ -142,6 +224,7 @@ impl ChaoxingResourceExecution {
         inventory: Arc<dyn ChaoxingInventoryTransport>,
         immediate: Arc<dyn ChaoxingImmediateResourceTransport>,
         video: Arc<dyn ChaoxingVideoTransport>,
+        live: Arc<dyn ChaoxingLiveTransport>,
     ) -> ProviderResult<Self> {
         Ok(Self {
             metadata: development_metadata()?,
@@ -149,7 +232,9 @@ impl ChaoxingResourceExecution {
             inventory,
             immediate,
             video,
+            live,
             video_sleeper: Arc::new(TokioVideoSleeper),
+            live_sleeper: Arc::new(TokioLiveSleeper),
         })
     }
 
@@ -479,6 +564,151 @@ impl ChaoxingResourceExecution {
             .await?;
         Ok(video_outcome(false))
     }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Live keeps Execution, route, fresh target, frozen settings and durable event boundaries explicit"
+    )]
+    async fn execute_live(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+        resource_request: &ChaoxingChapterResourceRequest,
+        remote_task_id: &str,
+        target: &ChaoxingLiveResourceTarget,
+        settings: ChaoxingRuntimeSettings,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        if target.remote_state() == RemoteState::Completed {
+            events
+                .log(execution_log(
+                    "live_finalize",
+                    "直播已在远端完成，跳过重复上报",
+                    None,
+                ))
+                .await?;
+            return Ok(live_outcome(true));
+        }
+        let status = self
+            .live
+            .live_status(context, route, resource_request.knowledge_id(), target)
+            .await?;
+        let adjusted_seconds = status
+            .duration_seconds()
+            .checked_mul(1_000)
+            .map(|duration| duration / u64::from(settings.video_playback_rate_millis))
+            .ok_or_else(|| protocol_drift("Chaoxing Live adjusted duration overflowed"))?;
+        let total_heartbeats = u32::try_from(adjusted_seconds.div_ceil(60).max(1))
+            .map_err(|_| protocol_drift("Chaoxing Live heartbeat count overflowed"))?;
+        let mutations = events.mutation_sink().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "Chaoxing Live execution requires a durable Core mutation sink",
+            )
+        })?;
+        events
+            .log(execution_log(
+                "live_execute",
+                "开始按直播总时长上报持久化心跳",
+                Some(serde_json::json!({
+                    "heartbeat_count": total_heartbeats,
+                    "playback_rate_millis": settings.video_playback_rate_millis,
+                })),
+            ))
+            .await?;
+        let mut mutation_ordinal = 0_u32;
+        for heartbeat in 1..=total_heartbeats {
+            if heartbeat > 1 {
+                self.live_sleeper
+                    .sleep(real_playback_duration(
+                        59,
+                        settings.video_playback_rate_millis,
+                    )?)
+                    .await;
+            }
+            mutation_ordinal = next_live_mutation_ordinal(mutation_ordinal)?;
+            let accepted = self
+                .live
+                .report_live_progress(context, route, target, &status, mutation_ordinal, mutations)
+                .await?;
+            if !accepted {
+                self.live_sleeper.sleep(Duration::from_secs(5)).await;
+                mutation_ordinal = next_live_mutation_ordinal(mutation_ordinal)?;
+                let _retry_accepted = self
+                    .live
+                    .report_live_progress(
+                        context,
+                        route,
+                        target,
+                        &status,
+                        mutation_ordinal,
+                        mutations,
+                    )
+                    .await?;
+            }
+            let percent = u8::try_from(u64::from(heartbeat) * 100 / u64::from(total_heartbeats))
+                .unwrap_or(100)
+                .min(100);
+            events
+                .report(ProviderProgress {
+                    percent: Some(percent),
+                    stage: "live_execute".to_owned(),
+                    status_text: Some("直播进度心跳尝试已持久化".to_owned()),
+                    completed_items: Some(heartbeat),
+                    total_items: Some(total_heartbeats),
+                })
+                .await
+                .map_err(live_post_mutation_error)?;
+        }
+        self.verify_live_completion(context, remote_task_id, total_heartbeats, events)
+            .await
+    }
+
+    async fn verify_live_completion(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        total_heartbeats: u32,
+        events: &(dyn ExecutionEventSink + Send + Sync),
+    ) -> ProviderResult<ExecutionOutcome> {
+        events
+            .log(execution_log(
+                "live_verify",
+                "直播心跳上报结束，开始复核远端任务状态",
+                None,
+            ))
+            .await
+            .map_err(live_post_mutation_error)?;
+        let progress = self
+            .resolve_resource_progress(context, remote_task_id)
+            .await
+            .map_err(live_post_mutation_error)?;
+        if progress.remote_state != RemoteState::Completed || progress.percent != Some(100) {
+            return Err(live_post_mutation_error(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "Chaoxing Live did not become completed after durable heartbeats",
+            )));
+        }
+        events
+            .report(ProviderProgress {
+                percent: Some(100),
+                stage: "live_verified".to_owned(),
+                status_text: Some("直播远端完成状态已复核".to_owned()),
+                completed_items: Some(total_heartbeats),
+                total_items: Some(total_heartbeats),
+            })
+            .await
+            .map_err(live_post_mutation_error)?;
+        events
+            .log(execution_log(
+                "live_verified",
+                "直播远端完成状态已复核",
+                Some(serde_json::json!({"resource_kind": "live", "verified": true})),
+            ))
+            .await
+            .map_err(live_post_mutation_error)?;
+        Ok(live_outcome(false))
+    }
 }
 
 impl fmt::Debug for ChaoxingResourceExecution {
@@ -490,7 +720,9 @@ impl fmt::Debug for ChaoxingResourceExecution {
             .field("inventory", &"configured")
             .field("immediate", &"configured")
             .field("video", &"configured")
+            .field("live", &"configured")
             .field("video_sleeper", &"configured")
+            .field("live_sleeper", &"configured")
             .finish()
     }
 }
@@ -562,12 +794,28 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
                 )
                 .await
             }
-            ExecutableResourceKind::Live | ExecutableResourceKind::Unsupported => {
-                Err(ProviderError::new(
-                    ProviderErrorKind::UnsupportedTask,
-                    "Chaoxing resource kind has no execution path",
-                ))
+            ExecutableResourceKind::Live => {
+                let target = locate_live_target(
+                    documents,
+                    route,
+                    &resource_request,
+                    &request.remote_task_id,
+                )?;
+                self.execute_live(
+                    context,
+                    route,
+                    &resource_request,
+                    &request.remote_task_id,
+                    &target,
+                    settings,
+                    events,
+                )
+                .await
             }
+            ExecutableResourceKind::Unsupported => Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing resource kind has no execution path",
+            )),
         }
     }
 }
@@ -654,6 +902,52 @@ fn locate_target(
         if found.replace(target).is_some() {
             return Err(protocol_drift(
                 "Chaoxing immediate execution found the task on multiple cards",
+            ));
+        }
+    }
+    found.ok_or_else(remote_resource_changed)
+}
+
+fn locate_live_target(
+    documents: Vec<ChaoxingChapterResourceDocument>,
+    route: ChaoxingCourseRoute<'_>,
+    request: &ChaoxingChapterResourceRequest,
+    remote_task_id: &str,
+) -> ProviderResult<ChaoxingLiveResourceTarget> {
+    if documents.len() != usize::from(CHAPTER_RESOURCE_CARD_COUNT) {
+        return Err(protocol_drift(
+            "Chaoxing Live execution received an incomplete card set",
+        ));
+    }
+    let mut indexed = BTreeMap::new();
+    for document in documents {
+        if document.knowledge_id() != request.knowledge_id()
+            || indexed.insert(document.card_index(), document).is_some()
+        {
+            return Err(protocol_drift(
+                "Chaoxing Live execution received a foreign or duplicate card",
+            ));
+        }
+    }
+    let scope = route.parser_scope()?;
+    let mut found = None;
+    for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
+        let document = indexed
+            .remove(&card_index)
+            .ok_or_else(|| protocol_drift("Chaoxing Live execution omitted a card"))?;
+        let Some(target) = locate_live_resource_target(
+            document.as_str(),
+            &scope,
+            request.knowledge_id(),
+            card_index,
+            remote_task_id,
+        )?
+        else {
+            continue;
+        };
+        if found.replace(target).is_some() {
+            return Err(protocol_drift(
+                "Chaoxing Live execution found the task on multiple cards",
             ));
         }
     }
@@ -849,6 +1143,34 @@ fn video_outcome(already_completed: bool) -> ExecutionOutcome {
     }
 }
 
+fn live_outcome(already_completed: bool) -> ExecutionOutcome {
+    ExecutionOutcome {
+        remote_state: RemoteState::Completed,
+        verified: true,
+        result_sanitized: serde_json::json!({
+            "schema": "chaoxing.live-result.v1",
+            "resource_kind": "live",
+            "already_completed": already_completed,
+            "verification": "fresh_progress_read",
+        }),
+    }
+}
+
+pub(crate) fn live_post_mutation_error(error: ProviderError) -> ProviderError {
+    if error.kind == ProviderErrorKind::HumanRequired {
+        return error;
+    }
+    let reason = if error.kind == ProviderErrorKind::Authentication {
+        HumanRequiredReason::SessionExpired
+    } else {
+        HumanRequiredReason::ManualIntervention
+    };
+    ProviderError::human_required(
+        "Chaoxing Live heartbeat began and was not replayed; fresh manual review is required",
+        reason,
+    )
+}
+
 fn real_playback_duration(
     video_seconds: u64,
     playback_rate_millis: u16,
@@ -858,6 +1180,13 @@ fn real_playback_duration(
         .map(|value| value.div_ceil(u64::from(playback_rate_millis)))
         .ok_or_else(|| protocol_drift("Chaoxing Video playback duration overflowed"))?;
     Ok(Duration::from_millis(milliseconds))
+}
+
+fn next_live_mutation_ordinal(current: u32) -> ProviderResult<u32> {
+    current
+        .checked_add(1)
+        .filter(|ordinal| *ordinal <= 100_000)
+        .ok_or_else(|| protocol_drift("Chaoxing Live mutation ordinal overflowed"))
 }
 
 fn video_percent(playing_time: u64, duration: u64) -> u8 {
@@ -885,7 +1214,9 @@ mod tests {
     };
 
     use asterism_domain::{ProviderAccountId, ProviderId, SecretId, TaskId};
-    use asterism_provider_api::{ProviderRouteContext, RemoteCourse};
+    use asterism_provider_api::{
+        ExecutionMutationIssue, ExecutionMutationReceipt, ProviderRouteContext, RemoteCourse,
+    };
 
     use super::*;
     use crate::{ChaoxingInventoryDocument, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState};
@@ -899,10 +1230,14 @@ mod tests {
         metadata: ProviderMetadata,
         completed_read: AtomicBool,
         completed_video: AtomicBool,
+        completed_live: AtomicBool,
+        reject_next_live: AtomicBool,
         resource_calls: AtomicUsize,
         execute_calls: AtomicUsize,
         video_reports: Mutex<Vec<u64>>,
         video_sleeps: Mutex<Vec<Duration>>,
+        live_reports: Mutex<Vec<u32>>,
+        live_sleeps: Mutex<Vec<Duration>>,
     }
 
     impl FixtureProvider {
@@ -911,10 +1246,14 @@ mod tests {
                 metadata: development_metadata().unwrap(),
                 completed_read: AtomicBool::new(completed_read),
                 completed_video: AtomicBool::new(false),
+                completed_live: AtomicBool::new(false),
+                reject_next_live: AtomicBool::new(false),
                 resource_calls: AtomicUsize::new(0),
                 execute_calls: AtomicUsize::new(0),
                 video_reports: Mutex::new(Vec::new()),
                 video_sleeps: Mutex::new(Vec::new()),
+                live_reports: Mutex::new(Vec::new()),
+                live_sleeps: Mutex::new(Vec::new()),
             }
         }
     }
@@ -978,6 +1317,12 @@ mod tests {
                 first = first.replace(
                     "\"jobid\":\"job-video\",\"isPassed\":false",
                     "\"jobid\":\"job-video\",\"isPassed\":true",
+                );
+            }
+            if self.completed_live.load(Ordering::Relaxed) {
+                first = first.replace(
+                    "\"jobid\":\"job-live\",\"isPassed\":false",
+                    "\"jobid\":\"job-live\",\"isPassed\":true",
                 );
             }
             (0..CHAPTER_RESOURCE_CARD_COUNT)
@@ -1070,10 +1415,87 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ChaoxingLiveTransport for FixtureProvider {
+        async fn live_status(
+            &self,
+            _context: &ProviderContext,
+            _route: ChaoxingCourseRoute<'_>,
+            knowledge_id: &str,
+            target: &ChaoxingLiveResourceTarget,
+        ) -> ProviderResult<ChaoxingLiveStatus> {
+            assert_eq!(knowledge_id, "4001");
+            assert_eq!(target.job_id(), "job-live");
+            ChaoxingLiveStatus::try_new(125, "SAFE_UID")
+        }
+
+        async fn report_live_progress(
+            &self,
+            _context: &ProviderContext,
+            _route: ChaoxingCourseRoute<'_>,
+            _target: &ChaoxingLiveResourceTarget,
+            status: &ChaoxingLiveStatus,
+            ordinal: u32,
+            mutations: &(dyn ExecutionMutationSink + Send + Sync),
+        ) -> ProviderResult<bool> {
+            let accepted = !self.reject_next_live.swap(false, Ordering::Relaxed);
+            assert_eq!(status.user_id().expose_secret(), "SAFE_UID");
+            mutations
+                .issue(&ExecutionMutationIssue::new(
+                    ordinal,
+                    "chaoxing.live.heartbeat",
+                    [u8::try_from(ordinal).unwrap(); 32],
+                )?)
+                .await?;
+            self.live_reports.lock().unwrap().push(ordinal);
+            mutations
+                .record_receipt(ExecutionMutationReceipt::new(
+                    ordinal,
+                    [u8::try_from(ordinal + 10).unwrap(); 32],
+                    accepted,
+                )?)
+                .await?;
+            if ordinal == 3 {
+                self.completed_live.store(true, Ordering::Relaxed);
+            }
+            Ok(accepted)
+        }
+    }
+
+    #[async_trait]
+    impl ChaoxingLiveSleeper for FixtureProvider {
+        async fn sleep(&self, duration: Duration) {
+            self.live_sleeps.lock().unwrap().push(duration);
+        }
+    }
+
     #[derive(Debug, Default)]
     struct RecordingEvents {
         progress: AtomicUsize,
         logs: AtomicUsize,
+        mutations_enabled: bool,
+        mutation_events: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ExecutionMutationSink for RecordingEvents {
+        async fn issue(&self, issue: &ExecutionMutationIssue) -> ProviderResult<()> {
+            self.mutation_events.lock().unwrap().push(format!(
+                "issue:{}:{}",
+                issue.ordinal(),
+                issue.operation_type()
+            ));
+            Ok(())
+        }
+
+        async fn record_receipt(&self, receipt: ExecutionMutationReceipt) -> ProviderResult<()> {
+            self.mutation_events.lock().unwrap().push(format!(
+                "receipt:{}:{}",
+                receipt.ordinal(),
+                receipt.accepted()
+            ));
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -1088,12 +1510,18 @@ mod tests {
             self.logs.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+
+        fn mutation_sink(&self) -> Option<&(dyn ExecutionMutationSink + Send + Sync)> {
+            self.mutations_enabled
+                .then_some(self as &(dyn ExecutionMutationSink + Send + Sync))
+        }
     }
 
     #[tokio::test]
     async fn immediate_execution_refetches_and_verifies_the_remote_card() {
         let fixture = Arc::new(FixtureProvider::new(false));
         let execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
             fixture.clone(),
             fixture.clone(),
             fixture.clone(),
@@ -1123,6 +1551,7 @@ mod tests {
     async fn progress_read_refetches_remote_state_without_executing() {
         let fixture = Arc::new(FixtureProvider::new(false));
         let execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
             fixture.clone(),
             fixture.clone(),
             fixture.clone(),
@@ -1169,6 +1598,7 @@ mod tests {
             fixture.clone(),
             fixture.clone(),
             fixture.clone(),
+            fixture.clone(),
         )
         .unwrap();
         let events = RecordingEvents::default();
@@ -1189,6 +1619,7 @@ mod tests {
     async fn video_execution_uses_frozen_speed_and_verifies_the_fresh_card() {
         let fixture = Arc::new(FixtureProvider::new(false));
         let mut execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
             fixture.clone(),
             fixture.clone(),
             fixture.clone(),
@@ -1218,6 +1649,129 @@ mod tests {
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
         assert_eq!(events.progress.load(Ordering::Relaxed), 3);
         assert_eq!(events.logs.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn live_execution_ledgers_each_heartbeat_then_verifies_progress() {
+        let fixture = Arc::new(FixtureProvider::new(false));
+        let mut execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        execution.live_sleeper = fixture.clone();
+        let events = RecordingEvents {
+            mutations_enabled: true,
+            ..RecordingEvents::default()
+        };
+        let outcome = execution
+            .execute(
+                &context(),
+                &execution_request("resource:100:200:4001:job-live"),
+                &events,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.remote_state, RemoteState::Completed);
+        assert!(outcome.verified);
+        assert_eq!(outcome.result_sanitized["resource_kind"], "live");
+        assert_eq!(*fixture.live_reports.lock().unwrap(), [1, 2, 3]);
+        assert_eq!(
+            *fixture.live_sleeps.lock().unwrap(),
+            [Duration::from_secs(59), Duration::from_secs(59)]
+        );
+        assert_eq!(
+            *events.mutation_events.lock().unwrap(),
+            [
+                "issue:1:chaoxing.live.heartbeat",
+                "receipt:1:true",
+                "issue:2:chaoxing.live.heartbeat",
+                "receipt:2:true",
+                "issue:3:chaoxing.live.heartbeat",
+                "receipt:3:true",
+            ]
+        );
+        assert_eq!(fixture.resource_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(events.progress.load(Ordering::Relaxed), 4);
+        assert_eq!(events.logs.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn live_execution_requires_the_durable_mutation_sink_before_send() {
+        let fixture = Arc::new(FixtureProvider::new(false));
+        let execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        let error = execution
+            .execute(
+                &context(),
+                &execution_request("resource:100:200:4001:job-live"),
+                &RecordingEvents::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
+        assert!(fixture.live_reports.lock().unwrap().is_empty());
+        assert!(!fixture.completed_live.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn live_definite_rejection_retries_once_with_a_new_ordinal() {
+        let fixture = Arc::new(FixtureProvider::new(false));
+        fixture.reject_next_live.store(true, Ordering::Relaxed);
+        let mut execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        execution.live_sleeper = fixture.clone();
+        let events = RecordingEvents {
+            mutations_enabled: true,
+            ..RecordingEvents::default()
+        };
+        execution
+            .execute(
+                &context(),
+                &execution_request("resource:100:200:4001:job-live"),
+                &events,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(*fixture.live_reports.lock().unwrap(), [1, 2, 3, 4]);
+        assert_eq!(
+            *fixture.live_sleeps.lock().unwrap(),
+            [
+                Duration::from_secs(5),
+                Duration::from_secs(59),
+                Duration::from_secs(59),
+            ]
+        );
+        assert_eq!(
+            *events.mutation_events.lock().unwrap(),
+            [
+                "issue:1:chaoxing.live.heartbeat",
+                "receipt:1:false",
+                "issue:2:chaoxing.live.heartbeat",
+                "receipt:2:true",
+                "issue:3:chaoxing.live.heartbeat",
+                "receipt:3:true",
+                "issue:4:chaoxing.live.heartbeat",
+                "receipt:4:true",
+            ]
+        );
     }
 
     fn context() -> ProviderContext {

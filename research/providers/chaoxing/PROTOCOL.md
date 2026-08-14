@@ -144,6 +144,41 @@ handoff are active first-batch work. The endpoint, signature, current Referer
 version and real account behavior remain live-test gates; this checkpoint is
 offline/native-boundary evidence only.
 
+## Live execution checkpoint
+
+The refreshed primary donor separates one read-only duration lookup from a
+minute-like heartbeat mutation loop:
+
+```text
+GET https://mooc1.chaoxing.com/ananas/live/liveinfo
+  ?liveid&userid&clazzid&knowledgeid&courseid&jobid&ut=s
+  -> temp.data.duration
+
+GET https://zhibo.chaoxing.com/saveTimePc
+  ?streamName&vdoid&userId&isStart=0&t&courseId
+  -> @success
+```
+
+Asterism rediscovers the exact fresh seven-card target and keeps `liveId`,
+`streamName`, `vdoid` and the optional status job value only in zeroizing,
+redacted execution state. The strict nonzero duration is capped at 24 hours;
+the frozen bounded playback rate determines both the heartbeat count and the
+59-second donor cadence. The `_uid` used by `liveinfo` is frozen in the status
+object and every later session must expose the same identity.
+
+Each heartbeat uses Core's ordered `ExecutionMutationSink`. Before send, the
+Provider records `chaoxing.live.heartbeat`, its 1-based ordinal and a
+domain-separated SHA-256 digest binding GET, stable resource job, full request
+URL including timestamp, and Referer. A definite bounded response records a
+separate response digest plus accepted bit before another ordinal may issue.
+One definite rejection may be retried after the donor's five-second delay under
+a new ledger ordinal. No session renewal occurs after the first heartbeat;
+network, parsing, receipt or later pre-send failures become `HumanRequired` and
+are never replayed.
+`@success` remains only a mutation receipt. Completion is accepted solely when
+a separate fresh `TaskProgressRead` rediscovers the exact card as Completed.
+All current evidence is synthetic/offline pending a sanitized live-account run.
+
 ## WorkModule inventory
 
 The current browser route is:

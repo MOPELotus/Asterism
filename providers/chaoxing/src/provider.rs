@@ -83,6 +83,7 @@ fn compose_development_provider(
         inventory_transport.clone(),
         inventory_transport.clone(),
         inventory_transport.clone(),
+        inventory_transport.clone(),
     )?);
     let task_progress = Arc::new(ChaoxingTaskProgress::try_new(
         task_detail.clone(),

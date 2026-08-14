@@ -69,8 +69,10 @@ read, while the Work detail fixtures cover conservative redirect classification.
 The Chapter and Resource fixtures cover stable knowledge/job identity, locked
 and completed state, the exact resource type split, empty card slots, execution
 token redaction, immediate Document/Read routing, Video object/report metadata,
-donor-compatible signature construction, bounded playback settings,
-idempotence and fresh-card result verification.
+donor-compatible signature construction, bounded playback settings, and Live
+route identity redaction plus ordered heartbeat issue/receipt sequencing.
+Resource mutation receipts remain provisional until fresh-card result
+verification.
 The Question fixtures separate CxKitty's mobile Chapter Work and Exam structures
 from the current OCS independent `/mooc2/work/dowork` and
 `/mooc2/exam/preview` structures. Attempt-local IDs, type inputs, stems, options
