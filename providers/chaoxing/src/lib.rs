@@ -63,8 +63,8 @@ pub use submission_execute::{ChaoxingSubmissionExecute, ChaoxingSubmissionTransp
 pub use submission_support::{
     ChaoxingChapterWorkVerificationDocument, ChaoxingExamVerificationDocument,
     ChaoxingSubmissionPlan, ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute,
-    parse_chapter_work_verification_snapshot, parse_exam_verification_snapshot,
-    parse_submission_receipt, parse_verification_snapshot,
+    parse_chapter_work_answer_candidates, parse_chapter_work_verification_snapshot,
+    parse_exam_verification_snapshot, parse_submission_receipt, parse_verification_snapshot,
 };
 pub use submission_verify::{ChaoxingSubmissionVerificationTransport, ChaoxingSubmissionVerify};
 pub use task_detail::ChaoxingTaskDetail;

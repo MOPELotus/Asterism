@@ -4,7 +4,8 @@ use std::{
 };
 
 use asterism_domain::{
-    NormalizedAnswer, QuestionKind, RemoteState, SubmissionDraft, SubmissionQuestionVerification,
+    AnswerCandidate, AnswerConfidence, AnswerSource, NormalizedAnswer, Question, QuestionKind,
+    RemoteState, SubmissionDraft, SubmissionQuestionVerification,
     SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionScore,
     SubmissionVerificationSnapshot, SubmissionVerificationStatus,
 };
@@ -12,6 +13,7 @@ use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use chrono::Utc;
 use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
+use serde_json::json;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::inventory::parse_exam_detail_facts;
@@ -591,7 +593,7 @@ pub fn parse_chapter_work_verification_snapshot(
         earned_milli_points,
         possible_milli_points: 100_000,
     });
-    let Some(remote_answers) = parse_chapter_result_answers(&html)? else {
+    let Some(remote_answers) = parse_chapter_result_answers(&html, "我的答案")? else {
         return chapter_result_inconclusive_snapshot(draft, score);
     };
     if remote_answers.len() != plan.len()
@@ -642,6 +644,87 @@ pub fn parse_chapter_work_verification_snapshot(
         questions,
         verified_at: Utc::now(),
     })
+}
+
+/// Resolves exact Provider-native standard answers from a fresh Chapter Work
+/// result page. This parser does not navigate, start a retake or mutate state.
+///
+/// # Errors
+///
+/// Returns typed errors when the result omits a complete supported standard
+/// answer set or when Question identity, order, type or option bindings drift.
+pub fn parse_chapter_work_answer_candidates(
+    document: &ChaoxingChapterWorkVerificationDocument,
+    questions: &[Question],
+) -> ProviderResult<Vec<AnswerCandidate>> {
+    if questions.is_empty() {
+        return Err(invalid_response(
+            "Chaoxing Chapter Work answer resolution requires Questions",
+        ));
+    }
+    let html = Html::parse_document(document.as_str());
+    reject_login_or_challenge(&html)?;
+    let Some(remote_answers) = parse_chapter_result_answers(&html, "正确答案")? else {
+        return Err(unsupported(
+            "Chaoxing Chapter Work result has no complete supported standard answers",
+        ));
+    };
+    if remote_answers.len() != questions.len()
+        || questions.iter().enumerate().any(|(index, question)| {
+            question.position != u32::try_from(index + 1).unwrap_or(u32::MAX)
+                || question.validate().is_err()
+        })
+    {
+        return Err(remote_changed(
+            "Chaoxing Chapter Work standard-answer Question set changed",
+        ));
+    }
+    remote_answers
+        .iter()
+        .zip(questions)
+        .map(|(actual, question)| {
+            let remote_id = question
+                .remote_question_id
+                .as_deref()
+                .filter(|value| valid_question_id(value))
+                .ok_or_else(|| {
+                    invalid_response(
+                        "Chaoxing Chapter Work answer-resolution Question identity is invalid",
+                    )
+                })?;
+            let type_code = provider_type_code(question.kind, &question.metadata_sanitized)?;
+            if actual.remote_id != remote_id || actual.type_code != type_code {
+                return Err(remote_changed(
+                    "Chaoxing Chapter Work standard-answer binding changed",
+                ));
+            }
+            let answer = chapter_standard_answer(question, actual)?;
+            let candidate = AnswerCandidate {
+                question_id: question.id,
+                source: AnswerSource::ProviderNative,
+                answer,
+                confidence: Some(
+                    AnswerConfidence::try_new(AnswerConfidence::MAX_BASIS_POINTS).map_err(
+                        |_| {
+                            invalid_response(
+                                "Chaoxing Chapter Work standard-answer confidence is invalid",
+                            )
+                        },
+                    )?,
+                ),
+                explanation: None,
+                provenance_sanitized: json!({
+                    "schema": "chaoxing.chapter-work-result-answer.v1",
+                    "remote_question_id": remote_id,
+                    "result_route": "selectWorkQuestionYiPiYue",
+                }),
+            };
+            candidate.validate().map_err(|_| {
+                invalid_response("Chaoxing Chapter Work standard-answer candidate is invalid")
+            })?;
+            Ok(candidate)
+        })
+        .collect()
 }
 
 /// Compares a fresh Exam result with every immutable Draft Question in exact
@@ -755,7 +838,10 @@ impl Drop for ChapterRemoteAnswer {
     }
 }
 
-fn parse_chapter_result_answers(html: &Html) -> ProviderResult<Option<Vec<ChapterRemoteAnswer>>> {
+fn parse_chapter_result_answers(
+    html: &Html,
+    answer_label: &'static str,
+) -> ProviderResult<Option<Vec<ChapterRemoteAnswer>>> {
     let mut answers = Vec::new();
     let mut remote_ids = BTreeSet::new();
     for question in html.select(&selector("div.singleQuesId")) {
@@ -776,10 +862,10 @@ fn parse_chapter_result_answers(html: &Html) -> ProviderResult<Option<Vec<Chapte
         let Some(type_code @ ("0" | "1" | "3")) = chapter_result_type(text.as_str()) else {
             return Ok(None);
         };
-        if !text.contains("我的答案") {
+        if !text.contains(answer_label) {
             return Ok(None);
         }
-        let value = parse_visible_answer(text.as_str(), type_code)?;
+        let value = parse_labeled_visible_answer(text.as_str(), answer_label, type_code)?;
         answers.push(ChapterRemoteAnswer {
             remote_id: remote_id.to_owned(),
             type_code: type_code.to_owned(),
@@ -790,6 +876,39 @@ fn parse_chapter_result_answers(html: &Html) -> ProviderResult<Option<Vec<Chapte
         Ok(None)
     } else {
         Ok(Some(answers))
+    }
+}
+
+fn chapter_standard_answer(
+    question: &Question,
+    actual: &ChapterRemoteAnswer,
+) -> ProviderResult<NormalizedAnswer> {
+    match actual.type_code.as_str() {
+        "0" | "1" => {
+            let selections = actual
+                .value
+                .chars()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>();
+            if (actual.type_code == "0" && selections.len() != 1)
+                || !valid_selections(question, &selections)
+            {
+                return Err(remote_changed(
+                    "Chaoxing Chapter Work standard answer no longer matches its options",
+                ));
+            }
+            Ok(NormalizedAnswer::Selections(selections))
+        }
+        "3" => match actual.value.as_str() {
+            "true" => Ok(NormalizedAnswer::Boolean(true)),
+            "false" => Ok(NormalizedAnswer::Boolean(false)),
+            _ => Err(protocol_drift(
+                "Chaoxing Chapter Work standard true/false answer is invalid",
+            )),
+        },
+        _ => Err(unsupported(
+            "Chaoxing Chapter Work standard-answer type is unsupported",
+        )),
     }
 }
 
@@ -1242,11 +1361,19 @@ fn valid_selections(question: &asterism_domain::Question, values: &[String]) -> 
 }
 
 fn parse_visible_answer(value: &str, type_code: &str) -> ProviderResult<String> {
+    parse_labeled_visible_answer(value, "我的答案", type_code)
+}
+
+fn parse_labeled_visible_answer(
+    value: &str,
+    answer_label: &'static str,
+    type_code: &str,
+) -> ProviderResult<String> {
     let (_, value) = value
-        .split_once("我的答案")
-        .ok_or_else(|| protocol_drift("Chaoxing Work result answer label is missing"))?;
+        .split_once(answer_label)
+        .ok_or_else(|| protocol_drift("Chaoxing Work result visible-answer label is missing"))?;
     let value = value.trim_start_matches([':', '：']).trim();
-    let value = ["正确答案", "答案解析", "得分"]
+    let value = ["我的答案", "正确答案", "答案解析", "得分"]
         .into_iter()
         .filter_map(|marker| value.find(marker))
         .min()
@@ -1637,6 +1764,68 @@ mod tests {
             let result = ChaoxingChapterWorkVerificationDocument::try_new(document).unwrap();
             assert!(parse_chapter_work_verification_snapshot(&result, &plan, &draft).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn chapter_result_resolves_only_bound_supported_standard_answers() {
+        let draft = chapter_result_draft().await;
+        let result =
+            ChaoxingChapterWorkVerificationDocument::try_new(CHAPTER_RESULT.to_owned()).unwrap();
+        let questions = draft
+            .items
+            .iter()
+            .map(|item| item.question.clone())
+            .collect::<Vec<_>>();
+        let candidates = parse_chapter_work_answer_candidates(&result, &questions).unwrap();
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].source, AnswerSource::ProviderNative);
+        assert_eq!(
+            candidates[0].answer,
+            NormalizedAnswer::Selections(vec!["B".to_owned()])
+        );
+        assert_eq!(
+            candidates[1].answer,
+            NormalizedAnswer::Selections(vec!["A".to_owned(), "C".to_owned()])
+        );
+        assert_eq!(candidates[2].answer, NormalizedAnswer::Boolean(true));
+        assert!(candidates.iter().all(|candidate| {
+            candidate.confidence.map(AnswerConfidence::basis_points)
+                == Some(AnswerConfidence::MAX_BASIS_POINTS)
+                && candidate.provenance_sanitized["result_route"] == "selectWorkQuestionYiPiYue"
+        }));
+
+        let unknown_option = ChaoxingChapterWorkVerificationDocument::try_new(
+            CHAPTER_RESULT.replacen("正确答案：B", "正确答案：D", 1),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_chapter_work_answer_candidates(&unknown_option, &questions)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+
+        let missing = ChaoxingChapterWorkVerificationDocument::try_new(CHAPTER_RESULT.replacen(
+            "正确答案：B",
+            "答案待公布",
+            1,
+        ))
+        .unwrap();
+        assert_eq!(
+            parse_chapter_work_answer_candidates(&missing, &questions)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::UnsupportedTask
+        );
+
+        let mut reordered = questions;
+        reordered.swap(0, 1);
+        assert_eq!(
+            parse_chapter_work_answer_candidates(&result, &reordered)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
     }
 
     #[tokio::test]

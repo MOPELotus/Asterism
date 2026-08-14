@@ -17,7 +17,7 @@ source modules even when their assessments share field names or HTML shapes.
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
 | SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts. Exam has a separate value-free preview and durable one-operation-at-a-time native chain: donor signature and request digest are frozen before dispatch, each accepted answer save advances one cursor and rotates `enc`/timing state, and the final submit yields only a Receipt. No Exam mutation is routed through Work payloads or replayed after ambiguity |
-| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has a strict current result parser awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, confirms Questions solely from exact Draft ID/order/type/value result evidence, and projects the independent bounded result score as fixed thousandths |
+| SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has strict current verification / standard-answer parsers awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, confirms Questions solely from exact Draft ID/order/type/value result evidence, and projects the independent bounded result score as fixed thousandths |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
 | BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
 
@@ -157,6 +157,15 @@ policy and remains independently guarded.
   conflicting scores fail closed. This parser is not yet wired into the
   capability because the audited result is reached through a study-page iframe
   whose shared BrowserBridge runtime remains Main-owned.
+- The same bound Chapter Work result parser can map a complete `正确答案` set to
+  `ProviderNative` AnswerCandidates for single-choice, multiple-choice and
+  true/false Questions. Candidate creation rechecks QID/order/type and current
+  option IDs, uses full confidence only for the server-declared standard value,
+  and retains sanitized route/QID provenance without copying result HTML.
+  Missing answers, fill/short-answer types, reordered Questions or unknown
+  options fail closed. `AnswerResolve` is not advertised and no `redoTest`
+  mutation is implemented until the shared BrowserBridge supplies the fully
+  bound fresh result document and Main wires the capability lifecycle.
 - Pending independent Exam rows with a structural `goTest` entry now advertise
   `QuestionInventory` and `QuestionParse`. The fresh read rebinds the exact
   course/class/exam identity and `enc_task`, obtains the donor cover, freezes a
@@ -191,8 +200,8 @@ policy and remains independently guarded.
 ## Completion boundary
 
 Chaoxing is complete only when all audited donor abilities—including remaining
-Chapter Work result-route wiring, Exam detail/result variants, Live, QR,
-captcha/face handling
+Chapter Work result-route/answer-resolution/retake wiring, Exam detail/result
+variants, Live, QR, captcha/face handling
 and required BrowserBridge/Capture fallbacks—have code and all currently
 executable verification. A native or parser milestone may be reported but does
 not stop development. Immutable Drafts, exact attempt binding, receipt/readback

@@ -110,6 +110,13 @@ malformed, out-of-range or conflicting scores fail closed. The fixture is
 synthetic parser evidence and does not claim that Native HTTP can reach the
 iframe result route.
 
+The same fixture's `正确答案` fields exercise Provider-native candidate mapping.
+Tests require the complete QID/order/type set and current option IDs, producing
+exact single-choice, multiple-choice and true/false candidates with sanitized
+provenance. Missing standard answers, reordered Questions and unknown options
+fail closed. No test advertises `AnswerResolve`, clicks `redoTest` or treats the
+synthetic iframe as live route evidence.
+
 The Exam fixtures cover the cover/start/full-preview attempt rotation and the
 separate CxKitty save/final acknowledgement shapes. They prove that each
 accepted answer save advances exactly one immutable-Draft cursor and replaces
@@ -206,3 +213,6 @@ every fixture before staging it.
   `selectWorkQuestionYiPiYue` iframe document in addition to the completed card.
   The synthetic parser fixture does not satisfy the pending BrowserBridge/live
   route validation requirement.
+- Chapter Work standard-answer evidence must bind to the current Question option
+  IDs. A retake's randomized DOM `data` mapping invalidates any earlier mapping;
+  parser candidates do not authorize or execute the retake.

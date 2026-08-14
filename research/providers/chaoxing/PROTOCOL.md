@@ -291,6 +291,17 @@ offline boundary only until Main's BrowserBridge can supply the fresh bound
 study-page iframe document. The completed card alone continues to produce only
 task-level confirmation.
 
+The same strict result boundary parses `正确答案` independently from the user's
+submitted value. When every result Question matches the current Question set by
+QID, DOM order and type, single-choice, multiple-choice and true/false standard
+values become full-confidence `ProviderNative` AnswerCandidates. Each choice
+must still name an option ID in the fresh Question snapshot; the candidate
+provenance records only the result-route schema and remote QID. Missing standard
+answers, fill/short-answer types, reordered Questions or unknown options fail
+closed. This pure parser neither advertises `AnswerResolve` nor invokes
+`redoTest`; both require the Main-owned BrowserBridge binding and a separately
+durable retake operation.
+
 ## Native independent Work submission
 
 The primary donor names every answer field `answer{qid}` and every type field
@@ -416,6 +427,10 @@ cover this boundary; live account validation remains pending.
   shared BrowserBridge binds course/class/knowledge/job and hands the fresh
   document to the strict Provider parser, a completed card must not be upgraded
   to per-Question verification.
+- Chapter Work retakes can randomize option `data` values while retaining the
+  displayed letters. Standard-answer candidates must be rebound to the fresh
+  Question option IDs for that attempt; cached option mappings must never drive
+  a later retake.
 - HTTP 200 or a donor `status = true` response is not Asterism completion. Asterism
   must fetch the result/detail page and store a sanitized verification snapshot.
 - Captcha, face verification, exam codes, minimum-submit time, expired tasks,
