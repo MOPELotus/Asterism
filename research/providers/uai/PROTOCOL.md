@@ -345,8 +345,12 @@ Provider decodes that artifact only when its bytes still match the issued
 digest and its fresh plan, nonce, origin, frame, Task and sequence all match;
 the command payload cannot be reconstructed from digest-only state or replaced
 by a helper. The Provider must still parse and validate the exact command and
-transport-observed result origin before Core records a terminal result; either
-digest remains replay/correlation metadata, not acceptance evidence.
+transport-observed result origin before Core records a terminal result. Raw
+intermediate events and terminal residence results therefore enter separate
+bounded zeroizing owners; each redacts its nonce/handles/labels, hashes the
+exact raw helper document and only then exposes typed parsing against the
+restored command. Either digest remains replay/correlation metadata, not
+acceptance evidence.
 
 Capture evidence may replace or refine this plan at any time; neither path is
 deferred.

@@ -89,9 +89,9 @@ artifact-bearing durable SubmissionExecute checkpoint on 2026-08-14. Apache
 `40ead69c7dabf` still matched the recorded revisions, and no new tag or
 capability/protocol delta required an incremental port.
 The same four default branches and complete tag refs were refreshed after the
-recoverable Browser residence command-artifact checkpoint on 2026-08-14. All
-recorded revisions and tags remained unchanged, so no incremental donor delta
-was present.
+recoverable Browser residence command-artifact and owned-result checkpoint on
+2026-08-14. All recorded revisions and tags remained unchanged, so no
+incremental donor delta was present.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends

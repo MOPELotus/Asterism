@@ -55,13 +55,13 @@ pub use authentication::{
 pub use browser_bridge::{
     EncodedUaiBrowserCommandArtifact, UAI_BROWSER_COMMAND_TYPE, UAI_BROWSER_EVENT_TYPE,
     UAI_BROWSER_RESIDENCE_RESULT_TYPE, UaiBrowserBridge, UaiBrowserCommand,
-    UaiBrowserCommandEnvelope, UaiBrowserEvent, UaiBrowserEventEnvelope, UaiBrowserMenuEntry,
-    UaiBrowserMessageSecurity, UaiBrowserPageEntry, UaiBrowserPageScope,
+    UaiBrowserCommandEnvelope, UaiBrowserEvent, UaiBrowserEventDocument, UaiBrowserEventEnvelope,
+    UaiBrowserMenuEntry, UaiBrowserMessageSecurity, UaiBrowserPageEntry, UaiBrowserPageScope,
     UaiBrowserResidenceControl, UaiBrowserResidencePlan, UaiBrowserResidenceResult,
-    UaiBrowserSessionBinding, UaiBrowserTarget, UaiBrowserTargetMenuEntry,
-    UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy, browser_event_exchange_digest,
-    browser_residence_exchange_digest, browser_start_url_from_detail, parse_browser_event,
-    parse_browser_residence_result,
+    UaiBrowserResidenceResultDocument, UaiBrowserSessionBinding, UaiBrowserTarget,
+    UaiBrowserTargetMenuEntry, UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy,
+    browser_event_exchange_digest, browser_residence_exchange_digest,
+    browser_start_url_from_detail, parse_browser_event, parse_browser_residence_result,
 };
 pub use compound_oral::{
     UaiCompoundOralPreparation, UaiCompoundOralSubmission, UaiCompoundOralSubmissionRequest,

@@ -69,6 +69,107 @@ impl fmt::Debug for EncodedUaiBrowserCommandArtifact {
     }
 }
 
+/// Owned bounded intermediate `BrowserBridge` event. Session nonce, opaque
+/// handles and page labels remain redacted and zeroized until typed parsing
+/// finishes.
+pub struct UaiBrowserEventDocument(Zeroizing<String>);
+
+impl UaiBrowserEventDocument {
+    /// # Errors
+    ///
+    /// Rejects an empty or oversized helper event before parsing.
+    pub fn try_new(document: String) -> ProviderResult<Self> {
+        let document = Zeroizing::new(document);
+        if document.is_empty() || document.len() > MAX_BROWSER_MESSAGE_BYTES {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge event is empty or oversized",
+            ));
+        }
+        Ok(Self(document))
+    }
+
+    /// # Errors
+    ///
+    /// Returns a typed error if the owned document violates exchange bounds.
+    pub fn exchange_digest(&self) -> ProviderResult<[u8; 32]> {
+        browser_event_exchange_digest(self.0.as_str())
+    }
+
+    /// # Errors
+    ///
+    /// Returns a typed error for malformed event JSON or a foreign command,
+    /// session, frame, Task or transport-observed origin.
+    pub fn parse_for_command(
+        &self,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+        observed_origin: &str,
+    ) -> ProviderResult<UaiBrowserEventEnvelope> {
+        parse_browser_event(self.0.as_str(), plan, command, observed_origin)
+    }
+}
+
+impl fmt::Debug for UaiBrowserEventDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserEventDocument")
+            .field("bytes", &self.0.len())
+            .field("contents", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Owned bounded terminal `BrowserBridge` residence result. It remains an
+/// observation requiring independent fresh duration readback.
+pub struct UaiBrowserResidenceResultDocument(Zeroizing<String>);
+
+impl UaiBrowserResidenceResultDocument {
+    /// # Errors
+    ///
+    /// Rejects an empty or oversized terminal helper result before parsing.
+    pub fn try_new(document: String) -> ProviderResult<Self> {
+        let document = Zeroizing::new(document);
+        if document.is_empty() || document.len() > MAX_BROWSER_RESULT_BYTES {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge result is empty or oversized",
+            ));
+        }
+        Ok(Self(document))
+    }
+
+    /// # Errors
+    ///
+    /// Returns a typed error if the owned document violates exchange bounds.
+    pub fn exchange_digest(&self) -> ProviderResult<[u8; 32]> {
+        browser_residence_exchange_digest(self.0.as_str())
+    }
+
+    /// # Errors
+    ///
+    /// Returns a typed error for malformed result JSON or a foreign command,
+    /// session, frame, Task, timing fact or transport-observed origin.
+    pub fn parse_for_command(
+        &self,
+        plan: &UaiBrowserResidencePlan,
+        command: &UaiBrowserCommandEnvelope,
+        observed_origin: &str,
+    ) -> ProviderResult<UaiBrowserResidenceResult> {
+        parse_browser_residence_result(self.0.as_str(), plan, command, observed_origin)
+    }
+}
+
+impl fmt::Debug for UaiBrowserResidenceResultDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserResidenceResultDocument")
+            .field("bytes", &self.0.len())
+            .field("contents", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UaiMenuDiscoveryStrategy {
@@ -2119,8 +2220,13 @@ mod tests {
             "last_label": "Unit 1 / Section 2 / Micro 3",
         })
         .to_string();
-        let result =
-            parse_browser_residence_result(&document, &plan, &command, UCONTENT_ORIGIN).unwrap();
+        let owned = UaiBrowserResidenceResultDocument::try_new(document.clone()).unwrap();
+        let debug = format!("{owned:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("nonce-42") && !debug.contains("Unit 1"));
+        let result = owned
+            .parse_for_command(&plan, &command, UCONTENT_ORIGIN)
+            .unwrap();
         assert_eq!(
             UaiBrowserResidenceResult::exchange_type(),
             UAI_BROWSER_RESIDENCE_RESULT_TYPE
@@ -2130,9 +2236,15 @@ mod tests {
             UAI_BROWSER_COMMAND_TYPE
         );
         assert_ne!(command.exchange_digest(&plan).unwrap(), [0; 32]);
-        assert_ne!(
-            browser_residence_exchange_digest(&document).unwrap(),
-            [0; 32]
+        assert_eq!(
+            owned.exchange_digest().unwrap(),
+            browser_residence_exchange_digest(&document).unwrap()
+        );
+        assert_ne!(owned.exchange_digest().unwrap(), [0; 32]);
+        assert!(UaiBrowserResidenceResultDocument::try_new(String::new()).is_err());
+        assert!(
+            UaiBrowserResidenceResultDocument::try_new("x".repeat(MAX_BROWSER_RESULT_BYTES + 1))
+                .is_err()
         );
         assert!(result.requires_fresh_duration_read());
         assert!(parse_browser_residence_result(&document, &plan, &command, IPUB_ORIGIN,).is_err());
@@ -2236,11 +2348,20 @@ mod tests {
             "event": { "kind": "pong" },
         })
         .to_string();
-        assert!(parse_browser_event(&pong_document, &plan, &ping, IPUB_ORIGIN).is_ok());
+        let owned = UaiBrowserEventDocument::try_new(pong_document.clone()).unwrap();
+        assert!(owned.parse_for_command(&plan, &ping, IPUB_ORIGIN).is_ok());
+        let debug = format!("{owned:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("nonce-42"));
         assert_ne!(ping.exchange_digest(&plan).unwrap(), [0; 32]);
-        assert_ne!(
-            browser_event_exchange_digest(&pong_document).unwrap(),
-            [0; 32]
+        assert_eq!(
+            owned.exchange_digest().unwrap(),
+            browser_event_exchange_digest(&pong_document).unwrap()
+        );
+        assert_ne!(owned.exchange_digest().unwrap(), [0; 32]);
+        assert!(UaiBrowserEventDocument::try_new(String::new()).is_err());
+        assert!(
+            UaiBrowserEventDocument::try_new("x".repeat(MAX_BROWSER_MESSAGE_BYTES + 1)).is_err()
         );
         assert!(browser_event_exchange_digest("").is_err());
         assert!(
