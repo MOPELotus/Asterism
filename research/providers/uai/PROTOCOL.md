@@ -613,7 +613,12 @@ placeholder-answer body with
 audited score/judge structure. The Course judge version is taken only from the
 fresh TaskDetail/Course-progress snapshot; missing, zero or unsigned values
 outside the signed protocol range fail before transport, and the captured
-donor example value is never hardcoded. Each body is sent once, validates an accepted
+donor example value is never hardcoded. After this fresh preflight, every
+marker or placeholder body is moved into the same redacted zeroizing request
+owner used by ordinary answer submission. Its digest binds the exact common
+POST route, content type and full body; Native HTTP sends only those owned
+bytes. The shared TaskExecution contract still needs a prepare-before-send
+digest registration hook. Each body is sent once, validates an accepted
 version acknowledgement, and returns an explicitly unverified outcome. Core
 persists the mutation attempt before the call, accepts success only from the
 existing exact Group progress reader, and uses that reader alone after

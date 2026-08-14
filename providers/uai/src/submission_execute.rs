@@ -662,6 +662,20 @@ pub fn build_submission_request(
         return Err(invalid_input("UAI submission request identity is invalid"));
     }
     let body = build_submission_request_body(course_instance_id, open_id, group_id, plan)?;
+    bind_submission_request_body(body)
+}
+
+/// Binds one already validated UAI submission body to the exact common POST
+/// route and content type. This is shared by ordinary answer submission and
+/// the independently authorized `ResourceExecution` wire families.
+pub(crate) fn bind_submission_request_body(
+    body: Zeroizing<String>,
+) -> ProviderResult<UaiSubmissionRequest> {
+    if body.is_empty() || body.len() > MAX_SUBMISSION_REQUEST_BYTES {
+        return Err(invalid_input(
+            "UAI submission request body is empty or exceeds the size limit",
+        ));
+    }
     let url = Url::parse(UAI_SUBMISSION_ROUTE)
         .map_err(|_| invalid_response("UAI submission route is invalid"))?;
     let mut digest = Sha256::new();

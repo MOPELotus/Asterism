@@ -52,7 +52,7 @@ use crate::{
     parse_submission_receipt, parse_task_inventory, parse_upload_grant, parse_upload_result,
     parse_upload_verification,
     progress::validate_progress_route_binding,
-    submission_execute::valid_submission_version,
+    submission_execute::{bind_submission_request_body, valid_submission_version},
     submission_verify::validate_verification_course_binding,
     task_inventory::parse_task_tree_unit_ids,
     user_identity::parse_user_identity,
@@ -832,14 +832,15 @@ impl NativeUaiInventoryTransport {
             &group_id,
             empty_answer,
         )?;
+        let request = bind_submission_request_body(body)?;
         let response = self
             .client
-            .post(submission_url()?)
+            .post(request.expose_url())
             .header(ACCEPT, "application/json")
-            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(CONTENT_TYPE, request.content_type())
             .headers(ucontent_session_headers(session)?)
             .header("x-annotator-auth-token", annotator_header)
-            .body(body.as_bytes().to_vec())
+            .body(request.expose_body().as_bytes().to_vec())
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error));
@@ -2691,6 +2692,7 @@ fn standard_answer_url(course_instance_id: &str, group_id: &str) -> ProviderResu
     )
 }
 
+#[cfg(test)]
 fn submission_url() -> ProviderResult<Url> {
     route_url(
         UCONTENT_ORIGIN,
@@ -3465,6 +3467,39 @@ mod tests {
         let debug = format!("{request:?}");
         assert!(debug.contains("[ROUTE]") && debug.contains("[REDACTED]"));
         assert!(!debug.contains("synthetic-open-id") && !debug.contains("1001"));
+    }
+
+    #[test]
+    fn empty_completion_requests_share_the_exact_redacted_digest_owner() {
+        let marker = bind_submission_request_body(Zeroizing::new(
+            build_preset_submission_body("course-v2:synthetic+rw", "synthetic-open-id", "group-1")
+                .unwrap(),
+        ))
+        .unwrap();
+        let duplicate = bind_submission_request_body(Zeroizing::new(
+            build_preset_submission_body("course-v2:synthetic+rw", "synthetic-open-id", "group-1")
+                .unwrap(),
+        ))
+        .unwrap();
+        let placeholder = bind_submission_request_body(Zeroizing::new(
+            build_empty_placeholder_submission_body(
+                "course-v2:synthetic+rw",
+                "synthetic-open-id",
+                "group-1",
+                "short_answer",
+                1,
+                123_290,
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+
+        assert_ne!(marker.request_digest(), [0; 32]);
+        assert_eq!(marker.request_digest(), duplicate.request_digest());
+        assert_ne!(marker.request_digest(), placeholder.request_digest());
+        let debug = format!("{placeholder:?}");
+        assert!(debug.contains("[ROUTE]") && debug.contains("[REDACTED]"));
+        assert!(!debug.contains("synthetic-open-id") && !debug.contains("short_answer"));
     }
 
     #[test]
