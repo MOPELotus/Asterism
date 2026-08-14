@@ -78,6 +78,10 @@ impl UaiAnswerDocuments {
     pub const fn new(content: UaiQuestionDocument, answer: UaiAnswerDocument) -> Self {
         Self { content, answer }
     }
+
+    pub(crate) const fn answer(&self) -> &UaiAnswerDocument {
+        &self.answer
+    }
 }
 
 /// Native boundary that rebinds a Group and reads content before its standard
@@ -174,12 +178,30 @@ pub fn parse_answer_candidates(
     document: &str,
     questions: &[Question],
 ) -> ProviderResult<Vec<AnswerCandidate>> {
+    validate_question_sequence(questions)?;
+    let decrypted = decrypt_answer_entries(document)?;
+    let entries = decrypted
+        .as_value()
+        .as_array()
+        .ok_or_else(|| protocol_drift("UAI decrypted standard answer is not an array"))?;
+    if entries.len() != questions.len() || entries.len() > MAX_QUESTIONS_PER_ANSWER {
+        return Err(protocol_drift(
+            "UAI standard-answer count does not match the Question snapshot",
+        ));
+    }
+    entries
+        .iter()
+        .zip(questions)
+        .map(|(entry, question)| parse_answer_entry(entry, question))
+        .collect()
+}
+
+pub(crate) fn decrypt_answer_entries(document: &str) -> ProviderResult<ZeroizingJsonValue> {
     if document.is_empty() || document.len() > MAX_ANSWER_DOCUMENT_BYTES {
         return Err(invalid_response(
             "UAI standard-answer response is empty or exceeds the size limit",
         ));
     }
-    validate_question_sequence(questions)?;
     let envelope: Value = serde_json::from_str(document)
         .map_err(|_| invalid_response("UAI standard-answer response is not valid JSON"))?;
     let envelope = envelope
@@ -209,16 +231,12 @@ pub fn parse_answer_candidates(
         .as_value()
         .as_array()
         .ok_or_else(|| protocol_drift("UAI decrypted standard answer is not an array"))?;
-    if entries.len() != questions.len() || entries.len() > MAX_QUESTIONS_PER_ANSWER {
+    if entries.len() > MAX_QUESTIONS_PER_ANSWER {
         return Err(protocol_drift(
-            "UAI standard-answer count does not match the Question snapshot",
+            "UAI standard-answer count exceeds its bound",
         ));
     }
-    entries
-        .iter()
-        .zip(questions)
-        .map(|(entry, question)| parse_answer_entry(entry, question))
-        .collect()
+    Ok(decrypted)
 }
 
 fn parse_answer_entry(entry: &Value, question: &Question) -> ProviderResult<AnswerCandidate> {

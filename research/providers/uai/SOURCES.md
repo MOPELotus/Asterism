@@ -141,6 +141,18 @@ implementation scope. Where the shared Core cannot yet express a reply draft,
 artifact handle or external resolver, that is a Core Gap rather than a Provider
 policy exclusion.
 
+The same Apache runner recognizes the exact compound family
+`basic-scoop-content,oral-sentence`, reads one encrypted standard-answer array
+for both native modules and submits both slots in one `submitType=1` body.
+Its empty-oral configuration proves the scalar-empty fallback and its generic
+builder proves an empty-array child when the encrypted row contains an empty
+child. Asterism freezes that observed representation and the explicit oral
+instance together with the matching Draft, current Task fingerprint and Course
+publish version. The donor's `answersExtra` indexing crosses module and child
+indices, so Asterism does not copy it or invent corrected semantics without a
+sanitized response fixture; non-empty or dynamic oral evidence fails closed
+while that exact compatibility case remains under incremental audit.
+
 The MIT donor also treats `video-popup` as an answer-bearing type, reads the
 first standard-answer value from every child and selects `submitType=2` because
 the exact base remains a study mode. The current Rust donor independently

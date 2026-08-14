@@ -577,6 +577,8 @@ submission:
 - discussion uses `ucloud.unipus.cn/api/bbs/utopic/page`, paginated
   `ureply/top/page`, `ureply/add`, then the normal Group completion mutation;
 - exit-ticket and configured oral flows use their own empty-submission shapes;
+- ordered `basic-scoop-content,oral-sentence` uses one compound body whose two
+  native instances come from the same encrypted standard-answer array;
 - `multiFileUpload` first requests a CMS upload token/file key, uploads the
   bounded artifact to the returned object-store route, then submits that key in
   the immutable answer flow;
@@ -663,3 +665,29 @@ changed modules fail closed. The shared artifact lifecycle, durable attempt and
 one compound Draft that owns both slots remain active Core integration work. A
 grant, object-store response, accepted final receipt or even exact two-module
 readback alone is never Group completion evidence.
+
+The donor's `basic-scoop-content,oral-sentence` path is likewise atomic rather
+than a normal matching submit followed by an unrelated oral completion. The
+Provider-private preparation first rebuilds one immutable matching sub-Draft,
+freshly requires the exact ordered two-module Task and current positive Course
+publish version, then reads the Group's encrypted standard-answer array under
+the same account boundary. Entry one must repeat the Draft's native instance;
+entry two supplies an explicit bounded numeric oral instance. Only the donor's
+reliably evidenced empty oral representations are accepted: a missing/empty
+answer becomes one scalar-empty child, while bounded parsed children with no
+`answers` or `value` material remain empty arrays. Non-empty values and dynamic
+`answersExtra` fail before mutation because the donor indexes those extras
+across incompatible module/child axes and no sanitized live fixture currently
+resolves the intended wire shape.
+
+The native mutation re-resolves Course instance and the exact incomplete,
+available `tab_type=task` leaf, then emits the matching answer followed by the
+frozen oral slot in one `submitType=1` POST. Every judge uses the fresh Course
+publish version and the oral judge retains exact `oral-sentence` labels. An
+accepted version is only a receipt. Verification reads exactly that version,
+requires the complete ordered two-module user-module state, exact matching
+answer equality, the same oral instance and the same scalar-empty/empty-array
+child representation. Fresh Group progress remains the only completion
+authority. Shared Core still needs one compound Draft/Attempt slot before the
+Provider-private preparation and transport can be exposed as a public
+capability.
