@@ -1522,6 +1522,81 @@ pub trait ExecutionCapabilityStepRepository: Send + Sync {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionAtomicMutation {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub ordinal: u32,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: String,
+    pub operation_type: String,
+    pub request_digest: [u8; 32],
+    pub response_digest: Option<[u8; 32]>,
+    pub accepted: Option<bool>,
+    pub issued_at: Timestamp,
+    pub received_at: Option<Timestamp>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionAtomicMutationIssueRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub ordinal: u32,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub operation_type: &'a str,
+    pub request_digest: [u8; 32],
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionAtomicMutationIssueOutcome {
+    Issued(ExecutionAtomicMutation),
+    AlreadyIssued(ExecutionAtomicMutation),
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionAtomicMutationReceiptRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub ordinal: u32,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub response_digest: [u8; 32],
+    pub accepted: bool,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionAtomicMutationReceiptOutcome {
+    Recorded(ExecutionAtomicMutation),
+    AlreadyRecorded(ExecutionAtomicMutation),
+}
+
+/// Durable, ordered issue/receipt ledger for the individual remote mutations
+/// inside one Provider-owned atomic operation. An issued row without a receipt
+/// is intentionally not replayable and prevents issuing the next ordinal.
+#[async_trait]
+pub trait ExecutionAtomicMutationRepository: Send + Sync {
+    async fn find_execution_atomic_mutations(
+        &self,
+        execution_id: ExecutionId,
+        attempt_id: ExecutionAttemptId,
+    ) -> Result<Vec<ExecutionAtomicMutation>, StorageError>;
+
+    async fn issue_execution_atomic_mutation(
+        &self,
+        request: ExecutionAtomicMutationIssueRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationIssueOutcome, StorageError>;
+
+    async fn record_execution_atomic_mutation_receipt(
+        &self,
+        request: ExecutionAtomicMutationReceiptRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationReceiptOutcome, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionScheduleOutcome {
     Created(Execution),
     Existing(Execution),

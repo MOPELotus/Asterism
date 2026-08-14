@@ -24,16 +24,18 @@ use crate::question_session::{
     consume_question_session_for_succeeded_execution,
 };
 use crate::{
-    Database, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
-    ExecutionBillingReservation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
-    ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
-    ExecutionCapabilityStepState, ExecutionLogAppendRequest, ExecutionProgressUpdate,
-    ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
-    ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, StorageError, SubmissionDraftRepository,
-    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
-    VerificationRecoveryStartRequest,
+    Database, ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
+    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
+    ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
+    ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionBillingReservation,
+    ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
+    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLogAppendRequest,
+    ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionQuestionStepFinishRequest,
+    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionRuntimeSettingsResolution,
+    ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome, ExecutionScheduleRequest,
+    ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, StorageError,
+    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
+    SubmissionResultRepository, VerificationRecoveryStartRequest,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage, SqliteQuestionSnapshotRepository};
 
@@ -653,6 +655,217 @@ impl ExecutionCapabilityStepRepository for SqliteExecutionRepository {
         }
         transaction.commit().await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
+    async fn find_execution_atomic_mutations(
+        &self,
+        execution_id: ExecutionId,
+        attempt_id: ExecutionAttemptId,
+    ) -> Result<Vec<ExecutionAtomicMutation>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT execution_id, execution_attempt_id, ordinal, scheduler_job_id, worker_id, \
+                    operation_type, request_digest, response_digest, accepted, issued_at, received_at \
+             FROM execution_atomic_mutations WHERE execution_id = ? AND execution_attempt_id = ? \
+             ORDER BY ordinal",
+        )
+        .bind(execution_id.to_string())
+        .bind(attempt_id.to_string())
+        .fetch_all(self.database.pool())
+        .await?;
+        rows.iter().map(decode_atomic_mutation).collect()
+    }
+
+    async fn issue_execution_atomic_mutation(
+        &self,
+        request: ExecutionAtomicMutationIssueRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationIssueOutcome, StorageError> {
+        validate_atomic_mutation_issue(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let active = find_active_attempt(&mut transaction, request.execution_id).await?;
+        if active.id != request.attempt_id {
+            return Err(StorageError::ExecutionAttemptNotActive);
+        }
+
+        let existing = select_atomic_mutation(
+            &mut transaction,
+            request.execution_id,
+            request.attempt_id,
+            request.ordinal,
+        )
+        .await?;
+        if let Some(existing) = existing {
+            let identical = existing.scheduler_job_id == request.scheduler_job_id
+                && existing.worker_id == request.worker_id
+                && existing.operation_type == request.operation_type
+                && existing.request_digest == request.request_digest;
+            transaction.rollback().await?;
+            return if identical {
+                Ok(ExecutionAtomicMutationIssueOutcome::AlreadyIssued(existing))
+            } else {
+                Err(StorageError::ExecutionStateConflict)
+            };
+        }
+
+        let (last_ordinal, incomplete): (i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(MAX(ordinal), 0), \
+                    COALESCE(SUM(CASE WHEN received_at IS NULL THEN 1 ELSE 0 END), 0) \
+             FROM execution_atomic_mutations WHERE execution_id = ? AND execution_attempt_id = ?",
+        )
+        .bind(request.execution_id.to_string())
+        .bind(request.attempt_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if incomplete != 0 || i64::from(request.ordinal) != last_ordinal + 1 {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+
+        sqlx::query(
+            "INSERT INTO execution_atomic_mutations \
+             (execution_id, execution_attempt_id, ordinal, scheduler_job_id, worker_id, \
+              operation_type, request_digest, issued_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(request.execution_id.to_string())
+        .bind(request.attempt_id.to_string())
+        .bind(i64::from(request.ordinal))
+        .bind(request.scheduler_job_id.to_string())
+        .bind(request.worker_id)
+        .bind(request.operation_type)
+        .bind(request.request_digest.as_slice())
+        .bind(encode_timestamp(request.at))
+        .execute(&mut *transaction)
+        .await?;
+        insert_worker_audit(
+            &mut transaction,
+            request.execution_id,
+            request.worker_id,
+            "execution_atomic_mutation_issued",
+            request.at,
+            request.correlation_id,
+            serde_json::json!({
+                "attempt_id": request.attempt_id,
+                "ordinal": request.ordinal,
+                "operation_type": request.operation_type,
+                "request_digest": "[HASHED]",
+            }),
+        )
+        .await?;
+        let mutation = ExecutionAtomicMutation {
+            execution_id: request.execution_id,
+            attempt_id: request.attempt_id,
+            ordinal: request.ordinal,
+            scheduler_job_id: request.scheduler_job_id,
+            worker_id: request.worker_id.to_owned(),
+            operation_type: request.operation_type.to_owned(),
+            request_digest: request.request_digest,
+            response_digest: None,
+            accepted: None,
+            issued_at: request.at,
+            received_at: None,
+        };
+        transaction.commit().await?;
+        Ok(ExecutionAtomicMutationIssueOutcome::Issued(mutation))
+    }
+
+    async fn record_execution_atomic_mutation_receipt(
+        &self,
+        request: ExecutionAtomicMutationReceiptRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationReceiptOutcome, StorageError> {
+        validate_atomic_mutation_receipt(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let active = find_active_attempt(&mut transaction, request.execution_id).await?;
+        if active.id != request.attempt_id {
+            return Err(StorageError::ExecutionAttemptNotActive);
+        }
+        let Some(mut mutation) = select_atomic_mutation(
+            &mut transaction,
+            request.execution_id,
+            request.attempt_id,
+            request.ordinal,
+        )
+        .await?
+        else {
+            return Err(StorageError::ExecutionStateConflict);
+        };
+        if mutation.scheduler_job_id != request.scheduler_job_id
+            || mutation.worker_id != request.worker_id
+        {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        if mutation.received_at.is_some() {
+            let identical = mutation.response_digest == Some(request.response_digest)
+                && mutation.accepted == Some(request.accepted);
+            transaction.rollback().await?;
+            return if identical {
+                Ok(ExecutionAtomicMutationReceiptOutcome::AlreadyRecorded(
+                    mutation,
+                ))
+            } else {
+                Err(StorageError::ExecutionStateConflict)
+            };
+        }
+        if request.at < mutation.issued_at {
+            return Err(StorageError::InvalidData(
+                "execution atomic mutation receipt predates its issue".to_owned(),
+            ));
+        }
+        let changed = sqlx::query(
+            "UPDATE execution_atomic_mutations SET response_digest = ?, accepted = ?, received_at = ? \
+             WHERE execution_id = ? AND execution_attempt_id = ? AND ordinal = ? \
+               AND response_digest IS NULL AND accepted IS NULL AND received_at IS NULL",
+        )
+        .bind(request.response_digest.as_slice())
+        .bind(request.accepted)
+        .bind(encode_timestamp(request.at))
+        .bind(request.execution_id.to_string())
+        .bind(request.attempt_id.to_string())
+        .bind(i64::from(request.ordinal))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        insert_worker_audit(
+            &mut transaction,
+            request.execution_id,
+            request.worker_id,
+            "execution_atomic_mutation_receipt_recorded",
+            request.at,
+            request.correlation_id,
+            serde_json::json!({
+                "attempt_id": request.attempt_id,
+                "ordinal": request.ordinal,
+                "response_digest": "[HASHED]",
+                "accepted": request.accepted,
+            }),
+        )
+        .await?;
+        mutation.response_digest = Some(request.response_digest);
+        mutation.accepted = Some(request.accepted);
+        mutation.received_at = Some(request.at);
+        transaction.commit().await?;
+        Ok(ExecutionAtomicMutationReceiptOutcome::Recorded(mutation))
     }
 }
 
@@ -2664,6 +2877,106 @@ fn decode_capability_step(
     })
 }
 
+async fn select_atomic_mutation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    attempt_id: ExecutionAttemptId,
+    ordinal: u32,
+) -> Result<Option<ExecutionAtomicMutation>, StorageError> {
+    sqlx::query(
+        "SELECT execution_id, execution_attempt_id, ordinal, scheduler_job_id, worker_id, \
+                operation_type, request_digest, response_digest, accepted, issued_at, received_at \
+         FROM execution_atomic_mutations WHERE execution_id = ? AND execution_attempt_id = ? \
+           AND ordinal = ?",
+    )
+    .bind(execution_id.to_string())
+    .bind(attempt_id.to_string())
+    .bind(i64::from(ordinal))
+    .fetch_optional(&mut **transaction)
+    .await?
+    .map(|row| decode_atomic_mutation(&row))
+    .transpose()
+}
+
+fn decode_atomic_mutation(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ExecutionAtomicMutation, StorageError> {
+    let accepted = row
+        .try_get::<Option<i64>, _>("accepted")?
+        .map(|value| match value {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(StorageError::InvalidData(
+                "persisted execution atomic mutation acceptance is invalid".to_owned(),
+            )),
+        })
+        .transpose()?;
+    Ok(ExecutionAtomicMutation {
+        execution_id: ExecutionId::from_str(row.try_get("execution_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        attempt_id: ExecutionAttemptId::from_str(row.try_get("execution_attempt_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        ordinal: u32::try_from(row.try_get::<i64, _>("ordinal")?).map_err(|_| {
+            StorageError::InvalidData("execution atomic mutation ordinal is invalid".to_owned())
+        })?,
+        scheduler_job_id: ScheduleId::from_str(row.try_get("scheduler_job_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        worker_id: row.try_get("worker_id")?,
+        operation_type: row.try_get("operation_type")?,
+        request_digest: decode_execution_digest(row.try_get("request_digest")?)?,
+        response_digest: row
+            .try_get::<Option<Vec<u8>>, _>("response_digest")?
+            .map(decode_execution_digest)
+            .transpose()?,
+        accepted,
+        issued_at: decode_timestamp(row.try_get("issued_at")?)?,
+        received_at: decode_optional_timestamp(row.try_get("received_at")?)?,
+    })
+}
+
+fn decode_execution_digest(bytes: Vec<u8>) -> Result<[u8; 32], StorageError> {
+    bytes.try_into().map_err(|_| {
+        StorageError::InvalidData("persisted execution mutation digest is invalid".to_owned())
+    })
+}
+
+fn validate_atomic_mutation_issue(
+    request: &ExecutionAtomicMutationIssueRequest<'_>,
+) -> Result<(), StorageError> {
+    validate_worker_token(request.worker_id, request.correlation_id)?;
+    if !(1..=100_000).contains(&request.ordinal)
+        || !valid_atomic_operation_type(request.operation_type)
+        || request.request_digest == [0; 32]
+    {
+        return Err(StorageError::InvalidData(
+            "execution atomic mutation issue is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_atomic_mutation_receipt(
+    request: &ExecutionAtomicMutationReceiptRequest<'_>,
+) -> Result<(), StorageError> {
+    validate_worker_token(request.worker_id, request.correlation_id)?;
+    if !(1..=100_000).contains(&request.ordinal) || request.response_digest == [0; 32] {
+        return Err(StorageError::InvalidData(
+            "execution atomic mutation receipt is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_atomic_operation_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value.trim() == value
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 fn valid_requested_capabilities(capabilities: &[TaskCapability]) -> bool {
     !capabilities.is_empty()
         && capabilities.len() <= 5
@@ -2994,6 +3307,154 @@ mod tests {
                 .iter()
                 .all(|step| step.state == ExecutionCapabilityStepState::Succeeded)
         );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one ledger scenario keeps ordering, idempotency, conflict and audit assertions on the same claimed attempt"
+    )]
+    async fn atomic_mutations_require_ordered_definite_attempt_bound_receipts() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let execution = scheduled_execution(owner, task_id, now);
+        assert!(matches!(
+            repository
+                .schedule_execution(test_request(&execution, owner, "atomic-mutations"))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::Created(_)
+        ));
+        let job_id = claim_execution(&database, &execution, "atomic-worker", now).await;
+        let attempt = repository
+            .start_attempt(ExecutionAttemptStartRequest {
+                execution_id: execution.id,
+                scheduler_job_id: job_id,
+                worker_id: "atomic-worker",
+                at: now + chrono::Duration::seconds(1),
+                correlation_id: "atomic-attempt",
+            })
+            .await
+            .unwrap();
+        let issue = |ordinal, digest, seconds| ExecutionAtomicMutationIssueRequest {
+            execution_id: execution.id,
+            attempt_id: attempt.id,
+            ordinal,
+            scheduler_job_id: job_id,
+            worker_id: "atomic-worker",
+            operation_type: "welearn.duration.keep",
+            request_digest: [digest; 32],
+            correlation_id: "atomic-mutation",
+            at: now + chrono::Duration::seconds(seconds),
+        };
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(issue(2, 2, 2))
+                .await
+                .is_err()
+        );
+        let first = match repository
+            .issue_execution_atomic_mutation(issue(1, 1, 2))
+            .await
+            .unwrap()
+        {
+            ExecutionAtomicMutationIssueOutcome::Issued(mutation) => mutation,
+            ExecutionAtomicMutationIssueOutcome::AlreadyIssued(_) => panic!("first issue repeated"),
+        };
+        assert_eq!(first.ordinal, 1);
+        assert_eq!(first.response_digest, None);
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(issue(2, 2, 3))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            repository
+                .issue_execution_atomic_mutation(issue(1, 1, 3))
+                .await
+                .unwrap(),
+            ExecutionAtomicMutationIssueOutcome::AlreadyIssued(first.clone())
+        );
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(issue(1, 9, 3))
+                .await
+                .is_err()
+        );
+
+        let receipt = |ordinal, digest, accepted, seconds| ExecutionAtomicMutationReceiptRequest {
+            execution_id: execution.id,
+            attempt_id: attempt.id,
+            ordinal,
+            scheduler_job_id: job_id,
+            worker_id: "atomic-worker",
+            response_digest: [digest; 32],
+            accepted,
+            correlation_id: "atomic-receipt",
+            at: now + chrono::Duration::seconds(seconds),
+        };
+        let received = match repository
+            .record_execution_atomic_mutation_receipt(receipt(1, 11, true, 4))
+            .await
+            .unwrap()
+        {
+            ExecutionAtomicMutationReceiptOutcome::Recorded(mutation) => mutation,
+            ExecutionAtomicMutationReceiptOutcome::AlreadyRecorded(_) => {
+                panic!("first receipt repeated")
+            }
+        };
+        assert_eq!(received.response_digest, Some([11; 32]));
+        assert_eq!(received.accepted, Some(true));
+        assert_eq!(
+            repository
+                .record_execution_atomic_mutation_receipt(receipt(1, 11, true, 5))
+                .await
+                .unwrap(),
+            ExecutionAtomicMutationReceiptOutcome::AlreadyRecorded(received)
+        );
+        assert!(
+            repository
+                .record_execution_atomic_mutation_receipt(receipt(1, 12, true, 5))
+                .await
+                .is_err()
+        );
+
+        repository
+            .issue_execution_atomic_mutation(issue(2, 2, 6))
+            .await
+            .unwrap();
+        repository
+            .record_execution_atomic_mutation_receipt(receipt(2, 22, false, 7))
+            .await
+            .unwrap();
+        repository
+            .issue_execution_atomic_mutation(issue(3, 3, 8))
+            .await
+            .unwrap();
+        let mutations = repository
+            .find_execution_atomic_mutations(execution.id, attempt.id)
+            .await
+            .unwrap();
+        assert_eq!(mutations.len(), 3);
+        assert_eq!(mutations[1].accepted, Some(false));
+        assert_eq!(mutations[2].received_at, None);
+
+        let audit_metadata: Vec<String> = sqlx::query_scalar(
+            "SELECT metadata_sanitized_json FROM audit_records \
+             WHERE resource_id = ? AND action LIKE 'execution_atomic_mutation_%' ORDER BY occurred_at",
+        )
+        .bind(execution.id.to_string())
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_metadata.len(), 5);
+        assert!(audit_metadata.iter().all(|metadata| {
+            !metadata.contains(&"01".repeat(32))
+                && !metadata.contains(&"0b".repeat(32))
+                && metadata.contains("[HASHED]")
+        }));
     }
 
     #[tokio::test]

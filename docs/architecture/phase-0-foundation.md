@@ -3498,3 +3498,24 @@ This snapshot supplies deterministic process-restart ownership but does not
 advance a Provider state machine. A Provider adapter must still freshly rebuild
 and validate its protocol authority, then either accept the prior result and
 issue the exact next sequence or stop for typed recovery/human handling.
+
+## One-hundred-and-ninety-eighth Phase 0 slice
+
+Core now retains an ordered issue/receipt ledger for each remote mutation inside
+one Provider-owned atomic operation. Migration 047 binds every ordinal to the
+exact Execution attempt, claimed scheduler job and worker, plus a bounded
+operation type and request digest. The first ordinal must be one, gaps are
+rejected, and Core will not issue ordinal `n + 1` until ordinal `n` has a
+durable, explicit boolean receipt and response digest.
+
+Issuance and receipt both revalidate the live scheduler claim, Execution lease
+and active attempt in an immediate transaction. Exact retries return the
+original record, while changed request or response identities fail closed.
+Request and response material never enters the ledger or Audit metadata; only
+their digests are retained and Audit represents them as hashed values.
+
+An issued row without a receipt is deliberately ambiguous. Recovery may inspect
+the attempt ledger, but neither Core nor a Provider may infer rejection, skip
+the missing response, or replay that ordinal. This is the persistence boundary
+needed by WELearn's multi-request duration completion transport; injecting it
+through the Provider execution API remains a separate contract slice.
