@@ -59,17 +59,18 @@ pub use browser_batch::{
     UaiCourseResidenceRestartTarget, UaiCourseResidenceTask, build_course_residence_batch_plan,
 };
 pub use browser_bridge::{
-    EncodedUaiBrowserCommandArtifact, UAI_BROWSER_COMMAND_TYPE, UAI_BROWSER_EVENT_TYPE,
-    UAI_BROWSER_RESIDENCE_RESULT_TYPE, UaiBrowserBridge, UaiBrowserCommand,
+    EncodedUaiBrowserCommandArtifact, UAI_BROWSER_COMMAND_TYPE, UAI_BROWSER_CURSOR_STATE_TYPE,
+    UAI_BROWSER_EVENT_TYPE, UAI_BROWSER_RESIDENCE_RESULT_TYPE, UaiBrowserBridge, UaiBrowserCommand,
     UaiBrowserCommandEnvelope, UaiBrowserCursorExchangeIssued, UaiBrowserCursorExchangeRecovered,
-    UaiBrowserEvent, UaiBrowserEventDocument, UaiBrowserEventEnvelope,
-    UaiBrowserEventExchangeCompleted, UaiBrowserExchangeIssued, UaiBrowserMenuEntry,
-    UaiBrowserMessageSecurity, UaiBrowserPageEntry, UaiBrowserPageScope,
-    UaiBrowserResidenceControl, UaiBrowserResidenceExchangeCompleted, UaiBrowserResidencePlan,
-    UaiBrowserResidenceResult, UaiBrowserResidenceResultDocument, UaiBrowserSessionBinding,
-    UaiBrowserTarget, UaiBrowserTargetMenuEntry, UaiBrowserTargetTaskEntry,
-    UaiMenuDiscoveryStrategy, browser_event_exchange_digest, browser_residence_exchange_digest,
-    browser_start_url_from_detail, parse_browser_event, parse_browser_residence_result,
+    UaiBrowserCursorPersistenceHandoff, UaiBrowserCursorPersistenceRecovery, UaiBrowserEvent,
+    UaiBrowserEventDocument, UaiBrowserEventEnvelope, UaiBrowserEventExchangeCompleted,
+    UaiBrowserExchangeIssued, UaiBrowserMenuEntry, UaiBrowserMessageSecurity, UaiBrowserPageEntry,
+    UaiBrowserPageScope, UaiBrowserResidenceControl, UaiBrowserResidenceExchangeCompleted,
+    UaiBrowserResidencePlan, UaiBrowserResidenceResult, UaiBrowserResidenceResultDocument,
+    UaiBrowserSessionBinding, UaiBrowserTarget, UaiBrowserTargetMenuEntry,
+    UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy, browser_event_exchange_digest,
+    browser_residence_exchange_digest, browser_start_url_from_detail, parse_browser_event,
+    parse_browser_residence_result,
 };
 pub use browser_cursor::{
     EncodedUaiBrowserCursorArtifact, UaiBrowserCursorAdvance, UaiBrowserCursorStage,

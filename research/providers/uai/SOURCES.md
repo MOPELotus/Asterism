@@ -117,6 +117,11 @@ The same four default branches and tag sets were rechecked after the exact
 CourseResource-bound Task study-record owner checkpoint on 2026-08-14. All
 recorded revisions remained remote HEAD and no new donor delta appeared.
 
+All four default branches and complete tag refs were checked again after the
+Core encrypted runtime-sidecar/UAI cursor handoff checkpoint on 2026-08-14.
+Apache `bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and
+current Rust `40ead69c7dabf` remained unchanged.
+
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
 `https://ucontent.unipus.cn/_explorationpc_default/pc.html` as the browser

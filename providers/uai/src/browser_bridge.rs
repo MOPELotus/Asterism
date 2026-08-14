@@ -1,8 +1,8 @@
 use std::{fmt, sync::Arc};
 
 use asterism_domain::{
-    BrowserBridgeExchange, BrowserBridgeExchangeState, BrowserBridgeSessionId, TaskCapability,
-    Timestamp,
+    BrowserBridgeExchange, BrowserBridgeExchangeState, BrowserBridgeRuntimeStateMetadata,
+    BrowserBridgeSessionId, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
     BrowserBridgeCapability, BrowserSessionSpec, ProviderContext, ProviderError, ProviderErrorKind,
@@ -68,6 +68,8 @@ pub const UAI_BROWSER_COMMAND_TYPE: &str = "uai.browser.command";
 pub const UAI_BROWSER_EVENT_TYPE: &str = "uai.browser.event";
 /// Stable Core `BrowserBridge` exchange type for one terminal residence result.
 pub const UAI_BROWSER_RESIDENCE_RESULT_TYPE: &str = "uai.browser.residence.result";
+/// Stable Core runtime-state type for the encrypted accumulated cursor.
+pub const UAI_BROWSER_CURSOR_STATE_TYPE: &str = "uai.browser.cursor.v4";
 
 /// Encrypted-at-rest UAI command material required to validate a browser
 /// result after process recovery. Only the digest belongs in the ordinary
@@ -180,6 +182,134 @@ impl UaiBrowserCursorExchangeIssued {
     ) {
         let (command, command_artifact, exchange) = self.issued.into_parts();
         (command, command_artifact, self.cursor_artifact, exchange)
+    }
+
+    /// Consumes one cursor-aware issuance into Core persistence material.
+    ///
+    /// Both secret artifacts move into the handoff without copying their
+    /// plaintext bytes. Cursor metadata is derived only from the exact issued
+    /// exchange and encoded cursor owned by this value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if the Provider-produced metadata cannot be
+    /// represented by Core's generic runtime-state contract.
+    pub fn into_persistence_handoff(self) -> ProviderResult<UaiBrowserCursorPersistenceHandoff> {
+        let (command, command_artifact, cursor_artifact, exchange) = self.into_parts();
+        let cursor_state_metadata = BrowserBridgeRuntimeStateMetadata {
+            session_id: exchange.session_id,
+            sequence: exchange.sequence,
+            state_type: UAI_BROWSER_CURSOR_STATE_TYPE.to_owned(),
+            state_digest: cursor_artifact.digest(),
+            stored_at: exchange.issued_at,
+        };
+        cursor_state_metadata.validate().map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "UAI cursor runtime-state metadata is invalid",
+            )
+        })?;
+        Ok(UaiBrowserCursorPersistenceHandoff {
+            command,
+            exchange,
+            command_artifact: command_artifact.into_secret_value(),
+            cursor_state_metadata,
+            cursor_state_artifact: cursor_artifact.into_secret_value(),
+        })
+    }
+}
+
+/// Consuming Core persistence handoff for one exact command and cursor.
+#[derive(Debug)]
+pub struct UaiBrowserCursorPersistenceHandoff {
+    command: UaiBrowserCommandEnvelope,
+    exchange: BrowserBridgeExchange,
+    command_artifact: SecretValue,
+    cursor_state_metadata: BrowserBridgeRuntimeStateMetadata,
+    cursor_state_artifact: SecretValue,
+}
+
+impl UaiBrowserCursorPersistenceHandoff {
+    pub const fn command(&self) -> &UaiBrowserCommandEnvelope {
+        &self.command
+    }
+
+    pub const fn exchange(&self) -> &BrowserBridgeExchange {
+        &self.exchange
+    }
+
+    pub const fn cursor_state_metadata(&self) -> &BrowserBridgeRuntimeStateMetadata {
+        &self.cursor_state_metadata
+    }
+
+    /// Transfers all dispatch and persistence owners without exposing or
+    /// copying either secret artifact.
+    pub fn into_parts(
+        self,
+    ) -> (
+        UaiBrowserCommandEnvelope,
+        BrowserBridgeExchange,
+        SecretValue,
+        BrowserBridgeRuntimeStateMetadata,
+        SecretValue,
+    ) {
+        (
+            self.command,
+            self.exchange,
+            self.command_artifact,
+            self.cursor_state_metadata,
+            self.cursor_state_artifact,
+        )
+    }
+}
+
+/// Strict consuming input restored from Core's command plus runtime sidecar.
+///
+/// Construction validates all generic UAI metadata and artifact digests before
+/// a fresh Provider read. Owned secret bytes remain zeroizing on every error.
+#[derive(Debug)]
+pub struct UaiBrowserCursorPersistenceRecovery {
+    exchange: BrowserBridgeExchange,
+    command_artifact: SecretValue,
+    cursor_state_metadata: BrowserBridgeRuntimeStateMetadata,
+    cursor_state_artifact: SecretValue,
+}
+
+impl UaiBrowserCursorPersistenceRecovery {
+    /// # Errors
+    ///
+    /// Rejects a non-issued UAI exchange, missing/foreign cursor state or
+    /// either artifact whose exact bytes no longer match durable metadata.
+    pub fn try_new(
+        exchange: BrowserBridgeExchange,
+        command_artifact: SecretValue,
+        cursor_state_metadata: BrowserBridgeRuntimeStateMetadata,
+        cursor_state_artifact: SecretValue,
+    ) -> ProviderResult<Self> {
+        let command_digest: [u8; 32] = Sha256::digest(command_artifact.expose_secret()).into();
+        let cursor_digest: [u8; 32] = Sha256::digest(cursor_state_artifact.expose_secret()).into();
+        if exchange.validate().is_err()
+            || exchange.state != BrowserBridgeExchangeState::Issued
+            || exchange.command_type != UAI_BROWSER_COMMAND_TYPE
+            || cursor_state_metadata.validate().is_err()
+            || cursor_state_metadata.state_type != UAI_BROWSER_CURSOR_STATE_TYPE
+            || cursor_state_metadata.session_id != exchange.session_id
+            || cursor_state_metadata.sequence != exchange.sequence
+            || cursor_state_metadata.stored_at != exchange.issued_at
+            || command_digest != exchange.command_digest
+            || cursor_digest != cursor_state_metadata.state_digest
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI persisted cursor command or runtime state is stale or foreign",
+            ));
+        }
+        Ok(Self {
+            exchange,
+            command_artifact,
+            cursor_state_metadata,
+            cursor_state_artifact,
+        })
     }
 }
 
@@ -2225,6 +2355,40 @@ impl UaiBrowserBridge {
         Ok(UaiBrowserCursorExchangeRecovered { command, cursor })
     }
 
+    /// Consumes Core's resolved command and cursor sidecar, then freshly
+    /// rebinds both Provider artifacts to the exact Course batch and Task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale generic metadata, changed encrypted
+    /// bytes, fresh Course/Task drift or a cursor paired with another command.
+    pub async fn recover_persisted_cursor_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        batch: &UaiCourseResidenceBatchPlan,
+        recovery: UaiBrowserCursorPersistenceRecovery,
+    ) -> ProviderResult<UaiBrowserCursorExchangeRecovered> {
+        let UaiBrowserCursorPersistenceRecovery {
+            exchange,
+            command_artifact,
+            cursor_state_metadata,
+            cursor_state_artifact,
+        } = recovery;
+        self.recover_cursor_exchange(
+            context,
+            remote_task_id,
+            settings,
+            batch,
+            &exchange,
+            &command_artifact,
+            &cursor_state_artifact,
+            cursor_state_metadata.state_digest,
+        )
+        .await
+    }
+
     /// Freshly validates an intermediate event for an in-memory issued
     /// command and completes its exact durable exchange row.
     ///
@@ -3828,23 +3992,81 @@ mod tests {
         let debug = format!("{issued:?}");
         assert!(debug.contains("[REDACTED]") && !debug.contains("Unit Z"));
 
-        let (dispatched, command_artifact, cursor_artifact, exchange) = issued.into_parts();
-        let cursor_digest = cursor_artifact.digest();
+        let handoff = issued.into_persistence_handoff().unwrap();
+        assert_eq!(handoff.exchange().issued_at, issued_at);
+        assert_eq!(
+            handoff.cursor_state_metadata(),
+            &BrowserBridgeRuntimeStateMetadata {
+                session_id,
+                sequence: 1,
+                state_type: UAI_BROWSER_CURSOR_STATE_TYPE.to_owned(),
+                state_digest: cursor
+                    .encode_artifact(&batch, &residence_plan_for_group_z(), handoff.command())
+                    .unwrap()
+                    .digest(),
+                stored_at: issued_at,
+            }
+        );
+        let handoff_debug = format!("{handoff:?}");
+        assert!(handoff_debug.contains("[REDACTED]") && !handoff_debug.contains("Unit Z"));
+        let (dispatched, exchange, command_artifact, cursor_state_metadata, cursor_artifact) =
+            handoff.into_parts();
+        let recovery = UaiBrowserCursorPersistenceRecovery::try_new(
+            exchange,
+            command_artifact,
+            cursor_state_metadata,
+            cursor_artifact,
+        )
+        .unwrap();
         let recovered = bridge
-            .recover_cursor_exchange(
+            .recover_persisted_cursor_exchange(
                 &context,
                 "group:2001:unit-z:group-z",
                 &settings,
                 &batch,
-                &exchange,
-                &command_artifact.into_secret_value(),
-                &cursor_artifact.into_secret_value(),
-                cursor_digest,
+                recovery,
             )
             .await
             .unwrap();
         assert_eq!(recovered.command(), &dispatched);
         assert_eq!(recovered.cursor(), &cursor);
+    }
+
+    #[tokio::test]
+    async fn cursor_persistence_recovery_rejects_foreign_state_type_before_fresh_reads() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let (batch, _plan, command, cursor) = initial_residence_cursor(&session_id.to_string());
+        let issued = bridge
+            .issue_cursor_exchange(
+                &context,
+                "group:2001:unit-z:group-z",
+                &settings,
+                &batch,
+                session_id,
+                &cursor,
+                command,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap()
+            .into_persistence_handoff()
+            .unwrap();
+        let (_, exchange, command_artifact, mut metadata, cursor_artifact) = issued.into_parts();
+        metadata.state_type = "uai.browser.cursor.v3".to_owned();
+        assert_eq!(
+            UaiBrowserCursorPersistenceRecovery::try_new(
+                exchange,
+                command_artifact,
+                metadata,
+                cursor_artifact,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
     }
 
     #[tokio::test]

@@ -424,9 +424,20 @@ and Task titles to agree with the Course batch, not merely the Group ID. On
 recovery the persisted exchange first selects the exact command artifact, then
 the separately persisted cursor digest selects and rebinds the accumulated
 cursor. Even another valid command issued under the same Core session and
-sequence cannot be paired with that cursor. Core remains responsible for
-atomically persisting both encrypted artifacts and the cursor digest before
-dispatch.
+sequence cannot be paired with that cursor.
+
+Core's generic encrypted runtime-state sidecar now supplies that atomic
+persistence. The Provider consuming handoff moves both zeroizing artifacts
+without copying their plaintext and derives the sidecar metadata only from the
+issued exchange and cursor: exact session, sequence, `stored_at=issued_at`,
+cursor digest and stable type `uai.browser.cursor.v4`. Strict consuming
+recovery rejects a missing/foreign state type, changed command or cursor bytes,
+or any session/sequence/time mismatch before fresh Provider reads; it then
+performs the existing command-first, cursor-second fresh rebind. The sidecar is
+never dispatched to the helper. It stores the accumulated cursor, not the
+complete immutable Course batch: Core still needs the frozen start authority,
+resolved settings and complete fresh ordered Course/Task inventory required to
+rebuild the same `UaiCourseResidenceBatchPlan` before Provider recovery.
 
 The first cursor transition is now executable at the Provider boundary. A
 completed `ScanMenu` exchange must retain the same Core session, sequence,
