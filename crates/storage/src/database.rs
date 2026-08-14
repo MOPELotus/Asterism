@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 36);
+        assert_eq!(migration_count, 37);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -155,6 +155,15 @@ mod tests {
             .collect();
         assert!(names.contains(&"encrypted_data".to_owned()));
         assert!(!names.iter().any(|name| name == "plaintext"));
+
+        let question_sessions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'question_sessions'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(question_sessions, 1);
     }
 
     #[tokio::test]

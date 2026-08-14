@@ -10,8 +10,8 @@ use asterism_domain::{
     ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
     LogLevel, OrchestrationState, PriceQuote, ProviderAccount, ProviderAccountId,
     ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
-    QuestionContentFingerprint, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId,
-    SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
+    QuestionContentFingerprint, QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken,
+    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
     SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
     Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
@@ -149,6 +149,57 @@ pub trait QuestionSnapshotRepository: Send + Sync {
         owner_id: UserId,
         task_id: TaskId,
     ) -> Result<Option<QuestionSnapshot>, StorageError>;
+}
+
+/// Result of atomically claiming the Question session selected by one
+/// Execution's immutable `SubmissionDraft`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QuestionSessionClaimOutcome {
+    Claimed(QuestionSession),
+    Existing(QuestionSession),
+    Expired(QuestionSession),
+    NotFound,
+    BindingConflict,
+    StateConflict(QuestionSession),
+}
+
+/// Durable owner/account/Task/Snapshot binding for provider attempt material.
+/// Provider-specific bytes and secrets are deliberately handled by a separate
+/// encrypted artifact boundary.
+#[async_trait]
+pub trait QuestionSessionRepository: Send + Sync {
+    async fn create_question_session(
+        &self,
+        session: &QuestionSession,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<(), StorageError>;
+
+    async fn find_owned_question_session(
+        &self,
+        owner_user_id: UserId,
+        session_id: asterism_domain::QuestionSessionId,
+    ) -> Result<Option<QuestionSession>, StorageError>;
+
+    async fn find_question_session_for_execution(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<QuestionSession>, StorageError>;
+
+    async fn claim_question_session_for_execution(
+        &self,
+        execution_id: ExecutionId,
+        claimed_at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<QuestionSessionClaimOutcome, StorageError>;
+
+    async fn update_question_session(
+        &self,
+        session: &QuestionSession,
+        expected_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<bool, StorageError>;
 }
 
 /// One immutable candidate returned by a specific `AnswerSource` and bound to a

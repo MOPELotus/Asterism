@@ -14,6 +14,7 @@ pub mod execution;
 pub mod external_oauth;
 pub mod id;
 pub mod question;
+pub mod question_session;
 pub mod submission;
 pub mod task;
 pub mod user;
@@ -63,6 +64,9 @@ pub use question::{
     AnswerCandidate, AnswerConfidence, AnswerConfidenceError, AnswerPair, AnswerSource,
     NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind,
     QuestionContentFingerprint, QuestionKind, QuestionOption, QuestionValidationError,
+};
+pub use question_session::{
+    MAX_QUESTION_SESSION_TTL_SECONDS, QuestionSession, QuestionSessionError, QuestionSessionState,
 };
 pub use submission::{
     SelectedAnswer, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftItem,
