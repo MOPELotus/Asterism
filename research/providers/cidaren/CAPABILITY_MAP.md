@@ -124,6 +124,11 @@ The current checkpoint (not a completion boundary):
     the command exposes a stable `cidaren.*.v1` operation type and framed
     SHA-256 request digest for Core's operation ledger, while Native transport
     can only send the already prepared request.
+30. hashes the bounded raw response before its zeroizing buffer is cleared and
+    carries that non-zero digest with the actual receive timestamp through the
+    typed transport outcome. Accepted `VerifyAnswer` state can replace only the
+    topic code while retaining every immutable artifact binding; all Provider
+    continuation phases use the required `cidaren.*` namespace.
 
 The remaining work is durable shared QuestionSession/Attempt registration for
 QuestionInventory/QuestionParse and SubmissionExecute, shared execution for

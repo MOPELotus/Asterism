@@ -10,7 +10,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::ParsedCidarenAttemptQuestion;
 
 pub const CIDAREN_QUESTION_ARTIFACT_TYPE: &str = "cidaren.question-attempt.v1";
-pub const CIDAREN_QUESTION_ARTIFACT_PHASE: &str = "current-question";
+pub const CIDAREN_QUESTION_ARTIFACT_PHASE: &str = "cidaren.current-question";
+pub const CIDAREN_READY_TO_VERIFY_PHASE: &str = "cidaren.ready-to-verify";
+pub const CIDAREN_READY_TO_ADVANCE_PHASE: &str = "cidaren.ready-to-advance";
 
 const MAX_ARTIFACT_BYTES: usize = 16 * 1_024;
 const MAX_REMOTE_TASK_ID_BYTES: usize = 768;
@@ -127,6 +129,23 @@ impl CidarenQuestionArtifact {
         let digest = Sha256::digest(encoded.as_slice()).into();
         let value = SecretValue::new(std::mem::take(&mut *encoded));
         Ok(EncodedCidarenQuestionArtifact { value, digest })
+    }
+
+    /// Replaces the consumed topic code with the exact rotated code returned
+    /// by an accepted `VerifyAnswer` response while retaining all immutable
+    /// Task and Question bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProtocolDrift` if the replacement code is malformed.
+    pub fn rotate_topic_code(mut self, next_topic_code: &str) -> ProviderResult<Self> {
+        if !valid_topic_code(next_topic_code) {
+            return Err(protocol_drift(
+                "Cidaren rotated Question artifact topic code is invalid",
+            ));
+        }
+        self.topic_code = Zeroizing::new(next_topic_code.to_owned());
+        Ok(self)
     }
 
     /// Decodes an encrypted continuation only after checking the immutable
@@ -298,6 +317,11 @@ mod tests {
                 .unwrap();
         assert_eq!(decoded.topic_code(), "synthetic-topic-code");
         assert!(!format!("{decoded:?}").contains("synthetic-topic-code"));
+
+        let rotated = decoded.rotate_topic_code("rotated-topic-code").unwrap();
+        assert_eq!(rotated.topic_code(), "rotated-topic-code");
+        assert_ne!(rotated.encode().unwrap().digest(), digest);
+        assert!(rotated.rotate_topic_code(" invalid").is_err());
     }
 
     #[test]

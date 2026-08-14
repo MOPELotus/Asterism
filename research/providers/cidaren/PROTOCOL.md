@@ -531,6 +531,13 @@ durable ledger. Native transport accepts only this prepared request and no
 longer calls the wall clock while assembling assessment mutations, so the
 persisted intent identifies the exact credential-free request that can reach
 the platform.
+When a bounded response arrives, Native transport hashes the raw bytes before
+parser sanitization and zeroization, records the actual receive time and emits
+both only with the strictly parsed response. Core can therefore finish the
+matching ledger operation with the exact non-zero result digest. An accepted
+`VerifyAnswer` rotates only the artifact's topic code; local/remote Task,
+Question, position and content fingerprint bindings stay immutable, and phase
+labels remain Provider-scoped as `cidaren.*`.
 
 `StartAnswer` is a non-idempotent remote attempt mutation, not a harmless
 Question read. The Provider request and parser layers are implemented, while

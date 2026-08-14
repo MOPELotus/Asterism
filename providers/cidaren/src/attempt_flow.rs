@@ -10,7 +10,6 @@ use asterism_domain::{
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderResult, RemoteTaskDetail,
 };
-use chrono::Utc;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -160,6 +159,7 @@ pub struct CidarenIssuedOutcome {
     flow_binding: [u8; 32],
     operation: CidarenAttemptOperation,
     response: CidarenAssessmentResponse,
+    response_digest: [u8; 32],
     received_at: asterism_domain::Timestamp,
 }
 
@@ -839,7 +839,7 @@ impl CidarenIssuedCommand {
                 "Cidaren issued command received another account context",
             ));
         }
-        let response = match &self.action {
+        let transport_outcome = match &self.action {
             CidarenIssuedAction::SubmitChoseWord(request) => {
                 transport.submit_chose_word(context, request).await
             }
@@ -856,11 +856,13 @@ impl CidarenIssuedCommand {
                 transport.skip_answer(context, request).await
             }
         }?;
+        let (response, response_digest, received_at) = transport_outcome.into_parts();
         Ok(CidarenIssuedOutcome {
             flow_binding: self.flow_binding,
             operation: self.operation,
             response,
-            received_at: Utc::now(),
+            response_digest,
+            received_at,
         })
     }
 }
@@ -885,7 +887,20 @@ impl fmt::Debug for CidarenIssuedOutcome {
             .debug_struct("CidarenIssuedOutcome")
             .field("operation", &self.operation)
             .field("response", &self.response)
+            .field("response_digest", &self.response_digest)
             .finish_non_exhaustive()
+    }
+}
+
+impl CidarenIssuedOutcome {
+    /// Digest of the exact raw response bytes accepted by the strict parser.
+    pub const fn response_digest(&self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    /// Actual response observation time retained across delayed acceptance.
+    pub const fn received_at(&self) -> Timestamp {
+        self.received_at
     }
 }
 
@@ -1104,7 +1119,7 @@ mod tests {
     };
     use asterism_provider_api::RemoteTask;
     use async_trait::async_trait;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
     use serde_json::{Map, Value, json};
 
     use super::*;
@@ -1124,7 +1139,7 @@ mod tests {
             &self,
             _context: &ProviderContext,
             _request: &CidarenStartAnswerRequest,
-        ) -> ProviderResult<CidarenAssessmentResponse> {
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
             self.respond(CidarenAttemptOperation::StartAnswer)
         }
 
@@ -1132,7 +1147,7 @@ mod tests {
             &self,
             _context: &ProviderContext,
             _request: &CidarenMutationRequest,
-        ) -> ProviderResult<CidarenAssessmentResponse> {
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
             self.respond(CidarenAttemptOperation::VerifyAnswer)
         }
 
@@ -1140,7 +1155,7 @@ mod tests {
             &self,
             _context: &ProviderContext,
             _request: &CidarenMutationRequest,
-        ) -> ProviderResult<CidarenAssessmentResponse> {
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
             self.respond(CidarenAttemptOperation::SubmitAnswerAndSave)
         }
 
@@ -1148,7 +1163,7 @@ mod tests {
             &self,
             _context: &ProviderContext,
             _request: &CidarenMutationRequest,
-        ) -> ProviderResult<CidarenAssessmentResponse> {
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
             self.respond(CidarenAttemptOperation::SkipAnswer)
         }
 
@@ -1156,7 +1171,7 @@ mod tests {
             &self,
             _context: &ProviderContext,
             _request: &CidarenMutationRequest,
-        ) -> ProviderResult<CidarenAssessmentResponse> {
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
             self.respond(CidarenAttemptOperation::SubmitChoseWord)
         }
     }
@@ -1165,13 +1180,20 @@ mod tests {
         fn respond(
             &self,
             operation: CidarenAttemptOperation,
-        ) -> ProviderResult<CidarenAssessmentResponse> {
+        ) -> ProviderResult<crate::CidarenAssessmentTransportOutcome> {
             self.operations.lock().unwrap().push(operation);
-            self.responses
+            let response = self
+                .responses
                 .lock()
                 .unwrap()
                 .pop_front()
-                .ok_or_else(|| invalid_response("fixture response exhausted"))
+                .ok_or_else(|| invalid_response("fixture response exhausted"))?;
+            let digest = Sha256::new()
+                .chain_update(b"cidaren-fixture-response:v1\0")
+                .chain_update(operation.operation_type().as_bytes())
+                .finalize()
+                .into();
+            crate::CidarenAssessmentTransportOutcome::try_new(response, digest, request_at())
         }
     }
 
@@ -1208,6 +1230,8 @@ mod tests {
             CidarenAttemptFlowStatus::Issued(CidarenAttemptOperation::StartAnswer)
         );
         let outcome = command.execute(transport.clone(), &context).await.unwrap();
+        assert_ne!(outcome.response_digest(), [0; 32]);
+        assert_eq!(outcome.received_at(), request_at());
         flow.accept(outcome).unwrap();
         let remote_progress = flow.current_remote_progress().unwrap();
         assert_eq!(remote_progress.completed(), 1);
@@ -1355,6 +1379,7 @@ mod tests {
             flow_binding: flow.flow_binding,
             operation: command.operation(),
             response: receipt(CidarenAssessmentReceiptKind::Completed),
+            response_digest: [9; 32],
             received_at,
         };
         drop(command);

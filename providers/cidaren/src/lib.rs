@@ -66,7 +66,7 @@ pub use assessment_response::{
     CidarenAssessmentReceiptKind, CidarenAssessmentResponse, CidarenDecodedAssessmentPayload,
     parse_assessment_response, parse_word_selection_response,
 };
-pub use assessment_transport::CidarenAssessmentTransport;
+pub use assessment_transport::{CidarenAssessmentTransport, CidarenAssessmentTransportOutcome};
 pub use authentication::{
     CidarenAuthentication, CidarenAuthenticationTransport, CidarenSessionResolver,
     CidarenTokenSession, classify_token_validation_response,
@@ -95,7 +95,8 @@ pub use provider::{
     build_development_provider_with_stored_session,
 };
 pub use question_artifact::{
-    CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_QUESTION_ARTIFACT_TYPE, CidarenQuestionArtifact,
+    CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_QUESTION_ARTIFACT_TYPE,
+    CIDAREN_READY_TO_ADVANCE_PHASE, CIDAREN_READY_TO_VERIFY_PHASE, CidarenQuestionArtifact,
     EncodedCidarenQuestionArtifact,
 };
 pub use question_parser::{

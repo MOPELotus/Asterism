@@ -189,6 +189,10 @@ placeholder identities, result codes, status values and pagination shape.
   one stable durable digest, while timestamp or answer changes produce another
   digest; Provider transport no longer chooses mutation timestamps after the
   operation has entered `Issued`.
+- Typed transport outcomes reject zero response digests and preserve the raw-
+  response digest plus observation time; artifact rotation tests prove a fresh
+  topic code changes the digest without weakening Task/Question bindings or
+  accepting malformed replacement state.
 - Native-boundary tests cover both `ClassTask` and `StudyTask` route families,
   preserve the donor's read/submit `Authorization-v` split for every mutation,
   and reject any operation outside the audited five-operation allowlist.

@@ -16,6 +16,7 @@ use reqwest::{
     },
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::oauth_authorization::{CidarenOauthCallbackBinding, parse_oauth_callback};
@@ -24,12 +25,12 @@ use crate::oauth_exchange::{
     CidarenOauthLoginRequest, LOGIN_VERSION,
 };
 use crate::{
-    CidarenAnswerEvidenceBinding, CidarenAnswerEvidenceTransport, CidarenAssessmentResponse,
-    CidarenAssessmentTransport, CidarenAuthenticationTransport, CidarenClassTaskPageDocument,
-    CidarenClassTaskTransport, CidarenMutationRequest, CidarenSessionResolver,
-    CidarenStartAnswerRequest, CidarenStudyTaskDocument, CidarenStudyTaskTransport,
-    CidarenTaskScoreTransport, CidarenTokenSession, CidarenWordEvidence, CidarenWordInfoRequest,
-    CidarenWordInventory, CidarenWordInventoryRequest, CidarenWordLookup,
+    CidarenAnswerEvidenceBinding, CidarenAnswerEvidenceTransport, CidarenAssessmentTransport,
+    CidarenAssessmentTransportOutcome, CidarenAuthenticationTransport,
+    CidarenClassTaskPageDocument, CidarenClassTaskTransport, CidarenMutationRequest,
+    CidarenSessionResolver, CidarenStartAnswerRequest, CidarenStudyTaskDocument,
+    CidarenStudyTaskTransport, CidarenTaskScoreTransport, CidarenTokenSession, CidarenWordEvidence,
+    CidarenWordInfoRequest, CidarenWordInventory, CidarenWordInventoryRequest, CidarenWordLookup,
     CidarenWordPrototypeRequest,
     answer_evidence_protocol::fresh_course_id,
     assessment_protocol::CidarenMutationAuthorization,
@@ -386,7 +387,7 @@ impl CidarenAssessmentTransport for NativeCidarenTransport {
         &self,
         context: &ProviderContext,
         request: &CidarenStartAnswerRequest,
-    ) -> ProviderResult<CidarenAssessmentResponse> {
+    ) -> ProviderResult<CidarenAssessmentTransportOutcome> {
         let session = self.sessions.resolve_session(context).await?;
         let request = native_start_answer_request(&self.client, &session, request)?;
         self.send_assessment_request(&session, request).await
@@ -396,7 +397,7 @@ impl CidarenAssessmentTransport for NativeCidarenTransport {
         &self,
         context: &ProviderContext,
         request: &CidarenMutationRequest,
-    ) -> ProviderResult<CidarenAssessmentResponse> {
+    ) -> ProviderResult<CidarenAssessmentTransportOutcome> {
         let session = self.sessions.resolve_session(context).await?;
         let request = native_mutation_request(&self.client, &session, request)?;
         self.send_assessment_request(&session, request).await
@@ -406,7 +407,7 @@ impl CidarenAssessmentTransport for NativeCidarenTransport {
         &self,
         context: &ProviderContext,
         request: &CidarenMutationRequest,
-    ) -> ProviderResult<CidarenAssessmentResponse> {
+    ) -> ProviderResult<CidarenAssessmentTransportOutcome> {
         let session = self.sessions.resolve_session(context).await?;
         let request = native_mutation_request(&self.client, &session, request)?;
         self.send_assessment_request(&session, request).await
@@ -416,7 +417,7 @@ impl CidarenAssessmentTransport for NativeCidarenTransport {
         &self,
         context: &ProviderContext,
         request: &CidarenMutationRequest,
-    ) -> ProviderResult<CidarenAssessmentResponse> {
+    ) -> ProviderResult<CidarenAssessmentTransportOutcome> {
         let session = self.sessions.resolve_session(context).await?;
         let request = native_mutation_request(&self.client, &session, request)?;
         self.send_assessment_request(&session, request).await
@@ -426,7 +427,7 @@ impl CidarenAssessmentTransport for NativeCidarenTransport {
         &self,
         context: &ProviderContext,
         request: &CidarenMutationRequest,
-    ) -> ProviderResult<CidarenAssessmentResponse> {
+    ) -> ProviderResult<CidarenAssessmentTransportOutcome> {
         let session = self.sessions.resolve_session(context).await?;
         let request = native_mutation_request(&self.client, &session, request)?;
         self.send_word_selection_request(request).await
@@ -580,7 +581,7 @@ impl NativeCidarenTransport {
         &self,
         session: &CidarenTokenSession,
         request: RequestBuilder,
-    ) -> ProviderResult<CidarenAssessmentResponse> {
+    ) -> ProviderResult<CidarenAssessmentTransportOutcome> {
         let response = request
             .send()
             .await
@@ -591,15 +592,17 @@ impl NativeCidarenTransport {
             MAX_ASSESSMENT_RESPONSE_BYTES,
         )
         .await?;
+        let response_digest = Sha256::digest(document.as_bytes()).into();
+        let received_at = Utc::now();
         let parsed = parse_assessment_response(document.as_bytes(), session.crypto_context());
         document.zeroize();
-        parsed
+        CidarenAssessmentTransportOutcome::try_new(parsed?, response_digest, received_at)
     }
 
     async fn send_word_selection_request(
         &self,
         request: RequestBuilder,
-    ) -> ProviderResult<CidarenAssessmentResponse> {
+    ) -> ProviderResult<CidarenAssessmentTransportOutcome> {
         let response = request
             .send()
             .await
@@ -610,9 +613,11 @@ impl NativeCidarenTransport {
             MAX_ASSESSMENT_RESPONSE_BYTES,
         )
         .await?;
+        let response_digest = Sha256::digest(document.as_bytes()).into();
+        let received_at = Utc::now();
         let parsed = parse_word_selection_response(document.as_bytes());
         document.zeroize();
-        parsed
+        CidarenAssessmentTransportOutcome::try_new(parsed?, response_digest, received_at)
     }
 }
 
