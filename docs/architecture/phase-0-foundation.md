@@ -3387,3 +3387,29 @@ boundary. UAI may retain accumulated menu/Tab/Task and budget cursor state insid
 its opaque command artifact or reference earlier result sequences; Core does not
 interpret Provider DOM state and does not need an oversized complete-and-next
 transaction.
+
+## One-hundred-and-ninety-third Phase 0 slice
+
+The generic `BrowserBridge` helper transport now preserves the non-replayable
+command boundary across HTTP. Migration 044 records the first dispatch of one
+session/sequence under a unique primary key. Storage authenticates the live
+claimed helper token, Provider scope, encrypted command artifact and command
+digest in the same immediate transaction that inserts this dispatch record.
+Only that first transaction returns the opaque command bytes; a repeated GET
+returns a conflict and cannot replay a browser action after an ambiguous lost
+response.
+
+The helper API exposes exact command bytes as bounded
+`application/octet-stream` with type and digest headers. Result upload is a
+separate bounded binary route with an explicit result type. A raw result is
+accepted only after the matching dispatch exists, then enters the existing
+encrypted first-writer-wins inbox. Identical uploads return the original
+receipt, while different bytes or types for the same sequence fail closed.
+Command and result bodies remain zeroizing owners at the Core transport
+boundary and are never represented as ordinary loggable JSON DTOs.
+
+Dispatch, receipt and Provider acceptance remain distinct facts. The API does
+not mark an exchange complete, interpret Provider DOM state, derive credentials
+or issue a successor command. Provider runtime must resolve the encrypted
+command/result pair, validate its own protocol and fresh bindings, and only then
+use the existing terminal exchange or atomic credential-commit boundary.

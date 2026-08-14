@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
 
 use crate::{
-    BrowserBridgeCommandArtifactRepository, BrowserBridgeCommandIssueRequest,
+    BrowserBridgeCommandArtifactRepository, BrowserBridgeCommandDispatchRecord,
+    BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandIssueRequest,
     BrowserBridgeCommandResolveRequest, BrowserBridgeExchangeRecord,
     BrowserBridgeResultArtifactRecord, BrowserBridgeResultReceiveRequest,
     BrowserBridgeResultResolveRequest, Database, ResolvedBrowserBridgeCommand,
@@ -268,6 +269,138 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
         }))
     }
 
+    async fn dispatch_browser_bridge_command(
+        &self,
+        request: BrowserBridgeCommandDispatchRequest<'_>,
+    ) -> Result<BrowserBridgeCommandDispatchRecord, SecretStoreError> {
+        let sequence =
+            i64::try_from(request.sequence).map_err(|_| SecretStoreError::InvalidValue)?;
+        if sequence < 1 {
+            return Err(SecretStoreError::InvalidValue);
+        }
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let Some(session) = authenticate_session_for_exchange(
+            &mut transaction,
+            request.session_id,
+            request.access_token_digest,
+            request.dispatched_at,
+        )
+        .await
+        .map_err(storage_error)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCommandDispatchRecord::AccessRejected);
+        };
+        authorize_scoped(
+            session.owner_user_id,
+            &session.provider_id,
+            &self.provider_id,
+            request.access,
+        )?;
+        let Some(exchange) = fetch_exchange(&mut transaction, request.session_id, sequence)
+            .await
+            .map_err(storage_error)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCommandDispatchRecord::NotFound);
+        };
+        if exchange.state != BrowserBridgeExchangeState::Issued
+            || request.dispatched_at < exchange.issued_at
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCommandDispatchRecord::SequenceConflict);
+        }
+        let result_present: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM browser_bridge_result_artifacts \
+             WHERE session_id = ? AND sequence = ?)",
+        )
+        .bind(request.session_id.to_string())
+        .bind(sequence)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if result_present != 0 {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCommandDispatchRecord::SequenceConflict);
+        }
+        let secret_id: Option<String> = sqlx::query_scalar(
+            "SELECT command_secret_blob_id FROM browser_bridge_exchanges \
+             WHERE session_id = ? AND sequence = ?",
+        )
+        .bind(request.session_id.to_string())
+        .bind(sequence)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        let Some(secret_id) = secret_id else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCommandDispatchRecord::SequenceConflict);
+        };
+        let secret_id = SecretId::from_str(&secret_id).map_err(|_| SecretStoreError::Storage)?;
+        let stored = fetch_secret(&mut transaction, secret_id).await?;
+        if stored.owner_user_id != session.owner_user_id
+            || stored.purpose != SecretPurpose::BrowserJobCredential
+        {
+            return Err(SecretStoreError::AuthenticationFailed);
+        }
+        let secret = SecretRef {
+            id: secret_id,
+            owner_user_id: stored.owner_user_id,
+            purpose: stored.purpose,
+            version: stored.version,
+            key_id: stored.key_id.clone(),
+            created_at: stored.created_at,
+            updated_at: stored.updated_at,
+        };
+        let key = self.keyring.get(&stored.key_id)?;
+        let plaintext = decrypt(key, &secret, &stored.nonce, &stored.encrypted_data)?;
+        if digest(&plaintext) != exchange.command_digest {
+            return Err(SecretStoreError::AuthenticationFailed);
+        }
+        let inserted = sqlx::query(
+            "INSERT INTO browser_bridge_command_dispatches \
+             (session_id, sequence, dispatched_at) VALUES (?, ?, ?) \
+             ON CONFLICT(session_id, sequence) DO NOTHING",
+        )
+        .bind(request.session_id.to_string())
+        .bind(sequence)
+        .bind(encode_timestamp(request.dispatched_at))
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if inserted.rows_affected() != 1 {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeCommandDispatchRecord::AlreadyDispatched);
+        }
+        insert_secret_audit(
+            &mut transaction,
+            request.access,
+            "browser_bridge_command_dispatched",
+            &secret,
+        )
+        .await
+        .map_err(storage_error)?;
+        insert_dispatch_audit(
+            &mut transaction,
+            request.access,
+            &exchange,
+            request.dispatched_at,
+        )
+        .await?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(BrowserBridgeCommandDispatchRecord::Dispatched(
+            ResolvedBrowserBridgeCommand {
+                exchange,
+                command_artifact: SecretValue::new(plaintext),
+            },
+        ))
+    }
+
     async fn receive_browser_bridge_result(
         &self,
         request: BrowserBridgeResultReceiveRequest<'_>,
@@ -314,16 +447,27 @@ impl BrowserBridgeCommandArtifactRepository for SqliteBrowserBridgeCommandArtifa
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(BrowserBridgeResultArtifactRecord::SequenceConflict);
         };
-        let command_artifact_present: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM browser_bridge_exchanges \
-             WHERE session_id = ? AND sequence = ? AND command_secret_blob_id IS NOT NULL)",
+        let dispatched_at: Option<String> = sqlx::query_scalar(
+            "SELECT dispatch.dispatched_at FROM browser_bridge_exchanges AS exchange \
+             JOIN browser_bridge_command_dispatches AS dispatch \
+               ON dispatch.session_id = exchange.session_id \
+              AND dispatch.sequence = exchange.sequence \
+             WHERE exchange.session_id = ? AND exchange.sequence = ? \
+               AND exchange.command_secret_blob_id IS NOT NULL",
         )
         .bind(request.metadata.session_id.to_string())
         .bind(sequence)
-        .fetch_one(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(storage_error)?;
-        if request.metadata.received_at < exchange.issued_at || command_artifact_present != 1 {
+        let Some(dispatched_at) = dispatched_at else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(BrowserBridgeResultArtifactRecord::SequenceConflict);
+        };
+        let dispatched_at = decode_timestamp(&dispatched_at)?;
+        if request.metadata.received_at < exchange.issued_at
+            || request.metadata.received_at < dispatched_at
+        {
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(BrowserBridgeResultArtifactRecord::SequenceConflict);
         }
@@ -550,6 +694,45 @@ fn decode_result_metadata(
     Ok(metadata)
 }
 
+async fn insert_dispatch_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    access: &SecretAccess,
+    exchange: &asterism_domain::BrowserBridgeExchange,
+    dispatched_at: asterism_domain::Timestamp,
+) -> Result<(), SecretStoreError> {
+    let (actor_type, actor_id) = match &access.actor {
+        SecretActor::User(id) => ("user", id.to_string()),
+        SecretActor::ServiceToken(id) => ("service_token", id.to_string()),
+        SecretActor::CoreService(service) => ("core_service", (*service).to_owned()),
+        SecretActor::ProviderRuntime(provider_id) => ("provider_runtime", provider_id.clone()),
+    };
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, ?, ?, 'browser_bridge_command_dispatched', \
+          'browser_bridge_exchange', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(dispatched_at))
+    .bind(actor_type)
+    .bind(actor_id)
+    .bind(format!("{}:{}", exchange.session_id, exchange.sequence))
+    .bind(&access.correlation_id)
+    .bind(
+        serde_json::json!({
+            "sequence": exchange.sequence,
+            "command_type": exchange.command_type,
+            "command_digest": "[HASHED]",
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 async fn insert_result_audit(
     transaction: &mut Transaction<'_, Sqlite>,
     access: &SecretAccess,
@@ -723,6 +906,89 @@ mod tests {
             result_digest: digest(raw_result),
             received_at: now + Duration::seconds(3),
         };
+        assert!(matches!(
+            fixture
+                .command_repository
+                .receive_browser_bridge_result(BrowserBridgeResultReceiveRequest {
+                    metadata: &result_metadata,
+                    result_artifact: SecretValue::new(raw_result.to_vec()),
+                    access_token_digest: &access_digest,
+                    access: &access,
+                })
+                .await
+                .unwrap(),
+            BrowserBridgeResultArtifactRecord::SequenceConflict
+        ));
+        let (_, foreign_access_digest) = OpaqueTokenService::new("ast_bridge").unwrap().generate();
+        assert!(matches!(
+            fixture
+                .dispatch_command(
+                    &session,
+                    1,
+                    &foreign_access_digest,
+                    &access,
+                    now + Duration::milliseconds(2_400),
+                )
+                .await,
+            BrowserBridgeCommandDispatchRecord::AccessRejected
+        ));
+        assert!(matches!(
+            fixture
+                .dispatch_command(
+                    &session,
+                    2,
+                    &access_digest,
+                    &access,
+                    now + Duration::milliseconds(2_400),
+                )
+                .await,
+            BrowserBridgeCommandDispatchRecord::NotFound
+        ));
+
+        let dispatched = fixture
+            .dispatch_command(
+                &session,
+                1,
+                &access_digest,
+                &access,
+                now + Duration::milliseconds(2_500),
+            )
+            .await;
+        let BrowserBridgeCommandDispatchRecord::Dispatched(dispatched) = dispatched else {
+            panic!("expected first command dispatch");
+        };
+        assert_eq!(dispatched.exchange, issued);
+        assert_eq!(dispatched.command_artifact.expose_secret(), command);
+        let early_result_metadata = BrowserBridgeResultArtifactMetadata {
+            received_at: now + Duration::milliseconds(2_400),
+            ..result_metadata.clone()
+        };
+        assert!(matches!(
+            fixture
+                .command_repository
+                .receive_browser_bridge_result(BrowserBridgeResultReceiveRequest {
+                    metadata: &early_result_metadata,
+                    result_artifact: SecretValue::new(raw_result.to_vec()),
+                    access_token_digest: &access_digest,
+                    access: &access,
+                })
+                .await
+                .unwrap(),
+            BrowserBridgeResultArtifactRecord::SequenceConflict
+        ));
+        assert!(matches!(
+            fixture
+                .dispatch_command(
+                    &session,
+                    1,
+                    &access_digest,
+                    &access,
+                    now + Duration::milliseconds(2_600),
+                )
+                .await,
+            BrowserBridgeCommandDispatchRecord::AlreadyDispatched
+        ));
+
         assert!(matches!(
             fixture
                 .command_repository
@@ -917,6 +1183,18 @@ mod tests {
             })
             .await
             .unwrap();
+        assert!(matches!(
+            fixture
+                .dispatch_command(
+                    &session,
+                    1,
+                    &access_digest,
+                    &access,
+                    now + Duration::milliseconds(2_500),
+                )
+                .await,
+            BrowserBridgeCommandDispatchRecord::Dispatched(_)
+        ));
         let completed_at = now + Duration::seconds(3);
         let raw_result = br#"{"kind":"capture_snapshot","token":"captured-token"}"#;
         let result_digest = digest(raw_result);
@@ -1006,6 +1284,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn terminal_binding_conflict_leaves_exchange_session_and_credentials_unchanged() {
         let fixture = fixture().await;
         let now = Utc::now() - Duration::seconds(10);
@@ -1029,6 +1308,18 @@ mod tests {
             })
             .await
             .unwrap();
+        assert!(matches!(
+            fixture
+                .dispatch_command(
+                    &session,
+                    1,
+                    &access_digest,
+                    &access,
+                    now + Duration::milliseconds(2_500),
+                )
+                .await,
+            BrowserBridgeCommandDispatchRecord::Dispatched(_)
+        ));
         let completed_at = now + Duration::seconds(3);
         let raw_result = br#"{"kind":"capture_snapshot","token":"must-not-persist"}"#;
         let result_digest = digest(raw_result);
@@ -1184,6 +1475,26 @@ mod tests {
                 sequence,
                 access,
             }
+        }
+
+        async fn dispatch_command(
+            &self,
+            session: &BrowserBridgeSession,
+            sequence: u64,
+            access_token_digest: &asterism_auth::TokenDigest,
+            access: &SecretAccess,
+            dispatched_at: asterism_domain::Timestamp,
+        ) -> BrowserBridgeCommandDispatchRecord {
+            self.command_repository
+                .dispatch_browser_bridge_command(BrowserBridgeCommandDispatchRequest {
+                    session_id: session.id,
+                    sequence,
+                    access_token_digest,
+                    dispatched_at,
+                    access,
+                })
+                .await
+                .unwrap()
         }
 
         fn bundle(

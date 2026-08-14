@@ -9,7 +9,8 @@ use asterism_secrets::{
     CredentialBundle, SecretAccess, SecretStoreError, SecretString, SecretValue,
 };
 use asterism_storage::{
-    BrowserBridgeCommandArtifactRepository,
+    BrowserBridgeCommandArtifactRepository, BrowserBridgeCommandDispatchRecord,
+    BrowserBridgeCommandDispatchRequest as StorageBrowserBridgeCommandDispatchRequest,
     BrowserBridgeCommandIssueRequest as StorageBrowserBridgeCommandIssueRequest,
     BrowserBridgeCommandResolveRequest as StorageBrowserBridgeCommandResolveRequest,
     BrowserBridgeCredentialCommitOutcome,
@@ -287,6 +288,56 @@ where
     }
 }
 
+/// Core-owned one-shot helper dispatch boundary. The access token is checked
+/// in the same Storage transaction that permanently records first dispatch,
+/// so an ambiguous HTTP retry cannot replay the browser command.
+#[derive(Debug)]
+pub struct BrowserBridgeCommandDispatchService<R> {
+    repository: R,
+    access_tokens: OpaqueTokenService,
+}
+
+impl<R> BrowserBridgeCommandDispatchService<R> {
+    /// # Errors
+    ///
+    /// Returns [`TokenError`] only if the fixed helper-token family is invalid.
+    pub fn new(repository: R) -> Result<Self, TokenError> {
+        Ok(Self {
+            repository,
+            access_tokens: OpaqueTokenService::new("ast_bridge")?,
+        })
+    }
+}
+
+impl<R> BrowserBridgeCommandDispatchService<R>
+where
+    R: BrowserBridgeCommandArtifactRepository,
+{
+    /// Resolves and marks one exact command dispatched atomically. A second
+    /// call returns `AlreadyDispatched` and never exposes the command bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid helper access, corrupt encrypted command state or an
+    /// unavailable encryption key without retrying dispatch.
+    pub async fn dispatch(
+        &self,
+        request: BrowserBridgeCommandDispatchRequest,
+    ) -> Result<BrowserBridgeCommandDispatchRecord, BrowserBridgeCommandServiceError> {
+        let access_token_digest = self.access_tokens.digest(&request.access_token);
+        Ok(self
+            .repository
+            .dispatch_browser_bridge_command(StorageBrowserBridgeCommandDispatchRequest {
+                session_id: request.session_id,
+                sequence: request.sequence,
+                access_token_digest: &access_token_digest,
+                dispatched_at: request.dispatched_at,
+                access: &request.access,
+            })
+            .await?)
+    }
+}
+
 /// Core-owned encrypted inbox for raw helper results. Receipt is durable before
 /// Provider parsing; recovery can replay parsing without asking the helper to
 /// echo browser state or credentials.
@@ -480,6 +531,15 @@ pub struct BrowserBridgeCommandResolveRequest {
     pub task_id: TaskId,
     pub session_id: BrowserBridgeSessionId,
     pub sequence: u64,
+    pub access: SecretAccess,
+}
+
+#[derive(Debug)]
+pub struct BrowserBridgeCommandDispatchRequest {
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub access_token: SecretString,
+    pub dispatched_at: Timestamp,
     pub access: SecretAccess,
 }
 

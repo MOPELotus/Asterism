@@ -1096,6 +1096,24 @@ pub struct ResolvedBrowserBridgeCommand {
     pub command_artifact: SecretValue,
 }
 
+#[derive(Debug)]
+pub struct BrowserBridgeCommandDispatchRequest<'a> {
+    pub session_id: BrowserBridgeSessionId,
+    pub sequence: u64,
+    pub access_token_digest: &'a TokenDigest,
+    pub dispatched_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Debug)]
+pub enum BrowserBridgeCommandDispatchRecord {
+    Dispatched(ResolvedBrowserBridgeCommand),
+    AccessRejected,
+    NotFound,
+    AlreadyDispatched,
+    SequenceConflict,
+}
+
 /// Provider-scoped encrypted persistence for exact `BrowserBridge` commands.
 /// Issuance stores the immutable exchange and its command bytes atomically;
 /// resolution re-checks the complete owner/account/Task/Provider binding.
@@ -1110,6 +1128,11 @@ pub trait BrowserBridgeCommandArtifactRepository: Send + Sync {
         &self,
         request: BrowserBridgeCommandResolveRequest<'_>,
     ) -> Result<Option<ResolvedBrowserBridgeCommand>, SecretStoreError>;
+
+    async fn dispatch_browser_bridge_command(
+        &self,
+        request: BrowserBridgeCommandDispatchRequest<'_>,
+    ) -> Result<BrowserBridgeCommandDispatchRecord, SecretStoreError>;
 
     async fn receive_browser_bridge_result(
         &self,

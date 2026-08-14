@@ -224,8 +224,8 @@ fn validate_request_body(operation: &Map<String, Value>, label: &str, failures: 
     if body.get("required").and_then(Value::as_bool) != Some(true) {
         failures.push(format!("{label} requestBody must be required"));
     }
-    if nested_value(body, &["content", "application/json", "schema"]).is_none() {
-        failures.push(format!("{label} JSON requestBody has no schema"));
+    if !has_typed_content(body) {
+        failures.push(format!("{label} requestBody has no typed content"));
     }
 }
 
@@ -299,13 +299,29 @@ fn validate_responses(operation: &Map<String, Value>, label: &str, failures: &mu
                         "{label} response {status} does not declare text/event-stream"
                     ));
                 }
-            } else {
+            } else if !has_typed_content(response) {
                 failures.push(format!(
                     "{label} response {status} has no typed success content"
                 ));
             }
         }
     }
+}
+
+#[cfg(test)]
+fn has_typed_content(object: &Map<String, Value>) -> bool {
+    object
+        .get("content")
+        .and_then(Value::as_object)
+        .is_some_and(|content| {
+            !content.is_empty()
+                && content.values().all(|media| {
+                    media
+                        .as_object()
+                        .and_then(|media| media.get("schema"))
+                        .is_some()
+                })
+        })
 }
 
 #[cfg(test)]

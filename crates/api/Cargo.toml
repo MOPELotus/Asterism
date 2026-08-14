@@ -17,11 +17,13 @@ asterism-scheduler = { path = "../scheduler" }
 asterism-secrets = { path = "../secrets" }
 asterism-storage = { path = "../storage" }
 axum.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tokio-stream.workspace = true

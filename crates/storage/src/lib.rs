@@ -52,6 +52,7 @@ pub use repository::{
     AuthBootstrapCredentialCommitOutcome, AuthBootstrapCredentialCommitRequest,
     AuthBootstrapCredentialRepository, AuthBootstrapSessionRepository, AuthSessionRepository,
     AuthenticatedCredentialRepository, BrowserBridgeCommandArtifactRepository,
+    BrowserBridgeCommandDispatchRecord, BrowserBridgeCommandDispatchRequest,
     BrowserBridgeCommandIssueRequest, BrowserBridgeCommandResolveRequest,
     BrowserBridgeCredentialCommit, BrowserBridgeCredentialCommitOutcome,
     BrowserBridgeCredentialCommitRequest, BrowserBridgeCredentialRepository,

@@ -227,6 +227,16 @@ pub fn build_router(state: ApiState) -> Router {
             "/api/v1/browser-bridge/sessions/{session_id}/snapshot",
             get(browser_bridge::get_browser_bridge_snapshot),
         )
+        .route(
+            "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}",
+            get(browser_bridge::dispatch_browser_bridge_command),
+        )
+        .route(
+            "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}/result",
+            post(browser_bridge::receive_browser_bridge_result).layer(DefaultBodyLimit::max(
+                browser_bridge::MAX_BROWSER_BRIDGE_ARTIFACT_BYTES,
+            )),
+        )
         .merge(protected)
         .with_state(state)
         .fallback(not_found)
@@ -1006,6 +1016,20 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}".to_owned(),
+            browser_bridge_command_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}/result".to_owned(),
+            browser_bridge_result_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/progress".to_owned(),
             task_progress_path(),
         );
@@ -1642,6 +1666,65 @@ fn browser_bridge_snapshot_path() -> Value {
     }})
 }
 
+fn browser_bridge_command_path() -> Value {
+    json!({"get": {
+        "operationId": "dispatchBrowserBridgeCommand",
+        "description": "Atomically marks one encrypted Provider command dispatched and returns its exact opaque bytes once. A retry never replays the command.",
+        "security": [{"browserBridgeAuth": []}],
+        "parameters": browser_bridge_exchange_parameters(),
+        "responses": {
+            "200": {
+                "description": "First and only dispatch of the exact Provider command",
+                "headers": {
+                    "X-Asterism-Browser-Command-Type": {"schema": {"type": "string"}},
+                    "X-Asterism-Browser-Command-Digest": {"schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+                },
+                "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}
+            },
+            "400": {"description": "Invalid session ID or sequence"},
+            "401": {"description": "Session-scoped BrowserBridge access token is invalid or expired"},
+            "404": {"description": "The requested command has not been issued"},
+            "409": {"description": "The command was already dispatched or conflicts with durable state"},
+            "503": {"description": "Encrypted BrowserBridge artifact storage is unavailable"}
+        }
+    }})
+}
+
+fn browser_bridge_result_path() -> Value {
+    let mut parameters = browser_bridge_exchange_parameters();
+    parameters.push(json!({
+        "name": "X-Asterism-Browser-Result-Type",
+        "in": "header",
+        "required": true,
+        "schema": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[a-z0-9._-]+$"}
+    }));
+    json!({"post": {
+        "operationId": "receiveBrowserBridgeResult",
+        "description": "Authenticates and encrypts the first exact opaque helper result before Provider parsing. Identical retries return the original receipt; conflicts never replace it.",
+        "security": [{"browserBridgeAuth": []}],
+        "parameters": parameters,
+        "requestBody": {"required": true, "content": {
+            "application/octet-stream": {"schema": {"type": "string", "format": "binary", "minLength": 1, "maxLength": 262_144}}
+        }},
+        "responses": {
+            "200": {"description": "Identical result was already durably received"},
+            "202": {"description": "Result durably encrypted and accepted for Provider validation"},
+            "400": {"description": "Invalid session, sequence, type, content type or artifact"},
+            "401": {"description": "Session-scoped BrowserBridge access token is invalid or expired"},
+            "409": {"description": "Result conflicts with command dispatch or the first durable receipt"},
+            "413": {"description": "Result exceeds the bounded helper transport size"},
+            "503": {"description": "Encrypted BrowserBridge artifact storage is unavailable"}
+        }
+    }})
+}
+
+fn browser_bridge_exchange_parameters() -> Vec<Value> {
+    vec![
+        json!({"name": "session_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}),
+        json!({"name": "sequence", "in": "path", "required": true, "schema": {"type": "integer", "format": "uint64", "minimum": 1}}),
+    ]
+}
+
 fn task_progress_path() -> Value {
     json!({"get": {
         "operationId": "getTaskProgress",
@@ -2210,15 +2293,17 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
         net::SocketAddr,
+        str::FromStr,
         time::Duration,
     };
 
     use asterism_domain::{
         AnswerCandidate, AnswerCandidateId, AnswerSource, AssessmentClass, AuthMethod, AuthState,
-        ExecutionAttemptId, ExecutionId, NormalizedAnswer, ProviderId, Question, QuestionId,
-        QuestionKind, QuestionSnapshotId, RemoteState, SelectedAnswer, SessionKind, SourceType,
-        SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadEncoding,
-        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, SubmissionQuestionVerification,
+        BrowserBridgeExchange, BrowserBridgeSessionId, ExecutionAttemptId, ExecutionId,
+        NormalizedAnswer, ProviderId, Question, QuestionId, QuestionKind, QuestionSnapshotId,
+        RemoteState, SelectedAnswer, SessionKind, SourceType, SubmissionDraft, SubmissionDraftId,
+        SubmissionDraftItem, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
+        SubmissionPayloadPreview, SubmissionQuestionVerification,
         SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult,
         SubmissionResultId, SubmissionResultStatus, SubmissionScore,
         SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId,
@@ -2233,7 +2318,7 @@ mod tests {
         ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask,
         SessionStatus, TaskExecutionCapability, TaskInventoryCapability, VerificationLevel,
     };
-    use asterism_secrets::{CredentialBundle, SecretKey};
+    use asterism_secrets::{CredentialBundle, SecretAccess, SecretActor, SecretKey, SecretValue};
     use asterism_storage::{
         AnswerCandidateRecord, AnswerCandidateRepository, QuestionSnapshot,
         QuestionSnapshotRepository, SecretKeyring, SqliteQuestionSnapshotRepository,
@@ -2246,6 +2331,7 @@ mod tests {
         http::{Request, header},
     };
     use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
+    use sha2::Digest;
     use tower::ServiceExt;
 
     use super::*;
@@ -4194,12 +4280,20 @@ mod tests {
     async fn browser_bridge_pairing_rotates_once_and_cancellation_revokes_access() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         database.migrate().await.unwrap();
-        let app = build_router(ApiState::new(
+        let secret_store = SqliteSecretStore::new(
             database.clone(),
-            Arc::new(scan_registry()),
-            3600,
-            false,
-        ));
+            Arc::new(
+                SecretKeyring::new(
+                    "key-a",
+                    BTreeMap::from([("key-a".to_owned(), SecretKey::new([9; 32]))]),
+                )
+                .unwrap(),
+            ),
+        );
+        let app = build_router(
+            ApiState::new(database.clone(), Arc::new(scan_registry()), 3600, false)
+                .with_secret_store(secret_store.clone()),
+        );
         let bootstrap = bootstrap(&app).await;
         let cookie = bootstrap.headers()[header::SET_COOKIE]
             .to_str()
@@ -4312,6 +4406,167 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.status(), StatusCode::OK);
         assert_eq!(response_json(snapshot).await["session"]["id"], session_id);
+
+        let command = br#"{"version":1,"kind":"capture_snapshot"}"#;
+        let issued_at = Utc::now();
+        let exchange = BrowserBridgeExchange::issue(
+            BrowserBridgeSessionId::from_str(&session_id).unwrap(),
+            1,
+            "provider-alpha.capture.snapshot".to_owned(),
+            sha2::Sha256::digest(command).into(),
+            issued_at,
+        )
+        .unwrap();
+        asterism_engine::BrowserBridgeCommandService::new(
+            secret_store.browser_bridge_commands(ProviderId::new("provider-alpha").unwrap()),
+        )
+        .issue(asterism_engine::BrowserBridgeCommandIssueRequest {
+            exchange,
+            command_artifact: SecretValue::new(command.to_vec()),
+            access: SecretAccess {
+                actor: SecretActor::CoreService("browser-bridge-api-test"),
+                correlation_id: "browser-bridge-command-issue".to_owned(),
+                reason: "issue API transport fixture".to_owned(),
+            },
+        })
+        .await
+        .unwrap();
+
+        let command_path = format!("/api/v1/browser-bridge/sessions/{session_id}/commands/1");
+        let dispatched = app
+            .clone()
+            .oneshot(
+                Request::get(&command_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .header("x-request-id", "browser-bridge-command-dispatch")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dispatched.status(), StatusCode::OK);
+        assert_eq!(dispatched.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            dispatched.headers()["x-asterism-browser-command-type"],
+            "provider-alpha.capture.snapshot"
+        );
+        assert_eq!(
+            to_bytes(dispatched.into_body(), 256 * 1024).await.unwrap(),
+            command.as_slice()
+        );
+        let replayed_command = app
+            .clone()
+            .oneshot(
+                Request::get(&command_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .header("x-request-id", "browser-bridge-command-replay")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replayed_command.status(), StatusCode::CONFLICT);
+
+        let result_path = format!("{command_path}/result");
+        let raw_result = br#"{"version":1,"kind":"capture_result"}"#;
+        let accepted = app
+            .clone()
+            .oneshot(
+                Request::post(&result_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(
+                        "x-asterism-browser-result-type",
+                        "provider-alpha.capture.snapshot.result",
+                    )
+                    .header("x-request-id", "browser-bridge-result-receive")
+                    .body(Body::from(raw_result.as_slice()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let receipt = response_json(accepted).await;
+        assert_eq!(receipt["sequence"], 1);
+        assert_eq!(receipt["duplicate"], false);
+        assert_eq!(receipt["result_digest"].as_str().unwrap().len(), 64);
+
+        let duplicate = app
+            .clone()
+            .oneshot(
+                Request::post(&result_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(
+                        "x-asterism-browser-result-type",
+                        "provider-alpha.capture.snapshot.result",
+                    )
+                    .header("x-request-id", "browser-bridge-result-duplicate")
+                    .body(Body::from(raw_result.as_slice()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        assert_eq!(response_json(duplicate).await["duplicate"], true);
+
+        let oversized = app
+            .clone()
+            .oneshot(
+                Request::post(&result_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(
+                        "x-asterism-browser-result-type",
+                        "provider-alpha.capture.snapshot.result",
+                    )
+                    .header("x-request-id", "browser-bridge-result-oversized")
+                    .body(Body::from(vec![
+                        0;
+                        browser_bridge::MAX_BROWSER_BRIDGE_ARTIFACT_BYTES
+                            + 1
+                    ]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let conflicting = app
+            .clone()
+            .oneshot(
+                Request::post(&result_path)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("BrowserBridge {access_token}"),
+                    )
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(
+                        "x-asterism-browser-result-type",
+                        "provider-alpha.capture.snapshot.result",
+                    )
+                    .header("x-request-id", "browser-bridge-result-conflict")
+                    .body(Body::from(br#"{"version":1,"kind":"foreign"}"#.as_slice()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflicting.status(), StatusCode::CONFLICT);
 
         let cancelled = app
             .clone()
@@ -6167,6 +6422,8 @@ mod tests {
             "/api/v1/browser-bridge/sessions/{session_id}",
             "/api/v1/browser-bridge/sessions/{session_id}/claim",
             "/api/v1/browser-bridge/sessions/{session_id}/snapshot",
+            "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}",
+            "/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}/result",
             "/api/v1/service-tokens",
             "/api/v1/service-tokens/{token_id}",
             "/api/v1/provider-accounts",
@@ -6233,6 +6490,16 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/browser-bridge/sessions/{session_id}/snapshot"]["get"]["operationId"],
             "pollBrowserBridgeSnapshot"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}"]["get"]
+                ["operationId"],
+            "dispatchBrowserBridgeCommand"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/browser-bridge/sessions/{session_id}/commands/{sequence}/result"]
+                ["post"]["operationId"],
+            "receiveBrowserBridgeResult"
         );
         assert_eq!(
             document["paths"]["/api/v1/tasks/{task_id}/progress"]["get"]["operationId"],

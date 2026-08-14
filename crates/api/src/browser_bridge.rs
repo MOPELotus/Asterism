@@ -1,34 +1,45 @@
 use std::{fmt, net::SocketAddr, str::FromStr};
 
 use asterism_domain::{
-    BrowserBridgeSession, BrowserBridgeSessionError, BrowserBridgeSessionId,
-    BrowserBridgeSessionState, ProviderId, TaskId, Timestamp,
+    BrowserBridgeResultArtifactMetadata, BrowserBridgeSession, BrowserBridgeSessionError,
+    BrowserBridgeSessionId, BrowserBridgeSessionState, ProviderId, TaskId, Timestamp,
 };
 use asterism_engine::{
+    BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandDispatchService,
     BrowserBridgeHelperSessionError, BrowserBridgeHelperSessionService,
+    BrowserBridgeResultArtifactService, BrowserBridgeResultReceiveRequest,
     BrowserBridgeSessionAccessRequest, BrowserBridgeSessionCancelRequest,
     BrowserBridgeSessionClaimRequest, BrowserBridgeSessionCreateRequest,
     ProviderTaskBrowserSessionService, ReadTaskBrowserSessionCommand,
 };
 use asterism_provider_api::BrowserSessionSpec;
-use asterism_secrets::SecretString;
+use asterism_secrets::{SecretAccess, SecretActor, SecretString, SecretValue};
 use asterism_storage::{
+    BrowserBridgeCommandDispatchRecord, BrowserBridgeResultArtifactRecord,
     SqliteBrowserBridgeSessionRepository, SqliteProviderAccountRepository,
     SqliteTaskQueryRepository,
 };
 use axum::{
     Extension, Json,
+    body::{Body, Bytes},
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes as OwnedBytes;
 use chrono::{Duration, Utc};
 use serde::{Serialize, ser::SerializeStruct};
+use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::{ApiError, ApiState, auth::AuthContext};
 
 const BROWSER_BRIDGE_TTL_SECONDS: i64 = 10 * 60 * 60;
 const MAX_BROWSER_BRIDGE_TOKEN_BYTES: usize = 128;
+pub(super) const MAX_BROWSER_BRIDGE_ARTIFACT_BYTES: usize = 256 * 1_024;
+const X_BROWSER_COMMAND_TYPE: &str = "x-asterism-browser-command-type";
+const X_BROWSER_COMMAND_DIGEST: &str = "x-asterism-browser-command-digest";
+const X_BROWSER_RESULT_TYPE: &str = "x-asterism-browser-result-type";
 
 pub(super) async fn create_browser_bridge_session(
     State(state): State<ApiState>,
@@ -181,6 +192,153 @@ pub(super) async fn get_browser_bridge_snapshot(
     ))
 }
 
+pub(super) async fn dispatch_browser_bridge_command(
+    State(state): State<ApiState>,
+    Path((session_id, sequence)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let session_id = parse_session_id(&session_id)?;
+    let sequence = parse_sequence(&sequence)?;
+    let access_token =
+        bridge_authorization(&headers).ok_or_else(ApiError::invalid_browser_bridge_token)?;
+    let dispatch_token = SecretString::new(access_token.expose_secret().to_owned());
+    let snapshot = bridge_service(&state)?
+        .authenticate_access(BrowserBridgeSessionAccessRequest {
+            session_id,
+            access_token,
+            authenticated_at: Utc::now(),
+        })
+        .await
+        .map_err(map_bridge_error)?;
+    let repository = bridge_artifact_repository(&state, snapshot.session.provider_id.clone())?;
+    let record = BrowserBridgeCommandDispatchService::new(repository)
+        .map_err(ApiError::internal)?
+        .dispatch(BrowserBridgeCommandDispatchRequest {
+            session_id,
+            sequence,
+            access_token: dispatch_token,
+            dispatched_at: Utc::now(),
+            access: bridge_secret_access(&headers, "dispatch BrowserBridge command")?,
+        })
+        .await
+        .map_err(map_command_service_error)?;
+    let BrowserBridgeCommandDispatchRecord::Dispatched(command) = record else {
+        return Err(map_dispatch_record(&record));
+    };
+    let command_type = axum::http::HeaderValue::from_str(&command.exchange.command_type)
+        .map_err(ApiError::internal)?;
+    let command_digest =
+        axum::http::HeaderValue::from_str(&encode_digest(command.exchange.command_digest))
+            .map_err(ApiError::internal)?;
+    let mut response = Response::new(Body::from(OwnedBytes::from_owner(SecretResponseBody(
+        command.command_artifact,
+    ))));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/octet-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(X_BROWSER_COMMAND_TYPE, command_type);
+    response
+        .headers_mut()
+        .insert(X_BROWSER_COMMAND_DIGEST, command_digest);
+    Ok(crate::auth::no_store(response))
+}
+
+pub(super) async fn receive_browser_bridge_result(
+    State(state): State<ApiState>,
+    Path((session_id, sequence)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let session_id = parse_session_id(&session_id)?;
+    let sequence = parse_sequence(&sequence)?;
+    require_octet_stream(&headers)?;
+    if body.is_empty() || body.len() > MAX_BROWSER_BRIDGE_ARTIFACT_BYTES {
+        return Err(ApiError::bad_request(
+            "invalid_browser_bridge_result",
+            "BrowserBridge result is empty or oversized",
+        ));
+    }
+    let result_type = headers
+        .get(X_BROWSER_RESULT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "invalid_browser_bridge_result_type",
+                "BrowserBridge result type is missing or invalid",
+            )
+        })?
+        .to_owned();
+    let access_token =
+        bridge_authorization(&headers).ok_or_else(ApiError::invalid_browser_bridge_token)?;
+    let receive_token = SecretString::new(access_token.expose_secret().to_owned());
+    let snapshot = bridge_service(&state)?
+        .authenticate_access(BrowserBridgeSessionAccessRequest {
+            session_id,
+            access_token,
+            authenticated_at: Utc::now(),
+        })
+        .await
+        .map_err(map_bridge_error)?;
+    let received_at = Utc::now();
+    let result_digest = Sha256::digest(body.as_ref()).into();
+    let metadata = BrowserBridgeResultArtifactMetadata {
+        session_id,
+        sequence,
+        result_type,
+        result_digest,
+        received_at,
+    };
+    metadata.validate().map_err(|_| {
+        ApiError::bad_request(
+            "invalid_browser_bridge_result_type",
+            "BrowserBridge result type is invalid",
+        )
+    })?;
+    let repository = bridge_artifact_repository(&state, snapshot.session.provider_id.clone())?;
+    let record = BrowserBridgeResultArtifactService::new(repository)
+        .map_err(ApiError::internal)?
+        .receive(BrowserBridgeResultReceiveRequest {
+            metadata,
+            result_artifact: secret_request_body(body),
+            access_token: receive_token,
+            access: bridge_secret_access(&headers, "receive BrowserBridge result")?,
+        })
+        .await
+        .map_err(map_command_service_error)?;
+    let (status, metadata, duplicate) = match record {
+        BrowserBridgeResultArtifactRecord::Inserted(metadata) => {
+            (StatusCode::ACCEPTED, metadata, false)
+        }
+        BrowserBridgeResultArtifactRecord::Duplicate(metadata) => (StatusCode::OK, metadata, true),
+        BrowserBridgeResultArtifactRecord::AccessRejected => {
+            return Err(ApiError::invalid_browser_bridge_token());
+        }
+        BrowserBridgeResultArtifactRecord::SequenceConflict => {
+            return Err(ApiError::conflict(
+                "browser_bridge_result_conflict",
+                "the BrowserBridge result conflicts with durable command state",
+            ));
+        }
+    };
+    Ok(crate::auth::no_store(
+        (
+            status,
+            Json(BrowserBridgeResultReceiptResponse {
+                session_id: metadata.session_id,
+                sequence: metadata.sequence,
+                result_type: metadata.result_type,
+                result_digest: encode_digest(metadata.result_digest),
+                received_at: metadata.received_at,
+                duplicate,
+            }),
+        )
+            .into_response(),
+    ))
+}
+
 fn bridge_service(
     state: &ApiState,
 ) -> Result<BrowserBridgeHelperSessionService<SqliteBrowserBridgeSessionRepository>, ApiError> {
@@ -188,6 +346,33 @@ fn bridge_service(
         state.database.clone(),
     ))
     .map_err(ApiError::internal)
+}
+
+fn bridge_artifact_repository(
+    state: &ApiState,
+    provider_id: ProviderId,
+) -> Result<asterism_storage::SqliteBrowserBridgeCommandArtifactRepository, ApiError> {
+    state
+        .secret_store
+        .as_ref()
+        .map(|store| store.browser_bridge_commands(provider_id))
+        .ok_or_else(|| {
+            ApiError::service_unavailable(
+                "secret_store_unavailable",
+                "the encrypted BrowserBridge artifact store is not configured",
+            )
+        })
+}
+
+fn bridge_secret_access(
+    headers: &HeaderMap,
+    reason: &'static str,
+) -> Result<SecretAccess, ApiError> {
+    Ok(SecretAccess {
+        actor: SecretActor::CoreService("browser-bridge-transport"),
+        correlation_id: request_id(headers)?.to_owned(),
+        reason: reason.to_owned(),
+    })
 }
 
 fn bridge_authorization(headers: &HeaderMap) -> Option<SecretString> {
@@ -218,6 +403,106 @@ fn parse_session_id(value: &str) -> Result<BrowserBridgeSessionId, ApiError> {
             "BrowserBridge session ID is invalid",
         )
     })
+}
+
+fn parse_sequence(value: &str) -> Result<u64, ApiError> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0 && i64::try_from(*value).is_ok())
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "invalid_browser_bridge_sequence",
+                "BrowserBridge sequence is invalid",
+            )
+        })
+}
+
+fn require_octet_stream(headers: &HeaderMap) -> Result<(), ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_type == Some("application/octet-stream") {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "invalid_browser_bridge_content_type",
+            "BrowserBridge results require application/octet-stream",
+        ))
+    }
+}
+
+fn encode_digest(digest: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn secret_request_body(body: Bytes) -> SecretValue {
+    match body.try_into_mut() {
+        Ok(mut body) => {
+            let secret = SecretValue::new(body.as_ref().to_vec());
+            body.as_mut().zeroize();
+            secret
+        }
+        Err(body) => SecretValue::new(body.to_vec()),
+    }
+}
+
+fn map_dispatch_record(record: &BrowserBridgeCommandDispatchRecord) -> ApiError {
+    match record {
+        BrowserBridgeCommandDispatchRecord::AccessRejected => {
+            ApiError::invalid_browser_bridge_token()
+        }
+        BrowserBridgeCommandDispatchRecord::NotFound => {
+            ApiError::not_found("browser_bridge_command_not_found")
+        }
+        BrowserBridgeCommandDispatchRecord::AlreadyDispatched => ApiError::conflict(
+            "browser_bridge_command_already_dispatched",
+            "the BrowserBridge command was already dispatched and cannot be replayed",
+        ),
+        BrowserBridgeCommandDispatchRecord::SequenceConflict => ApiError::conflict(
+            "browser_bridge_command_conflict",
+            "the BrowserBridge command conflicts with durable session state",
+        ),
+        BrowserBridgeCommandDispatchRecord::Dispatched(_) => {
+            ApiError::internal("dispatched command was mapped as an error")
+        }
+    }
+}
+
+fn map_command_service_error(error: asterism_engine::BrowserBridgeCommandServiceError) -> ApiError {
+    match error {
+        asterism_engine::BrowserBridgeCommandServiceError::SecretStore(
+            asterism_secrets::SecretStoreError::InvalidValue,
+        ) => ApiError::bad_request(
+            "invalid_browser_bridge_artifact",
+            "the BrowserBridge artifact is invalid",
+        ),
+        asterism_engine::BrowserBridgeCommandServiceError::SecretStore(
+            asterism_secrets::SecretStoreError::KeyUnavailable,
+        ) => ApiError::service_unavailable(
+            "secret_store_unavailable",
+            "the encrypted BrowserBridge artifact store is not configured",
+        ),
+        error @ asterism_engine::BrowserBridgeCommandServiceError::SecretStore(_) => {
+            ApiError::internal(error)
+        }
+    }
+}
+
+struct SecretResponseBody(SecretValue);
+
+impl AsRef<[u8]> for SecretResponseBody {
+    fn as_ref(&self) -> &[u8] {
+        self.0.expose_secret()
+    }
 }
 
 fn request_id(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -289,6 +574,16 @@ impl From<&BrowserBridgeSession> for BrowserBridgeSessionResponse {
 struct BrowserBridgeSessionSnapshotResponse {
     session: BrowserBridgeSessionResponse,
     spec: BrowserSessionSpec,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct BrowserBridgeResultReceiptResponse {
+    session_id: BrowserBridgeSessionId,
+    sequence: u64,
+    result_type: String,
+    result_digest: String,
+    received_at: Timestamp,
+    duplicate: bool,
 }
 
 struct CreateBrowserBridgeSessionResponse {

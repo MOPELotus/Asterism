@@ -17,6 +17,7 @@ import type {
   ProviderMetadata,
   ProviderSettingValue,
   ResolveAnswerCandidatesResponse,
+  ReceiveBrowserBridgeResultResponse,
   ScanProviderAccountResponse,
   Task,
 } from "./generated/index.ts";
@@ -123,6 +124,19 @@ export type QuestionContractIsTyped = Assert<
 
 export type PersistedQuestionSnapshotContractIsTyped = Assert<
   GetTaskQuestionSnapshotResponse extends GetTaskQuestionsResponse ? true : false
+>;
+
+export type BrowserBridgeResultReceiptContractIsTyped = Assert<
+  ReceiveBrowserBridgeResultResponse extends {
+    duplicate: boolean;
+    received_at: string;
+    result_digest: string;
+    result_type: string;
+    sequence: number;
+    session_id: string;
+  }
+    ? true
+    : false
 >;
 
 export type CandidateContractIsTyped = Assert<

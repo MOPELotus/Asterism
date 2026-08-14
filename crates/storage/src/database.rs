@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 43);
+        assert_eq!(migration_count, 44);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -165,6 +165,16 @@ mod tests {
                 .iter()
                 .any(|row| { row.get::<String, _>("name") == "command_secret_blob_id" })
         );
+
+        let dispatch_columns = sqlx::query("PRAGMA table_info(browser_bridge_command_dispatches)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        let dispatch_names = dispatch_columns
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect::<Vec<_>>();
+        assert_eq!(dispatch_names, ["session_id", "sequence", "dispatched_at"]);
 
         let question_sessions: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema \

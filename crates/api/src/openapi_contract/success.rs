@@ -24,6 +24,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ),
     ("claimBrowserBridgeSession", "BrowserBridgeClaimResponse"),
     ("pollBrowserBridgeSnapshot", "BrowserBridgeSnapshotResponse"),
+    (
+        "receiveBrowserBridgeResult",
+        "BrowserBridgeResultReceiptResponse",
+    ),
     ("listProviders", "ProviderMetadataListResponse"),
     ("listProviderCaptureRecipes", "CaptureRecipeListResponse"),
     ("listProviderAccounts", "ProviderAccountListResponse"),
@@ -839,6 +843,27 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         (
             "BrowserBridgeClaimResponse",
             browser_bridge_token_response("access_token"),
+        ),
+        (
+            "BrowserBridgeResultReceiptResponse",
+            object(
+                &[
+                    "session_id",
+                    "sequence",
+                    "result_type",
+                    "result_digest",
+                    "received_at",
+                    "duplicate",
+                ],
+                json!({
+                    "session_id": uuid(),
+                    "sequence": {"type": "integer", "format": "uint64", "minimum": 1},
+                    "result_type": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[a-z0-9._-]+$"},
+                    "result_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "received_at": timestamp(),
+                    "duplicate": {"type": "boolean"}
+                }),
+            ),
         ),
         (
             "TaskProgressResponse",
