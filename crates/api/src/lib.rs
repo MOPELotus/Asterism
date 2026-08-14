@@ -2342,12 +2342,13 @@ mod tests {
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, BrowserBridgeCapability, BrowserSessionSpec,
         CaptureCredentialOutput, CaptureRecipe, CaptureValueSource, CourseInventoryCapability,
-        CredentialValidation, ExecutionEventSink, ExecutionOutcome,
+        CredentialValidation, ExecutionEventSink, ExecutionOutcome, ExecutionPlanningRequest,
         ExecutionRequest as ProviderExecutionRequest, ProviderAuthContext, ProviderCapability,
-        ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
-        ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior, ProviderSettingDefinition,
-        ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask,
-        SessionStatus, TaskExecutionCapability, TaskInventoryCapability, VerificationLevel,
+        ProviderContext, ProviderEntry, ProviderExecutionPlan, ProviderExecutionPlanArtifact,
+        ProviderIdentity, ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema,
+        ProviderSettingCoreBehavior, ProviderSettingDefinition, ProviderSettingKind,
+        ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask, SessionStatus,
+        TaskExecutionCapability, TaskInventoryCapability, VerificationLevel,
     };
     use asterism_secrets::{CredentialBundle, SecretAccess, SecretActor, SecretKey, SecretValue};
     use asterism_storage::{
@@ -2391,6 +2392,29 @@ mod tests {
 
     #[async_trait]
     impl TaskExecutionCapability for ApiTaskExecution {
+        async fn prepare_execution_plan(
+            &self,
+            context: &ProviderContext,
+            request: &ExecutionPlanningRequest<'_>,
+        ) -> ProviderResult<ProviderExecutionPlan> {
+            assert_eq!(context.provider_id, self.metadata.id);
+            assert_eq!(request.requested_capabilities.len(), 1);
+            let artifact = ProviderExecutionPlanArtifact::try_new(
+                self.metadata.id.clone(),
+                "provider-alpha.api-planning.v1",
+                json!({
+                    "execution_id": request.execution_id,
+                    "task_id": request.task_id,
+                    "remote_task_id": request.remote_task_id,
+                }),
+            )?;
+            ProviderExecutionPlan::try_new(
+                self.metadata.id.clone(),
+                vec![request.requested_capabilities.to_vec()],
+                Some(artifact),
+            )
+        }
+
         async fn execute(
             &self,
             _context: &ProviderContext,
@@ -5847,6 +5871,18 @@ mod tests {
             (frozen_settings.2, frozen_settings.3, frozen_settings.4),
             (None, None, None)
         );
+        let frozen_plan: (String, String) = sqlx::query_as(
+            "SELECT artifact_type, payload_json FROM execution_provider_plan_artifacts \
+             WHERE execution_id = ?",
+        )
+        .bind(&execution_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(frozen_plan.0, "provider-alpha.api-planning.v1");
+        let frozen_plan: Value = serde_json::from_str(&frozen_plan.1).unwrap();
+        assert_eq!(frozen_plan["execution_id"], execution_id);
+        assert_eq!(frozen_plan["task_id"], routine_task.to_string());
     }
 
     #[tokio::test]

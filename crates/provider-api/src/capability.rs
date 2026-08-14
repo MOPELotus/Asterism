@@ -1453,6 +1453,29 @@ pub trait SubmissionVerifyCapability: ProviderIdentity {
     }
 }
 
+pub struct ExecutionPlanningRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub task_id: TaskId,
+    pub remote_task_id: &'a str,
+    pub course_id: Option<CourseId>,
+    pub requested_capabilities: &'a [TaskCapability],
+    pub runtime_settings: &'a ResolvedProviderRuntimeSettings,
+}
+
+impl fmt::Debug for ExecutionPlanningRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionPlanningRequest")
+            .field("execution_id", &self.execution_id)
+            .field("task_id", &self.task_id)
+            .field("remote_task_id", &"[REDACTED]")
+            .field("course_id", &self.course_id)
+            .field("requested_capabilities", &self.requested_capabilities)
+            .field("runtime_settings", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[async_trait]
 pub trait TaskExecutionCapability: ProviderIdentity {
     /// Declares an evidenced Provider-specific exception to Core's ordinary
@@ -1530,6 +1553,26 @@ pub trait TaskExecutionCapability: ProviderIdentity {
             self.execution_call_plan(requested_capabilities, runtime_settings)?,
             None,
         )
+    }
+
+    /// Performs an optional read-only fresh planning pass before Core freezes
+    /// an Execution. The default remains deterministic from already resolved
+    /// settings and preserves the existing single-Task contract.
+    ///
+    /// Implementations may use opaque credential references from `context` to
+    /// rediscover Provider facts, but must not perform any remote mutation.
+    /// The returned plan and optional credential-free artifact become
+    /// immutable scheduling evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unsupported selections, remote drift or unsafe plan evidence.
+    async fn prepare_execution_plan(
+        &self,
+        _context: &ProviderContext,
+        request: &ExecutionPlanningRequest<'_>,
+    ) -> ProviderResult<ProviderExecutionPlan> {
+        self.execution_plan_snapshot(request.requested_capabilities, request.runtime_settings)
     }
 
     /// Declares whether this exact selected action set requires the Provider's

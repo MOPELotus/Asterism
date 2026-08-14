@@ -5,7 +5,10 @@ use asterism_domain::{
     RequestSource, SubmissionDraft, SubmissionDraftId, Task, TaskCapability, TaskId, Timestamp,
     UserId,
 };
-use asterism_provider_api::{ProviderCapability, ProviderRegistry, ProviderRuntimeSettingsSchema};
+use asterism_provider_api::{
+    ExecutionPlanningRequest, ProviderCapability, ProviderContext, ProviderRegistry,
+    ProviderRuntimeSettingsSchema,
+};
 use asterism_storage::{
     ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
     ExecutionScheduleOutcome, ExecutionScheduleRequest, ProviderAccountRuntimeRepository,
@@ -123,9 +126,15 @@ where
             .await?
             .ok_or(ExecutionRequestError::TaskNotFound)?;
         validate_task(&task, &command.requested_capabilities, self.formal_policy)?;
-        let (runtime_settings, runtime_settings_schema) = self
-            .resolve_runtime_settings(command.owner_id, &task, command.requested_at)
+        let (runtime_settings, runtime_settings_schema, provider_context) = self
+            .resolve_runtime_settings(
+                command.owner_id,
+                &task,
+                &command.correlation_id,
+                command.requested_at,
+            )
             .await?;
+        let execution_id = ExecutionId::new();
         let ResolvedExecutionContract {
             verification_required,
             capability_plan,
@@ -138,7 +147,10 @@ where
             &self.providers,
             &runtime_settings.provider_id,
             &runtime_settings.resolved,
-        )?;
+            &provider_context,
+            execution_id,
+        )
+        .await?;
         if !remote_state_is_executable(
             &task,
             &command.requested_capabilities,
@@ -157,7 +169,7 @@ where
             )
             .await?;
         let mut execution = Execution {
-            id: ExecutionId::new(),
+            id: execution_id,
             task_id: task.id,
             requested_capabilities: command.requested_capabilities,
             submission_draft_id: submission_draft.as_ref().map(|draft| draft.id),
@@ -268,11 +280,13 @@ where
         &self,
         owner_id: UserId,
         task: &Task,
+        correlation_id: &str,
         captured_at: Timestamp,
     ) -> Result<
         (
             ExecutionRuntimeSettingsSnapshot,
             ProviderRuntimeSettingsSchema,
+            ProviderContext,
         ),
         ExecutionRequestError,
     > {
@@ -315,9 +329,10 @@ where
                 task_settings.as_ref().map(|record| &record.patch),
             )
             .map_err(|_| ExecutionRequestError::ProviderRuntimeUnavailable)?;
+        let provider_id = account.provider_id.clone();
         Ok((
             ExecutionRuntimeSettingsSnapshot {
-                provider_id: account.provider_id,
+                provider_id: provider_id.clone(),
                 resolved,
                 sources,
                 provider_revision: provider_settings.as_ref().map(|record| record.revision),
@@ -326,6 +341,12 @@ where
                 captured_at,
             },
             schema,
+            ProviderContext {
+                provider_id,
+                account_id: account.id,
+                credential_refs: account.credential_refs,
+                correlation_id: correlation_id.to_owned(),
+            },
         ))
     }
 }
@@ -409,12 +430,14 @@ fn safe_verification_action(
         || verification_required
 }
 
-fn resolve_execution_contract(
+async fn resolve_execution_contract(
     task: &Task,
     requested_capabilities: &[TaskCapability],
     providers: &ProviderRegistry,
     provider_id: &asterism_domain::ProviderId,
     runtime_settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+    context: &ProviderContext,
+    execution_id: ExecutionId,
 ) -> Result<ResolvedExecutionContract, ExecutionRequestError> {
     if requested_capabilities == [TaskCapability::SubmissionExecute] {
         return Ok(ResolvedExecutionContract {
@@ -431,8 +454,20 @@ fn resolve_execution_contract(
     let Some(capability) = provider.task_execution.as_ref() else {
         return Err(ExecutionRequestError::ExecutionVerificationUnavailable);
     };
+    if context.provider_id != *provider_id || context.account_id != task.provider_account_id {
+        return Err(ExecutionRequestError::ProviderRuntimeUnavailable);
+    }
+    let planning_request = ExecutionPlanningRequest {
+        execution_id,
+        task_id: task.id,
+        remote_task_id: &task.remote_id,
+        course_id: task.course_id,
+        requested_capabilities,
+        runtime_settings,
+    };
     let provider_plan = capability
-        .execution_plan_snapshot(requested_capabilities, runtime_settings)
+        .prepare_execution_plan(context, &planning_request)
+        .await
         .map_err(|_| ExecutionRequestError::ExecutionVerificationUnavailable)?;
     if provider_plan.provider_id() != provider_id {
         return Err(ExecutionRequestError::ExecutionVerificationUnavailable);

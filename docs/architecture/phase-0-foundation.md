@@ -3615,3 +3615,27 @@ WELearn and UAI child plans require complete, freshly validated Course/Task
 membership plus an exact start/target decision. Their future batch scheduling
 entry must freeze those inputs first and then pass the resulting artifact into
 this already durable execution boundary.
+
+## Two-hundred-and-third Phase 0 slice
+
+Execution planning now has an asynchronous read-only Provider hook before Core
+freezes the Execution. Core supplies a preallocated stable Execution identity,
+the exact local and remote Task/Course binding, canonical requested capability
+set, immutable resolved settings and a Provider/account context containing only
+opaque credential references. The default hook preserves the prior synchronous
+single-Task behavior, so Providers opt into fresh discovery explicitly.
+
+The hook grants no mutation authority. A Provider may use it only to rediscover
+the complete remote facts needed to select call groups and produce one bounded,
+credential-free plan artifact. Core repeats Provider/account binding before the
+call, validates the returned call permutation and artifact namespace, then
+persists the result in the same scheduling transaction as capability steps and
+runtime settings. An idempotent replay returns the existing Execution before
+calling the Provider planner again.
+
+The API integration fixture exercises the complete boundary rather than only a
+trait default: planning receives the stable Execution/Task identities, returns
+a private artifact, and scheduling stores its exact type and payload under that
+Execution. This hook makes fresh Provider-owned batch preparation possible, but
+the public Course/Unit selection and parent/child Execution contract remains a
+separate orchestration slice.
