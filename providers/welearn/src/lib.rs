@@ -35,7 +35,7 @@ pub use batch_plan::{
     WellearnAtomicCompletionProfile, WellearnBatchDispatch, WellearnBatchEntry,
     WellearnBatchExecutionShape, WellearnBatchFlow, WellearnBatchPlan, WellearnBatchTargetStrategy,
     WellearnBatchUnitSelection, build_batch_plan, build_selected_batch_plan,
-    validate_fresh_batch_entry,
+    validate_batch_plan_integrity, validate_fresh_batch_entry,
 };
 pub use cmi::{
     WellearnCmiDocument, WellearnCmiSnapshot, WellearnCmiTransport, WellearnTaskProgress,

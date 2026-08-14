@@ -531,6 +531,15 @@ can prove the exact frozen score tuple without replaying a mutation; other
 newly ineligible states fail as `RemoteChanged`. Core still owns durable plan
 authority and must not accept caller-supplied rebind facts as a substitute.
 
+Every constructed plan and every persisted-plan rebind first passes
+`validate_batch_plan_integrity`. This fail-closed Provider boundary proves that
+flow still agrees with dispatch, target strategy, execution shape and atomic
+profile; selection agrees with bounded Unit facts; children retain unique
+Course/SCO identities, Unit bindings, dispatch order, visibility and membership
+facts; and Auto's aggregate, equal-floor child targets and discarded remainder
+remain arithmetically identical. It returns `Internal` for plan-authority drift
+and does not repair, reorder or redistribute the frozen plan.
+
 ## Sanitization and routing
 
 - `uid`, `classid`, redirect state, PKCE material and Cookies are route/session

@@ -212,6 +212,199 @@ pub struct WellearnBatchPlan {
     pub discarded_remainder_seconds: u64,
 }
 
+/// Validates that a public or restored batch plan still contains one
+/// self-consistent immutable snapshot of the selected donor flow.
+///
+/// # Errors
+///
+/// Returns an internal error when flow-derived profiles, Unit selection,
+/// child membership/order, visibility facts or aggregate target arithmetic
+/// have drifted from each other.
+pub fn validate_batch_plan_integrity(plan: &WellearnBatchPlan) -> ProviderResult<()> {
+    validate_frozen_flow_profiles(plan)?;
+    let selected_ordinals = validate_frozen_unit_selection(plan)?;
+    validate_frozen_entries(plan, &selected_ordinals)?;
+    validate_frozen_targets(plan)
+}
+
+fn validate_frozen_flow_profiles(plan: &WellearnBatchPlan) -> ProviderResult<()> {
+    if plan.dispatch != plan.flow.dispatch()
+        || plan.target_strategy != plan.flow.target_strategy()
+        || plan.execution_shape != plan.flow.execution_shape()
+        || plan.atomic_completion_profile != plan.flow.atomic_completion_profile()
+        || plan.flow.validate_unit_selection(&plan.selection).is_err()
+    {
+        return Err(invalid_frozen_batch_plan(
+            "flow-derived execution profiles are inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_frozen_unit_selection(
+    plan: &WellearnBatchPlan,
+) -> ProviderResult<BTreeMap<u32, usize>> {
+    if plan.selected_units.is_empty() || plan.selected_units.len() > 512 {
+        return Err(invalid_frozen_batch_plan(
+            "selected Unit snapshot is empty or oversized",
+        ));
+    }
+    let mut selected_ordinals = BTreeMap::new();
+    for (ordinal, unit) in plan.selected_units.iter().enumerate() {
+        if unit.title.is_empty()
+            || unit.title.len() > 512
+            || unit.title.chars().any(char::is_control)
+            || unit.code.as_ref().is_some_and(|code| {
+                code.is_empty() || code.len() > 512 || code.chars().any(char::is_control)
+            })
+            || unit.index >= 512
+            || selected_ordinals.insert(unit.index, ordinal).is_some()
+        {
+            return Err(invalid_frozen_batch_plan(
+                "selected Unit snapshot contains an invalid or duplicate observation",
+            ));
+        }
+    }
+    match &plan.selection {
+        WellearnBatchUnitSelection::All => {
+            if !plan
+                .selected_units
+                .iter()
+                .enumerate()
+                .all(|(ordinal, unit)| usize::try_from(unit.index).ok() == Some(ordinal))
+            {
+                return Err(invalid_frozen_batch_plan(
+                    "all-Unit selection no longer matches the selected Unit snapshot",
+                ));
+            }
+        }
+        WellearnBatchUnitSelection::Explicit(indices) => {
+            if indices.as_slice()
+                != plan
+                    .selected_units
+                    .iter()
+                    .map(|unit| unit.index)
+                    .collect::<Vec<_>>()
+                    .as_slice()
+            {
+                return Err(invalid_frozen_batch_plan(
+                    "explicit Unit selection no longer matches the selected Unit snapshot",
+                ));
+            }
+        }
+    }
+    Ok(selected_ordinals)
+}
+
+fn validate_frozen_entries(
+    plan: &WellearnBatchPlan,
+    selected_ordinals: &BTreeMap<u32, usize>,
+) -> ProviderResult<()> {
+    if plan.entries.is_empty() || plan.entries.len() > MAX_BATCH_TASKS {
+        return Err(invalid_frozen_batch_plan(
+            "child snapshot is empty or oversized",
+        ));
+    }
+    let mut seen_remote_ids = BTreeSet::new();
+    let mut previous_order = None;
+    for entry in &plan.entries {
+        split_batch_identity(
+            plan.course_remote_id.as_str(),
+            entry.remote_task_id.as_str(),
+        )?;
+        if !seen_remote_ids.insert(entry.remote_task_id.as_str()) {
+            return Err(invalid_frozen_batch_plan(
+                "child snapshot contains a duplicate SCO identity",
+            ));
+        }
+        let selected_ordinal = selected_ordinals.get(&entry.unit_index).ok_or_else(|| {
+            invalid_frozen_batch_plan("child snapshot references an unselected Unit")
+        })?;
+        let unit = &plan.selected_units[*selected_ordinal];
+        if entry.unit_visible != unit.visible
+            || entry.visible
+                != (entry.unit_visible && entry.sco_visible.unwrap_or(entry.unit_visible))
+        {
+            return Err(invalid_frozen_batch_plan(
+                "child and selected Unit visibility facts are inconsistent",
+            ));
+        }
+        if plan.flow.requires_raw_sco_visibility() && entry.sco_visible == Some(false) {
+            return Err(invalid_frozen_batch_plan(
+                "child snapshot violates donor SCO visibility membership",
+            ));
+        }
+        if plan.flow.requires_pending_completion() && entry.completion != RemoteState::Pending {
+            return Err(invalid_frozen_batch_plan(
+                "child snapshot violates donor pending-completion membership",
+            ));
+        }
+        if matches!(
+            entry.completion,
+            RemoteState::Expired | RemoteState::Removed
+        ) {
+            return Err(invalid_frozen_batch_plan(
+                "child snapshot contains an unavailable SCO",
+            ));
+        }
+
+        let order = (
+            *selected_ordinal,
+            entry.sco_index,
+            entry.remote_task_id.as_str(),
+        );
+        if previous_order.is_some_and(|previous| previous >= order) {
+            return Err(invalid_frozen_batch_plan(
+                "child snapshot no longer preserves frozen dispatch order",
+            ));
+        }
+        previous_order = Some(order);
+    }
+    Ok(())
+}
+
+fn validate_frozen_targets(plan: &WellearnBatchPlan) -> ProviderResult<()> {
+    if plan.flow == WellearnBatchFlow::AutoDuration {
+        let aggregate = plan.aggregate_duration_seconds.ok_or_else(|| {
+            invalid_frozen_batch_plan("Auto duration has no frozen aggregate target")
+        })?;
+        let count = u64::try_from(plan.entries.len()).map_err(|_| {
+            invalid_frozen_batch_plan("Auto duration child count exceeds the bounded limit")
+        })?;
+        if aggregate == 0
+            || aggregate > MAX_AUTO_DURATION_MINUTES * 60
+            || aggregate % 60 != 0
+            || plan.discarded_remainder_seconds != aggregate % count
+            || !plan
+                .entries
+                .iter()
+                .all(|entry| entry.target_seconds == Some(aggregate / count))
+        {
+            return Err(invalid_frozen_batch_plan(
+                "Auto duration aggregate, child targets or remainder are inconsistent",
+            ));
+        }
+    } else if plan.aggregate_duration_seconds.is_some()
+        || plan.discarded_remainder_seconds != 0
+        || plan
+            .entries
+            .iter()
+            .any(|entry| entry.target_seconds.is_some())
+    {
+        return Err(invalid_frozen_batch_plan(
+            "non-aggregate flow contains aggregate target facts",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_frozen_batch_plan(reason: &'static str) -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        format!("WELearn frozen batch plan integrity failure: {reason}"),
+    )
+}
+
 /// Rebinds one immutable batch child to a complete fresh Task detail without
 /// changing membership, dispatch order or any frozen target.
 ///
@@ -232,6 +425,7 @@ pub fn validate_fresh_batch_entry(
     entry_index: usize,
     fresh_detail: &RemoteTaskDetail,
 ) -> ProviderResult<()> {
+    validate_batch_plan_integrity(plan)?;
     let entry = plan.entries.get(entry_index).ok_or_else(|| {
         ProviderError::new(
             ProviderErrorKind::Internal,
@@ -642,7 +836,7 @@ pub fn build_selected_batch_plan(
             "WELearn batch selection contains no donor-eligible SCO tasks",
         ));
     }
-    Ok(WellearnBatchPlan {
+    let plan = WellearnBatchPlan {
         course_remote_id,
         flow,
         dispatch: flow.dispatch(),
@@ -654,7 +848,9 @@ pub fn build_selected_batch_plan(
         entries,
         aggregate_duration_seconds,
         discarded_remainder_seconds,
-    })
+    };
+    validate_batch_plan_integrity(&plan)?;
+    Ok(plan)
 }
 
 fn select_units(
@@ -1228,6 +1424,111 @@ mod tests {
         validate_fresh_batch_entry(&plan, 0, &detail(fresh)).unwrap();
         assert_eq!(plan.entries[0].sco_index, 1);
         assert_eq!(plan.entries[0].completion, RemoteState::Pending);
+    }
+
+    #[test]
+    fn every_built_batch_plan_passes_frozen_integrity_validation() {
+        for (flow, duration_minutes) in [
+            (WellearnBatchFlow::FanyuchangCompletion, None),
+            (WellearnBatchFlow::FanyuchangDuration, None),
+            (WellearnBatchFlow::YzbrhDuration, None),
+            (WellearnBatchFlow::AutoDuration, Some(1)),
+            (WellearnBatchFlow::AutoLegacyDuration, None),
+        ] {
+            let plan = build_batch_plan(&tasks(), flow, duration_minutes).unwrap();
+            validate_batch_plan_integrity(&plan).unwrap();
+        }
+        for flow in [
+            WellearnBatchFlow::YzbrhCompletion,
+            WellearnBatchFlow::AutoCompletion,
+        ] {
+            let plan = build_batch_plan(&pending_tasks(), flow, None).unwrap();
+            validate_batch_plan_integrity(&plan).unwrap();
+        }
+    }
+
+    #[test]
+    fn frozen_integrity_rejects_flow_profile_drift() {
+        let plan = build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
+
+        let mut drifted = plan.clone();
+        drifted.dispatch = WellearnBatchDispatch::Sequential;
+        assert_eq!(
+            validate_batch_plan_integrity(&drifted).unwrap_err().kind,
+            ProviderErrorKind::Internal
+        );
+
+        let mut drifted = plan.clone();
+        drifted.target_strategy = WellearnBatchTargetStrategy::PerChild;
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+
+        let mut drifted = plan.clone();
+        drifted.execution_shape = WellearnBatchExecutionShape::DurationReport;
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+
+        let mut drifted = plan;
+        drifted.atomic_completion_profile =
+            Some(WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100);
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+    }
+
+    #[test]
+    fn frozen_integrity_rejects_selection_unit_and_entry_drift() {
+        let plan = build_selected_batch_plan(
+            &tasks(),
+            &units(),
+            WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+            WellearnBatchFlow::FanyuchangCompletion,
+            None,
+        )
+        .unwrap();
+
+        let mut drifted = plan.clone();
+        drifted.selection = WellearnBatchUnitSelection::Explicit(vec![0, 1]);
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+
+        let mut drifted = plan.clone();
+        drifted.selected_units[0].index = drifted.selected_units[1].index;
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+
+        let mut drifted = plan.clone();
+        drifted.entries[0].unit_visible = !drifted.entries[0].unit_visible;
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+
+        let mut drifted = plan.clone();
+        drifted.entries.swap(0, 1);
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+
+        let mut drifted = plan;
+        drifted.entries[1].remote_task_id = drifted.entries[0].remote_task_id.clone();
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+    }
+
+    #[test]
+    fn frozen_integrity_rejects_auto_aggregate_drift() {
+        let plan = build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
+
+        let mut drifted = plan.clone();
+        drifted.aggregate_duration_seconds = Some(61);
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+
+        let mut drifted = plan.clone();
+        drifted.entries[0].target_seconds = Some(21);
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+
+        let mut drifted = plan;
+        drifted.discarded_remainder_seconds = 1;
+        assert!(validate_batch_plan_integrity(&drifted).is_err());
+    }
+
+    #[test]
+    fn fresh_batch_rebind_rejects_a_drifted_persisted_plan_first() {
+        let tasks = pending_tasks();
+        let mut plan = build_batch_plan(&tasks, WellearnBatchFlow::AutoCompletion, None).unwrap();
+        plan.dispatch = WellearnBatchDispatch::PerChildConcurrent;
+
+        let error = validate_fresh_batch_entry(&plan, 0, &detail(tasks[1].clone())).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
     }
 
     #[test]
