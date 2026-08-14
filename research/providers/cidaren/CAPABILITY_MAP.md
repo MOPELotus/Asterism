@@ -195,7 +195,9 @@ The current checkpoint (not a completion boundary):
     metadata tuple. Provider validation rechecks result type, BrowserSession,
     sequence, exact raw-byte digest and non-regressing receive time; completion
     uses that stored receive time, so callers cannot supply those fields as
-    independent acceptance authority.
+    independent acceptance authority. Command-only recovery remains an
+    internal implementation step and is not an alternate public result-
+    acceptance entry.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

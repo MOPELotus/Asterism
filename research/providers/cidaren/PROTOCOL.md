@@ -169,11 +169,13 @@ wiring need not discard durable metadata to obtain helper or credential data.
 The wrapper deliberately has no consuming snapshot-only escape hatch. It can
 also convert directly into credential replacement + terminal exchange, which
 is the Provider-owned input pair for Main's atomic result/credential commit.
-`complete_recovered_capture_snapshot_exchange` is the post-crash Provider
-entry: it accepts only a valid Issued exchange, resolves the encrypted command
-against that exchange and Core's selected recipe, then delegates to the same
-fresh Task binding and owned result-document completion path as an in-process
-exchange.
+Command-only recovery is an internal step of the public post-crash
+`complete_persisted_capture_snapshot_exchange` entry. It accepts only a valid
+Issued exchange and resolves the encrypted command against that exchange and
+Core's selected recipe, but cannot independently accept a raw result or caller
+completion time. The persisted entry must first bind Core's encrypted result
+artifact and receipt metadata, then delegates to the same fresh Task binding
+and owned result-document completion path as an in-process exchange.
 Committed TokenOnly/Composite command fixtures are byte-identical to the
 compact JSON stored in the encrypted artifact and hashed into the exchange;
 helper dispatch and recovery therefore cannot evolve separate wire shapes.

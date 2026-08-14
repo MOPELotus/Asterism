@@ -324,7 +324,7 @@ impl CidarenBrowserBridge {
         clippy::too_many_arguments,
         reason = "the persisted exchange, encrypted artifact, recipe and result observation are independent recovery bindings"
     )]
-    pub async fn complete_recovered_capture_snapshot_exchange(
+    async fn complete_recovered_capture_snapshot_exchange(
         &self,
         context: &ProviderContext,
         remote_task_id: &str,
@@ -878,21 +878,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovered_capture_exchange_resolves_command_authority_before_result() {
+    async fn persisted_capture_result_resolves_command_authority_before_result() {
         let fixture = recovered_capture_fixture().await;
+        let result_digest = crate::browser_event_exchange_digest(&fixture.document).unwrap();
+        let result_artifact = SecretValue::new(fixture.document.into_bytes());
+        let result_metadata = BrowserBridgeResultArtifactMetadata {
+            session_id: fixture.session_id,
+            sequence: 3,
+            result_type: crate::CIDAREN_CAPTURE_RESULT_TYPE.to_owned(),
+            result_digest,
+            received_at: fixture.issued_at + Duration::seconds(1),
+        };
 
         assert_eq!(
             fixture
                 .capability
-                .complete_recovered_capture_snapshot_exchange(
+                .complete_persisted_capture_snapshot_exchange(
                     &fixture.context,
                     "class-task:2002",
                     &fixture.exchange,
                     &fixture.command_artifact,
                     CidarenCaptureMode::TokenOnly,
-                    CidarenBrowserResultDocument::try_new(fixture.document).unwrap(),
+                    &result_metadata,
+                    &result_artifact,
                     CIDAREN_ORIGIN,
-                    fixture.issued_at + Duration::seconds(1),
                 )
                 .await
                 .unwrap_err()
