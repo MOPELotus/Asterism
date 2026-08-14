@@ -32,6 +32,13 @@ const MAX_BROWSER_MENU_LABEL_BYTES: usize = 512;
 const BROWSER_MENU_HANDLE_PREFIX: &str = "uai-menu-v1-";
 const BROWSER_PAGE_HANDLE_PREFIX: &str = "uai-page-v1-";
 
+/// Stable Core `BrowserBridge` exchange type for one typed UAI command.
+pub const UAI_BROWSER_COMMAND_TYPE: &str = "uai.browser.command";
+/// Stable Core `BrowserBridge` exchange type for one typed UAI protocol event.
+pub const UAI_BROWSER_EVENT_TYPE: &str = "uai.browser.event";
+/// Stable Core `BrowserBridge` exchange type for one terminal residence result.
+pub const UAI_BROWSER_RESIDENCE_RESULT_TYPE: &str = "uai.browser.residence.result";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UaiMenuDiscoveryStrategy {
@@ -241,6 +248,11 @@ impl Drop for UaiBrowserResidenceResult {
 }
 
 impl UaiBrowserResidenceResult {
+    /// Returns the stable durable exchange type used by Core.
+    pub const fn exchange_type() -> &'static str {
+        UAI_BROWSER_RESIDENCE_RESULT_TYPE
+    }
+
     /// Validates one browser-side receipt against the frozen session and plan.
     /// It remains an observation only; fresh `DurationRead` is the acceptance
     /// authority.
@@ -626,6 +638,30 @@ pub struct UaiBrowserCommandEnvelope {
 }
 
 impl UaiBrowserCommandEnvelope {
+    /// Returns the stable durable exchange type used by Core.
+    pub const fn exchange_type() -> &'static str {
+        UAI_BROWSER_COMMAND_TYPE
+    }
+
+    /// Hashes the canonical typed command envelope for Core's durable
+    /// exchange record. The Provider payload itself remains outside Domain
+    /// storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the command is foreign to the frozen plan or
+    /// serialization unexpectedly fails.
+    pub fn exchange_digest(&self, plan: &UaiBrowserResidencePlan) -> ProviderResult<[u8; 32]> {
+        self.validate_for_plan(plan)?;
+        let encoded = serde_json::to_vec(self).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge command cannot be hashed",
+            )
+        })?;
+        Ok(Sha256::digest(encoded).into())
+    }
+
     /// Builds the bounded equivalent of the donor's `SCAN` command.
     ///
     /// # Errors
@@ -965,6 +1001,11 @@ pub struct UaiBrowserEventEnvelope {
 }
 
 impl UaiBrowserEventEnvelope {
+    /// Returns the stable durable exchange type used by Core.
+    pub const fn exchange_type() -> &'static str {
+        UAI_BROWSER_EVENT_TYPE
+    }
+
     /// Validates one received event against its exact command and transport
     /// supplied origin. JSON cannot self-assert its own origin.
     ///
@@ -1179,6 +1220,49 @@ pub fn parse_browser_event(
     })?;
     event.validate_for_command(plan, command, observed_origin)?;
     Ok(event)
+}
+
+/// Hashes one bounded raw protocol event for Core's durable exchange record.
+/// The raw event remains Provider/browser-helper-owned and is never persisted
+/// in Domain storage.
+///
+/// # Errors
+///
+/// Returns a typed error when the document is empty or oversized.
+pub fn browser_event_exchange_digest(document: &str) -> ProviderResult<[u8; 32]> {
+    browser_exchange_digest(
+        document,
+        MAX_BROWSER_MESSAGE_BYTES,
+        "UAI BrowserBridge event is empty or oversized",
+    )
+}
+
+/// Hashes one bounded terminal residence result for Core's durable exchange
+/// record without persisting the Provider-private document.
+///
+/// # Errors
+///
+/// Returns a typed error when the document is empty or oversized.
+pub fn browser_residence_exchange_digest(document: &str) -> ProviderResult<[u8; 32]> {
+    browser_exchange_digest(
+        document,
+        MAX_BROWSER_RESULT_BYTES,
+        "UAI BrowserBridge result is empty or oversized",
+    )
+}
+
+fn browser_exchange_digest(
+    document: &str,
+    max_bytes: usize,
+    error_message: &'static str,
+) -> ProviderResult<[u8; 32]> {
+    if document.is_empty() || document.len() > max_bytes {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            error_message,
+        ));
+    }
+    Ok(Sha256::digest(document.as_bytes()).into())
 }
 
 fn validate_browser_binding(
@@ -1922,6 +2006,19 @@ mod tests {
         .to_string();
         let result =
             parse_browser_residence_result(&document, &plan, &command, UCONTENT_ORIGIN).unwrap();
+        assert_eq!(
+            UaiBrowserResidenceResult::exchange_type(),
+            UAI_BROWSER_RESIDENCE_RESULT_TYPE
+        );
+        assert_eq!(
+            UaiBrowserCommandEnvelope::exchange_type(),
+            UAI_BROWSER_COMMAND_TYPE
+        );
+        assert_ne!(command.exchange_digest(&plan).unwrap(), [0; 32]);
+        assert_ne!(
+            browser_residence_exchange_digest(&document).unwrap(),
+            [0; 32]
+        );
         assert!(result.requires_fresh_duration_read());
         assert!(parse_browser_residence_result(&document, &plan, &command, IPUB_ORIGIN,).is_err());
         let wrong_origin = document.replace(UCONTENT_ORIGIN, "https://evil.example");
@@ -1973,6 +2070,14 @@ mod tests {
         })
         .to_string();
         let menu = parse_browser_event(&menu_document, &plan, &scan, UCONTENT_ORIGIN).unwrap();
+        assert_eq!(
+            UaiBrowserEventEnvelope::exchange_type(),
+            UAI_BROWSER_EVENT_TYPE
+        );
+        assert_ne!(
+            browser_event_exchange_digest(&menu_document).unwrap(),
+            [0; 32]
+        );
         let UaiBrowserEvent::MenuList { ref entries } = menu.event else {
             panic!("expected menu list")
         };
@@ -2017,6 +2122,15 @@ mod tests {
         })
         .to_string();
         assert!(parse_browser_event(&pong_document, &plan, &ping, IPUB_ORIGIN).is_ok());
+        assert_ne!(ping.exchange_digest(&plan).unwrap(), [0; 32]);
+        assert_ne!(
+            browser_event_exchange_digest(&pong_document).unwrap(),
+            [0; 32]
+        );
+        assert!(browser_event_exchange_digest("").is_err());
+        assert!(
+            browser_residence_exchange_digest(&"x".repeat(MAX_BROWSER_RESULT_BYTES + 1)).is_err()
+        );
         assert!(parse_browser_event(&pong_document, &plan, &ping, UCONTENT_ORIGIN).is_err());
         assert!(
             parse_browser_event(

@@ -325,8 +325,19 @@ residence/video settings exactly, and the final result must repeat both its
 sequence and target handle. The final observation permits at most that one Micro and
 one target Task per processed Tab. Target navigation, action dispatch,
 pause/recovery, browser session injection and fresh DurationRead acceptance are
-an active shared Core integration item. Capture
-evidence may replace or refine this plan at any time; neither path is deferred.
+an active shared Core integration item.
+
+Core's durable exchange ledger now receives only the stable message types
+`uai.browser.command`, `uai.browser.event` and
+`uai.browser.residence.result`, plus SHA-256 digests of the validated typed
+command or bounded raw result. UAI command/event/residence JSON, browser labels,
+session nonce and opaque handles remain outside Domain storage. The Provider
+must still parse and validate the exact plan, Task, origin, frame and sequence
+before Core records a terminal result; the digest is replay/correlation
+metadata, not acceptance evidence.
+
+Capture evidence may replace or refine this plan at any time; neither path is
+deferred.
 
 DurationRead never creates an Execution, reports time or mutates remote state.
 The independently implemented submission route does not report duration. HTTP

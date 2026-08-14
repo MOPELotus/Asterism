@@ -50,11 +50,13 @@ pub use authentication::{
     classify_password_login_response,
 };
 pub use browser_bridge::{
+    UAI_BROWSER_COMMAND_TYPE, UAI_BROWSER_EVENT_TYPE, UAI_BROWSER_RESIDENCE_RESULT_TYPE,
     UaiBrowserBridge, UaiBrowserCommand, UaiBrowserCommandEnvelope, UaiBrowserEvent,
     UaiBrowserEventEnvelope, UaiBrowserMenuEntry, UaiBrowserMessageSecurity, UaiBrowserPageEntry,
     UaiBrowserPageScope, UaiBrowserResidenceControl, UaiBrowserResidencePlan,
     UaiBrowserResidenceResult, UaiBrowserSessionBinding, UaiBrowserTarget,
     UaiBrowserTargetMenuEntry, UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy,
+    browser_event_exchange_digest, browser_residence_exchange_digest,
     browser_start_url_from_detail, parse_browser_event, parse_browser_residence_result,
 };
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
