@@ -1,25 +1,30 @@
 use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
-    AuditActor, AuditRecordId, ExecutionAttemptId, ExecutionId, ProviderId, QuestionSessionId,
-    QuestionSessionState, QuestionSnapshotId, SecretId, Timestamp, UserId,
+    AuditActor, AuditRecordId, ExecutionAttemptId, ExecutionId, ProviderId, QuestionSession,
+    QuestionSessionId, QuestionSessionState, QuestionSnapshotId, SecretId, Timestamp, UserId,
 };
 use asterism_secrets::{
     SecretAccess, SecretActor, SecretPurpose, SecretRef, SecretStoreError, SecretValue,
 };
 use async_trait::async_trait;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
 use crate::{
     Database, QuestionSessionArtifactAttachRequest, QuestionSessionArtifactRepository,
-    QuestionSessionContinuation, QuestionSessionMaterializeRequest, QuestionSessionOperation,
-    QuestionSessionOperationAcceptRequest, QuestionSessionOperationFinishOutcome,
-    QuestionSessionOperationIssueOutcome, QuestionSessionOperationIssueRequest,
-    QuestionSessionOperationState, ResolvedQuestionSessionContinuation, SecretKeyring,
+    QuestionSessionContinuation, QuestionSessionMaterializeRequest,
+    QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
+    QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
+    QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
+    QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionTransition,
+    ResolvedQuestionSessionContinuation, SecretKeyring,
     question::save_question_snapshot_in_transaction,
-    question_session::insert_question_session_in_transaction,
+    question_session::{
+        consume_claimed_question_session_in_transaction, fetch_by_id,
+        insert_question_session_in_transaction,
+    },
     secret::{
         authorize, decrypt, encrypt, fetch_secret, insert_secret_audit, insert_secret_blob,
         validate_secret,
@@ -321,6 +326,11 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         }
         let latest_operation =
             fetch_latest_operation(&mut transaction, metadata.session_id).await?;
+        let latest_transition = if let Some(operation) = latest_operation.as_ref() {
+            fetch_transition(&mut transaction, operation.session_id, operation.sequence).await?
+        } else {
+            None
+        };
         insert_secret_audit(
             &mut transaction,
             access,
@@ -333,6 +343,7 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         Ok(Some(ResolvedQuestionSessionContinuation {
             metadata,
             latest_operation,
+            latest_transition,
             value: SecretValue::new(plaintext),
         }))
     }
@@ -410,6 +421,7 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         Ok(Some(ResolvedQuestionSessionContinuation {
             metadata,
             latest_operation: None,
+            latest_transition: None,
             value: SecretValue::new(plaintext),
         }))
     }
@@ -670,6 +682,218 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
         })
     }
 
+    async fn materialize_next_question_session(
+        &self,
+        request: QuestionSessionNextMaterializeRequest<'_>,
+    ) -> Result<QuestionSessionNextMaterializeOutcome, SecretStoreError> {
+        validate_next_materialization(&request, &self.provider_id)?;
+        validate_secret(&request.artifact)?;
+        let artifact_digest = digest(request.artifact.expose_secret());
+        let ttl_seconds = i64::try_from(request.artifact_ttl_seconds)
+            .map_err(|_| SecretStoreError::InvalidValue)?;
+        let expires_at = request
+            .materialized_at
+            .checked_add_signed(Duration::seconds(ttl_seconds))
+            .ok_or(SecretStoreError::InvalidValue)?;
+
+        let mut transaction = self
+            .database
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let Some(existing) = fetch_operation(
+            &mut transaction,
+            request.operation.session_id,
+            request.operation.sequence,
+        )
+        .await?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionSessionNextMaterializeOutcome::Unavailable);
+        };
+        if existing.state == QuestionSessionOperationState::Accepted {
+            let transition =
+                fetch_transition(&mut transaction, existing.session_id, existing.sequence).await?;
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(match transition {
+                Some(transition)
+                    if existing.result_digest == Some(request.result_digest)
+                        && existing.completed_at == Some(request.materialized_at) =>
+                {
+                    QuestionSessionNextMaterializeOutcome::Duplicate {
+                        operation: existing,
+                        transition,
+                    }
+                }
+                Some(_) | None => QuestionSessionNextMaterializeOutcome::Conflict,
+            });
+        }
+        if !matches!(
+            existing.state,
+            QuestionSessionOperationState::Issued | QuestionSessionOperationState::Ambiguous
+        ) || &existing != request.operation
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionSessionNextMaterializeOutcome::Conflict);
+        }
+        let Some(binding) =
+            fetch_operation_binding(&mut transaction, existing.execution_id).await?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionSessionNextMaterializeOutcome::Unavailable);
+        };
+        let Some(previous) = fetch_by_id(&mut transaction, existing.session_id)
+            .await
+            .map_err(storage_error)?
+        else {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionSessionNextMaterializeOutcome::Unavailable);
+        };
+        authorize_scoped(
+            previous.owner_user_id,
+            &previous.provider_id,
+            &self.provider_id,
+            request.access,
+        )?;
+        if binding.session_id != previous.id
+            || binding.session_state != QuestionSessionState::Claimed
+            || binding.continuation_revision != existing.continuation_revision
+            || !binding.execution_live
+            || !attempt_is_live(
+                &mut transaction,
+                existing.execution_id,
+                existing.execution_attempt_id,
+            )
+            .await?
+            || previous.execution_id != Some(existing.execution_id)
+            || request.snapshot.id == previous.question_snapshot_id
+            || request.snapshot.task_id != previous.task_id
+            || request.snapshot.provider_id != previous.provider_id
+            || request.snapshot.provider_version != previous.provider_version
+            || request.snapshot.captured_at != request.materialized_at
+        {
+            transaction.rollback().await.map_err(storage_error)?;
+            return Ok(QuestionSessionNextMaterializeOutcome::Conflict);
+        }
+
+        save_question_snapshot_in_transaction(&mut transaction, request.snapshot)
+            .await
+            .map_err(storage_error)?;
+        let next_session = QuestionSession::active(
+            previous.owner_user_id,
+            previous.provider_account_id,
+            previous.task_id,
+            previous.provider_id.clone(),
+            previous.provider_version.clone(),
+            request.snapshot.id,
+            request.artifact_type.to_owned(),
+            artifact_digest,
+            request.materialized_at,
+            expires_at,
+        )
+        .map_err(|_| SecretStoreError::InvalidValue)?;
+        insert_question_session_in_transaction(
+            &mut transaction,
+            &next_session,
+            AuditActor::User(previous.owner_user_id),
+            &request.access.correlation_id,
+        )
+        .await
+        .map_err(storage_error)?;
+
+        let (key_id, key) = self.keyring.active();
+        let secret = SecretRef {
+            id: SecretId::new(),
+            owner_user_id: previous.owner_user_id,
+            purpose: SecretPurpose::BrowserJobCredential,
+            version: 1,
+            key_id: key_id.to_owned(),
+            created_at: request.materialized_at,
+            updated_at: request.materialized_at,
+        };
+        let (nonce, encrypted_data) = encrypt(key, &secret, request.artifact.expose_secret())?;
+        insert_secret_blob(&mut transaction, &secret, &nonce, &encrypted_data).await?;
+        sqlx::query(
+            "INSERT INTO question_session_continuations \
+             (session_id, execution_id, secret_blob_id, continuation_type, \
+              continuation_digest, phase, revision, created_at, updated_at) \
+             VALUES (?, NULL, ?, ?, ?, ?, 1, ?, ?)",
+        )
+        .bind(next_session.id.to_string())
+        .bind(secret.id.to_string())
+        .bind(request.artifact_type)
+        .bind(artifact_digest.as_slice())
+        .bind(request.artifact_phase)
+        .bind(encode_timestamp(request.materialized_at))
+        .bind(encode_timestamp(request.materialized_at))
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+
+        let expected_state = existing.state;
+        let mut accepted = existing;
+        accepted.state = QuestionSessionOperationState::Accepted;
+        accepted.result_digest = Some(request.result_digest);
+        accepted.completed_at = Some(request.materialized_at);
+        persist_operation_finish(&mut transaction, &accepted, expected_state).await?;
+        consume_claimed_question_session_in_transaction(
+            &mut transaction,
+            accepted.session_id,
+            accepted.execution_id,
+            request.materialized_at,
+            &request.access.correlation_id,
+        )
+        .await
+        .map_err(storage_error)?;
+        let transition = QuestionSessionTransition {
+            previous_session_id: accepted.session_id,
+            operation_sequence: accepted.sequence,
+            execution_id: accepted.execution_id,
+            next_session_id: next_session.id,
+            next_question_snapshot_id: request.snapshot.id,
+            transitioned_at: request.materialized_at,
+        };
+        insert_transition(&mut transaction, &transition).await?;
+        let continuation = QuestionSessionContinuation {
+            session_id: next_session.id,
+            execution_id: None,
+            continuation_type: request.artifact_type.to_owned(),
+            continuation_digest: artifact_digest,
+            phase: request.artifact_phase.to_owned(),
+            revision: 1,
+            created_at: request.materialized_at,
+            updated_at: request.materialized_at,
+        };
+        insert_secret_audit(
+            &mut transaction,
+            request.access,
+            "question_session_next_artifact_stored",
+            &secret,
+        )
+        .await
+        .map_err(storage_error)?;
+        insert_operation_audit(
+            &mut transaction,
+            &request.access.correlation_id,
+            "question_session_operation_accepted_next_question",
+            &accepted,
+        )
+        .await?;
+        insert_transition_audit(
+            &mut transaction,
+            &request.access.correlation_id,
+            &transition,
+        )
+        .await?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(QuestionSessionNextMaterializeOutcome::Materialized {
+            operation: accepted,
+            transition,
+            continuation,
+        })
+    }
+
     async fn finish_question_session_operation(
         &self,
         operation: &QuestionSessionOperation,
@@ -692,7 +916,10 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(QuestionSessionOperationFinishOutcome::Unavailable);
         };
-        if existing.state != QuestionSessionOperationState::Issued {
+        let can_finish = existing.state == QuestionSessionOperationState::Issued
+            || (terminal_state == QuestionSessionOperationState::Accepted
+                && existing.state == QuestionSessionOperationState::Ambiguous);
+        if !can_finish {
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(
                 if existing.state == terminal_state && existing.result_digest == result_digest {
@@ -706,25 +933,22 @@ impl QuestionSessionArtifactRepository for SqliteQuestionSessionArtifactReposito
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(QuestionSessionOperationFinishOutcome::Conflict);
         }
+        let expected_state = existing.state;
         let mut finished = existing;
         finished.state = terminal_state;
         finished.result_digest = result_digest;
         finished.completed_at = Some(completed_at);
-        persist_operation_finish(
-            &mut transaction,
-            &finished,
-            QuestionSessionOperationState::Issued,
-        )
-        .await?;
+        persist_operation_finish(&mut transaction, &finished, expected_state).await?;
         insert_operation_audit(
             &mut transaction,
             correlation_id,
             match terminal_state {
+                QuestionSessionOperationState::Accepted => {
+                    "question_session_operation_accepted_terminal"
+                }
                 QuestionSessionOperationState::Rejected => "question_session_operation_rejected",
                 QuestionSessionOperationState::Ambiguous => "question_session_operation_ambiguous",
-                QuestionSessionOperationState::Issued | QuestionSessionOperationState::Accepted => {
-                    unreachable!()
-                }
+                QuestionSessionOperationState::Issued => unreachable!(),
             },
             &finished,
         )
@@ -1004,6 +1228,60 @@ async fn fetch_latest_operation(
     .transpose()
 }
 
+async fn fetch_transition(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: QuestionSessionId,
+    sequence: u64,
+) -> Result<Option<QuestionSessionTransition>, SecretStoreError> {
+    sqlx::query(
+        "SELECT previous_session_id, operation_sequence, execution_id, next_session_id, \
+                next_question_snapshot_id, transitioned_at \
+         FROM question_session_transitions \
+         WHERE previous_session_id = ? AND operation_sequence = ?",
+    )
+    .bind(session_id.to_string())
+    .bind(i64::try_from(sequence).map_err(|_| SecretStoreError::InvalidValue)?)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?
+    .as_ref()
+    .map(decode_transition)
+    .transpose()
+}
+
+fn decode_transition(row: &SqliteRow) -> Result<QuestionSessionTransition, SecretStoreError> {
+    Ok(QuestionSessionTransition {
+        previous_session_id: parse_id(row_value!(row, "previous_session_id"))?,
+        operation_sequence: u64::try_from(row_value!(row, "operation_sequence", i64))
+            .map_err(|_| SecretStoreError::Storage)?,
+        execution_id: parse_id(row_value!(row, "execution_id"))?,
+        next_session_id: parse_id(row_value!(row, "next_session_id"))?,
+        next_question_snapshot_id: parse_id(row_value!(row, "next_question_snapshot_id"))?,
+        transitioned_at: decode_timestamp(row_value!(row, "transitioned_at"))?,
+    })
+}
+
+async fn insert_transition(
+    transaction: &mut Transaction<'_, Sqlite>,
+    transition: &QuestionSessionTransition,
+) -> Result<(), SecretStoreError> {
+    sqlx::query(
+        "INSERT INTO question_session_transitions \
+         (previous_session_id, operation_sequence, execution_id, next_session_id, \
+          next_question_snapshot_id, transitioned_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(transition.previous_session_id.to_string())
+    .bind(i64::try_from(transition.operation_sequence).map_err(|_| SecretStoreError::InvalidValue)?)
+    .bind(transition.execution_id.to_string())
+    .bind(transition.next_session_id.to_string())
+    .bind(transition.next_question_snapshot_id.to_string())
+    .bind(encode_timestamp(transition.transitioned_at))
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 fn decode_operation(row: &SqliteRow) -> Result<QuestionSessionOperation, SecretStoreError> {
     Ok(QuestionSessionOperation {
         session_id: parse_id(row_value!(row, "session_id"))?,
@@ -1126,6 +1404,41 @@ async fn insert_operation_audit(
     Ok(())
 }
 
+async fn insert_transition_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    correlation_id: &str,
+    transition: &QuestionSessionTransition,
+) -> Result<(), SecretStoreError> {
+    sqlx::query(
+        "INSERT INTO audit_records \
+         (id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, \
+          correlation_id, outcome, metadata_sanitized_json) \
+         VALUES (?, ?, 'execution', ?, 'question_session_transitioned', \
+                 'question_session_transition', ?, ?, 'succeeded', ?)",
+    )
+    .bind(AuditRecordId::new().to_string())
+    .bind(encode_timestamp(transition.transitioned_at))
+    .bind(transition.execution_id.to_string())
+    .bind(format!(
+        "{}:{}",
+        transition.previous_session_id, transition.operation_sequence
+    ))
+    .bind(correlation_id)
+    .bind(
+        serde_json::json!({
+            "previous_session_id": transition.previous_session_id,
+            "operation_sequence": transition.operation_sequence,
+            "next_session_id": transition.next_session_id,
+            "next_question_snapshot_id": transition.next_question_snapshot_id,
+        })
+        .to_string(),
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 fn validate_issue_request(
     request: &QuestionSessionOperationIssueRequest,
 ) -> Result<(), SecretStoreError> {
@@ -1157,6 +1470,34 @@ fn validate_accept_request(
     Ok(())
 }
 
+fn validate_next_materialization(
+    request: &QuestionSessionNextMaterializeRequest<'_>,
+    provider_id: &ProviderId,
+) -> Result<(), SecretStoreError> {
+    validate_label(request.artifact_type)?;
+    validate_label(request.artifact_phase)?;
+    validate_correlation_id(&request.access.correlation_id)?;
+    let operation_shape_valid = match request.operation.state {
+        QuestionSessionOperationState::Issued => request.operation.completed_at.is_none(),
+        QuestionSessionOperationState::Ambiguous => request.operation.completed_at.is_some(),
+        QuestionSessionOperationState::Accepted | QuestionSessionOperationState::Rejected => false,
+    };
+    if !operation_shape_valid
+        || request.operation.result_digest.is_some()
+        || request.result_digest == [0; 32]
+        || request.materialized_at < request.operation.issued_at
+        || request.artifact_ttl_seconds == 0
+        || request.artifact_ttl_seconds > 24 * 60 * 60
+        || request.snapshot.questions.is_empty()
+        || request.snapshot.provider_id != *provider_id
+        || !label_belongs_to_provider(provider_id, request.artifact_type)
+        || !label_belongs_to_provider(provider_id, request.artifact_phase)
+    {
+        return Err(SecretStoreError::InvalidValue);
+    }
+    Ok(())
+}
+
 fn validate_terminal_finish(
     state: QuestionSessionOperationState,
     result_digest: Option<[u8; 32]>,
@@ -1164,14 +1505,24 @@ fn validate_terminal_finish(
     operation: &QuestionSessionOperation,
 ) -> Result<(), SecretStoreError> {
     let shape_valid = match state {
+        QuestionSessionOperationState::Accepted => {
+            result_digest.is_some_and(|value| value != [0; 32])
+                && matches!(
+                    operation.state,
+                    QuestionSessionOperationState::Issued
+                        | QuestionSessionOperationState::Ambiguous
+                )
+        }
         QuestionSessionOperationState::Rejected => {
             result_digest.is_some_and(|value| value != [0; 32])
+                && operation.state == QuestionSessionOperationState::Issued
         }
-        QuestionSessionOperationState::Ambiguous => result_digest.is_none(),
-        QuestionSessionOperationState::Issued | QuestionSessionOperationState::Accepted => false,
+        QuestionSessionOperationState::Ambiguous => {
+            result_digest.is_none() && operation.state == QuestionSessionOperationState::Issued
+        }
+        QuestionSessionOperationState::Issued => false,
     };
     if !shape_valid
-        || operation.state != QuestionSessionOperationState::Issued
         || operation.result_digest.is_some()
         || operation.completed_at.is_some()
         || completed_at < operation.issued_at
@@ -1410,6 +1761,149 @@ mod tests {
         assert_eq!(resolved.value.expose_secret(), plaintext);
         assert_eq!(resolved.metadata.session_id, session.id);
         assert!(resolved.latest_operation.is_none());
+        assert!(resolved.latest_transition.is_none());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression proves one atomic accepted-operation, consumed-session and next-snapshot lifecycle"
+    )]
+    async fn accepted_next_question_atomically_replaces_the_claimed_session() {
+        let fixture = Fixture::new().await;
+        let (previous, execution_id, attempt_id) = fixture.claimed(b"question-one-state").await;
+        let issued_at = fixture.now + Duration::seconds(2);
+        let QuestionSessionOperationIssueOutcome::Issued(operation) = fixture
+            .artifacts
+            .issue_question_session_operation(QuestionSessionOperationIssueRequest {
+                execution_id,
+                execution_attempt_id: attempt_id,
+                expected_continuation_revision: 1,
+                operation_type: "chaoxing.exam.advance".to_owned(),
+                request_digest: [21; 32],
+                issued_at,
+                correlation_id: "next-question-issue".to_owned(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected issued operation");
+        };
+        let received_at = issued_at + Duration::seconds(1);
+        let question = Question {
+            id: asterism_domain::QuestionId::new(),
+            task_id: fixture.task,
+            remote_question_id: Some("question-two".to_owned()),
+            kind: QuestionKind::ShortAnswer,
+            stem: "Second Question".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({}),
+            position: 1,
+        };
+        let snapshot = QuestionSnapshot {
+            id: QuestionSnapshotId::new(),
+            task_id: fixture.task,
+            provider_id: fixture.provider.clone(),
+            provider_version: "exam-v1".to_owned(),
+            captured_at: received_at,
+            questions: vec![question],
+        };
+        let next_plaintext = b"question-two-state";
+        let outcome = fixture
+            .artifacts
+            .materialize_next_question_session(QuestionSessionNextMaterializeRequest {
+                operation: &operation,
+                snapshot: &snapshot,
+                artifact_type: "chaoxing.exam-attempt.v1",
+                artifact_phase: "chaoxing.question-ready",
+                artifact: SecretValue::new(next_plaintext.to_vec()),
+                artifact_ttl_seconds: 300,
+                result_digest: [22; 32],
+                materialized_at: received_at,
+                access: &fixture.access("next-question-materialize"),
+            })
+            .await
+            .unwrap();
+        let QuestionSessionNextMaterializeOutcome::Materialized {
+            operation: accepted,
+            transition,
+            continuation,
+        } = outcome
+        else {
+            panic!("expected next Question materialization");
+        };
+        assert_eq!(accepted.state, QuestionSessionOperationState::Accepted);
+        let previous_session = fixture
+            .sessions
+            .find_owned_question_session(fixture.owner, previous.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let next_session = fixture
+            .sessions
+            .find_owned_question_session(fixture.owner, transition.next_session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(previous_session.state, QuestionSessionState::Consumed);
+        assert_eq!(next_session.state, QuestionSessionState::Active);
+        assert_eq!(next_session.execution_id, None);
+        assert_eq!(transition.next_question_snapshot_id, snapshot.id);
+        assert_eq!(continuation.continuation_digest, digest(next_plaintext));
+
+        let resolved_previous = fixture
+            .artifacts
+            .resolve_question_session_continuation(
+                execution_id,
+                &fixture.access("next-question-resolve-previous"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_previous.latest_operation, Some(accepted.clone()));
+        assert_eq!(
+            resolved_previous.latest_transition,
+            Some(transition.clone())
+        );
+        let resolved_next = fixture
+            .artifacts
+            .resolve_active_question_session_continuation(
+                fixture.owner,
+                snapshot.id,
+                &SecretAccess {
+                    actor: SecretActor::CoreService("answer-resolve"),
+                    correlation_id: "next-question-resolve-active".to_owned(),
+                    reason: "resolve newly materialized Question".to_owned(),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_next.value.expose_secret(), next_plaintext);
+        assert_eq!(resolved_next.metadata.session_id, next_session.id);
+
+        assert!(matches!(
+            fixture
+                .artifacts
+                .materialize_next_question_session(QuestionSessionNextMaterializeRequest {
+                    operation: &operation,
+                    snapshot: &snapshot,
+                    artifact_type: "chaoxing.exam-attempt.v1",
+                    artifact_phase: "chaoxing.question-ready",
+                    artifact: SecretValue::new(next_plaintext.to_vec()),
+                    artifact_ttl_seconds: 300,
+                    result_digest: [22; 32],
+                    materialized_at: received_at,
+                    access: &fixture.access("next-question-materialize-duplicate"),
+                })
+                .await
+                .unwrap(),
+            QuestionSessionNextMaterializeOutcome::Duplicate {
+                operation: duplicate,
+                transition: duplicate_transition,
+            } if duplicate == accepted && duplicate_transition == transition
+        ));
     }
 
     #[tokio::test]

@@ -309,6 +309,13 @@ pub(crate) async fn consume_question_session_for_succeeded_execution(
         return Ok(());
     };
     let mut session = decode_session(&row)?;
+    if session.state == QuestionSessionState::Consumed
+        && session.execution_id == Some(execution_id)
+        && binding_is_valid(transaction, &session).await?
+        && consumed_session_has_next_transition(transaction, &session, consumed_at).await?
+    {
+        return Ok(());
+    }
     if session.state != QuestionSessionState::Claimed
         || session.execution_id != Some(execution_id)
         || !binding_is_valid(transaction, &session).await?
@@ -331,6 +338,69 @@ pub(crate) async fn consume_question_session_for_succeeded_execution(
         &session,
     )
     .await
+}
+
+/// Consumes one claimed session inside the caller's transaction after its
+/// accepted operation and replacement Question have both become durable.
+pub(crate) async fn consume_claimed_question_session_in_transaction(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: QuestionSessionId,
+    execution_id: ExecutionId,
+    consumed_at: Timestamp,
+    correlation_id: &str,
+) -> Result<QuestionSession, StorageError> {
+    validate_correlation_id(correlation_id)?;
+    let Some(mut session) = fetch_by_id(transaction, session_id).await? else {
+        return Err(StorageError::InvalidData(
+            "Question session is missing during next-Question transition".to_owned(),
+        ));
+    };
+    if session.state != QuestionSessionState::Claimed
+        || session.execution_id != Some(execution_id)
+        || !binding_is_valid(transaction, &session).await?
+        || !accepted_operation_chain_is_complete(transaction, &session, consumed_at).await?
+    {
+        return Err(StorageError::InvalidData(
+            "next-Question transition is not bound to a complete accepted operation".to_owned(),
+        ));
+    }
+    let expected_revision = session.revision;
+    session
+        .consume(consumed_at)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    persist_transition(transaction, &session, expected_revision).await?;
+    insert_audit(
+        transaction,
+        ("execution", Some(execution_id.to_string())),
+        "question_session_consumed_for_next_question",
+        correlation_id,
+        &session,
+    )
+    .await?;
+    Ok(session)
+}
+
+async fn consumed_session_has_next_transition(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session: &QuestionSession,
+    at: Timestamp,
+) -> Result<bool, StorageError> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM question_session_transitions AS transition \
+         INNER JOIN question_session_operations AS operation \
+           ON operation.session_id = transition.previous_session_id \
+          AND operation.sequence = transition.operation_sequence \
+         WHERE transition.previous_session_id = ? AND transition.execution_id = ? \
+           AND operation.state = 'accepted' AND operation.completed_at IS NOT NULL \
+           AND operation.completed_at <= ? AND transition.transitioned_at <= ?)",
+    )
+    .bind(session.id.to_string())
+    .bind(session.execution_id.map(|id| id.to_string()))
+    .bind(encode_timestamp(at))
+    .bind(encode_timestamp(at))
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(exists == 1 && session.closed_at.is_some_and(|closed_at| closed_at <= at))
 }
 
 async fn accepted_operation_chain_is_complete(
@@ -389,7 +459,8 @@ async fn accepted_operation_chain_is_complete(
     Ok(continuation_execution_id == session.execution_id
         && operation_count > 0
         && unresolved_count == 0
-        && latest_revision.checked_add(1) == Some(continuation_revision)
+        && (latest_revision == continuation_revision
+            || latest_revision.checked_add(1) == Some(continuation_revision))
         && continuation_updated_at <= consumed_at
         && latest_completed_at.is_some_and(|completed_at| completed_at <= consumed_at))
 }
@@ -489,7 +560,7 @@ fn decode_execution_binding(row: &SqliteRow) -> Result<ExecutionBinding, Storage
     })
 }
 
-async fn fetch_by_id(
+pub(crate) async fn fetch_by_id(
     transaction: &mut Transaction<'_, Sqlite>,
     session_id: QuestionSessionId,
 ) -> Result<Option<QuestionSession>, StorageError> {

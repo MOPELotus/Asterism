@@ -422,6 +422,7 @@ pub struct QuestionSessionContinuation {
 pub struct ResolvedQuestionSessionContinuation {
     pub metadata: QuestionSessionContinuation,
     pub latest_operation: Option<QuestionSessionOperation>,
+    pub latest_transition: Option<QuestionSessionTransition>,
     pub value: SecretValue,
 }
 
@@ -442,6 +443,44 @@ pub struct QuestionSessionMaterializeRequest<'a> {
     pub artifact: SecretValue,
     pub materialized_at: Timestamp,
     pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuestionSessionTransition {
+    pub previous_session_id: asterism_domain::QuestionSessionId,
+    pub operation_sequence: u64,
+    pub execution_id: ExecutionId,
+    pub next_session_id: asterism_domain::QuestionSessionId,
+    pub next_question_snapshot_id: QuestionSnapshotId,
+    pub transitioned_at: Timestamp,
+}
+
+#[derive(Debug)]
+pub struct QuestionSessionNextMaterializeRequest<'a> {
+    pub operation: &'a QuestionSessionOperation,
+    pub snapshot: &'a QuestionSnapshot,
+    pub artifact_type: &'a str,
+    pub artifact_phase: &'a str,
+    pub artifact: SecretValue,
+    pub artifact_ttl_seconds: u64,
+    pub result_digest: [u8; 32],
+    pub materialized_at: Timestamp,
+    pub access: &'a SecretAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QuestionSessionNextMaterializeOutcome {
+    Materialized {
+        operation: QuestionSessionOperation,
+        transition: QuestionSessionTransition,
+        continuation: QuestionSessionContinuation,
+    },
+    Duplicate {
+        operation: QuestionSessionOperation,
+        transition: QuestionSessionTransition,
+    },
+    Conflict,
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -551,6 +590,15 @@ pub trait QuestionSessionArtifactRepository: Send + Sync {
         request: QuestionSessionOperationAcceptRequest<'_>,
     ) -> Result<QuestionSessionOperationFinishOutcome, SecretStoreError>;
 
+    /// Accepts one definite next-Question response, consumes the old claimed
+    /// session and atomically materializes the next immutable snapshot/session.
+    async fn materialize_next_question_session(
+        &self,
+        request: QuestionSessionNextMaterializeRequest<'_>,
+    ) -> Result<QuestionSessionNextMaterializeOutcome, SecretStoreError>;
+
+    /// Finishes an issued operation as rejected/ambiguous, or accepts a
+    /// definite terminal submission without inventing another continuation.
     async fn finish_question_session_operation(
         &self,
         operation: &QuestionSessionOperation,
@@ -1349,6 +1397,22 @@ pub struct ExecutionAttemptFinishRequest<'a> {
     pub correlation_id: &'a str,
 }
 
+/// Finishes one successful submission Execution after the accepted remote
+/// response materialized another immutable Question. The Execution is
+/// terminal, but the Task returns to `ready` for an explicitly reviewed next
+/// Draft instead of being marked complete.
+#[derive(Clone, Debug)]
+pub struct ExecutionQuestionStepFinishRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub transition: &'a QuestionSessionTransition,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub progress: &'a ExecutionProgress,
+    pub at: Timestamp,
+    pub correlation_id: &'a str,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionRecoveryFinishRequest<'a> {
     pub execution_id: ExecutionId,
@@ -1481,6 +1545,11 @@ pub trait ExecutionRepository: Send + Sync {
     async fn finish_attempt(
         &self,
         request: ExecutionAttemptFinishRequest<'_>,
+    ) -> Result<Execution, StorageError>;
+
+    async fn finish_question_step(
+        &self,
+        request: ExecutionQuestionStepFinishRequest<'_>,
     ) -> Result<Execution, StorageError>;
 
     async fn finish_recovery(

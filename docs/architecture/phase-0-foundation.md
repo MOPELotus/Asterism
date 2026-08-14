@@ -3264,3 +3264,30 @@ Provider-scoped repository and passes a borrowed redacted continuation to the
 Provider method; Domain Questions, candidates, Drafts and API responses still
 contain no runtime URL, token or crypto material. Snapshots without an artifact
 continue through the legacy resolver method.
+
+## One-hundred-and-eighty-eighth Phase 0 slice
+
+Post-Question execution now distinguishes three real Provider outcomes instead
+of forcing every accepted response into continuation rotation. `Continue`
+rotates the encrypted state for another operation on the same immutable Draft;
+`NextQuestion` carries a complete newly observed Question set and its bounded
+Provider artifact; `Submitted` is a definite terminal acknowledgement and does
+not invent a replacement continuation. `NormalizedAnswer::Skip` separately
+expresses an explicit audited skip command, so a Provider can never interpret
+`Unknown` or a missing selection as mutation authority.
+
+For `NextQuestion`, SQLite accepts the issued operation, persists the next
+immutable `QuestionSnapshot`, creates its active unclaimed `QuestionSession`
+and encrypted continuation, consumes the old claimed session, and records the
+old-to-new transition in one immediate transaction. Recovery resolves that
+transition before any Provider call, so a crash after the remote response can
+finish locally without replaying the prior non-idempotent request. The current
+Execution succeeds, while its Task atomically returns to `ready`; the new
+Question must pass answer resolution and immutable Draft construction again.
+
+A terminal `Submitted` operation may be accepted without rotating Provider
+state, but its Receipt still is not success. Fresh `SubmissionVerify` must
+confirm the exact old Draft before the claimed session and Task become
+terminal. Migration 041 makes next-session transitions durable and binds each
+one to the exact prior session, operation sequence, Execution, next session,
+snapshot and accepted timestamp.

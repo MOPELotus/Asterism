@@ -1254,13 +1254,7 @@ mod question_read_flow_tests {
             received_at,
         };
         assert!(matches!(
-            ProviderSubmissionStepOutcome::submitted(
-                continuation(),
-                receipt,
-                [5; 32],
-                received_at,
-            )
-            .unwrap(),
+            ProviderSubmissionStepOutcome::submitted(receipt, [5; 32], received_at).unwrap(),
             ProviderSubmissionStepOutcome::Submitted {
                 response_digest,
                 ..
@@ -1311,8 +1305,10 @@ pub trait SubmissionBuildCapability: ProviderIdentity {
 }
 
 /// Result of one accepted post-materialization Question-session operation.
-/// Every accepted step rotates encrypted Provider state. A final submission
-/// additionally yields a Receipt, which remains distinct from verification.
+/// Continuing steps rotate encrypted Provider state. A next-Question response
+/// materializes a new immutable snapshot/session, while terminal completion
+/// yields a Receipt without inventing a replacement continuation. Neither is
+/// equivalent to whole-Task verification.
 #[derive(Debug)]
 pub enum ProviderSubmissionStepOutcome {
     Continue {
@@ -1320,8 +1316,8 @@ pub enum ProviderSubmissionStepOutcome {
         response_digest: [u8; 32],
         received_at: Timestamp,
     },
+    NextQuestion(ProviderQuestionMaterialization),
     Submitted {
-        continuation: ProviderQuestionReadContinuation,
         receipt: SubmissionReceipt,
         response_digest: [u8; 32],
         received_at: Timestamp,
@@ -1354,7 +1350,6 @@ impl ProviderSubmissionStepOutcome {
     ///
     /// Rejects an invalid Receipt or missing response digest.
     pub fn submitted(
-        continuation: ProviderQuestionReadContinuation,
         receipt: SubmissionReceipt,
         response_digest: [u8; 32],
         received_at: Timestamp,
@@ -1366,7 +1361,6 @@ impl ProviderSubmissionStepOutcome {
             ));
         }
         Ok(Self::Submitted {
-            continuation,
             receipt,
             response_digest,
             received_at,

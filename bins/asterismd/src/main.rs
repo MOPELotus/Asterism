@@ -701,10 +701,15 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let execution_handle =
-            start_execution_scheduler(&database, providers, &Config::default(), shutdown_receiver)
-                .unwrap()
-                .unwrap();
+        let execution_handle = start_execution_scheduler(
+            &database,
+            providers,
+            None,
+            &Config::default(),
+            shutdown_receiver,
+        )
+        .unwrap()
+        .unwrap();
 
         shutdown_sender.send(true).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), scan_handle)

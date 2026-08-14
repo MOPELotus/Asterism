@@ -242,7 +242,7 @@ enum TaskCommand {
         task_id: String,
         snapshot_id: String,
         question_id: String,
-        /// A typed `NormalizedAnswer` JSON value, for example {"type":"boolean","value":true}.
+        /// A typed `NormalizedAnswer` JSON value, for example {"type":"boolean","value":true} or {"type":"skip"}.
         #[arg(long)]
         answer: String,
         /// Optional confidence from 0 to 10000 basis points.

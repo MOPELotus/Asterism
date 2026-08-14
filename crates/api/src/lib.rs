@@ -1849,6 +1849,14 @@ fn normalized_answer_schema() -> Value {
             "type": "object",
             "required": ["type"],
             "properties": {
+                "type": {"const": "skip"}
+            },
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
                 "type": {"const": "unknown"}
             },
             "additionalProperties": false
@@ -5123,6 +5131,31 @@ mod tests {
         assert_eq!(body["candidates"][0]["candidate"]["source"], "manual");
         assert_eq!(body["candidates"].as_array().unwrap().len(), 3);
 
+        let skip_response = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/tasks/{task_id}/question-snapshots/{}/answer-candidates",
+                    snapshot.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "question_id": question_id,
+                        "answer": {"type": "skip"},
+                        "explanation": "Explicitly skip this Question"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(skip_response.status(), StatusCode::CREATED);
+        let skip_body = response_json(skip_response).await;
+        assert_eq!(skip_body["candidate"]["answer"], json!({"type": "skip"}));
+
         let draft_response = app
             .clone()
             .oneshot(
@@ -6111,6 +6144,15 @@ mod tests {
         if let Err(failures) = openapi_contract::validate(&document) {
             panic!("OpenAPI client-readiness validation failed: {failures:#?}");
         }
+        let normalized_variants = document["components"]["schemas"]["NormalizedAnswer"]["oneOf"]
+            .as_array()
+            .unwrap();
+        assert!(normalized_variants.iter().any(|variant| {
+            variant["properties"]["type"]["const"] == "skip"
+                && variant["required"] == json!(["type"])
+                && variant["properties"].get("value").is_none()
+                && variant["additionalProperties"] == false
+        }));
         for path in [
             "/api/v1/auth/bootstrap",
             "/api/v1/auth/login",

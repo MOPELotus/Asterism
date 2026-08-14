@@ -262,6 +262,10 @@ pub enum NormalizedAnswer {
     Pairs(Vec<AnswerPair>),
     Ordering(Vec<String>),
     Composite(Vec<Self>),
+    /// Explicitly authorizes the Provider's audited skip operation for this
+    /// Question. This is a command intent, never an answer value and never a
+    /// substitute for `Unknown`.
+    Skip,
     Unknown,
 }
 
@@ -308,7 +312,7 @@ impl NormalizedAnswer {
                     .iter()
                     .try_for_each(|value| value.validate_at_depth(depth + 1))
             }
-            Self::Boolean(_) | Self::Unknown => Ok(()),
+            Self::Boolean(_) | Self::Skip | Self::Unknown => Ok(()),
         }
     }
 }
@@ -523,6 +527,7 @@ mod tests {
             provenance_sanitized: serde_json::json!({"bank": "local-fixture"}),
         };
         assert_eq!(candidate.validate(), Ok(()));
+        assert_eq!(NormalizedAnswer::Skip.validate(), Ok(()));
 
         let duplicate = NormalizedAnswer::Ordering(vec!["A".to_owned(), "A".to_owned()]);
         assert_eq!(

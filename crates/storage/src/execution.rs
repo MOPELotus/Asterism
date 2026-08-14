@@ -28,9 +28,9 @@ use crate::{
     ExecutionBillingReservation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
     ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
     ExecutionCapabilityStepState, ExecutionLogAppendRequest, ExecutionProgressUpdate,
-    ExecutionQueryRepository, ExecutionRecoveryFinishRequest, ExecutionRepository,
-    ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome,
-    ExecutionScheduleRequest, ExecutionSubmissionRepository,
+    ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
+    ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
+    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionSubmissionRepository,
     ExecutionVerificationRecoveryRepository, StorageError, SubmissionDraftRepository,
     SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
     VerificationRecoveryStartRequest,
@@ -402,6 +402,7 @@ impl ExecutionRepository for SqliteExecutionRepository {
             &request,
             ExecutionState::Running,
             OrchestrationState::Running,
+            None,
         )
         .await?;
         record_attempt_finished(
@@ -409,6 +410,67 @@ impl ExecutionRepository for SqliteExecutionRepository {
             &request,
             "execution_attempt_finished",
             "execution attempt finished",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(execution)
+    }
+
+    async fn finish_question_step(
+        &self,
+        request: ExecutionQuestionStepFinishRequest<'_>,
+    ) -> Result<Execution, StorageError> {
+        validate_question_step_finish_request(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            false,
+        )
+        .await?;
+        if !question_transition_is_ready(&mut transaction, &request).await? {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        let execution_row = select_execution(&mut transaction, request.execution_id).await?;
+        let mut execution = decode_execution(&execution_row)?;
+        let (expected_execution_state, expected_task_state) = match execution.state {
+            ExecutionState::Running => (ExecutionState::Running, OrchestrationState::Running),
+            ExecutionState::Recovering => {
+                (ExecutionState::Recovering, OrchestrationState::Recovering)
+            }
+            _ => return Err(StorageError::ExecutionStateConflict),
+        };
+        let finish = ExecutionAttemptFinishRequest {
+            execution_id: request.execution_id,
+            attempt_id: request.attempt_id,
+            scheduler_job_id: request.scheduler_job_id,
+            worker_id: request.worker_id,
+            final_state: ExecutionState::Succeeded,
+            result: AttemptResult::Succeeded,
+            error_class: None,
+            provider_trace_id: None,
+            retry_at: None,
+            progress: request.progress,
+            at: request.at,
+            correlation_id: request.correlation_id,
+        };
+        apply_attempt_finish(
+            &mut transaction,
+            &mut execution,
+            &finish,
+            expected_execution_state,
+            expected_task_state,
+            Some(OrchestrationState::Ready),
+        )
+        .await?;
+        record_attempt_finished(
+            &mut transaction,
+            &finish,
+            "execution_question_step_finished",
+            "next Question materialized; execution step finished",
         )
         .await?;
         transaction.commit().await?;
@@ -460,6 +522,7 @@ impl ExecutionRepository for SqliteExecutionRepository {
             &finish,
             ExecutionState::Recovering,
             OrchestrationState::Recovering,
+            None,
         )
         .await?;
         record_attempt_finished(
@@ -1269,6 +1332,7 @@ async fn apply_attempt_finish(
     request: &ExecutionAttemptFinishRequest<'_>,
     expected_execution_state: ExecutionState,
     expected_task_state: OrchestrationState,
+    success_task_state: Option<OrchestrationState>,
 ) -> Result<(), StorageError> {
     if request.final_state == ExecutionState::Succeeded {
         consume_question_session_for_succeeded_execution(
@@ -1301,6 +1365,7 @@ async fn apply_attempt_finish(
         request,
         expected_execution_state,
         expected_task_state,
+        success_task_state,
     )
     .await?;
     settle_execution_reservation(
@@ -1334,8 +1399,18 @@ async fn update_finished_states(
     request: &ExecutionAttemptFinishRequest<'_>,
     expected_execution_state: ExecutionState,
     expected_task_state: OrchestrationState,
+    success_task_state: Option<OrchestrationState>,
 ) -> Result<(), StorageError> {
-    let task_state = orchestration_for_execution(request.final_state)?;
+    let task_state = if request.final_state == ExecutionState::Succeeded {
+        success_task_state.unwrap_or(orchestration_for_execution(request.final_state)?)
+    } else {
+        if success_task_state.is_some() {
+            return Err(StorageError::InvalidData(
+                "task-state override is only valid for a successful Execution".to_owned(),
+            ));
+        }
+        orchestration_for_execution(request.final_state)?
+    };
     let finished_at = request.final_state.is_terminal().then_some(request.at);
     let execution_update = sqlx::query(
         "UPDATE executions SET state = ?, scheduled_at = COALESCE(?, scheduled_at), \
@@ -1604,6 +1679,62 @@ fn validate_finish_request(
         ));
     }
     Ok(())
+}
+
+fn validate_question_step_finish_request(
+    request: &ExecutionQuestionStepFinishRequest<'_>,
+) -> Result<(), StorageError> {
+    validate_worker_token(request.worker_id, request.correlation_id)?;
+    validate_progress(request.progress)?;
+    if request.transition.execution_id != request.execution_id
+        || request.transition.transitioned_at > request.at
+        || request.progress.execution_id != request.execution_id
+        || request.progress.updated_at != request.at
+        || request.progress.stage != ExecutionStage::Completed
+        || request.progress.percent.is_some()
+    {
+        return Err(StorageError::InvalidData(
+            "next-Question execution finish request is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn question_transition_is_ready(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request: &ExecutionQuestionStepFinishRequest<'_>,
+) -> Result<bool, StorageError> {
+    let ready: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM question_session_transitions AS transition \
+         INNER JOIN question_session_operations AS operation \
+           ON operation.session_id = transition.previous_session_id \
+          AND operation.sequence = transition.operation_sequence \
+         INNER JOIN question_sessions AS previous \
+           ON previous.id = transition.previous_session_id \
+         INNER JOIN question_sessions AS next ON next.id = transition.next_session_id \
+         WHERE transition.previous_session_id = ? AND transition.operation_sequence = ? \
+           AND transition.execution_id = ? AND transition.next_session_id = ? \
+           AND transition.next_question_snapshot_id = ? AND transition.transitioned_at = ? \
+           AND operation.execution_attempt_id = ? AND operation.state = 'accepted' \
+           AND operation.result_digest IS NOT NULL \
+           AND previous.state = 'consumed' AND previous.execution_id = transition.execution_id \
+           AND next.state = 'active' AND next.execution_id IS NULL \
+           AND next.question_snapshot_id = transition.next_question_snapshot_id)",
+    )
+    .bind(request.transition.previous_session_id.to_string())
+    .bind(
+        i64::try_from(request.transition.operation_sequence).map_err(|_| {
+            StorageError::InvalidData("Question transition sequence is invalid".to_owned())
+        })?,
+    )
+    .bind(request.execution_id.to_string())
+    .bind(request.transition.next_session_id.to_string())
+    .bind(request.transition.next_question_snapshot_id.to_string())
+    .bind(encode_timestamp(request.transition.transitioned_at))
+    .bind(request.attempt_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(ready == 1)
 }
 
 fn validate_recovery_finish_request(
