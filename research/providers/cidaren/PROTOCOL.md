@@ -124,6 +124,18 @@ SubmitAnswerAndSave, SkipAnswer and SubmitChoseWord remain native HTTP
 mutations; no donor evidence justifies inventing a BrowserBridge replacement
 for those routes.
 
+Before a helper-side handler may inspect any browser state,
+`project_browser_helper_command` authenticates the bounded `SecretValue`
+against Core's command digest and strictly decodes the deny-unknown-fields JSON.
+It independently binds the BrowserBridge session ID, actual page origin,
+actual frame and `u64` dispatch sequence; validates the mode/revision pair and
+the exact class/study Task identity grammar; and returns no echoed command
+fields. Its closed output is only `CaptureSnapshotTokenOnly` or
+`CaptureSnapshotComposite`. TokenOnly permits only the lower-case `usertoken`
+request header. Composite permits that header or local/session
+`CDR_USER_TOKEN`, and requires local/session `CDR_LOGIN_INFO` alternatives.
+There is no selector, script or generic DOM action in the input or projection.
+
 The public helper lifecycle above is evidence for a shared local-helper
 dispatcher, not Provider-owned process or proxy management. Such a dispatcher
 must preserve and restore the exact previous proxy state, bind the one helper
@@ -134,10 +146,13 @@ bounded command/result validation and the exact token-only credential shape.
 Before issuing a command, `CidarenBrowserBridge::capture_snapshot_command`
 freshly calls the existing TaskDetail capability and requires the returned
 Task to advertise `BrowserBridge`, the exact visible Cidaren origin and a
-non-headless session. Browser policy revision 2 also freezes the audited
-`https://app.vocabgo.com/student/` start URL; its exact origin must remain the
-sole allowed origin. Command issue repeats the start URL/origin/headless check,
-then delegates bounded nonce/frame/Task/sequence validation to the typed command
+non-headless session. Browser policy revision 3 freezes the audited
+`https://app.vocabgo.com/student/` start URL, its sole allowed origin and the
+exact union of five read authorities: lower-case request header `usertoken`,
+local/session `CDR_USER_TOKEN` and local/session `CDR_LOGIN_INFO`. This policy
+revision is independent of the TokenOnly v1/Composite v2 command recipe
+versions. Command issue repeats the start URL/origin/headless check, then
+delegates bounded nonce/frame/Task/sequence validation to the typed command
 constructor. This keeps fresh rediscovery and identity rebinding in the
 Provider while leaving browser startup, access-token authentication, durable
 sequence consumption and credential commit to Core.

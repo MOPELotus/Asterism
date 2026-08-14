@@ -5,9 +5,9 @@ use asterism_domain::{
     BrowserBridgeSessionId, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
-    BrowserBridgeCapability, BrowserSessionSpec, CredentialReplacement, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
-    TaskDetailCapability,
+    BrowserBridgeCapability, BrowserBridgeReadSource, BrowserSessionSpec, CredentialReplacement,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
+    ProviderResult, TaskDetailCapability,
 };
 use asterism_secrets::SecretValue;
 use async_trait::async_trait;
@@ -17,14 +17,14 @@ use crate::{
     browser_protocol::{
         CidarenBrowserCommandEnvelope, CidarenBrowserEventEnvelope, CidarenBrowserResultDocument,
         CidarenCaptureMode, CidarenCaptureSnapshot, EncodedCidarenBrowserCommandArtifact,
-        parse_browser_event,
+        parse_browser_event, valid_remote_task_id,
     },
     metadata::development_metadata,
 };
 
 const CIDAREN_ORIGIN: &str = "https://app.vocabgo.com";
 const CIDAREN_STUDENT_START_URL: &str = "https://app.vocabgo.com/student/";
-const MAX_REMOTE_COMPONENT_BYTES: usize = 256;
+const CIDAREN_BROWSER_POLICY_VERSION: u32 = 3;
 
 /// Account-isolated visible browser boundary for the Cidaren H5 client.
 ///
@@ -153,8 +153,10 @@ impl CidarenBrowserBridge {
         mode: CidarenCaptureMode,
     ) -> ProviderResult<CidarenBrowserCommandEnvelope> {
         let spec = self.browser_session_spec(context, remote_task_id).await?;
-        if spec.start_url != CIDAREN_STUDENT_START_URL
+        if spec.version != CIDAREN_BROWSER_POLICY_VERSION
+            || spec.start_url != CIDAREN_STUDENT_START_URL
             || spec.allowed_origins != [CIDAREN_ORIGIN]
+            || spec.read_sources != cidaren_browser_read_sources()
             || spec.headless
         {
             return Err(ProviderError::new(
@@ -507,15 +509,41 @@ impl BrowserBridgeCapability for CidarenBrowserBridge {
             ));
         }
         Ok(BrowserSessionSpec {
-            version: 2,
+            version: CIDAREN_BROWSER_POLICY_VERSION,
             isolation_key: isolation_key(context, remote_task_id),
             start_url: CIDAREN_STUDENT_START_URL.to_owned(),
             allowed_origins: vec![CIDAREN_ORIGIN.to_owned()],
+            read_sources: cidaren_browser_read_sources(),
             // WeChat authorization and browser-storage capture both require a
             // user-visible browsing context in the audited donor flow.
             headless: false,
         })
     }
+}
+
+fn cidaren_browser_read_sources() -> Vec<BrowserBridgeReadSource> {
+    vec![
+        BrowserBridgeReadSource::RequestHeader {
+            origin: CIDAREN_ORIGIN.to_owned(),
+            name: "usertoken".to_owned(),
+        },
+        BrowserBridgeReadSource::LocalStorage {
+            origin: CIDAREN_ORIGIN.to_owned(),
+            key: "CDR_USER_TOKEN".to_owned(),
+        },
+        BrowserBridgeReadSource::SessionStorage {
+            origin: CIDAREN_ORIGIN.to_owned(),
+            key: "CDR_USER_TOKEN".to_owned(),
+        },
+        BrowserBridgeReadSource::LocalStorage {
+            origin: CIDAREN_ORIGIN.to_owned(),
+            key: "CDR_LOGIN_INFO".to_owned(),
+        },
+        BrowserBridgeReadSource::SessionStorage {
+            origin: CIDAREN_ORIGIN.to_owned(),
+            key: "CDR_LOGIN_INFO".to_owned(),
+        },
+    ]
 }
 
 fn isolation_key(context: &ProviderContext, remote_task_id: &str) -> String {
@@ -544,20 +572,7 @@ fn validate_context(context: &ProviderContext, metadata: &ProviderMetadata) -> P
 }
 
 fn validate_task_identity(remote_task_id: &str) -> ProviderResult<()> {
-    let class = remote_task_id
-        .strip_prefix("class-task:")
-        .is_some_and(|release_id| {
-            !release_id.is_empty()
-                && release_id.len() <= 32
-                && release_id.bytes().all(|byte| byte.is_ascii_digit())
-                && release_id != "0"
-                && !release_id.starts_with('0')
-        });
-    let study = remote_task_id
-        .strip_prefix("study-task:")
-        .and_then(|identity| identity.split_once(':'))
-        .is_some_and(|(course_id, list_id)| valid_component(course_id) && valid_component(list_id));
-    if class || study {
+    if valid_remote_task_id(remote_task_id) {
         Ok(())
     } else {
         Err(ProviderError::new(
@@ -565,14 +580,6 @@ fn validate_task_identity(remote_task_id: &str) -> ProviderResult<()> {
             "Cidaren BrowserBridge Task identity is invalid",
         ))
     }
-}
-
-fn valid_component(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_REMOTE_COMPONENT_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 #[cfg(test)]
@@ -656,13 +663,39 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(class.isolation_key, study.isolation_key);
-        assert_eq!(class.version, 2);
+        assert_eq!(class.version, 3);
         assert_eq!(class.version, study.version);
         assert_eq!(class.start_url, CIDAREN_STUDENT_START_URL);
         assert_eq!(class.start_url, study.start_url);
         assert_eq!(class.allowed_origins, study.allowed_origins);
         assert_eq!(class.headless, study.headless);
         assert_eq!(class.allowed_origins, [CIDAREN_ORIGIN]);
+        assert_eq!(
+            class.read_sources,
+            [
+                BrowserBridgeReadSource::RequestHeader {
+                    origin: CIDAREN_ORIGIN.to_owned(),
+                    name: "usertoken".to_owned(),
+                },
+                BrowserBridgeReadSource::LocalStorage {
+                    origin: CIDAREN_ORIGIN.to_owned(),
+                    key: "CDR_USER_TOKEN".to_owned(),
+                },
+                BrowserBridgeReadSource::SessionStorage {
+                    origin: CIDAREN_ORIGIN.to_owned(),
+                    key: "CDR_USER_TOKEN".to_owned(),
+                },
+                BrowserBridgeReadSource::LocalStorage {
+                    origin: CIDAREN_ORIGIN.to_owned(),
+                    key: "CDR_LOGIN_INFO".to_owned(),
+                },
+                BrowserBridgeReadSource::SessionStorage {
+                    origin: CIDAREN_ORIGIN.to_owned(),
+                    key: "CDR_LOGIN_INFO".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(class.read_sources, study.read_sources);
         assert!(!class.headless);
         class.validate().unwrap();
         study.validate().unwrap();

@@ -156,6 +156,65 @@ impl CidarenCaptureMode {
     }
 }
 
+/// One exact audited browser source a Cidaren helper may inspect.
+///
+/// Unit variants deliberately carry no selector, script, origin or arbitrary
+/// key. The dispatch origin is validated independently, while each variant
+/// identifies one frozen donor-observed header/storage fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CidarenBrowserCaptureSource {
+    RequestHeaderUserToken,
+    LocalStorageUserToken,
+    SessionStorageUserToken,
+    LocalStorageLoginInfo,
+    SessionStorageLoginInfo,
+}
+
+/// Closed helper action set projected from one authenticated command artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CidarenBrowserHelperAction {
+    CaptureSnapshotTokenOnly,
+    CaptureSnapshotComposite,
+}
+
+/// Secret-free helper projection for one exact Cidaren Capture action.
+///
+/// This contains no command echo, selector or executable script. Source lists
+/// are static and selected only by the artifact's validated recipe revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CidarenBrowserHelperProjection {
+    action: CidarenBrowserHelperAction,
+}
+
+impl CidarenBrowserHelperProjection {
+    pub const fn action(self) -> CidarenBrowserHelperAction {
+        self.action
+    }
+
+    pub const fn user_token_sources(self) -> &'static [CidarenBrowserCaptureSource] {
+        match self.action {
+            CidarenBrowserHelperAction::CaptureSnapshotTokenOnly => {
+                &[CidarenBrowserCaptureSource::RequestHeaderUserToken]
+            }
+            CidarenBrowserHelperAction::CaptureSnapshotComposite => &[
+                CidarenBrowserCaptureSource::RequestHeaderUserToken,
+                CidarenBrowserCaptureSource::LocalStorageUserToken,
+                CidarenBrowserCaptureSource::SessionStorageUserToken,
+            ],
+        }
+    }
+
+    pub const fn login_info_sources(self) -> &'static [CidarenBrowserCaptureSource] {
+        match self.action {
+            CidarenBrowserHelperAction::CaptureSnapshotTokenOnly => &[],
+            CidarenBrowserHelperAction::CaptureSnapshotComposite => &[
+                CidarenBrowserCaptureSource::LocalStorageLoginInfo,
+                CidarenBrowserCaptureSource::SessionStorageLoginInfo,
+            ],
+        }
+    }
+}
+
 /// Source of a captured `UserToken`. The source is descriptive only; the
 /// Core Capture recipe remains the authority for which source is allowed.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -249,23 +308,10 @@ impl CidarenBrowserCommandEnvelope {
         expected_sequence: u64,
         expected_mode: CidarenCaptureMode,
     ) -> ProviderResult<Self> {
-        let bytes = value.expose_secret();
-        if bytes.is_empty() || bytes.len() > MAX_BROWSER_COMMAND_BYTES {
-            return Err(invalid_response(
-                "Cidaren Capture command artifact is empty or oversized",
-            ));
-        }
-        if Sha256::digest(bytes).as_slice() != expected_digest {
-            return Err(protocol_drift(
-                "Cidaren Capture command artifact digest changed",
-            ));
-        }
+        let command = Self::decode_artifact(value, expected_digest)?;
         let expected_sequence = u32::try_from(expected_sequence).map_err(|_| {
             protocol_drift("Cidaren Capture command artifact sequence is unrepresentable")
         })?;
-        let command: Self = serde_json::from_slice(bytes)
-            .map_err(|_| protocol_drift("Cidaren Capture command artifact schema changed"))?;
-        command.validate()?;
         if command.session_nonce != expected_session_id.to_string()
             || command.remote_task_id != expected_remote_task_id
             || command.sequence != expected_sequence
@@ -279,6 +325,24 @@ impl CidarenBrowserCommandEnvelope {
                 "Cidaren Capture command artifact binding is stale or foreign",
             ));
         }
+        Ok(command)
+    }
+
+    fn decode_artifact(value: &SecretValue, expected_digest: [u8; 32]) -> ProviderResult<Self> {
+        let bytes = value.expose_secret();
+        if bytes.is_empty() || bytes.len() > MAX_BROWSER_COMMAND_BYTES {
+            return Err(invalid_response(
+                "Cidaren Capture command artifact is empty or oversized",
+            ));
+        }
+        if Sha256::digest(bytes).as_slice() != expected_digest {
+            return Err(protocol_drift(
+                "Cidaren Capture command artifact digest changed",
+            ));
+        }
+        let command: Self = serde_json::from_slice(bytes)
+            .map_err(|_| protocol_drift("Cidaren Capture command artifact schema changed"))?;
+        command.validate()?;
         Ok(command)
     }
 
@@ -332,6 +396,50 @@ impl CidarenBrowserCommandEnvelope {
         }
         Ok(())
     }
+}
+
+/// Authenticates and projects one Core-dispatched opaque command for a helper.
+///
+/// The actual page origin and frame are trusted transport observations, not
+/// fields echoed by helper JavaScript. Successful output is a closed,
+/// secret-free action/source description; this function never touches the DOM.
+///
+/// # Errors
+///
+/// Returns a typed error for size, digest, strict-schema, recipe revision,
+/// session nonce, origin, frame, sequence, mode or Task-identity drift.
+pub fn project_browser_helper_command(
+    value: &SecretValue,
+    expected_digest: [u8; 32],
+    expected_session_id: BrowserBridgeSessionId,
+    actual_origin: &str,
+    actual_frame_id: &str,
+    expected_sequence: u64,
+) -> ProviderResult<CidarenBrowserHelperProjection> {
+    let command = CidarenBrowserCommandEnvelope::decode_artifact(value, expected_digest)?;
+    let expected_sequence = u32::try_from(expected_sequence)
+        .map_err(|_| protocol_drift("Cidaren helper command sequence is unrepresentable"))?;
+    if command.session_nonce != expected_session_id.to_string()
+        || actual_origin != CIDAREN_ORIGIN
+        || command.origin != actual_origin
+        || !valid_frame_id(actual_frame_id)
+        || command.frame_id != actual_frame_id
+        || command.sequence != expected_sequence
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "Cidaren helper dispatch binding is stale or foreign",
+        ));
+    }
+    let action = match command.command {
+        CidarenBrowserCommand::CaptureSnapshot {
+            mode: CidarenCaptureMode::TokenOnly,
+        } => CidarenBrowserHelperAction::CaptureSnapshotTokenOnly,
+        CidarenBrowserCommand::CaptureSnapshot {
+            mode: CidarenCaptureMode::Composite,
+        } => CidarenBrowserHelperAction::CaptureSnapshotComposite,
+    };
+    Ok(CidarenBrowserHelperProjection { action })
 }
 
 impl fmt::Debug for CidarenBrowserCommandEnvelope {
@@ -734,7 +842,7 @@ fn valid_frame_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
-fn valid_remote_task_id(value: &str) -> bool {
+pub(crate) fn valid_remote_task_id(value: &str) -> bool {
     if value.len() > MAX_REMOTE_TASK_ID_BYTES || value.trim() != value {
         return false;
     }
@@ -898,6 +1006,200 @@ mod tests {
             .kind,
             ProviderErrorKind::RemoteChanged
         );
+    }
+
+    #[test]
+    fn helper_projection_exposes_only_audited_capture_actions_and_sources() {
+        let session_id = BrowserBridgeSessionId::new();
+        for (mode, action, user_token_sources, login_info_sources) in [
+            (
+                CidarenCaptureMode::TokenOnly,
+                CidarenBrowserHelperAction::CaptureSnapshotTokenOnly,
+                &[CidarenBrowserCaptureSource::RequestHeaderUserToken][..],
+                &[][..],
+            ),
+            (
+                CidarenCaptureMode::Composite,
+                CidarenBrowserHelperAction::CaptureSnapshotComposite,
+                &[
+                    CidarenBrowserCaptureSource::RequestHeaderUserToken,
+                    CidarenBrowserCaptureSource::LocalStorageUserToken,
+                    CidarenBrowserCaptureSource::SessionStorageUserToken,
+                ][..],
+                &[
+                    CidarenBrowserCaptureSource::LocalStorageLoginInfo,
+                    CidarenBrowserCaptureSource::SessionStorageLoginInfo,
+                ][..],
+            ),
+        ] {
+            let command = CidarenBrowserCommandEnvelope::capture_snapshot(
+                session_id.to_string(),
+                "frame-helper".to_owned(),
+                "study-task:course-a:list-a".to_owned(),
+                11,
+                mode,
+            )
+            .unwrap();
+            let artifact = command.encode_artifact().unwrap();
+            let digest = artifact.digest();
+            let projection = project_browser_helper_command(
+                &artifact.into_secret_value(),
+                digest,
+                session_id,
+                CIDAREN_ORIGIN,
+                "frame-helper",
+                11,
+            )
+            .unwrap();
+            assert_eq!(projection.action(), action);
+            assert_eq!(projection.user_token_sources(), user_token_sources);
+            assert_eq!(projection.login_info_sources(), login_info_sources);
+            let debug = format!("{projection:?}");
+            assert!(!debug.contains(&session_id.to_string()));
+            assert!(!debug.contains("study-task") && !debug.contains("script"));
+        }
+    }
+
+    #[test]
+    fn helper_projection_rejects_dispatch_binding_drift() {
+        let session_id = BrowserBridgeSessionId::new();
+        let command = CidarenBrowserCommandEnvelope::capture_snapshot(
+            session_id.to_string(),
+            "frame-helper".to_owned(),
+            "class-task:2002".to_owned(),
+            7,
+            CidarenCaptureMode::Composite,
+        )
+        .unwrap();
+        let artifact = command.encode_artifact().unwrap();
+        let digest = artifact.digest();
+        let value = artifact.into_secret_value();
+        assert_eq!(
+            project_browser_helper_command(
+                &value,
+                [9; 32],
+                session_id,
+                CIDAREN_ORIGIN,
+                "frame-helper",
+                7,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+        for (dispatch_session, origin, frame, sequence) in [
+            (
+                BrowserBridgeSessionId::new(),
+                CIDAREN_ORIGIN,
+                "frame-helper",
+                7,
+            ),
+            (session_id, "https://evil.example", "frame-helper", 7),
+            (session_id, CIDAREN_ORIGIN, "frame-foreign", 7),
+            (session_id, CIDAREN_ORIGIN, "frame-helper", 8),
+        ] {
+            assert_eq!(
+                project_browser_helper_command(
+                    &value,
+                    digest,
+                    dispatch_session,
+                    origin,
+                    frame,
+                    sequence,
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::RemoteChanged
+            );
+        }
+        assert_eq!(
+            project_browser_helper_command(
+                &value,
+                digest,
+                session_id,
+                CIDAREN_ORIGIN,
+                "frame-helper",
+                u64::from(u32::MAX) + 1,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::ProtocolDrift
+        );
+    }
+
+    #[test]
+    fn helper_projection_rejects_schema_task_and_automation_drift() {
+        let session_id = BrowserBridgeSessionId::new();
+        let base = CidarenBrowserCommandEnvelope::capture_snapshot(
+            session_id.to_string(),
+            "frame-helper".to_owned(),
+            "class-task:2002".to_owned(),
+            1,
+            CidarenCaptureMode::TokenOnly,
+        )
+        .unwrap();
+        let base: serde_json::Value = serde_json::to_value(base).unwrap();
+        let mut unknown_field = base.clone();
+        unknown_field
+            .as_object_mut()
+            .unwrap()
+            .insert("selector".to_owned(), json!("#arbitrary"));
+        let mut arbitrary_automation = base.clone();
+        arbitrary_automation["command"] = json!({
+            "kind": "run_script",
+            "selector": "#arbitrary",
+            "script": "return document.cookie"
+        });
+        let mut unknown_mode = base.clone();
+        unknown_mode["command"]["mode"] = json!("future");
+        let mut wrong_revision = base.clone();
+        wrong_revision["version"] = json!(99);
+        let mut invalid_task = base;
+        invalid_task["remote_task_id"] = json!("class-task:02");
+
+        for (document, expected_kind) in [
+            (unknown_field, ProviderErrorKind::ProtocolDrift),
+            (arbitrary_automation, ProviderErrorKind::ProtocolDrift),
+            (unknown_mode, ProviderErrorKind::ProtocolDrift),
+            (wrong_revision, ProviderErrorKind::ProtocolDrift),
+            (invalid_task, ProviderErrorKind::InvalidResponse),
+        ] {
+            let artifact = SecretValue::new(serde_json::to_vec(&document).unwrap());
+            let digest: [u8; 32] = Sha256::digest(artifact.expose_secret()).into();
+            assert_eq!(
+                project_browser_helper_command(
+                    &artifact,
+                    digest,
+                    session_id,
+                    CIDAREN_ORIGIN,
+                    "frame-helper",
+                    1,
+                )
+                .unwrap_err()
+                .kind,
+                expected_kind
+            );
+        }
+
+        for artifact in [
+            SecretValue::new(Vec::new()),
+            SecretValue::new(vec![b'x'; MAX_BROWSER_COMMAND_BYTES + 1]),
+        ] {
+            let digest: [u8; 32] = Sha256::digest(artifact.expose_secret()).into();
+            assert_eq!(
+                project_browser_helper_command(
+                    &artifact,
+                    digest,
+                    session_id,
+                    CIDAREN_ORIGIN,
+                    "frame-helper",
+                    1,
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::InvalidResponse
+            );
+        }
     }
 
     #[test]
