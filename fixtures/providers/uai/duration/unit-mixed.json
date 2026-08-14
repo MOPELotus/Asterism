@@ -32,7 +32,9 @@
                     "name": "Read the passage",
                     "path": "unit-1/section-1/micro-1/group-1",
                     "required": true,
-                    "role": "link"
+                    "role": "link",
+                    "scoreTaskFlag": true,
+                    "taskQuesTotalScore": 100
                   },
                   {
                     "finishProgress": 0,
@@ -41,7 +43,8 @@
                     "name": "Vocabulary",
                     "path": "unit-1/section-1/micro-1/group-2",
                     "required": true,
-                    "role": "group"
+                    "role": "group",
+                    "scoreTaskFlag": false
                   }
                 ]
               }

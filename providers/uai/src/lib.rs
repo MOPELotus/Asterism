@@ -89,7 +89,8 @@ pub use discussion::{
     parse_discussion_reply_receipt, parse_discussion_topic, prepare_discussion_completion,
 };
 pub use duration::{
-    UaiDurationDocument, UaiDurationTransport, UaiTaskDuration, parse_task_duration,
+    UaiDurationDocument, UaiDurationTransport, UaiTaskDuration, UaiTaskStudyRecord,
+    parse_task_duration, parse_task_study_record,
 };
 pub use inventory_capabilities::{
     UaiCourseInventory, UaiCourseInventoryTransport, UaiInventoryDocument, UaiTaskInventory,

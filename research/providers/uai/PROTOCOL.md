@@ -204,17 +204,23 @@ window.
 The independent study-record responses contain both `finishProgress` and
 `duration`. The frozen MIT donor explicitly documents Course, Unit and nested
 Task `duration` as learning seconds and passes the numeric CourseResource ID as
-query parameter `id`; it is not a strategy ID. Asterism therefore exposes an
-independent DurationRead but does not infer reporting semantics.
+query parameter `id`; it is not a strategy ID. Exact Task nodes additionally
+carry optional `required`, `scoreTaskFlag` and `taskQuesTotalScore`. Asterism
+therefore retains one Provider-private Task study record and exposes only its
+seconds through independent DurationRead; completion, policy and scoring facts
+are not forced into that shared semantic.
 
 Each duration operation resolves the account-bound session, obtains only the
 bounded `appUserId` and `ssoId` facts from a fresh user-info response, then
 reads `unitTaskSituation` for the exact CourseResource and Unit. The parser
 requires exactly one matching Unit, unique node identities and exactly one
 matching Group identity with audited `link` or `group` role and an explicit
-unsigned duration. Unknown roles, duplicate IDs, missing/negative/overflow
-duration and every identity mismatch fail closed. An Authentication failure
-restarts the whole user-info + duration pair once after atomic renewal.
+unsigned duration. The exact Group record separately preserves a finite
+`finishProgress` in `0..=100`, optional boolean required/score-task flags and a
+bounded unsigned optional Question total score. Unknown roles, duplicate IDs,
+missing/negative/overflow duration, malformed optional facts and every identity
+mismatch fail closed. An Authentication failure restarts the whole user-info +
+study-record pair once after atomic renewal.
 
 `totalAndUnitSituation` is also a first-class donor read rather than merely an
 internal skip optimization. The Provider-private native transport first reads

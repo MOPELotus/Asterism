@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
+use asterism_domain::Timestamp;
 use asterism_provider_api::{
     DurationReadCapability, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
     ProviderMetadata, ProviderResult, RemoteDuration,
@@ -17,6 +18,7 @@ use crate::{
 const MAX_DURATION_DOCUMENT_BYTES: usize = 1_024 * 1_024;
 const MAX_DURATION_NODES: usize = 8_192;
 const MAX_DURATION_DEPTH: usize = 32;
+const MAX_TASK_TOTAL_SCORE: u64 = 1_000_000;
 
 /// One bounded per-Unit study-record response, redacted and zeroized on drop.
 pub struct UaiDurationDocument(String);
@@ -66,6 +68,55 @@ pub trait UaiDurationTransport: Send + Sync {
     ) -> ProviderResult<UaiDurationDocument>;
 }
 
+/// Exact Task-level study-record facts from the independent MIT-donor route.
+/// Duration remains the only field projected into the shared `DurationRead`
+/// capability; the other facts keep their Provider-specific semantics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UaiTaskStudyRecord {
+    unit_id: String,
+    group_id: String,
+    finish_progress_percent: Option<f64>,
+    duration_seconds: u64,
+    required: Option<bool>,
+    score_task: Option<bool>,
+    question_total_score: Option<u64>,
+    observed_at: Timestamp,
+}
+
+impl UaiTaskStudyRecord {
+    pub fn unit_id(&self) -> &str {
+        &self.unit_id
+    }
+
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    pub const fn finish_progress_percent(&self) -> Option<f64> {
+        self.finish_progress_percent
+    }
+
+    pub const fn duration_seconds(&self) -> u64 {
+        self.duration_seconds
+    }
+
+    pub const fn required(&self) -> Option<bool> {
+        self.required
+    }
+
+    pub const fn score_task(&self) -> Option<bool> {
+        self.score_task
+    }
+
+    pub const fn question_total_score(&self) -> Option<u64> {
+        self.question_total_score
+    }
+
+    pub const fn observed_at(&self) -> Timestamp {
+        self.observed_at
+    }
+}
+
 /// Fresh read-only duration for one normalized UAI Group Task.
 pub struct UaiTaskDuration {
     metadata: ProviderMetadata,
@@ -83,6 +134,26 @@ impl UaiTaskDuration {
             metadata: development_metadata()?,
             transport,
         })
+    }
+
+    /// Reads the complete Provider-specific Task study record from one fresh,
+    /// identity-bound per-Unit response.
+    ///
+    /// # Errors
+    ///
+    /// Returns typed authentication, network, identity or protocol errors.
+    pub async fn read_study_record(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+    ) -> ProviderResult<UaiTaskStudyRecord> {
+        validate_context(context, &self.metadata)?;
+        let identity = parse_group_identity(remote_task_id)?;
+        let document = self
+            .transport
+            .fetch_duration(context, &identity.course_resource, &identity.unit)
+            .await?;
+        parse_task_study_record(document.as_str(), &identity.unit, &identity.group)
     }
 }
 
@@ -109,13 +180,11 @@ impl DurationReadCapability for UaiTaskDuration {
         context: &ProviderContext,
         remote_task_id: &str,
     ) -> ProviderResult<RemoteDuration> {
-        validate_context(context, &self.metadata)?;
-        let identity = parse_group_identity(remote_task_id)?;
-        let document = self
-            .transport
-            .fetch_duration(context, &identity.course_resource, &identity.unit)
-            .await?;
-        parse_task_duration(document.as_str(), &identity.unit, &identity.group)
+        let record = self.read_study_record(context, remote_task_id).await?;
+        Ok(RemoteDuration {
+            duration_seconds: record.duration_seconds(),
+            updated_at: record.observed_at(),
+        })
     }
 }
 
@@ -133,6 +202,25 @@ pub fn parse_task_duration(
     expected_unit_id: &str,
     expected_group_id: &str,
 ) -> ProviderResult<RemoteDuration> {
+    let record = parse_task_study_record(document, expected_unit_id, expected_group_id)?;
+    Ok(RemoteDuration {
+        duration_seconds: record.duration_seconds(),
+        updated_at: record.observed_at(),
+    })
+}
+
+/// Parses the complete exact Task study-record facts without collapsing them
+/// into Duration or progress semantics.
+///
+/// # Errors
+///
+/// Returns an invalid-response or protocol-drift error for malformed,
+/// unsupported, duplicate, unbound or out-of-range state.
+pub fn parse_task_study_record(
+    document: &str,
+    expected_unit_id: &str,
+    expected_group_id: &str,
+) -> ProviderResult<UaiTaskStudyRecord> {
     if document.is_empty() || document.len() > MAX_DURATION_DOCUMENT_BYTES {
         return Err(invalid_duration_response(
             "UAI duration response is empty or exceeds the size limit",
@@ -177,10 +265,16 @@ pub fn parse_task_duration(
 
     let mut state = DurationTraversal::new(&expected_group_id);
     visit_duration_node(unit, 1, &mut state)?;
-    match (state.matches, state.duration_seconds) {
-        (1, Some(duration_seconds)) => Ok(RemoteDuration {
-            duration_seconds,
-            updated_at: Utc::now(),
+    match (state.matches, state.facts) {
+        (1, Some(facts)) => Ok(UaiTaskStudyRecord {
+            unit_id: expected_unit_id.clone(),
+            group_id: expected_group_id.clone(),
+            finish_progress_percent: facts.finish_progress_percent,
+            duration_seconds: facts.duration_seconds,
+            required: facts.required,
+            score_task: facts.score_task,
+            question_total_score: facts.question_total_score,
+            observed_at: Utc::now(),
         }),
         (0, _) => Err(protocol_drift("UAI duration response has no matching Task")),
         _ => Err(protocol_drift(
@@ -194,7 +288,16 @@ struct DurationTraversal<'a> {
     node_count: usize,
     seen_node_ids: BTreeSet<String>,
     matches: usize,
-    duration_seconds: Option<u64>,
+    facts: Option<TaskStudyFacts>,
+}
+
+#[derive(Clone, Copy)]
+struct TaskStudyFacts {
+    finish_progress_percent: Option<f64>,
+    duration_seconds: u64,
+    required: Option<bool>,
+    score_task: Option<bool>,
+    question_total_score: Option<u64>,
 }
 
 impl<'a> DurationTraversal<'a> {
@@ -204,7 +307,7 @@ impl<'a> DurationTraversal<'a> {
             node_count: 0,
             seen_node_ids: BTreeSet::new(),
             matches: 0,
-            duration_seconds: None,
+            facts: None,
         }
     }
 }
@@ -244,14 +347,18 @@ fn visit_duration_node(
                     "UAI duration Task has an unsupported node role",
                 ));
             }
-            state.duration_seconds = Some(
-                object
-                    .get("duration")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| {
-                        protocol_drift("UAI duration Task has no unsigned duration in seconds")
-                    })?,
-            );
+            state.facts = Some(TaskStudyFacts {
+                finish_progress_percent: optional_percent(
+                    object.get("finishProgress"),
+                    "Task finish progress",
+                )?,
+                duration_seconds: object.get("duration").and_then(Value::as_u64).ok_or_else(
+                    || protocol_drift("UAI duration Task has no unsigned duration in seconds"),
+                )?,
+                required: optional_bool(object.get("required"), "Task required flag")?,
+                score_task: optional_bool(object.get("scoreTaskFlag"), "Task score flag")?,
+                question_total_score: optional_total_score(object.get("taskQuesTotalScore"))?,
+            });
         }
     }
 
@@ -267,6 +374,36 @@ fn visit_duration_node(
         }
     }
     Ok(())
+}
+
+fn optional_percent(value: Option<&Value>, label: &'static str) -> ProviderResult<Option<f64>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            .map(Some)
+            .ok_or_else(|| protocol_drift(format!("UAI duration {label} is invalid"))),
+    }
+}
+
+fn optional_bool(value: Option<&Value>, label: &'static str) -> ProviderResult<Option<bool>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        _ => Err(protocol_drift(format!("UAI duration {label} is invalid"))),
+    }
+}
+
+fn optional_total_score(value: Option<&Value>) -> ProviderResult<Option<u64>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .filter(|value| *value <= MAX_TASK_TOTAL_SCORE)
+            .map(Some)
+            .ok_or_else(|| protocol_drift("UAI duration Task total score is invalid")),
+    }
 }
 
 fn node_role(object: &Map<String, Value>) -> ProviderResult<String> {
@@ -379,6 +516,14 @@ mod tests {
 
     #[test]
     fn parser_reads_only_exact_bound_task_seconds() {
+        let record = parse_task_study_record(DURATION, "unit-1", "group-1").unwrap();
+        assert_eq!(record.unit_id(), "unit-1");
+        assert_eq!(record.group_id(), "group-1");
+        assert_eq!(record.finish_progress_percent(), Some(100.0));
+        assert_eq!(record.duration_seconds(), 445);
+        assert_eq!(record.required(), Some(true));
+        assert_eq!(record.score_task(), Some(true));
+        assert_eq!(record.question_total_score(), Some(100));
         assert_eq!(
             parse_task_duration(DURATION, "unit-1", "group-1")
                 .unwrap()
@@ -393,6 +538,10 @@ mod tests {
         );
         assert!(parse_task_duration(DURATION, "other-unit", "group-1").is_err());
         assert!(parse_task_duration(DURATION, "unit-1", "missing").is_err());
+        let unscored = parse_task_study_record(DURATION, "unit-1", "group-2").unwrap();
+        assert_eq!(unscored.finish_progress_percent(), Some(0.0));
+        assert_eq!(unscored.score_task(), Some(false));
+        assert_eq!(unscored.question_total_score(), None);
     }
 
     #[test]
@@ -413,6 +562,23 @@ mod tests {
             );
             assert!(parse_task_duration(&document, "unit-1", "group-1").is_err());
         }
+        for invalid in [
+            DURATION.replacen("\"finishProgress\": 100", "\"finishProgress\": 100.1", 1),
+            DURATION.replacen("\"required\": true", "\"required\": \"true\"", 4),
+            DURATION.replacen("\"scoreTaskFlag\": true", "\"scoreTaskFlag\": \"true\"", 1),
+            DURATION.replacen(
+                "\"taskQuesTotalScore\": 100",
+                "\"taskQuesTotalScore\": -1",
+                1,
+            ),
+            DURATION.replacen(
+                "\"taskQuesTotalScore\": 100",
+                "\"taskQuesTotalScore\": 1000001",
+                1,
+            ),
+        ] {
+            assert!(parse_task_study_record(&invalid, "unit-1", "group-1").is_err());
+        }
     }
 
     #[tokio::test]
@@ -423,6 +589,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(duration.duration_seconds, 445);
+        let record = capability
+            .read_study_record(&provider_context(), "group:2001:unit-1:group-1")
+            .await
+            .unwrap();
+        assert_eq!(record.finish_progress_percent(), Some(100.0));
+        assert_eq!(record.score_task(), Some(true));
         assert!(
             capability
                 .read_duration(&provider_context(), "link:2001:unit-1:group-1")

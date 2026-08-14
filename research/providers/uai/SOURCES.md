@@ -34,6 +34,12 @@ annotator-token contract across content, progress and submission routes;
 Asterism reimplements that bounded protocol without copying donor
 implementation code.
 
+The MIT `unitTaskSituation` model does not contain duration alone. On the exact
+nested Task it also parses `finishProgress`, `required`, `scoreTaskFlag` and
+optional `taskQuesTotalScore`. Asterism therefore retains those bounded facts
+in a Provider-private Task study record and treats DurationRead as one exact
+seconds projection, not as permission to discard the remaining donor semantics.
+
 The same MIT donor treats
 `studyRecord/totalAndUnitSituation?id={CourseResourceId}&appUserId={appUserId}`
 as a separate Course/Unit read. The response carries Course total and Unit
