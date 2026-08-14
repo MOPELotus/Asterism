@@ -9,16 +9,20 @@ use asterism_domain::{
 use asterism_provider_api::BrowserSessionSpec;
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
-use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
+use sqlx::{QueryBuilder, Row, Sqlite, Transaction, sqlite::SqliteRow};
 
 use crate::{
     BrowserBridgeExchangeRecord, BrowserBridgeRuntimeBindingRecord, BrowserBridgeSessionRepository,
-    Database, StorageError,
+    Database, PendingBrowserBridgeResult, StorageError,
 };
 
 const SESSION_SELECT: &str = "SELECT id, owner_user_id, provider_account_id, task_id, provider_id, \
     provider_version, spec_version, spec_digest, spec_json, state_json, revision, expires_at, \
     claimed_at, created_at, updated_at FROM browser_bridge_sessions";
+
+fn invalid_record(message: &str) -> StorageError {
+    StorageError::InvalidData(message.to_owned())
+}
 
 #[derive(Clone, Debug)]
 pub struct SqliteBrowserBridgeSessionRepository {
@@ -94,6 +98,72 @@ impl BrowserBridgeSessionRepository for SqliteBrowserBridgeSessionRepository {
             .as_ref()
             .map(decode_session)
             .transpose()
+    }
+
+    async fn list_pending_browser_bridge_results(
+        &self,
+        now: Timestamp,
+        provider_id: &ProviderId,
+        result_types: &[&str],
+        limit: u32,
+    ) -> Result<Vec<PendingBrowserBridgeResult>, StorageError> {
+        if !(1..=100).contains(&limit)
+            || result_types.is_empty()
+            || result_types.len() > 16
+            || result_types.iter().any(|result_type| {
+                result_type.is_empty()
+                    || result_type.len() > 128
+                    || result_type.chars().any(char::is_control)
+            })
+        {
+            return Err(StorageError::InvalidData(
+                "BrowserBridge pending-result selection is invalid".to_owned(),
+            ));
+        }
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT session.owner_user_id, session.id AS session_id, session.provider_id, \
+                    result.result_type \
+             FROM browser_bridge_sessions AS session \
+             JOIN browser_bridge_exchanges AS exchange ON exchange.session_id = session.id \
+             JOIN browser_bridge_result_artifacts AS result \
+               ON result.session_id = exchange.session_id AND result.sequence = exchange.sequence \
+             WHERE session.state_json = ",
+        );
+        query
+            .push_bind(serde_json::to_string(&BrowserBridgeSessionState::Claimed)?)
+            .push(" AND session.expires_at > ")
+            .push_bind(encode_timestamp(now))
+            .push(" AND session.provider_id = ")
+            .push_bind(provider_id.as_str())
+            .push(" AND exchange.state = 'issued' AND result.result_type IN (");
+        {
+            let mut separated = query.separated(", ");
+            for result_type in result_types {
+                separated.push_bind(result_type);
+            }
+        }
+        query
+            .push(") ORDER BY result.received_at, session.id, exchange.sequence LIMIT ")
+            .push_bind(i64::from(limit));
+        query
+            .build()
+            .fetch_all(self.database.pool())
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(PendingBrowserBridgeResult {
+                    owner_user_id: UserId::from_str(&row.get::<String, _>("owner_user_id"))
+                        .map_err(|_| invalid_record("invalid pending BrowserBridge owner"))?,
+                    session_id: BrowserBridgeSessionId::from_str(
+                        &row.get::<String, _>("session_id"),
+                    )
+                    .map_err(|_| invalid_record("invalid pending BrowserBridge session"))?,
+                    provider_id: ProviderId::new(row.get::<String, _>("provider_id"))
+                        .map_err(|_| invalid_record("invalid pending BrowserBridge Provider"))?,
+                    result_type: row.get("result_type"),
+                })
+            })
+            .collect()
     }
 
     async fn claim_browser_bridge_session(

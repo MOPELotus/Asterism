@@ -1070,6 +1070,16 @@ pub trait BrowserBridgeSessionRepository: Send + Sync {
         session_id: BrowserBridgeSessionId,
     ) -> Result<Option<BrowserBridgeExchange>, StorageError>;
 
+    /// Lists bounded durable result inboxes whose claimed session and issued
+    /// exchange still await Provider/Core processing.
+    async fn list_pending_browser_bridge_results(
+        &self,
+        now: Timestamp,
+        provider_id: &ProviderId,
+        result_types: &[&str],
+        limit: u32,
+    ) -> Result<Vec<PendingBrowserBridgeResult>, StorageError>;
+
     async fn update_browser_bridge_session_for_owner(
         &self,
         session: &BrowserBridgeSession,
@@ -1084,6 +1094,14 @@ pub trait BrowserBridgeSessionRepository: Send + Sync {
         access_token_digest: &TokenDigest,
         correlation_id: &str,
     ) -> Result<BrowserBridgeExchangeRecord, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingBrowserBridgeResult {
+    pub owner_user_id: UserId,
+    pub session_id: BrowserBridgeSessionId,
+    pub provider_id: ProviderId,
+    pub result_type: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1230,7 +1248,9 @@ pub enum BrowserBridgeResultArtifactRecord {
 #[derive(Debug)]
 pub struct BrowserBridgeCredentialCommitRequest<'a> {
     pub exchange: &'a BrowserBridgeExchange,
-    pub access_token_digest: &'a TokenDigest,
+    pub owner_user_id: UserId,
+    pub provider_account_id: ProviderAccountId,
+    pub task_id: TaskId,
     pub validated_bundle: CredentialBundle,
     pub access: &'a SecretAccess,
 }

@@ -3755,3 +3755,30 @@ and no Cookie, user-session, selector, script or arbitrary field is accepted.
 Core-side recovery, fresh Provider validation and the atomic result/credential
 commit remain the next orchestration boundary; this helper checkpoint does not
 claim server-side acceptance.
+
+## Two-hundred-and-ninth Phase 0 slice
+
+Core now owns the durable server-side path from a raw BrowserBridge credential
+result to an authenticated account replacement. Providers expose a closed set
+of exact credential-terminal result types in addition to classifying each
+type. Storage uses the Provider ID and that set in the bounded inbox query, so
+unknown, intermediate and execution-terminal results cannot be parsed as
+credentials or starve the credential processor.
+
+For every selected inbox entry, Core recovers the frozen session policy,
+runtime binding, exact encrypted command and exact encrypted result under a
+Core service identity. It freshly rebinds owner, account, Task, Provider and
+implementation version, rejects runtime sidecars on credential-terminal
+commands, asks the Provider to validate the recovered artifacts, and runs the
+replacement bundle through the existing authentication validator. Only the
+Provider-completed exchange whose type, digests, sequence and timestamps match
+the durable result can cross the commit boundary.
+
+The final Storage transaction no longer needs the helper's plaintext access
+token after restart. It rebinds the claimed session and account itself, writes
+the encrypted credential replacement, completes the exact exchange and
+session, clears helper access, and appends audit evidence atomically. The HTTP
+result receipt remains a separate idempotent inbox operation, so an ambiguous
+response never causes credential validation or terminal mutation replay. The
+daemon runs this processor only when a keyring and an explicitly declaring
+Provider are configured; individual failures stay durable for a later tick.

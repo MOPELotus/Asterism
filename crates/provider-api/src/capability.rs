@@ -1,10 +1,12 @@
 use std::{collections::BTreeMap, fmt};
 
 use asterism_domain::{
-    AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, CourseId, ExecutionId, LogLevel,
-    ProviderAccountId, ProviderId, Question, QuestionKind, RemoteState, SecretId, SelectedAnswer,
-    SessionKind, SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
-    SubmissionVerificationSnapshot, TaskCapability, TaskId, Timestamp, WaitingUserState,
+    AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, BrowserBridgeExchange,
+    BrowserBridgeExchangeState, BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
+    CourseId, ExecutionId, LogLevel, ProviderAccountId, ProviderId, Question, QuestionKind,
+    RemoteState, SecretId, SelectedAnswer, SessionKind, SourceType, SubmissionDraft,
+    SubmissionPayloadPreview, SubmissionReceipt, SubmissionVerificationSnapshot, TaskCapability,
+    TaskId, Timestamp, WaitingUserState,
 };
 use asterism_secrets::{
     CredentialBundle, CredentialField, SecretPurpose, SecretString, SecretValue,
@@ -1987,6 +1989,252 @@ pub trait BrowserBridgeCapability: ProviderIdentity {
         context: &ProviderContext,
         remote_task_id: &str,
     ) -> ProviderResult<BrowserSessionSpec>;
+
+    /// Classifies one Provider-namespaced result type without parsing result
+    /// bytes. Unknown types remain outside terminal credential orchestration.
+    fn browser_bridge_result_disposition(
+        &self,
+        _result_type: &str,
+    ) -> Option<BrowserBridgeResultDisposition> {
+        None
+    }
+
+    /// Enumerates the exact Provider-namespaced result types that may replace
+    /// credentials. Core uses this closed set to select a bounded durable
+    /// inbox without allowing unknown or non-credential results to starve it.
+    fn browser_bridge_credential_result_types(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Validates one recovered terminal credential result. Providers whose
+    /// `BrowserBridge` workflow does not replace credentials remain fail-closed.
+    async fn complete_browser_bridge_credential_result(
+        &self,
+        _context: &ProviderContext,
+        _request: BrowserBridgeCredentialResultRequest<'_>,
+    ) -> ProviderResult<BrowserBridgeCredentialResult> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not accept BrowserBridge credential results",
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowserBridgeResultDisposition {
+    CredentialTerminal,
+    Intermediate,
+    ExecutionTerminal,
+}
+
+/// Complete Core-owned evidence supplied to Provider terminal-result
+/// validation after encrypted recovery.
+pub struct BrowserBridgeCredentialResultRequest<'a> {
+    pub remote_task_id: &'a str,
+    pub issued_exchange: &'a BrowserBridgeExchange,
+    pub command_artifact: &'a SecretValue,
+    pub result_metadata: &'a BrowserBridgeResultArtifactMetadata,
+    pub result_artifact: &'a SecretValue,
+    pub runtime_binding: &'a BrowserBridgeRuntimeBinding,
+}
+
+impl BrowserBridgeCredentialResultRequest<'_> {
+    /// Validates shared artifact, exchange and runtime bindings before Provider
+    /// protocol parsing.
+    ///
+    /// # Errors
+    ///
+    /// Rejects incomplete, oversized, digest-mismatched or cross-session
+    /// evidence.
+    pub fn validate(&self) -> ProviderResult<()> {
+        let command = self.command_artifact.expose_secret();
+        let result = self.result_artifact.expose_secret();
+        let valid_remote_task = !self.remote_task_id.is_empty()
+            && self.remote_task_id.len() <= 2_048
+            && self.remote_task_id.trim() == self.remote_task_id
+            && !self.remote_task_id.chars().any(char::is_control);
+        let command_digest: [u8; 32] = Sha256::digest(command).into();
+        let result_digest: [u8; 32] = Sha256::digest(result).into();
+        if !valid_remote_task
+            || self.issued_exchange.validate().is_err()
+            || self.issued_exchange.state != BrowserBridgeExchangeState::Issued
+            || self.runtime_binding.validate().is_err()
+            || self.runtime_binding.session_id != self.issued_exchange.session_id
+            || self.runtime_binding.bound_at > self.issued_exchange.issued_at
+            || self.result_metadata.validate().is_err()
+            || self.result_metadata.session_id != self.issued_exchange.session_id
+            || self.result_metadata.sequence != self.issued_exchange.sequence
+            || self.result_metadata.received_at < self.issued_exchange.issued_at
+            || command.is_empty()
+            || command.len() > 256 * 1_024
+            || command_digest != self.issued_exchange.command_digest
+            || result.is_empty()
+            || result.len() > 256 * 1_024
+            || result_digest != self.result_metadata.result_digest
+        {
+            Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::ProtocolDrift,
+                "BrowserBridge credential result evidence is incomplete or foreign",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl fmt::Debug for BrowserBridgeCredentialResultRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeCredentialResultRequest")
+            .field("remote_task_id", &"[REDACTED]")
+            .field("issued_exchange", self.issued_exchange)
+            .field("command_artifact", &"[REDACTED]")
+            .field("result_metadata", self.result_metadata)
+            .field("result_artifact", &"[REDACTED]")
+            .field("runtime_binding", self.runtime_binding)
+            .finish()
+    }
+}
+
+/// Provider-validated credential replacement paired with the exact completed
+/// exchange Core must commit atomically.
+pub struct BrowserBridgeCredentialResult {
+    replacement: CredentialReplacement,
+    completed_exchange: BrowserBridgeExchange,
+}
+
+impl BrowserBridgeCredentialResult {
+    /// # Errors
+    ///
+    /// Rejects a non-terminal exchange or malformed/duplicate Provider secret
+    /// fields.
+    pub fn try_new(
+        replacement: CredentialReplacement,
+        completed_exchange: BrowserBridgeExchange,
+    ) -> ProviderResult<Self> {
+        let mut purposes = Vec::with_capacity(replacement.fields.len());
+        let valid_fields = !replacement.fields.is_empty()
+            && replacement.fields.len() <= 16
+            && replacement.fields.iter().all(|field| {
+                purposes.push(field.purpose);
+                field.purpose.is_provider_credential()
+                    && !field.value.expose_secret().is_empty()
+                    && field.value.expose_secret().len() <= 1024 * 1024
+            });
+        purposes.sort_unstable_by_key(|purpose| capture_purpose_rank(*purpose));
+        if !valid_fields
+            || purposes.windows(2).any(|pair| pair[0] == pair[1])
+            || completed_exchange.validate().is_err()
+            || completed_exchange.state != BrowserBridgeExchangeState::Completed
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::ProtocolDrift,
+                "BrowserBridge credential result is invalid or incomplete",
+            ));
+        }
+        Ok(Self {
+            replacement,
+            completed_exchange,
+        })
+    }
+
+    pub fn into_parts(self) -> (CredentialReplacement, BrowserBridgeExchange) {
+        (self.replacement, self.completed_exchange)
+    }
+}
+
+impl fmt::Debug for BrowserBridgeCredentialResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeCredentialResult")
+            .field("session_kind", &self.replacement.session_kind)
+            .field("credential_count", &self.replacement.fields.len())
+            .field("completed_exchange", &self.completed_exchange)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod browser_bridge_credential_result_tests {
+    use asterism_domain::BrowserBridgeSessionId;
+    use chrono::{Duration, Utc};
+
+    use super::*;
+
+    #[test]
+    fn shared_evidence_and_terminal_credentials_are_exact_and_redacted() {
+        let now = Utc::now();
+        let session_id = BrowserBridgeSessionId::new();
+        let command = SecretValue::new(b"bounded-command".to_vec());
+        let result = SecretValue::new(b"captured-secret-result".to_vec());
+        let command_digest = Sha256::digest(command.expose_secret()).into();
+        let result_digest = Sha256::digest(result.expose_secret()).into();
+        let exchange = BrowserBridgeExchange::issue(
+            session_id,
+            1,
+            "cidaren.capture.snapshot".to_owned(),
+            command_digest,
+            now,
+        )
+        .unwrap();
+        let metadata = BrowserBridgeResultArtifactMetadata {
+            session_id,
+            sequence: 1,
+            result_type: "cidaren.capture.snapshot.result".to_owned(),
+            result_digest,
+            received_at: now + Duration::seconds(1),
+        };
+        let binding = BrowserBridgeRuntimeBinding {
+            session_id,
+            observed_origin: "https://app.vocabgo.com".to_owned(),
+            frame_id: "top-frame:1".to_owned(),
+            bound_at: now,
+        };
+        let request = BrowserBridgeCredentialResultRequest {
+            remote_task_id: "class-task:1",
+            issued_exchange: &exchange,
+            command_artifact: &command,
+            result_metadata: &metadata,
+            result_artifact: &result,
+            runtime_binding: &binding,
+        };
+        assert_eq!(request.validate(), Ok(()));
+        assert!(!format!("{request:?}").contains("captured-secret-result"));
+
+        let mut changed_metadata = metadata.clone();
+        changed_metadata.sequence = 2;
+        assert!(
+            BrowserBridgeCredentialResultRequest {
+                result_metadata: &changed_metadata,
+                ..request
+            }
+            .validate()
+            .is_err()
+        );
+
+        let mut completed = exchange;
+        completed
+            .complete(
+                metadata.result_type.clone(),
+                metadata.result_digest,
+                metadata.received_at,
+            )
+            .unwrap();
+        let accepted = BrowserBridgeCredentialResult::try_new(
+            CredentialReplacement {
+                session_kind: SessionKind::Composite,
+                fields: vec![CredentialField {
+                    purpose: SecretPurpose::ProviderAccessToken,
+                    value: SecretValue::new(b"provider-token".to_vec()),
+                }],
+            },
+            completed,
+        )
+        .unwrap();
+        let debug = format!("{accepted:?}");
+        assert!(debug.contains("credential_count: 1"));
+        assert!(!debug.contains("provider-token"));
+    }
 }
 
 #[async_trait]

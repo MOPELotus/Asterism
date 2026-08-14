@@ -6,6 +6,7 @@ mod assessment;
 mod auth_bootstrap;
 mod auth_bootstrap_credential;
 mod auth_session;
+mod browser_bridge_credential;
 mod browser_bridge_session;
 mod credential;
 mod execution_job;
@@ -51,6 +52,12 @@ pub use auth_session::{
     AuthSessionBegin, AuthSessionCredentialCommit, AuthSessionCredentialRequest,
     AuthSessionService, AuthSessionServiceError, AuthSessionStartRequest,
     ExternalOauthCallbackRequest,
+};
+pub use browser_bridge_credential::{
+    BrowserBridgeCredentialProcessor, BrowserBridgeCredentialProcessorError,
+    BrowserBridgeCredentialTickReport, BrowserBridgeCredentialValidationError,
+    BrowserBridgeCredentialValidationService, ValidateBrowserBridgeCredentialCommand,
+    ValidatedBrowserBridgeCredential,
 };
 pub use browser_bridge_session::{
     BrowserBridgeCommandDispatchRequest, BrowserBridgeCommandDispatchService,

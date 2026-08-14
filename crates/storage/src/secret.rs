@@ -33,7 +33,7 @@ use crate::{
     BrowserBridgeCredentialRepository, Database,
     auth_bootstrap::{authenticate_access_in_transaction, complete_auth_bootstrap_in_transaction},
     auth_session::update_auth_session_in_transaction,
-    browser_bridge::{authenticate_session_for_exchange, fetch_exchange, insert_exchange_audit},
+    browser_bridge::{fetch_exchange, find_claimed_session_for_exchange, insert_exchange_audit},
 };
 use crate::{QuestionReadContinuationRepositoryFactory, QuestionSessionArtifactRepositoryFactory};
 
@@ -1120,20 +1120,23 @@ impl BrowserBridgeCredentialRepository for SqliteSecretStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage_error)?;
-        let Some(session) = authenticate_session_for_exchange(
+        let Some(session) = find_claimed_session_for_exchange(
             &mut transaction,
             request.exchange.session_id,
-            request.access_token_digest,
             completed_at,
         )
         .await
         .map_err(|_| SecretStoreError::Storage)?
         else {
             transaction.rollback().await.map_err(storage_error)?;
-            return Ok(BrowserBridgeCredentialCommitOutcome::AccessRejected);
+            return Ok(BrowserBridgeCredentialCommitOutcome::BindingConflict);
         };
         authorize_browser_bridge_secret_access(&session, request.access)?;
-        if request.validated_bundle.provider_id != session.provider_id {
+        if request.owner_user_id != session.owner_user_id
+            || request.provider_account_id != session.provider_account_id
+            || request.task_id != session.task_id
+            || request.validated_bundle.provider_id != session.provider_id
+        {
             transaction.rollback().await.map_err(storage_error)?;
             return Ok(BrowserBridgeCredentialCommitOutcome::BindingConflict);
         }
@@ -1259,7 +1262,7 @@ impl BrowserBridgeCredentialRepository for SqliteSecretStore {
         let updated_session = sqlx::query(
             "UPDATE browser_bridge_sessions SET state_json = ?, pairing_token_hash = NULL, \
              access_token_hash = NULL, revision = ?, updated_at = ? \
-             WHERE id = ? AND access_token_hash = ? AND pairing_token_hash IS NULL \
+             WHERE id = ? AND access_token_hash IS NOT NULL AND pairing_token_hash IS NULL \
                AND state_json = ? AND revision = 2",
         )
         .bind(
@@ -1269,7 +1272,6 @@ impl BrowserBridgeCredentialRepository for SqliteSecretStore {
         .bind(i64::from(completed_session.revision))
         .bind(encode_timestamp(completed_session.updated_at))
         .bind(completed_session.id.to_string())
-        .bind(request.access_token_digest.as_bytes().as_slice())
         .bind(
             serde_json::to_string(&BrowserBridgeSessionState::Claimed)
                 .map_err(|_| SecretStoreError::Storage)?,

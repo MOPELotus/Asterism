@@ -8,10 +8,10 @@ use asterism_config::{
 };
 use asterism_domain::ProviderId;
 use asterism_engine::{
-    DispatchConfig, DispatchReport, ExecutionRunnerConfig, ExecutionSchedulerConfig,
-    ExecutionSchedulerTickReport, ExecutionSchedulerWorker, FormalAssessmentPolicy,
-    OutboxDispatcher, ProviderScanService, ScanSchedulerConfig, ScanSchedulerTickReport,
-    ScanSchedulerWorker,
+    BrowserBridgeCredentialProcessor, BrowserBridgeCredentialTickReport, DispatchConfig,
+    DispatchReport, ExecutionRunnerConfig, ExecutionSchedulerConfig, ExecutionSchedulerTickReport,
+    ExecutionSchedulerWorker, FormalAssessmentPolicy, OutboxDispatcher, ProviderScanService,
+    ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedulerWorker,
 };
 use asterism_events::EventBus;
 use asterism_networking::{NetworkProfile, ResolvedNetworkProfile};
@@ -23,10 +23,11 @@ use asterism_provider_welearn::build_development_provider_with_renewal as build_
 use asterism_scheduler::RetryPolicy;
 use asterism_secrets::{SecretKey, SecretString, SecretValue};
 use asterism_storage::{
-    Database, RecoveryReport, SecretKeyring, SqliteExecutionLeaseRepository,
-    SqliteExecutionRepository, SqliteOutboxRepository, SqliteProviderAccountRepository,
-    SqliteProviderCredentialResolver, SqliteProviderScanRepository, SqliteSchedulerRepository,
-    SqliteSecretStore, SqliteTaskQueryRepository,
+    Database, RecoveryReport, SecretKeyring, SqliteBrowserBridgeSessionRepository,
+    SqliteExecutionLeaseRepository, SqliteExecutionRepository, SqliteOutboxRepository,
+    SqliteProviderAccountRepository, SqliteProviderCredentialResolver,
+    SqliteProviderScanRepository, SqliteSchedulerRepository, SqliteSecretStore,
+    SqliteTaskQueryRepository,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Parser;
@@ -56,6 +57,9 @@ const OUTBOX_BATCH_SIZE: u32 = 128;
 const OUTBOX_CLAIM_TTL_SECONDS: u64 = 30;
 const OUTBOX_MAX_ATTEMPTS: u32 = 8;
 const OUTBOX_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const BROWSER_BRIDGE_CREDENTIAL_BATCH_SIZE: u32 = 32;
+const BROWSER_BRIDGE_CREDENTIAL_TICK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(1);
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -172,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
         secret_keyring.map(|keyring| SqliteSecretStore::new(database.clone(), keyring));
     let secret_store_configured = secret_store.is_some();
     let execution_secret_store = secret_store.clone();
+    let browser_bridge_secret_store = secret_store.clone();
     let providers = Arc::new(build_provider_registry(&config, secret_store.as_ref())?);
     let events = EventBus::new(LIVE_EVENT_CAPACITY);
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
@@ -183,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .with_event_bus(events.clone())
     .with_stream_shutdown(shutdown_receiver.clone());
-    if let Some(secret_store) = secret_store {
+    if let Some(secret_store) = secret_store.clone() {
         api_state = api_state.with_secret_store(secret_store);
     }
     let app = build_router(api_state);
@@ -202,11 +207,17 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let execution_scheduler_handle = start_execution_scheduler(
         &database,
-        providers,
+        providers.clone(),
         execution_secret_store,
         &config,
-        shutdown_receiver,
+        shutdown_receiver.clone(),
     )?;
+    let browser_bridge_credential_handle = start_browser_bridge_credential_processor(
+        &database,
+        providers,
+        browser_bridge_secret_store,
+        shutdown_receiver,
+    );
 
     let graceful_shutdown_sender = shutdown_sender.clone();
     let server_result = axum::serve(
@@ -224,6 +235,11 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(handle) = execution_scheduler_handle {
         handle.await.context("execution scheduler task panicked")?;
+    }
+    if let Some(handle) = browser_bridge_credential_handle {
+        handle
+            .await
+            .context("BrowserBridge credential processor task panicked")?;
     }
     outbox_dispatcher_handle
         .await
@@ -530,6 +546,108 @@ fn start_execution_scheduler(
     Ok(handle)
 }
 
+fn start_browser_bridge_credential_processor(
+    database: &Database,
+    providers: Arc<ProviderRegistry>,
+    secret_store: Option<SqliteSecretStore>,
+    shutdown: watch::Receiver<bool>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let secret_store = secret_store?;
+    let has_credential_terminal = providers.metadata().any(|metadata| {
+        providers
+            .get(&metadata.id)
+            .and_then(|entry| entry.browser_bridge.as_ref())
+            .is_some_and(|capability| {
+                !capability
+                    .browser_bridge_credential_result_types()
+                    .is_empty()
+            })
+    });
+    if !has_credential_terminal {
+        return None;
+    }
+    Some(tokio::spawn(run_browser_bridge_credential_processor(
+        database.clone(),
+        providers,
+        secret_store,
+        shutdown,
+    )))
+}
+
+async fn run_browser_bridge_credential_processor(
+    database: Database,
+    providers: Arc<ProviderRegistry>,
+    secret_store: SqliteSecretStore,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(BROWSER_BRIDGE_CREDENTIAL_TICK_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        let should_tick = tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                false
+            }
+            _ = interval.tick() => true,
+        };
+        if !should_tick {
+            continue;
+        }
+        let provider_ids = providers
+            .metadata()
+            .filter(|metadata| {
+                providers
+                    .get(&metadata.id)
+                    .and_then(|entry| entry.browser_bridge.as_ref())
+                    .is_some_and(|capability| {
+                        !capability
+                            .browser_bridge_credential_result_types()
+                            .is_empty()
+                    })
+            })
+            .map(|metadata| metadata.id.clone())
+            .collect::<Vec<_>>();
+        for provider_id in provider_ids {
+            let processor = BrowserBridgeCredentialProcessor::new(
+                provider_id.clone(),
+                providers.clone(),
+                SqliteBrowserBridgeSessionRepository::new(database.clone()),
+                secret_store.browser_bridge_commands(provider_id.clone()),
+                SqliteTaskQueryRepository::new(database.clone()),
+                SqliteProviderAccountRepository::new(database.clone()),
+                secret_store.clone(),
+            );
+            match processor
+                .tick(chrono::Utc::now(), BROWSER_BRIDGE_CREDENTIAL_BATCH_SIZE)
+                .await
+            {
+                Ok(report) if report != BrowserBridgeCredentialTickReport::default() => {
+                    tracing::info!(
+                        provider = %provider_id,
+                        selected = report.selected,
+                        committed = report.committed,
+                        conflicted = report.conflicted,
+                        failed = report.failed,
+                        "BrowserBridge credential processor tick completed"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        provider = %provider_id,
+                        %error,
+                        "BrowserBridge credential processor tick failed"
+                    );
+                }
+            }
+        }
+    }
+    tracing::info!("BrowserBridge credential processor stopped");
+}
+
 async fn run_scan_scheduler(
     worker: DaemonScanWorker,
     tick_interval: std::time::Duration,
@@ -721,6 +839,39 @@ mod tests {
             .unwrap()
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), outbox_handle)
+            .await
+            .unwrap()
+            .unwrap();
+        database.close().await;
+    }
+
+    #[tokio::test]
+    async fn browser_bridge_credential_processor_starts_only_for_terminal_provider() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let keyring = load_secret_keyring(
+            Some("key-a".to_owned()),
+            Some(SecretString::new(format!(
+                "key-a={}",
+                STANDARD.encode([7; 32])
+            ))),
+        )
+        .unwrap()
+        .unwrap();
+        let store = SqliteSecretStore::new(database.clone(), keyring);
+        let mut config = Config::default();
+        config.providers.enable_development_cidaren = true;
+        let providers = Arc::new(build_provider_registry(&config, Some(&store)).unwrap());
+        let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+        let handle = start_browser_bridge_credential_processor(
+            &database,
+            providers,
+            Some(store),
+            shutdown_receiver,
+        )
+        .expect("Cidaren declares a credential-terminal BrowserBridge result");
+        shutdown_sender.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
             .await
             .unwrap()
             .unwrap();

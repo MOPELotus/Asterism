@@ -1046,7 +1046,7 @@ mod tests {
     use crate::{
         BrowserBridgeCredentialCommitOutcome, BrowserBridgeCredentialCommitRequest,
         BrowserBridgeCredentialRepository, BrowserBridgeSessionRepository,
-        SqliteBrowserBridgeSessionRepository, SqliteSecretStore,
+        PendingBrowserBridgeResult, SqliteBrowserBridgeSessionRepository, SqliteSecretStore,
     };
 
     #[tokio::test]
@@ -1603,6 +1603,50 @@ mod tests {
             })
             .await
             .unwrap();
+        assert!(
+            fixture
+                .session_repository
+                .list_pending_browser_bridge_results(
+                    completed_at,
+                    &ProviderId::new("other-provider").unwrap(),
+                    &["cidaren.capture.snapshot.result"],
+                    10,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            fixture
+                .session_repository
+                .list_pending_browser_bridge_results(
+                    completed_at,
+                    &fixture.provider,
+                    &["cidaren.capture.unknown"],
+                    10,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fixture
+                .session_repository
+                .list_pending_browser_bridge_results(
+                    completed_at,
+                    &fixture.provider,
+                    &["cidaren.capture.snapshot.result"],
+                    10,
+                )
+                .await
+                .unwrap(),
+            [PendingBrowserBridgeResult {
+                owner_user_id: fixture.owner,
+                session_id: session.id,
+                provider_id: fixture.provider.clone(),
+                result_type: "cidaren.capture.snapshot.result".to_owned(),
+            }]
+        );
         let mut completed = issued.clone();
         completed
             .complete(
@@ -1615,7 +1659,9 @@ mod tests {
             .secret_store
             .commit_browser_bridge_credentials(BrowserBridgeCredentialCommitRequest {
                 exchange: &completed,
-                access_token_digest: &access_digest,
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                task_id: fixture.task,
                 validated_bundle: fixture.bundle(completed_at, b"captured-token"),
                 access: &access,
             })
@@ -1658,18 +1704,33 @@ mod tests {
             serde_json::from_str::<AuthState>(&persisted.2).unwrap(),
             AuthState::Authenticated
         );
+        assert!(
+            fixture
+                .session_repository
+                .list_pending_browser_bridge_results(
+                    completed_at,
+                    &fixture.provider,
+                    &["cidaren.capture.snapshot.result"],
+                    10,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let retry = fixture
             .secret_store
             .commit_browser_bridge_credentials(BrowserBridgeCredentialCommitRequest {
                 exchange: &completed,
-                access_token_digest: &access_digest,
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                task_id: fixture.task,
                 validated_bundle: fixture.bundle(completed_at, b"captured-token"),
                 access: &access,
             })
             .await
             .unwrap();
-        assert_eq!(retry, BrowserBridgeCredentialCommitOutcome::AccessRejected);
+        assert_eq!(retry, BrowserBridgeCredentialCommitOutcome::BindingConflict);
     }
 
     #[tokio::test]
@@ -1742,7 +1803,9 @@ mod tests {
             .secret_store
             .commit_browser_bridge_credentials(BrowserBridgeCredentialCommitRequest {
                 exchange: &foreign,
-                access_token_digest: &access_digest,
+                owner_user_id: fixture.owner,
+                provider_account_id: fixture.account,
+                task_id: fixture.task,
                 validated_bundle: fixture.bundle(completed_at, b"must-not-persist"),
                 access: &access,
             })
