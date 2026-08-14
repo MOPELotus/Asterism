@@ -167,6 +167,14 @@ impl UaiUploadedArtifact {
         &self.intent_fingerprint
     }
 
+    pub fn course_resource_id(&self) -> &str {
+        &self.course_resource_id
+    }
+
+    pub(crate) fn task_fingerprint(&self) -> &str {
+        &self.task_fingerprint
+    }
+
     pub(crate) fn from_grant(
         grant: &UaiUploadGrant,
         returned_file_key: String,
@@ -188,6 +196,21 @@ impl UaiUploadedArtifact {
             artifact_digest: grant.artifact_digest.clone(),
             intent_fingerprint: grant.intent_fingerprint.clone(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(upload_position: u32) -> Self {
+        Self {
+            remote_task_id: "group:2001:unit-1:group-upload".to_owned(),
+            task_fingerprint: "v1:compound-upload".to_owned(),
+            course_resource_id: "2001".to_owned(),
+            unit_id: "unit-1".to_owned(),
+            group_id: "group-upload".to_owned(),
+            upload_position,
+            file_key: "course/42/nothing.mp3".to_owned(),
+            artifact_digest: "sha256:synthetic-artifact".to_owned(),
+            intent_fingerprint: "uai-upload-v1:synthetic-intent".to_owned(),
+        }
     }
 }
 
@@ -1096,6 +1119,27 @@ fn validate_upload_readback_entry(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_upload_readback_question(
+    entry: &Value,
+    expected_file_key: &str,
+) -> ProviderResult<()> {
+    let entry = entry
+        .as_object()
+        .ok_or_else(|| protocol_drift("UAI upload readback module is not an object"))?;
+    let instance_is_zero = match entry.get("instanceId") {
+        Some(Value::String(value)) => value == "0",
+        Some(Value::Number(value)) => value.as_u64() == Some(0),
+        _ => false,
+    };
+    if !instance_is_zero {
+        return Err(ProviderError::new(
+            ProviderErrorKind::RemoteChanged,
+            "UAI upload readback module identity changed",
+        ));
+    }
+    validate_upload_readback_entry(entry, expected_file_key)
 }
 
 fn safe_remote_component(value: Option<&Value>, label: &'static str) -> ProviderResult<String> {

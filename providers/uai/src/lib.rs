@@ -12,6 +12,7 @@ mod annotator;
 mod answer;
 mod authentication;
 mod browser_bridge;
+mod compound_upload;
 mod course_inventory;
 mod course_policy;
 mod course_progress;
@@ -59,6 +60,11 @@ pub use browser_bridge::{
     UaiBrowserTargetMenuEntry, UaiBrowserTargetTaskEntry, UaiMenuDiscoveryStrategy,
     browser_event_exchange_digest, browser_residence_exchange_digest,
     browser_start_url_from_detail, parse_browser_event, parse_browser_residence_result,
+};
+pub use compound_upload::{
+    UaiCompoundUploadPreparation, UaiCompoundUploadSubmission, UaiCompoundUploadTransport,
+    UaiCompoundUploadVerification, build_compound_upload_submission_body,
+    parse_compound_upload_verification,
 };
 pub use course_inventory::{UaiCourseContext, parse_course_context, parse_course_inventory};
 pub use course_policy::{

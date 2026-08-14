@@ -158,3 +158,6 @@ the single-upload child into the current Rust donor's minimal ordered
 question/judge envelope and fresh Course publish version, without copying the
 Apache donor's fabricated score maps. The compound form remains atomic and
 cannot be decomposed into an upload mutation plus a later unrelated answer.
+The Provider-private compound plan now preserves that boundary with one
+validated ordinary sub-draft and one bound uploaded artifact; shared Core must
+still persist them as one compound Draft/Attempt before capability exposure.

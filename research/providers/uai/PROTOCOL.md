@@ -630,9 +630,16 @@ closed. This confirms answer persistence only and still requires a separate
 fresh exact Group progress read for completion.
 
 The donor's mixed `multichoice,multiFileUpload` flow is one atomic Group
-submission. Asterism therefore refuses to submit only its upload half; durable
-Artifact plus Submission Draft integration must carry both answers together.
-The shared artifact lifecycle, durable attempt registration and mixed Draft
-composition remain active Core work. A grant, object-store response, accepted
-final receipt or even exact uploaded-key readback alone is never Group
-completion evidence.
+submission. Asterism therefore still refuses to submit only its upload half.
+The Provider-private compound preparation accepts exactly one already validated
+ordinary `multichoice` sub-draft plus one Task-bound uploaded artifact, then
+re-reads the full Task and requires exact ordered
+`multichoice,multiFileUpload`, upload position 2, the unchanged Task
+fingerprint/hierarchy and a current publish version. Native HTTP emits both
+answers in one request after the same fresh incomplete/available task-leaf
+preflight. Receipt-versioned readback must contain exactly the immutable choice
+answer followed by module `0` with the exact object key; reversed, extra or
+changed modules fail closed. The shared artifact lifecycle, durable attempt and
+one compound Draft that owns both slots remain active Core integration work. A
+grant, object-store response, accepted final receipt or even exact two-module
+readback alone is never Group completion evidence.

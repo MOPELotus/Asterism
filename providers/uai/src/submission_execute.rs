@@ -485,6 +485,18 @@ impl UaiSubmissionPlan {
         })
     }
 
+    pub(crate) fn from_single_draft_current(
+        draft: &SubmissionDraft,
+        task_type: &str,
+        course_publish_version: u64,
+    ) -> ProviderResult<Self> {
+        Self::from_draft_with_versions(
+            draft,
+            &[task_type.to_owned()],
+            UaiSubmissionProtocolVersions::current(course_publish_version)?,
+        )
+    }
+
     #[must_use]
     pub fn questions(&self) -> &[UaiSubmissionQuestionPlan] {
         &self.questions

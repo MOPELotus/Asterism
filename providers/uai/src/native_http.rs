@@ -15,32 +15,34 @@ use reqwest::{
     Client, Response, StatusCode, Url,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, RETRY_AFTER},
 };
+use serde_json::Value;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     UaiAggregateProgressDocument, UaiAggregateProgressTransport, UaiAnswerDocument,
-    UaiAnswerDocuments, UaiAnswerTransport, UaiCourseInventoryTransport, UaiCoursePolicyDocument,
-    UaiCoursePolicyTransport, UaiCourseProgressDocument, UaiDiscussionBinding,
-    UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult, UaiDiscussionReplyDraft,
-    UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument, UaiDurationTransport,
-    UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult, UaiPresetCompletionTransport,
-    UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument, UaiQuestionTransport,
-    UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument, UaiSubmissionTransport,
-    UaiTaskInventoryDocuments, UaiTaskInventoryTransport, UaiUploadArtifact, UaiUploadGrant,
-    UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport, UaiUploadVerification,
-    UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
+    UaiAnswerDocuments, UaiAnswerTransport, UaiCompoundUploadSubmission,
+    UaiCompoundUploadTransport, UaiCompoundUploadVerification, UaiCourseInventoryTransport,
+    UaiCoursePolicyDocument, UaiCoursePolicyTransport, UaiCourseProgressDocument,
+    UaiDiscussionBinding, UaiDiscussionCompletionPlan, UaiDiscussionCompletionResult,
+    UaiDiscussionReplyDraft, UaiDiscussionReplyPage, UaiDiscussionTransport, UaiDurationDocument,
+    UaiDurationTransport, UaiInventoryDocument, UaiJwtSession, UaiPresetCompletionResult,
+    UaiPresetCompletionTransport, UaiProgressDocument, UaiProgressTransport, UaiQuestionDocument,
+    UaiQuestionTransport, UaiSessionResolver, UaiSubmissionPlan, UaiSubmissionResponseDocument,
+    UaiSubmissionTransport, UaiTaskInventoryDocuments, UaiTaskInventoryTransport,
+    UaiUploadArtifact, UaiUploadGrant, UaiUploadIntent, UaiUploadSubmission, UaiUploadTransport,
+    UaiUploadVerification, UaiUploadedArtifact, UaiVerificationDocument, UaiVerificationTransport,
     annotator::generate_annotator_token,
-    build_discussion_reply_page_request, build_discussion_reply_request,
-    build_discussion_topic_request, build_upload_multipart,
+    build_compound_upload_submission_body, build_discussion_reply_page_request,
+    build_discussion_reply_request, build_discussion_topic_request, build_upload_multipart,
     course_inventory::{
         course_resource_id_from_remote, parse_course_context_for_resource_id,
         required_remote_component,
     },
     encrypted::ZeroizingJsonValue,
-    parse_course_context, parse_course_progress, parse_discussion_binding,
-    parse_discussion_reply_page, parse_discussion_reply_receipt, parse_discussion_topic,
-    parse_group_progress, parse_submission_receipt, parse_task_inventory, parse_upload_grant,
-    parse_upload_result, parse_upload_verification,
+    parse_compound_upload_verification, parse_course_context, parse_course_progress,
+    parse_discussion_binding, parse_discussion_reply_page, parse_discussion_reply_receipt,
+    parse_discussion_topic, parse_group_progress, parse_submission_receipt, parse_task_inventory,
+    parse_upload_grant, parse_upload_result, parse_upload_verification,
     progress::validate_progress_route_binding,
     submission_execute::valid_submission_version,
     submission_verify::validate_verification_course_binding,
@@ -1097,6 +1099,106 @@ impl NativeUaiInventoryTransport {
         parse_upload_verification(document.as_str(), submission, receipt)
     }
 
+    async fn submit_compound_upload_with_session(
+        &self,
+        session: &UaiJwtSession,
+        submission: &UaiCompoundUploadSubmission,
+    ) -> ProviderResult<SubmissionReceipt> {
+        let course_resource_id = required_remote_component(
+            Some(&Value::String(submission.course_resource_id().to_owned())),
+            "compound upload Course-resource ID",
+        )?;
+        let unit_id = required_remote_component(
+            Some(&Value::String(submission.unit_id().to_owned())),
+            "compound upload Unit ID",
+        )?;
+        let group_id = required_remote_component(
+            Some(&Value::String(submission.group_id().to_owned())),
+            "compound upload Group ID",
+        )?;
+        if submission.remote_task_id() != format!("group:{course_resource_id}:{unit_id}:{group_id}")
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI compound upload hierarchy is foreign to its Task",
+            ));
+        }
+        let detail = UaiInventoryDocument::try_new(
+            self.send_get_with_session(
+                session,
+                course_resource_detail_url(&course_resource_id)?,
+                ResponseRoute::CourseDetail,
+            )
+            .await?,
+        )?;
+        let route = parse_course_context_for_resource_id(course_resource_id, detail.as_str())?;
+        let progress = self
+            .fetch_progress_for_route_with_session(session, route.course_instance_id(), &unit_id)
+            .await?;
+        validate_answer_submission_progress_target(
+            progress.as_str(),
+            &unit_id,
+            &group_id,
+            Utc::now(),
+        )?;
+        let body = build_compound_upload_submission_body(
+            submission,
+            route.course_instance_id(),
+            session.expose_open_id(),
+        )?;
+        let annotator = generate_annotator_token(session.expose_open_id())?;
+        let mut annotator_header =
+            HeaderValue::from_str(annotator.expose_secret()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "UAI annotator token cannot be encoded as a request header",
+                )
+            })?;
+        annotator_header.set_sensitive(true);
+        let response = self
+            .client
+            .post(submission_url()?)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .headers(ucontent_session_headers(session)?)
+            .header("x-annotator-auth-token", annotator_header)
+            .body(body.as_bytes().to_vec())
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let document = UaiSubmissionResponseDocument::try_new(
+            read_json_response(response, ResponseRoute::Submission).await?,
+        )?;
+        parse_submission_receipt(document.as_str(), route.course_instance_id(), &group_id)
+    }
+
+    async fn verify_compound_upload_with_session(
+        &self,
+        session: &UaiJwtSession,
+        submission: &UaiCompoundUploadSubmission,
+        receipt: &SubmissionReceipt,
+    ) -> ProviderResult<UaiCompoundUploadVerification> {
+        let version = receipt
+            .provider_trace_id
+            .as_deref()
+            .filter(|value| receipt.remote_status == "accepted" && valid_submission_version(value))
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "UAI compound upload verification requires an accepted receipt",
+                )
+            })?;
+        let document = self
+            .fetch_verification_with_session(
+                session,
+                submission.course_resource_id(),
+                submission.group_id(),
+                version,
+            )
+            .await?;
+        parse_compound_upload_verification(document.as_str(), submission, receipt)
+    }
+
     async fn fetch_verification_with_session(
         &self,
         session: &UaiJwtSession,
@@ -1613,6 +1715,48 @@ impl UaiUploadTransport for NativeUaiInventoryTransport {
             Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
                 let session = self.sessions.renew_session(context).await?;
                 self.verify_uploaded_artifact_with_session(&session, submission, receipt)
+                    .await
+            }
+            result => result,
+        }
+    }
+}
+
+#[async_trait]
+impl UaiCompoundUploadTransport for NativeUaiInventoryTransport {
+    async fn submit_compound_upload(
+        &self,
+        context: &ProviderContext,
+        submission: &UaiCompoundUploadSubmission,
+    ) -> ProviderResult<SubmissionReceipt> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .submit_compound_upload_with_session(&session, submission)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.submit_compound_upload_with_session(&session, submission)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn verify_compound_upload(
+        &self,
+        context: &ProviderContext,
+        submission: &UaiCompoundUploadSubmission,
+        receipt: &SubmissionReceipt,
+    ) -> ProviderResult<UaiCompoundUploadVerification> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self
+            .verify_compound_upload_with_session(&session, submission, receipt)
+            .await
+        {
+            Err(error) if error.kind == ProviderErrorKind::Authentication && !renewed => {
+                let session = self.sessions.renew_session(context).await?;
+                self.verify_compound_upload_with_session(&session, submission, receipt)
                     .await
             }
             result => result,

@@ -310,7 +310,7 @@ fn parse_remote_questions(
     Ok(())
 }
 
-fn parse_remote_question(
+pub(crate) fn parse_remote_question(
     entry: &Value,
     planned: &crate::UaiSubmissionQuestionPlan,
 ) -> ProviderResult<()> {
