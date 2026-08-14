@@ -3,10 +3,10 @@ use std::{collections::BTreeMap, fmt};
 use asterism_domain::{
     AnswerCandidate, AssessmentClass, AuthMethod, AuthSessionId, BrowserBridgeExchange,
     BrowserBridgeExchangeState, BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
-    CourseId, ExecutionId, LogLevel, ProviderAccountId, ProviderId, Question, QuestionKind,
-    RemoteState, SecretId, SelectedAnswer, SessionKind, SourceType, SubmissionDraft,
-    SubmissionPayloadPreview, SubmissionReceipt, SubmissionVerificationSnapshot, TaskCapability,
-    TaskId, Timestamp, WaitingUserState,
+    BrowserBridgeRuntimeStateMetadata, CourseId, ExecutionId, LogLevel, ProviderAccountId,
+    ProviderId, Question, QuestionKind, RemoteState, SecretId, SelectedAnswer, SessionKind,
+    SourceType, SubmissionDraft, SubmissionPayloadPreview, SubmissionReceipt,
+    SubmissionVerificationSnapshot, TaskCapability, TaskId, Timestamp, WaitingUserState,
 };
 use asterism_secrets::{
     CredentialBundle, CredentialField, SecretPurpose, SecretString, SecretValue,
@@ -2030,6 +2030,20 @@ pub trait BrowserBridgeCapability: ProviderIdentity {
             "Provider does not accept BrowserBridge credential results",
         ))
     }
+
+    /// Consumes one Core-recovered intermediate or execution-terminal result.
+    /// Providers without a durable multi-command workflow remain fail-closed.
+    async fn complete_browser_bridge_workflow_result(
+        &self,
+        _context: &ProviderContext,
+        _settings: &ResolvedProviderRuntimeSettings,
+        _request: BrowserBridgeWorkflowResultRequest,
+    ) -> ProviderResult<BrowserBridgeWorkflowResult> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Provider does not accept BrowserBridge workflow results",
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2037,6 +2051,469 @@ pub enum BrowserBridgeResultDisposition {
     CredentialTerminal,
     Intermediate,
     ExecutionTerminal,
+}
+
+/// Provider-private workflow-plan bytes encrypted by Core and rebound by type
+/// and digest after restart.
+pub struct BrowserBridgeWorkflowPlanArtifact {
+    artifact_type: String,
+    artifact_digest: [u8; 32],
+    artifact: SecretValue,
+}
+
+impl BrowserBridgeWorkflowPlanArtifact {
+    /// # Errors
+    ///
+    /// Rejects an unsafe type, empty/oversized bytes or digest mismatch.
+    pub fn try_new(artifact_type: String, artifact: SecretValue) -> ProviderResult<Self> {
+        let bytes = artifact.expose_secret();
+        let artifact_digest: [u8; 32] = Sha256::digest(bytes).into();
+        if !valid_browser_bridge_type(&artifact_type)
+            || bytes.is_empty()
+            || bytes.len() > 256 * 1_024
+            || artifact_digest == [0; 32]
+        {
+            return Err(browser_bridge_workflow_error());
+        }
+        Ok(Self {
+            artifact_type,
+            artifact_digest,
+            artifact,
+        })
+    }
+
+    pub fn artifact_type(&self) -> &str {
+        &self.artifact_type
+    }
+
+    pub const fn artifact_digest(&self) -> [u8; 32] {
+        self.artifact_digest
+    }
+
+    pub fn into_parts(self) -> (String, [u8; 32], SecretValue) {
+        (self.artifact_type, self.artifact_digest, self.artifact)
+    }
+}
+
+impl fmt::Debug for BrowserBridgeWorkflowPlanArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeWorkflowPlanArtifact")
+            .field("artifact_type", &self.artifact_type)
+            .field("artifact_digest", &self.artifact_digest)
+            .field("artifact", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Exact encrypted runtime sidecar paired with the issued command.
+pub struct BrowserBridgeWorkflowRuntimeState {
+    pub metadata: BrowserBridgeRuntimeStateMetadata,
+    pub artifact: SecretValue,
+}
+
+impl BrowserBridgeWorkflowRuntimeState {
+    fn validate_for_exchange(&self, exchange: &BrowserBridgeExchange) -> ProviderResult<()> {
+        let digest: [u8; 32] = Sha256::digest(self.artifact.expose_secret()).into();
+        if self.metadata.validate().is_err()
+            || self.metadata.session_id != exchange.session_id
+            || self.metadata.sequence != exchange.sequence
+            || self.metadata.stored_at != exchange.issued_at
+            || self.metadata.state_digest != digest
+            || self.artifact.expose_secret().is_empty()
+            || self.artifact.expose_secret().len() > 256 * 1_024
+        {
+            Err(browser_bridge_workflow_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl fmt::Debug for BrowserBridgeWorkflowRuntimeState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeWorkflowRuntimeState")
+            .field("metadata", &self.metadata)
+            .field("artifact", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Owned Core recovery evidence for a Provider multi-command workflow result.
+pub struct BrowserBridgeWorkflowResultRequest {
+    pub remote_task_id: String,
+    pub issued_exchange: BrowserBridgeExchange,
+    pub command_artifact: SecretValue,
+    pub workflow_plan: Option<BrowserBridgeWorkflowPlanArtifact>,
+    pub runtime_state: Option<BrowserBridgeWorkflowRuntimeState>,
+    pub result_metadata: BrowserBridgeResultArtifactMetadata,
+    pub result_artifact: SecretValue,
+    pub runtime_binding: BrowserBridgeRuntimeBinding,
+}
+
+impl BrowserBridgeWorkflowResultRequest {
+    /// Validates every generic session/sequence/digest/time binding before
+    /// Provider-specific plan, cursor or result parsing.
+    ///
+    /// # Errors
+    ///
+    /// Rejects incomplete, oversized, changed or cross-session evidence.
+    pub fn validate(&self) -> ProviderResult<()> {
+        let command = self.command_artifact.expose_secret();
+        let result = self.result_artifact.expose_secret();
+        let command_digest: [u8; 32] = Sha256::digest(command).into();
+        let result_digest: [u8; 32] = Sha256::digest(result).into();
+        let valid_remote_task = !self.remote_task_id.is_empty()
+            && self.remote_task_id.len() <= 2_048
+            && self.remote_task_id.trim() == self.remote_task_id
+            && !self.remote_task_id.chars().any(char::is_control);
+        if !valid_remote_task
+            || self.issued_exchange.validate().is_err()
+            || self.issued_exchange.state != BrowserBridgeExchangeState::Issued
+            || self.runtime_binding.validate().is_err()
+            || self.runtime_binding.session_id != self.issued_exchange.session_id
+            || self.runtime_binding.bound_at > self.issued_exchange.issued_at
+            || self.result_metadata.validate().is_err()
+            || self.result_metadata.session_id != self.issued_exchange.session_id
+            || self.result_metadata.sequence != self.issued_exchange.sequence
+            || self.result_metadata.received_at < self.issued_exchange.issued_at
+            || command.is_empty()
+            || command.len() > 256 * 1_024
+            || command_digest != self.issued_exchange.command_digest
+            || result.is_empty()
+            || result.len() > 256 * 1_024
+            || result_digest != self.result_metadata.result_digest
+        {
+            return Err(browser_bridge_workflow_error());
+        }
+        if let Some(runtime_state) = &self.runtime_state {
+            runtime_state.validate_for_exchange(&self.issued_exchange)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for BrowserBridgeWorkflowResultRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeWorkflowResultRequest")
+            .field("remote_task_id", &"[REDACTED]")
+            .field("issued_exchange", &self.issued_exchange)
+            .field("command_artifact", &"[REDACTED]")
+            .field("workflow_plan", &self.workflow_plan)
+            .field("runtime_state", &self.runtime_state)
+            .field("result_metadata", &self.result_metadata)
+            .field("result_artifact", &"[REDACTED]")
+            .field("runtime_binding", &self.runtime_binding)
+            .finish()
+    }
+}
+
+/// One exact next command returned after Provider validation of an
+/// intermediate result.
+pub struct BrowserBridgeWorkflowNextCommand {
+    pub exchange: BrowserBridgeExchange,
+    pub command_artifact: SecretValue,
+    pub runtime_state: Option<BrowserBridgeWorkflowRuntimeState>,
+}
+
+impl BrowserBridgeWorkflowNextCommand {
+    fn validate_after(&self, completed: &BrowserBridgeExchange) -> ProviderResult<()> {
+        let command = self.command_artifact.expose_secret();
+        let digest: [u8; 32] = Sha256::digest(command).into();
+        if self.exchange.validate().is_err()
+            || self.exchange.state != BrowserBridgeExchangeState::Issued
+            || self.exchange.session_id != completed.session_id
+            || self.exchange.sequence != completed.sequence.checked_add(1).unwrap_or(0)
+            || self.exchange.issued_at < completed.completed_at.unwrap_or(completed.issued_at)
+            || command.is_empty()
+            || command.len() > 256 * 1_024
+            || self.exchange.command_digest != digest
+        {
+            return Err(browser_bridge_workflow_error());
+        }
+        if let Some(runtime_state) = &self.runtime_state {
+            runtime_state.validate_for_exchange(&self.exchange)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for BrowserBridgeWorkflowNextCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeWorkflowNextCommand")
+            .field("exchange", &self.exchange)
+            .field("command_artifact", &"[REDACTED]")
+            .field("runtime_state", &self.runtime_state)
+            .finish()
+    }
+}
+
+/// Provider-validated workflow transition ready for Core's atomic Storage
+/// boundary.
+pub enum BrowserBridgeWorkflowResult {
+    Intermediate {
+        completed_exchange: BrowserBridgeExchange,
+        next: Box<BrowserBridgeWorkflowNextCommand>,
+    },
+    ExecutionTerminal {
+        completed_exchange: BrowserBridgeExchange,
+        verified_progress: RemoteProgress,
+    },
+}
+
+impl BrowserBridgeWorkflowResult {
+    /// # Errors
+    ///
+    /// Rejects a mismatched completion, non-contiguous next command or stale
+    /// terminal verification.
+    pub fn try_intermediate(
+        completed_exchange: BrowserBridgeExchange,
+        next: BrowserBridgeWorkflowNextCommand,
+        issued: &BrowserBridgeExchange,
+        result: &BrowserBridgeResultArtifactMetadata,
+    ) -> ProviderResult<Self> {
+        validate_workflow_completion(&completed_exchange, issued, result)?;
+        next.validate_after(&completed_exchange)?;
+        Ok(Self::Intermediate {
+            completed_exchange,
+            next: Box::new(next),
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Rejects a mismatched completion or progress observed before the raw
+    /// terminal result was received.
+    pub fn try_execution_terminal(
+        completed_exchange: BrowserBridgeExchange,
+        verified_progress: RemoteProgress,
+        issued: &BrowserBridgeExchange,
+        result: &BrowserBridgeResultArtifactMetadata,
+    ) -> ProviderResult<Self> {
+        validate_workflow_completion(&completed_exchange, issued, result)?;
+        if verified_progress.updated_at < result.received_at
+            || verified_progress
+                .percent
+                .is_some_and(|percent| percent > 100)
+        {
+            return Err(browser_bridge_workflow_error());
+        }
+        Ok(Self::ExecutionTerminal {
+            completed_exchange,
+            verified_progress,
+        })
+    }
+}
+
+impl fmt::Debug for BrowserBridgeWorkflowResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Intermediate {
+                completed_exchange,
+                next,
+            } => formatter
+                .debug_struct("BrowserBridgeWorkflowResult::Intermediate")
+                .field("completed_exchange", completed_exchange)
+                .field("next", next)
+                .finish(),
+            Self::ExecutionTerminal {
+                completed_exchange,
+                verified_progress,
+            } => formatter
+                .debug_struct("BrowserBridgeWorkflowResult::ExecutionTerminal")
+                .field("completed_exchange", completed_exchange)
+                .field("verified_progress", verified_progress)
+                .finish(),
+        }
+    }
+}
+
+fn validate_workflow_completion(
+    completed: &BrowserBridgeExchange,
+    issued: &BrowserBridgeExchange,
+    result: &BrowserBridgeResultArtifactMetadata,
+) -> ProviderResult<()> {
+    if issued.validate().is_err()
+        || issued.state != BrowserBridgeExchangeState::Issued
+        || completed.validate().is_err()
+        || completed.state != BrowserBridgeExchangeState::Completed
+        || completed.session_id != issued.session_id
+        || completed.sequence != issued.sequence
+        || completed.command_type != issued.command_type
+        || completed.command_digest != issued.command_digest
+        || completed.issued_at != issued.issued_at
+        || completed.session_id != result.session_id
+        || completed.sequence != result.sequence
+        || completed.result_type.as_deref() != Some(result.result_type.as_str())
+        || completed.result_digest != Some(result.result_digest)
+        || completed.completed_at != Some(result.received_at)
+    {
+        Err(browser_bridge_workflow_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn valid_browser_bridge_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.trim() == value
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn browser_bridge_workflow_error() -> crate::ProviderError {
+    crate::ProviderError::new(
+        crate::ProviderErrorKind::ProtocolDrift,
+        "BrowserBridge workflow evidence is incomplete, changed or foreign",
+    )
+}
+
+#[cfg(test)]
+mod browser_bridge_workflow_result_tests {
+    use asterism_domain::BrowserBridgeSessionId;
+    use chrono::{Duration, Utc};
+
+    use super::*;
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture proves request, intermediate, terminal, foreign-command and stale-readback bindings"
+    )]
+    fn workflow_evidence_transitions_are_exact_and_redacted() {
+        let now = Utc::now();
+        let session_id = BrowserBridgeSessionId::new();
+        let command = SecretValue::new(b"command-one".to_vec());
+        let issued = BrowserBridgeExchange::issue(
+            session_id,
+            1,
+            "uai.browser.command".to_owned(),
+            Sha256::digest(command.expose_secret()).into(),
+            now,
+        )
+        .unwrap();
+        let result = SecretValue::new(b"intermediate-result".to_vec());
+        let result_metadata = BrowserBridgeResultArtifactMetadata {
+            session_id,
+            sequence: 1,
+            result_type: "uai.browser.event".to_owned(),
+            result_digest: Sha256::digest(result.expose_secret()).into(),
+            received_at: now + Duration::seconds(1),
+        };
+        let state = SecretValue::new(b"cursor-state".to_vec());
+        let state_metadata = BrowserBridgeRuntimeStateMetadata {
+            session_id,
+            sequence: 1,
+            state_type: "uai.browser.cursor.v4".to_owned(),
+            state_digest: Sha256::digest(state.expose_secret()).into(),
+            stored_at: now,
+        };
+        let request = BrowserBridgeWorkflowResultRequest {
+            remote_task_id: "group:course:unit:task".to_owned(),
+            issued_exchange: issued.clone(),
+            command_artifact: command,
+            workflow_plan: Some(
+                BrowserBridgeWorkflowPlanArtifact::try_new(
+                    "uai.browser.batch.v1".to_owned(),
+                    SecretValue::new(b"batch-plan-secret".to_vec()),
+                )
+                .unwrap(),
+            ),
+            runtime_state: Some(BrowserBridgeWorkflowRuntimeState {
+                metadata: state_metadata,
+                artifact: state,
+            }),
+            result_metadata: result_metadata.clone(),
+            result_artifact: result,
+            runtime_binding: BrowserBridgeRuntimeBinding {
+                session_id,
+                observed_origin: "https://ucontent.unipus.cn".to_owned(),
+                frame_id: "top-frame:1".to_owned(),
+                bound_at: now,
+            },
+        };
+        request.validate().unwrap();
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("batch-plan-secret"));
+        assert!(!debug.contains("intermediate-result"));
+
+        let mut completed = issued.clone();
+        completed
+            .complete(
+                result_metadata.result_type.clone(),
+                result_metadata.result_digest,
+                result_metadata.received_at,
+            )
+            .unwrap();
+        let next_command = SecretValue::new(b"command-two".to_vec());
+        let next_exchange = BrowserBridgeExchange::issue(
+            session_id,
+            2,
+            "uai.browser.command".to_owned(),
+            Sha256::digest(next_command.expose_secret()).into(),
+            result_metadata.received_at,
+        )
+        .unwrap();
+        BrowserBridgeWorkflowResult::try_intermediate(
+            completed.clone(),
+            BrowserBridgeWorkflowNextCommand {
+                exchange: next_exchange,
+                command_artifact: next_command,
+                runtime_state: None,
+            },
+            &issued,
+            &result_metadata,
+        )
+        .unwrap();
+
+        let verified = RemoteProgress {
+            remote_state: RemoteState::InProgress,
+            percent: Some(50),
+            duration_seconds: Some(700),
+            updated_at: result_metadata.received_at,
+        };
+        BrowserBridgeWorkflowResult::try_execution_terminal(
+            completed.clone(),
+            verified.clone(),
+            &issued,
+            &result_metadata,
+        )
+        .unwrap();
+        let mut foreign_issued = issued.clone();
+        foreign_issued.command_digest = [9; 32];
+        assert!(
+            BrowserBridgeWorkflowResult::try_execution_terminal(
+                completed.clone(),
+                verified,
+                &foreign_issued,
+                &result_metadata,
+            )
+            .is_err()
+        );
+        assert!(
+            BrowserBridgeWorkflowResult::try_execution_terminal(
+                completed,
+                RemoteProgress {
+                    updated_at: now,
+                    ..RemoteProgress {
+                        remote_state: RemoteState::InProgress,
+                        percent: Some(50),
+                        duration_seconds: Some(700),
+                        updated_at: result_metadata.received_at,
+                    }
+                },
+                &issued,
+                &result_metadata,
+            )
+            .is_err()
+        );
+    }
 }
 
 /// Complete Core-owned evidence supplied to Provider terminal-result

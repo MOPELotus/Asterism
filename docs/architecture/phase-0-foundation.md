@@ -3838,3 +3838,27 @@ stage. Unknown types remain outside all Core workers. This declaration layer is
 the prerequisite for adding the UAI cursor-result processor: SQL can select
 only the exact intermediate and execution-terminal types without allowing an
 unknown or credential result to occupy its bounded claim window.
+
+## Two-hundred-and-thirteenth Phase 0 slice
+
+The Provider API now has an owned, consuming BrowserBridge workflow-result
+boundary. Core supplies the exact issued exchange, decrypted command, optional
+encrypted workflow plan, optional sequence-bound runtime sidecar, raw result,
+runtime origin/frame binding and frozen runtime settings. Generic validation
+checks every type, size, digest, session, sequence and timestamp before any
+Provider-specific plan, cursor or DOM-result parser runs; Debug output redacts
+all artifact bytes and the remote Task identity.
+
+An intermediate callback can return only the exact completed exchange plus one
+contiguous next issued command and its optional exact runtime sidecar. An
+execution-terminal callback can return only the exact completed exchange plus
+a fresh `RemoteProgress` observed no earlier than the terminal result. Both
+constructors compare the completed command identity with the original issued
+exchange, not only with result metadata, so a Provider cannot substitute a
+different command at the same session and sequence.
+
+This contract grants no persistence or dispatch authority by itself. The next
+Core slice must atomically complete the current exchange while either storing
+the next encrypted command/state or terminating the session with independently
+verified progress; only after that transaction exists can the daemon invoke
+UAI's persisted cursor-result adapter.
