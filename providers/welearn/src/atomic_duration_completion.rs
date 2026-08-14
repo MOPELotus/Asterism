@@ -1,12 +1,166 @@
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 
 use crate::{
-    WellearnAtomicCompletionProfile, WellearnDurationProtocolMode,
+    WellearnAtomicCompletionProfile, WellearnCmiDocument, WellearnDurationProtocolMode,
     WellearnResourceCompletionCmiFormat, WellearnResourceCompletionSequence,
     WellearnResourceCompletionTimeMode, WellearnResourceCompletionWriteMode,
     WellearnResourceExecutionPlan, WellearnResourceMutationProfile,
     runtime_settings::MAX_DURATION_REPORT_SECONDS,
 };
+
+/// Ordered mutation receipts emitted by one authorized atomic lifecycle.
+/// Explicit rejection remains diagnostic; only fresh CMI verification can
+/// prove the final goal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WellearnAtomicDurationCompletionReceipts {
+    start_accepted: bool,
+    heartbeat_acceptances: Vec<bool>,
+    set_accepted: Option<bool>,
+    save_accepted: bool,
+}
+
+impl WellearnAtomicDurationCompletionReceipts {
+    pub const fn new(
+        start_accepted: bool,
+        heartbeat_acceptances: Vec<bool>,
+        set_accepted: Option<bool>,
+        save_accepted: bool,
+    ) -> Self {
+        Self {
+            start_accepted,
+            heartbeat_acceptances,
+            set_accepted,
+            save_accepted,
+        }
+    }
+
+    pub const fn start_accepted(&self) -> bool {
+        self.start_accepted
+    }
+
+    pub fn heartbeat_acceptances(&self) -> &[bool] {
+        &self.heartbeat_acceptances
+    }
+
+    pub const fn set_accepted(&self) -> Option<bool> {
+        self.set_accepted
+    }
+
+    pub const fn save_accepted(&self) -> bool {
+        self.save_accepted
+    }
+}
+
+/// Independent CMI evidence and mutation receipts returned by one complete
+/// atomic duration-completion lifecycle.
+///
+/// This value does not grant execution authority. The intermediate
+/// `after_duration` document exists only for current Fanyuchang, whose final
+/// completion CMI must carry fresh time fields from the same operation.
+#[derive(Debug)]
+pub struct WellearnAtomicDurationCompletionDocuments {
+    initial: WellearnCmiDocument,
+    after_duration: Option<WellearnCmiDocument>,
+    after_completion: WellearnCmiDocument,
+    receipts: WellearnAtomicDurationCompletionReceipts,
+}
+
+impl WellearnAtomicDurationCompletionDocuments {
+    /// Builds and validates a complete evidence bundle against the authorized
+    /// Provider wire plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the document slots or ordered mutation
+    /// receipts cannot have been produced by the selected donor lifecycle.
+    pub fn try_new(
+        plan: WellearnAtomicDurationCompletionPlan,
+        initial: WellearnCmiDocument,
+        after_duration: Option<WellearnCmiDocument>,
+        after_completion: WellearnCmiDocument,
+        receipts: WellearnAtomicDurationCompletionReceipts,
+    ) -> ProviderResult<Self> {
+        let documents = Self {
+            initial,
+            after_duration,
+            after_completion,
+            receipts,
+        };
+        documents.validate_for_plan(plan)?;
+        Ok(documents)
+    }
+
+    pub const fn initial(&self) -> &WellearnCmiDocument {
+        &self.initial
+    }
+
+    pub const fn after_duration(&self) -> Option<&WellearnCmiDocument> {
+        self.after_duration.as_ref()
+    }
+
+    pub const fn after_completion(&self) -> &WellearnCmiDocument {
+        &self.after_completion
+    }
+
+    pub const fn receipts(&self) -> &WellearnAtomicDurationCompletionReceipts {
+        &self.receipts
+    }
+
+    /// Revalidates an evidence bundle before parsing its CMI documents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for a plan/document shape mismatch.
+    pub fn validate_for_plan(
+        &self,
+        plan: WellearnAtomicDurationCompletionPlan,
+    ) -> ProviderResult<()> {
+        plan.validate()?;
+        let valid = match plan.profile() {
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+                self.after_duration.is_some()
+                    && self.receipts.start_accepted
+                    && self.receipts.set_accepted.is_some()
+                    && valid_client_counter_receipts(
+                        &self.receipts.heartbeat_acceptances,
+                        plan.target_seconds(),
+                    )
+            }
+            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => {
+                let expected =
+                    usize::try_from(plan.target_seconds() / plan.heartbeat_interval_seconds())
+                        .map_err(|_| invalid_atomic_documents())?;
+                self.after_duration.is_none()
+                    && self.receipts.set_accepted.is_none()
+                    && self.receipts.heartbeat_acceptances.len() == expected
+            }
+        };
+        if !valid {
+            return Err(invalid_atomic_documents());
+        }
+        Ok(())
+    }
+}
+
+fn valid_client_counter_receipts(receipts: &[bool], target_seconds: u64) -> bool {
+    let Ok(expected) = usize::try_from(target_seconds) else {
+        return false;
+    };
+    if receipts.len() > expected {
+        return false;
+    }
+    match receipts.iter().position(|accepted| !accepted) {
+        Some(rejected) => rejected + 1 == receipts.len(),
+        None => receipts.len() == expected,
+    }
+}
+
+fn invalid_atomic_documents() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn atomic duration-completion documents do not match the frozen lifecycle",
+    )
+}
 
 /// Complete immutable wire plan for one donor-audited, one-start
 /// duration-completion operation.
@@ -188,6 +342,10 @@ mod tests {
             current.completion.write_mode,
             WellearnResourceCompletionWriteMode::SetThenSave
         );
+        assert_eq!(
+            current.completion.mutation_profile,
+            WellearnResourceMutationProfile::CurrentFullSimpleReferer
+        );
         current.validate().unwrap();
 
         let auto = WellearnAtomicDurationCompletionPlan::try_new(
@@ -204,6 +362,10 @@ mod tests {
         assert_eq!(
             auto.completion.write_mode,
             WellearnResourceCompletionWriteMode::SaveOnly
+        );
+        assert_eq!(
+            auto.completion.mutation_profile,
+            WellearnResourceMutationProfile::LegacyMinimalTaskReferer
         );
         auto.validate().unwrap();
     }
@@ -276,5 +438,176 @@ mod tests {
         let mut drifted = plan;
         drifted.completion.write_mode = WellearnResourceCompletionWriteMode::SaveOnly;
         assert!(drifted.validate().is_err());
+    }
+
+    #[test]
+    fn current_documents_preserve_ordered_keep_rejection_and_false_diagnostics() {
+        let plan = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
+            3,
+        )
+        .unwrap();
+        let documents = WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            cmi(),
+            Some(cmi()),
+            cmi(),
+            WellearnAtomicDurationCompletionReceipts::new(
+                true,
+                vec![true, false],
+                Some(false),
+                false,
+            ),
+        )
+        .unwrap();
+
+        assert!(documents.after_duration().is_some());
+        assert_eq!(documents.receipts().heartbeat_acceptances(), [true, false]);
+        assert_eq!(documents.receipts().set_accepted(), Some(false));
+        assert!(!documents.receipts().save_accepted());
+        documents.validate_for_plan(plan).unwrap();
+    }
+
+    #[test]
+    fn auto_documents_bind_complete_intervals_and_zero_floor() {
+        let plan = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
+            125,
+        )
+        .unwrap();
+        let documents = WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            cmi(),
+            None,
+            cmi(),
+            WellearnAtomicDurationCompletionReceipts::new(false, vec![false, true], None, false),
+        )
+        .unwrap();
+        assert!(documents.after_duration().is_none());
+        assert_eq!(documents.receipts().heartbeat_acceptances().len(), 2);
+
+        let zero = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
+            0,
+        )
+        .unwrap();
+        WellearnAtomicDurationCompletionDocuments::try_new(
+            zero,
+            cmi(),
+            None,
+            cmi(),
+            WellearnAtomicDurationCompletionReceipts::new(true, Vec::new(), None, true),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn documents_reject_impossible_current_lifecycles() {
+        let plan = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100,
+            3,
+        )
+        .unwrap();
+        for (after_duration, receipts) in [
+            (
+                None,
+                WellearnAtomicDurationCompletionReceipts::new(
+                    true,
+                    vec![true, true, true],
+                    Some(true),
+                    true,
+                ),
+            ),
+            (
+                Some(cmi()),
+                WellearnAtomicDurationCompletionReceipts::new(
+                    false,
+                    vec![true, true, true],
+                    Some(true),
+                    true,
+                ),
+            ),
+            (
+                Some(cmi()),
+                WellearnAtomicDurationCompletionReceipts::new(
+                    true,
+                    vec![true, false, true],
+                    Some(true),
+                    true,
+                ),
+            ),
+            (
+                Some(cmi()),
+                WellearnAtomicDurationCompletionReceipts::new(
+                    true,
+                    vec![true, true],
+                    Some(true),
+                    true,
+                ),
+            ),
+            (
+                Some(cmi()),
+                WellearnAtomicDurationCompletionReceipts::new(
+                    true,
+                    vec![true, true, true],
+                    None,
+                    true,
+                ),
+            ),
+        ] {
+            assert!(
+                WellearnAtomicDurationCompletionDocuments::try_new(
+                    plan,
+                    cmi(),
+                    after_duration,
+                    cmi(),
+                    receipts,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn documents_reject_impossible_auto_lifecycles() {
+        let plan = WellearnAtomicDurationCompletionPlan::try_new(
+            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
+            120,
+        )
+        .unwrap();
+        for (after_duration, receipts) in [
+            (
+                Some(cmi()),
+                WellearnAtomicDurationCompletionReceipts::new(true, vec![true, true], None, true),
+            ),
+            (
+                None,
+                WellearnAtomicDurationCompletionReceipts::new(true, vec![true], None, true),
+            ),
+            (
+                None,
+                WellearnAtomicDurationCompletionReceipts::new(
+                    true,
+                    vec![true, true],
+                    Some(true),
+                    true,
+                ),
+            ),
+        ] {
+            assert!(
+                WellearnAtomicDurationCompletionDocuments::try_new(
+                    plan,
+                    cmi(),
+                    after_duration,
+                    cmi(),
+                    receipts,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    fn cmi() -> WellearnCmiDocument {
+        WellearnCmiDocument::try_new("{}".to_owned()).unwrap()
     }
 }

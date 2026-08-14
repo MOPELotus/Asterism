@@ -201,6 +201,14 @@ only structural field names, response codes and bounded placeholder shapes.
   reject restored profile/cadence/protocol/score/CMI/write-family drift. These
   are pure plan tests and do not claim persistence, scheduling or mutation
   authority.
+- Atomic combined-document tests keep CMI evidence separate from ordered
+  mutation receipts. Current-donor fixtures require post-duration CMI, an
+  accepted start, one set/save slot and either every keep or one terminal
+  rejection; Auto fixtures require exactly one keep per full minute, no
+  post-duration/set slot and accept an empty zero-target keep list. Explicit
+  `false` receipts remain valid diagnostics, while missing, extra or
+  post-rejection mutations fail before CMI parsing. No execution entry is
+  fixture-claimed by these value tests.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.

@@ -432,6 +432,19 @@ a valid singleton `DurationReport` plan. The value provides no persistence,
 scheduling or mutation authority by itself; Core must carry it with the exact
 selected capabilities and durable attempt binding.
 
+The future atomic transport must return one independent combined evidence
+shape rather than concatenate singleton `DurationReport` and
+`ResourceExecution` documents. `WellearnAtomicDurationCompletionDocuments`
+contains the initial CMI, a current-donor-only post-duration CMI used to source
+fresh time fields, the final completion CMI, and separate ordered mutation
+receipts. Current Fanyuchang requires an accepted start, exactly the target
+number of accepted keeps or a single terminal rejected keep, one set receipt
+and one save receipt. Modular Auto records one keep receipt per complete
+60-second interval (none for target zero), permits donor-evidenced explicit
+negative receipts, omits both the post-duration CMI and set receipt, and has one
+completion-bearing save receipt. Receipt booleans never replace final CMI
+verification, and this returned shape still provides no execution authority.
+
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or
 submit individual answers. Their user-facing “exercise accuracy” choice is a

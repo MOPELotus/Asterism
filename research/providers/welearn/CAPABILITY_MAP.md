@@ -148,9 +148,16 @@ time, write, save-sequence and endpoint/Referer facts, and rejects every
 restored cross-donor mixture. Auto's evidenced equal-floor zero-second target
 is valid only in its atomic profile; current Fanyuchang still requires at least
 one client-counter second. This Provider plan neither persists nor schedules an
-operation. Current singleton mutation authority deliberately does not execute
-either exact combined flow until Core can persist, authorize and recover it
-without inserting a bare save or second start.
+operation. A separate `WellearnAtomicDurationCompletionDocuments` bundle keeps
+initial, optional post-duration and final CMI evidence apart from ordered
+start/heartbeat/set/save acceptance receipts. Its plan validator requires the
+current donor's post-duration evidence, accepted start and terminal first keep
+rejection, while Auto has exactly one receipt per complete 60-second interval,
+no post-duration/set slot and supports an empty zero-target keep list. Explicit
+negative receipts remain diagnostics; no bundle grants mutation authority.
+Current singleton mutation authority deliberately does not execute either
+exact combined flow until Core can persist, authorize and recover it without
+inserting a bare save or second start.
 
 One donor-level orchestration contract remains a shared Core gap. The Provider
 now freezes bounded Unit identity, all/explicit selection, explicit order,

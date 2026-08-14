@@ -27,7 +27,10 @@ mod stored_session;
 mod task_detail;
 mod task_inventory;
 
-pub use atomic_duration_completion::WellearnAtomicDurationCompletionPlan;
+pub use atomic_duration_completion::{
+    WellearnAtomicDurationCompletionDocuments, WellearnAtomicDurationCompletionPlan,
+    WellearnAtomicDurationCompletionReceipts,
+};
 pub use authentication::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCookieSession,
     WellearnLoginRedirect, WellearnPasswordCipher, WellearnSessionResolver,
