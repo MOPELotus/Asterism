@@ -117,6 +117,14 @@ provenance. Missing standard answers, reordered Questions and unknown options
 fail closed. No test advertises `AnswerResolve`, clicks `redoTest` or treats the
 synthetic iframe as live route evidence.
 
+Capability-level tests wrap the same bounded fixture with a fake fresh
+TaskDetail and result transport. They prove that the typed resolver emits three
+bound ProviderNative candidates only after exact completed
+course/class/knowledge/job rediscovery, and that pending Task state or a foreign
+Question page kind fails before the result transport is called. The development
+factory remains unregistered and no fixture represents external Tiku, searcher,
+answer-wrapper, model or random output as Provider-native evidence.
+
 The Exam fixtures cover the cover/start/full-preview attempt rotation and the
 separate CxKitty save/final acknowledgement shapes. They prove that each
 accepted answer save advances exactly one immutable-Draft cursor and replaces

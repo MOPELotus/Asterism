@@ -4,6 +4,7 @@
 //! Exam contracts plus unverified native transports. It deliberately does not
 //! claim live compatibility or a verified Provider.
 
+mod answer;
 mod authentication;
 mod chapter_inventory;
 mod course_inventory;
@@ -29,6 +30,9 @@ mod task_detail;
 mod task_inventory;
 mod task_progress;
 
+pub use answer::{
+    ChaoxingAnswerResolutionTransport, ChaoxingAnswerResolve, ChaoxingChapterWorkResultRequest,
+};
 pub use authentication::{
     ChaoxingAuthentication, ChaoxingAuthenticationTransport, NativeChaoxingAuthenticationTransport,
 };

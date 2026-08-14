@@ -302,6 +302,31 @@ closed. This pure parser neither advertises `AnswerResolve` nor invokes
 `redoTest`; both require the Main-owned BrowserBridge binding and a separately
 durable retake operation.
 
+The Provider now wraps that pure parser in an unregistered typed
+`ChaoxingAnswerResolve`. The capability validates the authenticated Provider
+context and a complete same-Task, consecutive `chapter_work_mobile` Question
+snapshot, refreshes TaskDetail, and accepts only an exact completed
+`resource:course:class:knowledge:job` whose normalized facts match every stable
+component. Its transport receives a credential-free
+`ChaoxingChapterWorkResultRequest` and must return one bounded, zeroizing result
+document; candidate parsing then repeats QID/order/type/current-option binding.
+No development metadata, factory entry or Task advertises `AnswerResolve` yet.
+The blocker is architectural rather than parser uncertainty: the standard is
+post-result evidence reached through a bound Browser iframe, whereas the normal
+Core resolution phase precedes submission. Main must provide the iframe read and
+an explicit lifecycle before registration. No pending independent Work, pending
+Chapter Work or Exam donor exposes a Chaoxing-native standard-answer endpoint.
+External Tiku/searcher/wrapper/model results and random/fuzzer guesses are never
+reported as `ProviderNative`.
+
+CxKitty's QR path is independently actionable after this checkpoint. One Web
+Cookie jar loads `passport2.chaoxing.com/login`, extracts bounded `uuid`/`enc`,
+activates `createqr?uuid=...&fid=-1`, presents the exact
+`toauthlogin?uuid=...&enc=...` payload, and polls `getauthstatus` with the same
+two values. A clean-room Provider command can own parsing and polling semantics,
+but shared challenge presentation and atomic owner-bound credential commit are
+required before the authentication method can be advertised.
+
 ## Native independent Work submission
 
 The primary donor names every answer field `answer{qid}` and every type field

@@ -29,6 +29,40 @@ pending.
 
 No donor source is vendored into Asterism by this audit.
 
+## AnswerResolution audit
+
+The pinned donors expose four distinct answer sources which must not be merged:
+
+- `Samueli924/chaoxing` calls a user-configured `Tiku.query_all`; absent or
+  unmatched results fall back to random answers, and its README explicitly says
+  correctness is not guaranteed.
+- CxKitty requires configured REST, JSON, SQLite or OpenAI searchers and can use
+  a random/fuzzer fallback. These are external-bank/model inputs, not Chaoxing
+  Provider HTTP evidence.
+- OCS requires non-empty answer-wrapper configuration or its browser-local cache.
+  The cache is populated from prior wrapper/results and is not a platform
+  standard-answer endpoint.
+- The agent skill consumes pre-computed answers and focuses on Browser filling,
+  persistence and verification. It does not define an answer source.
+
+The only reproducible Provider-native standard-answer evidence is the pinned
+`chaoxing-exam` Chapter result DOM: a completed
+`selectWorkQuestionYiPiYue` iframe exposes `正确答案` beside exact Questions.
+Asterism therefore implements a typed but unregistered Chapter-result
+`AnswerResolveCapability` which performs fresh TaskDetail rebinding, delegates
+one fully bound read to an abstract result transport, and then applies the
+existing strict QID/order/type/current-option parser. Pending Work/Exam Questions
+have no audited Chaoxing standard-answer protocol, so they remain a hard blocker
+rather than receiving external or guessed answers. Registration additionally
+waits for the BrowserBridge result transport and a Core lifecycle which can
+distinguish post-result evidence from pre-submission resolution.
+
+The same audit confirmed CxKitty's separate QR session sequence: read `uuid` and
+`enc` from the Web login page under one Cookie jar, activate `createqr`, display
+the `toauthlogin` URL, and poll `getauthstatus`. That is the next Provider-owned
+authentication candidate, but challenge presentation, owner-bound polling and
+atomic credential commit remain shared runtime responsibilities.
+
 ## Refresh log
 
 - 2026-08-14: refreshed all six recorded donor default `HEAD` revisions at the

@@ -16,6 +16,7 @@ source modules even when their assessments share field names or HTML shapes.
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, while completed Exams with a strictly bound preview entry add fresh result score/retake provenance without enabling retake execution |
 | TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live fixtures still pending |
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
+| AnswerResolve | `chaoxing-exam` completed Chapter result | Samueli Tiku, CxKitty searchers, OCS wrappers/cache, agent pre-computed answers | Reference | A typed but unregistered component rebinds fresh completed Chapter Work detail and consumes one abstract bound result document before producing strict ProviderNative candidates; all other donor sources are external/manual/random and no pending Work/Exam standard-answer protocol exists |
 | SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts. Exam has a separate value-free preview and durable one-operation-at-a-time native chain: donor signature and request digest are frozen before dispatch, each accepted answer save advances one cursor and rotates `enc`/timing state, and the final submit yields only a Receipt. No Exam mutation is routed through Work payloads or replayed after ambiguity |
 | SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has strict current verification / standard-answer parsers awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, confirms Questions solely from exact Draft ID/order/type/value result evidence, and projects the independent bounded result score as fixed thousandths |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream |
@@ -166,6 +167,15 @@ policy and remains independently guarded.
   options fail closed. `AnswerResolve` is not advertised and no `redoTest`
   mutation is implemented until the shared BrowserBridge supplies the fully
   bound fresh result document and Main wires the capability lifecycle.
+- `ChaoxingAnswerResolve` now implements the typed Provider API around that
+  parser without changing development metadata, the Provider factory or Task
+  capability advertisement. It first requires an authenticated context and a
+  fresh exact completed Chapter Work TaskDetail whose normalized
+  course/class/knowledge/job facts match the stable remote identity. Only then
+  may `ChaoxingAnswerResolutionTransport` return one bounded result document.
+  Pending tasks and foreign page kinds fail before transport. Registration is
+  blocked on the Main-owned BrowserBridge iframe read and on keeping this
+  post-result evidence distinct from pre-submission answer resolution.
 - Pending independent Exam rows with a structural `goTest` entry now advertise
   `QuestionInventory` and `QuestionParse`. The fresh read rebinds the exact
   course/class/exam identity and `enc_task`, obtains the donor cover, freezes a
