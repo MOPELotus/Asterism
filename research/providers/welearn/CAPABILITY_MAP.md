@@ -172,23 +172,24 @@ inventing a zero-time readback predicate that its save-only request does not
 write. Receipt booleans never affect this goal predicate. The verifier performs
 no I/O and still does not register or authorize atomic execution.
 
-The Provider now also defines a storage-agnostic durable handoff contract:
-stable `WellearnAtomicMutationKind` values plus bounded, hash-only issue and
-receipt values and `WellearnAtomicMutationSink`. Core execution/attempt/job/
-worker identity stays inside the future sink adapter; no Storage type crosses
-the Provider boundary. Issue success means a newly durable ordinal only, and a
-receipt carries the same ordinal, response digest and explicit acceptance.
-These values are validated and Debug-redacted, but the native transport does
-not consume the sink yet, so durable issue-before-send is not claimed.
+The native atomic transport now consumes Core's storage-agnostic generic
+`ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. WELearn
+keeps only stable `WellearnAtomicMutationKind` operation strings; the bounded,
+hash-only issue and receipt values are shared Provider API values, so no
+Storage type or duplicate Provider sink contract crosses the boundary. A
+missing sink fails before session resolution or any remote mutation. Every
+start/keep/set/save persists its issue before sending and its explicit receipt,
+including `accepted=false`, before the next ordinal. Duplicate/already-issued
+identity is owned by Core and fails closed; after start, issue, network,
+response, receipt and event errors become HumanRequired with no replay.
 
-A crate-private canonical digest boundary is ready for that wiring. Request
-identity domain-separates and length-prefixes kind, ordinal, the exact endpoint
-URL, exact Referer and every ordered form name/value; changing order or any
-component changes the digest. The API has no Cookie parameter and rejects a
-Cookie-named form field. Response identity uses a separate domain over the
-bounded native document's exact text. Inputs and aggregate form bytes are
-bounded and only the resulting hash can enter issue/receipt values. The helper
-is offline-tested but not yet called by native transport.
+The crate-private canonical digest boundary is wired to each native request.
+Request identity domain-separates and length-prefixes kind, ordinal, the actual
+endpoint URL, actual Referer and every ordered form name/value; changing order
+or any component changes the digest. The API has no Cookie parameter and
+rejects a Cookie-named form field. Response identity uses a separate domain
+over the bounded native document's exact text. Inputs and aggregate form bytes
+are bounded and only the resulting hash enters the shared issue/receipt values.
 
 One donor-level orchestration contract remains a shared Core gap. The Provider
 now freezes bounded Unit identity, all/explicit selection, explicit order,

@@ -113,7 +113,7 @@ fn invalid_digest_input() -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WellearnAtomicMutationIssue;
+    use asterism_provider_api::ExecutionMutationIssue;
 
     #[test]
     fn request_digest_is_stable_and_binds_every_ordered_component() {
@@ -232,7 +232,7 @@ mod tests {
         )
         .unwrap();
         let issue =
-            WellearnAtomicMutationIssue::try_new(1, WellearnAtomicMutationKind::Start, digest)
+            ExecutionMutationIssue::new(1, WellearnAtomicMutationKind::Start.as_str(), digest)
                 .unwrap();
         let debug = format!("{issue:?}");
         assert!(!debug.contains(endpoint.as_str()));

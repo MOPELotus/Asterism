@@ -1,5 +1,3 @@
-use std::fmt;
-
 use asterism_domain::RemoteState;
 use asterism_provider_api::{
     ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderResult,
@@ -13,8 +11,6 @@ use crate::{
     WellearnResourceExecutionPlan, WellearnResourceMutationProfile, parse_cmi_snapshot,
     runtime_settings::MAX_DURATION_REPORT_SECONDS,
 };
-
-const MAX_ATOMIC_MUTATION_ORDINAL: u32 = 100_000;
 
 /// Stable Provider operation type for one remote mutation inside the atomic
 /// `WELearn` lifecycle.
@@ -37,134 +33,6 @@ impl WellearnAtomicMutationKind {
             Self::Save => "welearn.atomic.save",
         }
     }
-}
-
-/// Redacted issue request that must become durable before one remote mutation
-/// is sent. Core-owned execution and worker bindings remain inside the sink.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub struct WellearnAtomicMutationIssue {
-    ordinal: u32,
-    kind: WellearnAtomicMutationKind,
-    request_digest: [u8; 32],
-}
-
-impl WellearnAtomicMutationIssue {
-    /// Builds one bounded, nonzero mutation issue.
-    ///
-    /// # Errors
-    ///
-    /// Returns an internal error for an invalid ordinal or zero digest.
-    pub fn try_new(
-        ordinal: u32,
-        kind: WellearnAtomicMutationKind,
-        request_digest: [u8; 32],
-    ) -> ProviderResult<Self> {
-        if !(1..=MAX_ATOMIC_MUTATION_ORDINAL).contains(&ordinal) || request_digest == [0; 32] {
-            return Err(invalid_atomic_mutation_record());
-        }
-        Ok(Self {
-            ordinal,
-            kind,
-            request_digest,
-        })
-    }
-
-    pub const fn ordinal(self) -> u32 {
-        self.ordinal
-    }
-
-    pub const fn kind(self) -> WellearnAtomicMutationKind {
-        self.kind
-    }
-
-    pub const fn request_digest(self) -> [u8; 32] {
-        self.request_digest
-    }
-}
-
-impl fmt::Debug for WellearnAtomicMutationIssue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WellearnAtomicMutationIssue")
-            .field("ordinal", &self.ordinal)
-            .field("kind", &self.kind)
-            .field("request_digest", &"[HASHED]")
-            .finish()
-    }
-}
-
-/// Redacted explicit response receipt that must become durable before the next
-/// mutation ordinal may be issued.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub struct WellearnAtomicMutationReceipt {
-    ordinal: u32,
-    response_digest: [u8; 32],
-    accepted: bool,
-}
-
-impl WellearnAtomicMutationReceipt {
-    /// Builds one bounded explicit response receipt.
-    ///
-    /// # Errors
-    ///
-    /// Returns an internal error for an invalid ordinal or zero digest.
-    pub fn try_new(
-        ordinal: u32,
-        response_digest: [u8; 32],
-        accepted: bool,
-    ) -> ProviderResult<Self> {
-        if !(1..=MAX_ATOMIC_MUTATION_ORDINAL).contains(&ordinal) || response_digest == [0; 32] {
-            return Err(invalid_atomic_mutation_record());
-        }
-        Ok(Self {
-            ordinal,
-            response_digest,
-            accepted,
-        })
-    }
-
-    pub const fn ordinal(self) -> u32 {
-        self.ordinal
-    }
-
-    pub const fn response_digest(self) -> [u8; 32] {
-        self.response_digest
-    }
-
-    pub const fn accepted(self) -> bool {
-        self.accepted
-    }
-}
-
-impl fmt::Debug for WellearnAtomicMutationReceipt {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WellearnAtomicMutationReceipt")
-            .field("ordinal", &self.ordinal)
-            .field("response_digest", &"[HASHED]")
-            .field("accepted", &self.accepted)
-            .finish()
-    }
-}
-
-fn invalid_atomic_mutation_record() -> ProviderError {
-    ProviderError::new(
-        ProviderErrorKind::Internal,
-        "WELearn atomic mutation issue or receipt is invalid",
-    )
-}
-
-/// Core-injected durable issue/receipt boundary for Provider-owned atomic
-/// mutations.
-///
-/// `issue` may return success only for a newly durable ordinal. A duplicate or
-/// previously issued ordinal must fail closed so a new native session cannot
-/// replay or skip an earlier mutation.
-#[async_trait]
-pub trait WellearnAtomicMutationSink: Send + Sync {
-    async fn issue(&self, issue: WellearnAtomicMutationIssue) -> ProviderResult<()>;
-
-    async fn record_receipt(&self, receipt: WellearnAtomicMutationReceipt) -> ProviderResult<()>;
 }
 
 /// Sanitized proof returned after exact fresh CMI verification of an atomic
@@ -602,59 +470,6 @@ mod tests {
                 .iter()
                 .all(|value| !value.is_empty() && value.len() <= 96)
         );
-    }
-
-    #[test]
-    fn mutation_issue_and_receipt_are_bounded_and_redacted() {
-        let issue =
-            WellearnAtomicMutationIssue::try_new(1, WellearnAtomicMutationKind::Start, [7; 32])
-                .unwrap();
-        assert_eq!(issue.ordinal(), 1);
-        assert_eq!(issue.kind(), WellearnAtomicMutationKind::Start);
-        assert_eq!(issue.request_digest(), [7; 32]);
-        let issue_debug = format!("{issue:?}");
-        assert!(issue_debug.contains("[HASHED]"));
-        assert!(!issue_debug.contains("7, 7"));
-
-        let receipt = WellearnAtomicMutationReceipt::try_new(1, [9; 32], false).unwrap();
-        assert_eq!(receipt.ordinal(), 1);
-        assert_eq!(receipt.response_digest(), [9; 32]);
-        assert!(!receipt.accepted());
-        let receipt_debug = format!("{receipt:?}");
-        assert!(receipt_debug.contains("[HASHED]"));
-        assert!(!receipt_debug.contains("9, 9"));
-        assert!(
-            WellearnAtomicMutationIssue::try_new(
-                MAX_ATOMIC_MUTATION_ORDINAL,
-                WellearnAtomicMutationKind::Save,
-                [1; 32],
-            )
-            .is_ok()
-        );
-        assert!(
-            WellearnAtomicMutationReceipt::try_new(MAX_ATOMIC_MUTATION_ORDINAL, [1; 32], true,)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn mutation_issue_and_receipt_reject_invalid_identity() {
-        for ordinal in [0, MAX_ATOMIC_MUTATION_ORDINAL + 1] {
-            assert!(
-                WellearnAtomicMutationIssue::try_new(
-                    ordinal,
-                    WellearnAtomicMutationKind::Save,
-                    [1; 32],
-                )
-                .is_err()
-            );
-            assert!(WellearnAtomicMutationReceipt::try_new(ordinal, [1; 32], true).is_err());
-        }
-        assert!(
-            WellearnAtomicMutationIssue::try_new(1, WellearnAtomicMutationKind::Start, [0; 32],)
-                .is_err()
-        );
-        assert!(WellearnAtomicMutationReceipt::try_new(1, [0; 32], true).is_err());
     }
 
     #[test]

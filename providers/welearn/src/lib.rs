@@ -7,10 +7,6 @@
 //! of live compatibility.
 
 mod atomic_duration_completion;
-#[allow(
-    dead_code,
-    reason = "canonical atomic digests are consumed when the pending durable sink is wired"
-)]
 mod atomic_mutation_digest;
 mod authentication;
 mod batch_plan;
@@ -35,8 +31,7 @@ mod task_inventory;
 pub use atomic_duration_completion::{
     WellearnAtomicDurationCompletionDocuments, WellearnAtomicDurationCompletionPlan,
     WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionTransport,
-    WellearnAtomicDurationCompletionVerification, WellearnAtomicMutationIssue,
-    WellearnAtomicMutationKind, WellearnAtomicMutationReceipt, WellearnAtomicMutationSink,
+    WellearnAtomicDurationCompletionVerification, WellearnAtomicMutationKind,
     verify_atomic_duration_completion,
 };
 pub use authentication::{

@@ -472,14 +472,14 @@ receipts remain diagnostics and cannot weaken or strengthen the fresh-CMI goal.
 
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 `WellearnAtomicMutationKind` has stable operation strings for start,
-counter/implicit keep, set and save. `WellearnAtomicMutationIssue` contains only
-the 1-based ordinal, kind and request digest; the matching receipt contains only
-ordinal, response digest and explicit acceptance. Ordinals are bounded through
-100,000, digests must be nonzero SHA-256-sized values, and Debug never renders
-their bytes. `WellearnAtomicMutationSink` owns asynchronous issue and receipt
-calls while Core's Execution/attempt/lease/worker facts stay hidden in its
-adapter. A duplicate issue must fail closed rather than return success to a new
-native session.
+counter/implicit keep, set and save. Core's generic `ExecutionMutationIssue`
+contains only the 1-based ordinal, operation string and request digest; its
+matching `ExecutionMutationReceipt` contains only ordinal, response digest and
+explicit acceptance. Ordinals and digests are validated by the shared values,
+and Debug never renders digest bytes. The native transport obtains Core's
+generic `ExecutionMutationSink` from the execution event sink, while Core's
+Execution/attempt/lease/worker facts stay hidden in its adapter. A missing or
+duplicate issue fails closed before its request can be sent.
 
 Canonical request identity is also Provider-owned. The v1 request hash uses a
 separate domain and length-prefixes the kind, ordinal, exact endpoint, exact
@@ -488,8 +488,10 @@ boundaries and reordered forms cannot alias. URLs, field count/names and total
 form bytes are bounded. Cookie has no input slot and a Cookie-named form field
 is rejected. The response hash uses another domain over the exact bounded
 native response text. Neither helper stores or renders those inputs. Digest
-generation and sink values are implemented; connecting issue-before-send and
-receipt-before-next-ordinal inside native transport remains the next checkpoint.
+generation is connected to every native atomic start/keep/set/save. Each issue
+is durable before send and each parsed response receipt, including explicit
+rejection, is durable before another ordinal. An ambiguous response records no
+receipt and every post-start failure is non-replayable HumanRequired.
 
 This behavior maps to `ResourceExecution`, rather than Question/Answer/
 Submission, because the audited implementations do not inventory questions or

@@ -1,10 +1,11 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, sync::Arc, time::Duration};
 
 use asterism_domain::{HumanRequiredReason, LogLevel};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
-    ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog,
-    ProviderProgress, ProviderResult, RemoteCourse,
+    ExecutionEventSink, ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSink,
+    ProviderContext, ProviderError, ProviderErrorKind, ProviderExecutionLog, ProviderProgress,
+    ProviderResult, RemoteCourse,
 };
 use async_trait::async_trait;
 use reqwest::{
@@ -21,6 +22,7 @@ use crate::{
     WellearnResourceExecutionDocuments, WellearnResourceExecutionTransport,
     WellearnScoLeavesDocument, WellearnSessionResolver, WellearnTaskInventoryDocuments,
     WellearnTaskInventoryTransport,
+    atomic_mutation_digest::{atomic_mutation_request_digest, atomic_mutation_response_digest},
     cmi::{
         UNINITIALIZED_CMI_MARKER, WellearnCmiSnapshot, parse_cmi_snapshot,
         parse_mutation_cmi_baseline,
@@ -330,65 +332,41 @@ impl NativeWellearnInventoryTransport {
         }
     }
 
-    async fn set_atomic_completion(
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "durable identity must stay adjacent to the exact atomic HTTP request"
+    )]
+    async fn send_durable_atomic_mutation(
         &self,
+        sink: &(dyn ExecutionMutationSink + Send + Sync),
+        ordinal: u32,
+        kind: crate::WellearnAtomicMutationKind,
+        mutation_started: bool,
         session: &crate::WellearnCookieSession,
         route: &crate::WellearnCourseContext,
         task_referer: &Url,
         plan: WellearnAtomicDurationCompletionPlan,
-        sco_id: &str,
-        cmi: &str,
+        phase: AtomicMutationPhase,
+        fields: &[(&str, &str)],
+        response_kind: MutationResponseKind,
     ) -> ProviderResult<bool> {
-        let response = self
-            .send_atomic_mutation_form(
-                session,
-                route,
-                task_referer,
-                plan,
-                AtomicMutationPhase::Completion,
-                &[
-                    ("action", "setscoinfo"),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                    ("uid", route.user_id()),
-                    ("data", cmi),
-                    ("isend", "False"),
-                ],
-            )
-            .await?;
-        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
-    }
-
-    async fn save_atomic_completion(
-        &self,
-        session: &crate::WellearnCookieSession,
-        route: &crate::WellearnCourseContext,
-        task_referer: &Url,
-        plan: WellearnAtomicDurationCompletionPlan,
-        sco_id: &str,
-    ) -> ProviderResult<bool> {
-        let score = plan.completion().score_percent.to_string();
-        let response = self
-            .send_atomic_mutation_form(
-                session,
-                route,
-                task_referer,
-                plan,
-                AtomicMutationPhase::Completion,
-                &[
-                    ("action", "savescoinfo160928"),
-                    ("cid", route.course_id()),
-                    ("scoid", sco_id),
-                    ("uid", route.user_id()),
-                    ("progress", "100"),
-                    ("crate", score.as_str()),
-                    ("status", "unknown"),
-                    ("cstatus", "completed"),
-                    ("trycount", "0"),
-                ],
-            )
-            .await?;
-        mutation_accepted(response.as_str(), MutationResponseKind::StrictSuccess)
+        let profile = atomic_http_profile(plan, phase);
+        let endpoint = sco_endpoint_url(route, profile.endpoint)
+            .map_err(|error| atomic_stage_error(error, mutation_started))?;
+        let referer = match profile.referer {
+            ScoRefererProfile::Simple => static_url(STUDY_COURSE_REFERER),
+            ScoRefererProfile::TaskSpecific => Ok(task_referer.clone()),
+        }
+        .map_err(|error| atomic_stage_error(error, mutation_started))?;
+        let request_digest =
+            atomic_mutation_request_digest(kind, ordinal, &endpoint, &referer, fields)
+                .map_err(|error| atomic_stage_error(error, mutation_started))?;
+        let issue = ExecutionMutationIssue::new(ordinal, kind.as_str(), request_digest)
+            .map_err(|error| atomic_stage_error(error, mutation_started))?;
+        execute_durable_atomic_mutation(sink, issue, mutation_started, response_kind, || {
+            self.send_atomic_mutation_form(session, route, task_referer, plan, phase, fields)
+        })
+        .await
     }
 }
 
@@ -485,6 +463,7 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<WellearnAtomicDurationCompletionDocuments> {
         plan.validate()?;
+        let sink = required_atomic_mutation_sink(events)?;
         let duration_profile = atomic_http_profile(plan, AtomicMutationPhase::Duration);
         let completion_profile = atomic_http_profile(plan, AtomicMutationPhase::Completion);
         let completion = plan.completion();
@@ -510,22 +489,25 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
         let task_referer = study_course_url(&route, sco_id)?;
         let start_payload = atomic_start_payload(plan);
         let start_fields = sco_start_fields(&route, sco_id, start_payload);
+        let mut ordinal = 1_u32;
 
         // The first mutation boundary begins before awaiting the start request.
         // Every failure below is non-replayable until final read-only verification.
-        let start = self
-            .send_atomic_mutation_form(
+        let start_accepted = self
+            .send_durable_atomic_mutation(
+                sink,
+                ordinal,
+                crate::WellearnAtomicMutationKind::Start,
+                false,
                 &session,
                 &route,
                 &task_referer,
                 plan,
                 AtomicMutationPhase::Duration,
                 &start_fields,
+                MutationResponseKind::StrictSuccess,
             )
-            .await
-            .map_err(atomic_post_mutation_error)?;
-        let start_accepted = mutation_accepted(start.as_str(), MutationResponseKind::StrictSuccess)
-            .map_err(atomic_post_mutation_error)?;
+            .await?;
         if plan.profile() == crate::WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100
             && !start_accepted
         {
@@ -534,6 +516,7 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
                 "WELearn current atomic duration start was not accepted",
             )));
         }
+        ordinal = next_atomic_ordinal(ordinal).map_err(atomic_post_mutation_error)?;
 
         let mut heartbeat_acceptances = Vec::new();
         let mut after_duration = None;
@@ -541,17 +524,34 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
         match plan.profile() {
             crate::WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
                 for elapsed in 0..plan.target_seconds() {
+                    let (session_time, total_time) = duration_counter_fields(elapsed);
+                    let fields = [
+                        ("action", "keepsco_with_getticket_with_updatecmitime"),
+                        ("uid", route.user_id()),
+                        ("cid", route.course_id()),
+                        ("scoid", sco_id),
+                        ("session_time", session_time.as_str()),
+                        ("total_time", total_time.as_str()),
+                        ("timelimitsec", "0"),
+                        ("endcaltime", "false"),
+                    ];
                     let accepted = self
-                        .keep_duration_counter(
+                        .send_durable_atomic_mutation(
+                            sink,
+                            ordinal,
+                            crate::WellearnAtomicMutationKind::CounterKeep,
+                            true,
                             &session,
                             &route,
-                            duration_profile.endpoint,
-                            sco_id,
-                            elapsed,
+                            &task_referer,
+                            plan,
+                            AtomicMutationPhase::Duration,
+                            &fields,
+                            MutationResponseKind::Heartbeat,
                         )
-                        .await
-                        .map_err(atomic_post_mutation_error)?;
+                        .await?;
                     heartbeat_acceptances.push(accepted);
+                    ordinal = next_atomic_ordinal(ordinal).map_err(atomic_post_mutation_error)?;
                     if !accepted {
                         break;
                     }
@@ -582,18 +582,31 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
                     Some(&fresh_snapshot),
                 )
                 .map_err(atomic_post_mutation_error)?;
+                let fields = [
+                    ("action", "setscoinfo"),
+                    ("cid", route.course_id()),
+                    ("scoid", sco_id),
+                    ("uid", route.user_id()),
+                    ("data", cmi.as_str()),
+                    ("isend", "False"),
+                ];
                 set_accepted = Some(
-                    self.set_atomic_completion(
+                    self.send_durable_atomic_mutation(
+                        sink,
+                        ordinal,
+                        crate::WellearnAtomicMutationKind::Set,
+                        true,
                         &session,
                         &route,
                         &task_referer,
                         plan,
-                        sco_id,
-                        cmi.as_str(),
+                        AtomicMutationPhase::Completion,
+                        &fields,
+                        MutationResponseKind::StrictSuccess,
                     )
-                    .await
-                    .map_err(atomic_post_mutation_error)?,
+                    .await?,
                 );
+                ordinal = next_atomic_ordinal(ordinal).map_err(atomic_post_mutation_error)?;
                 after_duration = Some(fresh_time);
             }
             crate::WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => {
@@ -604,11 +617,29 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
                 for completed in 1..=complete_intervals {
                     tokio::time::sleep(Duration::from_secs(plan.heartbeat_interval_seconds()))
                         .await;
+                    let fields = [
+                        ("action", "keepsco_with_getticket_with_updatecmitime"),
+                        ("uid", route.user_id()),
+                        ("cid", route.course_id()),
+                        ("scoid", sco_id),
+                    ];
                     let accepted = self
-                        .keep_duration_implicit(&session, &route, duration_profile.endpoint, sco_id)
-                        .await
-                        .map_err(atomic_post_mutation_error)?;
+                        .send_durable_atomic_mutation(
+                            sink,
+                            ordinal,
+                            crate::WellearnAtomicMutationKind::ImplicitKeep,
+                            true,
+                            &session,
+                            &route,
+                            &task_referer,
+                            plan,
+                            AtomicMutationPhase::Duration,
+                            &fields,
+                            MutationResponseKind::Heartbeat,
+                        )
+                        .await?;
                     heartbeat_acceptances.push(accepted);
+                    ordinal = next_atomic_ordinal(ordinal).map_err(atomic_post_mutation_error)?;
                     report_duration_heartbeat(
                         events,
                         completed.saturating_mul(plan.heartbeat_interval_seconds()),
@@ -626,10 +657,33 @@ impl WellearnAtomicDurationCompletionTransport for NativeWellearnInventoryTransp
             }
         }
 
+        let score = completion.score_percent.to_string();
+        let save_fields = [
+            ("action", "savescoinfo160928"),
+            ("cid", route.course_id()),
+            ("scoid", sco_id),
+            ("uid", route.user_id()),
+            ("progress", "100"),
+            ("crate", score.as_str()),
+            ("status", "unknown"),
+            ("cstatus", "completed"),
+            ("trycount", "0"),
+        ];
         let save_accepted = self
-            .save_atomic_completion(&session, &route, &task_referer, plan, sco_id)
-            .await
-            .map_err(atomic_post_mutation_error)?;
+            .send_durable_atomic_mutation(
+                sink,
+                ordinal,
+                crate::WellearnAtomicMutationKind::Save,
+                true,
+                &session,
+                &route,
+                &task_referer,
+                plan,
+                AtomicMutationPhase::Completion,
+                &save_fields,
+                MutationResponseKind::StrictSuccess,
+            )
+            .await?;
 
         let after_completion = match self
             .fetch_cmi_for_route_at_endpoint(&session, &route, sco_id, completion_profile.endpoint)
@@ -904,6 +958,64 @@ fn atomic_post_mutation_error(error: ProviderError) -> ProviderError {
         "WELearn atomic mutation began and was not replayed; fresh manual review is required",
         reason,
     )
+}
+
+fn atomic_stage_error(error: ProviderError, mutation_started: bool) -> ProviderError {
+    if mutation_started {
+        atomic_post_mutation_error(error)
+    } else {
+        error
+    }
+}
+
+fn next_atomic_ordinal(ordinal: u32) -> ProviderResult<u32> {
+    ordinal
+        .checked_add(1)
+        .filter(|next| *next <= 100_000)
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn atomic mutation ordinal exceeded the durable bound",
+            )
+        })
+}
+
+fn required_atomic_mutation_sink(
+    events: &(dyn ExecutionEventSink + Send + Sync),
+) -> ProviderResult<&(dyn ExecutionMutationSink + Send + Sync)> {
+    events.mutation_sink().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Internal,
+            "WELearn atomic transport requires a durable Core mutation sink",
+        )
+    })
+}
+
+async fn execute_durable_atomic_mutation<F, Fut>(
+    sink: &(dyn ExecutionMutationSink + Send + Sync),
+    issue: ExecutionMutationIssue,
+    mutation_started: bool,
+    response_kind: MutationResponseKind,
+    send: F,
+) -> ProviderResult<bool>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ProviderResult<WellearnInventoryDocument>>,
+{
+    sink.issue(&issue)
+        .await
+        .map_err(|error| atomic_stage_error(error, mutation_started))?;
+    let response = send().await.map_err(atomic_post_mutation_error)?;
+    let response_digest =
+        atomic_mutation_response_digest(&response).map_err(atomic_post_mutation_error)?;
+    let accepted =
+        mutation_accepted(response.as_str(), response_kind).map_err(atomic_post_mutation_error)?;
+    let receipt = ExecutionMutationReceipt::new(issue.ordinal(), response_digest, accepted)
+        .map_err(atomic_post_mutation_error)?;
+    sink.record_receipt(receipt)
+        .await
+        .map_err(atomic_post_mutation_error)?;
+    Ok(accepted)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1995,11 +2107,67 @@ fn static_route_error() -> ProviderError {
 #[cfg(test)]
 mod tests {
     use std::io::{Read as _, Write as _};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use asterism_networking::NetworkProfile;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct FixtureMutationSink {
+        events: Arc<Mutex<Vec<String>>>,
+        fail_issue: bool,
+        fail_receipt: bool,
+    }
+
+    #[async_trait]
+    impl ExecutionMutationSink for FixtureMutationSink {
+        async fn issue(&self, issue: &ExecutionMutationIssue) -> ProviderResult<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("issue:{}", issue.ordinal()));
+            if self.fail_issue {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "fixture issue failed",
+                ));
+            }
+            Ok(())
+        }
+
+        async fn record_receipt(&self, receipt: ExecutionMutationReceipt) -> ProviderResult<()> {
+            self.events.lock().unwrap().push(format!(
+                "receipt:{}:{}",
+                receipt.ordinal(),
+                receipt.accepted()
+            ));
+            if self.fail_receipt {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "fixture receipt failed",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoMutationEvents;
+
+    #[async_trait]
+    impl ExecutionEventSink for NoMutationEvents {
+        async fn report(&self, _update: ProviderProgress) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
+            Ok(())
+        }
+    }
 
     #[derive(Debug)]
     struct UnusedSessions;
@@ -2202,6 +2370,177 @@ mod tests {
         assert_eq!(duration_heartbeat_plan(61, 60), (1, 1));
     }
 
+    #[tokio::test]
+    async fn durable_mutations_issue_send_and_receipt_in_exact_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = FixtureMutationSink {
+            events: Arc::clone(&events),
+            fail_issue: false,
+            fail_receipt: false,
+        };
+        let first_events = Arc::clone(&events);
+        assert!(
+            execute_durable_atomic_mutation(
+                &sink,
+                fixture_issue(1),
+                false,
+                MutationResponseKind::StrictSuccess,
+                move || async move {
+                    first_events.lock().unwrap().push("send:1".to_owned());
+                    WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned())
+                },
+            )
+            .await
+            .unwrap()
+        );
+        let second_events = Arc::clone(&events);
+        assert!(
+            !execute_durable_atomic_mutation(
+                &sink,
+                fixture_issue(2),
+                true,
+                MutationResponseKind::Heartbeat,
+                move || async move {
+                    second_events.lock().unwrap().push("send:2".to_owned());
+                    WellearnInventoryDocument::try_new(r#"{"ret":2}"#.to_owned())
+                },
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "issue:1",
+                "send:1",
+                "receipt:1:true",
+                "issue:2",
+                "send:2",
+                "receipt:2:false",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_mutation_issue_errors_map_only_after_start() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = FixtureMutationSink {
+            events,
+            fail_issue: true,
+            fail_receipt: false,
+        };
+        let sends = Arc::new(AtomicUsize::new(0));
+        let start_sends = Arc::clone(&sends);
+        let start_error = execute_durable_atomic_mutation(
+            &sink,
+            fixture_issue(1),
+            false,
+            MutationResponseKind::StrictSuccess,
+            move || async move {
+                start_sends.fetch_add(1, Ordering::Relaxed);
+                WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(start_error.kind, ProviderErrorKind::Internal);
+
+        let later_sends = Arc::clone(&sends);
+        let later_error = execute_durable_atomic_mutation(
+            &sink,
+            fixture_issue(2),
+            true,
+            MutationResponseKind::Heartbeat,
+            move || async move {
+                later_sends.fetch_add(1, Ordering::Relaxed);
+                WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(later_error.kind, ProviderErrorKind::HumanRequired);
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn durable_mutation_ambiguity_never_records_a_receipt() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = FixtureMutationSink {
+            events: Arc::clone(&events),
+            fail_issue: false,
+            fail_receipt: false,
+        };
+        let send_events = Arc::clone(&events);
+        let error = execute_durable_atomic_mutation(
+            &sink,
+            fixture_issue(1),
+            false,
+            MutationResponseKind::StrictSuccess,
+            move || async move {
+                send_events.lock().unwrap().push("send:1".to_owned());
+                WellearnInventoryDocument::try_new("not-json".to_owned())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::HumanRequired);
+        assert_eq!(*events.lock().unwrap(), ["issue:1", "send:1"]);
+    }
+
+    #[tokio::test]
+    async fn receipt_persistence_failure_is_always_non_replayable() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = FixtureMutationSink {
+            events: Arc::clone(&events),
+            fail_issue: false,
+            fail_receipt: true,
+        };
+        let send_events = Arc::clone(&events);
+        let error = execute_durable_atomic_mutation(
+            &sink,
+            fixture_issue(1),
+            false,
+            MutationResponseKind::StrictSuccess,
+            move || async move {
+                send_events.lock().unwrap().push("send:1".to_owned());
+                WellearnInventoryDocument::try_new(r#"{"ret":0}"#.to_owned())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::HumanRequired);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["issue:1", "send:1", "receipt:1:true"]
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_transport_rejects_a_missing_sink_before_native_work() {
+        let network = ResolvedNetworkProfile::resolve(&NetworkProfile::default(), None, None)
+            .expect("built-in network profile");
+        let transport =
+            NativeWellearnInventoryTransport::try_new(&network, Arc::new(UnusedSessions)).unwrap();
+        let context = ProviderContext {
+            provider_id: asterism_domain::ProviderId::new("welearn").unwrap(),
+            account_id: asterism_domain::ProviderAccountId::new(),
+            credential_refs: Vec::new(),
+            correlation_id: "atomic-missing-sink".to_owned(),
+        };
+        let plan = WellearnAtomicDurationCompletionPlan::try_new(
+            crate::WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0,
+            0,
+        )
+        .unwrap();
+
+        let error = transport
+            .complete_duration_atomically(&context, "course", "sco", plan, &NoMutationEvents)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Internal);
+        assert!(error.message.contains("durable Core mutation sink"));
+    }
+
     #[test]
     fn atomic_http_profiles_switch_auto_referer_only_for_completion() {
         let current = WellearnAtomicDurationCompletionPlan::try_new(
@@ -2245,6 +2584,15 @@ mod tests {
             }
         );
         assert_eq!(atomic_start_payload(auto), ScoStartPayload::MinimalIdentity);
+    }
+
+    fn fixture_issue(ordinal: u32) -> ExecutionMutationIssue {
+        ExecutionMutationIssue::new(
+            ordinal,
+            "welearn.atomic.start",
+            [u8::try_from(ordinal).unwrap(); 32],
+        )
+        .unwrap()
     }
 
     #[test]

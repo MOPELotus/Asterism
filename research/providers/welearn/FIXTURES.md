@@ -223,17 +223,21 @@ only structural field names, response codes and bounded placeholder shapes.
   arbitrary observed time while requiring score 0 because its save-only final
   does not write a zero-time CMI payload. False mutation receipts remain
   diagnostic when the independent fresh readback proves the exact goal.
-- Atomic sink-value tests freeze the five operation type strings, accept only
-  ordinals 1 through 100,000 and nonzero 32-byte request/response digests, keep
-  explicit false receipts representable, and prove Debug renders digest bytes
-  only as `[HASHED]`. This fixture boundary imports no Storage/Core types and is
-  not yet connected to native request sending.
+- Shared atomic sink-value tests freeze the generic ordinal/digest bounds and
+  Debug redaction, while WELearn tests freeze its five operation type strings.
+  Native durable-boundary tests prove exact `issue → send → receipt` ordering
+  across successive ordinals, persist explicit false receipts before
+  continuing, reject a missing injected sink, send nothing after an issue
+  failure, record no receipt for an ambiguous response, and map receipt
+  persistence failure to non-replayable HumanRequired. No Storage type enters
+  the Provider fixture boundary.
 - Atomic digest tests prove deterministic domain-separated request/response
   hashes, bind kind/ordinal/endpoint/Referer and ordered form fields, distinguish
   ambiguous concatenation boundaries and reordered forms, reject Cookie form
   input, and show issue/document Debug cannot expose route, action, session or
   response text. Response hashing accepts only the bounded native document
-  wrapper. Native sink wiring remains intentionally absent at this checkpoint.
+  wrapper, and native requests use those hashes for the shared issue/receipt
+  boundary.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.
