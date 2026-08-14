@@ -33,6 +33,7 @@ mod native_http;
 mod oauth_authorization;
 mod oauth_exchange;
 mod provider;
+mod question_artifact;
 mod question_parser;
 mod response_decode;
 mod runtime_settings;
@@ -92,6 +93,10 @@ pub use native_http::NativeCidarenTransport;
 pub use provider::{
     build_development_provider, build_development_provider_native,
     build_development_provider_with_stored_session,
+};
+pub use question_artifact::{
+    CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_QUESTION_ARTIFACT_TYPE, CidarenQuestionArtifact,
+    EncodedCidarenQuestionArtifact,
 };
 pub use question_parser::{
     CidarenAttemptProgress, ParsedCidarenAttemptQuestion, ParsedCidarenAttemptStep,

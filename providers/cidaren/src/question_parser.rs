@@ -43,6 +43,7 @@ impl CidarenAttemptProgress {
 /// zeroizing route context used by the future durable attempt boundary.
 pub struct ParsedCidarenAttemptQuestion {
     topic_code: Zeroizing<String>,
+    remote_task_id: String,
     remote_id: String,
     kind: QuestionKind,
     stem: String,
@@ -166,15 +167,20 @@ pub fn parse_attempt_step(
 }
 
 impl ParsedCidarenAttemptQuestion {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used by the Provider-private lifecycle awaiting durable QuestionSession integration"
-        )
-    )]
     pub(crate) fn topic_code(&self) -> &str {
         self.topic_code.as_str()
+    }
+
+    pub(crate) fn remote_task_id(&self) -> &str {
+        &self.remote_task_id
+    }
+
+    pub(crate) fn remote_id(&self) -> &str {
+        &self.remote_id
+    }
+
+    pub(crate) const fn position(&self) -> u32 {
+        self.position
     }
 
     /// Produces a bounded scan-local reference with the one-time attempt token
@@ -245,6 +251,7 @@ impl fmt::Debug for ParsedCidarenAttemptQuestion {
 
 impl Drop for ParsedCidarenAttemptQuestion {
     fn drop(&mut self) {
+        self.remote_task_id.zeroize();
         self.remote_id.zeroize();
         self.stem.zeroize();
         zeroize_json(&mut self.metadata_sanitized);
@@ -306,6 +313,7 @@ pub fn parse_attempt_question(
         .inspect_err(|_| topic_code.zeroize())?;
     let parsed = ParsedCidarenAttemptQuestion {
         topic_code: Zeroizing::new(topic_code),
+        remote_task_id: remote_task_id.to_owned(),
         remote_id,
         kind,
         stem,

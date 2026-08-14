@@ -531,8 +531,16 @@ registry integration waits on Core's durable AttemptStart/QuestionSession
 contract so ambiguous starts are recovered/verified rather than replayed.
 
 Question discovery, answer resolution, submission construction, mutation and
-fresh verification remain separate capabilities. `topic_code` is ephemeral,
-redacted and zeroized; it never enters a persisted Question or immutable Draft.
+fresh verification remain separate capabilities. `topic_code` is redacted and
+zeroized; it never enters a persisted Question or immutable Draft. For durable
+recovery after a Question exists, the Provider encodes only the local/remote
+Task binding, remote Question ID, position, complete content fingerprint and
+one-time code in the versioned `cidaren.question-attempt.v1` artifact. Core
+checks its stable digest and stores the plaintext only through the encrypted
+QuestionSession continuation boundary; Provider decoding repeats every binding
+check before reuse. This post-start artifact does not make `StartAnswer`
+replayable: the non-idempotent mutation before the first Question still needs
+the separate Main-owned pre-question AttemptSession and ambiguity recovery.
 The donor's strings such as “task complete” are bounded receipt facts and do
 not replace an identity-bound post-mutation read. The Provider-private
 SubmissionVerify implementation recomputes the immutable preview, freshly

@@ -175,8 +175,11 @@ placeholder identities, result codes, status values and pagination shape.
 - Legacy response decoding is bounded and exact-version only; `jv=99` requires
   a fresh account-bound Capture context and zeroizes crypto JSON, key and
   plaintext buffers.
-- `topic_code` appears only in ephemeral zeroizing route/attempt state and is
-  absent from serialized Question fixtures and immutable Drafts.
+- `topic_code` is absent from serialized Question fixtures and immutable
+  Drafts. Its versioned Provider artifact is bounded, zeroizing and stable-
+  digest covered for Core's encrypted continuation store; decode tests reject
+  foreign local/remote Tasks, Questions, positions, fingerprints, unknown
+  fields, digest drift and oversized values.
 - Optional `topic_done_num/topic_total` are bounded integers, completed never
   exceeds total, missing legacy payloads remain valid, and the counters neither
   alter Question fingerprints nor drive the local mutation position.
