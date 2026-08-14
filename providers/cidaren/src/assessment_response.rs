@@ -141,7 +141,7 @@ fn parse_root(
             message_sanitized: message,
         });
     }
-    if code != 1 && code != 20_001 {
+    if code != 1 && !(code == 20_001 && object.get("data").is_some_and(json_truthy)) {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidResponse,
             "Cidaren assessment endpoint returned a non-success code",
@@ -174,7 +174,13 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
         .and_then(Value::as_i64)
         .ok_or_else(|| protocol_drift("Cidaren word-selection response has no numeric code"))?;
     let message = optional_message(object.get("msg"))?;
-    if code != 1 && code != 20_001 {
+    if message.as_deref() == Some("任务已完成！") || code == 20_004 {
+        return Ok(CidarenAssessmentResponse::Receipt {
+            kind: CidarenAssessmentReceiptKind::Completed,
+            message_sanitized: message,
+        });
+    }
+    if code != 1 && !(code == 20_001 && object.get("data").is_some_and(json_truthy)) {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidResponse,
             "Cidaren word-selection endpoint returned a non-success code",
@@ -184,6 +190,17 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
         kind: CidarenAssessmentReceiptKind::Accepted,
         message_sanitized: message,
     })
+}
+
+fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
 }
 
 fn optional_message(value: Option<&Value>) -> ProviderResult<Option<String>> {
@@ -291,7 +308,7 @@ mod tests {
     fn word_selection_accepts_only_its_acknowledgement_shape() {
         for document in [
             serde_json::json!({"code": 1, "msg": "synthetic accepted"}),
-            serde_json::json!({"code": 20001, "msg": "synthetic accepted", "data": {}}),
+            serde_json::json!({"code": 20001, "msg": "synthetic accepted", "data": {"accepted": true}}),
         ] {
             assert!(matches!(
                 parse_word_selection_response(&serde_json::to_vec(&document).unwrap()).unwrap(),
@@ -301,6 +318,25 @@ mod tests {
                 }
             ));
         }
+        for document in [
+            serde_json::json!({"code": 20001, "msg": "synthetic", "data": null}),
+            serde_json::json!({"code": 20001, "msg": "synthetic", "data": {}}),
+            serde_json::json!({"code": 20001, "msg": "synthetic", "data": []}),
+            serde_json::json!({"code": 20001, "msg": "synthetic", "data": ""}),
+            serde_json::json!({"code": 20001, "msg": "synthetic", "data": 0}),
+            serde_json::json!({"code": 20001, "msg": "synthetic", "data": false}),
+        ] {
+            assert!(
+                parse_word_selection_response(&serde_json::to_vec(&document).unwrap()).is_err()
+            );
+        }
+        assert!(matches!(
+            parse_word_selection_response(br#"{"code":20004,"msg":"synthetic terminal"}"#).unwrap(),
+            CidarenAssessmentResponse::Receipt {
+                kind: CidarenAssessmentReceiptKind::Completed,
+                ..
+            }
+        ));
         assert!(parse_word_selection_response(br#"{"code":0,"msg":"rejected"}"#).is_err());
         assert!(
             parse_assessment_response(br#"{"code":1,"msg":"synthetic accepted"}"#, None).is_err()

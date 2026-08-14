@@ -588,6 +588,17 @@ impl CidarenAttemptFlow {
                     self.phase = Some(CidarenAttemptPhase::ReadyToStart);
                     Ok(())
                 }
+                CidarenAssessmentResponse::Receipt {
+                    kind: CidarenAssessmentReceiptKind::Completed,
+                    message_sanitized,
+                } => {
+                    self.phase = Some(CidarenAttemptPhase::Receipt {
+                        kind: CidarenAssessmentReceiptKind::Completed,
+                        message_sanitized,
+                        received_at,
+                    });
+                    Ok(())
+                }
                 _ => Err(protocol_drift(
                     "Cidaren SubmitChoseWord returned an unexpected response",
                 )),
@@ -1283,6 +1294,44 @@ mod tests {
             .unwrap();
         flow.accept(outcome).unwrap();
         assert_eq!(flow.status(), CidarenAttemptFlowStatus::ReadyToStart);
+        assert_eq!(
+            *transport.operations.lock().unwrap(),
+            [CidarenAttemptOperation::SubmitChoseWord]
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_word_selection_receipt_does_not_issue_start() {
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([receipt(
+                CidarenAssessmentReceiptKind::Completed,
+            )])),
+            operations: Mutex::new(Vec::new()),
+        });
+        let context = context();
+        let (detail, plan) = word_selection_plan();
+        let mut flow = CidarenAttemptFlow::try_new(
+            &context,
+            TaskId::new(),
+            "class-task:2002",
+            &detail,
+            Some(plan),
+        )
+        .unwrap();
+        let outcome = flow
+            .issue_word_selection()
+            .unwrap()
+            .execute(transport.clone(), &context)
+            .await
+            .unwrap();
+        flow.accept(outcome).unwrap();
+
+        assert_eq!(
+            flow.status(),
+            CidarenAttemptFlowStatus::Receipt(CidarenAssessmentReceiptKind::Completed)
+        );
+        assert!(flow.completion_receipt().is_ok());
+        assert!(flow.issue_start().is_err());
         assert_eq!(
             *transport.operations.lock().unwrap(),
             [CidarenAttemptOperation::SubmitChoseWord]

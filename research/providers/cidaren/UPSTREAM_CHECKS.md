@@ -248,6 +248,14 @@ an observation and is discarded, matching both donors' executable use. Core
 still owns recipe/acquisition/account validation and the atomic SecretStore
 commit. The Provider suite reached 117 passing tests with strict clippy clean.
 
+The executable-call audit also rechecked the donor's shared response handler.
+It accepts `code=20001` only when `data` is Python-truthy and accepts terminal
+`code=20004`; the prior word-selection parser instead accepted empty `20001`
+and rejected `20004`. The parser and one-shot flow now reject empty/null/zero/
+false `20001` data, preserve terminal selection as a receipt and never issue
+`StartAnswer` afterward. This is receipt handling, not verification. The
+Provider suite reached 119 passing tests with strict clippy clean.
+
 ## Check procedure
 
 For the next checkpoint:

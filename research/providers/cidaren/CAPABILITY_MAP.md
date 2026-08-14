@@ -102,6 +102,9 @@ The current checkpoint (not a completion boundary):
 24. preserves the actual one-shot response observation time through outcome
     acceptance so delayed durable recovery cannot fabricate a later terminal
     receipt timestamp.
+25. mirrors the donor's compound response success condition for word
+    selection, rejecting empty `20001` payloads and retaining `20004` as a
+    terminal receipt that cannot trigger another Start mutation.
 
 The remaining work is durable shared QuestionSession/Attempt registration for
 QuestionInventory/QuestionParse and SubmissionExecute, shared execution for
