@@ -75,6 +75,11 @@ pub(crate) fn validate_fresh_execution_detail(
         .get("task")
         .and_then(Value::as_object)
         .ok_or_else(|| protocol_drift("WELearn fresh SCO detail has no normalized Task"))?;
+    if detail.task.normalized.as_object() != Some(normalized) {
+        return Err(protocol_drift(
+            "WELearn fresh SCO detail mixes different normalized Task snapshots",
+        ));
+    }
     if normalized.get("schema").and_then(Value::as_str) != Some("welearn.sco.v2")
         || normalized.get("course_id").and_then(Value::as_str) != Some(course_id)
         || normalized.get("sco_id").and_then(Value::as_str) != Some(sco_id)
@@ -364,6 +369,42 @@ mod tests {
 
         let missing = capability.task_detail(&context(), "sco:9999:301").await;
         assert_eq!(missing.unwrap_err().kind, ProviderErrorKind::RemoteChanged);
+    }
+
+    #[tokio::test]
+    async fn execution_rebind_rejects_mixed_detail_snapshots() {
+        let inventory = Arc::new(FixtureInventory::new());
+        let capability = WellearnTaskDetail::try_new(inventory.clone(), inventory).unwrap();
+        let detail = capability
+            .task_detail(&context(), "sco:1001:301")
+            .await
+            .unwrap();
+        let required = [TaskCapability::ResourceExecution];
+        validate_fresh_execution_detail(&detail, "sco:1001:301", "1001", "301", &required).unwrap();
+
+        let mut public_task_drift = detail.clone();
+        public_task_drift.task.normalized["unit_title"] = json!("Different public Unit");
+        let error = validate_fresh_execution_detail(
+            &public_task_drift,
+            "sco:1001:301",
+            "1001",
+            "301",
+            &required,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+
+        let mut nested_task_drift = detail;
+        nested_task_drift.normalized_detail["task"]["unit_title"] = json!("Different nested Unit");
+        let error = validate_fresh_execution_detail(
+            &nested_task_drift,
+            "sco:1001:301",
+            "1001",
+            "301",
+            &required,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
     }
 
     fn context() -> ProviderContext {
