@@ -152,7 +152,13 @@ hashes the bounded raw result document after transport-size validation. Core
 persists only these type strings and SHA-256 digests with the session sequence.
 The command/result JSON, token, `login_info`, optional `user_session` and
 validated `CidarenCaptureSnapshot` remain outside Domain storage and are
-zeroized/committed through the existing Capture credential path.
+zeroized/committed through the existing Capture credential path. The digest is
+an audit/identity check, not enough recovery authority by itself: after a
+process restart, Cidaren must still recover the exact issued recipe mode,
+frame, Task, nonce and sequence without trusting the helper's echoed result.
+The shared action boundary therefore needs an encrypted bounded command
+artifact, or an equivalent independently frozen set of reconstructible fields,
+persisted before dispatch.
 The high-level Provider adapter accepts the raw result only as an owned,
 bounded `CidarenBrowserResultDocument`. Its contents are unavailable through
 Debug or the public API, and the consumed transport buffer is zeroized after
