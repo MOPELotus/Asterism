@@ -995,6 +995,7 @@ mod tests {
             capability_plan: vec![TaskCapability::DurationReport],
             capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 
@@ -1030,6 +1031,7 @@ mod tests {
             capability_plan: vec![TaskCapability::DurationReport],
             capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 }

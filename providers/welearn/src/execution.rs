@@ -354,6 +354,7 @@ mod tests {
             runtime_settings: ProviderRuntimeSettingsSchema::empty()
                 .resolve(None, None, None)
                 .unwrap(),
+            provider_plan_artifact: None,
         }
     }
 }

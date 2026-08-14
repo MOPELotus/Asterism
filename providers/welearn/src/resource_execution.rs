@@ -1356,6 +1356,7 @@ mod tests {
             capability_plan: vec![TaskCapability::ResourceExecution],
             capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 
@@ -1387,6 +1388,7 @@ mod tests {
             capability_plan: vec![TaskCapability::ResourceExecution],
             capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 
@@ -1418,6 +1420,7 @@ mod tests {
             capability_plan: vec![TaskCapability::ResourceExecution],
             capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 
@@ -1461,6 +1464,7 @@ mod tests {
             capability_plan: vec![TaskCapability::ResourceExecution],
             capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 
@@ -1489,6 +1493,7 @@ mod tests {
         };
         ExecutionRequest {
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
             ..request()
         }
     }
@@ -1520,6 +1525,7 @@ mod tests {
             ],
             capability_step_position: 2,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 
@@ -1563,6 +1569,7 @@ mod tests {
             capability_plan: vec![TaskCapability::ResourceExecution],
             capability_step_position: 1,
             runtime_settings: schema.resolve(None, None, Some(&task)).unwrap(),
+            provider_plan_artifact: None,
         }
     }
 }
