@@ -55,9 +55,10 @@ pub use authentication::{
     classify_password_login_response,
 };
 pub use browser_batch::{
-    UaiCourseResidenceBatchPlan, UaiCourseResidenceBudgetShare, UaiCourseResidenceChildPlan,
-    UaiCourseResidenceMicro, UaiCourseResidenceRestartTarget, UaiCourseResidenceTask,
-    build_course_residence_batch_plan, build_course_residence_child_plan,
+    UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE, UaiCourseResidenceBatchPlan,
+    UaiCourseResidenceBudgetShare, UaiCourseResidenceChildPlan, UaiCourseResidenceMicro,
+    UaiCourseResidenceRestartTarget, UaiCourseResidenceTask, build_course_residence_batch_plan,
+    build_course_residence_child_plan,
 };
 pub use browser_bridge::{
     EncodedUaiBrowserCommandArtifact, UAI_BROWSER_COMMAND_TYPE, UAI_BROWSER_CURSOR_STATE_TYPE,

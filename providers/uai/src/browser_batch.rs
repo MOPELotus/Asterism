@@ -1,9 +1,9 @@
 use std::{collections::BTreeSet, fmt};
 
-use asterism_domain::TaskCapability;
+use asterism_domain::{ProviderId, TaskCapability};
 use asterism_provider_api::{
-    ProviderError, ProviderErrorKind, ProviderResult, RemoteCourse, RemoteTask,
-    ResolvedProviderRuntimeSettings,
+    ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderResult, RemoteCourse,
+    RemoteTask, ResolvedProviderRuntimeSettings,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,12 +11,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     course_inventory::{course_resource_id_from_remote, required_remote_component, required_text},
+    metadata::PROVIDER_ID,
     runtime_settings::{BROWSER_PLAY_VIDEO_KEY, BROWSER_RESIDENCE_SECONDS_KEY},
 };
 
 const UAI_COURSE_RESIDENCE_BATCH_VERSION: u32 = 1;
 const UAI_COURSE_RESIDENCE_CHILD_PLAN_VERSION: u16 = 1;
-const MAX_CHILD_PLAN_BYTES: usize = 1_048_576;
+const UAI_COURSE_RESIDENCE_ARTIFACT_VERSION: u16 = 1;
+const MAX_CHILD_PLAN_BYTES: usize = 8 * 1_024 * 1_024;
+pub const UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE: &str =
+    "uai.course-residence-child-plan.v1";
 const MIN_RESIDENCE_SECONDS: u64 = 60;
 const MAX_RESIDENCE_SECONDS: u64 = 28_800;
 const MAX_BATCH_MICROS: usize = 2_048;
@@ -90,6 +94,25 @@ struct UaiCourseResidenceChildPlanWire {
     batch_plan_digest: [u8; 32],
 }
 
+#[derive(Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UaiCourseResidenceArtifactPayload {
+    version: u16,
+    child_plan_version: u16,
+    provider_plan_version: u32,
+    course_remote_id: String,
+    course_publish_version: Option<u64>,
+    runtime_profile_digest: [u8; 32],
+    owner_remote_task_id: String,
+    ordered_task_count: u32,
+    ordered_tasks_digest: [u8; 32],
+    start_ordinal: u32,
+    start_micro_identity_digest: [u8; 32],
+    batch_membership_digest: [u8; 32],
+    batch_plan_digest: [u8; 32],
+    child_plan_digest: [u8; 32],
+}
+
 impl<'de> Deserialize<'de> for UaiCourseResidenceChildPlan {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -154,6 +177,75 @@ impl UaiCourseResidenceChildPlan {
 
     pub const fn runtime_profile_digest(&self) -> [u8; 32] {
         self.runtime_profile_digest
+    }
+
+    /// Projects the complete child into Core's bounded credential-free plan
+    /// artifact without dropping donor batch capacity.
+    ///
+    /// The compact payload retains hashes of both the complete ordered Task
+    /// sequence and canonical child JSON. Recovery never treats those hashes
+    /// as an executable plan; it must freshly rebuild the full child value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for child invariant/encoding drift or a typed
+    /// Core artifact error if the shared contract rejects the projection.
+    pub fn to_provider_execution_plan_artifact(
+        &self,
+    ) -> ProviderResult<ProviderExecutionPlanArtifact> {
+        let payload = UaiCourseResidenceArtifactPayload::from_child(self)?;
+        ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new(PROVIDER_ID).map_err(|_| invalid_child_plan())?,
+            UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE,
+            serde_json::to_value(payload).map_err(|_| invalid_child_plan())?,
+        )
+    }
+
+    /// Strictly restores a Core plan artifact through full fresh Provider
+    /// reconstruction and cursor-start rebinding.
+    ///
+    /// Provider/type validation happens before payload parsing. The payload's
+    /// hashes only select the expected child; fresh Course/Tasks/settings and
+    /// the explicit profile digest remain the sole reconstruction authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-response error for a foreign/type/schema artifact,
+    /// or `RemoteChanged` when fresh inputs do not reproduce every projected
+    /// field and digest.
+    pub fn from_provider_execution_plan_artifact_bound(
+        artifact: &ProviderExecutionPlanArtifact,
+        course: &RemoteCourse,
+        tasks: &[RemoteTask],
+        settings: &ResolvedProviderRuntimeSettings,
+        runtime_profile_digest: [u8; 32],
+    ) -> ProviderResult<(Self, UaiCourseResidenceBatchPlan)> {
+        if artifact.provider_id().as_str() != PROVIDER_ID
+            || artifact.artifact_type() != UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE
+        {
+            return Err(invalid_child_artifact());
+        }
+        let payload: UaiCourseResidenceArtifactPayload =
+            serde_json::from_value(artifact.payload_sanitized().clone())
+                .map_err(|_| invalid_child_artifact())?;
+        payload.validate()?;
+        if payload.runtime_profile_digest != runtime_profile_digest {
+            return Err(stale_child_plan());
+        }
+        let rebuilt = build_course_residence_child_plan(
+            course,
+            tasks,
+            settings,
+            runtime_profile_digest,
+            &payload.owner_remote_task_id,
+            payload.start_ordinal,
+        )?;
+        if UaiCourseResidenceArtifactPayload::from_child(&rebuilt)? != payload {
+            return Err(stale_child_plan());
+        }
+        let batch =
+            rebuilt.rebuild_batch_for_cursor(course, tasks, settings, runtime_profile_digest)?;
+        Ok((rebuilt, batch))
     }
 
     /// Encodes the fully revalidated value under a fixed Provider bound.
@@ -259,6 +351,57 @@ impl UaiCourseResidenceChildPlan {
         }
         if !task_ids.contains(self.owner_remote_task_id.as_str()) {
             return Err(invalid_child_plan());
+        }
+        Ok(())
+    }
+}
+
+impl UaiCourseResidenceArtifactPayload {
+    fn from_child(child: &UaiCourseResidenceChildPlan) -> ProviderResult<Self> {
+        child.validate()?;
+        let encoded = child.encode()?;
+        let mut child_digest = Sha256::new();
+        update_field(
+            &mut child_digest,
+            b"uai.course-residence.child-plan-artifact.v1",
+        );
+        update_field(&mut child_digest, &encoded);
+        Ok(Self {
+            version: UAI_COURSE_RESIDENCE_ARTIFACT_VERSION,
+            child_plan_version: child.version,
+            provider_plan_version: child.provider_plan_version,
+            course_remote_id: child.course_remote_id.clone(),
+            course_publish_version: child.course_publish_version,
+            runtime_profile_digest: child.runtime_profile_digest,
+            owner_remote_task_id: child.owner_remote_task_id.clone(),
+            ordered_task_count: u32::try_from(child.ordered_tasks.len())
+                .map_err(|_| invalid_child_plan())?,
+            ordered_tasks_digest: ordered_tasks_digest(&child.ordered_tasks),
+            start_ordinal: child.start_ordinal,
+            start_micro_identity_digest: child.start_micro_identity_digest,
+            batch_membership_digest: child.batch_membership_digest,
+            batch_plan_digest: child.batch_plan_digest,
+            child_plan_digest: child_digest.finalize().into(),
+        })
+    }
+
+    fn validate(&self) -> ProviderResult<()> {
+        if self.version != UAI_COURSE_RESIDENCE_ARTIFACT_VERSION
+            || self.child_plan_version != UAI_COURSE_RESIDENCE_CHILD_PLAN_VERSION
+            || self.provider_plan_version != UAI_COURSE_RESIDENCE_BATCH_VERSION
+            || !valid_text(&self.course_remote_id, MAX_TITLE_BYTES)
+            || !valid_text(&self.owner_remote_task_id, MAX_TITLE_BYTES)
+            || self.ordered_task_count == 0
+            || self.ordered_task_count as usize > MAX_BATCH_TASKS
+            || self.start_ordinal as usize >= MAX_BATCH_MICROS
+            || self.runtime_profile_digest == [0; 32]
+            || self.ordered_tasks_digest == [0; 32]
+            || self.start_micro_identity_digest == [0; 32]
+            || self.batch_membership_digest == [0; 32]
+            || self.batch_plan_digest == [0; 32]
+            || self.child_plan_digest == [0; 32]
+        {
+            return Err(invalid_child_artifact());
         }
         Ok(())
     }
@@ -984,6 +1127,17 @@ fn plan_digest(plan: &UaiCourseResidenceBatchPlan) -> [u8; 32] {
     digest.finalize().into()
 }
 
+fn ordered_tasks_digest(tasks: &[UaiCourseResidenceChildTask]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    update_field(&mut digest, b"uai.course-residence.ordered-tasks.v1");
+    digest.update((tasks.len() as u64).to_be_bytes());
+    for task in tasks {
+        update_field(&mut digest, task.remote_task_id.as_bytes());
+        update_field(&mut digest, task.fingerprint.as_bytes());
+    }
+    digest.finalize().into()
+}
+
 fn update_field(digest: &mut Sha256, value: &[u8]) {
     digest.update((value.len() as u64).to_be_bytes());
     digest.update(value);
@@ -1029,6 +1183,13 @@ fn invalid_child_plan() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
         "UAI Course residence child plan is invalid or internally inconsistent",
+    )
+}
+
+fn invalid_child_artifact() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::InvalidResponse,
+        "UAI Course residence execution plan artifact is foreign or invalid",
     )
 }
 
@@ -1351,6 +1512,193 @@ mod tests {
         assert!(
             UaiCourseResidenceChildPlan::decode(&vec![b' '; MAX_CHILD_PLAN_BYTES + 1]).is_err()
         );
+    }
+
+    #[test]
+    fn child_plan_artifact_round_trips_only_through_fresh_full_rebuild() {
+        let (course, tasks) = inventory();
+        let settings = browser_settings(1_200, true);
+        let profile_digest = [11; 32];
+        let child = build_course_residence_child_plan(
+            &course,
+            &tasks,
+            &settings,
+            profile_digest,
+            &tasks[1].remote_id,
+            1,
+        )
+        .unwrap();
+        let artifact = child.to_provider_execution_plan_artifact().unwrap();
+
+        assert_eq!(artifact.provider_id().as_str(), "uai");
+        assert_eq!(
+            artifact.artifact_type(),
+            UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE
+        );
+        assert_ne!(artifact.artifact_digest(), [0; 32]);
+        assert!(artifact.payload_sanitized().get("ordered_tasks").is_none());
+        assert!(
+            artifact
+                .payload_sanitized()
+                .get("ordered_tasks_digest")
+                .is_some()
+        );
+        assert!(
+            serde_json::to_vec(artifact.payload_sanitized())
+                .unwrap()
+                .len()
+                < 64 * 1_024
+        );
+        let debug = format!("{artifact:?}");
+        assert!(!debug.contains(&tasks[1].remote_id));
+        assert!(debug.contains("[HASHED]") && debug.contains("[REDACTED]"));
+        let (restored, batch) =
+            UaiCourseResidenceChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact,
+                &course,
+                &tasks,
+                &settings,
+                profile_digest,
+            )
+            .unwrap();
+        assert_eq!(restored, child);
+        assert_eq!(batch.plan_digest(), child.batch_plan_digest);
+
+        let mut changed = tasks.clone();
+        changed[0].fingerprint = format!("v1:{}", "b".repeat(64));
+        assert_eq!(
+            UaiCourseResidenceChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact,
+                &course,
+                &changed,
+                &settings,
+                profile_digest,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            UaiCourseResidenceChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact,
+                &course,
+                &tasks,
+                &browser_settings(1_260, true),
+                profile_digest,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            UaiCourseResidenceChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact, &course, &tasks, &settings, [13; 32],
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        let mut reordered = tasks.clone();
+        reordered.swap(1, 2);
+        assert!(
+            UaiCourseResidenceChildPlan::from_provider_execution_plan_artifact_bound(
+                &artifact,
+                &course,
+                &reordered,
+                &settings,
+                profile_digest,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn child_plan_artifact_rejects_foreign_type_provider_and_schema() {
+        let (course, tasks) = inventory();
+        let settings = browser_settings(1_200, false);
+        let child = build_course_residence_child_plan(
+            &course,
+            &tasks,
+            &settings,
+            [12; 32],
+            &tasks[0].remote_id,
+            0,
+        )
+        .unwrap();
+        let artifact = child.to_provider_execution_plan_artifact().unwrap();
+        let payload = artifact.payload_sanitized().clone();
+        let foreign_provider = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new("foreign").unwrap(),
+            "foreign.course-residence-child-plan.v1",
+            payload.clone(),
+        )
+        .unwrap();
+        let foreign_type = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new("uai").unwrap(),
+            "uai.foreign-plan.v1",
+            payload.clone(),
+        )
+        .unwrap();
+        for foreign in [&foreign_provider, &foreign_type] {
+            assert_eq!(
+                UaiCourseResidenceChildPlan::from_provider_execution_plan_artifact_bound(
+                    foreign, &course, &tasks, &settings, [12; 32],
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::InvalidResponse
+            );
+        }
+
+        let mut unknown = payload;
+        unknown["unknown"] = serde_json::json!(true);
+        let unknown = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new("uai").unwrap(),
+            UAI_COURSE_RESIDENCE_CHILD_PLAN_ARTIFACT_TYPE,
+            unknown,
+        )
+        .unwrap();
+        assert_eq!(
+            UaiCourseResidenceChildPlan::from_provider_execution_plan_artifact_bound(
+                &unknown, &course, &tasks, &settings, [12; 32],
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn compact_core_artifact_preserves_the_maximum_uai_batch_boundary() {
+        let resource = "r".repeat(128);
+        let unit = "u".repeat(128);
+        let ordered_tasks = (0..MAX_BATCH_TASKS)
+            .map(|ordinal| UaiCourseResidenceChildTask {
+                remote_task_id: format!("group:{resource}:{unit}:{ordinal:0width$}", width = 128),
+                fingerprint: format!("v1:{}", "a".repeat(64)),
+            })
+            .collect::<Vec<_>>();
+        let child = UaiCourseResidenceChildPlan {
+            version: UAI_COURSE_RESIDENCE_CHILD_PLAN_VERSION,
+            provider_plan_version: UAI_COURSE_RESIDENCE_BATCH_VERSION,
+            course_remote_id: format!("course-resource:{}", "c".repeat(128)),
+            course_publish_version: Some(1),
+            runtime_profile_digest: [1; 32],
+            owner_remote_task_id: ordered_tasks[0].remote_task_id.clone(),
+            ordered_tasks,
+            start_ordinal: 0,
+            start_micro_identity_digest: [2; 32],
+            batch_membership_digest: [3; 32],
+            batch_plan_digest: [4; 32],
+        };
+
+        let full_child = child.encode().unwrap();
+        assert_eq!(child.ordered_tasks.len(), MAX_BATCH_TASKS);
+        assert!(full_child.len() > 64 * 1_024);
+        assert!(full_child.len() <= MAX_CHILD_PLAN_BYTES);
+        let artifact = child.to_provider_execution_plan_artifact().unwrap();
+        let artifact_bytes = serde_json::to_vec(artifact.payload_sanitized()).unwrap();
+        assert!(artifact_bytes.len() < 64 * 1_024);
     }
 
     fn inventory() -> (RemoteCourse, Vec<RemoteTask>) {

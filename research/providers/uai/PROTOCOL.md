@@ -322,20 +322,36 @@ drift. A separate Provider-private child-plan value freezes child and batch
 plan versions, Course identity/publish version, an explicit caller-supplied
 runtime settings/profile digest, one owner Task inside the selected start
 Micro, the complete ordered Task identity/fingerprint sequence and all
-membership/start/plan digests. Its strict JSON is bounded to 1 MiB, rejects
+membership/start/plan digests. Its strict JSON is bounded to 8 MiB, rejects
 unknown fields, revalidates during deserialization and redacts identities and
 fingerprints from Debug. Recovery reconstructs the batch from fresh
 Course/Task/settings inputs and compares the complete typed value; foreign or
 reordered inventory, a changed Task fingerprint, stale settings or another
 profile digest fails closed before cursor construction. The Provider does not
-guess Core profile IDs or revisions. The Provider's version-4 accumulated
+guess Core profile IDs or revisions.
+
+Directly placing all 8192 bounded Task identities/fingerprints in Core's
+64 KiB `ProviderExecutionPlanArtifact` is not safe. UAI therefore projects the
+full child into namespaced type `uai.course-residence-child-plan.v1`: bounded
+credential-free JSON retains child/batch versions, Course/publish/profile and
+owner/start identities, Task count, all batch/start digests, a domain-separated
+ordered-Task digest and a separate digest of the canonical complete child
+JSON. The raw child remains Provider-owned and its 8 MiB bound covers the
+maximum donor batch. Artifact recovery first rejects a foreign Provider/type
+or unknown payload field, then rebuilds the complete child and batch from
+fresh Course/Tasks/settings/profile inputs and requires the entire compact
+projection to match. The hashes cannot independently authorize a cursor and
+no list is truncated to satisfy the shared size bound.
+
+The Provider's version-4 accumulated
 cursor can now move into a bounded, zeroizing `SecretValue` artifact with a
 stable SHA-256 digest. On
 recovery it rebinds the full batch membership and restart-sensitive plan
 digests, the exact serialized Browser residence plan and the exact next
 command, while strict decoding rejects unknown fields and malformed or
-oversized bytes. Core still needs to persist/index the credential-free child
-value and connect it to the shared executor before this plan is executable.
+oversized bytes. Core can persist the compact credential-free artifact, but
+still needs to attach UAI planning to scheduling and connect the shared browser
+executor before this plan is executable.
 
 The donor's `ipub` iframe side alone receives wildcard `UAI_CMD`
 `SCAN`/`CLICK`/`PING`; the `ucontent` top page consumes its menu/click/PONG
@@ -455,9 +471,9 @@ or any session/sequence/time mismatch before fresh Provider reads; it then
 performs the existing command-first, cursor-second fresh rebind. The sidecar is
 never dispatched to the helper. It stores the accumulated cursor, not the
 complete immutable Course batch. The bounded child-plan value now owns the
-frozen start/settings-profile/ordered-fingerprint authority; Core must persist
-that value and still supply complete fresh ordered Course/Task inventory plus
-the same resolved settings/profile digest to rebuild the exact
+frozen start/settings-profile/ordered-fingerprint authority; Core persists its
+compact artifact projection and must still supply complete fresh ordered
+Course/Task inventory plus the same resolved settings/profile digest to rebuild the exact
 `UaiCourseResidenceBatchPlan` before Provider recovery.
 
 The first cursor transition is now executable at the Provider boundary. A
