@@ -10,10 +10,11 @@ use asterism_domain::{
     ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
     LogLevel, OrchestrationState, PriceQuote, ProviderAccount, ProviderAccountId,
     ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
-    QuestionContentFingerprint, QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken,
-    ServiceTokenId, SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
-    SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
-    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
+    QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId, QuestionSession,
+    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
+    SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
+    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
+    UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     BrowserSessionSpec, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
@@ -151,6 +152,37 @@ pub trait QuestionSnapshotRepository: Send + Sync {
         owner_id: UserId,
         task_id: TaskId,
     ) -> Result<Option<QuestionSnapshot>, StorageError>;
+}
+
+/// Durable pre-Question start mutation selected by exact owner and Task.
+#[async_trait]
+pub trait QuestionReadAttemptRepository: Send + Sync {
+    async fn create_question_read_attempt(
+        &self,
+        attempt: &QuestionReadAttempt,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<(), StorageError>;
+
+    async fn find_owned_question_read_attempt(
+        &self,
+        owner_user_id: UserId,
+        attempt_id: QuestionReadAttemptId,
+    ) -> Result<Option<QuestionReadAttempt>, StorageError>;
+
+    async fn find_latest_owned_question_read_attempt(
+        &self,
+        owner_user_id: UserId,
+        task_id: TaskId,
+    ) -> Result<Option<QuestionReadAttempt>, StorageError>;
+
+    async fn update_question_read_attempt(
+        &self,
+        attempt: &QuestionReadAttempt,
+        expected_revision: u32,
+        actor: AuditActor,
+        correlation_id: &str,
+    ) -> Result<bool, StorageError>;
 }
 
 /// Result of atomically claiming the Question session selected by one

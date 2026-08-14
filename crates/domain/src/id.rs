@@ -61,6 +61,7 @@ entity_id!(TaskDiffId);
 entity_id!(TaskActionReceiptId);
 entity_id!(QuestionId);
 entity_id!(QuestionSnapshotId);
+entity_id!(QuestionReadAttemptId);
 entity_id!(QuestionSessionId);
 entity_id!(AnswerCandidateId);
 entity_id!(SubmissionDraftId);

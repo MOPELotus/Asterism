@@ -14,6 +14,7 @@ mod provider_account;
 mod provider_runtime_settings;
 mod question;
 mod question_artifact;
+mod question_read_attempt;
 mod question_session;
 mod recovery;
 mod repository;
@@ -38,6 +39,7 @@ pub use provider_account::SqliteProviderAccountRepository;
 pub use provider_runtime_settings::SqliteProviderRuntimeSettingsRepository;
 pub use question::SqliteQuestionSnapshotRepository;
 pub use question_artifact::SqliteQuestionSessionArtifactRepository;
+pub use question_read_attempt::SqliteQuestionReadAttemptRepository;
 pub use question_session::SqliteQuestionSessionRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
@@ -59,19 +61,20 @@ pub use repository::{
     PriorAnswerEvidence, ProviderAccountRepository, ProviderAccountRuntimeRepository,
     ProviderRuntimeSettingsRecord, ProviderRuntimeSettingsRepository,
     ProviderRuntimeSettingsTarget, ProviderRuntimeSettingsWriteOutcome,
-    ProviderRuntimeSettingsWriteRequest, QuestionSessionArtifactAttachRequest,
-    QuestionSessionArtifactRepository, QuestionSessionClaimOutcome, QuestionSessionContinuation,
-    QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
-    QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
-    QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionRepository,
-    QuestionSnapshot, QuestionSnapshotRepository, ResolvedQuestionSessionContinuation,
-    ScanScheduleRepository, SchedulerRepository, ServiceTokenPage, ServiceTokenQueryRepository,
-    SessionRepository, SubmissionDraftRepository, SubmissionReceiptPersistRequest,
-    SubmissionResultPersistRequest, SubmissionResultRepository, TaskLifecycleMutation,
-    TaskLifecycleMutationOutcome, TaskLifecycleReceipt, TaskLifecycleRepository, TaskPage,
-    TaskQueryRepository, TaskRepository, TaskRuntimeRepository, UserAdminCreate,
-    UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate, UserAdminUpdateOutcome,
-    UserProfilePage, UserRepository, VerificationRecoveryStartRequest,
+    ProviderRuntimeSettingsWriteRequest, QuestionReadAttemptRepository,
+    QuestionSessionArtifactAttachRequest, QuestionSessionArtifactRepository,
+    QuestionSessionClaimOutcome, QuestionSessionContinuation, QuestionSessionOperation,
+    QuestionSessionOperationAcceptRequest, QuestionSessionOperationFinishOutcome,
+    QuestionSessionOperationIssueOutcome, QuestionSessionOperationIssueRequest,
+    QuestionSessionOperationState, QuestionSessionRepository, QuestionSnapshot,
+    QuestionSnapshotRepository, ResolvedQuestionSessionContinuation, ScanScheduleRepository,
+    SchedulerRepository, ServiceTokenPage, ServiceTokenQueryRepository, SessionRepository,
+    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
+    SubmissionResultRepository, TaskLifecycleMutation, TaskLifecycleMutationOutcome,
+    TaskLifecycleReceipt, TaskLifecycleRepository, TaskPage, TaskQueryRepository, TaskRepository,
+    TaskRuntimeRepository, UserAdminCreate, UserAdminCreateOutcome, UserAdminRepository,
+    UserAdminUpdate, UserAdminUpdateOutcome, UserProfilePage, UserRepository,
+    VerificationRecoveryStartRequest,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

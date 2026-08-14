@@ -14,6 +14,7 @@ pub mod execution;
 pub mod external_oauth;
 pub mod id;
 pub mod question;
+pub mod question_read_attempt;
 pub mod question_session;
 pub mod submission;
 pub mod task;
@@ -64,6 +65,10 @@ pub use question::{
     AnswerCandidate, AnswerConfidence, AnswerConfidenceError, AnswerPair, AnswerSource,
     NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind,
     QuestionContentFingerprint, QuestionKind, QuestionOption, QuestionValidationError,
+};
+pub use question_read_attempt::{
+    MAX_QUESTION_READ_ATTEMPT_TTL_SECONDS, QuestionReadAttempt, QuestionReadAttemptError,
+    QuestionReadAttemptState,
 };
 pub use question_session::{
     MAX_QUESTION_SESSION_TTL_SECONDS, QuestionSession, QuestionSessionError, QuestionSessionState,
