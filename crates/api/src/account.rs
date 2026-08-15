@@ -1,4 +1,4 @@
-use std::{fmt, str::FromStr};
+use std::{fmt, str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AuthMethod, AuthSession, AuthSessionId, AuthState, ExternalOauthState, ProviderAccount,
@@ -21,8 +21,9 @@ use asterism_storage::{
     AccountHealthRepository, AuthSessionRepository, ProviderAccountRepository,
     ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRepository,
     ProviderRuntimeSettingsTarget, ScanScheduleRepository, SqliteAuthSessionRepository,
-    SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
-    SqliteProviderScanRepository, SqliteSchedulerRepository, StorageError,
+    SqliteProtocolObservationRepository, SqliteProviderAccountRepository,
+    SqliteProviderRuntimeSettingsRepository, SqliteProviderScanRepository,
+    SqliteSchedulerRepository, StorageError,
 };
 use axum::{
     Extension, Json,
@@ -483,8 +484,11 @@ pub(super) async fn scan_provider_account(
         .ok_or_else(|| ApiError::internal("request ID middleware did not provide an ID"))?;
     let report = ProviderScanService::new(
         state.providers,
-        SqliteProviderScanRepository::new(state.database),
+        SqliteProviderScanRepository::new(state.database.clone()),
     )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .scan_account(
         &account,
         correlation_id,

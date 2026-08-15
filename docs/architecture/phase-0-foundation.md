@@ -4709,3 +4709,12 @@ Coverage proves an unknown historical result shape is retained as
 SubmissionVerify/UnknownResultShape while the harvest watermark remains at its
 initial value and QuestionSnapshot, Candidate, private evidence, global corpus
 and import-ledger tables all remain empty.
+
+## Two-hundred-and-fifty-fifth Phase 0 slice
+
+The authenticated manual account-scan API now injects the same SQLite protocol
+observation repository as the scheduled scan worker. Both entry points use the
+same `ProviderScanService`, account/correlation occurrence identity, failure
+classification and all-or-nothing inventory ingestion boundary. This closes an
+API composition omission; it does not add another scan protocol or duplicate
+observation path.
