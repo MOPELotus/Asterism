@@ -287,13 +287,17 @@ fn parse_row(value: &Value) -> ProviderResult<ClassTaskRow> {
             ));
         }
     };
-    let over_status = match required_i64(object.get("over_status"), "over status")? {
+    let over_status_raw = required_i64(object.get("over_status"), "over status")?;
+    let over_status = match over_status_raw {
         1 => OverStatus::NotStarted,
         2 => OverStatus::Active,
         3 => OverStatus::Expired,
         _ => {
-            return Err(protocol_drift(
+            return Err(protocol_drift_with_observation(
                 "Cidaren class-task row contains an unknown over status",
+                ProtocolSurface::TaskInventory,
+                ProtocolObservationKind::FieldDrift,
+                json!({"over_status": over_status_raw}),
             ));
         }
     };
@@ -698,15 +702,18 @@ mod tests {
         assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
         assert_eq!(observation.kind, ProtocolObservationKind::UnknownTaskType);
         assert_eq!(observation.shape_sanitized, json!({"task_type": 9}));
-        assert!(
-            parse_task_inventory(
-                None,
-                &[invalid(
-                    &base.replace("\"over_status\":2", "\"over_status\":9")
-                )]
-            )
-            .is_err()
-        );
+        let error = parse_task_inventory(
+            None,
+            &[invalid(
+                &base.replace("\"over_status\":2", "\"over_status\":9"),
+            )],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(observation.kind, ProtocolObservationKind::FieldDrift);
+        assert_eq!(observation.shape_sanitized, json!({"over_status": 9}));
         assert!(
             parse_task_inventory(
                 None,

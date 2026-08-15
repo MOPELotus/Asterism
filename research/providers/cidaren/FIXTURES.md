@@ -213,10 +213,11 @@ placeholder identities, result codes, status values and pagination shape.
   a fresh account-bound Capture context and zeroizes crypto JSON, key and
   plaintext buffers.
 - Provider-local parser tests pin sanitized protocol observations for unknown
-  numeric `topic_mode`, unknown class-page `task_type` and unknown response
-  encoding version. The first two shapes contain only their parsed integer;
-  the encoding-version shape contains only ASCII classification and byte
-  length, never the original `jv` or response body.
+  numeric `topic_mode`, unknown class/ordinary-study `task_type`, unknown class
+  `over_status` and unknown response encoding version. The task/status/mode
+  shapes contain only their parsed integer; the encoding-version shape contains
+  only ASCII classification and byte length, never the original `jv`, response
+  row or body.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

@@ -428,7 +428,9 @@ class test task. Both are routine platform activities. `over_status == 1`
 means not started, `2` means active/not expired and `3` means expired according
 to the donor and maintainer issue response. Completion is independently
 observed through `progress == 100`; an active row with lower progress remains
-pending or in progress.
+pending or in progress. Any other class `task_type` or `over_status` fails the
+complete inventory and emits only its parsed integer as a bounded
+`TaskInventory` protocol observation; the surrounding row is never retained.
 
 `start_time` is an epoch-millisecond opening observation. Donor samples pair
 `over_time` with a duration-like millisecond value. Public issue 6 also records
@@ -461,7 +463,9 @@ every uninitialized unit. The native boundary first re-reads `Student/Main`,
 accepts only a safe selected Course identity, binds that exact value into the
 query and rejects a response or row that changes it. Class and study Course
 views are merged by `course_id`; conflicting titles fail closed. This also
-allows a selected Course with no class assignments to remain visible.
+allows a selected Course with no class assignments to remain visible. An
+ordinary-unit `task_type` other than the evidenced integer `3` likewise fails
+closed with only that integer attached as `TaskInventory / UnknownTaskType`.
 
 Pagination is all-or-nothing. Page one defines total rows; Asterism requires
 exactly pages `1..ceil(total/10)`, a consistent total, no duplicate page, no
@@ -539,7 +543,7 @@ establishes the `2_1254` family, but its
 textbook word payload is not retained as a fixture. Missing `jv=99` context is
 Authentication; malformed framing/tag/plaintext is InvalidResponse.
 
-Three high-value fail-closed branches attach Core protocol observations without
+Five high-value fail-closed branches attach Core protocol observations without
 retaining response or user data:
 
 - an unknown numeric `topic_mode` records only `{ "topic_mode": i64 }` on
@@ -548,6 +552,10 @@ retaining response or user data:
   length on `Other / EndpointVersionDrift`; the `jv` string itself is omitted;
 - an unknown numeric class-page `task_type` records only
   `{ "task_type": i64 }` on `TaskInventory / UnknownTaskType`.
+- an unknown numeric ordinary-study `task_type` records the same bounded shape
+  and classification without retaining its `StudyTask/List` row;
+- an unknown numeric class-page `over_status` records only
+  `{ "over_status": i64 }` on `TaskInventory / FieldDrift`.
 
 These observations decorate the existing `ProtocolDrift` failure only. They do
 not authorize guessing, retrying a mutation or accepting the new shape. No raw

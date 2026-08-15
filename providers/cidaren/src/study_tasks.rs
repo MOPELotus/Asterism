@@ -1,14 +1,19 @@
 use std::collections::BTreeMap;
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
+use asterism_domain::{
+    AssessmentClass, ProtocolObservationKind, ProtocolSurface, RemoteState, SourceType,
+    TaskCapability,
+};
 use asterism_provider_api::{
     ProviderError, ProviderErrorKind, ProviderResult, ProviderRouteContext, RemoteCourse,
     RemoteTask,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::inventory::CidarenStudyTaskDocument;
+use crate::{
+    inventory::CidarenStudyTaskDocument, protocol_observation::protocol_drift_with_observation,
+};
 
 const MAX_STUDY_TASKS: usize = 10_000;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 256;
@@ -147,9 +152,13 @@ fn parse_row(value: &Value, selected_course_id: &str) -> ProviderResult<StudyTas
     let object = value
         .as_object()
         .ok_or_else(|| protocol_drift("Cidaren study-task list contains a non-object row"))?;
-    if required_i64(object.get("task_type"), "task type")? != 3 {
-        return Err(protocol_drift(
+    let task_type = required_i64(object.get("task_type"), "task type")?;
+    if task_type != 3 {
+        return Err(protocol_drift_with_observation(
             "Cidaren study-task row contains an unknown task type",
+            ProtocolSurface::TaskInventory,
+            ProtocolObservationKind::UnknownTaskType,
+            json!({"task_type": task_type}),
         ));
     }
     let course_id = required_component(object.get("course_id"), "Course ID")?;
@@ -454,6 +463,16 @@ mod tests {
                 .and_then(|document| parse_study_task_inventory(None, &document))
                 .is_err()
         );
+
+        let unknown_task_type = raw.replacen("\"task_type\": 3", "\"task_type\": 9", 1);
+        let error = CidarenStudyTaskDocument::try_new("course-a", unknown_task_type)
+            .and_then(|document| parse_study_task_inventory(None, &document))
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(observation.kind, ProtocolObservationKind::UnknownTaskType);
+        assert_eq!(observation.shape_sanitized, json!({"task_type": 9}));
     }
 
     fn fixture_document() -> CidarenStudyTaskDocument {

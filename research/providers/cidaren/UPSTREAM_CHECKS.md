@@ -652,6 +652,26 @@ the observation boundary. Ordinary-study task-type drift, unknown
 `over_status` and generic malformed-field/result shapes remain unobserved for
 future bounded work rather than being inferred from error messages.
 
+### 2026-08-15 task-vocabulary observation follow-up
+
+The three recorded donor default branches and both tag sets were rechecked as
+`ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`,
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and historical
+`main@1409858800f3c4bd27577a08049bf1f8d17a069c`. Public release head remains
+`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`, the issue update ordering is
+still headed by the audited 112/113 cluster, and the imported OAuth handoff
+document hashes still match its manifest. No protocol or capability delta
+entered scope.
+
+Cidaren now completes the bounded Task-vocabulary observations deferred by
+the preceding checkpoint. An ordinary `StudyTask/List` row whose `task_type`
+is not the evidenced integer 3 fails the complete inventory with
+`TaskInventory / UnknownTaskType`; a class row whose `over_status` is outside
+1/2/3 fails with `TaskInventory / FieldDrift`. Each observation retains only
+the parsed integer. It never includes the surrounding row, Course/Task
+identity, title, score, progress, timing, response body or authentication
+material, and it does not normalize an unknown value into an executable Task.
+
 ## Check procedure
 
 For the next checkpoint:
