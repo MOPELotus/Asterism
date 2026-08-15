@@ -93,7 +93,8 @@ Question/attachment identities plus every redirected final route. Response
 fixtures move synthetic bytes into a zeroizing owner, require exact status 200,
 the original final route and a nonempty body within the frozen ceiling, bind
 the byte digest and length to the request digest, redact body/route/binding and
-reject partial status, empty, oversized or route-substituted responses.
+reject partial status, any nonzero reported redirect count, empty, oversized or
+route-substituted responses.
 Downloaded-subtitle fixtures reuse the evidenced VTT/SRT line normalizer,
 remove headers, cue ordinals, timestamps and rich-text markup, retain the exact
 response owner and bind the normalized secret-text digest to its response

@@ -785,8 +785,8 @@ UAI session; every external host or custom port is anonymous. Subtitle, audio an
 ceilings, permit no redirect and accept only the original canonical route as
 the reported final URL. After shared execution, the Provider moves the
 downloaded `SecretValue` into a zeroizing response owner only when status is
-exactly 200, the reported final URL still equals that canonical route and the
-actual body is nonempty and within the plan ceiling. Its response digest hashes
+exactly 200, the executor reports zero redirects, the reported final URL still
+equals that canonical route and the actual body is nonempty and within the plan ceiling. Its response digest hashes
 the immutable request digest, exact body digest and byte length, preventing a
 valid download for another attachment from being substituted downstream.
 Response MIME or file-signature inference is intentionally absent because the

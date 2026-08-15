@@ -975,17 +975,23 @@ impl UaiMediaFetchPlan {
     ///
     /// # Errors
     ///
-    /// Rejects a non-200 response, changed final route, empty body or payload
-    /// exceeding the request's frozen response ceiling.
+    /// Rejects a non-200 response, any observed redirect, changed final route,
+    /// empty body or payload exceeding the request's frozen response ceiling.
     pub fn accept_response(
         self,
         status: u16,
         final_url: &str,
+        redirect_count: u32,
         body: SecretValue,
     ) -> ProviderResult<UaiMediaFetchResponse> {
         if status != 200 {
             return Err(invalid_response(
                 "UAI media fetch did not return an exact successful response",
+            ));
+        }
+        if redirect_count != 0 {
+            return Err(protocol_drift(
+                "UAI media fetch response followed a forbidden redirect",
             ));
         }
         self.validate_final_url(final_url)?;
@@ -1676,7 +1682,7 @@ mod tests {
                     vec![b'a' + u8::try_from(index).unwrap()]
                 };
                 request
-                    .accept_response(200, &url, SecretValue::new(body))
+                    .accept_response(200, &url, 0, SecretValue::new(body))
                     .unwrap()
             })
             .collect()
@@ -2087,7 +2093,7 @@ mod tests {
                 let request = artifact.prepare_media_fetch("9001", &first).unwrap();
                 let url = request.expose_url().to_owned();
                 request
-                    .accept_response(200, &url, SecretValue::new(vec![b'a']))
+                    .accept_response(200, &url, 0, SecretValue::new(vec![b'a']))
                     .unwrap()
             })
             .collect();
@@ -2118,7 +2124,7 @@ mod tests {
         let request_digest = plan.request_digest();
         let url = plan.expose_url().to_owned();
         let response = plan
-            .accept_response(200, &url, SecretValue::new(b"synthetic audio".to_vec()))
+            .accept_response(200, &url, 0, SecretValue::new(b"synthetic audio".to_vec()))
             .unwrap();
 
         assert_eq!(response.plan().request_digest(), request_digest);
@@ -2134,12 +2140,12 @@ mod tests {
         let duplicate = artifact
             .prepare_media_fetch("9001", &audio_id)
             .unwrap()
-            .accept_response(200, &url, SecretValue::new(b"synthetic audio".to_vec()))
+            .accept_response(200, &url, 0, SecretValue::new(b"synthetic audio".to_vec()))
             .unwrap();
         let changed = artifact
             .prepare_media_fetch("9001", &audio_id)
             .unwrap()
-            .accept_response(200, &url, SecretValue::new(b"different audio".to_vec()))
+            .accept_response(200, &url, 0, SecretValue::new(b"different audio".to_vec()))
             .unwrap();
         assert_eq!(response.response_digest(), duplicate.response_digest());
         assert_ne!(response.response_digest(), changed.response_digest());
@@ -2170,7 +2176,14 @@ mod tests {
             artifact
                 .prepare_media_fetch("9001", &audio_id)
                 .unwrap()
-                .accept_response(206, &audio_url, SecretValue::new(vec![1]))
+                .accept_response(206, &audio_url, 0, SecretValue::new(vec![1]))
+                .is_err()
+        );
+        assert!(
+            artifact
+                .prepare_media_fetch("9001", &audio_id)
+                .unwrap()
+                .accept_response(200, &audio_url, 1, SecretValue::new(vec![1]))
                 .is_err()
         );
         assert!(
@@ -2180,6 +2193,7 @@ mod tests {
                 .accept_response(
                     200,
                     "https://cdn.example.edu/listening.mp3",
+                    0,
                     SecretValue::new(vec![1]),
                 )
                 .is_err()
@@ -2188,7 +2202,7 @@ mod tests {
             artifact
                 .prepare_media_fetch("9001", &audio_id)
                 .unwrap()
-                .accept_response(200, &audio_url, SecretValue::new(Vec::new()))
+                .accept_response(200, &audio_url, 0, SecretValue::new(Vec::new()))
                 .is_err()
         );
         assert!(
@@ -2198,6 +2212,7 @@ mod tests {
                 .accept_response(
                     200,
                     &subtitle_url,
+                    0,
                     SecretValue::new(vec![
                         b'x';
                         usize::try_from(MAX_SUBTITLE_RESPONSE_BYTES).unwrap()
@@ -2228,6 +2243,7 @@ mod tests {
             .accept_response(
                 200,
                 &url,
+                0,
                 SecretValue::new(
                     b"WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<p>Hello</p>\n\n2\n00:00:03.000 --> 00:00:04.000\nWorld"
                         .to_vec(),
@@ -2269,7 +2285,7 @@ mod tests {
             artifact
                 .prepare_media_fetch("9001", &audio_id)
                 .unwrap()
-                .accept_response(200, &audio_url, SecretValue::new(b"audio".to_vec()))
+                .accept_response(200, &audio_url, 0, SecretValue::new(b"audio".to_vec()))
                 .unwrap()
                 .parse_subtitle()
                 .is_err()
@@ -2283,7 +2299,7 @@ mod tests {
                 artifact
                     .prepare_media_fetch("9001", &subtitle_id)
                     .unwrap()
-                    .accept_response(200, &subtitle_url, body)
+                    .accept_response(200, &subtitle_url, 0, body)
                     .unwrap()
                     .parse_subtitle()
                     .is_err()
