@@ -10,6 +10,7 @@ branches, tags/releases and relevant protocol commits for incremental audit.
 | [`Duster-Cule/UnipusHelperPro`](https://github.com/Duster-Cule/UnipusHelperPro) | `590b4a58fe175240fe9a08fdd69948effcf4f193` | Independent Course/task progress and duration reads; encrypted answer, ordered single/multi-module submit builders and fresh user-module verification routes | Reference | MIT |
 | [`uxudjs/UnipusAIAutoPlayer`](https://github.com/uxudjs/UnipusAIAutoPlayer) | `cc6bdc86a13e7c80a54dff50819607a488ed952e` | Current Unit/Section/Micro DOM and iframe discovery, Tab/Task interaction, popup handling, page-residence distribution and optional video playback/keepalive | Reference | GPL-3.0 |
 | [`Zzj-klwgxdz/UnipusAI`](https://github.com/Zzj-klwgxdz/UnipusAI) | `525c7ecfc2b46daa9877c93ad2f6422cf5084937` | Current Rust progress-leaf `tab_type`, required/minimum-score/time-window/statistic strategy, text/video mark-seen, generic ordered child answer body, content-derived judge types, external LLM and media transcription | Reference | GPL-3.0 |
+| [Qiniu Kodo direct-upload API](https://developer.qiniu.com/kodo/1312/upload) | Page metadata updated `2025-12-16`; retrieved `2026-08-15` | The standard HTTP 200 response contains `hash` (Qiniu ETag) and `key`; upload-token policy may customize response content, so the donor-required exact key remains authoritative and a present bounded hash is optional stage evidence | Protocol documentation | Documentation only |
 
 The Apache backend donor is the primary current HTTP reference. The MIT donor
 is an independent route/schema cross-check and proves that completion,
@@ -407,3 +408,16 @@ does not port this guessed code-name mapping. Apache, MIT and AutoPlayer default
 revisions and complete tag sets remained unchanged. Their visible issue lists
 still contain no new capability-bearing issue beyond the previously audited
 surfaces.
+
+The upload stage-output design checkpoint on 2026-08-15 queried all four
+default refs and complete tag refs again. Apache remained `bef0d29155ce`, MIT
+remained `590b4a58fe17`, AutoPlayer remained `cc6bdc86a13e` and Rust remained
+`525c7ecfc2b`; no new donor commit or tag changed upload, submission, media or
+Browser behavior. The pinned Apache upload implementation was re-read at this
+checkpoint: it consumes only the exact `key` from the Qiniu response. Qiniu's
+current primary direct-upload documentation additionally defines the normal
+HTTP 200 JSON as `hash` plus `key`, with `hash` serving as the Qiniu ETag.
+Asterism may preserve a bounded present hash as encrypted stage evidence, but
+must not require it when the CMS-issued upload policy customizes the response,
+use it instead of the exact donor-required key, or promote the same mutation
+response to independent verification.

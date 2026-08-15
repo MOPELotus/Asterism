@@ -1239,6 +1239,68 @@ sequence must therefore remain Provider-private until the shared Artifact/Draft
 and encrypted stage-output capability can bind those bytes, the returned key
 and, for mixed Groups, the ordinary sub-Draft into one durable Attempt.
 
+### Minimal durable upload stage state
+
+The smallest shared contract that closes this gap has one immutable encrypted
+input plus Provider-owned stage states. Every record must be bound to the same
+`owner_user_id`, `provider_account_id`, Core `task_id`, `execution_id`,
+`execution_attempt_id`, `provider_id=uai`, Provider-plan artifact digest and
+sequence-plan digest. A stage record additionally binds its namespaced
+artifact type/version/digest, phase position, source or target mutation ordinal,
+operation type, predecessor-state digest, exact input-artifact digest and the
+matching issue request/receipt response digests where that stage has them.
+Core validates the relational owner/account/Task/Attempt chain before
+decrypting; UAI then validates the
+remote Task/fingerprint, Course/Unit/Group, upload position, intent fingerprint
+and artifact digest inside the zeroizing payload. Neither layer may authorize a
+stage from hashes alone.
+
+| State | Earliest durable point | Encrypted Provider payload | Successor authority |
+|---|---|---|---|
+| `uai.upload.input.v1` | Before sequence preparation | bounded filename, `audio/mpeg` and exact bytes, plus the immutable single-upload or compound-Draft binding | UAI reconstructs `UaiUploadArtifact`, recomputes its digest and freshly prepares the upload intent |
+| `uai.upload.grant.v1` | After an exact code-200 CMS document parses, before any Qiniu issue | zeroizing token and exact file key plus the complete `UaiUploadGrant` Task/artifact/intent binding and grant request/response digests | Only the exact input artifact may materialize the Qiniu request; a persisted grant is reused, never silently replaced |
+| `uai.upload.object.v1` | In the same transaction as the accepted Qiniu mutation receipt | exact returned key, optional bounded returned `hash`/Qiniu ETag, response digest and the complete `UaiUploadedArtifact` binding; the token is no longer copied forward | Only this accepted state, not the receipt hash alone, may prepare single or compound final submission |
+| `uai.upload.final-plan.v1` | After fresh Task/progress/account rebinding and before final-submit issue, atomically with that issue or already durable | exact single/compound semantic plan, Course publish version, uploaded key/artifact lineage, immutable Draft reference for compound form and exact final request digest | Recovery can verify the issued request identity but can never replay an issued request without a receipt |
+| `uai.upload.final-result.v1` | In the same transaction as a definite accepted final-submit receipt | accepted submission version, final request/response digests and final-plan digest | Receipt-versioned user-module readback may retry read-only; fresh TaskProgressRead remains a separate completion authority |
+
+The Qiniu primary documentation describes a normal 200 response containing
+both `hash` and `key`, while the audited donor consumes only `key` and an upload
+token may customize the response body. The key is therefore required and must
+equal the CMS grant. A present hash should be preserved only when it is a
+bounded safe string; absence stays compatible, and the hash is neither final
+submission input nor an independent object readback.
+
+Receipt plus stage-output persistence is one atomic transition. An accepted
+Qiniu receipt without `uai.upload.object.v1`, a final receipt without the exact
+submission version, or a stage output without its matching accepted receipt is
+an invalid durable state. Exact duplicate writes are idempotent; any changed
+digest, ordinal, predecessor, owner, account, Task, artifact or Attempt is a
+conflict. Earlier secret material may be crypto-erased only after its successor
+state is durable: in particular, the grant token can be destroyed after the
+Qiniu receipt and object state commit together, while immutable digest lineage
+remains.
+
+The recovery/retry boundary is deliberately narrower than the donor's local
+exception loop:
+
+| Point of failure | Automatic action permitted |
+|---|---|
+| Input validation, fresh reads or request construction before issue | Retry; no remote mutation authority was consumed |
+| CMS grant request before any Qiniu issue | Re-read/reissue only when no grant state is durable; it is prerequisite credential acquisition, not Task completion. Once persisted, reuse that exact state or fail the Attempt rather than overwrite it; no token TTL is guessed |
+| Qiniu request after durable issue but before an atomic receipt/output commit | Never replay. The result is ambiguous and no audited object-stat authority is available. A new grant is not assumed to produce a different key |
+| Definite rejected Qiniu response | Record the rejection; no successor output is created. A new Attempt may start only from an explicitly reusable input artifact and a fresh grant |
+| Final submit after durable issue but before an atomic receipt/result commit | Never replay. Fresh progress may diagnose completion but cannot recover the receipt version or prove exact answer persistence |
+| Definite final code `600001`/`600002` or definite authentication rejection | Record a rejected receipt and typed retry time before any later issue. The donor permits one delayed retry for the throttle codes; no sleep or replay occurs inside the Provider transport |
+| Accepted final receipt and durable result | Retry only the receipt-versioned readback and fresh progress reads; never repeat either mutation |
+
+The current Core sequence advance conditions still cannot express "stop on the
+first accepted occurrence, otherwise repeat a definite rejection up to the
+bounded donor maximum". `AcceptedMaximumReached` would force all occurrences
+even when the first submit succeeded. Until Main adds that acceptance-short-
+circuit condition plus durable retry scheduling, UAI must surface the typed
+retry and perform no automatic final-submit retry. This is separate from the
+encrypted stage-output contract above.
+
 The donor's `basic-scoop-content,oral-sentence` path is likewise atomic rather
 than a normal matching submit followed by an unrelated oral completion. The
 Provider-private preparation first rebuilds one immutable matching sub-Draft,
