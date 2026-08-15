@@ -148,6 +148,15 @@ exact result-route fact rather than a product assumption.
    lifecycle for result iframe harvesting, rendered matching/composite controls
    or browser challenge completion.
 
+Checkpoint closure on 2026-08-15: shared gap 1 is closed for Draft construction.
+Core freezes the complete denominator, resolved minimum and exact unanswered
+Question IDs. Chaoxing now consumes that partition for independent Work and
+Chapter Work by re-reading a complete editor, preserving every current control
+in DOM order, sending selected Draft values and rebuilding every unanswered
+value as empty. Partial mobile Exam remains a Provider continuation gap because
+its encrypted v2 state still advances a complete sequential Question cursor.
+The other shared gaps above remain independently tracked.
+
 ## Re-audit outcome
 
 No donor revision changed. The sweep recovered genuine omitted scope, most

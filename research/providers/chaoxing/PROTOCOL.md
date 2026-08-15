@@ -551,6 +551,24 @@ the immutable Draft. Save-only and final submit are distinct intents. A donor
 rollback which submits below threshold to unlock a prerequisite is a separate
 explicit execution policy, never an implicit coverage bypass.
 
+Core now freezes that coverage partition. For independent Work and Chapter Work,
+the Provider rebuilds one fresh complete form: `totalQuestionNum` and the parsed
+Question count must equal the immutable denominator, every selected QID/type must
+still exist, and the complete current DOM order is retained in `answerwqbid`.
+Selected values come only from the Draft; every unanswered `answer*` is emitted
+empty with its fresh numeric `answertype*`, so neither old editor state nor a
+random donor fallback can leak into the final submit. Independent Work result
+verification again requires the complete count and binds each selected QID/type
+to its original snapshot position before comparing the visible value. Unselected
+rendered controls are not promoted to answer evidence.
+
+The mobile Exam path is not silently generalized by this change. Its encrypted
+v2 artifact binds the complete Question-set digest and advances a sequential
+save cursor, while a partial Draft carries only selected Question bodies.
+Until a versioned artifact preserves every original position and validates a
+selected cursor without weakening the complete-set digest, partial Exam
+execution fails as typed `UnsupportedTask` before fresh inventory or mutation.
+
 Completed historical Chapter Work, independent Work and Exam rows may be
 enumerated read-only. A result fetch must remain bound to
 owner/account/course/task/attempt and must not call any attempt-creating route.

@@ -141,6 +141,7 @@ impl<'a> WorkSubmissionIdentity<'a> {
 /// Ephemeral, redacted answer plan rebuilt from one immutable submission draft.
 pub struct ChaoxingSubmissionPlan {
     answers: Vec<PlannedAnswer>,
+    total_question_count: usize,
 }
 
 struct PlannedAnswer {
@@ -200,7 +201,12 @@ impl ChaoxingSubmissionPlan {
                 value,
             });
         }
-        Ok(Self { answers })
+        let total_question_count = usize::try_from(draft.answer_coverage.total_question_count)
+            .map_err(|_| invalid_response("Chaoxing submission coverage count is invalid"))?;
+        Ok(Self {
+            answers,
+            total_question_count,
+        })
     }
 
     pub(crate) fn answers(&self) -> impl ExactSizeIterator<Item = (&str, &str, &str)> {
@@ -216,6 +222,14 @@ impl ChaoxingSubmissionPlan {
     pub(crate) const fn len(&self) -> usize {
         self.answers.len()
     }
+
+    pub(crate) const fn total_question_count(&self) -> usize {
+        self.total_question_count
+    }
+
+    pub(crate) const fn is_partial(&self) -> bool {
+        self.answers.len() != self.total_question_count
+    }
 }
 
 impl fmt::Debug for ChaoxingSubmissionPlan {
@@ -223,6 +237,7 @@ impl fmt::Debug for ChaoxingSubmissionPlan {
         formatter
             .debug_struct("ChaoxingSubmissionPlan")
             .field("answer_count", &self.answers.len())
+            .field("total_question_count", &self.total_question_count)
             .field("answers", &"[REDACTED]")
             .finish()
     }
@@ -275,16 +290,7 @@ impl ChaoxingSubmissionForm {
                 "Chaoxing Work editor contains multiple submission forms",
             ));
         }
-        let remote_types = parse_remote_question_types(form)?;
-        let planned_types = plan
-            .answers()
-            .map(|(id, type_code, _)| (id.to_owned(), type_code.to_owned()))
-            .collect::<BTreeMap<_, _>>();
-        if remote_types != planned_types {
-            return Err(remote_changed(
-                "Chaoxing Work Questions changed after draft construction",
-            ));
-        }
+        let remote_types = validate_remote_question_partition(form, plan)?;
 
         let mut values = BTreeMap::new();
         for input in form.select(&selector("input[name]")) {
@@ -311,7 +317,7 @@ impl ChaoxingSubmissionForm {
         let total = values
             .get("totalQuestionNum")
             .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value == plan.len())
+            .filter(|value| *value == plan.total_question_count())
             .ok_or_else(|| {
                 remote_changed("Chaoxing Work Question count changed before submission")
             })?;
@@ -327,20 +333,7 @@ impl ChaoxingSubmissionForm {
 
         let mut fields = values.into_iter().collect::<Vec<_>>();
         fields.push(("pyFlag".to_owned(), String::new()));
-        fields.push((
-            "answerwqbid".to_owned(),
-            format!(
-                "{},",
-                plan.answers()
-                    .map(|(id, _, _)| id)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-        ));
-        for (remote_id, type_code, value) in plan.answers() {
-            fields.push((format!("answer{remote_id}"), value.to_owned()));
-            fields.push((format!("answertype{remote_id}"), type_code.to_owned()));
-        }
+        append_submission_answer_fields(&mut fields, remote_types, plan);
         if fields.len() > MAX_FORM_FIELDS {
             return Err(invalid_response(
                 "Chaoxing Work submission form exceeds the field limit",
@@ -351,6 +344,62 @@ impl ChaoxingSubmissionForm {
 
     pub(crate) fn fields(&self) -> &[(String, String)] {
         &self.fields
+    }
+}
+
+fn validate_remote_question_partition(
+    form: ElementRef<'_>,
+    plan: &ChaoxingSubmissionPlan,
+) -> ProviderResult<Vec<RemoteQuestionType>> {
+    let remote_types = parse_remote_question_types(form)?;
+    let planned_types = plan
+        .answers()
+        .map(|(id, type_code, _)| (id.to_owned(), type_code.to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    if remote_types.len() != plan.total_question_count()
+        || planned_types.iter().any(|(remote_id, type_code)| {
+            remote_types
+                .iter()
+                .find(|remote| remote.remote_id == *remote_id)
+                .is_none_or(|remote| remote.type_code != *type_code)
+        })
+    {
+        return Err(remote_changed(
+            "Chaoxing Work Questions changed after draft construction",
+        ));
+    }
+    Ok(remote_types)
+}
+
+fn append_submission_answer_fields(
+    fields: &mut Vec<(String, String)>,
+    remote_types: Vec<RemoteQuestionType>,
+    plan: &ChaoxingSubmissionPlan,
+) {
+    fields.push((
+        "answerwqbid".to_owned(),
+        format!(
+            "{},",
+            remote_types
+                .iter()
+                .map(|remote| remote.remote_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    ));
+    let planned_answers = plan
+        .answers()
+        .map(|(remote_id, type_code, value)| (remote_id, (type_code, value)))
+        .collect::<BTreeMap<_, _>>();
+    for remote in remote_types {
+        let value = planned_answers
+            .get(remote.remote_id.as_str())
+            .map_or("", |(_, value)| *value);
+        fields.push((format!("answer{}", remote.remote_id), value.to_owned()));
+        fields.push((
+            format!("answertype{}", remote.remote_id),
+            remote.type_code.clone(),
+        ));
     }
 }
 
@@ -1326,59 +1375,16 @@ fn parse_view_snapshot(
     ) {
         return Err(unknown_work_view_shape(html));
     }
-    let mut remote_answers = BTreeMap::new();
-    for node in html.select(&selector(".questionLi")) {
-        let type_input = node
-            .select(&selector("input[id^='answertype']"))
-            .next()
-            .ok_or_else(|| protocol_drift("Chaoxing Work result Question has no identity"))?;
-        let remote_id = type_input
-            .value()
-            .attr("id")
-            .and_then(|value| value.strip_prefix("answertype"))
-            .filter(|value| valid_question_id(value))
-            .ok_or_else(|| protocol_drift("Chaoxing Work result Question identity is invalid"))?;
-        let type_code = type_input
-            .value()
-            .attr("value")
-            .filter(|value| matches!(*value, "0" | "1" | "3"))
-            .ok_or_else(|| protocol_drift("Chaoxing Work result Question type is invalid"))?;
-        let answer_node = node
-            .select(&selector(".mark_answer, .stem_answer, .my-answer"))
-            .find(|candidate| normalized_text(candidate.text()).contains("我的答案"))
-            .ok_or_else(|| protocol_drift("Chaoxing Work result has no server-visible answer"))?;
-        let answer = parse_visible_answer(&normalized_text(answer_node.text()), type_code)?;
-        if remote_answers
-            .insert(remote_id.to_owned(), (type_code.to_owned(), answer))
-            .is_some()
-        {
-            return Err(protocol_drift(
-                "Chaoxing Work result contains duplicate Question identity",
-            ));
-        }
-    }
-    if remote_answers.len() != plan.len() {
+    let Some(question_statuses) = parse_selected_work_result(html, plan, draft)? else {
         return inconclusive_snapshot(draft, RemoteState::Completed);
-    }
-    let mut matched = BTreeSet::new();
-    for (remote_id, type_code, expected) in plan.answers() {
-        let Some((actual_type, actual)) = remote_answers.get(remote_id) else {
-            return inconclusive_snapshot(draft, RemoteState::Completed);
-        };
-        if actual_type == type_code && actual == expected {
-            matched.insert(remote_id);
-        }
-    }
-    let confirmed = matched.len() == plan.len();
-    let status = if confirmed {
+    };
+    let status = if question_statuses
+        .values()
+        .all(|status| *status == SubmissionQuestionVerificationStatus::Confirmed)
+    {
         SubmissionVerificationStatus::Confirmed
     } else {
         SubmissionVerificationStatus::Rejected
-    };
-    let question_status = if confirmed {
-        SubmissionQuestionVerificationStatus::Confirmed
-    } else {
-        SubmissionQuestionVerificationStatus::Rejected
     };
     let snapshot = SubmissionVerificationSnapshot {
         status,
@@ -1390,12 +1396,92 @@ fn parse_view_snapshot(
             .iter()
             .map(|item| SubmissionQuestionVerification {
                 question_id: item.question.id,
-                status: question_status,
+                status: item
+                    .question
+                    .remote_question_id
+                    .as_deref()
+                    .and_then(|remote_id| question_statuses.get(remote_id))
+                    .copied()
+                    .unwrap_or(SubmissionQuestionVerificationStatus::Unverified),
             })
             .collect(),
         verified_at: Utc::now(),
     };
     validate_snapshot(snapshot)
+}
+
+fn parse_selected_work_result(
+    html: &Html,
+    plan: &ChaoxingSubmissionPlan,
+    draft: &SubmissionDraft,
+) -> ProviderResult<Option<BTreeMap<String, SubmissionQuestionVerificationStatus>>> {
+    let planned = plan
+        .answers()
+        .zip(&draft.items)
+        .map(|((remote_id, type_code, expected), item)| {
+            (remote_id, (type_code, expected, item.question.position))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut remote_ids = BTreeSet::new();
+    let mut question_statuses = BTreeMap::new();
+    let mut remote_count = 0_usize;
+    for (index, node) in html.select(&selector(".questionLi")).enumerate() {
+        remote_count = remote_count
+            .checked_add(1)
+            .ok_or_else(|| protocol_drift("Chaoxing Work result Question count is invalid"))?;
+        let Some(type_input) = unique_result_node(
+            node.select(&selector("input[id^='answertype']")),
+            "Chaoxing Work result contains duplicate Question identity fields",
+        )?
+        else {
+            return Ok(None);
+        };
+        let remote_id = type_input
+            .value()
+            .attr("id")
+            .and_then(|value| value.strip_prefix("answertype"))
+            .filter(|value| valid_question_id(value))
+            .ok_or_else(|| protocol_drift("Chaoxing Work result Question identity is invalid"))?;
+        let type_code = type_input
+            .value()
+            .attr("value")
+            .filter(|value| valid_remote_type_code(value))
+            .ok_or_else(|| protocol_drift("Chaoxing Work result Question type is malformed"))?;
+        if !remote_ids.insert(remote_id.to_owned()) {
+            return Err(protocol_drift(
+                "Chaoxing Work result contains duplicate Question identity",
+            ));
+        }
+        let Some((expected_type, expected, expected_position)) = planned.get(remote_id) else {
+            continue;
+        };
+        if type_code != *expected_type
+            || usize::try_from(*expected_position).ok() != index.checked_add(1)
+        {
+            return Ok(None);
+        }
+        let Some(answer_node) = unique_result_node(
+            node.select(&selector(".mark_answer, .stem_answer, .my-answer"))
+                .filter(|candidate| normalized_text(candidate.text()).contains("我的答案")),
+            "Chaoxing Work result contains duplicate visible answers",
+        )?
+        else {
+            return Ok(None);
+        };
+        let actual = parse_visible_answer(&normalized_text(answer_node.text()), type_code)?;
+        question_statuses.insert(
+            remote_id.to_owned(),
+            if actual == *expected {
+                SubmissionQuestionVerificationStatus::Confirmed
+            } else {
+                SubmissionQuestionVerificationStatus::Rejected
+            },
+        );
+    }
+    if remote_count != plan.total_question_count() || question_statuses.len() != plan.len() {
+        return Ok(None);
+    }
+    Ok(Some(question_statuses))
 }
 
 fn unknown_work_view_shape(html: &Html) -> ProviderError {
@@ -1474,8 +1560,21 @@ fn validate_snapshot(
     Ok(snapshot)
 }
 
-fn parse_remote_question_types(form: ElementRef<'_>) -> ProviderResult<BTreeMap<String, String>> {
-    let mut types = BTreeMap::new();
+struct RemoteQuestionType {
+    remote_id: String,
+    type_code: String,
+}
+
+impl Drop for RemoteQuestionType {
+    fn drop(&mut self) {
+        self.remote_id.zeroize();
+        self.type_code.zeroize();
+    }
+}
+
+fn parse_remote_question_types(form: ElementRef<'_>) -> ProviderResult<Vec<RemoteQuestionType>> {
+    let mut types = Vec::new();
+    let mut remote_ids = BTreeSet::new();
     for input in form.select(&selector("input[id^='answertype']")) {
         let remote_id = input
             .value()
@@ -1486,23 +1585,29 @@ fn parse_remote_question_types(form: ElementRef<'_>) -> ProviderResult<BTreeMap<
         let type_code = input
             .value()
             .attr("value")
-            .filter(|value| matches!(*value, "0" | "1" | "2" | "3" | "4"))
-            .ok_or_else(|| protocol_drift("Chaoxing Work editor Question type is unsupported"))?;
-        if types
-            .insert(remote_id.to_owned(), type_code.to_owned())
-            .is_some()
-        {
+            .filter(|value| valid_remote_type_code(value))
+            .ok_or_else(|| protocol_drift("Chaoxing Work editor Question type is malformed"))?;
+        if !remote_ids.insert(remote_id.to_owned()) {
             return Err(protocol_drift(
                 "Chaoxing Work editor contains duplicate Question identity",
             ));
         }
+        types.push(RemoteQuestionType {
+            remote_id: remote_id.to_owned(),
+            type_code: type_code.to_owned(),
+        });
     }
     if types.is_empty() {
-        return Err(protocol_drift(
-            "Chaoxing Work editor has no supported Questions",
-        ));
+        return Err(protocol_drift("Chaoxing Work editor has no Questions"));
     }
     Ok(types)
+}
+
+fn valid_remote_type_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 3
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
 }
 
 fn provider_type_code(kind: QuestionKind, metadata: &serde_json::Value) -> ProviderResult<&str> {
@@ -1776,10 +1881,14 @@ mod tests {
         include_str!("../../../fixtures/providers/chaoxing/questions/work-preview-mixed.html");
     const EDITOR: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/submission-editor.html");
+    const PARTIAL_EDITOR: &str =
+        include_str!("../../../fixtures/providers/chaoxing/work/submission-editor-partial.html");
     const PROMPT: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/submission-prompt.html");
     const VIEW: &str =
         include_str!("../../../fixtures/providers/chaoxing/work/submission-view.html");
+    const PARTIAL_VIEW: &str =
+        include_str!("../../../fixtures/providers/chaoxing/work/submission-view-partial.html");
     const CHAPTER_QUESTIONS: &str =
         include_str!("../../../fixtures/providers/chaoxing/questions/work-mobile-mixed.html");
     const CHAPTER_EDITOR: &str =
@@ -1821,6 +1930,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partial_editor_preserves_full_question_partition_without_stale_answers() {
+        let draft = partial_draft().await;
+        draft.validate().unwrap();
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        assert!(plan.is_partial());
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan.total_question_count(), 4);
+        let identity = WorkSubmissionIdentity::parse("work:100:200:work-1").unwrap();
+        let form = ChaoxingSubmissionForm::parse(PARTIAL_EDITOR, identity, &plan).unwrap();
+        let fields = form.fields().iter().cloned().collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            fields.get("answerwqbid").map(String::as_str),
+            Some("work-preview-q-1,work-preview-q-2,work-preview-q-3,work-preview-q-4,")
+        );
+        assert_eq!(
+            fields.get("answerwork-preview-q-1").map(String::as_str),
+            Some("B")
+        );
+        assert_eq!(
+            fields.get("answerwork-preview-q-2").map(String::as_str),
+            Some("AC")
+        );
+        for remote_id in ["work-preview-q-3", "work-preview-q-4"] {
+            assert_eq!(
+                fields
+                    .get(&format!("answer{remote_id}"))
+                    .map(String::as_str),
+                Some("")
+            );
+        }
+        assert_eq!(
+            fields.get("answertypework-preview-q-4").map(String::as_str),
+            Some("11")
+        );
+        assert!(!format!("{form:?}").contains("SAFE_PARTIAL_EPHEMERAL_TOKEN"));
+
+        let missing = PARTIAL_EDITOR.replace(
+            r#"<div class="questionLi">
+        <input id="answertypework-preview-q-4" value="11">
+        <input name="answerwork-preview-q-4" value="stale-answer">
+      </div>"#,
+            "",
+        );
+        assert_eq!(
+            ChaoxingSubmissionForm::parse(&missing, identity, &plan)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::RemoteChanged
+        );
+    }
+
+    #[tokio::test]
     async fn chapter_editor_builds_all_donor_answer_shapes_without_stale_values() {
         let draft = chapter_draft().await;
         let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
@@ -1845,6 +2007,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partial_chapter_editor_keeps_unanswered_question_empty() {
+        let draft = partial_chapter_draft().await;
+        draft.validate().unwrap();
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let identity = WorkSubmissionIdentity::parse("resource:100:200:4001:job-work").unwrap();
+        let form = ChaoxingSubmissionForm::parse(CHAPTER_EDITOR, identity, &plan).unwrap();
+        let fields = form.fields().iter().cloned().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            fields.get("answerwqbid").map(String::as_str),
+            Some("work-q-1,work-q-2,work-q-3,work-q-4,")
+        );
+        assert_eq!(fields.get("answerwork-q-3").map(String::as_str), Some(""));
+        assert_eq!(
+            fields.get("answertypework-q-3").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            fields.get("answerwork-q-4").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[tokio::test]
     async fn submitted_view_confirms_exact_server_visible_answers_only() {
         let draft = draft().await;
         let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
@@ -1866,6 +2051,65 @@ mod tests {
                 .unwrap();
         let snapshot = parse_verification_snapshot(&changed, &plan, &draft).unwrap();
         assert_eq!(snapshot.status, SubmissionVerificationStatus::Rejected);
+    }
+
+    #[tokio::test]
+    async fn partial_result_confirms_only_selected_answers_against_full_count() {
+        let draft = partial_draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let view = ChaoxingWorkVerificationDocument::try_new(
+            ChaoxingWorkVerificationRoute::View,
+            PARTIAL_VIEW.to_owned(),
+        )
+        .unwrap();
+        let snapshot = parse_verification_snapshot(&view, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Confirmed);
+        assert_eq!(snapshot.questions.len(), 2);
+        assert!(snapshot.questions.iter().all(|question| {
+            question.status == SubmissionQuestionVerificationStatus::Confirmed
+        }));
+
+        let changed = PARTIAL_VIEW.replace("我的答案：AC", "我的答案：AD");
+        let changed =
+            ChaoxingWorkVerificationDocument::try_new(ChaoxingWorkVerificationRoute::View, changed)
+                .unwrap();
+        let snapshot = parse_verification_snapshot(&changed, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Rejected);
+        assert_eq!(
+            snapshot
+                .questions
+                .iter()
+                .map(|question| question.status)
+                .collect::<Vec<_>>(),
+            [
+                SubmissionQuestionVerificationStatus::Confirmed,
+                SubmissionQuestionVerificationStatus::Rejected,
+            ]
+        );
+
+        let missing = PARTIAL_VIEW.replace(
+            r#"<div class="questionLi">
+      <input id="answertypework-preview-q-4" value="11">
+    </div>"#,
+            "",
+        );
+        let missing =
+            ChaoxingWorkVerificationDocument::try_new(ChaoxingWorkVerificationRoute::View, missing)
+                .unwrap();
+        let snapshot = parse_verification_snapshot(&missing, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
+
+        let reordered = PARTIAL_VIEW
+            .replace("work-preview-q-1", "work-preview-q-swap")
+            .replace("work-preview-q-2", "work-preview-q-1")
+            .replace("work-preview-q-swap", "work-preview-q-2");
+        let reordered = ChaoxingWorkVerificationDocument::try_new(
+            ChaoxingWorkVerificationRoute::View,
+            reordered,
+        )
+        .unwrap();
+        let snapshot = parse_verification_snapshot(&reordered, &plan, &draft).unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
     }
 
     #[tokio::test]
@@ -2354,6 +2598,16 @@ mod tests {
         }
     }
 
+    async fn partial_draft() -> SubmissionDraft {
+        let mut draft = draft().await;
+        draft.answer_coverage = SubmissionAnswerCoverage {
+            total_question_count: 4,
+            minimum_coverage_millis: 500,
+            unanswered_question_ids: vec![QuestionId::new(), QuestionId::new()],
+        };
+        draft
+    }
+
     async fn chapter_result_draft() -> SubmissionDraft {
         let mut draft = chapter_draft().await;
         let removed_question_id = draft.items.remove(2).question.id;
@@ -2365,6 +2619,21 @@ mod tests {
         for (index, item) in draft.items.iter_mut().enumerate() {
             item.question.position = u32::try_from(index + 1).unwrap();
         }
+        draft
+    }
+
+    async fn partial_chapter_draft() -> SubmissionDraft {
+        let mut draft = chapter_draft().await;
+        let unanswered = draft.items.remove(2).question.id;
+        draft
+            .payload_preview
+            .fields
+            .retain(|field| field.question_id != unanswered);
+        draft.answer_coverage = SubmissionAnswerCoverage {
+            total_question_count: 4,
+            minimum_coverage_millis: 750,
+            unanswered_question_ids: vec![unanswered],
+        };
         draft
     }
 

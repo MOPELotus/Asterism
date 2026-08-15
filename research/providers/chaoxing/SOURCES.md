@@ -65,6 +65,15 @@ atomic credential commit remain shared runtime responsibilities.
 
 ## Refresh log
 
+- 2026-08-15: refreshed all six donor default branches, tag counts, latest
+  Releases and issue updates after the partial-coverage Core checkpoint. Every
+  recorded revision remains unchanged; tag counts remain 45/0/0/321/0/29,
+  latest Releases remain `v3.1.4`/`4.15.3`/`v2.5.0` where present, and no issue
+  was updated after the prior 2026-08-15 refresh. Re-reading Samueli's complete
+  Work form and OCS's thresholded browser submit confirmed that unanswered
+  controls remain in the complete form while the threshold is computed over
+  all Questions. Asterism now rebuilds empty unanswered Work/Chapter Work
+  fields from a fresh editor instead of forwarding stale or invented values.
 - 2026-08-15: refreshed all six donor default branches; every recorded revision
   remains unchanged. The Audio checkpoint re-audited Samueli's shared
   status/report/signature flow and Audio Referer/`dtype`, plus OCS's exact

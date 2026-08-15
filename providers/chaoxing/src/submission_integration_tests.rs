@@ -496,6 +496,53 @@ async fn exam_session_rotates_saves_then_verifies_the_terminal_inventory() {
     assert_eq!(platform.verifications.load(Ordering::Relaxed), 1);
 }
 
+#[tokio::test]
+async fn partial_exam_fails_before_fresh_io_until_cursor_binding_is_extended() {
+    let context = context();
+    let platform = Arc::new(FixturePlatform::default());
+    let execute = ChaoxingSubmissionExecute::try_new(
+        Arc::new(FixtureCourses::new()),
+        platform.clone(),
+        platform.clone(),
+    )
+    .unwrap();
+    let (mut draft, artifact) = exam_draft_and_artifact().await;
+    let unanswered = draft.items.pop().unwrap().question.id;
+    draft
+        .payload_preview
+        .fields
+        .retain(|field| field.question_id != unanswered);
+    draft.answer_coverage = SubmissionAnswerCoverage {
+        total_question_count: 2,
+        minimum_coverage_millis: 500,
+        unanswered_question_ids: vec![unanswered],
+    };
+    draft.validate().unwrap();
+    let encoded = artifact.encode().unwrap();
+    let digest = encoded.digest();
+    let value = encoded.into_secret_value();
+
+    let error = execute
+        .prepare_submission_operation(
+            &context,
+            "exam:100:200:exam-1",
+            &draft,
+            ResolvedProviderQuestionSessionContinuation {
+                continuation_type: CHAOXING_EXAM_QUESTION_ARTIFACT_TYPE,
+                continuation_digest: digest,
+                phase: CHAOXING_EXAM_QUESTIONS_READY_PHASE,
+                revision: 1,
+                value: &value,
+            },
+            &runtime_settings_schema().resolve(None, None, None).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ProviderErrorKind::UnsupportedTask);
+    assert_eq!(platform.inventories.load(Ordering::Relaxed), 0);
+    assert_eq!(platform.exam_steps.load(Ordering::Relaxed), 0);
+}
+
 async fn execute_exam_step(
     execute: &ChaoxingSubmissionExecute,
     context: &ProviderContext,

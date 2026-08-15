@@ -18,7 +18,7 @@ source modules even when their assessments share field names or HTML shapes.
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
 | AnswerResolve | `chaoxing-exam` completed Chapter result | Samueli Tiku, CxKitty searchers, OCS wrappers/cache, agent pre-computed answers | Reference | A typed but unregistered component rebinds fresh completed Chapter Work detail and consumes one abstract bound result document before producing strict ProviderNative candidates; all other donor sources are external/manual/random and no pending Work/Exam standard-answer protocol exists |
 | AnswerHistoryHarvest | `chaoxing-exam` completed Chapter result | Samueli issue #607, OCS result cache | Reference | A typed capability pages only completed Chapter Work references supplied by a bounded read-only transport, binds the audited `workAnswerId` into a Provider attempt digest, hashes the exact result document, applies Core's TaskId to parsed Questions and emits submitted/official/correctness/score/structural `RedoTest` facts. The native development factory does not advertise it until a real BrowserBridge/Capture list/read transport exists |
-| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts. Exam has a separate value-free preview and durable one-operation-at-a-time native chain: donor signature and request digest are frozen before dispatch, each accepted answer save advances one cursor and rotates `enc`/timing state, and the final submit yields only a Receipt. No Exam mutation is routed through Work payloads or replayed after ambiguity |
+| SubmissionBuild / Execute | `Samueli924/chaoxing` | CxKitty, OCS, agent skill | Reference | Independent Work and Chapter Work rebuild answers from immutable Drafts, including Core-frozen partial coverage: a fresh editor must retain the complete Question count and every selected QID/type, all unanswered controls are rebuilt empty in original DOM order, and no stale or invented value is forwarded. Exam has a separate value-free preview and durable one-operation-at-a-time native chain, but partial Exam Drafts remain fail-closed until its encrypted full-Question cursor can bind selected original positions. No Exam mutation is routed through Work payloads or replayed after ambiguity |
 | SubmissionVerify | agent skill, `Samueli924/chaoxing` | `chaoxing-exam`, OCS | PortSource / Reference | Independent Work verifies exact server-visible answers; Chapter Work refreshes seven cards and has strict current verification / standard-answer parsers awaiting its BrowserBridge iframe route; Exam uses Completed only for task recovery, confirms Questions solely from exact Draft ID/order/type/value result evidence, and projects the independent bounded result score as fixed thousandths. A fresh explicit Expired state maps to `WindowClosed`; all less specific incomplete states remain conservatively undiagnosed |
 | Error classification | CxKitty | agent skill, `Samueli924/chaoxing` | Reference | Auth, captcha, face, timing, access, protocol and network branches exist upstream. Unknown numeric Question kinds, unknown Chapter resource structures and unknown Work result shapes now attach bounded protocol observations containing only controlled enums, counts and field-presence facts |
 | BrowserBridge / Capture | agent skill | OCS, `chaoxing-exam`, CxKitty | Reference | Current first-batch fallback for QR/session binding, captcha/face gates and any donor capability Native HTTP cannot express reliably |
@@ -159,6 +159,17 @@ policy and remains independently guarded.
   a result view must expose the exact submitted answer for every Draft
   Question. This is synthetic/offline evidence only and does not raise the
   Provider above Development.
+- Core-frozen partial coverage is now executable for independent Work and
+  Chapter Work. The short-lived Provider plan retains selected answers plus the
+  immutable complete count; the fresh editor must expose that exact count and
+  every selected QID/type. `answerwqbid` and `answertype*` preserve the complete
+  current DOM order, while unanswered `answer*` values are rebuilt as empty and
+  every stale editor answer is discarded. Independent Work result verification
+  requires the same complete count and original position for each selected QID,
+  then confirms or rejects only Draft Questions. The encrypted mobile Exam
+  artifact still advances a complete sequential cursor, so partial Exam
+  execution returns typed `UnsupportedTask` before fresh I/O rather than
+  weakening its attempt binding.
 - Pending Chapter Work also advertises `SubmissionBuild`, `SubmissionExecute`
   and `SubmissionVerify`. Build supports donor type codes 0-4; Execute rechecks
   the immutable Draft and fresh Course/Chapter/seven-card target, then sends one
@@ -240,9 +251,11 @@ adds the following accepted boundaries without weakening existing capability
 contracts:
 
 - partial-answer submission is in scope with the audited Samueli default
-  `cover_rate=0.9`, but Main must bind the resolved policy, complete snapshot
-  denominator and intentional unanswered set into the immutable Draft before
-  Chaoxing can execute a subset;
+  `cover_rate=0.9`. Core now binds the resolved policy, complete snapshot
+  denominator and intentional unanswered set into the immutable Draft;
+  independent Work and Chapter Work execute that partition through a fresh
+  complete editor. Mobile Exam remains separate because its encrypted cursor
+  still needs a lossless selected-original-position binding;
 - result harvesting feeds an owner-level Answer Evidence Corpus only from a
   read-only, strictly rebound result route; task completion, score, `我的答案`,
   `正确答案` and per-Question correctness remain separate facts;

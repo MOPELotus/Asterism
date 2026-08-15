@@ -245,6 +245,12 @@ impl SubmissionExecuteCapability for ChaoxingSubmissionExecute {
                 "Chaoxing Exam submission draft preview is stale or foreign",
             ));
         }
+        if ChaoxingSubmissionPlan::from_draft(draft)?.is_partial() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing native Exam submission cannot yet rebind a partial Question cursor",
+            ));
+        }
         validate_fresh_exam_pending(
             self.courses.as_ref(),
             self.inventory.as_ref(),

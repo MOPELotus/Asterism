@@ -27,8 +27,10 @@ fixtures/providers/chaoxing/
     detail-submitted.html
     detail-closed.html
     submission-editor.html
+    submission-editor-partial.html
     submission-prompt.html
     submission-view.html
+    submission-view-partial.html
     chapter-submission-editor.html
     chapter-result.html
   exam/
@@ -89,13 +91,24 @@ fresh job/token rebinding, single attempt acquisition and page-kind-bound cache.
 They remain synthetic parser/transport-boundary evidence rather than live
 responses.
 
-The three submission fixtures are donor-compatible synthetic shapes rather
+The submission fixtures are donor-compatible synthetic shapes rather
 than captured responses. They cover strict editor identity/type matching,
 allowlisted hidden-field forwarding, removal of stale answer values, a bounded
 JSON acknowledgement that remains only a Receipt, prompt-as-Pending semantics,
 and exact server-visible answer comparison on the result view. They contain no
 real token, answer, route or account fact and do not prove the endpoint works
 against the current live platform.
+
+`submission-editor-partial.html` and `submission-view-partial.html` cover the
+Core-frozen subset path. Four fresh controls include two selected Questions, one
+unanswered supported text Question and one unanswered observed matching type.
+Tests require the complete count and DOM order, rebuild both unanswered values
+as empty, retain their numeric type fields, discard all stale values, and verify
+only the two selected answers against their original positions. Missing a
+Question makes form preparation fail as `RemoteChanged` and result verification
+Inconclusive; a selected mismatch rejects only that selected Question. The
+fixtures remain synthetic and do not prove that a live teacher policy accepts
+the same partial final submission.
 
 `work/chapter-submission-editor.html` adds the primary donor's synthetic
 Chapter Work `form1` shape. Tests prove stale answer inputs and unknown fields
