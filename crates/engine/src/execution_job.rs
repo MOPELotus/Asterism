@@ -17,14 +17,14 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink, ExecutionMutationIssue,
-    ExecutionMutationPlan, ExecutionMutationReceipt, ExecutionMutationSink,
-    ExecutionMutationVerification, ExecutionRequest as ProviderExecutionRequest,
-    ProviderCapability, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderExecutionConcurrency, ProviderExecutionLog, ProviderProgress,
-    ProviderQuestionMaterialization, ProviderRegistry, ProviderSubmissionStepOutcome,
-    ResolvedProviderQuestionSessionContinuation, ResolvedProviderRuntimeSettings,
-    SubmissionExecuteCapability, SubmissionVerifyCapability, TaskExecutionCapability,
-    TaskProgressCapability,
+    ExecutionMutationPlan, ExecutionMutationReceipt, ExecutionMutationSequenceObservation,
+    ExecutionMutationSequencePlan, ExecutionMutationSink, ExecutionMutationVerification,
+    ExecutionRequest as ProviderExecutionRequest, ProviderCapability, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderExecutionConcurrency, ProviderExecutionLog,
+    ProviderProgress, ProviderQuestionMaterialization, ProviderRegistry,
+    ProviderSubmissionStepOutcome, ResolvedProviderQuestionSessionContinuation,
+    ResolvedProviderRuntimeSettings, SubmissionExecuteCapability, SubmissionVerifyCapability,
+    TaskExecutionCapability, TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
@@ -35,9 +35,13 @@ use asterism_storage::{
     ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationPlanPrepareOutcome,
     ExecutionAtomicMutationPlanPrepareRequest, ExecutionAtomicMutationReceiptOutcome,
     ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
-    ExecutionAtomicMutationVerificationOutcome, ExecutionAtomicMutationVerificationRequest,
-    ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionCapabilityCallMutation,
-    ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
+    ExecutionAtomicMutationSequenceObservationOutcome,
+    ExecutionAtomicMutationSequenceObservationRequest,
+    ExecutionAtomicMutationSequencePlanPrepareOutcome,
+    ExecutionAtomicMutationSequencePlanPrepareRequest, ExecutionAtomicMutationVerificationOutcome,
+    ExecutionAtomicMutationVerificationRequest, ExecutionAttemptFinishRequest,
+    ExecutionAttemptStartRequest, ExecutionCapabilityCallMutation, ExecutionCapabilityStep,
+    ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
     ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
     ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest,
     ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionSubmissionRepository,
@@ -4175,6 +4179,98 @@ impl<E: ExecutionAtomicMutationRepository> ExecutionMutationSink
         }
     }
 
+    async fn prepare_sequence_plan(
+        &self,
+        plan: &ExecutionMutationSequencePlan,
+    ) -> Result<(), ProviderError> {
+        let prefix = format!("{}.", self.provider_id);
+        if !plan.sequence_type().starts_with(&prefix)
+            || plan.phases().iter().any(|phase| {
+                !phase.operation_type().starts_with(&prefix)
+                    || phase
+                        .required_observation_type()
+                        .is_some_and(|value| !value.starts_with(&prefix))
+            })
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation sequence crosses its namespace",
+            ));
+        }
+        match self
+            .executions
+            .prepare_execution_atomic_mutation_sequence_plan(
+                ExecutionAtomicMutationSequencePlanPrepareRequest {
+                    execution_id: self.execution_id,
+                    attempt_id: self.attempt_id,
+                    scheduler_job_id: self.scheduler_job_id,
+                    worker_id: self.worker_id,
+                    plan,
+                    correlation_id: self.correlation_id,
+                    at: Utc::now(),
+                },
+            )
+            .await
+        {
+            Ok(
+                ExecutionAtomicMutationSequencePlanPrepareOutcome::Prepared(_)
+                | ExecutionAtomicMutationSequencePlanPrepareOutcome::AlreadyPrepared(_),
+            ) => Ok(()),
+            Err(error) => {
+                if matches!(
+                    error,
+                    StorageError::ExecutionClaimLost
+                        | StorageError::SchedulerClaimLost
+                        | StorageError::LeaseLost
+                ) {
+                    self.claim_lost.store(true, Ordering::Release);
+                }
+                Err(ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "Core could not persist Provider mutation sequence",
+                ))
+            }
+        }
+    }
+
+    async fn record_sequence_observation(
+        &self,
+        observation: ExecutionMutationSequenceObservation,
+    ) -> Result<(), ProviderError> {
+        if !observation
+            .observation_type()
+            .starts_with(&format!("{}.", self.provider_id))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation observation crosses its namespace",
+            ));
+        }
+        match self
+            .executions
+            .record_execution_atomic_mutation_sequence_observation(
+                ExecutionAtomicMutationSequenceObservationRequest {
+                    execution_id: self.execution_id,
+                    attempt_id: self.attempt_id,
+                    scheduler_job_id: self.scheduler_job_id,
+                    worker_id: self.worker_id,
+                    phase_position: observation.phase_position(),
+                    observation_type: observation.observation_type(),
+                    observation_digest: observation.observation_digest(),
+                    correlation_id: self.correlation_id,
+                    at: Utc::now(),
+                },
+            )
+            .await
+        {
+            Ok(
+                ExecutionAtomicMutationSequenceObservationOutcome::Recorded(_)
+                | ExecutionAtomicMutationSequenceObservationOutcome::AlreadyRecorded(_),
+            ) => Ok(()),
+            Err(error) => Err(self.map_mutation_storage_error(&error, true)),
+        }
+    }
+
     async fn issue(&self, issue: &ExecutionMutationIssue) -> Result<(), ProviderError> {
         if !issue
             .operation_type()
@@ -4681,6 +4777,7 @@ mod tests {
         SubmissionPayloadPreview, TaskId, UserId,
     };
     use asterism_provider_api::{
+        ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
         ExecutionOutcome, PreparedProviderSubmissionOperation, ProviderCapability, ProviderEntry,
         ProviderIdentity, ProviderMetadata, ProviderQuestionReadContinuation, ProviderResult,
         ProviderRuntimeSettingsSchema, ProviderSettingDefinition, ProviderSettingKind,
@@ -5085,23 +5182,56 @@ mod tests {
             .mutation_sink()
             .expect("Core execution fixture supplies durable mutation sink");
         if let Some(artifact) = artifact {
-            mutations
-                .prepare_compound_plan(
-                    &ExecutionMutationPlan::try_new(
-                        artifact.artifact_digest(),
-                        vec![
-                            asterism_provider_api::ExecutionMutationPlanStep::try_new(
-                                1,
-                                "provider-alpha.fixture.save",
-                                Some([41; 32]),
-                                vec![],
-                            )
-                            .unwrap(),
-                        ],
+            if artifact.artifact_type() == "provider-alpha.execution-sequence.v1" {
+                mutations
+                    .prepare_sequence_plan(
+                        &ExecutionMutationSequencePlan::try_new(
+                            artifact.artifact_digest(),
+                            "provider-alpha.fixture-sequence.v1",
+                            vec![
+                                ExecutionMutationSequencePhase::try_new(
+                                    "provider-alpha.fixture.save",
+                                    1,
+                                    1,
+                                    false,
+                                    ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+                                    Some("provider-alpha.fixture.precondition.v1".to_owned()),
+                                )
+                                .unwrap(),
+                            ],
+                        )
+                        .unwrap(),
                     )
-                    .unwrap(),
-                )
-                .await?;
+                    .await?;
+                mutations
+                    .record_sequence_observation(
+                        ExecutionMutationSequenceObservation::try_new(
+                            1,
+                            "provider-alpha.fixture.precondition.v1",
+                            [40; 32],
+                        )
+                        .unwrap(),
+                    )
+                    .await?;
+            } else {
+                mutations
+                    .prepare_compound_plan(
+                        &ExecutionMutationPlan::try_new(
+                            artifact.artifact_digest(),
+                            vec![
+                                asterism_provider_api::ExecutionMutationPlanStep::try_new(
+                                    1,
+                                    "provider-alpha.fixture.save",
+                                    Some([41; 32]),
+                                    vec![],
+                                )
+                                .unwrap(),
+                            ],
+                        )
+                        .unwrap(),
+                    )
+                    .await?;
+            }
         }
         mutations
             .issue(
@@ -5544,6 +5674,42 @@ mod tests {
         assert_eq!(persisted.1, artifact.artifact_digest());
         assert_eq!(persisted.2, 1);
         assert!(persisted.3 <= persisted.4);
+    }
+
+    #[tokio::test]
+    async fn provider_sequence_observation_is_persisted_before_its_first_issue() {
+        let fixture = Fixture::new(AssessmentClass::Routine, ProviderBehavior::Success).await;
+        let artifact = fixture.attach_provider_sequence_plan_artifact().await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        let persisted: (Vec<u8>, Vec<u8>, String, i64, Vec<u8>, String, String) = sqlx::query_as(
+            "SELECT plan.plan_digest, plan.artifact_digest, plan.sequence_type, \
+                        observation.phase_position, observation.observation_digest, \
+                        observation.observed_at, mutation.issued_at \
+                 FROM execution_atomic_mutation_sequence_plans AS plan \
+                 INNER JOIN execution_atomic_mutation_sequence_observations AS observation \
+                   ON observation.execution_id = plan.execution_id \
+                  AND observation.execution_attempt_id = plan.execution_attempt_id \
+                 INNER JOIN execution_atomic_mutations AS mutation \
+                   ON mutation.execution_id = plan.execution_id \
+                  AND mutation.execution_attempt_id = plan.execution_attempt_id \
+                  AND mutation.ordinal = 1 \
+                 WHERE plan.execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(persisted.0.len(), 32);
+        assert_eq!(persisted.1, artifact.artifact_digest());
+        assert_eq!(persisted.2, "provider-alpha.fixture-sequence.v1");
+        assert_eq!(persisted.3, 1);
+        assert_eq!(persisted.4, vec![40; 32]);
+        assert!(persisted.5 <= persisted.6);
     }
 
     #[tokio::test]
@@ -7125,9 +7291,24 @@ mod tests {
         async fn attach_provider_plan_artifact(
             &self,
         ) -> asterism_provider_api::ProviderExecutionPlanArtifact {
+            self.attach_provider_artifact("provider-alpha.execution-plan.v1")
+                .await
+        }
+
+        async fn attach_provider_sequence_plan_artifact(
+            &self,
+        ) -> asterism_provider_api::ProviderExecutionPlanArtifact {
+            self.attach_provider_artifact("provider-alpha.execution-sequence.v1")
+                .await
+        }
+
+        async fn attach_provider_artifact(
+            &self,
+            artifact_type: &str,
+        ) -> asterism_provider_api::ProviderExecutionPlanArtifact {
             let artifact = asterism_provider_api::ProviderExecutionPlanArtifact::try_new(
                 ProviderId::new("provider-alpha").unwrap(),
-                "provider-alpha.execution-plan.v1",
+                artifact_type,
                 serde_json::json!({"target_seconds": 120}),
             )
             .unwrap();

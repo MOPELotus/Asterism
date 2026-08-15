@@ -26,9 +26,9 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
-    ExecutionMutationPlan, ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource,
-    ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema, ProviderSettingScope,
-    ResolvedProviderRuntimeSettings,
+    ExecutionMutationPlan, ExecutionMutationSequencePlan, ProviderExecutionPlanArtifact,
+    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
+    ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
@@ -2211,6 +2211,62 @@ pub enum ExecutionAtomicMutationPlanPrepareOutcome {
     AlreadyPrepared(ExecutionAtomicMutationPlanRecord),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionAtomicMutationSequencePlanRecord {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: String,
+    pub plan: ExecutionMutationSequencePlan,
+    pub prepared_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionAtomicMutationSequencePlanPrepareRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub plan: &'a ExecutionMutationSequencePlan,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionAtomicMutationSequencePlanPrepareOutcome {
+    Prepared(ExecutionAtomicMutationSequencePlanRecord),
+    AlreadyPrepared(ExecutionAtomicMutationSequencePlanRecord),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionAtomicMutationSequenceObservationRecord {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub phase_position: u8,
+    pub observation_type: String,
+    pub observation_digest: [u8; 32],
+    pub observed_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionAtomicMutationSequenceObservationRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub phase_position: u8,
+    pub observation_type: &'a str,
+    pub observation_digest: [u8; 32],
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionAtomicMutationSequenceObservationOutcome {
+    Recorded(ExecutionAtomicMutationSequenceObservationRecord),
+    AlreadyRecorded(ExecutionAtomicMutationSequenceObservationRecord),
+}
+
 /// Durable, ordered issue/receipt ledger for the individual remote mutations
 /// inside one Provider-owned atomic operation. An issued row without a receipt
 /// is intentionally not replayable and prevents issuing the next ordinal.
@@ -2226,6 +2282,28 @@ pub trait ExecutionAtomicMutationRepository: Send + Sync {
         &self,
         request: ExecutionAtomicMutationPlanPrepareRequest<'_>,
     ) -> Result<ExecutionAtomicMutationPlanPrepareOutcome, StorageError>;
+
+    async fn find_execution_atomic_mutation_sequence_plan(
+        &self,
+        execution_id: ExecutionId,
+        attempt_id: ExecutionAttemptId,
+    ) -> Result<Option<ExecutionAtomicMutationSequencePlanRecord>, StorageError>;
+
+    async fn prepare_execution_atomic_mutation_sequence_plan(
+        &self,
+        request: ExecutionAtomicMutationSequencePlanPrepareRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationSequencePlanPrepareOutcome, StorageError>;
+
+    async fn find_execution_atomic_mutation_sequence_observations(
+        &self,
+        execution_id: ExecutionId,
+        attempt_id: ExecutionAttemptId,
+    ) -> Result<Vec<ExecutionAtomicMutationSequenceObservationRecord>, StorageError>;
+
+    async fn record_execution_atomic_mutation_sequence_observation(
+        &self,
+        request: ExecutionAtomicMutationSequenceObservationRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationSequenceObservationOutcome, StorageError>;
 
     async fn find_execution_atomic_mutations(
         &self,

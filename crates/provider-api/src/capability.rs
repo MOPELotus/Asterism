@@ -1962,6 +1962,309 @@ fn execution_mutation_plan_digest(
     digest.finalize().into()
 }
 
+const MAX_EXECUTION_MUTATION_SEQUENCE_PHASES: usize = 32;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionMutationSequenceAdvanceCondition {
+    MaximumReached,
+    AcceptedMaximumReached,
+    RejectedOrMaximumReached,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExecutionMutationSequencePhase {
+    operation_type: String,
+    minimum_occurrences: u32,
+    maximum_occurrences: u32,
+    stop_repeating_after_rejection: bool,
+    advance_condition: ExecutionMutationSequenceAdvanceCondition,
+    required_observation_type: Option<String>,
+}
+
+impl ExecutionMutationSequencePhase {
+    /// Creates one bounded receipt-conditional sequence phase.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid operation/observation labels, inverted or unbounded
+    /// occurrence ranges, and an accepted-only transition with no occurrence.
+    pub fn try_new(
+        operation_type: impl Into<String>,
+        minimum_occurrences: u32,
+        maximum_occurrences: u32,
+        stop_repeating_after_rejection: bool,
+        advance_condition: ExecutionMutationSequenceAdvanceCondition,
+        required_observation_type: Option<String>,
+    ) -> ProviderResult<Self> {
+        let operation_type = operation_type.into();
+        if !valid_execution_mutation_operation_type(&operation_type)
+            || maximum_occurrences > 100_000
+            || minimum_occurrences > maximum_occurrences
+            || matches!(
+                advance_condition,
+                ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached
+            ) && maximum_occurrences == 0
+            || required_observation_type
+                .as_deref()
+                .is_some_and(|value| !valid_execution_mutation_operation_type(value))
+            || required_observation_type.is_some() && maximum_occurrences == 0
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation sequence phase is invalid",
+            ));
+        }
+        Ok(Self {
+            operation_type,
+            minimum_occurrences,
+            maximum_occurrences,
+            stop_repeating_after_rejection,
+            advance_condition,
+            required_observation_type,
+        })
+    }
+
+    pub fn operation_type(&self) -> &str {
+        &self.operation_type
+    }
+
+    pub const fn minimum_occurrences(&self) -> u32 {
+        self.minimum_occurrences
+    }
+
+    pub const fn maximum_occurrences(&self) -> u32 {
+        self.maximum_occurrences
+    }
+
+    pub const fn stop_repeating_after_rejection(&self) -> bool {
+        self.stop_repeating_after_rejection
+    }
+
+    pub const fn advance_condition(&self) -> ExecutionMutationSequenceAdvanceCondition {
+        self.advance_condition
+    }
+
+    pub fn required_observation_type(&self) -> Option<&str> {
+        self.required_observation_type.as_deref()
+    }
+}
+
+impl fmt::Debug for ExecutionMutationSequencePhase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationSequencePhase")
+            .field("operation_type", &self.operation_type)
+            .field("minimum_occurrences", &self.minimum_occurrences)
+            .field("maximum_occurrences", &self.maximum_occurrences)
+            .field(
+                "stop_repeating_after_rejection",
+                &self.stop_repeating_after_rejection,
+            )
+            .field("advance_condition", &self.advance_condition)
+            .field("required_observation_type", &self.required_observation_type)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExecutionMutationSequencePlan {
+    plan_digest: [u8; 32],
+    artifact_digest: [u8; 32],
+    sequence_type: String,
+    phases: Vec<ExecutionMutationSequencePhase>,
+}
+
+impl ExecutionMutationSequencePlan {
+    /// Freezes a bounded receipt-conditional phase machine before the first
+    /// mutation. Operation labels are unique so Core can unambiguously map
+    /// each issued ordinal back to its phase.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid authority digests/types, empty/oversized phase sets,
+    /// duplicate operations or a total occurrence ceiling above 100,000.
+    pub fn try_new(
+        artifact_digest: [u8; 32],
+        sequence_type: impl Into<String>,
+        phases: Vec<ExecutionMutationSequencePhase>,
+    ) -> ProviderResult<Self> {
+        let sequence_type = sequence_type.into();
+        let unique_operations = phases
+            .iter()
+            .map(ExecutionMutationSequencePhase::operation_type)
+            .collect::<std::collections::BTreeSet<_>>();
+        let maximum_mutations = phases.iter().try_fold(0_u32, |total, phase| {
+            total.checked_add(phase.maximum_occurrences)
+        });
+        if artifact_digest == [0; 32]
+            || !valid_execution_mutation_operation_type(&sequence_type)
+            || phases.is_empty()
+            || phases.len() > MAX_EXECUTION_MUTATION_SEQUENCE_PHASES
+            || unique_operations.len() != phases.len()
+            || maximum_mutations.is_none_or(|total| total == 0 || total > 100_000)
+            || phases.iter().any(|phase| {
+                ExecutionMutationSequencePhase::try_new(
+                    phase.operation_type.clone(),
+                    phase.minimum_occurrences,
+                    phase.maximum_occurrences,
+                    phase.stop_repeating_after_rejection,
+                    phase.advance_condition,
+                    phase.required_observation_type.clone(),
+                )
+                .is_err()
+            })
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation sequence plan is invalid",
+            ));
+        }
+        let plan_digest =
+            execution_mutation_sequence_plan_digest(artifact_digest, &sequence_type, &phases);
+        Ok(Self {
+            plan_digest,
+            artifact_digest,
+            sequence_type,
+            phases,
+        })
+    }
+
+    pub const fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    pub const fn artifact_digest(&self) -> [u8; 32] {
+        self.artifact_digest
+    }
+
+    pub fn sequence_type(&self) -> &str {
+        &self.sequence_type
+    }
+
+    pub fn phases(&self) -> &[ExecutionMutationSequencePhase] {
+        &self.phases
+    }
+}
+
+impl fmt::Debug for ExecutionMutationSequencePlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationSequencePlan")
+            .field("plan_digest", &"[HASHED]")
+            .field("artifact_digest", &"[HASHED]")
+            .field("sequence_type", &self.sequence_type)
+            .field("phase_count", &self.phases.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExecutionMutationSequenceObservation {
+    phase_position: u8,
+    observation_type: String,
+    observation_digest: [u8; 32],
+}
+
+impl ExecutionMutationSequenceObservation {
+    /// # Errors
+    ///
+    /// Rejects an empty phase position, invalid type or empty digest.
+    pub fn try_new(
+        phase_position: u8,
+        observation_type: impl Into<String>,
+        observation_digest: [u8; 32],
+    ) -> ProviderResult<Self> {
+        let observation_type = observation_type.into();
+        if phase_position == 0
+            || !valid_execution_mutation_operation_type(&observation_type)
+            || observation_digest == [0; 32]
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation sequence observation is invalid",
+            ));
+        }
+        Ok(Self {
+            phase_position,
+            observation_type,
+            observation_digest,
+        })
+    }
+
+    pub const fn phase_position(&self) -> u8 {
+        self.phase_position
+    }
+
+    pub fn observation_type(&self) -> &str {
+        &self.observation_type
+    }
+
+    pub const fn observation_digest(&self) -> [u8; 32] {
+        self.observation_digest
+    }
+}
+
+impl fmt::Debug for ExecutionMutationSequenceObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationSequenceObservation")
+            .field("phase_position", &self.phase_position)
+            .field("observation_type", &self.observation_type)
+            .field("observation_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+fn execution_mutation_sequence_plan_digest(
+    artifact_digest: [u8; 32],
+    sequence_type: &str,
+    phases: &[ExecutionMutationSequencePhase],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"asterism.execution-mutation-sequence-plan.v1\0");
+    digest.update(artifact_digest);
+    digest.update(
+        u32::try_from(sequence_type.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(sequence_type.as_bytes());
+    digest.update(
+        u32::try_from(phases.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    for phase in phases {
+        digest.update(
+            u32::try_from(phase.operation_type.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        digest.update(phase.operation_type.as_bytes());
+        digest.update(phase.minimum_occurrences.to_be_bytes());
+        digest.update(phase.maximum_occurrences.to_be_bytes());
+        digest.update([u8::from(phase.stop_repeating_after_rejection)]);
+        digest.update([match phase.advance_condition {
+            ExecutionMutationSequenceAdvanceCondition::MaximumReached => 1,
+            ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached => 2,
+            ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached => 3,
+        }]);
+        match &phase.required_observation_type {
+            Some(observation_type) => {
+                digest.update([1]);
+                digest.update(
+                    u32::try_from(observation_type.len())
+                        .unwrap_or(u32::MAX)
+                        .to_be_bytes(),
+                );
+                digest.update(observation_type.as_bytes());
+            }
+            None => digest.update([0]),
+        }
+    }
+    digest.finalize().into()
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct ExecutionMutationIssue {
     ordinal: u32,
@@ -2136,6 +2439,30 @@ pub trait ExecutionMutationSink {
         ))
     }
 
+    /// Atomically freezes a receipt-conditional phase machine before any
+    /// remote mutation is issued.
+    async fn prepare_sequence_plan(
+        &self,
+        _plan: &ExecutionMutationSequencePlan,
+    ) -> ProviderResult<()> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Execution mutation sequence planning is not available for this sink",
+        ))
+    }
+
+    /// Persists one hash-only observation required before entering its frozen
+    /// sequence phase. Exact repeats are idempotent.
+    async fn record_sequence_observation(
+        &self,
+        _observation: ExecutionMutationSequenceObservation,
+    ) -> ProviderResult<()> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Execution mutation sequence observations are not available for this sink",
+        ))
+    }
+
     /// Persists the exact request identity before the Provider performs the
     /// corresponding remote mutation. A repeated issuance fails closed.
     async fn issue(&self, issue: &ExecutionMutationIssue) -> ProviderResult<()>;
@@ -2254,6 +2581,104 @@ mod execution_mutation_tests {
                 "welearn.atomic.save",
                 Some([3; 32]),
                 vec![2, 1],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn receipt_conditional_sequence_freezes_early_rejection_and_observation_gate() {
+        let phases = vec![
+            ExecutionMutationSequencePhase::try_new(
+                "welearn.atomic.start",
+                1,
+                1,
+                true,
+                ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached,
+                None,
+            )
+            .unwrap(),
+            ExecutionMutationSequencePhase::try_new(
+                "welearn.atomic.keep_counter",
+                1,
+                3,
+                true,
+                ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached,
+                None,
+            )
+            .unwrap(),
+            ExecutionMutationSequencePhase::try_new(
+                "welearn.atomic.set",
+                1,
+                1,
+                false,
+                ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+                Some("welearn.atomic.pre-final.v1".to_owned()),
+            )
+            .unwrap(),
+            ExecutionMutationSequencePhase::try_new(
+                "welearn.atomic.save",
+                1,
+                1,
+                false,
+                ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+                None,
+            )
+            .unwrap(),
+        ];
+        let plan = ExecutionMutationSequencePlan::try_new(
+            [7; 32],
+            "welearn.atomic.fany-sequence.v1",
+            phases.clone(),
+        )
+        .unwrap();
+        assert_eq!(plan.phases(), phases);
+        assert_ne!(plan.plan_digest(), [0; 32]);
+        assert!(!format!("{plan:?}").contains("7, 7"));
+
+        let zero_keep = ExecutionMutationSequencePhase::try_new(
+            "welearn.atomic.keep_counter",
+            0,
+            0,
+            true,
+            ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached,
+            None,
+        )
+        .unwrap();
+        assert_eq!(zero_keep.maximum_occurrences(), 0);
+        assert!(
+            ExecutionMutationSequencePlan::try_new(
+                [7; 32],
+                "welearn.atomic.duplicate.v1",
+                vec![phases[0].clone(), phases[0].clone()],
+            )
+            .is_err()
+        );
+        assert!(
+            ExecutionMutationSequencePhase::try_new(
+                "welearn.atomic.invalid",
+                0,
+                0,
+                false,
+                ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached,
+                None,
+            )
+            .is_err()
+        );
+
+        let observation = ExecutionMutationSequenceObservation::try_new(
+            3,
+            "welearn.atomic.pre-final.v1",
+            [8; 32],
+        )
+        .unwrap();
+        assert_eq!(observation.phase_position(), 3);
+        assert!(!format!("{observation:?}").contains("8, 8"));
+        assert!(
+            ExecutionMutationSequenceObservation::try_new(
+                0,
+                "welearn.atomic.pre-final.v1",
+                [8; 32],
             )
             .is_err()
         );
