@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use asterism_domain::{
-    RemoteState, SubmissionDraft, SubmissionQuestionVerification,
+    CompletionDiagnosis, RemoteState, SubmissionDraft, SubmissionQuestionVerification,
     SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionVerificationSnapshot,
     SubmissionVerificationStatus, TaskCapability,
 };
@@ -156,6 +156,18 @@ impl SubmissionVerifyCapability for CidarenSubmissionVerify {
             .validate()
             .map_err(|_| invalid_response("Cidaren verification snapshot is invalid"))?;
         Ok(snapshot)
+    }
+
+    fn completion_diagnosis(
+        &self,
+        verification: &SubmissionVerificationSnapshot,
+    ) -> Option<CompletionDiagnosis> {
+        (verification.status == SubmissionVerificationStatus::Inconclusive
+            && verification.remote_state == Some(RemoteState::Expired)
+            && verification
+                .progress_percent
+                .is_some_and(|progress| progress < 100))
+        .then_some(CompletionDiagnosis::WindowClosed)
     }
 }
 
@@ -361,6 +373,7 @@ mod tests {
             snapshot.questions[0].status,
             SubmissionQuestionVerificationStatus::Unverified
         );
+        assert_eq!(verifier.completion_diagnosis(&snapshot), None);
     }
 
     #[tokio::test]
@@ -389,6 +402,53 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.status, SubmissionVerificationStatus::Pending);
         assert_eq!(snapshot.progress_percent, Some(35));
+        for state in [
+            RemoteState::NotOpen,
+            RemoteState::Pending,
+            RemoteState::InProgress,
+        ] {
+            let mut unfinished = snapshot.clone();
+            unfinished.remote_state = Some(state);
+            assert_eq!(verifier.completion_diagnosis(&unfinished), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_task_reports_window_closed_without_guessing_unknown_state() {
+        let draft = draft().await;
+        let expired = CidarenSubmissionVerify::try_new(
+            Arc::new(FixtureDetail {
+                state: RemoteState::Expired,
+                progress: 35,
+            }),
+            Arc::new(FixtureScore {
+                earned_milli_points: None,
+                fail: false,
+            }),
+        )
+        .unwrap();
+        let snapshot = expired
+            .verify_submission(&context(), "class-task:2002", &draft, None)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status, SubmissionVerificationStatus::Inconclusive);
+        assert_eq!(
+            expired.completion_diagnosis(&snapshot),
+            Some(CompletionDiagnosis::WindowClosed)
+        );
+
+        let mut incomplete_fact = snapshot.clone();
+        incomplete_fact.progress_percent = None;
+        assert_eq!(expired.completion_diagnosis(&incomplete_fact), None);
+        incomplete_fact = snapshot.clone();
+        incomplete_fact.status = SubmissionVerificationStatus::Pending;
+        assert_eq!(expired.completion_diagnosis(&incomplete_fact), None);
+
+        let unknown = SubmissionVerificationSnapshot {
+            remote_state: Some(RemoteState::Unknown),
+            ..snapshot
+        };
+        assert_eq!(expired.completion_diagnosis(&unknown), None);
     }
 
     #[tokio::test]

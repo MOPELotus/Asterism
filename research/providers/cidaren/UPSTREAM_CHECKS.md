@@ -593,6 +593,22 @@ unanswered IDs must be empty and total count must equal the Draft item count.
 A generic Domain-valid 50% Draft is fixture-covered and fails closed. This
 adds no Cidaren partial policy or runtime setting.
 
+### 2026-08-15 verified completion-diagnosis boundary
+
+The donor refs, latest public tag/release and issue update head were rechecked
+at this checkpoint and did not move. Cidaren registers no TaskExecution slot,
+so only its fresh SubmissionVerify snapshot can provide a Provider-specific
+completion diagnosis.
+
+The existing verified facts support one exact mapping. A class Task with
+audited `over_status == 3` is explicitly expired, so its incomplete snapshot
+maps to `WindowClosed`. Completed snapshots need no diagnosis. Task-level
+`NotOpen/Pending/InProgress` plus 0-99% proves an unfinished Task but does not
+identify pending children or another cause. Those states, unknown/inconsistent
+state, score, duration, prerequisite, review and attempt-limit cases remain
+unmapped because the donor exposes no reliable corresponding fact. Provider
+tests freeze the expiry mapping and conservative boundaries.
+
 ## Check procedure
 
 For the next checkpoint:

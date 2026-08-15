@@ -312,6 +312,11 @@ placeholder identities, result codes, status values and pagination shape.
   the Task goal while per-Question answer history stays explicitly Unverified;
   a terminal receipt with incomplete readback remains Pending, and stale
   Draft/preview/state combinations fail closed.
+- Completion-diagnosis tests freeze only evidenced facts: explicit `Expired`
+  with incomplete progress is `WindowClosed`; `NotOpen/Pending/InProgress`,
+  completed and unknown states return no Provider diagnosis because Task-level
+  progress does not identify pending children. Score never supplies a passing-
+  threshold inference, and Cidaren has no TaskExecution slot to diagnose.
 - Coverage regression tests freeze Cidaren's no-partial-policy boundary:
   complete one-Question Answer and explicit Skip Drafts use 1000/1000 with no
   unanswered IDs, while a generic Domain-valid 50% Draft is rejected before

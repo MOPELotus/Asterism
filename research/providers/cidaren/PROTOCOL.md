@@ -797,6 +797,23 @@ rerunning the GUI merely calls `StartAnswer`, and completed class Tasks are
 filtered from execution. Therefore Score Improvement cannot safely start a
 Cidaren retake until new upstream/live evidence establishes its allowed range.
 
+For an incomplete fresh SubmissionVerify snapshot, Cidaren exposes one reliable
+shared diagnosis. Donor class `over_status == 3` explicitly means expired, so
+`Inconclusive + Expired + 0..99%` maps to `WindowClosed`. Completed snapshots
+need no diagnosis. `NotOpen/Pending/InProgress` plus task-level progress below
+100 proves only that the Task is unfinished: it does not carry the current
+attempt's `topic_done_num/topic_total` or identify one required child. Those
+states, `RemoteState::Unknown` and any tuple not emitted by the verifier return
+no Provider override and remain Core `RemoteUnknown`.
+
+This mapping does not use task score: no passing threshold is evidenced. The
+donor exposes accumulated `time_spent`, but no required-duration threshold or
+duration-failure result fact, so progress cannot be diagnosed as
+`DurationInsufficient`; the same absence prevents `RequiredChildrenPending`.
+No audited field establishes a prerequisite lock, teacher review, human action,
+attempt limit or retake rule. Cidaren also has no registered TaskExecution slot;
+only the verified submission readback supplies completion-diagnosis facts.
+
 `AnswerResolve` and `SubmissionVerify` are independent public Provider
 capabilities. Answer resolution freshly binds the Task's Course/unit inventory,
 loads only the evidence needed by each normalized Question and returns bounded
