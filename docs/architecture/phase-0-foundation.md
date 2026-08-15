@@ -4171,3 +4171,28 @@ incremental ingestion. Exact choice/text/boolean facts project only when their
 semantic shape is identity-free; attachments, unsupported hierarchies and
 incomplete option content remain durable unmatched private evidence without
 polluting global answer counts.
+
+## Two-hundred-and-thirtieth Phase 0 slice
+
+Strict Completion and Score Improvement now exist as separate Domain state
+machines with separate typed identities. Both freeze one bounded policy
+snapshot containing enable switches, attempt limits, deadlines, target score
+and formal-retry confirmation behavior. The default enables Strict Completion,
+keeps Score Improvement opt-in, caps both flows and requires confirmation for
+formal assessment retries.
+
+Strict Completion starts active only when enabled, records structured
+`CompletionDiagnosis` values, and becomes terminal immediately after a fresh
+Completed or Passed observation. Mechanical insufficiency may return to active
+within bounds; prerequisites, teacher/human action, unsupported behavior,
+protocol drift, unknown remote state, closed windows and exhausted attempts
+stop automatic work. A second formal submission attempt cannot start without
+explicit confirmation.
+
+Score Improvement can start only from an immutable verified completion
+baseline, with both policy enablement and explicit opt-in. Unknown or
+teacher-defined retake score policy stops for human action before mutation.
+Every retake requires confirmation, preserves the original completion outcome,
+tracks the best observed score by normalized ratio and terminates at target,
+remote/attempt limits or diagnosis. A lower result cannot turn the completed
+baseline back into an incomplete Task.

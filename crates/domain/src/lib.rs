@@ -10,6 +10,7 @@ pub mod auth_bootstrap_event;
 pub mod automation;
 pub mod browser_bridge;
 pub mod browser_bridge_exchange;
+pub mod completion;
 pub mod credits;
 pub mod execution;
 pub mod external_oauth;
@@ -56,6 +57,13 @@ pub use browser_bridge::{
 pub use browser_bridge_exchange::{
     BrowserBridgeExchange, BrowserBridgeExchangeError, BrowserBridgeExchangeState,
     BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeStateMetadata,
+};
+pub use completion::{
+    CompletionDiagnosis, CompletionOutcome, CompletionPolicySnapshot,
+    CompletionPolicyValidationError, CompletionWorkflowBinding, RetakeScorePolicy,
+    ScoreImprovementState, ScoreImprovementWorkflow, ScoreImprovementWorkflowError,
+    StrictCompletionState, StrictCompletionWorkflow, StrictCompletionWorkflowError,
+    VerifiedCompletionBaseline,
 };
 pub use credits::{
     CreditAccount, CreditAmount, CreditError, CreditReservation, CreditReservationState,
