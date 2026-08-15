@@ -322,6 +322,11 @@ only structural field names, response codes and bounded placeholder shapes.
   only after fresh CMI proof. A changed but still valid fresh observation
   changes the digest; Debug remains hash-redacted. The proof also exposes the
   final receipt acceptance bit without treating a negative receipt as verified.
+- Prepared coordinator tests record exactly one Core verification for an
+  accepted final Fanyuchang save after fresh proof, bind it to the derived save
+  ordinal and never record one for Auto's explicit negative final receipt. A
+  missing durable sink after an accepted save returns non-retryable
+  `HumanRequired` after one transport call rather than replaying the lifecycle.
 - Runtime settings retain the current donor's one-second heartbeat and short
   session behavior, expose only the audited 1/60-second heartbeat values, and
   bind each cadence to its exact donor wire mode.

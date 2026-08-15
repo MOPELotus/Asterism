@@ -1975,8 +1975,10 @@ mod tests {
 
     use asterism_domain::ProviderAccountId;
     use asterism_provider_api::{
-        ExecutionEventSink, ProviderContext, ProviderExecutionLog, ProviderIdentity,
-        ProviderMetadata, ProviderProgress, TaskDetailCapability,
+        ExecutionEventSink, ExecutionMutationIssue, ExecutionMutationReceipt,
+        ExecutionMutationSink, ExecutionMutationVerification, ProviderContext,
+        ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
+        TaskDetailCapability,
     };
     use async_trait::async_trait;
 
@@ -2124,11 +2126,50 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct AtomicFixtureEvents;
+    #[derive(Debug, Default)]
+    struct AtomicFixtureEvents {
+        verifications: Mutex<Vec<ExecutionMutationVerification>>,
+    }
+
+    #[async_trait]
+    impl ExecutionMutationSink for AtomicFixtureEvents {
+        async fn issue(&self, _issue: &ExecutionMutationIssue) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn record_receipt(&self, _receipt: ExecutionMutationReceipt) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn record_verification(
+            &self,
+            verification: ExecutionMutationVerification,
+        ) -> ProviderResult<()> {
+            self.verifications.lock().unwrap().push(verification);
+            Ok(())
+        }
+    }
 
     #[async_trait]
     impl ExecutionEventSink for AtomicFixtureEvents {
+        async fn report(&self, _update: ProviderProgress) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        async fn log(&self, _event: ProviderExecutionLog) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        fn mutation_sink(&self) -> Option<&(dyn ExecutionMutationSink + Send + Sync)> {
+            Some(self)
+        }
+    }
+
+    #[derive(Debug)]
+    struct AtomicFixtureEventsWithoutSink;
+
+    #[async_trait]
+    impl ExecutionEventSink for AtomicFixtureEventsWithoutSink {
         async fn report(&self, _update: ProviderProgress) -> ProviderResult<()> {
             Ok(())
         }
@@ -2719,8 +2760,9 @@ mod tests {
         )
         .unwrap();
 
+        let events = AtomicFixtureEvents::default();
         let outcome = executor
-            .execute_prepared(&atomic_context(), &prepared, &AtomicFixtureEvents)
+            .execute_prepared(&atomic_context(), &prepared, &events)
             .await
             .unwrap();
 
@@ -2736,6 +2778,12 @@ mod tests {
         );
         assert_eq!(outcome.result_sanitized["target_seconds"], 20);
         assert_eq!(outcome.result_sanitized["score_percent"], 0);
+        assert_eq!(outcome.result_sanitized["final_save_ordinal"], 2);
+        assert_eq!(
+            outcome.result_sanitized["final_save_verification_recorded"],
+            false
+        );
+        assert!(events.verifications.lock().unwrap().is_empty());
         assert_eq!(detail_calls.lock().unwrap().as_slice(), &["sco:1001:301"]);
         assert_eq!(
             transport.calls.lock().unwrap().as_slice(),
@@ -2773,8 +2821,9 @@ mod tests {
         )
         .unwrap();
 
+        let events = AtomicFixtureEvents::default();
         let outcome = executor
-            .execute_prepared(&atomic_context(), &prepared, &AtomicFixtureEvents)
+            .execute_prepared(&atomic_context(), &prepared, &events)
             .await
             .unwrap();
 
@@ -2786,6 +2835,59 @@ mod tests {
         assert_eq!(outcome.result_sanitized["score_percent"], 100);
         assert_eq!(outcome.result_sanitized["time_preservation_verified"], true);
         assert_eq!(outcome.result_sanitized["heartbeat_count"], 1);
+        assert_eq!(outcome.result_sanitized["final_save_ordinal"], 4);
+        assert_eq!(
+            outcome.result_sanitized["final_save_verification_recorded"],
+            true
+        );
+        let verifications = events.verifications.lock().unwrap();
+        assert_eq!(verifications.len(), 1);
+        assert_eq!(verifications[0].ordinal(), 4);
+        assert!(verifications[0].verified());
+        assert_ne!(verifications[0].observation_digest(), [0; 32]);
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_atomic_executor_requires_durable_final_verification() {
+        let fresh_tasks = tasks();
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:301",
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&fresh_tasks, &units(), &authority)
+                .unwrap();
+        let transport = Arc::new(AtomicFixtureTransport::default());
+        let executor = WellearnAtomicDurationCompletion::try_new(
+            Arc::new(AtomicFixtureDetail {
+                metadata: development_metadata().unwrap(),
+                detail: detail(fresh_tasks[0].clone()),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            transport.clone(),
+        )
+        .unwrap();
+
+        let error = executor
+            .execute_prepared(
+                &atomic_context(),
+                &prepared,
+                &AtomicFixtureEventsWithoutSink,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ProviderErrorKind::HumanRequired);
+        assert_eq!(
+            error.human_required_reason,
+            Some(asterism_domain::HumanRequiredReason::ManualIntervention)
+        );
         assert_eq!(transport.calls.lock().unwrap().len(), 1);
     }
 
@@ -2815,13 +2917,15 @@ mod tests {
         )
         .unwrap();
 
+        let events = AtomicFixtureEvents::default();
         assert!(
             executor
-                .execute_prepared(&atomic_context(), &prepared, &AtomicFixtureEvents)
+                .execute_prepared(&atomic_context(), &prepared, &events)
                 .await
                 .is_err()
         );
         assert!(transport.calls.lock().unwrap().is_empty());
+        assert!(events.verifications.lock().unwrap().is_empty());
     }
 
     #[test]

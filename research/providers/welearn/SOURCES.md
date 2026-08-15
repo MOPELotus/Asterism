@@ -116,6 +116,10 @@ The following final-observation identity checkpoint repeated all three head/tag
 queries and again found no revision delta. Its domain-separated digest is an
 Asterism persistence boundary over existing fresh-CMI evidence, not a newly
 observed donor endpoint or result claim.
+The Core-verification integration checkpoint repeated the three default-head
+and tag queries after shared commit `ee62903`; revisions and tags remained
+unchanged. The Provider now durably attaches the existing exact fresh-CMI proof
+only to an accepted final save and adds no donor behavior.
 
 ## Source selection
 

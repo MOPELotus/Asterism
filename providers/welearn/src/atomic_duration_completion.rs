@@ -1,9 +1,10 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::RemoteState;
+use asterism_domain::{HumanRequiredReason, RemoteState};
 use asterism_provider_api::{
-    ExecutionEventSink, ExecutionOutcome, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderIdentity, ProviderMetadata, ProviderResult, TaskDetailCapability,
+    ExecutionEventSink, ExecutionMutationVerification, ExecutionOutcome, ProviderContext,
+    ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata, ProviderResult,
+    TaskDetailCapability,
 };
 use async_trait::async_trait;
 
@@ -230,6 +231,8 @@ impl WellearnAtomicDurationCompletion {
             .complete_duration_atomically(context, &course_id, &sco_id, plan, events)
             .await?;
         let verification = verify_atomic_duration_completion(plan, &documents)?;
+        let final_save_verification_recorded =
+            persist_atomic_completion_verification(events, verification).await?;
         let receipts = documents.receipts();
         let heartbeat_accepted = receipts
             .heartbeat_acceptances()
@@ -252,10 +255,41 @@ impl WellearnAtomicDurationCompletion {
                 "heartbeat_rejected": heartbeat_rejected,
                 "set_accepted": receipts.set_accepted(),
                 "save_accepted": receipts.save_accepted(),
+                "final_save_ordinal": verification.final_save_ordinal(),
+                "final_save_verification_recorded": final_save_verification_recorded,
                 "verification": "provider_fresh_cmi",
             }),
         })
     }
+}
+
+async fn persist_atomic_completion_verification(
+    events: &(dyn ExecutionEventSink + Send + Sync),
+    verification: WellearnAtomicDurationCompletionVerification,
+) -> ProviderResult<bool> {
+    if !verification.final_save_accepted() {
+        return Ok(false);
+    }
+    let sink = events
+        .mutation_sink()
+        .ok_or_else(atomic_verification_persistence_error)?;
+    let record = ExecutionMutationVerification::new(
+        verification.final_save_ordinal(),
+        verification.observation_digest(),
+        true,
+    )
+    .map_err(|_| atomic_verification_persistence_error())?;
+    sink.record_verification(record)
+        .await
+        .map_err(|_| atomic_verification_persistence_error())?;
+    Ok(true)
+}
+
+fn atomic_verification_persistence_error() -> ProviderError {
+    ProviderError::human_required(
+        "WELearn atomic completion was verified but its durable observation was not recorded",
+        HumanRequiredReason::ManualIntervention,
+    )
 }
 
 impl fmt::Debug for WellearnAtomicDurationCompletion {

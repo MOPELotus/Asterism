@@ -186,8 +186,10 @@ inventing a zero-time readback predicate that its save-only request does not
 write. Receipt booleans never affect this goal predicate. Only after proof, the
 verifier derives the final save ordinal/acceptance and a domain-separated digest
 over the frozen goal plus exact fresh proof documents. It performs no I/O and
-does not attach verification to start/keep/set or a rejected save; persistence
-still waits for the shared Core boundary.
+does not attach verification to start/keep/set or a rejected save. The prepared
+coordinator now records that proof through Core's durable sink only for an
+accepted final save; missing/failed persistence is post-mutation HumanRequired
+and never replays the lifecycle.
 
 The native atomic transport now consumes Core's storage-agnostic generic
 `ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. WELearn

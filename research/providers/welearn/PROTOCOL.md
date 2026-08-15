@@ -565,9 +565,12 @@ returns its explicit acceptance bit plus a domain-separated observation digest.
 The digest binds the frozen profile/target, final-save ordinal and only the
 fresh post-duration/final CMI documents used by the proof; it excludes initial
 state and every credential/route fact. Debug output redacts the digest. This
-Provider value performs no persistence: Core may later record it only against
-an accepted final save, never against start/keep/set or an explicit negative
-receipt.
+Provider proof itself performs no persistence. The high-level coordinator now
+passes it to Core's durable mutation sink only when the final save receipt is
+accepted, and records `verified=true` against that exact ordinal. It never
+attaches verification to start/keep/set or an explicit negative receipt. A
+missing sink or persistence failure occurs after the remote lifecycle and is
+therefore non-retryable `HumanRequired`, with no mutation replay.
 
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 `WellearnAtomicMutationKind` has stable operation strings for start,
