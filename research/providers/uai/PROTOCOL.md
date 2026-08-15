@@ -1227,8 +1227,12 @@ Native verification refreshes and binds the Course route, then requires exact
 accepts exactly one numeric/string-zero `instanceId`, submitted context and one
 completed child whose sole value equals the immutable uploaded key. Any missing
 receipt, changed key, extra module/child/value or unsubmitted state fails
-closed. This confirms answer persistence only and still requires a separate
-fresh exact Group progress read for completion.
+closed. After those checks, the verification owner retains the exact bounded
+user-module document digest independently of optional policy fields. This
+provides the future mutation-verification observation only when recovery also
+has the exact final plan and accepted submission version; the digest alone
+cannot restore either. It confirms answer persistence only and still requires
+a separate fresh exact Group progress read for completion.
 
 The donor's mixed `multichoice,multiFileUpload` flow is one atomic Group
 submission. Asterism therefore still refuses to submit only its upload half.
@@ -1243,10 +1247,12 @@ complete choice-plus-key body. The semantic plan fingerprint remains separate,
 and the sender consumes the same owner rather than rebuilding its wire bytes.
 Receipt-versioned readback must contain exactly the immutable choice
 answer followed by module `0` with the exact object key; reversed, extra or
-changed modules fail closed. The shared artifact lifecycle, durable attempt and
-one compound Draft that owns both slots remain active Core integration work. A
-grant, object-store response, accepted final receipt or even exact two-module
-readback alone is never Group completion evidence.
+changed modules fail closed. Its verification owner likewise retains the exact
+readback digest independently of optional policy fields. The shared artifact
+lifecycle, durable attempt and one compound Draft that owns both slots remain
+active Core integration work. A grant, object-store response, accepted final
+receipt or even exact two-module readback alone is never Group completion
+evidence.
 
 Core's receipt-conditional atomic sequence now covers the bounded stage-advance
 rules for staged upload. Each mutating phase can advance only from its definite

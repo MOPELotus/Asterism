@@ -447,3 +447,10 @@ four default refs and complete tag refs once more. Apache remained
 changed the exact numeric `600001`/`600002` classification or 120-second delay.
 The new durable deadline is therefore a faithful Core persistence of existing
 donor evidence rather than a newly inferred retry policy.
+
+The upload recovery-verification audit later on 2026-08-15 repeated those four
+default-ref and complete-tag checks with the same unchanged revisions. No donor
+added a version-free user-module read or an object-key-independent verification
+surface. Exact recovery therefore still needs Apache/MIT's accepted submission
+version plus the immutable single/compound answer material; a response hash or
+fresh completion progress is not substitute evidence.

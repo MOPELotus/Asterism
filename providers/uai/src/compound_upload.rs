@@ -303,6 +303,7 @@ pub struct UaiCompoundUploadVerification {
     remote_task_id: String,
     artifact_digest: String,
     submission_version: String,
+    result_digest: [u8; 32],
     score: Option<SubmissionScore>,
     policy: Option<UaiSubmissionPolicyEvidence>,
     verified_at: Timestamp,
@@ -323,6 +324,11 @@ impl UaiCompoundUploadVerification {
 
     pub fn submission_version(&self) -> &str {
         &self.submission_version
+    }
+
+    /// Exact digest of the accepted receipt-versioned user-module readback.
+    pub const fn result_digest(&self) -> [u8; 32] {
+        self.result_digest
     }
 
     pub const fn score(&self) -> Option<SubmissionScore> {
@@ -350,6 +356,7 @@ impl fmt::Debug for UaiCompoundUploadVerification {
             .field("remote_task_id", &self.remote_task_id)
             .field("artifact_digest", &self.artifact_digest)
             .field("submission_version", &self.submission_version)
+            .field("result_digest", &"[HASHED]")
             .field("score", &self.score)
             .field("policy", &self.policy)
             .field("verified_at", &self.verified_at)
@@ -362,6 +369,7 @@ impl Drop for UaiCompoundUploadVerification {
         self.remote_task_id.zeroize();
         self.artifact_digest.zeroize();
         self.submission_version.zeroize();
+        self.result_digest.zeroize();
     }
 }
 
@@ -725,6 +733,7 @@ pub fn parse_compound_upload_verification(
     let response = ZeroizingJsonValue::new(serde_json::from_str(document).map_err(|_| {
         invalid_response("UAI compound upload verification response is not valid JSON")
     })?);
+    let result_digest = Sha256::digest(document.as_bytes()).into();
     let state = bound_verification_state(response.as_value(), submission.group_id(), version)?;
     let score = verified_submission_score(state)?;
     let question_data = state
@@ -743,17 +752,13 @@ pub fn parse_compound_upload_verification(
         .ok_or_else(|| remote_changed("UAI compound upload readback is not exactly two modules"))?;
     parse_remote_question(&entries[0], submission.ordinary_question()?)?;
     validate_upload_readback_question(&entries[1], submission.expose_file_key())?;
-    let policy = verified_submission_policy(
-        state,
-        submission.group_id(),
-        version,
-        Sha256::digest(document.as_bytes()).into(),
-    )?;
+    let policy = verified_submission_policy(state, submission.group_id(), version, result_digest)?;
     Ok(UaiCompoundUploadVerification {
         ordinary_draft_id: submission.ordinary_draft_id,
         remote_task_id: submission.remote_task_id.clone(),
         artifact_digest: submission.artifact_digest.clone(),
         submission_version: version.to_owned(),
+        result_digest,
         score,
         policy,
         verified_at: Utc::now(),
@@ -980,6 +985,10 @@ mod tests {
             parse_compound_upload_verification(&document, &submission, &receipt).unwrap();
         assert_eq!(verified.ordinary_draft_id(), draft.id);
         assert_eq!(verified.artifact_digest(), uploaded.artifact_digest());
+        assert_eq!(
+            verified.result_digest(),
+            <[u8; 32]>::from(Sha256::digest(document.as_bytes()))
+        );
         assert_eq!(verified.score(), None);
         let policy = verified.policy().unwrap();
         assert_eq!(policy.group_id(), "group-upload");
