@@ -228,6 +228,11 @@ placeholder identities, result codes, status values and pagination shape.
   an optional numeric code, or `score/task_score/grade` kinds plus alias count;
   conflicting score values, extra answer/topic fields and `jv` content remain
   absent from the observation.
+- Class-page and ordinary-study envelope tests retain only root/code/data value
+  kinds, optional numeric code, bounded record/list counts and known field
+  kinds. Synthetic row answers, Course IDs/titles and task-list string values
+  do not cross the observation; every malformed envelope still rejects the
+  complete inventory.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

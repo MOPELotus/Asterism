@@ -563,6 +563,10 @@ retaining response or user data:
   root/code/data/jv kinds plus an optional numeric code, or the three alias
   kinds/count, on `SubmissionVerify / UnknownResultShape`; score values and
   unrelated decoded fields are omitted.
+- malformed class-page and selected-Course study-list envelopes record only
+  root/code/data/records/list field kinds, an optional numeric code and bounded
+  structural counts on `TaskInventory / UnknownResultShape`; no row, identity,
+  title, score or progress value is retained.
 
 These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
 failure only. They do not authorize guessing, retrying a mutation or accepting

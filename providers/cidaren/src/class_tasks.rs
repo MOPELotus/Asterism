@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::inventory::CidarenClassTaskPageDocument;
-use crate::protocol_observation::protocol_drift_with_observation;
+use crate::protocol_observation::{
+    error_with_protocol_observation, json_value_kind, protocol_drift_with_observation,
+};
 
 const PAGE_SIZE: usize = 10;
 const MAX_TASKS: usize = 10_000;
@@ -222,34 +224,52 @@ fn parse_pages(pages: &[CidarenClassTaskPageDocument]) -> ProviderResult<Vec<Cla
 fn parse_page(document: &str) -> ProviderResult<(usize, Vec<ClassTaskRow>)> {
     let root: Value = serde_json::from_str(document)
         .map_err(|_| invalid_response("Cidaren class-task page is not valid JSON"))?;
-    let object = root
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren class-task page is not an object"))?;
-    if required_i64(object.get("code"), "response code")? != 1 {
-        return Err(invalid_response(
-            "Cidaren class-task endpoint returned a non-success response",
+    let Some(object) = root.as_object() else {
+        return Err(class_page_observation(
+            protocol_drift("Cidaren class-task page is not an object"),
+            &root,
+        ));
+    };
+    let code = required_i64(object.get("code"), "response code")
+        .map_err(|error| class_page_observation(error, &root))?;
+    if code != 1 {
+        return Err(class_page_observation(
+            invalid_response("Cidaren class-task endpoint returned a non-success response"),
+            &root,
         ));
     }
-    let data = object
-        .get("data")
-        .and_then(Value::as_object)
-        .ok_or_else(|| protocol_drift("Cidaren class-task page has no data object"))?;
-    let total = required_u64(data.get("total"), "total count").and_then(|value| {
-        usize::try_from(value)
-            .map_err(|_| invalid_response("Cidaren class-task total exceeds the limit"))
-    })?;
+    let Some(data) = object.get("data").and_then(Value::as_object) else {
+        return Err(class_page_observation(
+            protocol_drift("Cidaren class-task page has no data object"),
+            &root,
+        ));
+    };
+    let total = required_u64(data.get("total"), "total count")
+        .map_err(|error| class_page_observation(error, &root))
+        .and_then(|value| {
+            usize::try_from(value).map_err(|_| {
+                class_page_observation(
+                    invalid_response("Cidaren class-task total exceeds the limit"),
+                    &root,
+                )
+            })
+        })?;
     if total > MAX_TASKS {
-        return Err(invalid_response(
-            "Cidaren class-task total exceeds the item limit",
+        return Err(class_page_observation(
+            invalid_response("Cidaren class-task total exceeds the item limit"),
+            &root,
         ));
     }
-    let records = data
-        .get("records")
-        .and_then(Value::as_array)
-        .ok_or_else(|| protocol_drift("Cidaren class-task page has no records array"))?;
+    let Some(records) = data.get("records").and_then(Value::as_array) else {
+        return Err(class_page_observation(
+            protocol_drift("Cidaren class-task page has no records array"),
+            &root,
+        ));
+    };
     if records.len() > PAGE_SIZE {
-        return Err(invalid_response(
-            "Cidaren class-task page exceeds the audited page size",
+        return Err(class_page_observation(
+            invalid_response("Cidaren class-task page exceeds the audited page size"),
+            &root,
         ));
     }
     records
@@ -257,6 +277,48 @@ fn parse_page(document: &str) -> ProviderResult<(usize, Vec<ClassTaskRow>)> {
         .map(parse_row)
         .collect::<ProviderResult<Vec<_>>>()
         .map(|rows| (total, rows))
+}
+
+fn class_page_observation(error: ProviderError, root: &Value) -> ProviderError {
+    let object = root.as_object();
+    let data = object.and_then(|object| object.get("data"));
+    let data_object = data.and_then(Value::as_object);
+    let records = data_object.and_then(|data| data.get("records"));
+    let total = data_object.and_then(|data| data.get("total"));
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::TaskInventory,
+        ProtocolObservationKind::UnknownResultShape,
+        json!({
+            "schema": "cidaren.class-task-page-observation.v1",
+            "root_kind": json_value_kind(Some(root)),
+            "code_kind": json_value_kind(object.and_then(|object| object.get("code"))),
+            "code_value": object
+                .and_then(|object| object.get("code"))
+                .and_then(parsed_i64),
+            "data_kind": json_value_kind(data),
+            "records_kind": json_value_kind(records),
+            "records_entries": records.and_then(Value::as_array).map(Vec::len),
+            "total_kind": json_value_kind(total),
+            "total_value": total.and_then(parsed_u64),
+        }),
+    )
+}
+
+fn parsed_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(value) => value.as_i64(),
+        Value::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn parsed_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(value) => value.as_u64(),
+        Value::String(value) => value.trim().parse::<u64>().ok(),
+        _ => None,
+    }
 }
 
 pub(crate) fn class_task_total(document: &str) -> ProviderResult<usize> {
@@ -724,6 +786,47 @@ mod tests {
         assert!(
             parse_task_inventory(None, &[invalid(&base.replace("\"course\"", "\"bad/id\""))])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn page_envelope_drift_exposes_only_result_shape() {
+        let error = parse_page(
+            r#"{"code":991,"data":{"records":[{"answer":"must-not-cross"}],"total":1}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({
+                "schema": "cidaren.class-task-page-observation.v1",
+                "root_kind": "object",
+                "code_kind": "number",
+                "code_value": 991,
+                "data_kind": "object",
+                "records_kind": "array",
+                "records_entries": 1,
+                "total_kind": "number",
+                "total_value": 1,
+            })
+        );
+        assert!(
+            !serde_json::to_string(&observation.shape_sanitized)
+                .unwrap()
+                .contains("must-not-cross")
+        );
+
+        let error = parse_page(r#"["must-not-cross"]"#).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        assert_eq!(
+            error.protocol_observation.unwrap().shape_sanitized["root_kind"],
+            "array"
         );
     }
 }

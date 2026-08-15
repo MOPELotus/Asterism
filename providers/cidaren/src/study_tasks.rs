@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    inventory::CidarenStudyTaskDocument, protocol_observation::protocol_drift_with_observation,
+    inventory::CidarenStudyTaskDocument,
+    protocol_observation::{
+        error_with_protocol_observation, json_value_kind, protocol_drift_with_observation,
+    },
 };
 
 const MAX_STUDY_TASKS: usize = 10_000;
@@ -100,31 +103,43 @@ pub fn parse_study_task_inventory(
 fn parse_snapshot(document: &CidarenStudyTaskDocument) -> ProviderResult<StudyTaskSnapshot> {
     let root: Value = serde_json::from_str(document.as_str())
         .map_err(|_| invalid_response("Cidaren study-task response is not valid JSON"))?;
-    let object = root
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren study-task response is not an object"))?;
-    if required_i64(object.get("code"), "response code")? != 1 {
-        return Err(invalid_response(
-            "Cidaren study-task endpoint returned a non-success response",
+    let Some(object) = root.as_object() else {
+        return Err(study_envelope_observation(
+            protocol_drift("Cidaren study-task response is not an object"),
+            &root,
+        ));
+    };
+    let code = required_i64(object.get("code"), "response code")
+        .map_err(|error| study_envelope_observation(error, &root))?;
+    if code != 1 {
+        return Err(study_envelope_observation(
+            invalid_response("Cidaren study-task endpoint returned a non-success response"),
+            &root,
         ));
     }
-    let data = object
-        .get("data")
-        .and_then(Value::as_object)
-        .ok_or_else(|| protocol_drift("Cidaren study-task response has no data object"))?;
-    let course_id = required_component(data.get("course_id"), "Course ID")?;
+    let Some(data) = object.get("data").and_then(Value::as_object) else {
+        return Err(study_envelope_observation(
+            protocol_drift("Cidaren study-task response has no data object"),
+            &root,
+        ));
+    };
+    let course_id = required_component(data.get("course_id"), "Course ID")
+        .map_err(|error| study_envelope_observation(error, &root))?;
     if course_id != document.selected_course_id() {
         return Err(protocol_drift(
             "Cidaren study-task response changed the selected Course identity",
         ));
     }
-    let records = data
-        .get("task_list")
-        .and_then(Value::as_array)
-        .ok_or_else(|| protocol_drift("Cidaren study-task response has no task list"))?;
+    let Some(records) = data.get("task_list").and_then(Value::as_array) else {
+        return Err(study_envelope_observation(
+            protocol_drift("Cidaren study-task response has no task list"),
+            &root,
+        ));
+    };
     if records.len() > MAX_STUDY_TASKS {
-        return Err(invalid_response(
-            "Cidaren study-task response exceeds the item limit",
+        return Err(study_envelope_observation(
+            invalid_response("Cidaren study-task response exceeds the item limit"),
+            &root,
         ));
     }
 
@@ -146,6 +161,43 @@ fn parse_snapshot(document: &CidarenStudyTaskDocument) -> ProviderResult<StudyTa
         course_status_raw: optional_i64(data.get("course_status"), "Course status")?,
         tasks: tasks.into_values().collect(),
     })
+}
+
+fn study_envelope_observation(error: ProviderError, root: &Value) -> ProviderError {
+    let object = root.as_object();
+    let data = object.and_then(|object| object.get("data"));
+    let data_object = data.and_then(Value::as_object);
+    let task_list = data_object.and_then(|data| data.get("task_list"));
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::TaskInventory,
+        ProtocolObservationKind::UnknownResultShape,
+        json!({
+            "schema": "cidaren.study-task-list-observation.v1",
+            "root_kind": json_value_kind(Some(root)),
+            "code_kind": json_value_kind(object.and_then(|object| object.get("code"))),
+            "code_value": object
+                .and_then(|object| object.get("code"))
+                .and_then(parsed_i64),
+            "data_kind": json_value_kind(data),
+            "course_id_kind": json_value_kind(
+                data_object.and_then(|data| data.get("course_id"))
+            ),
+            "course_name_kind": json_value_kind(
+                data_object.and_then(|data| data.get("course_name"))
+            ),
+            "task_list_kind": json_value_kind(task_list),
+            "task_list_entries": task_list.and_then(Value::as_array).map(Vec::len),
+        }),
+    )
+}
+
+fn parsed_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(value) => value.as_i64(),
+        Value::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
+    }
 }
 
 fn parse_row(value: &Value, selected_course_id: &str) -> ProviderResult<StudyTaskRow> {
@@ -473,6 +525,54 @@ mod tests {
         assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
         assert_eq!(observation.kind, ProtocolObservationKind::UnknownTaskType);
         assert_eq!(observation.shape_sanitized, json!({"task_type": 9}));
+    }
+
+    #[test]
+    fn study_envelope_drift_exposes_only_result_shape() {
+        let document = CidarenStudyTaskDocument::try_new(
+            "course-a",
+            r#"{"code":991,"data":{"course_id":"must-not-cross","course_name":"must-not-cross","task_list":[{"answer":"must-not-cross"}]}}"#,
+        )
+        .unwrap();
+        let error = parse_snapshot(&document).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({
+                "schema": "cidaren.study-task-list-observation.v1",
+                "root_kind": "object",
+                "code_kind": "number",
+                "code_value": 991,
+                "data_kind": "object",
+                "course_id_kind": "string",
+                "course_name_kind": "string",
+                "task_list_kind": "array",
+                "task_list_entries": 1,
+            })
+        );
+        assert!(
+            !serde_json::to_string(&observation.shape_sanitized)
+                .unwrap()
+                .contains("must-not-cross")
+        );
+
+        let document = CidarenStudyTaskDocument::try_new(
+            "course-a",
+            r#"{"code":1,"data":{"course_id":"course-a","course_name":"Synthetic","task_list":"must-not-cross"}}"#,
+        )
+        .unwrap();
+        let error = parse_snapshot(&document).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        assert_eq!(
+            error.protocol_observation.unwrap().shape_sanitized["task_list_kind"],
+            "string"
+        );
     }
 
     fn fixture_document() -> CidarenStudyTaskDocument {

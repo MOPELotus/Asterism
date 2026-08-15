@@ -236,6 +236,12 @@ The current checkpoint (not a completion boundary):
     `score`/`task_score`/`grade` kinds and alias count. Score values, unrelated
     payload fields and answer/session material remain excluded, while fresh
     Task completion/progress continues to be the independent verification fact.
+47. attaches bounded shape-only observations to class-page and selected-Course
+    study-list envelope drift. Only root/code/data field kinds, optional numeric
+    code, structural counts and the known Course/list field kinds are retained;
+    row content, Course/Task identities, titles, score/progress values and
+    authentication material remain excluded. The complete inventory still
+    fails atomically before any stale Task can reach terminal readback.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

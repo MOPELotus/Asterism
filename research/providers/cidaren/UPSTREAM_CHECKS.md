@@ -709,6 +709,23 @@ fields, answers, topic codes, `jv` content and the response body are omitted.
 This does not make score completion evidence or weaken the separate fresh
 100%/Completed requirement.
 
+### 2026-08-15 inventory-envelope observation follow-up
+
+The recorded donor refs, tags/releases, public issue update head and OAuth
+handoff manifest were rechecked after the pushed checkpoint and did not move.
+No inventory route, result code or field family entered scope.
+
+Cidaren's class-page and selected-Course study-list parsers now attach bounded
+`TaskInventory / UnknownResultShape` observations when their outer result
+envelopes drift. The class shape retains root/code/data/records/total kinds,
+an optional numeric code and bounded record/total counts. The study shape
+retains root/code/data/Course/list field kinds, an optional numeric code and
+bounded list count. Neither shape contains a row, Course/Task identity, title,
+score/progress/time value, answer material or credential. Existing
+`ProtocolDrift`/`InvalidResponse`, complete-pagination rejection and fresh
+identity rebinding remain unchanged, so terminal verification cannot continue
+from a partial or newly guessed inventory.
+
 ## Check procedure
 
 For the next checkpoint:
