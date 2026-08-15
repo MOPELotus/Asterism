@@ -436,7 +436,11 @@ selector or script; unknown `selector`/`script` fields fail strict schema
 validation even on unit actions. `ResidenceControl` projects only a bounded
 Task handle, exact active leaf budget and typed pause/resume/restart value into
 a selector-free helper-runtime recipe, then accepts only a matching control
-acknowledgement whose active seconds do not exceed that budget. The Provider
+acknowledgement whose active seconds do not exceed that budget. When an active
+`ResidenceTarget` is available, the control command is derived from that exact
+validated session/frame/Task command and copies its rational leaf seconds; it
+cannot widen a leaf back to the Course-level plan budget. A non-residence or
+foreign active command fails before a control envelope exists. The Provider
 can persist the separately issued control's ordinary command artifact and
 exchange, fresh-rebind that artifact after recovery, validate the independently
 stored raw-result digest and reduce it to a redacted typed acknowledgement plus

@@ -3267,6 +3267,72 @@ impl UaiBrowserCommandEnvelope {
         )
     }
 
+    /// Builds a control command from the exact active residence command so a
+    /// rational leaf budget cannot be widened back to the Course-level plan
+    /// budget.
+    ///
+    /// This command-level derivation does not itself grant authority to issue
+    /// concurrently with, or cancel, the active residence exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a non-residence active command, a foreign
+    /// session/frame/Task binding or an out-of-range restart ordinal.
+    pub fn residence_control_for_active(
+        plan: &UaiBrowserResidencePlan,
+        binding: &UaiBrowserSessionBinding,
+        sequence: u32,
+        active: &Self,
+        control: UaiBrowserResidenceControl,
+    ) -> ProviderResult<Self> {
+        active.validate_for_plan(plan)?;
+        binding.validate_for_plan(plan)?;
+        if active.version != binding.version
+            || active.session_nonce != binding.session_nonce
+            || active.origin != binding.origin
+            || active.frame_id != binding.frame_id
+            || active.remote_task_id != binding.remote_task_id
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteChanged,
+                "UAI BrowserBridge active residence is foreign to its control binding",
+            ));
+        }
+        let (task_handle, seconds) = match &active.command {
+            UaiBrowserCommand::ResidenceTarget {
+                task_handle,
+                seconds,
+                ..
+            } => (task_handle.clone(), *seconds),
+            _ => {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "UAI BrowserBridge residence control has no active residence target",
+                ));
+            }
+        };
+        if matches!(
+            &control,
+            UaiBrowserResidenceControl::Restart { start_micro_ordinal }
+                if *start_micro_ordinal >= plan.max_discovered_micros
+        ) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "UAI BrowserBridge restart Micro ordinal exceeds the frozen bound",
+            ));
+        }
+        Self::new(
+            plan,
+            binding,
+            sequence,
+            UaiBrowserCommand::ResidenceControl {
+                task_handle,
+                seconds,
+                control,
+            },
+        )
+    }
+
     fn new(
         plan: &UaiBrowserResidencePlan,
         binding: &UaiBrowserSessionBinding,
@@ -9229,6 +9295,32 @@ mod tests {
                 UaiBrowserCommand::ResidenceControl { seconds: 1_200, .. }
             ));
         }
+        let active_leaf =
+            UaiBrowserCommandEnvelope::residence_target_for_leaf(&plan, &binding, 7, &target, 100)
+                .unwrap();
+        let leaf_control = UaiBrowserCommandEnvelope::residence_control_for_active(
+            &plan,
+            &binding,
+            8,
+            &active_leaf,
+            UaiBrowserResidenceControl::Pause,
+        )
+        .unwrap();
+        assert!(matches!(
+            leaf_control.command,
+            UaiBrowserCommand::ResidenceControl { seconds: 100, .. }
+        ));
+        let ping = UaiBrowserCommandEnvelope::ping(&plan, &binding, 7).unwrap();
+        assert!(
+            UaiBrowserCommandEnvelope::residence_control_for_active(
+                &plan,
+                &binding,
+                8,
+                &ping,
+                UaiBrowserResidenceControl::Pause,
+            )
+            .is_err()
+        );
         let document =
             include_str!("../../../fixtures/providers/uai/browser/residence-control-restart.json")
                 .replace("{{target_task_handle}}", &target.entry().handle);
