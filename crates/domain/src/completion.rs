@@ -100,7 +100,7 @@ impl Default for CompletionPolicySnapshot {
         let captured_at = chrono::Utc::now();
         Self {
             strict_completion_enabled: true,
-            score_improvement_enabled: false,
+            score_improvement_enabled: true,
             strict_attempt_limit: 3,
             score_improvement_attempt_limit: 1,
             score_target_millis: 1_000,
@@ -697,6 +697,31 @@ mod tests {
             formal_retry_requires_confirmation: true,
             captured_at: at,
         }
+    }
+
+    #[test]
+    fn canonical_policy_enables_both_modes_without_auto_starting_a_retake() {
+        let now = Utc::now();
+        let policy = CompletionPolicySnapshot {
+            captured_at: now,
+            ..CompletionPolicySnapshot::default()
+        };
+        assert!(policy.strict_completion_enabled);
+        assert!(policy.score_improvement_enabled);
+        let workflow = ScoreImprovementWorkflow::new(
+            binding(),
+            policy,
+            VerifiedCompletionBaseline {
+                outcome: CompletionOutcome::Completed,
+                score: None,
+                verified_at: now,
+            },
+            RetakeScorePolicy::HighestScore,
+            false,
+            now,
+        )
+        .unwrap();
+        assert_eq!(workflow.state, ScoreImprovementState::Disabled);
     }
 
     #[test]

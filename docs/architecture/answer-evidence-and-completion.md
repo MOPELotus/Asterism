@@ -206,11 +206,12 @@ Every registered Provider schema receives the same Core-owned completion
 fields at registration: Strict Completion enabled, Score Improvement enabled,
 the two attempt limits, Score Improvement target and the two workflow time
 limits. All seven may inherit through Provider, ProviderAccount and Task scope.
-The canonical defaults enable Strict Completion, keep Score Improvement
-disabled until explicit opt-in, allow three completion attempts and one score
-attempt, target 100%, and bound the workflows to seven days and one day
-respectively. Formal scored retry confirmation is a fixed safety invariant,
-not a setting that an owner or lower scope can disable.
+The canonical defaults enable both Strict Completion and Score Improvement,
+allow three completion attempts and one score attempt, target 100%, and bound
+the workflows to seven days and one day respectively. Starting an actual Score
+Improvement workflow still requires explicit opt-in. Formal scored retry
+confirmation is a fixed safety invariant, not a setting that an owner or lower
+scope can disable.
 
 An Execution atomically persists both its immutable resolved settings and the
 derived `CompletionPolicySnapshot`, including source revisions, capture time and
@@ -219,6 +220,12 @@ fields freezes the canonical defaults against its original capture time.
 Missing Provider-owned values, unknown values, malformed types and
 schema-version changes remain fail-closed; compatibility handling never
 broadens Provider authority.
+
+Both canonical policy switches default to enabled. This does not remove the
+separate Score Improvement opt-in: without that explicit post-completion choice
+the retake workflow is Disabled and no score attempt can start. Explicit scoped
+settings, including false, still override defaults, while immutable historical
+Execution snapshots retain the policy they originally froze.
 
 ## Course aggregate progress
 

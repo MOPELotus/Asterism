@@ -3843,7 +3843,7 @@ mod tests {
             serde_json::from_str(&frozen.2).unwrap();
         assert_eq!(completion_policy.strict_attempt_limit, 5);
         assert!(completion_policy.strict_completion_enabled);
-        assert!(!completion_policy.score_improvement_enabled);
+        assert!(completion_policy.score_improvement_enabled);
         completion_policy.validate().unwrap();
         assert_eq!((frozen.3, frozen.4, frozen.5), (Some(1), Some(1), Some(1)));
 

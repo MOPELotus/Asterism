@@ -4177,9 +4177,9 @@ polluting global answer counts.
 Strict Completion and Score Improvement now exist as separate Domain state
 machines with separate typed identities. Both freeze one bounded policy
 snapshot containing enable switches, attempt limits, deadlines, target score
-and formal-retry confirmation behavior. The default enables Strict Completion,
-keeps Score Improvement opt-in, caps both flows and requires confirmation for
-formal assessment retries.
+and formal-retry confirmation behavior. The default enables both policy
+switches, keeps actual Score Improvement execution explicitly opt-in, caps both
+flows and requires confirmation for formal assessment retries.
 
 Strict Completion starts active only when enabled, records structured
 `CompletionDiagnosis` values, and becomes terminal immediately after a fresh
@@ -4844,3 +4844,19 @@ Authenticated. Subsequent credential replacement and replay cannot create a
 second full scan. Coverage decodes the migrated scheduler payload, proves the
 backfill is idempotent, and verifies direct, AuthSession and BrowserBridge entry
 points retain exactly one harvest/job across refresh or duplicate submission.
+
+## Two-hundred-and-sixty-fourth Phase 0 slice
+
+The canonical completion policy and Core-owned runtime setting schema now
+default both Strict Completion and Score Improvement policy switches to
+enabled. This is permission to create the corresponding bounded workflow, not
+automatic score chasing: Score Improvement still requires a separate explicit
+owner opt-in after a verified Completed or Passed baseline, and every retake
+still requires its existing confirmation and Provider limits.
+
+Explicit Provider, ProviderAccount or Task setting values continue to override
+the default, including an explicit false value. Already-frozen Execution policy
+snapshots are not rewritten; migration 060's historical backfill remains an
+immutable record of the policy frozen at that earlier revision. Coverage proves
+the new canonical policy enables both switches while a non-opted-in Score
+Improvement workflow remains Disabled.

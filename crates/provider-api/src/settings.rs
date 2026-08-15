@@ -561,7 +561,7 @@ impl ProviderRuntimeSettingsSchema {
                 self,
                 &resolved,
                 ProviderSettingCoreBehavior::ScoreImprovementEnabled,
-                false,
+                true,
             )?,
             strict_attempt_limit: u32::try_from(strict_limit).map_err(|_| {
                 invalid_completion_behavior(
@@ -791,7 +791,7 @@ fn core_completion_definitions() -> Vec<ProviderSettingDefinition> {
             display_name: "Score improvement".to_owned(),
             description: "Allow explicitly confirmed retakes after verified completion.".to_owned(),
             kind: ProviderSettingKind::Boolean,
-            default: ProviderSettingValue::Boolean(false),
+            default: ProviderSettingValue::Boolean(true),
             scopes: scopes.clone(),
             core_behavior: Some(ProviderSettingCoreBehavior::ScoreImprovementEnabled),
         },
@@ -1490,7 +1490,7 @@ mod tests {
         let hydrated = schema.hydrate_frozen_core_defaults(&legacy).unwrap();
         schema.validate_resolved(&hydrated).unwrap();
         assert_eq!(hydrated.boolean(STRICT_COMPLETION_ENABLED_KEY), Some(true));
-        assert_eq!(hydrated.boolean(SCORE_IMPROVEMENT_ENABLED_KEY), Some(false));
+        assert_eq!(hydrated.boolean(SCORE_IMPROVEMENT_ENABLED_KEY), Some(true));
 
         let mut missing_provider_value = legacy;
         missing_provider_value
