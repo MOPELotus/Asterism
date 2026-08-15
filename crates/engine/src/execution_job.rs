@@ -4554,6 +4554,7 @@ mod tests {
         CompositeSuccess,
         SubmissionConfirmed,
         SubmissionRejected,
+        SubmissionRejectedCompleted,
         SubmissionPending,
         SubmissionExecuteNetwork,
         DurableSubmissionConfirmed,
@@ -4695,6 +4696,7 @@ mod tests {
                 ProviderBehavior::CompositeSuccess => request.requested_capabilities.clone(),
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionRejected
+                | ProviderBehavior::SubmissionRejectedCompleted
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork
                 | ProviderBehavior::DurableSubmissionConfirmed
@@ -4772,6 +4774,7 @@ mod tests {
                 }),
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionRejected
+                | ProviderBehavior::SubmissionRejectedCompleted
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork
                 | ProviderBehavior::DurableSubmissionConfirmed
@@ -4834,6 +4837,7 @@ mod tests {
                 }),
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionRejected
+                | ProviderBehavior::SubmissionRejectedCompleted
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork
                 | ProviderBehavior::DurableSubmissionConfirmed
@@ -4912,6 +4916,7 @@ mod tests {
                 }
                 ProviderBehavior::SubmissionConfirmed
                 | ProviderBehavior::SubmissionRejected
+                | ProviderBehavior::SubmissionRejectedCompleted
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork
                 | ProviderBehavior::DurableSubmissionConfirmed
@@ -5131,7 +5136,12 @@ mod tests {
         ) -> ProviderResult<SubmissionVerificationSnapshot> {
             *self.submission_verify_calls.lock().unwrap() += 1;
             let pending = self.behavior == ProviderBehavior::SubmissionPending;
-            let rejected = self.behavior == ProviderBehavior::SubmissionRejected;
+            let rejected = matches!(
+                self.behavior,
+                ProviderBehavior::SubmissionRejected
+                    | ProviderBehavior::SubmissionRejectedCompleted
+            );
+            let completed = !pending && self.behavior != ProviderBehavior::SubmissionRejected;
             Ok(SubmissionVerificationSnapshot {
                 status: if pending {
                     SubmissionVerificationStatus::Pending
@@ -5140,10 +5150,10 @@ mod tests {
                 } else {
                     SubmissionVerificationStatus::Confirmed
                 },
-                remote_state: Some(if pending || rejected {
-                    RemoteState::InProgress
-                } else {
+                remote_state: Some(if completed {
                     RemoteState::Completed
+                } else {
+                    RemoteState::InProgress
                 }),
                 score: rejected.then_some(asterism_domain::SubmissionScore {
                     earned_milli_points: 0,
@@ -5790,6 +5800,73 @@ mod tests {
                 Some("score_below_threshold".to_owned()),
                 0,
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_completion_wins_over_a_rejected_submission_status() {
+        let fixture = Fixture::submission(ProviderBehavior::SubmissionRejectedCompleted).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+
+        let persisted: (String, String, String) = sqlx::query_as(
+            "SELECT execution.state, workflow.state, result.status \
+             FROM executions AS execution \
+             INNER JOIN strict_completion_execution_observations AS observation \
+                     ON observation.execution_id = execution.id \
+             INNER JOIN strict_completion_workflows AS workflow \
+                     ON workflow.id = observation.workflow_id \
+             INNER JOIN submission_results AS result \
+                     ON result.execution_id = execution.id \
+             WHERE execution.id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted,
+            (
+                "succeeded".to_owned(),
+                "completed".to_owned(),
+                "rejected".to_owned(),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_ledgers_a_persisted_submission_result_without_provider_replay() {
+        let fixture = Fixture::submission_with_persisted_confirmed_result().await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 0);
+
+        let persisted: (String, String, i64, i64) = sqlx::query_as(
+            "SELECT execution.state, workflow.state, \
+                    json_extract(workflow.workflow_json, '$.attempts_started'), COUNT(*) \
+             FROM executions AS execution \
+             INNER JOIN strict_completion_execution_observations AS observation \
+                     ON observation.execution_id = execution.id \
+             INNER JOIN strict_completion_workflows AS workflow \
+                     ON workflow.id = observation.workflow_id \
+             WHERE execution.id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted,
+            ("succeeded".to_owned(), "completed".to_owned(), 0, 1)
         );
     }
 
@@ -6498,6 +6575,102 @@ mod tests {
             .execute(fixture.database.pool())
             .await
             .unwrap();
+            fixture
+        }
+
+        async fn submission_with_persisted_confirmed_result() -> Self {
+            let mut fixture = Self::submission(ProviderBehavior::SubmissionConfirmed).await;
+            let repository = SqliteExecutionRepository::new(fixture.database.clone());
+            let task_id = execution_id_to_task(&repository, fixture.execution_id)
+                .await
+                .unwrap();
+            let lease = ExecutionLease {
+                task_id,
+                execution_id: fixture.execution_id,
+                worker_id: "execution-worker".to_owned(),
+                expires_at: fixture.now + chrono::Duration::minutes(1),
+            };
+            SqliteExecutionLeaseRepository::new(fixture.database.clone())
+                .try_acquire(&lease, fixture.now)
+                .await
+                .unwrap();
+            let attempt = repository
+                .start_attempt(ExecutionAttemptStartRequest {
+                    execution_id: fixture.execution_id,
+                    scheduler_job_id: fixture.job.id,
+                    worker_id: "execution-worker",
+                    at: fixture.now,
+                    correlation_id: "persisted-result-attempt",
+                })
+                .await
+                .unwrap();
+            let draft = repository
+                .find_execution_submission_draft(fixture.execution_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let result_at = fixture.now + chrono::Duration::seconds(1);
+            let result = SubmissionResult {
+                id: SubmissionResultId::new(),
+                submission_draft_id: draft.id,
+                execution_id: fixture.execution_id,
+                execution_attempt_id: attempt.id,
+                task_id,
+                question_snapshot_id: draft.question_snapshot_id,
+                provider_id: draft.provider_id.clone(),
+                provider_version: draft.provider_version.clone(),
+                status: SubmissionResultStatus::Confirmed,
+                receipt: None,
+                verification: SubmissionVerificationSnapshot {
+                    status: SubmissionVerificationStatus::Confirmed,
+                    remote_state: Some(RemoteState::Completed),
+                    score: None,
+                    progress_percent: Some(100),
+                    questions: draft
+                        .items
+                        .iter()
+                        .map(|item| asterism_domain::SubmissionQuestionVerification {
+                            question_id: item.question.id,
+                            status:
+                                asterism_domain::SubmissionQuestionVerificationStatus::Confirmed,
+                        })
+                        .collect(),
+                    verified_at: result_at,
+                },
+                created_at: result_at,
+            };
+            repository
+                .persist_submission_result(SubmissionResultPersistRequest {
+                    result: &result,
+                    scheduler_job_id: fixture.job.id,
+                    worker_id: "execution-worker",
+                    correlation_id: "persisted-result",
+                    at: result_at,
+                })
+                .await
+                .unwrap();
+
+            let recovery_at = fixture.now + chrono::Duration::seconds(3);
+            let expired = (recovery_at - chrono::Duration::seconds(1)).to_rfc3339();
+            sqlx::query("UPDATE execution_leases SET expires_at = ? WHERE execution_id = ?")
+                .bind(&expired)
+                .bind(fixture.execution_id.to_string())
+                .execute(fixture.database.pool())
+                .await
+                .unwrap();
+            sqlx::query("UPDATE scheduled_jobs SET lease_expires_at = ? WHERE id = ?")
+                .bind(&expired)
+                .bind(fixture.job.id.to_string())
+                .execute(fixture.database.pool())
+                .await
+                .unwrap();
+            fixture
+                .database
+                .recover_stale_work(recovery_at)
+                .await
+                .unwrap();
+            fixture.job = fixture.claim_recovery(recovery_at).await;
+            fixture.now = recovery_at;
             fixture
         }
 
