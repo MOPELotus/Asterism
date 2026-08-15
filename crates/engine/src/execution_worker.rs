@@ -93,6 +93,15 @@ where
         self.runner = self.runner.with_question_session_artifacts(artifacts);
         self
     }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn asterism_storage::ProtocolObservationRepository>,
+    ) -> Self {
+        self.runner = self.runner.with_protocol_observations(observations);
+        self
+    }
 }
 
 impl<E, L, S, A, T> ExecutionSchedulerWorker<E, L, S, A, T>

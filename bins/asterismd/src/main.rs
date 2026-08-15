@@ -29,9 +29,9 @@ use asterism_storage::{
     Database, RecoveryReport, SecretKeyring, SqliteAnswerBootstrapHarvestRepository,
     SqliteAnswerHistoryIngestionRepository, SqliteBrowserBridgeSessionRepository,
     SqliteExecutionLeaseRepository, SqliteExecutionRepository, SqliteOutboxRepository,
-    SqliteProviderAccountRepository, SqliteProviderCredentialResolver,
-    SqliteProviderScanRepository, SqliteSchedulerRepository, SqliteSecretStore,
-    SqliteTaskQueryRepository,
+    SqliteProtocolObservationRepository, SqliteProviderAccountRepository,
+    SqliteProviderCredentialResolver, SqliteProviderScanRepository, SqliteSchedulerRepository,
+    SqliteSecretStore, SqliteTaskQueryRepository,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Parser;
@@ -567,6 +567,9 @@ fn start_execution_scheduler(
             },
         )
         .context("failed to configure the execution scheduler")?;
+        let worker = worker.with_protocol_observations(Arc::new(
+            SqliteProtocolObservationRepository::new(database.clone()),
+        ));
         let worker = if let Some(secret_store) = secret_store {
             worker.with_question_session_artifacts(Arc::new(secret_store))
         } else {

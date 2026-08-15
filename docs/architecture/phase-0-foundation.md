@@ -4552,3 +4552,26 @@ coverage proves aggregation, replay safety, Provider/Execution binding and
 secret rejection, while API coverage proves filtered reads and typed query
 failure. Provider and Engine drift branches are not silently considered wired:
 each still needs an explicit fail-closed emission call in later slices.
+
+## Two-hundred-and-forty-seventh Phase 0 slice
+
+`ProviderError` may now carry one optional boxed `ProviderProtocolObservation`.
+The Provider must name the shared protocol surface and drift kind and supply a
+shape-only JSON value; the Provider API applies the same 64 KiB and sensitive-
+key validation as Domain before accepting the payload. Legacy errors remain
+wire-compatible and carry no observation. Core never derives a shape from an
+error message, response body or Provider code.
+
+Every Execution worker branch that handles a Provider error now records a
+present observation before entering retry, verification-only recovery or a
+terminal state. Core accepts the payload only on `ProtocolDrift` and
+`InvalidResponse`, redigests the shape and binds the occurrence digest to the
+Provider, Execution, scheduler job, correlation, error kind, surface and shape.
+The daemon always supplies the SQLite inbox repository. Persistence failure is
+not ignored: the claimed job fails through the existing storage error path and
+may safely replay because the occurrence digest is deterministic.
+
+Coverage proves that an identical bound occurrence is idempotent and a distinct
+occurrence aggregates into the same shape. The shared path is now wired; each
+Provider must still attach observations only at explicit unknown type/result/
+field branches where it can produce a redacted structural fact without guessing.

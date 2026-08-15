@@ -10,9 +10,9 @@ use std::{
 use asterism_domain::{
     AttemptResult, AuthState, Execution, ExecutionAttempt, ExecutionId, ExecutionLease,
     ExecutionProgress, ExecutionStage, ExecutionState, HumanRequiredReason, OrchestrationState,
-    ProviderAccountId, ProviderErrorClass, ProviderId, QuestionSnapshotId, RemoteState,
-    StrictCompletionState, SubmissionAttemptReceipt, SubmissionDraft, SubmissionResult,
-    SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot,
+    ProtocolObservation, ProviderAccountId, ProviderErrorClass, ProviderId, QuestionSnapshotId,
+    RemoteState, StrictCompletionState, SubmissionAttemptReceipt, SubmissionDraft,
+    SubmissionResult, SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot,
     SubmissionVerificationStatus, Task, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
@@ -38,7 +38,8 @@ use asterism_storage::{
     ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
     ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest,
     ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, LeaseAcquireOutcome, ProviderAccountRuntimeRepository,
+    ExecutionVerificationRecoveryRepository, LeaseAcquireOutcome, ProtocolObservationRecordRequest,
+    ProtocolObservationRepository, ProviderAccountRuntimeRepository,
     QuestionSessionArtifactRepository, QuestionSessionArtifactRepositoryFactory,
     QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
     QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
@@ -51,6 +52,7 @@ use asterism_storage::{
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::{FormalAssessmentPolicy, TaskAction, authorize_task_action};
@@ -193,6 +195,7 @@ pub struct ScheduledExecutionRunner<E, L, S, A, T> {
     accounts: A,
     tasks: T,
     question_sessions: Option<Arc<dyn QuestionSessionArtifactRepositoryFactory>>,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
     admission: Arc<ExecutionAdmissionController>,
     config: ExecutionRunnerConfig,
 }
@@ -222,6 +225,7 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
             accounts,
             tasks,
             question_sessions: None,
+            protocol_observations: None,
             admission: Arc::new(ExecutionAdmissionController::new(
                 config.global_concurrency_limit,
             )),
@@ -237,6 +241,15 @@ impl<E, L, S, A, T> ScheduledExecutionRunner<E, L, S, A, T> {
         self.question_sessions = Some(artifacts);
         self
     }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
 }
 
 impl<E, L, S, A, T> std::fmt::Debug for ScheduledExecutionRunner<E, L, S, A, T> {
@@ -250,6 +263,10 @@ impl<E, L, S, A, T> std::fmt::Debug for ScheduledExecutionRunner<E, L, S, A, T> 
             .field("accounts", &"configured")
             .field("tasks", &"configured")
             .field("question_sessions", &self.question_sessions.is_some())
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
             .field("admission", &self.admission)
             .field("config", &self.config)
             .finish()
@@ -1502,6 +1519,8 @@ where
         at: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        self.record_provider_protocol_observation(job, error, at, correlation_id)
+            .await?;
         let error_class = provider_error_class(error);
         if matches!(
             error.kind,
@@ -1521,6 +1540,82 @@ where
             correlation_id,
         )
         .await
+    }
+
+    async fn begin_verification_recovery_from_provider_error(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        error: &ProviderError,
+        correlation_id: &str,
+    ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
+        let at = Utc::now().max(attempt.started_at);
+        self.record_provider_protocol_observation(job, error, at, correlation_id)
+            .await?;
+        self.begin_verification_recovery(job, attempt, provider_error_class(error), correlation_id)
+            .await
+    }
+
+    async fn record_provider_protocol_observation(
+        &self,
+        job: &ScheduledJob,
+        error: &ProviderError,
+        observed_at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<(), ScheduledExecutionRunError> {
+        let Some(observation) = error.protocol_observation.as_ref() else {
+            return Ok(());
+        };
+        if !matches!(
+            error.kind,
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse
+        ) {
+            return Err(ScheduledExecutionRunError::InvalidProviderProtocolObservation);
+        }
+        let shape_digest = ProtocolObservation::shape_digest(&observation.shape_sanitized)
+            .map_err(|_| ScheduledExecutionRunError::InvalidProviderProtocolObservation)?;
+        let Some(repository) = self.protocol_observations.as_ref() else {
+            return Ok(());
+        };
+        let execution_id = claimed_execution_id(job)?;
+        let task_id = execution_id_to_task(&self.executions, execution_id).await?;
+        let task = self
+            .tasks
+            .find_runtime_task(task_id)
+            .await?
+            .ok_or(ScheduledExecutionRunError::TaskMissing(task_id))?;
+        let account = self
+            .accounts
+            .find_runtime_provider_account(task.provider_account_id)
+            .await?
+            .ok_or(ScheduledExecutionRunError::StateConflict)?;
+        let occurrence = serde_json::json!({
+            "provider_id": account.provider_id.as_str(),
+            "execution_id": execution_id,
+            "scheduler_job_id": job.id,
+            "correlation_id": correlation_id,
+            "error_kind": error.kind,
+            "surface": observation.surface,
+            "observation_kind": observation.kind,
+            "shape_digest": shape_digest,
+        });
+        let occurrence_digest = Sha256::digest(
+            serde_json::to_vec(&occurrence)
+                .map_err(|_| ScheduledExecutionRunError::InvalidProviderProtocolObservation)?,
+        )
+        .into();
+        repository
+            .record_protocol_observation(ProtocolObservationRecordRequest {
+                provider_id: account.provider_id,
+                surface: observation.surface,
+                kind: observation.kind,
+                shape_sanitized: &observation.shape_sanitized,
+                occurrence_digest,
+                execution_id: Some(execution_id),
+                observed_at,
+            })
+            .await?;
+        Ok(())
     }
 
     fn recovery_retry_at(
@@ -1959,10 +2054,10 @@ where
                 Ok(outcome) => outcome,
                 Err(error) => {
                     return self
-                        .begin_verification_recovery(
+                        .begin_verification_recovery_from_provider_error(
                             job,
                             attempt,
-                            provider_error_class(&error),
+                            &error,
                             correlation_id,
                         )
                         .await;
@@ -2000,10 +2095,10 @@ where
                     }
                     Err(error) => {
                         return self
-                            .begin_verification_recovery(
+                            .begin_verification_recovery_from_provider_error(
                                 job,
                                 attempt,
-                                provider_error_class(&error),
+                                &error,
                                 correlation_id,
                             )
                             .await;
@@ -2529,10 +2624,10 @@ where
                         .await
                 }
                 Err(error) => {
-                    self.begin_verification_recovery(
+                    self.begin_verification_recovery_from_provider_error(
                         job,
                         attempt,
-                        provider_error_class(&error),
+                        &error,
                         correlation_id,
                     )
                     .await
@@ -2576,6 +2671,9 @@ where
                 .await
             }
             Err(error) => {
+                let failed_at = Utc::now().max(now);
+                self.record_provider_protocol_observation(job, &error, failed_at, correlation_id)
+                    .await?;
                 let (error_class, disposition) =
                     if duration_report_only(&prepared.request.requested_capabilities) {
                         (
@@ -2586,7 +2684,7 @@ where
                         classify_provider_error(
                             &error,
                             attempt.attempt_no,
-                            Utc::now().max(now),
+                            failed_at,
                             self.config.retry_policy,
                         )?
                     };
@@ -2595,7 +2693,7 @@ where
                     attempt,
                     error_class,
                     disposition,
-                    Utc::now().max(now),
+                    failed_at,
                     correlation_id,
                 )
                 .await
@@ -2682,10 +2780,10 @@ where
                 .await
             }
             Err(error) => {
-                self.begin_verification_recovery(
+                self.begin_verification_recovery_from_provider_error(
                     job,
                     attempt,
-                    provider_error_class(&error),
+                    &error,
                     correlation_id,
                 )
                 .await
@@ -2784,10 +2882,10 @@ where
             }
             Err(error) => {
                 return self
-                    .begin_verification_recovery(
+                    .begin_verification_recovery_from_provider_error(
                         job,
                         attempt,
-                        provider_error_class(&error),
+                        &error,
                         correlation_id,
                     )
                     .await;
@@ -2913,10 +3011,10 @@ where
                             Ok(recovered) => recovered,
                             Err(error) => {
                                 return self
-                                    .begin_verification_recovery(
+                                    .begin_verification_recovery_from_provider_error(
                                         job,
                                         attempt,
-                                        provider_error_class(&error),
+                                        &error,
                                         correlation_id,
                                     )
                                     .await;
@@ -3003,10 +3101,10 @@ where
                 Ok(operation) => operation,
                 Err(error) => {
                     return self
-                        .begin_verification_recovery(
+                        .begin_verification_recovery_from_provider_error(
                             job,
                             attempt,
-                            provider_error_class(&error),
+                            &error,
                             correlation_id,
                         )
                         .await;
@@ -3111,10 +3209,10 @@ where
                         return Err(ScheduledExecutionRunError::StateConflict);
                     }
                     return self
-                        .begin_verification_recovery(
+                        .begin_verification_recovery_from_provider_error(
                             job,
                             attempt,
-                            provider_error_class(&error),
+                            &error,
                             correlation_id,
                         )
                         .await;
@@ -3281,10 +3379,10 @@ where
                 .await
             }
             Err(error) => {
-                self.begin_verification_recovery(
+                self.begin_verification_recovery_from_provider_error(
                     job,
                     attempt,
-                    provider_error_class(&error),
+                    &error,
                     correlation_id,
                 )
                 .await
@@ -4493,6 +4591,8 @@ pub enum ScheduledExecutionRunError {
     TaskMissing(asterism_domain::TaskId),
     #[error("execution and task orchestration state conflict")]
     StateConflict,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProviderProtocolObservation,
     #[error("execution worker timestamp overflow")]
     TimeOverflow,
     #[error(transparent)]
@@ -4512,11 +4612,11 @@ mod tests {
 
     use asterism_domain::{
         AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, AssessmentClass,
-        AuditActor, NormalizedAnswer, ProviderAccountId, ProviderId, ProviderRuntimeSettingsId,
-        Question, QuestionId, QuestionKind, QuestionOption, QuestionSession, QuestionSnapshotId,
-        RequestSource, SelectedAnswer, SubmissionDraftId, SubmissionDraftItem,
-        SubmissionPayloadEncoding, SubmissionPayloadFieldPreview, SubmissionPayloadPreview, TaskId,
-        UserId,
+        AuditActor, NormalizedAnswer, ProtocolObservationKind, ProtocolSurface, ProviderAccountId,
+        ProviderId, ProviderRuntimeSettingsId, Question, QuestionId, QuestionKind, QuestionOption,
+        QuestionSession, QuestionSnapshotId, RequestSource, SelectedAnswer, SubmissionDraftId,
+        SubmissionDraftItem, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
+        SubmissionPayloadPreview, TaskId, UserId,
     };
     use asterism_provider_api::{
         ExecutionOutcome, PreparedProviderSubmissionOperation, ProviderCapability, ProviderEntry,
@@ -4532,7 +4632,8 @@ mod tests {
         ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
         ExecutionScheduleRequest, QuestionSessionArtifactAttachRequest, QuestionSessionRepository,
         QuestionSnapshot, QuestionSnapshotRepository, SecretKeyring,
-        SqliteExecutionLeaseRepository, SqliteExecutionRepository, SqliteProviderAccountRepository,
+        SqliteExecutionLeaseRepository, SqliteExecutionRepository,
+        SqliteProtocolObservationRepository, SqliteProviderAccountRepository,
         SqliteQuestionSessionRepository, SqliteQuestionSnapshotRepository,
         SqliteSchedulerRepository, SqliteSecretStore, SqliteTaskQueryRepository,
         SubmissionDraftRepository,
@@ -4619,6 +4720,62 @@ mod tests {
         );
         drop(one);
         drop(two);
+    }
+
+    #[tokio::test]
+    async fn provider_protocol_observation_is_idempotent_per_bound_occurrence() {
+        let fixture = Fixture::new(AssessmentClass::Routine, ProviderBehavior::Success).await;
+        let error = ProviderError::new(ProviderErrorKind::ProtocolDrift, "question type changed")
+            .try_with_protocol_observation(
+                ProtocolSurface::QuestionParse,
+                ProtocolObservationKind::UnknownQuestionKind,
+                serde_json::json!({"type_code": 991, "fields": ["id", "type"]}),
+            )
+            .unwrap();
+
+        fixture
+            .runner
+            .record_provider_protocol_observation(
+                &fixture.job,
+                &error,
+                fixture.now,
+                "provider-observation:first",
+            )
+            .await
+            .unwrap();
+        fixture
+            .runner
+            .record_provider_protocol_observation(
+                &fixture.job,
+                &error,
+                fixture.now,
+                "provider-observation:first",
+            )
+            .await
+            .unwrap();
+        fixture
+            .runner
+            .record_provider_protocol_observation(
+                &fixture.job,
+                &error,
+                fixture.now + chrono::Duration::seconds(1),
+                "provider-observation:second",
+            )
+            .await
+            .unwrap();
+
+        let aggregate: (i64, i64) =
+            sqlx::query_as("SELECT COUNT(*), MAX(occurrence_count) FROM protocol_observations")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        let occurrences: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM protocol_observation_occurrences")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert_eq!(aggregate, (1, 2));
+        assert_eq!(occurrences, 2);
     }
 
     #[derive(Debug)]
@@ -6430,7 +6587,10 @@ mod tests {
                 config,
             )
             .unwrap()
-            .with_question_session_artifacts(Arc::new(secret_store.clone()));
+            .with_question_session_artifacts(Arc::new(secret_store.clone()))
+            .with_protocol_observations(Arc::new(
+                SqliteProtocolObservationRepository::new(database.clone()),
+            ));
             let _ = account_id;
             Self {
                 database,

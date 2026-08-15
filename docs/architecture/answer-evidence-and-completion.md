@@ -272,3 +272,10 @@ Provider. The instance inbox is Master-only and filterable by Provider and kind.
 Provider call sites still own the decision to emit a redacted shape after they
 fail closed; adding the durable inbox does not make unconnected drift paths
 observable by itself.
+`ProviderError` therefore exposes an optional validated shape payload rather
+than asking Core to parse diagnostic text. During an Execution, Core persists
+that payload before applying the existing failure or verification-recovery
+policy and binds replay identity to the exact job and Execution. The daemon
+configures this sink by default; a storage failure remains visible and retry-
+safe instead of silently losing the observation. Providers attach the payload
+only where their parser has an explicit structural fact.
