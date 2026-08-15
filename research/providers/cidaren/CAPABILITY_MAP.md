@@ -304,6 +304,16 @@ pending, so it remains undiagnosed. No score-below-threshold,
 duration-insufficient, prerequisite, teacher-review, human-action or
 attempt-limit diagnosis is inferred.
 
+Core revisions through `1824fb4` now persist completion observations and may
+continue an active Strict Completion workflow only for non-stopping verified
+diagnoses. They expose no new Cidaren protocol hook. Cidaren's only specific
+incomplete diagnosis is `WindowClosed`, while every other unfinished snapshot
+falls back to Core `RemoteUnknown`; both stop automatic continuation. The
+Provider therefore grants no implicit retry/retake authority. Its donor
+`task_type == 2` remains a routine class-test source, not an independently
+evidenced Formal assessment classification, and this does not weaken the
+separate explicit authorization required for mutations.
+
 The one-time full upstream sweep found no migration omission: the historical
 batch/class-vs-study flags compose already complete TaskInventory and durable
 per-Task execution; all donor timing semantics are present in runtime schema

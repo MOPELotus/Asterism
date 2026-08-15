@@ -814,6 +814,21 @@ No audited field establishes a prerequisite lock, teacher review, human action,
 attempt limit or retake rule. Cidaren also has no registered TaskExecution slot;
 only the verified submission readback supplies completion-diagnosis facts.
 
+The later Core Strict Completion attempt ledger does not add a Cidaren retry
+protocol. A verified `WindowClosed` diagnosis and Core's fallback
+`RemoteUnknown` are stopping diagnoses, so neither can schedule another
+Cidaren assessment attempt. The Provider deliberately does not relabel
+unfinished progress as `RequiredChildrenPending` or `DurationInsufficient`
+merely to make the shared workflow continue. Another `StartAnswer` after an
+incomplete or ambiguous result still requires ordinary user/product authority
+and an evidenced current session; it is not a retake primitive.
+
+`task_type == 2` remains the donor's routine class-test family and maps to the
+separate `SourceType::Exam` module. No audited row/result field establishes the
+independent assessment-nature fact needed to change `AssessmentClass` to
+Formal. Source classification therefore is not used as a substitute for
+formal-assessment or retake policy.
+
 `AnswerResolve` and `SubmissionVerify` are independent public Provider
 capabilities. Answer resolution freshly binds the Task's Course/unit inventory,
 loads only the evidence needed by each normalized Question and returns bounded

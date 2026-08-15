@@ -609,6 +609,30 @@ state, score, duration, prerequisite, review and attempt-limit cases remain
 unmapped because the donor exposes no reliable corresponding fact. Provider
 tests freeze the expiry mapping and conservative boundaries.
 
+### 2026-08-15 post-Strict-Completion continuation audit
+
+The recorded donor branches remain `ularch/master@bce9559`,
+`MOPELotus/master@a74b4a2` and historical `main@1409858`; public latest
+tag/release remains `1.5.4@7e29ee4`, and the issue update head remains the
+already audited 112/113 cluster. No new donor route, setting, result field or
+Question wire entered scope.
+
+Core revisions through `1824fb4` persist per-attempt completion observations
+and continue only an active workflow whose verified diagnosis permits another
+attempt. Re-reading every Cidaren slot found no new Provider-only implementation
+unit: Cidaren has no TaskExecution capability, history/retake route or
+retry-eligible verified incomplete reason. Its explicit `WindowClosed` and
+fallback `RemoteUnknown` both stop automatic continuation. Mapping ordinary
+0-99% progress to a retry-eligible reason would fabricate protocol authority.
+
+The task-family classification was also rechecked. Donor `task_type == 2`
+explicitly identifies a class test and remains `SourceType::Exam`, but no
+independent row/result fact establishes Formal assessment nature; the existing
+Routine classification therefore remains unchanged. The four blockers in
+`CAPABILITY_MAP.md` are still exhaustive: authenticated browser context, live
+account validation, authorized live mutations and mode-73 answer encoding.
+This checkpoint adds no speculative Provider code or fixture.
+
 ## Check procedure
 
 For the next checkpoint:

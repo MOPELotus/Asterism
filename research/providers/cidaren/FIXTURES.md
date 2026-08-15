@@ -317,6 +317,9 @@ placeholder identities, result codes, status values and pagination shape.
   completed and unknown states return no Provider diagnosis because Task-level
   progress does not identify pending children. Score never supplies a passing-
   threshold inference, and Cidaren has no TaskExecution slot to diagnose.
+- Those diagnosis regressions also freeze the post-`1824fb4` continuation
+  boundary: Cidaren emits no retry-eligible completion reason, so Provider
+  fixtures cannot be used as implicit StartAnswer/retake authority.
 - Coverage regression tests freeze Cidaren's no-partial-policy boundary:
   complete one-Question Answer and explicit Skip Drafts use 1000/1000 with no
   unanswered IDs, while a generic Domain-valid 50% Draft is rejected before
