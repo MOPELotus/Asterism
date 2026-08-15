@@ -172,8 +172,10 @@ attempt, target 100%, and bound the workflows to seven days and one day
 respectively. Formal scored retry confirmation is a fixed safety invariant,
 not a setting that an owner or lower scope can disable.
 
-An Execution consumes one immutable resolved settings snapshot. If a durable
-snapshot predates these Core fields, recovery may restore only their canonical
-defaults in memory. Missing Provider-owned values, unknown values, malformed
-types and schema-version changes remain fail-closed; compatibility hydration
-never rewrites the original persisted evidence or broadens Provider authority.
+An Execution atomically persists both its immutable resolved settings and the
+derived `CompletionPolicySnapshot`, including source revisions, capture time and
+absolute deadlines. Migration of a durable snapshot that predates these Core
+fields freezes the canonical defaults against its original capture time.
+Missing Provider-owned values, unknown values, malformed types and
+schema-version changes remain fail-closed; compatibility handling never
+broadens Provider authority.

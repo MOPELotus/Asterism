@@ -3435,7 +3435,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::COOKIE, &cookie)
                     .body(Body::from(
-                        r#"{"expected_revision":0,"schema_version":2,"values":{"execution.max_concurrency":{"type":"integer","value":1}}}"#,
+                        r#"{"expected_revision":0,"schema_version":2,"values":{"execution.max_concurrency":{"type":"integer","value":1},"core.strict_completion.attempt_limit":{"type":"integer","value":5}}}"#,
                     ))
                     .unwrap(),
             )
@@ -3447,6 +3447,10 @@ mod tests {
         assert_eq!(
             task["resolved"]["values"]["execution.max_concurrency"]["value"],
             1
+        );
+        assert_eq!(
+            task["resolved"]["values"]["core.strict_completion.attempt_limit"]["value"],
+            5
         );
         assert_eq!(task["sources"]["execution.max_concurrency"], "task");
         assert_eq!(task["overrides"]["provider"]["revision"], 1);
@@ -3471,9 +3475,16 @@ mod tests {
         assert_eq!(execution.status(), StatusCode::CREATED);
         let execution = response_json(execution).await;
         let execution_id = execution["execution"]["id"].as_str().unwrap();
-        let frozen: (String, String, Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
-            "SELECT resolved_settings_json, sources_json, provider_revision, \
-                    provider_account_revision, task_revision \
+        let frozen: (
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        ) = sqlx::query_as(
+            "SELECT resolved_settings_json, sources_json, completion_policy_json, \
+                    provider_revision, provider_account_revision, task_revision \
              FROM execution_runtime_settings WHERE execution_id = ?",
         )
         .bind(execution_id)
@@ -3482,7 +3493,13 @@ mod tests {
         .unwrap();
         assert!(frozen.0.contains("\"value\":1"));
         assert!(frozen.1.contains("\"task\""));
-        assert_eq!((frozen.2, frozen.3, frozen.4), (Some(1), Some(1), Some(1)));
+        let completion_policy: asterism_domain::CompletionPolicySnapshot =
+            serde_json::from_str(&frozen.2).unwrap();
+        assert_eq!(completion_policy.strict_attempt_limit, 5);
+        assert!(completion_policy.strict_completion_enabled);
+        assert!(!completion_policy.score_improvement_enabled);
+        completion_policy.validate().unwrap();
+        assert_eq!((frozen.3, frozen.4, frozen.5), (Some(1), Some(1), Some(1)));
 
         let audit_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_records \

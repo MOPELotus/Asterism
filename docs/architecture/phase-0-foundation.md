@@ -4239,3 +4239,22 @@ Provider-authored fields, unknown keys, invalid values or schema-version drift
 still stop execution. BrowserBridge recovery follows the same boundary, so an
 upgrade neither strands pre-existing work nor silently broadens its Provider
 settings.
+
+## Two-hundred-and-thirty-third Phase 0 slice
+
+Every newly scheduled Execution now derives a typed `CompletionPolicySnapshot`
+from the fully resolved Provider -> ProviderAccount -> Task settings hierarchy
+and persists it atomically beside the resolved values, source map and layer
+revisions. Storage validates the policy bounds and exact capture-time binding,
+re-resolves all current layers inside the scheduling transaction, derives the
+same policy again and rejects the whole request if either settings or policy
+changed before commit.
+
+Migration 060 rebuilds `execution_runtime_settings` with a non-null completion
+policy document. Existing rows receive the canonical Strict Completion and
+Score Improvement defaults with absolute seven-day and one-day deadlines based
+on their original `captured_at`; the migration preserves the timestamp's
+nanosecond suffix rather than accepting SQLite's millisecond formatting loss.
+The migration has a populated-row regression, and API coverage proves a Task
+attempt-limit override is frozen into the durable policy rather than merely
+remaining in the generic settings map.

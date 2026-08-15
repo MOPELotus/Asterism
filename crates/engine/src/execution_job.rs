@@ -6148,10 +6148,12 @@ mod tests {
         };
         let schema = runtime_settings_schema();
         let (resolved, sources) = schema.resolve_with_sources(None, None, None).unwrap();
+        let completion_policy = schema.completion_policy_snapshot(&resolved, now).unwrap();
         let runtime_settings = ExecutionRuntimeSettingsSnapshot {
             provider_id: ProviderId::new("provider-alpha").unwrap(),
             resolved,
             sources,
+            completion_policy,
             provider_revision: None,
             provider_account_revision: None,
             task_revision: None,

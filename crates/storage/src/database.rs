@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 59);
+        assert_eq!(migration_count, 60);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -230,6 +230,76 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(question_read_attempt_continuations, 1);
+    }
+
+    #[tokio::test]
+    async fn execution_completion_policy_migration_backfills_frozen_defaults() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE executions (id TEXT PRIMARY KEY NOT NULL) STRICT;\
+             INSERT INTO executions (id) VALUES ('execution-a');\
+             CREATE TABLE execution_runtime_settings (\
+                 execution_id TEXT PRIMARY KEY NOT NULL REFERENCES executions(id) ON DELETE CASCADE,\
+                 provider_id TEXT NOT NULL,\
+                 schema_version INTEGER NOT NULL CHECK (schema_version >= 1),\
+                 resolved_settings_json TEXT NOT NULL,\
+                 sources_json TEXT NOT NULL,\
+                 provider_revision INTEGER,\
+                 provider_account_revision INTEGER,\
+                 task_revision INTEGER,\
+                 captured_at TEXT NOT NULL\
+             ) STRICT;\
+             INSERT INTO execution_runtime_settings (\
+                 execution_id, provider_id, schema_version, resolved_settings_json, sources_json, captured_at\
+             ) VALUES (\
+                 'execution-a', 'provider-a', 1, '{}', '{}',\
+                 '2026-08-01T12:34:56.123456789Z'\
+             );",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/060_execution_completion_policy.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let policy_json: String = sqlx::query_scalar(
+            "SELECT completion_policy_json FROM execution_runtime_settings \
+             WHERE execution_id = 'execution-a'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        let policy: asterism_domain::CompletionPolicySnapshot =
+            serde_json::from_str(&policy_json).unwrap();
+        assert!(policy.strict_completion_enabled);
+        assert!(!policy.score_improvement_enabled);
+        assert_eq!(policy.strict_attempt_limit, 3);
+        assert_eq!(policy.score_improvement_attempt_limit, 1);
+        assert_eq!(policy.score_target_millis, 1_000);
+        assert_eq!(
+            policy.strict_expires_at.unwrap(),
+            policy.captured_at + chrono::Duration::days(7)
+        );
+        assert_eq!(
+            policy.score_improvement_expires_at.unwrap(),
+            policy.captured_at + chrono::Duration::days(1)
+        );
+        assert!(policy.formal_retry_requires_confirmation);
+        policy.validate().unwrap();
+
+        let completion_column = sqlx::query("PRAGMA table_info(execution_runtime_settings)")
+            .fetch_all(database.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.get::<String, _>("name") == "completion_policy_json")
+            .unwrap();
+        assert_eq!(completion_column.get::<i64, _>("notnull"), 1);
     }
 
     #[tokio::test]

@@ -329,12 +329,16 @@ where
                 task_settings.as_ref().map(|record| &record.patch),
             )
             .map_err(|_| ExecutionRequestError::ProviderRuntimeUnavailable)?;
+        let completion_policy = schema
+            .completion_policy_snapshot(&resolved, captured_at)
+            .map_err(|_| ExecutionRequestError::ProviderRuntimeUnavailable)?;
         let provider_id = account.provider_id.clone();
         Ok((
             ExecutionRuntimeSettingsSnapshot {
                 provider_id: provider_id.clone(),
                 resolved,
                 sources,
+                completion_policy,
                 provider_revision: provider_settings.as_ref().map(|record| record.revision),
                 provider_account_revision: account_settings.as_ref().map(|record| record.revision),
                 task_revision: task_settings.as_ref().map(|record| record.revision),

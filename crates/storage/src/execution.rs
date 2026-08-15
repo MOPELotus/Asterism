@@ -270,7 +270,7 @@ impl ExecutionRepository for SqliteExecutionRepository {
             "SELECT settings.provider_id AS snapshot_provider_id, settings.schema_version, \
                     settings.resolved_settings_json, settings.sources_json, \
                     settings.provider_revision, settings.provider_account_revision, \
-                    settings.task_revision, settings.captured_at, \
+                    settings.task_revision, settings.completion_policy_json, settings.captured_at, \
                     execution.created_at AS execution_created_at, \
                     account.provider_id AS actual_provider_id \
              FROM execution_runtime_settings AS settings \
@@ -2547,12 +2547,16 @@ fn valid_runtime_settings_snapshot(
     });
     snapshot.resolved.schema_version > 0
         && snapshot.captured_at == execution_created_at
+        && snapshot.completion_policy.captured_at == snapshot.captured_at
+        && snapshot.completion_policy.validate().is_ok()
         && revisions_valid
         && keys_match
         && sources_bound
         && serde_json::to_vec(&snapshot.resolved.values)
             .is_ok_and(|value| value.len() <= MAX_EXECUTION_SETTINGS_JSON_BYTES)
         && serde_json::to_vec(&snapshot.sources)
+            .is_ok_and(|value| value.len() <= MAX_EXECUTION_SETTINGS_JSON_BYTES)
+        && serde_json::to_vec(&snapshot.completion_policy)
             .is_ok_and(|value| value.len() <= MAX_EXECUTION_SETTINGS_JSON_BYTES)
 }
 
@@ -2702,10 +2706,17 @@ async fn runtime_settings_match_current_layers(
     ) else {
         return Ok(false);
     };
+    let Ok(completion_policy) = resolution
+        .schema
+        .completion_policy_snapshot(&resolved, captured_at)
+    else {
+        return Ok(false);
+    };
     let current = ExecutionRuntimeSettingsSnapshot {
         provider_id: resolution.snapshot.provider_id.clone(),
         resolved,
         sources,
+        completion_policy,
         provider_revision: provider.as_ref().map(|layer| layer.revision),
         provider_account_revision: account.as_ref().map(|layer| layer.revision),
         task_revision: task.as_ref().map(|layer| layer.revision),
@@ -2778,11 +2789,12 @@ async fn insert_runtime_settings_snapshot(
 ) -> Result<(), StorageError> {
     let resolved_settings_json = serde_json::to_string(&snapshot.resolved.values)?;
     let sources_json = serde_json::to_string(&snapshot.sources)?;
+    let completion_policy_json = serde_json::to_string(&snapshot.completion_policy)?;
     sqlx::query(
         "INSERT INTO execution_runtime_settings \
          (execution_id, provider_id, schema_version, resolved_settings_json, sources_json, \
-          provider_revision, provider_account_revision, task_revision, captured_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          provider_revision, provider_account_revision, task_revision, completion_policy_json, \
+          captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(execution_id.to_string())
     .bind(snapshot.provider_id.as_str())
@@ -2792,6 +2804,7 @@ async fn insert_runtime_settings_snapshot(
     .bind(snapshot.provider_revision.map(i64::from))
     .bind(snapshot.provider_account_revision.map(i64::from))
     .bind(snapshot.task_revision.map(i64::from))
+    .bind(completion_policy_json)
     .bind(encode_timestamp(snapshot.captured_at))
     .execute(&mut **transaction)
     .await?;
@@ -2871,8 +2884,10 @@ fn decode_runtime_settings_snapshot(
     }
     let resolved_settings_json = row.try_get::<String, _>("resolved_settings_json")?;
     let sources_json = row.try_get::<String, _>("sources_json")?;
+    let completion_policy_json = row.try_get::<String, _>("completion_policy_json")?;
     if resolved_settings_json.len() > MAX_EXECUTION_SETTINGS_JSON_BYTES
         || sources_json.len() > MAX_EXECUTION_SETTINGS_JSON_BYTES
+        || completion_policy_json.len() > MAX_EXECUTION_SETTINGS_JSON_BYTES
     {
         return Err(StorageError::InvalidData(
             "execution runtime settings snapshot is too large".to_owned(),
@@ -2895,6 +2910,7 @@ fn decode_runtime_settings_snapshot(
             )?,
         },
         sources: serde_json::from_str(&sources_json)?,
+        completion_policy: serde_json::from_str(&completion_policy_json)?,
         provider_revision: decode_optional_revision(row.try_get("provider_revision")?)?,
         provider_account_revision: decode_optional_revision(
             row.try_get("provider_account_revision")?,
@@ -5153,6 +5169,10 @@ mod tests {
                 "execution.max_concurrency".to_owned(),
                 ProviderRuntimeSettingSource::Provider,
             )]),
+            completion_policy: asterism_domain::CompletionPolicySnapshot {
+                captured_at,
+                ..asterism_domain::CompletionPolicySnapshot::default()
+            },
             provider_revision: Some(7),
             provider_account_revision: None,
             task_revision: None,
