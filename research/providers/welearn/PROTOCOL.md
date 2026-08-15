@@ -574,6 +574,14 @@ authority, complete batch snapshot and exact child artifact before calling the
 same prepared path. Invalid or cross-attempt artifacts stop before fresh
 TaskDetail, sequence preparation, session resolution or mutation; successful
 input cannot select a different execution behavior from the prepared value.
+The verified value's `to_execution_outcome` adapter now owns the complete
+sanitized result mapping for both atomic profiles. It rebinds profile, score,
+time-proof shape, receipt-derived final ordinal/acceptance and heartbeat
+diagnostics before producing `Completed`; the immediate coordinator uses this
+same adapter. Its `final_save_verification_recorded` input describes actual
+durable Core state and can never be true for a rejected final save. Future
+recovery wiring must call the mapping only with the persistence state Core has
+actually committed, not merely because Provider fresh proof succeeded.
 
 `build_native_atomic_duration_completion_runtime` makes the production-native
 executor and recovery coordinator constructible without exposing the private

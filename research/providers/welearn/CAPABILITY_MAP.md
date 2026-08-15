@@ -202,7 +202,11 @@ accepted final save; missing/failed persistence is post-mutation HumanRequired
 and never replays the lifecycle. Immediate and recovery paths share one public
 verification-record adapter: accepted final save maps to the exact generic
 ordinal/digest proof, while an explicit rejection maps to no Core verification
-record.
+record. The same Provider verification value now also owns the sanitized
+`ExecutionOutcome` mapping and revalidates its plan/receipt/profile/ordinal
+bindings. Immediate execution uses it after persistence; the explicit
+`final_save_verification_recorded` fact cannot be true for a rejected save and
+must not be inferred from proof construction during recovery.
 
 Read-only crash recovery now has a separate Provider proof boundary. The
 bounded hash-only `welearn.atomic-pre-final-observation.v1` value binds a Fany

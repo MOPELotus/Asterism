@@ -284,6 +284,9 @@ only structural field names, response codes and bounded placeholder shapes.
   receipt diagnostics. They also prove the exact conditional sequence is
   prepared before transport and that post-mutation verification-persistence
   failure remains HumanRequired rather than being confused with a missing sink.
+  The shared outcome adapter freezes the same result schema, heartbeat counts
+  and final ordinal while rejecting proof/receipt drift or a recorded flag on
+  an explicitly rejected final save.
 - Atomic sequence fixtures bind `welearn.atomic-duration-completion.v1` to the
   exact child artifact. Fanyuchang freezes accepted start, a zero-or-target
   terminal-rejection keep phase, phase-3 observation-gated set and final save;

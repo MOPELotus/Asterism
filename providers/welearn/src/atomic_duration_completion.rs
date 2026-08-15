@@ -107,6 +107,67 @@ impl WellearnAtomicDurationCompletionVerification {
             )
         })
     }
+
+    /// Adapts the exact Provider proof and its validated receipt shape to the
+    /// shared sanitized execution outcome.
+    ///
+    /// `final_save_verification_recorded` describes durable Core state, not
+    /// merely proof construction. It can be true only for an accepted final
+    /// save whose generic verification record exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for plan/profile/score/time, receipt-derived
+    /// final ordinal/acceptance or persistence-state drift.
+    pub fn to_execution_outcome(
+        self,
+        plan: WellearnAtomicDurationCompletionPlan,
+        receipts: &WellearnAtomicDurationCompletionReceipts,
+        final_save_verification_recorded: bool,
+    ) -> ProviderResult<ExecutionOutcome> {
+        plan.validate()?;
+        let requires_time_observation = matches!(
+            plan.profile(),
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100
+        );
+        receipts.validate_for_plan(plan, requires_time_observation)?;
+        if self.profile != plan.profile()
+            || self.score_percent != plan.completion().score_percent
+            || self.time_preservation_verified != requires_time_observation.then_some(true)
+            || self.final_save_ordinal != receipts.final_save_ordinal(plan)?
+            || self.final_save_accepted != receipts.save_accepted()
+            || self.observation_digest == [0; 32]
+            || final_save_verification_recorded && !self.final_save_accepted
+        {
+            return Err(invalid_atomic_execution_outcome());
+        }
+        let heartbeat_accepted = receipts
+            .heartbeat_acceptances()
+            .iter()
+            .filter(|accepted| **accepted)
+            .count();
+        let heartbeat_rejected = receipts.heartbeat_acceptances().len() - heartbeat_accepted;
+        Ok(ExecutionOutcome {
+            remote_state: RemoteState::Completed,
+            verified: true,
+            result_sanitized: serde_json::json!({
+                "schema": "welearn.atomic-duration-completion.v1",
+                "profile": atomic_profile_name(self.profile),
+                "target_seconds": plan.target_seconds(),
+                "score_percent": self.score_percent,
+                "time_preservation_verified": self.time_preservation_verified,
+                "start_accepted": receipts.start_accepted(),
+                "heartbeat_count": receipts.heartbeat_acceptances().len(),
+                "heartbeat_accepted": heartbeat_accepted,
+                "heartbeat_rejected": heartbeat_rejected,
+                "set_accepted": receipts.set_accepted(),
+                "save_accepted": receipts.save_accepted(),
+                "final_save_ordinal": self.final_save_ordinal,
+                "final_save_verification_recorded": final_save_verification_recorded,
+                "verification": "provider_fresh_cmi",
+            }),
+        })
+    }
 }
 
 impl fmt::Debug for WellearnAtomicDurationCompletionVerification {
@@ -277,33 +338,11 @@ impl WellearnAtomicDurationCompletion {
         let verification = verify_atomic_duration_completion(plan, &documents)?;
         let final_save_verification_recorded =
             persist_atomic_completion_verification(events, verification).await?;
-        let receipts = documents.receipts();
-        let heartbeat_accepted = receipts
-            .heartbeat_acceptances()
-            .iter()
-            .filter(|accepted| **accepted)
-            .count();
-        let heartbeat_rejected = receipts.heartbeat_acceptances().len() - heartbeat_accepted;
-        Ok(ExecutionOutcome {
-            remote_state: RemoteState::Completed,
-            verified: true,
-            result_sanitized: serde_json::json!({
-                "schema": "welearn.atomic-duration-completion.v1",
-                "profile": atomic_profile_name(verification.profile()),
-                "target_seconds": plan.target_seconds(),
-                "score_percent": verification.score_percent(),
-                "time_preservation_verified": verification.time_preservation_verified(),
-                "start_accepted": receipts.start_accepted(),
-                "heartbeat_count": receipts.heartbeat_acceptances().len(),
-                "heartbeat_accepted": heartbeat_accepted,
-                "heartbeat_rejected": heartbeat_rejected,
-                "set_accepted": receipts.set_accepted(),
-                "save_accepted": receipts.save_accepted(),
-                "final_save_ordinal": verification.final_save_ordinal(),
-                "final_save_verification_recorded": final_save_verification_recorded,
-                "verification": "provider_fresh_cmi",
-            }),
-        })
+        verification.to_execution_outcome(
+            plan,
+            documents.receipts(),
+            final_save_verification_recorded,
+        )
     }
 
     /// Restores the complete Provider-private parent, batch and child facts,
@@ -353,6 +392,13 @@ fn atomic_verification_persistence_error() -> ProviderError {
     ProviderError::human_required(
         "WELearn atomic completion was verified but its durable observation was not recorded",
         HumanRequiredReason::ManualIntervention,
+    )
+}
+
+fn invalid_atomic_execution_outcome() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn atomic execution outcome is inconsistent with its exact proof and receipts",
     )
 }
 
@@ -1171,6 +1217,21 @@ mod tests {
         let debug = format!("{verification:?}");
         assert!(debug.contains("[HASHED]"));
         assert!(!debug.contains(&format!("{:?}", verification.observation_digest())));
+        let outcome = verification
+            .to_execution_outcome(plan, documents.receipts(), false)
+            .unwrap();
+        assert!(outcome.verified);
+        assert_eq!(outcome.remote_state, RemoteState::Completed);
+        assert_eq!(outcome.result_sanitized["heartbeat_rejected"], 0);
+        assert_eq!(
+            outcome.result_sanitized["final_save_verification_recorded"],
+            false
+        );
+        assert!(
+            verification
+                .to_execution_outcome(plan, documents.receipts(), true)
+                .is_err()
+        );
 
         let accepted_documents = WellearnAtomicDurationCompletionDocuments::try_new(
             plan,
@@ -1194,6 +1255,26 @@ mod tests {
         assert_eq!(record.ordinal(), accepted.final_save_ordinal());
         assert_eq!(record.observation_digest(), accepted.observation_digest());
         assert!(record.verified());
+        let outcome = accepted
+            .to_execution_outcome(plan, accepted_documents.receipts(), true)
+            .unwrap();
+        assert_eq!(
+            outcome.result_sanitized["profile"],
+            "fanyuchang_fresh_set_save_100"
+        );
+        assert_eq!(outcome.result_sanitized["heartbeat_count"], 1);
+        assert_eq!(outcome.result_sanitized["final_save_ordinal"], 4);
+        assert_eq!(
+            outcome.result_sanitized["final_save_verification_recorded"],
+            true
+        );
+        let mut drifted = accepted;
+        drifted.final_save_ordinal = 3;
+        assert!(
+            drifted
+                .to_execution_outcome(plan, accepted_documents.receipts(), true)
+                .is_err()
+        );
     }
 
     #[test]

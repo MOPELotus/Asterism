@@ -177,6 +177,11 @@ three default-head queries and the Fanyuchang tag after shared commit
 already-audited WELearn artifacts, sequence records, observations and fresh
 read-only proof; it adds no donor protocol behavior and supplies no mutation
 replay authority.
+The adjacent atomic-outcome adapter checkpoint repeated the three default-head
+and Fanyuchang-tag queries with the same full revisions. Consolidating
+WELearn's already-audited proof/receipt diagnostics into one sanitized outcome
+mapping adds no donor behavior; it only prevents immediate and future recovery
+paths from diverging on Asterism result or persistence-state semantics.
 
 ## Source selection
 
