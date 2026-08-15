@@ -4932,3 +4932,20 @@ harvest. Tests prove no secret appears in API output, concurrent poll claims do
 not duplicate I/O, expired leases remain auditable, and recovery does not
 increment the Provider poll count. `asterismctl provider-account auth poll`
 drives the same owner-scoped endpoint.
+
+## Two-hundred-and-sixty-eighth Phase 0 slice
+
+Receipt-conditional mutation sequences can now express a bounded retry phase
+that advances on the first accepted receipt or after the configured maximum
+number of definite receipts. This is distinct from the existing accepted-at-
+maximum and rejected-or-maximum conditions: an accepted mutation is never
+issued again merely to fill the phase cardinality, while a definite rejection
+may authorize the next ordinal up to the immutable limit.
+
+The condition participates in the frozen plan digest and has an explicit
+durable encoding. Migration 071 rebuilds the constrained phase table while
+preserving existing plans and phase-gated observations. Storage coverage
+proves a rejected first request permits one successor, the next accepted
+receipt short-circuits before the maximum, and the following phase receives
+the actual contiguous ordinal. Ambiguous issued mutations remain ineligible
+for retry because sequence advancement still requires a persisted receipt.

@@ -4318,6 +4318,9 @@ fn next_sequence_phase(
             .checked_sub(1)
             .filter(|index| *index >= start)
             .and_then(|index| mutations[index].accepted);
+        let any_accepted = mutations[start..mutation_index]
+            .iter()
+            .any(|mutation| mutation.accepted == Some(true));
         let minimum_reached = count >= phase.minimum_occurrences();
         let can_advance = minimum_reached
             && match phase.advance_condition() {
@@ -4326,6 +4329,9 @@ fn next_sequence_phase(
                 }
                 ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached => {
                     count == phase.maximum_occurrences() && last_accepted == Some(true)
+                }
+                ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached => {
+                    any_accepted || count == phase.maximum_occurrences()
                 }
                 ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached => {
                     count == phase.maximum_occurrences() || last_accepted == Some(false)
@@ -4406,6 +4412,9 @@ const fn encode_sequence_advance_condition(
         ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached => {
             "accepted_maximum_reached"
         }
+        ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached => {
+            "accepted_or_maximum_reached"
+        }
         ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached => {
             "rejected_or_maximum_reached"
         }
@@ -4419,6 +4428,9 @@ fn decode_sequence_advance_condition(
         "maximum_reached" => Ok(ExecutionMutationSequenceAdvanceCondition::MaximumReached),
         "accepted_maximum_reached" => {
             Ok(ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached)
+        }
+        "accepted_or_maximum_reached" => {
+            Ok(ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached)
         }
         "rejected_or_maximum_reached" => {
             Ok(ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached)
@@ -5689,6 +5701,15 @@ mod tests {
                 )
                 .unwrap(),
                 ExecutionMutationSequencePhase::try_new(
+                    "test.retry",
+                    1,
+                    3,
+                    false,
+                    ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached,
+                    None,
+                )
+                .unwrap(),
+                ExecutionMutationSequencePhase::try_new(
                     "test.save",
                     1,
                     1,
@@ -5884,16 +5905,38 @@ mod tests {
             .await
             .unwrap();
         repository
-            .issue_execution_atomic_mutation(issue(5, "test.save", 5, 12))
+            .issue_execution_atomic_mutation(issue(5, "test.retry", 5, 12))
             .await
             .unwrap();
         repository
-            .record_execution_atomic_mutation_receipt(receipt(5, 15, true, 13))
+            .record_execution_atomic_mutation_receipt(receipt(5, 15, false, 13))
+            .await
+            .unwrap();
+        repository
+            .issue_execution_atomic_mutation(issue(6, "test.retry", 6, 14))
+            .await
+            .unwrap();
+        repository
+            .record_execution_atomic_mutation_receipt(receipt(6, 16, true, 15))
             .await
             .unwrap();
         assert!(
             repository
-                .issue_execution_atomic_mutation(issue(6, "test.save", 6, 14))
+                .issue_execution_atomic_mutation(issue(7, "test.retry", 7, 16))
+                .await
+                .is_err()
+        );
+        repository
+            .issue_execution_atomic_mutation(issue(7, "test.save", 7, 16))
+            .await
+            .unwrap();
+        repository
+            .record_execution_atomic_mutation_receipt(receipt(7, 17, true, 17))
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(issue(8, "test.save", 8, 18))
                 .await
                 .is_err()
         );
@@ -5911,7 +5954,9 @@ mod tests {
                 (2, "test.keep"),
                 (3, "test.keep"),
                 (4, "test.set"),
-                (5, "test.save"),
+                (5, "test.retry"),
+                (6, "test.retry"),
+                (7, "test.save"),
             ]
         );
     }

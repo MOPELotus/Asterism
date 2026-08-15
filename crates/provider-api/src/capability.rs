@@ -2018,6 +2018,7 @@ const MAX_EXECUTION_MUTATION_SEQUENCE_PHASES: usize = 32;
 pub enum ExecutionMutationSequenceAdvanceCondition {
     MaximumReached,
     AcceptedMaximumReached,
+    AcceptedOrMaximumReached,
     RejectedOrMaximumReached,
 }
 
@@ -2037,7 +2038,8 @@ impl ExecutionMutationSequencePhase {
     /// # Errors
     ///
     /// Rejects invalid operation/observation labels, inverted or unbounded
-    /// occurrence ranges, and an accepted-only transition with no occurrence.
+    /// occurrence ranges, and an acceptance-dependent transition with no
+    /// occurrence.
     pub fn try_new(
         operation_type: impl Into<String>,
         minimum_occurrences: u32,
@@ -2053,6 +2055,7 @@ impl ExecutionMutationSequencePhase {
             || matches!(
                 advance_condition,
                 ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached
+                    | ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached
             ) && maximum_occurrences == 0
             || required_observation_type
                 .as_deref()
@@ -2298,6 +2301,7 @@ fn execution_mutation_sequence_plan_digest(
             ExecutionMutationSequenceAdvanceCondition::MaximumReached => 1,
             ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached => 2,
             ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached => 3,
+            ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached => 4,
         }]);
         match &phase.required_observation_type {
             Some(observation_type) => {
@@ -2715,7 +2719,6 @@ mod execution_mutation_tests {
             )
             .is_err()
         );
-
         let observation = ExecutionMutationSequenceObservation::try_new(
             3,
             "welearn.atomic.pre-final.v1",
@@ -2729,6 +2732,52 @@ mod execution_mutation_tests {
                 0,
                 "welearn.atomic.pre-final.v1",
                 [8; 32],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn acceptance_short_circuit_is_bounded_and_changes_the_plan_digest() {
+        let short_circuit = ExecutionMutationSequencePhase::try_new(
+            "uai.upload.final",
+            1,
+            2,
+            false,
+            ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached,
+            None,
+        )
+        .unwrap();
+        let maximum = ExecutionMutationSequencePhase::try_new(
+            "uai.upload.final",
+            1,
+            2,
+            false,
+            ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+            None,
+        )
+        .unwrap();
+        let short_circuit_plan = ExecutionMutationSequencePlan::try_new(
+            [7; 32],
+            "uai.upload.sequence.v1",
+            vec![short_circuit],
+        )
+        .unwrap();
+        let maximum_plan = ExecutionMutationSequencePlan::try_new(
+            [7; 32],
+            "uai.upload.sequence.v1",
+            vec![maximum],
+        )
+        .unwrap();
+        assert_ne!(short_circuit_plan.plan_digest(), maximum_plan.plan_digest());
+        assert!(
+            ExecutionMutationSequencePhase::try_new(
+                "uai.upload.invalid",
+                0,
+                0,
+                false,
+                ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached,
+                None,
             )
             .is_err()
         );

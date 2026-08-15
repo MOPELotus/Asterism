@@ -123,6 +123,8 @@ pub enum StorageError {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use sqlx::Row;
 
     use super::*;
@@ -137,7 +139,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 70);
+        assert_eq!(migration_count, 71);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -239,6 +241,94 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(protocol_tables, 2);
+    }
+
+    #[tokio::test]
+    async fn acceptance_short_circuit_migration_preserves_sequence_records() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        let prior = sqlx::migrate::Migrator {
+            migrations: Cow::Owned(
+                MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version <= 70)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        let mut connection = database.pool().acquire().await.unwrap();
+        prior.run_direct(&mut *connection).await.unwrap();
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO execution_atomic_mutation_sequence_plans (
+                execution_id, execution_attempt_id, scheduler_job_id, worker_id,
+                plan_digest, artifact_digest, sequence_type, phase_count, prepared_at
+             ) VALUES ('execution', 'attempt', 'job', 'worker', zeroblob(32),
+                zeroblob(32), 'test.sequence.v1', 1, '2026-08-15T00:00:00Z')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO execution_atomic_mutation_sequence_phases (
+                execution_id, execution_attempt_id, position, operation_type,
+                minimum_occurrences, maximum_occurrences,
+                stop_repeating_after_rejection, advance_condition,
+                required_observation_type
+             ) VALUES ('execution', 'attempt', 1, 'test.operation', 1, 2, 0,
+                'accepted_maximum_reached', 'test.observation')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO execution_atomic_mutation_sequence_observations (
+                execution_id, execution_attempt_id, phase_position,
+                observation_type, observation_digest, observed_at
+             ) VALUES ('execution', 'attempt', 1, 'test.observation',
+                zeroblob(32), '2026-08-15T00:00:01Z')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        MIGRATOR.run_direct(&mut *connection).await.unwrap();
+
+        let preserved: (String, i64, String) = sqlx::query_as(
+            "SELECT phase.advance_condition, phase.maximum_occurrences,
+                    observation.observation_type
+             FROM execution_atomic_mutation_sequence_phases AS phase
+             JOIN execution_atomic_mutation_sequence_observations AS observation
+               ON observation.execution_id = phase.execution_id
+              AND observation.execution_attempt_id = phase.execution_attempt_id
+              AND observation.phase_position = phase.position",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(
+            preserved,
+            (
+                "accepted_maximum_reached".to_owned(),
+                2,
+                "test.observation".to_owned(),
+            )
+        );
+        sqlx::query(
+            "UPDATE execution_atomic_mutation_sequence_phases
+             SET advance_condition = 'accepted_or_maximum_reached'",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
