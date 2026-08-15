@@ -436,10 +436,14 @@ selector or script; unknown `selector`/`script` fields fail strict schema
 validation even on unit actions. `ResidenceControl` projects only a bounded
 Task handle, exact active leaf budget and typed pause/resume/restart value into
 a selector-free helper-runtime recipe, then accepts only a matching control
-acknowledgement whose active seconds do not exceed that budget. It does not
-issue a concurrent control or mutate the accumulated cursor; Core must still
-define active-exchange cancellation/recovery ownership. This boundary decodes
-and projects only; it performs no DOM operation and accepts no helper echo as
+acknowledgement whose active seconds do not exceed that budget. The Provider
+can persist the separately issued control's ordinary command artifact and
+exchange, fresh-rebind that artifact after recovery, validate the independently
+stored raw-result digest and reduce it to a redacted typed acknowledgement plus
+completed exchange. That acknowledgement still does not mutate the accumulated
+cursor or cancel the active residence exchange; Core must define that
+active-exchange cancellation/recovery ownership. This boundary decodes and
+projects only; it performs no DOM operation and accepts no helper echo as
 authority.
 
 That projection now compiles into a second closed typed value before Capture
@@ -658,8 +662,9 @@ time, observed duration and richer study-record facts. It deliberately does
 not infer a required duration delta, remote completion or authority for the
 next browser leaf; those remain Core policy/orchestration decisions.
 
-Pause/resume/restart cannot safely enter the accumulated cursor yet. Core must
-first define how a control exchange owns or cancels an already issued active
+Pause/resume/restart cannot safely enter the accumulated cursor yet. Their
+independent durable command/acknowledgement exchange is recoverable, but Core
+must first define how it owns or cancels an already issued active
 `ResidenceTarget`, how its sequence advances, which terminal state the old
 exchange receives and which owner survives recovery. The Provider will not
 invent concurrent exchange or replay semantics around that missing runtime

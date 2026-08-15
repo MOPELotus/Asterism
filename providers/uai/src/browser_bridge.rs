@@ -427,6 +427,54 @@ impl UaiBrowserEventExchangeCompleted {
     }
 }
 
+/// One validated pause/resume/restart acknowledgement and its completed
+/// durable exchange.
+///
+/// This owner proves only that the helper accepted the exact issued control
+/// for the bound Task handle and budget. It does not mutate the accumulated
+/// residence cursor, cancel an active residence exchange or authorize another
+/// command.
+pub struct UaiBrowserResidenceControlExchangeCompleted {
+    task_handle: Zeroizing<String>,
+    control: UaiBrowserResidenceControl,
+    observed_active_seconds: u64,
+    exchange: BrowserBridgeExchange,
+}
+
+impl UaiBrowserResidenceControlExchangeCompleted {
+    pub fn task_handle(&self) -> &str {
+        &self.task_handle
+    }
+
+    pub const fn control(&self) -> &UaiBrowserResidenceControl {
+        &self.control
+    }
+
+    pub const fn observed_active_seconds(&self) -> u64 {
+        self.observed_active_seconds
+    }
+
+    pub const fn exchange(&self) -> &BrowserBridgeExchange {
+        &self.exchange
+    }
+
+    pub fn into_exchange(self) -> BrowserBridgeExchange {
+        self.exchange
+    }
+}
+
+impl fmt::Debug for UaiBrowserResidenceControlExchangeCompleted {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiBrowserResidenceControlExchangeCompleted")
+            .field("task_handle", &"[REDACTED]")
+            .field("control", &self.control)
+            .field("observed_active_seconds", &self.observed_active_seconds)
+            .field("exchange", &self.exchange)
+            .finish()
+    }
+}
+
 /// One validated terminal residence observation and its completed exchange.
 ///
 /// The observation still requires an independent fresh `DurationRead`; the
@@ -4676,6 +4724,83 @@ impl UaiBrowserBridge {
         )
     }
 
+    /// Completes one in-memory residence-control exchange into a typed
+    /// acknowledgement without granting cursor or cancellation authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a stale Task/settings plan, a non-control
+    /// command, foreign helper output or invalid exchange metadata.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "fresh Provider settings and independently observed control output remain separate bindings"
+    )]
+    pub async fn complete_residence_control_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        issued: &UaiBrowserExchangeIssued,
+        document: UaiBrowserEventDocument,
+        observed_origin: &str,
+        completed_at: Timestamp,
+    ) -> ProviderResult<UaiBrowserResidenceControlExchangeCompleted> {
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        complete_residence_control_exchange_inner(
+            &plan,
+            issued.command(),
+            issued.exchange(),
+            &document,
+            observed_origin,
+            completed_at,
+        )
+    }
+
+    /// Recovers the exact persisted residence-control command and completes
+    /// its typed acknowledgement without trusting helper-echoed authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a non-issued/foreign exchange, changed
+    /// command artifact, stale Task/settings or action-mismatched output.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the persisted exchange, command artifact and independently observed control output are recovery authorities"
+    )]
+    pub async fn complete_recovered_residence_control_exchange(
+        &self,
+        context: &ProviderContext,
+        remote_task_id: &str,
+        settings: &asterism_provider_api::ResolvedProviderRuntimeSettings,
+        issued_exchange: &BrowserBridgeExchange,
+        command_artifact: &SecretValue,
+        document: UaiBrowserEventDocument,
+        observed_origin: &str,
+        completed_at: Timestamp,
+    ) -> ProviderResult<UaiBrowserResidenceControlExchangeCompleted> {
+        validate_issued_exchange(issued_exchange)?;
+        let plan = self
+            .residence_plan(context, remote_task_id, settings)
+            .await?;
+        let command = UaiBrowserCommandEnvelope::decode_artifact_for_exchange(
+            command_artifact,
+            issued_exchange.command_digest,
+            &plan,
+            issued_exchange.session_id,
+            issued_exchange.sequence,
+        )?;
+        complete_residence_control_exchange_inner(
+            &plan,
+            &command,
+            issued_exchange,
+            &document,
+            observed_origin,
+            completed_at,
+        )
+    }
+
     /// Freshly validates a terminal residence observation and completes its
     /// exact issued exchange. The result still requires fresh duration readback.
     ///
@@ -4905,6 +5030,59 @@ fn complete_event_exchange_inner(
             )
         })?;
     Ok(UaiBrowserEventExchangeCompleted { event, exchange })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resolved control command and independently observed acknowledgement retain separate exchange bindings"
+)]
+fn complete_residence_control_exchange_inner(
+    plan: &UaiBrowserResidencePlan,
+    command: &UaiBrowserCommandEnvelope,
+    issued_exchange: &BrowserBridgeExchange,
+    document: &UaiBrowserEventDocument,
+    observed_origin: &str,
+    completed_at: Timestamp,
+) -> ProviderResult<UaiBrowserResidenceControlExchangeCompleted> {
+    if !matches!(command.command, UaiBrowserCommand::ResidenceControl { .. }) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::ProtocolDrift,
+            "UAI residence control completion selected a non-control command",
+        ));
+    }
+    let completed = complete_event_exchange_inner(
+        plan,
+        command,
+        issued_exchange,
+        document,
+        observed_origin,
+        completed_at,
+    )?;
+    let (task_handle, control, observed_active_seconds) = match &completed.event().event {
+        UaiBrowserEvent::ResidenceControlResult {
+            task_handle,
+            control,
+            accepted: true,
+            observed_active_seconds,
+        } => (
+            Zeroizing::new(task_handle.clone()),
+            control.clone(),
+            *observed_active_seconds,
+        ),
+        _ => {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "UAI residence control completion received a foreign event",
+            ));
+        }
+    };
+    let (_, exchange) = completed.into_parts();
+    Ok(UaiBrowserResidenceControlExchangeCompleted {
+        task_handle,
+        control,
+        observed_active_seconds,
+        exchange,
+    })
 }
 
 #[allow(
@@ -9075,6 +9253,143 @@ mod tests {
                 },
             )
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one control fixture proves in-memory completion, persisted recovery and action-substitution rejection"
+    )]
+    async fn residence_control_acknowledgement_recovers_only_its_persisted_exchange() {
+        let bridge = browser_bridge();
+        let context = provider_context();
+        let settings = browser_runtime_settings(false);
+        let plan = residence_plan(false);
+        let session_id = BrowserBridgeSessionId::new();
+        let session_nonce = session_id.to_string();
+        let binding =
+            UaiBrowserSessionBinding::try_new(&plan, &session_nonce, UCONTENT_ORIGIN, "frame-1")
+                .unwrap();
+        let task = UaiBrowserPageEntry::try_new(
+            &plan,
+            &binding,
+            UaiBrowserPageScope::Task,
+            0,
+            "Read the passage".to_owned(),
+            true,
+        )
+        .unwrap();
+        let target = plan.select_target_task_entry(&binding, &[task]).unwrap();
+        let target_handle = target.entry().handle.clone();
+        let command = UaiBrowserCommandEnvelope::residence_control(
+            &plan,
+            &binding,
+            8,
+            &target,
+            UaiBrowserResidenceControl::Restart {
+                start_micro_ordinal: 3,
+            },
+        )
+        .unwrap();
+        let issued_at = chrono::Utc::now();
+        let issued = bridge
+            .issue_command_exchange(
+                &context,
+                "group:2001:unit-1:group-1",
+                &settings,
+                session_id,
+                command,
+                issued_at,
+            )
+            .await
+            .unwrap();
+        let fixture =
+            include_str!("../../../fixtures/providers/uai/browser/residence-control-restart.json")
+                .replace("nonce-42", &session_nonce)
+                .replace("{{target_task_handle}}", &target_handle);
+        let completed_at = issued_at + chrono::Duration::seconds(1);
+        let completed = bridge
+            .complete_residence_control_exchange(
+                &context,
+                "group:2001:unit-1:group-1",
+                &settings,
+                &issued,
+                UaiBrowserEventDocument::try_new(fixture.clone()).unwrap(),
+                UCONTENT_ORIGIN,
+                completed_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.task_handle(), target_handle);
+        assert_eq!(
+            completed.control(),
+            &UaiBrowserResidenceControl::Restart {
+                start_micro_ordinal: 3
+            }
+        );
+        assert_eq!(completed.observed_active_seconds(), 600);
+        assert_eq!(
+            completed.exchange().state,
+            BrowserBridgeExchangeState::Completed
+        );
+        assert_eq!(
+            completed.exchange().result_type.as_deref(),
+            Some(UAI_BROWSER_EVENT_TYPE)
+        );
+        assert!(!format!("{completed:?}").contains(&target_handle));
+
+        let (_, artifact, exchange) = issued.into_parts();
+        let artifact = artifact.into_secret_value();
+        let result_digest = browser_event_exchange_digest(&fixture).unwrap();
+        let metadata = BrowserBridgeResultArtifactMetadata {
+            session_id,
+            sequence: 8,
+            result_type: UAI_BROWSER_EVENT_TYPE.to_owned(),
+            result_digest,
+            received_at: completed_at,
+        };
+        let inbox = UaiBrowserEventInbox::try_new(
+            &exchange,
+            metadata,
+            SecretValue::new(fixture.clone().into_bytes()),
+        )
+        .unwrap();
+        let (document, metadata) = inbox.into_parts();
+        let recovered = bridge
+            .complete_recovered_residence_control_exchange(
+                &context,
+                "group:2001:unit-1:group-1",
+                &settings,
+                &exchange,
+                &artifact,
+                document,
+                UCONTENT_ORIGIN,
+                metadata.received_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.exchange().result_digest, Some(result_digest));
+        assert_eq!(recovered.observed_active_seconds(), 600);
+
+        let changed_control = fixture.replace(
+            "{\"kind\": \"restart\", \"start_micro_ordinal\": 3}",
+            "{\"kind\": \"pause\"}",
+        );
+        assert!(
+            bridge
+                .complete_recovered_residence_control_exchange(
+                    &context,
+                    "group:2001:unit-1:group-1",
+                    &settings,
+                    &exchange,
+                    &artifact,
+                    UaiBrowserEventDocument::try_new(changed_control).unwrap(),
+                    UCONTENT_ORIGIN,
+                    completed_at,
+                )
+                .await
+                .is_err()
         );
     }
 
