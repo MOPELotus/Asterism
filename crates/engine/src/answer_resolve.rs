@@ -9,13 +9,19 @@ use asterism_provider_api::{
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
-    AnswerCandidateRecord, AnswerCandidateRepository, ProviderAccountRuntimeRepository,
-    QuestionSessionArtifactRepositoryFactory, QuestionSnapshotRepository,
-    ResolvedQuestionSessionContinuation, StorageError, TaskQueryRepository,
+    AnswerCandidateRecord, AnswerCandidateRepository, ProtocolObservationRepository,
+    ProviderAccountRuntimeRepository, QuestionSessionArtifactRepositoryFactory,
+    QuestionSnapshotRepository, ResolvedQuestionSessionContinuation, StorageError,
+    TaskQueryRepository,
 };
 use chrono::Utc;
 
-use crate::{AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action};
+use crate::{
+    AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action,
+    protocol_observation::{
+        ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+    },
+};
 
 const MAX_CORRELATION_ID_BYTES: usize = 128;
 const MAX_PROVIDER_CANDIDATES_PER_RESOLUTION: usize = 20_000;
@@ -44,6 +50,7 @@ pub struct ProviderAnswerResolveService<Q, A, S> {
     accounts: A,
     answers: S,
     question_sessions: Option<Arc<dyn QuestionSessionArtifactRepositoryFactory>>,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<Q, A, S> std::fmt::Debug for ProviderAnswerResolveService<Q, A, S> {
@@ -55,6 +62,10 @@ impl<Q, A, S> std::fmt::Debug for ProviderAnswerResolveService<Q, A, S> {
             .field("accounts", &"configured")
             .field("answers", &"configured")
             .field("question_sessions", &self.question_sessions.is_some())
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
             .finish()
     }
 }
@@ -67,6 +78,7 @@ impl<Q, A, S> ProviderAnswerResolveService<Q, A, S> {
             accounts,
             answers,
             question_sessions: None,
+            protocol_observations: None,
         }
     }
 
@@ -76,6 +88,15 @@ impl<Q, A, S> ProviderAnswerResolveService<Q, A, S> {
         artifacts: Arc<dyn QuestionSessionArtifactRepositoryFactory>,
     ) -> Self {
         self.question_sessions = Some(artifacts);
+        self
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
         self
     }
 }
@@ -159,12 +180,13 @@ where
         } else {
             None
         };
-        let candidates = resolver
-            .resolve_answers_with_session(
+        let candidates = self
+            .resolve_provider_candidates(
+                resolver.as_ref(),
                 &context,
-                &task.remote_id,
-                &snapshot.questions,
-                resolved_session.as_ref().map(provider_session_continuation),
+                &task,
+                &snapshot,
+                resolved_session.as_ref(),
             )
             .await?;
         validate_candidates(&snapshot.questions, &candidates)?;
@@ -188,6 +210,51 @@ where
             provider_version: entry.metadata.implementation_version.clone(),
             candidates: records,
         })
+    }
+
+    async fn resolve_provider_candidates(
+        &self,
+        resolver: &dyn asterism_provider_api::AnswerResolveCapability,
+        context: &ProviderContext,
+        task: &asterism_domain::Task,
+        snapshot: &asterism_storage::QuestionSnapshot,
+        resolved_session: Option<&ResolvedQuestionSessionContinuation>,
+    ) -> Result<Vec<asterism_domain::AnswerCandidate>, ProviderAnswerResolveError> {
+        match resolver
+            .resolve_answers_with_session(
+                context,
+                &task.remote_id,
+                &snapshot.questions,
+                resolved_session.map(provider_session_continuation),
+            )
+            .await
+        {
+            Ok(candidates) => Ok(candidates),
+            Err(error) => {
+                let occurrence_scope = format!(
+                    "answer-resolve:{}:{}:{}",
+                    task.id, snapshot.id, context.correlation_id
+                );
+                record_provider_protocol_observation(
+                    self.protocol_observations.as_deref(),
+                    &context.provider_id,
+                    None,
+                    &occurrence_scope,
+                    &error,
+                    Utc::now(),
+                )
+                .await
+                .map_err(|error| match error {
+                    ProviderProtocolObservationRecordError::Invalid => {
+                        ProviderAnswerResolveError::InvalidProtocolObservation
+                    }
+                    ProviderProtocolObservationRecordError::Storage(error) => {
+                        ProviderAnswerResolveError::Storage(error)
+                    }
+                })?;
+                Err(error.into())
+            }
+        }
     }
 }
 
@@ -254,6 +321,8 @@ pub enum ProviderAnswerResolveError {
     CapabilityUnavailable(ProviderId),
     #[error("answer resolution correlation id is invalid")]
     InvalidCorrelationId,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error("Provider returned foreign, duplicate, unsanitized, or unbounded candidates")]
     ProviderResponseInvalid,
     #[error(transparent)]
@@ -275,14 +344,18 @@ mod tests {
 
     use asterism_domain::{
         AnswerCandidate, AnswerConfidence, AssessmentClass, AuthState, NormalizedAnswer,
-        OrchestrationState, ProviderAccount, ProviderAccountId, Question, QuestionId, QuestionKind,
-        RemoteState, SecretId, SourceType, Task, Timestamp,
+        OrchestrationState, ProtocolObservationKind, ProtocolSurface, ProviderAccount,
+        ProviderAccountId, Question, QuestionId, QuestionKind, RemoteState, SecretId, SourceType,
+        Task, Timestamp,
     };
     use asterism_provider_api::{
-        AnswerResolveCapability, ProviderCapability, ProviderEntry, ProviderIdentity,
-        ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema, VerificationLevel,
+        AnswerResolveCapability, ProviderCapability, ProviderEntry, ProviderErrorKind,
+        ProviderIdentity, ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema,
+        VerificationLevel,
     };
-    use asterism_storage::{QuestionSnapshot, TaskPage};
+    use asterism_storage::{
+        Database, QuestionSnapshot, SqliteProtocolObservationRepository, TaskPage,
+    };
     use async_trait::async_trait;
 
     use super::*;
@@ -392,6 +465,7 @@ mod tests {
         metadata: ProviderMetadata,
         candidates: Mutex<Vec<AnswerCandidate>>,
         called: AtomicBool,
+        protocol_drift: AtomicBool,
     }
 
     impl ProviderIdentity for FakeResolver {
@@ -409,6 +483,18 @@ mod tests {
             _questions: &[Question],
         ) -> ProviderResult<Vec<AnswerCandidate>> {
             self.called.store(true, Ordering::Relaxed);
+            if self.protocol_drift.load(Ordering::Relaxed) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "native answer result shape changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::AnswerResolve,
+                    ProtocolObservationKind::UnknownResultShape,
+                    serde_json::json!({"document": "answer_result", "answer_kind": "object"}),
+                )
+                .unwrap());
+            }
             Ok(self.candidates.lock().unwrap().clone())
         }
     }
@@ -455,6 +541,40 @@ mod tests {
             Err(ProviderAnswerResolveError::TaskCapabilityUnavailable)
         ));
         assert!(!fixture.resolver.called.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn answer_drift_is_observed_without_persisting_candidates() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let mut fixture = fixture(true, AnswerSource::ProviderNative);
+        fixture
+            .resolver
+            .protocol_drift
+            .store(true, Ordering::Relaxed);
+        fixture.service = fixture.service.with_protocol_observations(Arc::new(
+            SqliteProtocolObservationRepository::new(database.clone()),
+        ));
+
+        assert!(matches!(
+            fixture.service.resolve(fixture.command("answer-drift")).await,
+            Err(ProviderAnswerResolveError::Provider(error))
+                if error.kind == ProviderErrorKind::InvalidResponse
+        ));
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            (
+                "answer_resolve".to_owned(),
+                "unknown_result_shape".to_owned(),
+                None,
+            )
+        );
+        assert!(fixture.repository.saved.lock().unwrap().is_empty());
     }
 
     struct Fixture {
@@ -560,6 +680,7 @@ mod tests {
                 provenance_sanitized: serde_json::json!({"native": true}),
             }]),
             called: AtomicBool::new(false),
+            protocol_drift: AtomicBool::new(false),
         });
         let mut registry = ProviderRegistry::default();
         let mut entry = ProviderEntry {

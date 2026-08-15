@@ -509,7 +509,10 @@ pub(super) async fn resolve_provider_answer_candidates(
         SqliteTaskQueryRepository::new(state.database.clone()),
         SqliteProviderAccountRepository::new(state.database.clone()),
         answers,
-    );
+    )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database.clone(),
+    )));
     if let Some(secret_store) = state.secret_store {
         service = service.with_question_session_artifacts(Arc::new(secret_store));
     }
@@ -1521,7 +1524,8 @@ fn map_provider_answer_resolve_error(error: ProviderAnswerResolveError) -> ApiEr
             "invalid_request_id",
             "the request correlation ID is invalid",
         ),
-        ProviderAnswerResolveError::ProviderResponseInvalid => {
+        ProviderAnswerResolveError::ProviderResponseInvalid
+        | ProviderAnswerResolveError::InvalidProtocolObservation => {
             tracing::warn!(%error, "Provider returned invalid AnswerCandidates");
             ApiError::bad_gateway(
                 "provider_answer_candidates_invalid",

@@ -4672,3 +4672,21 @@ The API injects the SQLite repository. Invalid shape payloads share the existing
 invalid-detail bad-gateway response, while Inbox storage failure stays an
 internal persistence error. Coverage proves a typed TaskDetail/FieldDrift shape
 is stored without Execution provenance before the read fails.
+
+## Two-hundred-and-fifty-third Phase 0 slice
+
+Provider-native AnswerResolve now records a present structural observation
+before returning a Provider failure. Its occurrence scope binds Task, immutable
+QuestionSnapshot and request correlation, and remains outside an Execution.
+Authorization, account/snapshot binding, durable QuestionSession resolution and
+Provider capability checks all continue to run first.
+
+Observation persistence is deliberately separate from answer persistence. A
+failed Provider response can enter the Inbox, but no AnswerCandidate record is
+written and the shape can never be interpreted as Official, ProviderNative,
+VerifiedHistorical or Unverified answer evidence. Invalid observation payloads
+share the existing invalid-candidates bad-gateway response; Inbox storage
+failure remains internal.
+
+Coverage proves an AnswerResolve/UnknownResultShape aggregate is stored without
+Execution provenance while the candidate batch remains empty.

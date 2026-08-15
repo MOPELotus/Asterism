@@ -301,3 +301,7 @@ duration, score or evidence.
 TaskDetail behaves the same way: a safe field-shape observation may be retained
 after the authorized Provider call fails, but it cannot update the persisted
 Task or expose route text, remote URLs or raw detail through the Inbox.
+Provider-native AnswerResolve observations are diagnostic only. Even when a
+shape is durably retained, the failed call writes no AnswerCandidate and cannot
+promote anything into the owner corpus. Evidence still requires the ordinary
+typed Candidate and verification/provenance contracts.
