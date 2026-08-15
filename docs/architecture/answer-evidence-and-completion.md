@@ -161,3 +161,19 @@ ProviderAccount and Task overrides remain within existing authorization. Core
 uses the established Provider default -> ProviderAccount override -> Task
 override -> immutable Execution settings snapshot rule, records source
 attribution, and does not rewrite historical Attempts when policy changes.
+
+Every registered Provider schema receives the same Core-owned completion
+fields at registration: Strict Completion enabled, Score Improvement enabled,
+the two attempt limits, Score Improvement target and the two workflow time
+limits. All seven may inherit through Provider, ProviderAccount and Task scope.
+The canonical defaults enable Strict Completion, keep Score Improvement
+disabled until explicit opt-in, allow three completion attempts and one score
+attempt, target 100%, and bound the workflows to seven days and one day
+respectively. Formal scored retry confirmation is a fixed safety invariant,
+not a setting that an owner or lower scope can disable.
+
+An Execution consumes one immutable resolved settings snapshot. If a durable
+snapshot predates these Core fields, recovery may restore only their canonical
+defaults in memory. Missing Provider-owned values, unknown values, malformed
+types and schema-version changes remain fail-closed; compatibility hydration
+never rewrites the original persisted evidence or broadens Provider authority.

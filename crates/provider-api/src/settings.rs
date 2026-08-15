@@ -15,6 +15,17 @@ const MAX_PROVIDER_EXECUTION_CONCURRENCY: i64 = 100;
 const MAX_ACCOUNT_EXECUTION_CONCURRENCY: i64 = 100;
 const MIN_ACCOUNT_SCAN_INTERVAL_SECONDS: u64 = 60;
 const MAX_ACCOUNT_SCAN_INTERVAL_SECONDS: u64 = 7 * 24 * 60 * 60;
+const MAX_COMPLETION_ATTEMPTS: i64 = 100;
+const MIN_COMPLETION_TIME_LIMIT_SECONDS: u64 = 60;
+const MAX_COMPLETION_TIME_LIMIT_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+pub const STRICT_COMPLETION_ENABLED_KEY: &str = "core.strict_completion.enabled";
+pub const SCORE_IMPROVEMENT_ENABLED_KEY: &str = "core.score_improvement.enabled";
+pub const STRICT_COMPLETION_ATTEMPT_LIMIT_KEY: &str = "core.strict_completion.attempt_limit";
+pub const SCORE_IMPROVEMENT_ATTEMPT_LIMIT_KEY: &str = "core.score_improvement.attempt_limit";
+pub const SCORE_IMPROVEMENT_TARGET_KEY: &str = "core.score_improvement.target";
+pub const STRICT_COMPLETION_TIME_LIMIT_KEY: &str = "core.strict_completion.time_limit";
+pub const SCORE_IMPROVEMENT_TIME_LIMIT_KEY: &str = "core.score_improvement.time_limit";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +53,13 @@ pub enum ProviderSettingCoreBehavior {
     AccountExecutionConcurrency,
     AccountScanInterval,
     MinimumAnswerCoverage,
+    StrictCompletionEnabled,
+    ScoreImprovementEnabled,
+    StrictCompletionAttemptLimit,
+    ScoreImprovementAttemptLimit,
+    ScoreImprovementTarget,
+    StrictCompletionTimeLimit,
+    ScoreImprovementTimeLimit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +142,18 @@ impl ProviderRuntimeSettingsSchema {
             version: 1,
             definitions: Vec::new(),
         }
+    }
+
+    /// Appends the canonical Core-owned completion policy fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] when a Provider schema collides with
+    /// a reserved key/behavior or the combined schema exceeds its bounds.
+    pub fn with_core_completion_policy(mut self) -> Result<Self, ProviderSettingsError> {
+        self.definitions.extend(core_completion_definitions());
+        self.validate()?;
+        Ok(self)
     }
 
     /// Validates the complete Provider-authored schema before registration.
@@ -331,6 +361,44 @@ impl ProviderRuntimeSettingsSchema {
         Ok(())
     }
 
+    /// Restores canonical defaults that were introduced after an execution
+    /// settings snapshot was frozen.
+    ///
+    /// Only missing Core-owned completion fields are restored. Provider
+    /// fields, unknown values, schema revisions and malformed values remain
+    /// fail-closed so this cannot broaden Provider execution authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] when the frozen snapshot cannot be
+    /// upgraded without changing Provider-owned settings.
+    pub fn hydrate_frozen_core_defaults(
+        &self,
+        resolved: &ResolvedProviderRuntimeSettings,
+    ) -> Result<ResolvedProviderRuntimeSettings, ProviderSettingsError> {
+        self.validate()?;
+        if resolved.schema_version != self.version {
+            return Err(ProviderSettingsError::SchemaVersionMismatch);
+        }
+        let mut hydrated = resolved.clone();
+        for definition in &self.definitions {
+            if hydrated.values.contains_key(&definition.key) {
+                continue;
+            }
+            if definition.core_behavior.is_some_and(is_completion_behavior) {
+                hydrated
+                    .values
+                    .insert(definition.key.clone(), definition.default.clone());
+            } else {
+                return Err(ProviderSettingsError::MissingSetting {
+                    key: definition.key.clone(),
+                });
+            }
+        }
+        self.validate_resolved(&hydrated)?;
+        Ok(hydrated)
+    }
+
     /// Resolves the Core-owned execution admission limits from a validated,
     /// immutable settings snapshot. Schemas without these optional hints keep
     /// the conservative one-at-a-time Provider and account defaults.
@@ -353,6 +421,13 @@ impl ProviderRuntimeSettingsSchema {
                 behavior,
                 ProviderSettingCoreBehavior::AccountScanInterval
                     | ProviderSettingCoreBehavior::MinimumAnswerCoverage
+                    | ProviderSettingCoreBehavior::StrictCompletionEnabled
+                    | ProviderSettingCoreBehavior::ScoreImprovementEnabled
+                    | ProviderSettingCoreBehavior::StrictCompletionAttemptLimit
+                    | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit
+                    | ProviderSettingCoreBehavior::ScoreImprovementTarget
+                    | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
+                    | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit
             ) {
                 continue;
             }
@@ -371,7 +446,14 @@ impl ProviderRuntimeSettingsSchema {
                     limits.account = value;
                 }
                 ProviderSettingCoreBehavior::AccountScanInterval
-                | ProviderSettingCoreBehavior::MinimumAnswerCoverage => unreachable!(),
+                | ProviderSettingCoreBehavior::MinimumAnswerCoverage
+                | ProviderSettingCoreBehavior::StrictCompletionEnabled
+                | ProviderSettingCoreBehavior::ScoreImprovementEnabled
+                | ProviderSettingCoreBehavior::StrictCompletionAttemptLimit
+                | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit
+                | ProviderSettingCoreBehavior::ScoreImprovementTarget
+                | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
+                | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit => unreachable!(),
             }
         }
         Ok(limits)
@@ -436,6 +518,83 @@ impl ProviderRuntimeSettingsSchema {
                         behavior: ProviderSettingCoreBehavior::MinimumAnswerCoverage,
                     })
             })
+    }
+
+    /// Resolves the shared completion policy from one immutable settings snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderSettingsError`] when the snapshot or one mapped Core
+    /// value is missing, malformed or produces an unrepresentable deadline.
+    pub fn completion_policy_snapshot(
+        &self,
+        resolved: &ResolvedProviderRuntimeSettings,
+        captured_at: asterism_domain::Timestamp,
+    ) -> Result<asterism_domain::CompletionPolicySnapshot, ProviderSettingsError> {
+        let resolved = self.hydrate_frozen_core_defaults(resolved)?;
+        let strict_limit = completion_integer(
+            self,
+            &resolved,
+            ProviderSettingCoreBehavior::StrictCompletionAttemptLimit,
+            3,
+        )?;
+        let score_limit = completion_integer(
+            self,
+            &resolved,
+            ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit,
+            1,
+        )?;
+        let target = completion_decimal(
+            self,
+            &resolved,
+            ProviderSettingCoreBehavior::ScoreImprovementTarget,
+            1_000,
+        )?;
+        let policy = asterism_domain::CompletionPolicySnapshot {
+            strict_completion_enabled: completion_boolean(
+                self,
+                &resolved,
+                ProviderSettingCoreBehavior::StrictCompletionEnabled,
+                true,
+            )?,
+            score_improvement_enabled: completion_boolean(
+                self,
+                &resolved,
+                ProviderSettingCoreBehavior::ScoreImprovementEnabled,
+                false,
+            )?,
+            strict_attempt_limit: u32::try_from(strict_limit).map_err(|_| {
+                invalid_completion_behavior(
+                    ProviderSettingCoreBehavior::StrictCompletionAttemptLimit,
+                )
+            })?,
+            score_improvement_attempt_limit: u32::try_from(score_limit).map_err(|_| {
+                invalid_completion_behavior(
+                    ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit,
+                )
+            })?,
+            score_target_millis: u16::try_from(target).map_err(|_| {
+                invalid_completion_behavior(ProviderSettingCoreBehavior::ScoreImprovementTarget)
+            })?,
+            strict_expires_at: completion_deadline(
+                self,
+                &resolved,
+                ProviderSettingCoreBehavior::StrictCompletionTimeLimit,
+                captured_at,
+            )?,
+            score_improvement_expires_at: completion_deadline(
+                self,
+                &resolved,
+                ProviderSettingCoreBehavior::ScoreImprovementTimeLimit,
+                captured_at,
+            )?,
+            formal_retry_requires_confirmation: true,
+            captured_at,
+        };
+        policy.validate().map_err(|_| {
+            invalid_completion_behavior(ProviderSettingCoreBehavior::StrictCompletionEnabled)
+        })?;
+        Ok(policy)
     }
 }
 
@@ -611,10 +770,209 @@ pub enum ProviderSettingsError {
     InvalidValue { key: String },
 }
 
+fn core_completion_definitions() -> Vec<ProviderSettingDefinition> {
+    let scopes = BTreeSet::from([
+        ProviderSettingScope::Provider,
+        ProviderSettingScope::ProviderAccount,
+        ProviderSettingScope::Task,
+    ]);
+    vec![
+        ProviderSettingDefinition {
+            key: STRICT_COMPLETION_ENABLED_KEY.to_owned(),
+            display_name: "Strict completion".to_owned(),
+            description: "Continue bounded verified work until the Task is complete.".to_owned(),
+            kind: ProviderSettingKind::Boolean,
+            default: ProviderSettingValue::Boolean(true),
+            scopes: scopes.clone(),
+            core_behavior: Some(ProviderSettingCoreBehavior::StrictCompletionEnabled),
+        },
+        ProviderSettingDefinition {
+            key: SCORE_IMPROVEMENT_ENABLED_KEY.to_owned(),
+            display_name: "Score improvement".to_owned(),
+            description: "Allow explicitly confirmed retakes after verified completion.".to_owned(),
+            kind: ProviderSettingKind::Boolean,
+            default: ProviderSettingValue::Boolean(false),
+            scopes: scopes.clone(),
+            core_behavior: Some(ProviderSettingCoreBehavior::ScoreImprovementEnabled),
+        },
+        ProviderSettingDefinition {
+            key: STRICT_COMPLETION_ATTEMPT_LIMIT_KEY.to_owned(),
+            display_name: "Strict completion attempt limit".to_owned(),
+            description: "Maximum attempts in one Strict Completion workflow.".to_owned(),
+            kind: ProviderSettingKind::Integer {
+                minimum: 1,
+                maximum: MAX_COMPLETION_ATTEMPTS,
+                step: 1,
+            },
+            default: ProviderSettingValue::Integer(3),
+            scopes: scopes.clone(),
+            core_behavior: Some(ProviderSettingCoreBehavior::StrictCompletionAttemptLimit),
+        },
+        ProviderSettingDefinition {
+            key: SCORE_IMPROVEMENT_ATTEMPT_LIMIT_KEY.to_owned(),
+            display_name: "Score improvement attempt limit".to_owned(),
+            description: "Maximum explicitly confirmed retakes in one workflow.".to_owned(),
+            kind: ProviderSettingKind::Integer {
+                minimum: 1,
+                maximum: MAX_COMPLETION_ATTEMPTS,
+                step: 1,
+            },
+            default: ProviderSettingValue::Integer(1),
+            scopes: scopes.clone(),
+            core_behavior: Some(ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit),
+        },
+        ProviderSettingDefinition {
+            key: SCORE_IMPROVEMENT_TARGET_KEY.to_owned(),
+            display_name: "Score improvement target".to_owned(),
+            description: "Target score fraction in thousandths.".to_owned(),
+            kind: ProviderSettingKind::DecimalMillis {
+                minimum: 1,
+                maximum: 1_000,
+                step: 1,
+            },
+            default: ProviderSettingValue::DecimalMillis(1_000),
+            scopes: scopes.clone(),
+            core_behavior: Some(ProviderSettingCoreBehavior::ScoreImprovementTarget),
+        },
+        ProviderSettingDefinition {
+            key: STRICT_COMPLETION_TIME_LIMIT_KEY.to_owned(),
+            display_name: "Strict completion time limit".to_owned(),
+            description: "Maximum wall-clock duration of one Strict Completion workflow."
+                .to_owned(),
+            kind: ProviderSettingKind::DurationSeconds {
+                minimum: MIN_COMPLETION_TIME_LIMIT_SECONDS,
+                maximum: MAX_COMPLETION_TIME_LIMIT_SECONDS,
+                step: 60,
+            },
+            default: ProviderSettingValue::DurationSeconds(7 * 24 * 60 * 60),
+            scopes: scopes.clone(),
+            core_behavior: Some(ProviderSettingCoreBehavior::StrictCompletionTimeLimit),
+        },
+        ProviderSettingDefinition {
+            key: SCORE_IMPROVEMENT_TIME_LIMIT_KEY.to_owned(),
+            display_name: "Score improvement time limit".to_owned(),
+            description: "Maximum wall-clock duration of one Score Improvement workflow."
+                .to_owned(),
+            kind: ProviderSettingKind::DurationSeconds {
+                minimum: MIN_COMPLETION_TIME_LIMIT_SECONDS,
+                maximum: MAX_COMPLETION_TIME_LIMIT_SECONDS,
+                step: 60,
+            },
+            default: ProviderSettingValue::DurationSeconds(24 * 60 * 60),
+            scopes,
+            core_behavior: Some(ProviderSettingCoreBehavior::ScoreImprovementTimeLimit),
+        },
+    ]
+}
+
+fn completion_definition(
+    schema: &ProviderRuntimeSettingsSchema,
+    behavior: ProviderSettingCoreBehavior,
+) -> Option<&ProviderSettingDefinition> {
+    schema
+        .definitions
+        .iter()
+        .find(|definition| definition.core_behavior == Some(behavior))
+}
+
+fn is_completion_behavior(behavior: ProviderSettingCoreBehavior) -> bool {
+    matches!(
+        behavior,
+        ProviderSettingCoreBehavior::StrictCompletionEnabled
+            | ProviderSettingCoreBehavior::ScoreImprovementEnabled
+            | ProviderSettingCoreBehavior::StrictCompletionAttemptLimit
+            | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit
+            | ProviderSettingCoreBehavior::ScoreImprovementTarget
+            | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
+            | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit
+    )
+}
+
+fn completion_boolean(
+    schema: &ProviderRuntimeSettingsSchema,
+    resolved: &ResolvedProviderRuntimeSettings,
+    behavior: ProviderSettingCoreBehavior,
+    fallback: bool,
+) -> Result<bool, ProviderSettingsError> {
+    completion_definition(schema, behavior).map_or(Ok(fallback), |definition| {
+        resolved
+            .boolean(&definition.key)
+            .ok_or_else(|| invalid_completion_behavior(behavior))
+    })
+}
+
+fn completion_integer(
+    schema: &ProviderRuntimeSettingsSchema,
+    resolved: &ResolvedProviderRuntimeSettings,
+    behavior: ProviderSettingCoreBehavior,
+    fallback: i64,
+) -> Result<i64, ProviderSettingsError> {
+    completion_definition(schema, behavior).map_or(Ok(fallback), |definition| {
+        resolved
+            .integer(&definition.key)
+            .ok_or_else(|| invalid_completion_behavior(behavior))
+    })
+}
+
+fn completion_decimal(
+    schema: &ProviderRuntimeSettingsSchema,
+    resolved: &ResolvedProviderRuntimeSettings,
+    behavior: ProviderSettingCoreBehavior,
+    fallback: i64,
+) -> Result<i64, ProviderSettingsError> {
+    completion_definition(schema, behavior).map_or(Ok(fallback), |definition| {
+        resolved
+            .decimal_millis(&definition.key)
+            .ok_or_else(|| invalid_completion_behavior(behavior))
+    })
+}
+
+fn completion_deadline(
+    schema: &ProviderRuntimeSettingsSchema,
+    resolved: &ResolvedProviderRuntimeSettings,
+    behavior: ProviderSettingCoreBehavior,
+    captured_at: asterism_domain::Timestamp,
+) -> Result<Option<asterism_domain::Timestamp>, ProviderSettingsError> {
+    let Some(definition) = completion_definition(schema, behavior) else {
+        return Ok(None);
+    };
+    let seconds = resolved
+        .duration_seconds(&definition.key)
+        .and_then(|seconds| i64::try_from(seconds).ok())
+        .ok_or_else(|| invalid_completion_behavior(behavior))?;
+    captured_at
+        .checked_add_signed(chrono::Duration::seconds(seconds))
+        .map(Some)
+        .ok_or_else(|| invalid_completion_behavior(behavior))
+}
+
+fn invalid_completion_behavior(behavior: ProviderSettingCoreBehavior) -> ProviderSettingsError {
+    ProviderSettingsError::InvalidCoreBehavior {
+        key: "core.completion".to_owned(),
+        behavior,
+    }
+}
+
 fn validate_core_behavior(
     definition: &ProviderSettingDefinition,
     behavior: ProviderSettingCoreBehavior,
 ) -> Result<(), ProviderSettingsError> {
+    if valid_core_behavior_kind(definition, behavior)
+        && valid_core_behavior_scopes(definition, behavior)
+    {
+        Ok(())
+    } else {
+        Err(ProviderSettingsError::InvalidCoreBehavior {
+            key: definition.key.clone(),
+            behavior,
+        })
+    }
+}
+
+fn valid_core_behavior_kind(
+    definition: &ProviderSettingDefinition,
+    behavior: ProviderSettingCoreBehavior,
+) -> bool {
     let maximum = match behavior {
         ProviderSettingCoreBehavior::ProviderExecutionConcurrency => {
             MAX_PROVIDER_EXECUTION_CONCURRENCY
@@ -623,9 +981,16 @@ fn validate_core_behavior(
             MAX_ACCOUNT_EXECUTION_CONCURRENCY
         }
         ProviderSettingCoreBehavior::AccountScanInterval
-        | ProviderSettingCoreBehavior::MinimumAnswerCoverage => 0,
+        | ProviderSettingCoreBehavior::MinimumAnswerCoverage
+        | ProviderSettingCoreBehavior::StrictCompletionEnabled
+        | ProviderSettingCoreBehavior::ScoreImprovementEnabled
+        | ProviderSettingCoreBehavior::StrictCompletionAttemptLimit
+        | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit
+        | ProviderSettingCoreBehavior::ScoreImprovementTarget
+        | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
+        | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit => 0,
     };
-    let valid_kind = match behavior {
+    match behavior {
         ProviderSettingCoreBehavior::ProviderExecutionConcurrency
         | ProviderSettingCoreBehavior::AccountExecutionConcurrency => matches!(
             definition.kind,
@@ -644,7 +1009,8 @@ fn validate_core_behavior(
             } if minimum >= MIN_ACCOUNT_SCAN_INTERVAL_SECONDS
                 && maximum <= MAX_ACCOUNT_SCAN_INTERVAL_SECONDS
         ),
-        ProviderSettingCoreBehavior::MinimumAnswerCoverage => matches!(
+        ProviderSettingCoreBehavior::MinimumAnswerCoverage
+        | ProviderSettingCoreBehavior::ScoreImprovementTarget => matches!(
             definition.kind,
             ProviderSettingKind::DecimalMillis {
                 minimum,
@@ -652,8 +1018,37 @@ fn validate_core_behavior(
                 step: 1,
             } if minimum >= 1 && maximum <= 1_000
         ),
-    };
-    let valid_scopes = match behavior {
+        ProviderSettingCoreBehavior::StrictCompletionEnabled
+        | ProviderSettingCoreBehavior::ScoreImprovementEnabled => {
+            matches!(definition.kind, ProviderSettingKind::Boolean)
+        }
+        ProviderSettingCoreBehavior::StrictCompletionAttemptLimit
+        | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit => matches!(
+            definition.kind,
+            ProviderSettingKind::Integer {
+                minimum: 1,
+                maximum,
+                step: 1,
+            } if maximum <= MAX_COMPLETION_ATTEMPTS
+        ),
+        ProviderSettingCoreBehavior::StrictCompletionTimeLimit
+        | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit => matches!(
+            definition.kind,
+            ProviderSettingKind::DurationSeconds {
+                minimum,
+                maximum,
+                ..
+            } if minimum >= MIN_COMPLETION_TIME_LIMIT_SECONDS
+                && maximum <= MAX_COMPLETION_TIME_LIMIT_SECONDS
+        ),
+    }
+}
+
+fn valid_core_behavior_scopes(
+    definition: &ProviderSettingDefinition,
+    behavior: ProviderSettingCoreBehavior,
+) -> bool {
+    match behavior {
         ProviderSettingCoreBehavior::ProviderExecutionConcurrency => {
             definition.scopes.len() == 1
                 && definition.scopes.contains(&ProviderSettingScope::Provider)
@@ -669,14 +1064,20 @@ fn validate_core_behavior(
                     ProviderSettingScope::ProviderAccount,
                 ])
         }
-    };
-    if valid_kind && valid_scopes {
-        Ok(())
-    } else {
-        Err(ProviderSettingsError::InvalidCoreBehavior {
-            key: definition.key.clone(),
-            behavior,
-        })
+        ProviderSettingCoreBehavior::StrictCompletionEnabled
+        | ProviderSettingCoreBehavior::ScoreImprovementEnabled
+        | ProviderSettingCoreBehavior::StrictCompletionAttemptLimit
+        | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit
+        | ProviderSettingCoreBehavior::ScoreImprovementTarget
+        | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
+        | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit => {
+            definition.scopes
+                == BTreeSet::from([
+                    ProviderSettingScope::Provider,
+                    ProviderSettingScope::ProviderAccount,
+                    ProviderSettingScope::Task,
+                ])
+        }
     }
 }
 
@@ -1005,6 +1406,100 @@ mod tests {
         assert!(matches!(
             partial.validate(),
             Err(ProviderSettingsError::InvalidCoreBehavior { .. })
+        ));
+    }
+
+    #[test]
+    fn completion_policy_is_core_owned_inherited_and_frozen() {
+        let schema = schema().with_core_completion_policy().unwrap();
+        let provider = patch([(
+            SCORE_IMPROVEMENT_TARGET_KEY,
+            ProviderSettingValue::DecimalMillis(950),
+        )]);
+        let account = patch([(
+            STRICT_COMPLETION_ATTEMPT_LIMIT_KEY,
+            ProviderSettingValue::Integer(5),
+        )]);
+        let task = patch([(
+            SCORE_IMPROVEMENT_ENABLED_KEY,
+            ProviderSettingValue::Boolean(true),
+        )]);
+        let (resolved, sources) = schema
+            .resolve_with_sources(Some(&provider), Some(&account), Some(&task))
+            .unwrap();
+        let captured_at = chrono::Utc::now();
+        let policy = schema
+            .completion_policy_snapshot(&resolved, captured_at)
+            .unwrap();
+        assert!(policy.strict_completion_enabled);
+        assert!(policy.score_improvement_enabled);
+        assert_eq!(policy.strict_attempt_limit, 5);
+        assert_eq!(policy.score_improvement_attempt_limit, 1);
+        assert_eq!(policy.score_target_millis, 950);
+        assert_eq!(
+            policy.strict_expires_at,
+            Some(captured_at + chrono::Duration::days(7))
+        );
+        assert_eq!(
+            policy.score_improvement_expires_at,
+            Some(captured_at + chrono::Duration::days(1))
+        );
+        assert!(policy.formal_retry_requires_confirmation);
+        assert_eq!(
+            sources[SCORE_IMPROVEMENT_TARGET_KEY],
+            ProviderRuntimeSettingSource::Provider
+        );
+        assert_eq!(
+            sources[STRICT_COMPLETION_ATTEMPT_LIMIT_KEY],
+            ProviderRuntimeSettingSource::ProviderAccount
+        );
+        assert_eq!(
+            sources[SCORE_IMPROVEMENT_ENABLED_KEY],
+            ProviderRuntimeSettingSource::Task
+        );
+    }
+
+    #[test]
+    fn provider_schema_cannot_claim_a_reserved_completion_key() {
+        let mut collision = schema();
+        collision.definitions.push(ProviderSettingDefinition {
+            key: STRICT_COMPLETION_ENABLED_KEY.to_owned(),
+            display_name: "Provider collision".to_owned(),
+            description: "Provider-defined value using a Core-reserved key.".to_owned(),
+            kind: ProviderSettingKind::Boolean,
+            default: ProviderSettingValue::Boolean(false),
+            scopes: BTreeSet::from([ProviderSettingScope::Provider]),
+            core_behavior: None,
+        });
+        assert!(matches!(
+            collision.with_core_completion_policy(),
+            Err(ProviderSettingsError::DuplicateDefinition { .. })
+        ));
+    }
+
+    #[test]
+    fn frozen_snapshots_restore_only_later_core_completion_defaults() {
+        let provider_schema = schema();
+        let legacy = provider_schema.resolve(None, None, None).unwrap();
+        let schema = provider_schema.with_core_completion_policy().unwrap();
+
+        assert!(matches!(
+            schema.validate_resolved(&legacy),
+            Err(ProviderSettingsError::MissingSetting { .. })
+        ));
+        let hydrated = schema.hydrate_frozen_core_defaults(&legacy).unwrap();
+        schema.validate_resolved(&hydrated).unwrap();
+        assert_eq!(hydrated.boolean(STRICT_COMPLETION_ENABLED_KEY), Some(true));
+        assert_eq!(hydrated.boolean(SCORE_IMPROVEMENT_ENABLED_KEY), Some(false));
+
+        let mut missing_provider_value = legacy;
+        missing_provider_value
+            .values
+            .remove("video.max_concurrency");
+        assert!(matches!(
+            schema.hydrate_frozen_core_defaults(&missing_provider_value),
+            Err(ProviderSettingsError::MissingSetting { key })
+                if key == "video.max_concurrency"
         ));
     }
 }

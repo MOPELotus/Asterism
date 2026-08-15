@@ -4219,3 +4219,23 @@ timestamp column against the workflow document. Score Improvement persistence
 therefore cannot overwrite the immutable Completed/Passed baseline even when a
 retake score is lower, and Strict Completion cannot be revived after a verified
 terminal outcome.
+
+## Two-hundred-and-thirty-second Phase 0 slice
+
+Completion policy is now part of every registered Provider runtime-settings
+schema through seven canonical Core-owned definitions. Provider schemas cannot
+claim the reserved keys or duplicate their Core behaviors. Resolution keeps the
+existing Provider -> ProviderAccount -> Task precedence and source attribution,
+then freezes enablement, attempt limits, score target and wall-clock bounds for
+the Execution. Strict Completion defaults on; post-completion Score Improvement
+remains explicit opt-in; formal assessment retry confirmation is deliberately
+not configurable.
+
+Registry injection also preserves already durable executions. Before recovery
+or Provider dispatch, Core may hydrate only missing canonical completion fields
+from their fixed defaults into an in-memory copy of a legacy frozen snapshot.
+The exact complete-snapshot validator remains strict, and missing
+Provider-authored fields, unknown keys, invalid values or schema-version drift
+still stop execution. BrowserBridge recovery follows the same boundary, so an
+upgrade neither strands pre-existing work nor silently broadens its Provider
+settings.

@@ -411,7 +411,14 @@ impl ProviderRegistry {
     ///
     /// Returns [`RegistryError`] when an identifier is duplicated or metadata
     /// does not match the attached capability implementations.
-    pub fn register(&mut self, entry: ProviderEntry) -> Result<(), RegistryError> {
+    pub fn register(&mut self, mut entry: ProviderEntry) -> Result<(), RegistryError> {
+        entry.runtime_settings = entry
+            .runtime_settings
+            .with_core_completion_policy()
+            .map_err(|source| RegistryError::InvalidRuntimeSettingsSchema {
+                provider_id: entry.metadata.id.clone(),
+                source,
+            })?;
         entry.validate()?;
         let provider_id = entry.metadata.id.clone();
         if self.entries.contains_key(&provider_id) {
@@ -488,8 +495,9 @@ mod tests {
     use super::*;
     use crate::{
         AnswerHistoryCursor, AnswerHistoryPage, AnswerHistoryTaskRequest, BrowserSessionSpec,
-        ProviderAnswerHistoryTaskEvidence, ProviderContext, ProviderResult, RemoteCourse,
-        RemoteQuestionRef, RemoteTask, VerificationLevel,
+        ProviderAnswerHistoryTaskEvidence, ProviderContext, ProviderResult,
+        ProviderSettingCoreBehavior, RemoteCourse, RemoteQuestionRef, RemoteTask,
+        VerificationLevel,
     };
 
     #[derive(Debug)]
@@ -715,6 +723,30 @@ mod tests {
                 .metadata
                 .display_name,
             "chaoxing"
+        );
+        assert_eq!(
+            registry
+                .get(&ProviderId::new("chaoxing").unwrap())
+                .unwrap()
+                .runtime_settings
+                .definitions
+                .iter()
+                .filter(|definition| {
+                    matches!(
+                        definition.core_behavior,
+                        Some(
+                            ProviderSettingCoreBehavior::StrictCompletionEnabled
+                                | ProviderSettingCoreBehavior::ScoreImprovementEnabled
+                                | ProviderSettingCoreBehavior::StrictCompletionAttemptLimit
+                                | ProviderSettingCoreBehavior::ScoreImprovementAttemptLimit
+                                | ProviderSettingCoreBehavior::ScoreImprovementTarget
+                                | ProviderSettingCoreBehavior::StrictCompletionTimeLimit
+                                | ProviderSettingCoreBehavior::ScoreImprovementTimeLimit
+                        )
+                    )
+                })
+                .count(),
+            7
         );
     }
 

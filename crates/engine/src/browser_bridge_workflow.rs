@@ -133,13 +133,13 @@ where
         ) {
             return Err(BrowserBridgeWorkflowValidationError::UndeclaredResultType);
         }
-        let context = recovered
+        let mut context = recovered
             .command
             .workflow_context
             .ok_or(BrowserBridgeWorkflowValidationError::WorkflowContextMissing)?;
-        entry
+        context.runtime_settings = entry
             .runtime_settings
-            .validate_resolved(&context.runtime_settings)
+            .hydrate_frozen_core_defaults(&context.runtime_settings)
             .map_err(|_| BrowserBridgeWorkflowValidationError::RuntimeSettingsChanged)?;
         let workflow_plan = context
             .workflow_plan

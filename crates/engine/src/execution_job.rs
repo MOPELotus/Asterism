@@ -1203,9 +1203,15 @@ where
         if runtime_settings.provider_id != account.provider_id {
             return Ok(Err(ProviderErrorClass::Internal));
         }
+        let Ok(resolved_runtime_settings) = entry
+            .runtime_settings
+            .hydrate_frozen_core_defaults(&runtime_settings.resolved)
+        else {
+            return Ok(Err(ProviderErrorClass::Internal));
+        };
         let Ok(concurrency) = entry
             .runtime_settings
-            .execution_concurrency(&runtime_settings.resolved)
+            .execution_concurrency(&resolved_runtime_settings)
         else {
             return Ok(Err(ProviderErrorClass::Internal));
         };
@@ -2046,9 +2052,15 @@ where
                 disposition: FailureDisposition::HumanRequired,
             }));
         }
+        let Ok(resolved_runtime_settings) = entry
+            .runtime_settings
+            .hydrate_frozen_core_defaults(&runtime_settings.resolved)
+        else {
+            return Ok(Err(internal_prepared_failure()));
+        };
         let Ok(concurrency) = entry
             .runtime_settings
-            .execution_concurrency(&runtime_settings.resolved)
+            .execution_concurrency(&resolved_runtime_settings)
         else {
             return Ok(Err(internal_prepared_failure()));
         };
@@ -2063,7 +2075,7 @@ where
             },
             remote_task_id: task.remote_id.clone(),
             draft,
-            runtime_settings: runtime_settings.resolved,
+            runtime_settings: resolved_runtime_settings,
             concurrency,
             provider_version: entry.metadata.implementation_version.clone(),
         }))
@@ -2150,9 +2162,15 @@ where
         {
             return Ok(Err(internal_prepared_failure()));
         }
+        let Ok(resolved_runtime_settings) = entry
+            .runtime_settings
+            .hydrate_frozen_core_defaults(&runtime_settings.resolved)
+        else {
+            return Ok(Err(internal_prepared_failure()));
+        };
         let Ok(concurrency) = entry
             .runtime_settings
-            .execution_concurrency(&runtime_settings.resolved)
+            .execution_concurrency(&resolved_runtime_settings)
         else {
             return Ok(Err(internal_prepared_failure()));
         };
@@ -2164,7 +2182,7 @@ where
             requested_capabilities: capabilities,
             capability_plan: capability_plan.to_vec(),
             capability_step_position,
-            runtime_settings: runtime_settings.resolved,
+            runtime_settings: resolved_runtime_settings,
             provider_plan_artifact,
         };
         if !request.has_valid_capability_step() {
