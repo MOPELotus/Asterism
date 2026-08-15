@@ -415,10 +415,15 @@ only structural field names, response codes and bounded placeholder shapes.
   full/simple-Referer read separate from Auto's legacy minimal/task-Referer read.
   The durable entry produces the identical proof from encoded parent/batch/child
   values, while malformed parent authority stops before either read boundary.
-  Snapshot-native prepared and durable entries produce the same proof; the
-  durable form sources the child artifact from the snapshot, and an issued
-  final save without a receipt or a complete snapshot carrying a foreign retry
-  delay stops before Task discovery.
+  Snapshot-native prepared and durable entries produce the same shared recovery
+  result; the durable form sources the child artifact from the snapshot. Tests
+  bind a newly accepted final save to the exact pending ordinal/digest while
+  keeping the recorded flag false, suppress a duplicate pending write when the
+  identical verification is already stored and set that flag true, and emit
+  neither for an explicit final rejection. An early stored verification, an
+  issued final save without a receipt or a complete snapshot carrying a foreign
+  retry delay stops before Task discovery; stored digest drift fails against
+  the later fresh proof.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

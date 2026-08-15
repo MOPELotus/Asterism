@@ -3,9 +3,9 @@ use std::{fmt, sync::Arc};
 use asterism_provider_api::{
     ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSequenceObservation,
     ExecutionMutationSequencePlan, ExecutionMutationSequenceRecoverySnapshot,
-    ExecutionMutationVerification, ProviderContext, ProviderError, ProviderErrorKind,
-    ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata, ProviderResult,
-    TaskDetailCapability,
+    ExecutionMutationVerification, ExecutionRecoveryOutcome, ProviderContext, ProviderError,
+    ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata,
+    ProviderResult, TaskDetailCapability,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -130,12 +130,12 @@ impl WellearnAtomicDurationCompletionRecovery {
     ///
     /// Returns a typed error for context, prepared-child, snapshot,
     /// fresh-detail, CMI or exact-goal drift.
-    pub async fn verify_prepared_snapshot(
+    pub async fn verify_execution_recovery(
         &self,
         context: &ProviderContext,
         prepared: &WellearnPreparedAtomicChildPlan,
         snapshot: &ExecutionMutationSequenceRecoverySnapshot,
-    ) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
         if context.provider_id != self.metadata.id {
             return Err(ProviderError::new(
                 ProviderErrorKind::Internal,
@@ -152,13 +152,30 @@ impl WellearnAtomicDurationCompletionRecovery {
             .await?;
         prepared.validate_fresh_detail(&detail)?;
         let fresh_final = self.transport.read_atomic_final(context, child).await?;
-        verify_restored_recovery_snapshot(
+        let verification = verify_restored_recovery_snapshot(
             child,
             &receipts,
             pre_final.as_ref(),
             stored_verification,
             &fresh_final,
-        )
+        )?;
+        build_execution_recovery_outcome(child, &receipts, stored_verification, verification)
+    }
+
+    /// Alias retaining the prepared-child snapshot boundary while returning
+    /// Core's recovery-specific outcome and optional pending verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed errors as [`Self::verify_execution_recovery`].
+    pub async fn verify_prepared_snapshot(
+        &self,
+        context: &ProviderContext,
+        prepared: &WellearnPreparedAtomicChildPlan,
+        snapshot: &ExecutionMutationSequenceRecoverySnapshot,
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
+        self.verify_execution_recovery(context, prepared, snapshot)
+            .await
     }
 
     /// Restores all Provider-private durable artifacts together, then enters
@@ -212,13 +229,13 @@ impl WellearnAtomicDurationCompletionRecovery {
         encoded_parent_authority: &[u8],
         encoded_batch_snapshot: &[u8],
         snapshot: &ExecutionMutationSequenceRecoverySnapshot,
-    ) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+    ) -> ProviderResult<ExecutionRecoveryOutcome> {
         let prepared = WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
             encoded_parent_authority,
             encoded_batch_snapshot,
             snapshot.artifact(),
         )?;
-        self.verify_prepared_snapshot(context, &prepared, snapshot)
+        self.verify_execution_recovery(context, &prepared, snapshot)
             .await
     }
 }
@@ -558,6 +575,12 @@ fn restore_recovery_sequence_snapshot(
     let (receipts, pre_final) =
         restore_recovery_sequence_records(child, snapshot.plan(), &issues, &receipts, observation)?;
     let final_save_ordinal = receipts.final_save_ordinal(child.duration_completion_plan()?)?;
+    let final_accepted_ordinal = snapshot.final_accepted_mutation_ordinal();
+    if (receipts.save_accepted() && final_accepted_ordinal != Some(final_save_ordinal))
+        || (!receipts.save_accepted() && final_accepted_ordinal.is_some())
+    {
+        return Err(invalid_recovery_sequence_records());
+    }
     let mut stored_verifications = snapshot
         .records()
         .iter()
@@ -588,6 +611,31 @@ fn verify_restored_recovery_snapshot(
         return Err(invalid_recovery_sequence_records());
     }
     Ok(verification)
+}
+
+fn build_execution_recovery_outcome(
+    child: &WellearnAtomicChildPlan,
+    receipts: &WellearnAtomicDurationCompletionReceipts,
+    stored_verification: Option<ExecutionMutationVerification>,
+    verification: WellearnAtomicDurationCompletionVerification,
+) -> ProviderResult<ExecutionRecoveryOutcome> {
+    let pending_verification = verification.to_execution_mutation_verification()?;
+    let verification_recorded = match (pending_verification, stored_verification) {
+        (Some(pending), Some(stored)) if pending == stored => true,
+        (Some(_) | None, None) => false,
+        _ => return Err(invalid_recovery_sequence_records()),
+    };
+    let outcome = verification.to_execution_outcome(
+        child.duration_completion_plan()?,
+        receipts,
+        verification_recorded,
+    )?;
+    Ok(match (pending_verification, verification_recorded) {
+        (Some(pending), false) => {
+            ExecutionRecoveryOutcome::with_mutation_verification(outcome, pending)
+        }
+        _ => ExecutionRecoveryOutcome::new(outcome),
+    })
 }
 
 fn restore_recovery_sequence_records(

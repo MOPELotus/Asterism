@@ -2501,13 +2501,25 @@ mod tests {
         issues: &[ExecutionMutationIssue],
         receipts: &[ExecutionMutationReceipt],
         observation: Option<ExecutionMutationSequenceObservation>,
+        verification: Option<ExecutionMutationVerification>,
     ) -> ExecutionMutationSequenceRecoverySnapshot {
+        let final_index = issues.len().checked_sub(1).unwrap();
         let records = issues
             .iter()
             .cloned()
             .zip(receipts.iter().copied())
-            .map(|(issue, receipt)| {
-                ExecutionMutationRecoveryRecord::try_new(issue, Some(receipt), None).unwrap()
+            .enumerate()
+            .map(|(index, (issue, receipt))| {
+                ExecutionMutationRecoveryRecord::try_new(
+                    issue,
+                    Some(receipt),
+                    if index == final_index {
+                        verification
+                    } else {
+                        None
+                    },
+                )
+                .unwrap()
             })
             .collect();
         ExecutionMutationSequenceRecoverySnapshot::try_new(
@@ -3533,6 +3545,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scenario compares every recovery result state against the same prepared child"
+    )]
     async fn recovery_snapshot_prepared_and_durable_entries_prove_the_same_goal() {
         let fresh_tasks = tasks();
         let authority = WellearnAtomicBatchPlanningAuthority::try_new(
@@ -3570,7 +3586,8 @@ mod tests {
             plan.clone(),
             &issues,
             &receipts,
-            Some(observation),
+            Some(observation.clone()),
+            None,
         );
         let detail_calls = Arc::new(Mutex::new(Vec::new()));
         let transport = Arc::new(AtomicRecoveryFixtureTransport {
@@ -3587,11 +3604,11 @@ mod tests {
         )
         .unwrap();
 
-        let prepared_proof = recovery
-            .verify_prepared_snapshot(&atomic_context(), &prepared, &snapshot)
+        let prepared_recovery = recovery
+            .verify_execution_recovery(&atomic_context(), &prepared, &snapshot)
             .await
             .unwrap();
-        let durable_proof = recovery
+        let durable_recovery = recovery
             .verify_durable_snapshot(
                 &atomic_context(),
                 &authority.encode().unwrap(),
@@ -3600,10 +3617,72 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(prepared_proof, durable_proof);
-        assert_eq!(prepared_proof.final_save_ordinal(), 4);
+        assert_eq!(prepared_recovery, durable_recovery);
+        let (outcome, pending_verification) = prepared_recovery.into_parts();
+        assert!(outcome.verified);
+        assert_eq!(outcome.result_sanitized["final_save_ordinal"], 4);
+        assert_eq!(
+            outcome.result_sanitized["final_save_verification_recorded"],
+            false
+        );
+        let pending_verification = pending_verification.unwrap();
+        assert_eq!(pending_verification.ordinal(), 4);
+        assert!(pending_verification.verified());
+        let direct_proof =
+            crate::verify_atomic_duration_completion_recovery_from_sequence_snapshot(
+                prepared.child_plan(),
+                &snapshot,
+                &completed_atomic_cmi("100"),
+            )
+            .unwrap();
+        assert_eq!(
+            pending_verification.observation_digest(),
+            direct_proof.observation_digest()
+        );
         assert_eq!(detail_calls.lock().unwrap().len(), 2);
         assert_eq!(transport.calls.lock().unwrap().len(), 2);
+
+        let persisted_snapshot = atomic_recovery_snapshot(
+            prepared.provider_plan_artifact().unwrap(),
+            plan.clone(),
+            &issues,
+            &receipts,
+            Some(observation.clone()),
+            Some(pending_verification),
+        );
+        let persisted_recovery = recovery
+            .verify_prepared_snapshot(&atomic_context(), &prepared, &persisted_snapshot)
+            .await
+            .unwrap();
+        assert!(persisted_recovery.mutation_verification().is_none());
+        assert_eq!(
+            persisted_recovery.outcome().result_sanitized["final_save_verification_recorded"],
+            true
+        );
+
+        let mut rejected_receipts = receipts.clone();
+        rejected_receipts[3] = ExecutionMutationReceipt::new(4, [2; 32], false).unwrap();
+        let rejected_snapshot = atomic_recovery_snapshot(
+            prepared.provider_plan_artifact().unwrap(),
+            plan.clone(),
+            &issues,
+            &rejected_receipts,
+            Some(observation),
+            None,
+        );
+        let rejected_recovery = recovery
+            .verify_prepared_snapshot(&atomic_context(), &prepared, &rejected_snapshot)
+            .await
+            .unwrap();
+        assert!(rejected_recovery.mutation_verification().is_none());
+        assert_eq!(
+            rejected_recovery.outcome().result_sanitized["final_save_verification_recorded"],
+            false
+        );
+        assert_eq!(
+            rejected_recovery.outcome().result_sanitized["save_accepted"],
+            false
+        );
 
         let mut retryable_receipts = receipts;
         retryable_receipts[1] =
@@ -3614,6 +3693,7 @@ mod tests {
             &issues,
             &retryable_receipts,
             snapshot.observations().first().cloned(),
+            None,
         );
         assert!(
             recovery
@@ -3621,11 +3701,15 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(detail_calls.lock().unwrap().len(), 2);
-        assert_eq!(transport.calls.lock().unwrap().len(), 2);
+        assert_eq!(detail_calls.lock().unwrap().len(), 4);
+        assert_eq!(transport.calls.lock().unwrap().len(), 4);
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture proves both invalid durable-record shapes stop before fresh I/O"
+    )]
     async fn recovery_snapshot_rejects_ambiguous_final_issue_before_fresh_io() {
         let fresh_tasks = tasks();
         let authority = WellearnAtomicBatchPlanningAuthority::try_new(
@@ -3651,6 +3735,35 @@ mod tests {
             (WellearnAtomicMutationKind::Set, true),
             (WellearnAtomicMutationKind::Save, true),
         ]);
+        let observation = WellearnAtomicPreFinalObservation::capture(
+            prepared.child_plan(),
+            &completed_atomic_cmi("100"),
+        )
+        .unwrap()
+        .to_sequence_observation()
+        .unwrap();
+        let early_records = issues
+            .iter()
+            .cloned()
+            .zip(receipts.iter().copied())
+            .enumerate()
+            .map(|(index, (issue, receipt))| {
+                ExecutionMutationRecoveryRecord::try_new(
+                    issue,
+                    Some(receipt),
+                    (index == 0)
+                        .then(|| ExecutionMutationVerification::new(1, [9; 32], true).unwrap()),
+                )
+                .unwrap()
+            })
+            .collect();
+        let early_verification = ExecutionMutationSequenceRecoverySnapshot::try_new(
+            prepared.provider_plan_artifact().unwrap(),
+            plan.clone(),
+            early_records,
+            vec![observation.clone()],
+        )
+        .unwrap();
         let final_index = issues.len() - 1;
         let records = issues
             .into_iter()
@@ -3665,13 +3778,6 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        let observation = WellearnAtomicPreFinalObservation::capture(
-            prepared.child_plan(),
-            &completed_atomic_cmi("100"),
-        )
-        .unwrap()
-        .to_sequence_observation()
-        .unwrap();
         let snapshot = ExecutionMutationSequenceRecoverySnapshot::try_new(
             prepared.provider_plan_artifact().unwrap(),
             plan,
@@ -3694,6 +3800,23 @@ mod tests {
         )
         .unwrap();
 
+        assert!(
+            recovery
+                .verify_prepared_snapshot(&atomic_context(), &prepared, &early_verification,)
+                .await
+                .is_err()
+        );
+        assert!(
+            recovery
+                .verify_durable_snapshot(
+                    &atomic_context(),
+                    &authority.encode().unwrap(),
+                    &prepared.batch_plan().encode_snapshot().unwrap(),
+                    &early_verification,
+                )
+                .await
+                .is_err()
+        );
         assert!(
             recovery
                 .verify_prepared_snapshot(&atomic_context(), &prepared, &snapshot)

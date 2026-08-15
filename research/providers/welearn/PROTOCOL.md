@@ -674,8 +674,13 @@ fresh-rebinds the complete prepared batch child, and rejects Task identity,
 capability or eligibility drift before one final CMI read. The read-only
 transport derives current Fanyuchang's full/simple-Referer profile or Auto's
 legacy minimal/task-Referer profile from the child instead of using one generic
-endpoint. It returns the sanitized verification value only; Core still owns
-same-attempt record loading, recovery dispatch and final verification storage.
+endpoint. Its `verify_execution_recovery` boundary returns a sanitized outcome
+plus at most one pending final-save verification. An accepted final save with
+no stored proof returns `recorded=false` plus the exact ordinal/digest; the same
+fresh proof matching an existing record returns `recorded=true` and no pending
+write; an explicit rejected final returns `recorded=false` and no verification.
+Core still owns same-attempt record loading, recovery dispatch and final
+verification storage.
 Its `verify_durable_artifacts` entry accepts the encoded parent authority,
 complete batch snapshot and exact child artifact alongside the sequence records,
 jointly restores all Provider-private values first, and then enters the same
@@ -685,8 +690,11 @@ The snapshot-native `verify_prepared_snapshot` and `verify_durable_snapshot`
 entries remove those parallel record arguments. The durable form takes its
 child artifact only from the Core snapshot, jointly restores parent/batch/child,
 then applies the same snapshot-first, fresh-rebind and read-only final-CMI
-proof. These methods are still outside capability registration until Core owns
-WELearn composite parent/child creation and dispatch.
+proof. Both return `ExecutionRecoveryOutcome`; accepted proof requires Core's
+complete-sequence final accepted ordinal before either fresh read, and stored
+ordinal drift likewise stops there. Stored digest equality is checked against
+the new fresh proof. These methods are still outside capability registration
+until Core owns WELearn composite parent/child creation and dispatch.
 
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 The child-artifact-bound conditional sequence freezes the only legal operation
@@ -913,15 +921,17 @@ The new Provider encoding supplies the opaque persistence payload for the first
 step, but does not select a parent Execution ID, write Storage, create children
 or grant mutation authority; those bindings remain the same shared Core Gap.
 
-That Core Gap now has an exact integration shape. The parent transaction must
+Core `0c0d26b` closes the shared recovery-result portion of that integration:
+Engine validates an optional Provider verification against the same-attempt
+complete sequence and final accepted ordinal, then writes it under the active
+recovery claim before finishing. The remaining Core Gap is the parent
+transaction: it must
 store the encoded authority plus the independently bounded complete batch
 snapshot, consume the ordered atomic dispatch projection once, and create each
 child with its exact artifact/sequence without rescanning. On recovery, Core
-must reload those parent values and its same-attempt sequence snapshot, then
-persist the optional final-save mutation verification returned with the
-sanitized outcome before finishing success. A generic recovery method returning
-only `ExecutionOutcome` cannot represent that last durable proof; giving the
-Provider direct Storage access would violate ownership instead of closing it.
+must reload those parent values and its same-attempt sequence snapshot. Giving
+the Provider direct Storage access would still violate ownership instead of
+closing that parent/child gap.
 
 `WellearnBatchPlan.target_strategy` records the corresponding target boundary:
 Fanyuchang, YZBRH and Auto completion resolve score or duration targets per

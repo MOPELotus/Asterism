@@ -230,11 +230,18 @@ receipt set, exact donor observation shape and only an exact accepted-final-save
 stored verification; ambiguity or substitution stops before fresh I/O. Its
 durable entry takes the child artifact from that snapshot and jointly restores
 encoded parent authority plus complete batch snapshot before the same
-record/fresh-read path. Composite registration/dispatch and returned
-verification persistence remain Core work; neither path resumes or replays
-mutation. Core's generic retry-deadline receipt extension is explicitly absent
-from WELearn native output and rejected on both record and snapshot restore;
-neither audited atomic donor retries a definite rejection after a delay.
+record/fresh-read path. The coordinator's `verify_execution_recovery` adapter
+now returns Core's `ExecutionRecoveryOutcome`: a newly proved accepted final
+save carries its exact pending ordinal/digest while the sanitized recorded flag
+remains false; an identical stored verification sets that flag true and emits
+no duplicate; an explicit final rejection does neither. Complete-sequence and
+final-accepted ordinal drift fail before fresh I/O, while stored digest drift
+fails against the new fresh proof. Engine validates and writes any pending
+record to the same Attempt before consuming the outcome. Composite parent/child
+registration and dispatch remain Core work; neither Provider path resumes or
+replays mutation. Core's generic retry-deadline receipt extension is explicitly
+absent from WELearn native output and rejected on both record and snapshot
+restore; neither audited atomic donor retries a definite rejection after a delay.
 
 The native atomic transport now consumes Core's storage-agnostic generic
 `ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. Both the
@@ -305,13 +312,12 @@ remaining plan work is the parent/child Execution and composite dispatch layer,
 not another fixed capability-step approximation of the existing conditional
 sequence.
 
-The minimum remaining shared contract is now concrete. One Core transaction
+The remaining shared contract is now concrete. One Core transaction
 must bind the encoded parent authority and bounded complete batch snapshot to a
 parent attempt, then create every ordered child Execution from
 `WellearnAtomicBatchDispatchPlan` with its exact artifact and sequence; recovery
-must reload those parent values rather than rescan. The recovery capability
-result must carry both sanitized `ExecutionOutcome` and the optional exact
-final-save `ExecutionMutationVerification`. Engine must validate that record
-against the same-attempt snapshot and persist it before marking the recovered
-child successful. Provider code must not write Storage or synthesize this
-parent/child ownership.
+must reload those parent values rather than rescan. Core `0c0d26b` now supplies
+the recovery result, complete-sequence/final-ordinal validation and claim-bound
+same-Attempt verification write before finish; WELearn supplies the exact
+three-state adapter above. Provider code must not write Storage or synthesize
+the still-missing parent/child ownership.

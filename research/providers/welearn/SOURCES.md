@@ -190,9 +190,18 @@ adds no new request or scheduling behavior.
 The remaining-contract checkpoint reused that immediately preceding unchanged
 upstream refresh and rechecked the complete sweep ledger against current Core.
 Same-attempt sequence loading is now implemented and no longer listed as a
-missing primitive. The remaining parent/batch transaction, child creation and
-recovery-verification persistence requirements are Asterism architecture work,
-not newly discovered donor behavior.
+missing primitive. Core `0c0d26b` subsequently closed recovery-verification
+return, validation and same-Attempt persistence. The remaining parent/batch
+transaction, child creation and recovery dispatch requirements are Asterism
+architecture work, not newly discovered donor behavior.
+The recovery-outcome integration checkpoint repeated all three default-head
+queries and the Fanyuchang tag. Heads remain
+`afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2`,
+`bd160e91d0452b8bf483087fbdd3bdd58d855e13` and
+`85918caaccd93b73b1e41fe537b4e9a11377b759`; `v4.0.0` remains
+`5d1df60cb0078f70679be2a22f2afbf1ef4fa88a`. Mapping the existing fresh proof
+into Core's recovery result adds no donor route, setting, retry or mutation
+behavior, so no upstream delta is available to port at this checkpoint.
 
 ## Source selection
 
