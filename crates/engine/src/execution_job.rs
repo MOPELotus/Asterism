@@ -17,14 +17,16 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink, ExecutionMutationIssue,
-    ExecutionMutationPlan, ExecutionMutationReceipt, ExecutionMutationSequenceObservation,
-    ExecutionMutationSequencePlan, ExecutionMutationSink, ExecutionMutationVerification,
-    ExecutionRequest as ProviderExecutionRequest, ProviderCapability, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderExecutionConcurrency, ProviderExecutionLog,
-    ProviderProgress, ProviderQuestionMaterialization, ProviderRegistry,
-    ProviderSubmissionStepOutcome, ResolvedProviderQuestionSessionContinuation,
-    ResolvedProviderRuntimeSettings, SubmissionExecuteCapability, SubmissionVerifyCapability,
-    TaskExecutionCapability, TaskProgressCapability,
+    ExecutionMutationPlan, ExecutionMutationReceipt, ExecutionMutationRecoveryRecord,
+    ExecutionMutationSequenceObservation, ExecutionMutationSequencePlan,
+    ExecutionMutationSequenceRecoverySnapshot, ExecutionMutationSink,
+    ExecutionMutationVerification, ExecutionRequest as ProviderExecutionRequest,
+    ProviderCapability, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderExecutionConcurrency, ProviderExecutionLog, ProviderProgress,
+    ProviderQuestionMaterialization, ProviderRegistry, ProviderSubmissionStepOutcome,
+    ResolvedProviderQuestionSessionContinuation, ResolvedProviderRuntimeSettings,
+    SubmissionExecuteCapability, SubmissionVerifyCapability, TaskExecutionCapability,
+    TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
@@ -492,9 +494,14 @@ where
         let _admission = self
             .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
             .await?;
-        let provider = prepared
-            .capability
-            .verify_execution(&prepared.context, &prepared.request);
+        let mutation_sequence = self
+            .load_execution_mutation_sequence_recovery(&prepared.request, attempt_id)
+            .await?;
+        let provider = prepared.capability.verify_execution_recovery(
+            &prepared.context,
+            &prepared.request,
+            mutation_sequence.as_ref(),
+        );
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -525,6 +532,105 @@ where
                     .await
             }
         }
+    }
+
+    async fn load_execution_mutation_sequence_recovery(
+        &self,
+        request: &ProviderExecutionRequest,
+        attempt_id: asterism_domain::ExecutionAttemptId,
+    ) -> Result<Option<ExecutionMutationSequenceRecoverySnapshot>, ScheduledExecutionRunError> {
+        let plan = self
+            .executions
+            .find_execution_atomic_mutation_sequence_plan(request.execution_id, attempt_id)
+            .await?;
+        let observations = self
+            .executions
+            .find_execution_atomic_mutation_sequence_observations(request.execution_id, attempt_id)
+            .await?;
+        let mutations = self
+            .executions
+            .find_execution_atomic_mutations(request.execution_id, attempt_id)
+            .await?;
+        let Some(plan) = plan else {
+            if observations.is_empty() {
+                return Ok(None);
+            }
+            return Err(invalid_mutation_recovery_storage());
+        };
+        if plan.execution_id != request.execution_id || plan.attempt_id != attempt_id {
+            return Err(invalid_mutation_recovery_storage());
+        }
+        let Some(artifact) = request.provider_plan_artifact.clone() else {
+            return Err(invalid_mutation_recovery_storage());
+        };
+        let mut records = Vec::with_capacity(mutations.len());
+        for mutation in mutations {
+            if mutation.execution_id != request.execution_id || mutation.attempt_id != attempt_id {
+                return Err(invalid_mutation_recovery_storage());
+            }
+            let issue = ExecutionMutationIssue::new(
+                mutation.ordinal,
+                mutation.operation_type,
+                mutation.request_digest,
+            )
+            .map_err(|_| invalid_mutation_recovery_storage())?;
+            let receipt = match (
+                mutation.response_digest,
+                mutation.accepted,
+                mutation.received_at,
+            ) {
+                (Some(response_digest), Some(accepted), Some(_)) => Some(
+                    ExecutionMutationReceipt::new(mutation.ordinal, response_digest, accepted)
+                        .map_err(|_| invalid_mutation_recovery_storage())?,
+                ),
+                (None, None, None) => None,
+                _ => return Err(invalid_mutation_recovery_storage()),
+            };
+            let verification = match (
+                mutation.verification_digest,
+                mutation.verified,
+                mutation.verified_at,
+            ) {
+                (Some(observation_digest), Some(verified), Some(_)) => Some(
+                    ExecutionMutationVerification::new(
+                        mutation.ordinal,
+                        observation_digest,
+                        verified,
+                    )
+                    .map_err(|_| invalid_mutation_recovery_storage())?,
+                ),
+                (None, None, None) => None,
+                _ => return Err(invalid_mutation_recovery_storage()),
+            };
+            records.push(
+                ExecutionMutationRecoveryRecord::try_new(issue, receipt, verification)
+                    .map_err(|_| invalid_mutation_recovery_storage())?,
+            );
+        }
+        let observations = observations
+            .into_iter()
+            .map(|observation| {
+                if observation.execution_id != request.execution_id
+                    || observation.attempt_id != attempt_id
+                {
+                    return Err(invalid_mutation_recovery_storage());
+                }
+                ExecutionMutationSequenceObservation::try_new(
+                    observation.phase_position,
+                    observation.observation_type,
+                    observation.observation_digest,
+                )
+                .map_err(|_| invalid_mutation_recovery_storage())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ExecutionMutationSequenceRecoverySnapshot::try_new(
+            artifact,
+            plan.plan,
+            records,
+            observations,
+        )
+        .map(Some)
+        .map_err(|_| invalid_mutation_recovery_storage())
     }
 
     #[allow(
@@ -638,12 +744,17 @@ where
             }
         };
         let execution_id = claimed_execution_id(job)?;
+        let mutation_sequence = self
+            .load_execution_mutation_sequence_recovery(&prepared.request, attempt_id)
+            .await?;
         let _admission = self
             .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
             .await?;
-        let provider = prepared
-            .capability
-            .verify_execution(&prepared.context, &prepared.request);
+        let provider = prepared.capability.verify_execution_recovery(
+            &prepared.context,
+            &prepared.request,
+            mutation_sequence.as_ref(),
+        );
         tokio::pin!(provider);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4041,6 +4152,12 @@ const fn internal_prepared_failure() -> PreparedFailure {
     prepared_failure(ProviderErrorClass::Internal, FailureDisposition::Failed)
 }
 
+fn invalid_mutation_recovery_storage() -> ScheduledExecutionRunError {
+    ScheduledExecutionRunError::Storage(StorageError::InvalidData(
+        "execution mutation recovery evidence is invalid".to_owned(),
+    ))
+}
+
 struct PersistedExecutionEventSink<'a, E> {
     executions: &'a E,
     execution_id: ExecutionId,
@@ -4946,6 +5063,8 @@ mod tests {
         submission_verify_calls: Mutex<u32>,
         received_provider_plan_artifacts:
             Mutex<Vec<Option<asterism_provider_api::ProviderExecutionPlanArtifact>>>,
+        received_mutation_recoveries:
+            Mutex<Vec<Option<asterism_provider_api::ExecutionMutationSequenceRecoverySnapshot>>>,
         durable_calls: Arc<Mutex<u32>>,
         database: Database,
     }
@@ -5163,6 +5282,19 @@ mod tests {
                     panic!("submission recovery must use SubmissionVerify")
                 }
             }
+        }
+
+        async fn verify_execution_recovery(
+            &self,
+            context: &ProviderContext,
+            request: &ProviderExecutionRequest,
+            mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
+        ) -> ProviderResult<ExecutionOutcome> {
+            self.received_mutation_recoveries
+                .lock()
+                .unwrap()
+                .push(mutation_sequence.cloned());
+            self.verify_execution(context, request).await
         }
 
         fn completion_diagnosis(
@@ -5734,6 +5866,14 @@ mod tests {
                 .unwrap(),
             vec![Some(artifact)]
         );
+        assert_eq!(
+            *fixture
+                .provider
+                .received_mutation_recoveries
+                .lock()
+                .unwrap(),
+            vec![None]
+        );
     }
 
     #[tokio::test]
@@ -5748,6 +5888,14 @@ mod tests {
         assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
         assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
         assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+        assert!(
+            fixture
+                .provider
+                .received_mutation_recoveries
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -6628,6 +6776,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_receives_the_same_attempt_mutation_sequence_snapshot() {
+        let fixture = Fixture::verified_sequence_recovering(ProviderBehavior::Success).await;
+
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 0);
+        assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
+        let recoveries = fixture
+            .provider
+            .received_mutation_recoveries
+            .lock()
+            .unwrap();
+        let snapshot = recoveries
+            .first()
+            .and_then(Option::as_ref)
+            .expect("sequence recovery snapshot");
+        assert_eq!(
+            snapshot.artifact().artifact_type(),
+            "provider-alpha.execution-sequence.v1"
+        );
+        assert_eq!(
+            snapshot.plan().sequence_type(),
+            "provider-alpha.fixture-sequence.v1"
+        );
+        assert_eq!(snapshot.records().len(), 1);
+        assert_eq!(snapshot.records()[0].issue().ordinal(), 1);
+        assert_eq!(snapshot.records()[0].receipt().unwrap().ordinal(), 1);
+        assert!(snapshot.records()[0].verification().unwrap().verified());
+        assert_eq!(snapshot.observations().len(), 1);
+        assert_eq!(
+            snapshot.observations()[0].observation_type(),
+            "provider-alpha.fixture.precondition.v1"
+        );
+    }
+
+    #[tokio::test]
     async fn worker_uses_the_frozen_snapshot_after_provider_defaults_change() {
         let fixture = Fixture::new(AssessmentClass::Routine, ProviderBehavior::Success).await;
         let changed = asterism_provider_api::ProviderRuntimeSettingsPatch {
@@ -6824,6 +7013,7 @@ mod tests {
                 progress_calls: Mutex::new(0),
                 submission_verify_calls: Mutex::new(0),
                 received_provider_plan_artifacts: Mutex::new(Vec::new()),
+                received_mutation_recoveries: Mutex::new(Vec::new()),
                 durable_calls: Arc::new(Mutex::new(0)),
                 database: database.clone(),
             });
@@ -6909,6 +7099,13 @@ mod tests {
 
         async fn verified_recovering(behavior: ProviderBehavior) -> Self {
             Self::verified(behavior).await.enter_recovery().await
+        }
+
+        async fn verified_sequence_recovering(behavior: ProviderBehavior) -> Self {
+            Self::verified(behavior)
+                .await
+                .enter_sequence_recovery()
+                .await
         }
 
         async fn duration(behavior: ProviderBehavior) -> Self {
@@ -7205,7 +7402,33 @@ mod tests {
             fixture
         }
 
-        async fn enter_recovery(mut self) -> Self {
+        async fn enter_recovery(self) -> Self {
+            self.start_abandoned_attempt().await;
+            self.expire_and_claim_recovery().await
+        }
+
+        async fn enter_sequence_recovery(self) -> Self {
+            let artifact = self.attach_provider_sequence_plan_artifact().await;
+            let attempt = self.start_abandoned_attempt().await;
+            let claim_lost = Arc::new(AtomicBool::new(false));
+            let sink = PersistedExecutionEventSink {
+                executions: &self.runner.executions,
+                execution_id: self.execution_id,
+                attempt_id: attempt.id,
+                scheduler_job_id: self.job.id,
+                worker_id: "execution-worker",
+                correlation_id: "stale-sequence-test",
+                provider_id: ProviderId::new("provider-alpha").unwrap(),
+                mutations_enabled: true,
+                claim_lost,
+            };
+            persist_fixture_mutation(&sink, Some(&artifact))
+                .await
+                .unwrap();
+            self.expire_and_claim_recovery().await
+        }
+
+        async fn start_abandoned_attempt(&self) -> ExecutionAttempt {
             let task_id = execution_id_to_task(
                 &SqliteExecutionRepository::new(self.database.clone()),
                 self.execution_id,
@@ -7231,7 +7454,10 @@ mod tests {
                     correlation_id: "stale-execution-test",
                 })
                 .await
-                .unwrap();
+                .unwrap()
+        }
+
+        async fn expire_and_claim_recovery(mut self) -> Self {
             let expired = (self.now - chrono::Duration::seconds(1)).to_rfc3339();
             sqlx::query("UPDATE execution_leases SET expires_at = ? WHERE execution_id = ?")
                 .bind(&expired)

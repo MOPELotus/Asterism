@@ -1666,6 +1666,18 @@ pub trait TaskExecutionCapability: ProviderIdentity {
         ))
     }
 
+    /// Rebinds a recovery attempt with the exact immutable mutation sequence
+    /// records loaded by Core. The snapshot is read-only evidence and never
+    /// authorizes issuing or replaying a remote mutation.
+    async fn verify_execution_recovery(
+        &self,
+        context: &ProviderContext,
+        request: &ExecutionRequest,
+        _mutation_sequence: Option<&ExecutionMutationSequenceRecoverySnapshot>,
+    ) -> ProviderResult<ExecutionOutcome> {
+        self.verify_execution(context, request).await
+    }
+
     /// Maps Provider-specific verified execution facts to a shared reason why
     /// the Task is not complete. Returning `None` leaves Core on the
     /// conservative `RemoteUnknown` path.
@@ -2482,6 +2494,260 @@ impl ExecutionMutationVerification {
     }
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExecutionMutationRecoveryRecord {
+    issue: ExecutionMutationIssue,
+    receipt: Option<ExecutionMutationReceipt>,
+    verification: Option<ExecutionMutationVerification>,
+}
+
+impl ExecutionMutationRecoveryRecord {
+    /// Binds the hash-only lifecycle of one issued mutation for read-only
+    /// recovery.
+    ///
+    /// # Errors
+    ///
+    /// Rejects cross-ordinal records, verification without an accepted
+    /// receipt, or verification attached to an ambiguous issue.
+    pub fn try_new(
+        issue: ExecutionMutationIssue,
+        receipt: Option<ExecutionMutationReceipt>,
+        verification: Option<ExecutionMutationVerification>,
+    ) -> ProviderResult<Self> {
+        if receipt.is_some_and(|value| value.ordinal() != issue.ordinal())
+            || verification.is_some_and(|value| value.ordinal() != issue.ordinal())
+            || verification.is_some() && receipt.is_none_or(|value| !value.accepted())
+        {
+            return Err(invalid_execution_mutation_recovery());
+        }
+        Ok(Self {
+            issue,
+            receipt,
+            verification,
+        })
+    }
+
+    pub const fn issue(&self) -> &ExecutionMutationIssue {
+        &self.issue
+    }
+
+    pub const fn receipt(&self) -> Option<ExecutionMutationReceipt> {
+        self.receipt
+    }
+
+    pub const fn verification(&self) -> Option<ExecutionMutationVerification> {
+        self.verification
+    }
+}
+
+impl fmt::Debug for ExecutionMutationRecoveryRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationRecoveryRecord")
+            .field("issue", &self.issue)
+            .field("receipt", &self.receipt)
+            .field("verification", &self.verification)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExecutionMutationSequenceRecoverySnapshot {
+    artifact: ProviderExecutionPlanArtifact,
+    plan: ExecutionMutationSequencePlan,
+    records: Vec<ExecutionMutationRecoveryRecord>,
+    observations: Vec<ExecutionMutationSequenceObservation>,
+}
+
+impl ExecutionMutationSequenceRecoverySnapshot {
+    /// Freezes the exact Provider-visible mutation evidence loaded from one
+    /// Core execution attempt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects artifact/plan or Provider namespace drift, non-contiguous
+    /// ordinals, regressing or over-limit phases, multiple ambiguous issues,
+    /// and observations outside the plan's declared gates.
+    pub fn try_new(
+        artifact: ProviderExecutionPlanArtifact,
+        plan: ExecutionMutationSequencePlan,
+        records: Vec<ExecutionMutationRecoveryRecord>,
+        observations: Vec<ExecutionMutationSequenceObservation>,
+    ) -> ProviderResult<Self> {
+        let provider_prefix = format!("{}.", artifact.provider_id().as_str());
+        if plan.artifact_digest() != artifact.artifact_digest()
+            || !plan.sequence_type().starts_with(&provider_prefix)
+            || plan.phases().iter().any(|phase| {
+                !phase.operation_type().starts_with(&provider_prefix)
+                    || phase
+                        .required_observation_type()
+                        .is_some_and(|value| !value.starts_with(&provider_prefix))
+            })
+            || !valid_recovery_records(&plan, &records, &observations)
+            || !valid_recovery_observations(&provider_prefix, &plan, &observations)
+        {
+            return Err(invalid_execution_mutation_recovery());
+        }
+        Ok(Self {
+            artifact,
+            plan,
+            records,
+            observations,
+        })
+    }
+
+    pub const fn artifact(&self) -> &ProviderExecutionPlanArtifact {
+        &self.artifact
+    }
+
+    pub const fn plan(&self) -> &ExecutionMutationSequencePlan {
+        &self.plan
+    }
+
+    pub fn records(&self) -> &[ExecutionMutationRecoveryRecord] {
+        &self.records
+    }
+
+    pub fn observations(&self) -> &[ExecutionMutationSequenceObservation] {
+        &self.observations
+    }
+}
+
+impl fmt::Debug for ExecutionMutationSequenceRecoverySnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationSequenceRecoverySnapshot")
+            .field("provider_id", self.artifact.provider_id())
+            .field("artifact_digest", &"[HASHED]")
+            .field("plan_digest", &"[HASHED]")
+            .field("record_count", &self.records.len())
+            .field("observation_count", &self.observations.len())
+            .finish_non_exhaustive()
+    }
+}
+
+fn valid_recovery_records(
+    plan: &ExecutionMutationSequencePlan,
+    records: &[ExecutionMutationRecoveryRecord],
+    observations: &[ExecutionMutationSequenceObservation],
+) -> bool {
+    for (index, record) in records.iter().enumerate() {
+        if usize::try_from(record.issue().ordinal()).ok() != Some(index + 1)
+            || record.receipt().is_none() && index + 1 != records.len()
+        {
+            return false;
+        }
+    }
+    let mut record_index = 0_usize;
+    for (phase_index, phase) in plan.phases().iter().enumerate() {
+        let start = record_index;
+        while records
+            .get(record_index)
+            .is_some_and(|record| record.issue().operation_type() == phase.operation_type())
+        {
+            if record_index > start
+                && (!sequence_phase_can_repeat(phase, &records[start..record_index])
+                    || sequence_phase_can_advance(phase, &records[start..record_index]))
+            {
+                return false;
+            }
+            record_index += 1;
+        }
+        let Ok(count) = u32::try_from(record_index - start) else {
+            return false;
+        };
+        if count > phase.maximum_occurrences()
+            || count > 0
+                && phase.required_observation_type().is_some_and(|required| {
+                    !observations.iter().any(|observation| {
+                        usize::from(observation.phase_position()) == phase_index + 1
+                            && observation.observation_type() == required
+                    })
+                })
+        {
+            return false;
+        }
+        if record_index < records.len()
+            && !sequence_phase_can_advance(phase, &records[start..record_index])
+        {
+            return false;
+        }
+    }
+    record_index == records.len()
+}
+
+fn sequence_phase_can_advance(
+    phase: &ExecutionMutationSequencePhase,
+    records: &[ExecutionMutationRecoveryRecord],
+) -> bool {
+    let Ok(count) = u32::try_from(records.len()) else {
+        return false;
+    };
+    if count < phase.minimum_occurrences()
+        || records.iter().any(|record| record.receipt().is_none())
+    {
+        return false;
+    }
+    let last_accepted = records
+        .last()
+        .and_then(ExecutionMutationRecoveryRecord::receipt)
+        .map(ExecutionMutationReceipt::accepted);
+    let any_accepted = records
+        .iter()
+        .filter_map(ExecutionMutationRecoveryRecord::receipt)
+        .any(ExecutionMutationReceipt::accepted);
+    match phase.advance_condition() {
+        ExecutionMutationSequenceAdvanceCondition::MaximumReached => {
+            count == phase.maximum_occurrences()
+        }
+        ExecutionMutationSequenceAdvanceCondition::AcceptedMaximumReached => {
+            count == phase.maximum_occurrences() && last_accepted == Some(true)
+        }
+        ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached => {
+            any_accepted || count == phase.maximum_occurrences()
+        }
+        ExecutionMutationSequenceAdvanceCondition::RejectedOrMaximumReached => {
+            last_accepted == Some(false) || count == phase.maximum_occurrences()
+        }
+    }
+}
+
+fn sequence_phase_can_repeat(
+    phase: &ExecutionMutationSequencePhase,
+    records: &[ExecutionMutationRecoveryRecord],
+) -> bool {
+    u32::try_from(records.len()).is_ok_and(|count| count < phase.maximum_occurrences())
+        && !(phase.stop_repeating_after_rejection()
+            && records
+                .last()
+                .and_then(ExecutionMutationRecoveryRecord::receipt)
+                .is_some_and(|receipt| !receipt.accepted()))
+}
+
+fn valid_recovery_observations(
+    provider_prefix: &str,
+    plan: &ExecutionMutationSequencePlan,
+    observations: &[ExecutionMutationSequenceObservation],
+) -> bool {
+    observations.iter().enumerate().all(|(index, observation)| {
+        let position = usize::from(observation.phase_position());
+        position > 0
+            && (index == 0
+                || observations[index - 1].phase_position() < observation.phase_position())
+            && observation.observation_type().starts_with(provider_prefix)
+            && plan.phases().get(position - 1).is_some_and(|phase| {
+                phase.required_observation_type() == Some(observation.observation_type())
+            })
+    })
+}
+
+fn invalid_execution_mutation_recovery() -> crate::ProviderError {
+    crate::ProviderError::new(
+        crate::ProviderErrorKind::InvalidResponse,
+        "Provider execution mutation recovery evidence is invalid",
+    )
+}
+
 #[async_trait]
 pub trait ExecutionMutationSink {
     /// Atomically freezes a complete immutable mutation plan before any remote
@@ -2778,6 +3044,83 @@ mod execution_mutation_tests {
                 false,
                 ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached,
                 None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn mutation_recovery_snapshot_is_attempt_ordered_bound_and_redacted() {
+        let artifact = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new("uai").unwrap(),
+            "uai.upload.v1",
+            serde_json::json!({"mode": "upload"}),
+        )
+        .unwrap();
+        let plan = ExecutionMutationSequencePlan::try_new(
+            artifact.artifact_digest(),
+            "uai.upload.sequence.v1",
+            vec![
+                ExecutionMutationSequencePhase::try_new(
+                    "uai.upload.object",
+                    1,
+                    1,
+                    false,
+                    ExecutionMutationSequenceAdvanceCondition::MaximumReached,
+                    None,
+                )
+                .unwrap(),
+                ExecutionMutationSequencePhase::try_new(
+                    "uai.upload.final",
+                    1,
+                    2,
+                    false,
+                    ExecutionMutationSequenceAdvanceCondition::AcceptedOrMaximumReached,
+                    Some("uai.upload.object-key.v1".to_owned()),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let records = vec![
+            ExecutionMutationRecoveryRecord::try_new(
+                ExecutionMutationIssue::new(1, "uai.upload.object", [1; 32]).unwrap(),
+                Some(ExecutionMutationReceipt::new(1, [2; 32], true).unwrap()),
+                Some(ExecutionMutationVerification::new(1, [3; 32], true).unwrap()),
+            )
+            .unwrap(),
+            ExecutionMutationRecoveryRecord::try_new(
+                ExecutionMutationIssue::new(2, "uai.upload.final", [4; 32]).unwrap(),
+                None,
+                None,
+            )
+            .unwrap(),
+        ];
+        let snapshot = ExecutionMutationSequenceRecoverySnapshot::try_new(
+            artifact,
+            plan,
+            records,
+            vec![
+                ExecutionMutationSequenceObservation::try_new(
+                    2,
+                    "uai.upload.object-key.v1",
+                    [5; 32],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(snapshot.records().len(), 2);
+        assert!(snapshot.records()[1].receipt().is_none());
+        assert_eq!(snapshot.observations()[0].phase_position(), 2);
+        let debug = format!("{snapshot:?}");
+        assert!(debug.contains("record_count: 2"));
+        assert!(!debug.contains("1, 1"));
+        assert!(
+            ExecutionMutationRecoveryRecord::try_new(
+                ExecutionMutationIssue::new(1, "uai.upload.object", [1; 32]).unwrap(),
+                Some(ExecutionMutationReceipt::new(1, [2; 32], false).unwrap()),
+                Some(ExecutionMutationVerification::new(1, [3; 32], true).unwrap()),
             )
             .is_err()
         );

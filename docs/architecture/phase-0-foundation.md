@@ -4949,3 +4949,23 @@ proves a rejected first request permits one successor, the next accepted
 receipt short-circuits before the maximum, and the following phase receives
 the actual contiguous ordinal. Ambiguous issued mutations remain ineligible
 for retry because sequence advancement still requires a persisted receipt.
+
+## Two-hundred-and-sixty-ninth Phase 0 slice
+
+Execution recovery now exposes an optional, read-only mutation-sequence
+snapshot to the Provider's dedicated recovery verifier. Core loads the frozen
+Provider plan artifact, conditional sequence, contiguous issue/receipt/
+verification records and phase observations by the exact active Attempt, then
+reconstructs a credential-free Provider API value. The constructor rechecks
+artifact digest binding, Provider namespaces, phase order and limits,
+response-dependent transitions, observation gates and the rule that only the
+last issued record may lack a definite receipt.
+
+The snapshot grants no mutation sink and cannot resume or replay an operation.
+Existing Providers retain their ordinary goal-bound verifier by default;
+fixed-plan or mutation-free recoveries receive no sequence snapshot. Engine
+coverage proves an abandoned sequence reaches recovery with its original
+artifact and hash-only records, while the immediate post-execution verifier
+does not receive recovery-only evidence. This closes the generic same-Attempt
+read/dispatch boundary, but does not itself create WELearn parent/child
+Executions or register its composite batch capability.
