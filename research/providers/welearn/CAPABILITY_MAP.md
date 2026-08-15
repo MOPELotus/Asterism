@@ -240,6 +240,12 @@ minute value that does not equal its frozen configured/range/offset derivation.
 This closes the Provider-owned persistence representation only; Core still has
 to choose where the opaque parent authority lives and atomically bind it to the
 parent attempt and all child artifacts.
+The complete Provider batch also encodes as bounded deny-unknown
+`welearn.batch-plan.v1` bytes and fully revalidates on decode; all seven flows
+and the 8,192-child maximum are covered. This supplies the complete
+membership/derived-fact persistence value, but Core must still atomically bind
+it with parent selection/entropy authority and each child artifact rather than
+treating the snapshot alone as scheduling or mutation permission.
 Immutable Core Execution identity now makes donor-style per-Execution random
 duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
 persisted capability-step plan still needs the atomic duration-completion

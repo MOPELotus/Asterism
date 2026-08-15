@@ -358,6 +358,11 @@ only structural field names, response codes and bounded placeholder shapes.
   dispatch when a SCO response ordinal moves, allow an already-completed child
   to enter no-replay preflight, reject selected-Unit drift, and re-apply only
   the visibility rule used by the selected donor flow.
+- Complete batch snapshot tests round-trip all seven donor flows under the
+  namespaced `welearn.batch-plan.v1` schema, cover the valid 8,192-child maximum
+  within the independent 8 MiB bound, and reject empty/oversized input, unknown
+  fields, version drift, dispatch drift and Auto child-target drift. Decode
+  always re-enters full frozen-plan integrity validation.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

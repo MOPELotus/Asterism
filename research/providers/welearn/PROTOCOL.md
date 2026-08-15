@@ -821,6 +821,19 @@ facts; and Auto's aggregate, equal-floor child targets and discarded remainder
 remain arithmetically identical. It returns `Internal` for plan-authority drift
 and does not repair, reorder or redistribute the frozen plan.
 
+The complete batch now has a separate Provider-private
+`welearn.batch-plan.v1` snapshot. Its deny-unknown v1 wire schema retains every
+derived flow/dispatch/target profile, ordered Unit selection and observation,
+ordered child identity/visibility/completion/target fact, aggregate and
+discarded remainder. Encode first runs full plan integrity; decode enforces an
+8 MiB local bound and reruns the same semantic validator rather than trusting
+serialized derived fields. The bound covers the full audited 8,192-child
+maximum and is deliberately separate from the 64 KiB single-Execution child
+artifact ceiling. This snapshot does not replace parent selection/entropy
+authority or per-child artifacts: Core must persist all three atomically so an
+Auto aggregate cannot masquerade as its configured base/range/sample and a
+Fanyuchang child cannot lose its independently frozen target.
+
 ## Sanitization and routing
 
 - `uid`, `classid`, redirect state, PKCE material and Cookies are route/session

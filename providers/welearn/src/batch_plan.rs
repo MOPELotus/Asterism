@@ -15,6 +15,9 @@ use crate::{
 /// Namespaced Core artifact type for one version-one atomic child plan.
 pub const WELLEARN_ATOMIC_CHILD_PLAN_ARTIFACT_TYPE: &str = "welearn.atomic-child.v1";
 
+/// Namespaced Provider-private type for one complete frozen batch snapshot.
+pub const WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE: &str = "welearn.batch-plan.v1";
+
 /// Audited donor batch flow. This is a pure membership/target boundary; it
 /// does not create or schedule Core executions.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -32,7 +35,8 @@ pub enum WellearnBatchFlow {
 /// Donor dispatch behavior that the shared parent/child execution layer must
 /// persist with the selected batch flow. This remains a Provider-private
 /// semantic value; it does not schedule child executions itself.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WellearnBatchDispatch {
     PerChildConcurrent,
     Sequential,
@@ -42,7 +46,8 @@ pub enum WellearnBatchDispatch {
 /// Target allocation contract for a frozen donor batch. The shared durable
 /// layer uses this fact to persist either each child target or the aggregate
 /// derivation without asking the Provider to resample after recovery.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WellearnBatchTargetStrategy {
     PerChild,
     SharedConfigured,
@@ -85,6 +90,8 @@ const MAX_AUTO_CONFIGURED_DURATION_MINUTES: u16 = 300;
 const MAX_AUTO_DURATION_RANDOM_RANGE_MINUTES: u8 = 30;
 const MAX_AUTO_DURATION_MINUTES: u64 = 330;
 const MAX_BATCH_ID_COMPONENT_BYTES: usize = 128;
+const WELLEARN_BATCH_PLAN_SNAPSHOT_VERSION: u16 = 1;
+const MAX_BATCH_PLAN_SNAPSHOT_BYTES: usize = 8 * 1_024 * 1_024;
 const WELLEARN_ATOMIC_BATCH_PLANNING_AUTHORITY_VERSION: u16 = 1;
 const MAX_ATOMIC_BATCH_PLANNING_AUTHORITY_BYTES: usize = 4_096;
 const WELLEARN_ATOMIC_CHILD_PLAN_VERSION: u16 = 1;
@@ -342,6 +349,175 @@ impl From<WellearnBatchUnitSelectionWire> for WellearnBatchUnitSelection {
             WellearnBatchUnitSelectionWire::All => Self::All,
             WellearnBatchUnitSelectionWire::Explicit(indices) => Self::Explicit(indices),
         }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnUnitObservationWire {
+    index: u32,
+    title: String,
+    code: Option<String>,
+    visible: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnBatchEntryWire {
+    remote_task_id: String,
+    unit_index: u32,
+    sco_index: u32,
+    unit_visible: bool,
+    sco_visible: Option<bool>,
+    visible: bool,
+    completion: RemoteState,
+    target_seconds: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnBatchPlanWire {
+    version: u16,
+    course_remote_id: String,
+    flow: WellearnBatchFlow,
+    dispatch: WellearnBatchDispatch,
+    target_strategy: WellearnBatchTargetStrategy,
+    execution_shape: WellearnBatchExecutionShape,
+    atomic_completion_profile: Option<WellearnAtomicCompletionProfile>,
+    selection: WellearnBatchUnitSelectionWire,
+    selected_units: Vec<WellearnUnitObservationWire>,
+    entries: Vec<WellearnBatchEntryWire>,
+    aggregate_duration_seconds: Option<u64>,
+    discarded_remainder_seconds: u64,
+}
+
+impl TryFrom<&WellearnBatchPlan> for WellearnBatchPlanWire {
+    type Error = ProviderError;
+
+    fn try_from(plan: &WellearnBatchPlan) -> Result<Self, Self::Error> {
+        validate_batch_plan_integrity(plan)?;
+        let entries = plan
+            .entries
+            .iter()
+            .map(|entry| {
+                Ok(WellearnBatchEntryWire {
+                    remote_task_id: entry.remote_task_id.clone(),
+                    unit_index: entry.unit_index,
+                    sco_index: u32::try_from(entry.sco_index)
+                        .map_err(|_| invalid_serialized_batch_plan())?,
+                    unit_visible: entry.unit_visible,
+                    sco_visible: entry.sco_visible,
+                    visible: entry.visible,
+                    completion: entry.completion,
+                    target_seconds: entry.target_seconds,
+                })
+            })
+            .collect::<ProviderResult<Vec<_>>>()?;
+        Ok(Self {
+            version: WELLEARN_BATCH_PLAN_SNAPSHOT_VERSION,
+            course_remote_id: plan.course_remote_id.clone(),
+            flow: plan.flow,
+            dispatch: plan.dispatch,
+            target_strategy: plan.target_strategy,
+            execution_shape: plan.execution_shape,
+            atomic_completion_profile: plan.atomic_completion_profile,
+            selection: WellearnBatchUnitSelectionWire::from(&plan.selection),
+            selected_units: plan
+                .selected_units
+                .iter()
+                .map(|unit| WellearnUnitObservationWire {
+                    index: unit.index,
+                    title: unit.title.clone(),
+                    code: unit.code.clone(),
+                    visible: unit.visible,
+                })
+                .collect(),
+            entries,
+            aggregate_duration_seconds: plan.aggregate_duration_seconds,
+            discarded_remainder_seconds: plan.discarded_remainder_seconds,
+        })
+    }
+}
+
+impl TryFrom<WellearnBatchPlanWire> for WellearnBatchPlan {
+    type Error = ProviderError;
+
+    fn try_from(wire: WellearnBatchPlanWire) -> Result<Self, Self::Error> {
+        if wire.version != WELLEARN_BATCH_PLAN_SNAPSHOT_VERSION {
+            return Err(invalid_serialized_batch_plan());
+        }
+        let plan = Self {
+            course_remote_id: wire.course_remote_id,
+            flow: wire.flow,
+            dispatch: wire.dispatch,
+            target_strategy: wire.target_strategy,
+            execution_shape: wire.execution_shape,
+            atomic_completion_profile: wire.atomic_completion_profile,
+            selection: wire.selection.into(),
+            selected_units: wire
+                .selected_units
+                .into_iter()
+                .map(|unit| WellearnUnitObservation {
+                    index: unit.index,
+                    title: unit.title,
+                    code: unit.code,
+                    visible: unit.visible,
+                })
+                .collect(),
+            entries: wire
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    Ok(WellearnBatchEntry {
+                        remote_task_id: entry.remote_task_id,
+                        unit_index: entry.unit_index,
+                        sco_index: usize::try_from(entry.sco_index)
+                            .map_err(|_| invalid_serialized_batch_plan())?,
+                        unit_visible: entry.unit_visible,
+                        sco_visible: entry.sco_visible,
+                        visible: entry.visible,
+                        completion: entry.completion,
+                        target_seconds: entry.target_seconds,
+                    })
+                })
+                .collect::<ProviderResult<Vec<_>>>()?,
+            aggregate_duration_seconds: wire.aggregate_duration_seconds,
+            discarded_remainder_seconds: wire.discarded_remainder_seconds,
+        };
+        validate_batch_plan_integrity(&plan).map_err(|_| invalid_serialized_batch_plan())?;
+        Ok(plan)
+    }
+}
+
+impl WellearnBatchPlan {
+    /// Encodes one complete validated batch without credentials or route facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when plan integrity, serialization or the
+    /// Provider's eight-MiB parent snapshot bound fails.
+    pub fn encode_snapshot(&self) -> ProviderResult<Vec<u8>> {
+        let wire = WellearnBatchPlanWire::try_from(self)?;
+        let encoded = serde_json::to_vec(&wire).map_err(|_| invalid_serialized_batch_plan())?;
+        if encoded.is_empty() || encoded.len() > MAX_BATCH_PLAN_SNAPSHOT_BYTES {
+            return Err(invalid_serialized_batch_plan());
+        }
+        Ok(encoded)
+    }
+
+    /// Restores and fully revalidates one complete bounded batch snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for empty, oversized, malformed,
+    /// version-drifted or semantically inconsistent bytes.
+    pub fn decode_snapshot(encoded: &[u8]) -> ProviderResult<Self> {
+        if encoded.is_empty() || encoded.len() > MAX_BATCH_PLAN_SNAPSHOT_BYTES {
+            return Err(invalid_serialized_batch_plan());
+        }
+        let wire: WellearnBatchPlanWire =
+            serde_json::from_slice(encoded).map_err(|_| invalid_serialized_batch_plan())?;
+        Self::try_from(wire).map_err(|_| invalid_serialized_batch_plan())
     }
 }
 
@@ -1060,6 +1236,13 @@ fn invalid_serialized_atomic_planning_authority() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
         "WELearn serialized atomic batch planning authority is invalid",
+    )
+}
+
+fn invalid_serialized_batch_plan() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn serialized batch plan snapshot is invalid",
     )
 }
 
@@ -3334,6 +3517,92 @@ mod tests {
             let plan = build_batch_plan(&pending_tasks(), flow, None).unwrap();
             validate_batch_plan_integrity(&plan).unwrap();
         }
+    }
+
+    #[test]
+    fn batch_plan_snapshot_round_trips_every_donor_flow() {
+        assert_eq!(WELLEARN_BATCH_PLAN_SNAPSHOT_TYPE, "welearn.batch-plan.v1");
+        for (flow, duration_minutes, pending_only) in [
+            (WellearnBatchFlow::FanyuchangCompletion, None, false),
+            (WellearnBatchFlow::FanyuchangDuration, None, false),
+            (WellearnBatchFlow::YzbrhCompletion, None, true),
+            (WellearnBatchFlow::YzbrhDuration, None, false),
+            (WellearnBatchFlow::AutoCompletion, None, true),
+            (WellearnBatchFlow::AutoDuration, Some(1), false),
+            (WellearnBatchFlow::AutoLegacyDuration, None, false),
+        ] {
+            let tasks = if pending_only {
+                pending_tasks()
+            } else {
+                tasks()
+            };
+            let plan = build_batch_plan(&tasks, flow, duration_minutes).unwrap();
+            let encoded = plan.encode_snapshot().unwrap();
+            assert!(!encoded.is_empty());
+            assert!(encoded.len() <= MAX_BATCH_PLAN_SNAPSHOT_BYTES);
+            assert_eq!(WellearnBatchPlan::decode_snapshot(&encoded).unwrap(), plan);
+        }
+    }
+
+    #[test]
+    fn batch_plan_snapshot_rejects_schema_size_and_semantic_drift() {
+        let plan = build_batch_plan(&tasks(), WellearnBatchFlow::AutoDuration, Some(1)).unwrap();
+        let encoded = plan.encode_snapshot().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+
+        let mut drifted = value.clone();
+        drifted["version"] = serde_json::json!(2);
+        assert!(
+            WellearnBatchPlan::decode_snapshot(&serde_json::to_vec(&drifted).unwrap()).is_err()
+        );
+
+        let mut drifted = value.clone();
+        drifted["unexpected"] = serde_json::json!(true);
+        assert!(
+            WellearnBatchPlan::decode_snapshot(&serde_json::to_vec(&drifted).unwrap()).is_err()
+        );
+
+        let mut drifted = value.clone();
+        drifted["dispatch"] = serde_json::json!("sequential");
+        assert!(
+            WellearnBatchPlan::decode_snapshot(&serde_json::to_vec(&drifted).unwrap()).is_err()
+        );
+
+        let mut drifted = value;
+        drifted["entries"][0]["target_seconds"] = serde_json::json!(21);
+        assert!(
+            WellearnBatchPlan::decode_snapshot(&serde_json::to_vec(&drifted).unwrap()).is_err()
+        );
+
+        assert!(WellearnBatchPlan::decode_snapshot(&[]).is_err());
+        assert!(
+            WellearnBatchPlan::decode_snapshot(&vec![b'x'; MAX_BATCH_PLAN_SNAPSHOT_BYTES + 1])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn maximum_batch_plan_stays_within_snapshot_bound() {
+        let template = tasks().remove(0);
+        let mut maximum = Vec::with_capacity(MAX_BATCH_TASKS);
+        for index in 0..MAX_BATCH_TASKS {
+            let mut task = template.clone();
+            task.remote_id = format!("sco:1001:bulk-{index:04}");
+            task.normalized["sco_id"] = serde_json::json!(format!("bulk-{index:04}"));
+            task.normalized["sco_index"] = serde_json::json!(index);
+            maximum.push(task);
+        }
+        let plan = build_batch_plan(&maximum, WellearnBatchFlow::FanyuchangDuration, None).unwrap();
+        let encoded = plan.encode_snapshot().unwrap();
+        assert_eq!(plan.entries.len(), MAX_BATCH_TASKS);
+        assert!(encoded.len() <= MAX_BATCH_PLAN_SNAPSHOT_BYTES);
+        assert_eq!(
+            WellearnBatchPlan::decode_snapshot(&encoded)
+                .unwrap()
+                .entries
+                .len(),
+            MAX_BATCH_TASKS
+        );
     }
 
     #[test]

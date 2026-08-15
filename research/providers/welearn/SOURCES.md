@@ -120,6 +120,10 @@ The Core-verification integration checkpoint repeated the three default-head
 and tag queries after shared commit `ee62903`; revisions and tags remained
 unchanged. The Provider now durably attaches the existing exact fresh-CMI proof
 only to an accepted final save and adds no donor behavior.
+The complete-batch snapshot checkpoint repeated the same three remote head/tag
+queries after the pushed workspace gate and found no delta. Its versioned
+bounded encoding persists already-audited membership and target derivations;
+it adds no WELearn request, setting or execution behavior.
 
 ## Source selection
 
