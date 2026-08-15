@@ -1272,7 +1272,12 @@ and, for mixed Groups, the ordinary sub-Draft into one durable Attempt.
 Once an exact single or compound final plan already exists, UAI now projects a
 credential-free `uai.upload.final-plan.v1` scheduling artifact whose binding
 digest covers the complete semantic plan without exposing the object key or
-ordinary selected answer. Its one-phase `uai.upload.final-submit.v1` sequence
+ordinary selected answer. For a compound plan, the digest directly covers the
+ordinary protocol versions, ordered Question identity/type, every ordered
+answer child/value and every judge question/reply type in addition to the
+immutable Draft ID and upload lineage. A same-ID selected-answer substitution
+therefore changes the scheduling artifact and sequence-plan digests before any
+issue. Its one-phase `uai.upload.final-submit.v1` sequence
 permits at most two `uai.upload.final-submit` ordinals and uses Core's
 `AcceptedOrMaximumReached` condition. Every concrete single/compound request
 also carries the same semantic binding digest before its exact issue-time wire

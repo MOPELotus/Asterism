@@ -193,6 +193,38 @@ impl UaiCompoundUploadSubmission {
             digest.update(b"\0");
         }
         digest.update(self.course_publish_version.to_be_bytes());
+        let protocol_versions = self.ordinary_plan.protocol_versions();
+        digest.update(protocol_versions.course().to_be_bytes());
+        digest.update(protocol_versions.answer().to_be_bytes());
+        digest.update(
+            u32::try_from(self.ordinary_plan.questions().len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        for question in self.ordinary_plan.questions() {
+            update_sequence_field(&mut digest, question.remote_question_id());
+            update_sequence_field(&mut digest, question.task_type());
+            digest.update(
+                u32::try_from(question.answer_children().len())
+                    .unwrap_or(u32::MAX)
+                    .to_be_bytes(),
+            );
+            for child in question.answer_children() {
+                digest.update(u32::try_from(child.len()).unwrap_or(u32::MAX).to_be_bytes());
+                for value in child {
+                    update_sequence_field(&mut digest, value);
+                }
+            }
+            digest.update(
+                u32::try_from(question.judges().len())
+                    .unwrap_or(u32::MAX)
+                    .to_be_bytes(),
+            );
+            for judge in question.judges() {
+                update_sequence_field(&mut digest, judge.question_type());
+                update_sequence_field(&mut digest, judge.reply_type());
+            }
+        }
         digest.finalize().into()
     }
 
@@ -207,6 +239,11 @@ impl UaiCompoundUploadSubmission {
             .filter(|_| self.ordinary_plan.questions().len() == 1)
             .ok_or_else(|| protocol_drift("UAI compound upload lost its ordinary Question plan"))
     }
+}
+
+fn update_sequence_field(digest: &mut Sha256, value: &str) {
+    digest.update(u32::try_from(value.len()).unwrap_or(u32::MAX).to_be_bytes());
+    digest.update(value.as_bytes());
 }
 
 impl fmt::Debug for UaiCompoundUploadSubmission {
@@ -910,13 +947,14 @@ mod tests {
     #[test]
     fn atomic_upload_request_digest_changes_with_the_selected_answer() {
         let uploaded = UaiUploadedArtifact::fixture(2);
+        let draft = ordinary_draft();
         let first = build_compound_upload_submission(
             &detail(&["multichoice", "multiFileUpload"]),
-            &ordinary_draft(),
+            &draft,
             &uploaded,
         )
         .unwrap();
-        let mut changed_draft = ordinary_draft();
+        let mut changed_draft = draft.clone();
         changed_draft.items[0].selected.answer = NormalizedAnswer::Selections(vec!["B".to_owned()]);
         changed_draft.validate().unwrap();
         let changed = build_compound_upload_submission(
@@ -925,6 +963,19 @@ mod tests {
             &uploaded,
         )
         .unwrap();
+        assert_eq!(first.ordinary_draft_id(), changed.ordinary_draft_id());
+        assert_eq!(first.fingerprint(), changed.fingerprint());
+        let first_sequence = crate::UaiUploadFinalSubmissionSequence::for_compound(&first).unwrap();
+        let changed_sequence =
+            crate::UaiUploadFinalSubmissionSequence::for_compound(&changed).unwrap();
+        assert_ne!(
+            first_sequence.artifact().artifact_digest(),
+            changed_sequence.artifact().artifact_digest()
+        );
+        assert_ne!(
+            first_sequence.plan().plan_digest(),
+            changed_sequence.plan().plan_digest()
+        );
         let first =
             build_compound_upload_submission_request(&first, "course-instance-1", "openid-1")
                 .unwrap();

@@ -463,3 +463,11 @@ preserves the already audited code-0 submission version and exact request/body
 response lineage without adding donor semantics. Its encrypted state is a
 future atomic recovery input, not a substitute for the exact final plan or
 receipt-versioned readback.
+
+The compound final-plan binding checkpoint later on 2026-08-15 re-used the
+same immediately preceding unchanged four-donor head/tag query and re-read the
+Apache atomic compound branch. Because the donor emits the ordinary selected
+answer and upload key in one body, Asterism now hashes the complete ordinary
+child/judge semantics directly into the sequence binding instead of relying on
+the Draft identifier alone. This strengthens local recovery identity without
+adding or changing donor wire behavior.
