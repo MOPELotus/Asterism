@@ -96,6 +96,7 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
         "getTaskCompletionWorkflows",
         "TaskCompletionWorkflowsResponse",
     ),
+    ("optInScoreImprovement", "ScoreImprovementOptInResponse"),
     ("listTaskAttemptHistory", "TaskAttemptHistoryPageResponse"),
     ("getCourseProgress", "CourseProgressResponse"),
     ("getTaskDetail", "TaskDetailResponse"),
@@ -1065,6 +1066,24 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             ),
         ),
         (
+            "ScoreImprovementOptInRequest",
+            object(
+                &["explicitly_opted_in"],
+                json!({"explicitly_opted_in": {"const": true}}),
+            ),
+        ),
+        (
+            "ScoreImprovementOptInResponse",
+            object(
+                &["revision", "workflow", "created"],
+                json!({
+                    "revision": unsigned_integer(),
+                    "workflow": schema_ref("ScoreImprovementWorkflow"),
+                    "created": {"type": "boolean"}
+                }),
+            ),
+        ),
+        (
             "TaskCompletionWorkflowsResponse",
             object(
                 &["task_id", "strict_completion", "score_improvement"],
@@ -1399,6 +1418,7 @@ fn score_improvement_schema() -> Value {
             "policy",
             "completion_baseline",
             "retake_score_policy",
+            "retake_authority",
             "explicitly_opted_in",
             "state",
             "attempts_started",
@@ -1421,6 +1441,22 @@ fn score_improvement_schema() -> Value {
                 }),
             ),
             "retake_score_policy": string_enum(&["highest_score", "last_attempt", "average", "teacher_rule", "unknown"]),
+            "retake_authority": {
+                "oneOf": [
+                    object(
+                        &["answer_history_import_id", "result_digest", "allowed", "remaining_attempts", "closes_at", "observed_at"],
+                        json!({
+                            "answer_history_import_id": uuid(),
+                            "result_digest": {"type": "array", "minItems": 32, "maxItems": 32, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+                            "allowed": {"type": "boolean"},
+                            "remaining_attempts": {"type": ["integer", "null"], "minimum": 0},
+                            "closes_at": nullable_timestamp(),
+                            "observed_at": timestamp()
+                        }),
+                    ),
+                    {"type": "null"}
+                ]
+            },
             "explicitly_opted_in": {"type": "boolean"},
             "state": string_enum(&["disabled", "ready", "attempt_running", "finished", "stopped"]),
             "attempts_started": unsigned_integer(),

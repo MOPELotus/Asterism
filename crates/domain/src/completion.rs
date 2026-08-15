@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ProviderAccountId, ScoreImprovementWorkflowId, StrictCompletionWorkflowId, SubmissionScore,
-    TaskId, Timestamp, UserId,
+    AnswerHistoryImportId, ProviderAccountId, ScoreImprovementWorkflowId,
+    StrictCompletionWorkflowId, SubmissionScore, TaskId, Timestamp, UserId,
 };
 
 const MAX_POLICY_ATTEMPTS: u32 = 100;
@@ -46,13 +46,14 @@ impl CompletionDiagnosis {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetakeScorePolicy {
     HighestScore,
     LastAttempt,
     Average,
     TeacherRule,
+    #[default]
     Unknown,
 }
 
@@ -397,6 +398,31 @@ pub struct VerifiedCompletionBaseline {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ScoreImprovementRetakeAuthority {
+    pub answer_history_import_id: AnswerHistoryImportId,
+    pub result_digest: [u8; 32],
+    pub allowed: bool,
+    pub remaining_attempts: Option<u32>,
+    pub closes_at: Option<Timestamp>,
+    pub observed_at: Timestamp,
+}
+
+impl ScoreImprovementRetakeAuthority {
+    fn validate(&self, created_at: Timestamp) -> Result<(), ScoreImprovementWorkflowError> {
+        if self.result_digest == [0; 32]
+            || self.observed_at > created_at
+            || (!self.allowed
+                && self
+                    .remaining_attempts
+                    .is_some_and(|remaining| remaining > 0))
+        {
+            return Err(ScoreImprovementWorkflowError::InvalidRetakeAuthority);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreImprovementState {
     Disabled,
@@ -413,6 +439,8 @@ pub struct ScoreImprovementWorkflow {
     pub policy: CompletionPolicySnapshot,
     pub completion_baseline: VerifiedCompletionBaseline,
     pub retake_score_policy: RetakeScorePolicy,
+    #[serde(default)]
+    pub retake_authority: Option<ScoreImprovementRetakeAuthority>,
     pub explicitly_opted_in: bool,
     pub state: ScoreImprovementState,
     pub attempts_started: u32,
@@ -438,9 +466,38 @@ impl ScoreImprovementWorkflow {
         explicitly_opted_in: bool,
         at: Timestamp,
     ) -> Result<Self, ScoreImprovementWorkflowError> {
+        Self::new_with_authority(
+            binding,
+            policy,
+            completion_baseline,
+            retake_score_policy,
+            None,
+            explicitly_opted_in,
+            at,
+        )
+    }
+
+    /// Creates an opt-in workflow bound to one exact read-only Provider result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScoreImprovementWorkflowError`] when the result authority,
+    /// policy, baseline, or timestamps are invalid.
+    pub fn new_with_authority(
+        binding: CompletionWorkflowBinding,
+        policy: CompletionPolicySnapshot,
+        completion_baseline: VerifiedCompletionBaseline,
+        retake_score_policy: RetakeScorePolicy,
+        retake_authority: Option<ScoreImprovementRetakeAuthority>,
+        explicitly_opted_in: bool,
+        at: Timestamp,
+    ) -> Result<Self, ScoreImprovementWorkflowError> {
         policy.validate()?;
         if policy.captured_at > at || completion_baseline.verified_at > at {
             return Err(ScoreImprovementWorkflowError::InvalidTimestamp);
+        }
+        if let Some(authority) = retake_authority {
+            authority.validate(at)?;
         }
         let enabled = policy.score_improvement_enabled && explicitly_opted_in;
         let baseline_reaches_target = completion_baseline
@@ -468,6 +525,7 @@ impl ScoreImprovementWorkflow {
             policy,
             completion_baseline,
             retake_score_policy,
+            retake_authority,
             explicitly_opted_in,
             state,
             attempts_started: 0,
@@ -487,6 +545,9 @@ impl ScoreImprovementWorkflow {
     /// opt-in policy, diagnosis or timestamps violate the state machine.
     pub fn validate(&self) -> Result<(), ScoreImprovementWorkflowError> {
         self.policy.validate()?;
+        if let Some(authority) = self.retake_authority {
+            authority.validate(self.created_at)?;
+        }
         if self.policy.captured_at > self.created_at
             || self.completion_baseline.verified_at > self.created_at
             || self.updated_at < self.created_at
@@ -558,8 +619,25 @@ impl ScoreImprovementWorkflow {
         if self.state != ScoreImprovementState::Ready {
             return Err(ScoreImprovementWorkflowError::StateConflict);
         }
+        let authority = self
+            .retake_authority
+            .ok_or(ScoreImprovementWorkflowError::RetakeAuthorityRequired)?;
+        if !authority.allowed {
+            return Err(ScoreImprovementWorkflowError::RetakeAuthorityRequired);
+        }
         if !explicitly_confirmed {
             return Err(ScoreImprovementWorkflowError::ConfirmationRequired);
+        }
+        if authority.closes_at.is_some_and(|closes_at| at >= closes_at) {
+            self.stop(CompletionDiagnosis::WindowClosed, at);
+            return Err(ScoreImprovementWorkflowError::LimitReached);
+        }
+        if authority
+            .remaining_attempts
+            .is_some_and(|remaining| self.attempts_started >= remaining)
+        {
+            self.stop(CompletionDiagnosis::AttemptLimitReached, at);
+            return Err(ScoreImprovementWorkflowError::LimitReached);
         }
         if self
             .policy
@@ -669,6 +747,10 @@ pub enum ScoreImprovementWorkflowError {
     DiagnosisRequired,
     #[error("score improvement observation contains an invalid score")]
     InvalidScore,
+    #[error("score improvement retake authority is invalid")]
+    InvalidRetakeAuthority,
+    #[error("score improvement retake requires an exact Provider result authority")]
+    RetakeAuthorityRequired,
 }
 
 #[cfg(test)]
@@ -696,6 +778,17 @@ mod tests {
             score_improvement_expires_at: Some(at + Duration::hours(1)),
             formal_retry_requires_confirmation: true,
             captured_at: at,
+        }
+    }
+
+    fn retake_authority(at: Timestamp) -> ScoreImprovementRetakeAuthority {
+        ScoreImprovementRetakeAuthority {
+            answer_history_import_id: AnswerHistoryImportId::new(),
+            result_digest: [7; 32],
+            allowed: true,
+            remaining_attempts: Some(2),
+            closes_at: Some(at + Duration::hours(1)),
+            observed_at: at,
         }
     }
 
@@ -834,11 +927,12 @@ mod tests {
         .unwrap();
         assert_eq!(disabled.state, ScoreImprovementState::Disabled);
 
-        let mut active = ScoreImprovementWorkflow::new(
+        let mut active = ScoreImprovementWorkflow::new_with_authority(
             binding(),
             policy(now),
             baseline,
             RetakeScorePolicy::LastAttempt,
+            Some(retake_authority(now)),
             true,
             now,
         )
@@ -862,6 +956,29 @@ mod tests {
         assert_eq!(active.state, ScoreImprovementState::Stopped);
         assert_eq!(active.completion_baseline, baseline);
         assert_eq!(active.best_observed_score, baseline.score);
+    }
+
+    #[test]
+    fn legacy_unbound_workflow_cannot_begin_a_retake() {
+        let now = Utc::now();
+        let mut workflow = ScoreImprovementWorkflow::new(
+            binding(),
+            policy(now),
+            VerifiedCompletionBaseline {
+                outcome: CompletionOutcome::Completed,
+                score: None,
+                verified_at: now,
+            },
+            RetakeScorePolicy::HighestScore,
+            true,
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(
+            workflow.begin_retake(true, now),
+            Err(ScoreImprovementWorkflowError::RetakeAuthorityRequired)
+        );
     }
 
     #[test]

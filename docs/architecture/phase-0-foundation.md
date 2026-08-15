@@ -4878,3 +4878,19 @@ available answer candidate may now persist its snapshot and Task facts with
 zero candidates/evidence; it still contributes nothing to the Global Corpus.
 This read model is the prerequisite for a safe Score Improvement opt-in path and
 does not itself create a retake workflow.
+
+## Two-hundred-and-sixty-sixth Phase 0 slice
+
+An owner with Task execution authority can now explicitly opt into Score
+Improvement through a dedicated Core/API path after a verified Completed or
+Passed baseline. Core requires the latest same-owner/account/Task Answer History
+fact to be no older than completion, freezes its import identity and result
+digest, and copies only typed score/retake facts into the workflow. Remaining
+Provider attempts and result close time can only reduce the frozen Core bounds.
+
+The opt-in is idempotent per Task and performs no Provider call, Execution
+creation or remote Attempt start. Unknown/teacher-controlled score-retention
+policy remains stopped for human action. A legacy workflow without exact result
+authority remains readable but `begin_retake` fails closed. HTTP/OpenAPI
+coverage proves explicit `true` is required, one workflow is created, the exact
+result authority is returned and a replay returns the same record.

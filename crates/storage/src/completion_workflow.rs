@@ -1270,11 +1270,19 @@ mod tests {
             }),
             verified_at: fixture.now,
         };
-        let workflow = ScoreImprovementWorkflow::new(
+        let workflow = ScoreImprovementWorkflow::new_with_authority(
             fixture.binding(),
             fixture.policy(),
             baseline,
             RetakeScorePolicy::LastAttempt,
+            Some(asterism_domain::ScoreImprovementRetakeAuthority {
+                answer_history_import_id: asterism_domain::AnswerHistoryImportId::new(),
+                result_digest: [9; 32],
+                allowed: true,
+                remaining_attempts: Some(1),
+                closes_at: Some(fixture.now + Duration::hours(1)),
+                observed_at: fixture.now,
+            }),
             true,
             fixture.now,
         )

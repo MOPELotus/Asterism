@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, fmt};
 
 use asterism_domain::{
-    CourseId, NormalizedAnswer, Question, QuestionId, QuestionKind, SubmissionScore, TaskId,
-    Timestamp,
+    CourseId, NormalizedAnswer, Question, QuestionId, QuestionKind, RetakeScorePolicy,
+    SubmissionScore, TaskId, Timestamp,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -218,6 +218,8 @@ pub struct AnswerHistoryRetakeFacts {
     pub allowed: bool,
     pub remaining_attempts: Option<u32>,
     pub closes_at: Option<Timestamp>,
+    #[serde(default)]
+    pub score_policy: RetakeScorePolicy,
     pub metadata_sanitized: Value,
 }
 
@@ -478,6 +480,7 @@ mod tests {
                 allowed: true,
                 remaining_attempts: None,
                 closes_at: None,
+                score_policy: RetakeScorePolicy::HighestScore,
                 metadata_sanitized: serde_json::json!({"action": "redo_test"}),
             }),
             provenance_sanitized: serde_json::json!({"surface": "result_page"}),

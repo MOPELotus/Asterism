@@ -48,6 +48,7 @@ Phase 0 已建立并持续完善以下基础：
 - 排除快照临时身份但纳入完整脱敏题面语义、用于保守 LocalCache 匹配的版本化 QuestionContentFingerprint；
 - 为新快照持久化强题目指纹，并仅按 owner/Task/时间/双侧唯一性读取历史直接答案证据的 LocalCache 存储边界；
 - 将精确历史直接证据重新绑定到当前 Question、由 Core 固定 LocalCache provenance 且顺序重试幂等的保守答案缓存导入编排；
+- 显式 Score Improvement opt-in 现只接受已验证 Completed/Passed 基线和不早于该完成事实的同 owner/account/Task 历史结果，冻结 history import/result digest、Provider 计分保留策略、剩余次数与截止时间，并仅允许这些远端事实收紧 Core 策略；创建 workflow 不调用 Provider、不创建 Execution/Attempt，旧的无 authority workflow 也不能启动 retake；
 - 以显式 Task/Snapshot 导入 LocalCache 候选、返回本次新增证据且不隐式解析答案的 HTTP/OpenAPI/CLI 入口；
 - 通过数据库复合外键绑定 QuestionSnapshot / Question / AnswerCandidate、整份校验后原子持久化且 owner-scoped 读取的不可变 SubmissionDraft；
 - 要求每题恰好一个显式已存候选、仅生成安全 Provider payload preview 且不触发远端写入的 SubmissionDraft Core 编排；

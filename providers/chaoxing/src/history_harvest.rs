@@ -328,6 +328,7 @@ impl AnswerHistoryHarvestCapability for ChaoxingAnswerHistoryHarvest {
             allowed: local.retake_entry() == Some(ChaoxingChapterWorkRetakeEntry::RedoTest),
             remaining_attempts: None,
             closes_at: None,
+            score_policy: asterism_domain::RetakeScorePolicy::Unknown,
             metadata_sanitized: json!({
                 "schema": "chaoxing.chapter-work-retake-facts.v1",
                 "entry": local

@@ -325,6 +325,10 @@ fn task_routes() -> Router<ApiState> {
             get(task::get_task_completion_workflows),
         )
         .route(
+            "/api/v1/tasks/{task_id}/completion-workflows/score-improvement",
+            post(task::opt_in_score_improvement),
+        )
+        .route(
             "/api/v1/tasks/{task_id}/attempt-history",
             get(task::list_task_attempt_history),
         )
@@ -1107,6 +1111,13 @@ pub fn openapi_document() -> Value {
         .insert(
             "/api/v1/tasks/{task_id}/completion-workflows".to_owned(),
             task_completion_workflows_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/tasks/{task_id}/completion-workflows/score-improvement".to_owned(),
+            score_improvement_opt_in_path(),
         );
     document["paths"]
         .as_object_mut()
@@ -2079,6 +2090,27 @@ fn task_completion_workflows_path() -> Value {
     }})
 }
 
+fn score_improvement_opt_in_path() -> Value {
+    json!({"post": {
+        "operationId": "optInScoreImprovement",
+        "description": "Records an explicit owner opt-in from a verified completion baseline and the latest exact Provider result facts. This operation never creates or starts a remote retake.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScoreImprovementOptInRequest"}}}},
+        "responses": {
+            "200": {"description": "Existing idempotent Score Improvement opt-in", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScoreImprovementOptInResponse"}}}},
+            "201": {"description": "Score Improvement opt-in recorded", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScoreImprovementOptInResponse"}}}},
+            "400": {"description": "Invalid Task ID or explicit opt-in body"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Task execution permission is required"},
+            "404": {"description": "Owner-scoped Task not found"},
+            "409": {"description": "Completion, history, policy, retake or workflow precondition failed"}
+        }
+    }})
+}
+
 fn task_attempt_history_path() -> Value {
     json!({"get": {
         "operationId": "listTaskAttemptHistory",
@@ -2491,36 +2523,38 @@ mod tests {
     use asterism_domain::{
         AnswerCandidate, AnswerCandidateId, AnswerSource, AssessmentClass, AuthMethod, AuthState,
         BrowserBridgeExchange, BrowserBridgeRuntimeStateMetadata, BrowserBridgeSessionId,
-        CompletionPolicySnapshot, CompletionWorkflowBinding, ExecutionAttemptId, ExecutionId,
-        NormalizedAnswer, ProtocolObservationKind, ProtocolSurface, ProviderAccountId, ProviderId,
-        Question, QuestionId, QuestionKind, QuestionSnapshotId, RemoteState, SelectedAnswer,
-        SessionKind, SourceType, StrictCompletionWorkflow, SubmissionDraft, SubmissionDraftId,
-        SubmissionDraftItem, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
-        SubmissionPayloadPreview, SubmissionQuestionVerification,
+        CompletionOutcome, CompletionPolicySnapshot, CompletionWorkflowBinding, ExecutionAttemptId,
+        ExecutionId, NormalizedAnswer, ProtocolObservationKind, ProtocolSurface, ProviderAccountId,
+        ProviderId, Question, QuestionId, QuestionKind, QuestionSnapshotId, RemoteState,
+        RetakeScorePolicy, SelectedAnswer, SessionKind, SourceType, StrictCompletionWorkflow,
+        SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadEncoding,
+        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, SubmissionQuestionVerification,
         SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult,
         SubmissionResultId, SubmissionResultStatus, SubmissionScore,
         SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId, UserId,
     };
     use asterism_provider_api::{
-        AuthChallenge, AuthenticationCapability, BrowserBridgeCapability, BrowserSessionSpec,
-        CaptureCredentialOutput, CaptureRecipe, CaptureValueSource, CourseInventoryCapability,
-        CredentialValidation, ExecutionEventSink, ExecutionOutcome, ExecutionPlanningRequest,
-        ExecutionRequest as ProviderExecutionRequest, ProviderAuthContext, ProviderCapability,
-        ProviderContext, ProviderEntry, ProviderExecutionPlan, ProviderExecutionPlanArtifact,
-        ProviderIdentity, ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema,
-        ProviderSettingCoreBehavior, ProviderSettingDefinition, ProviderSettingKind,
-        ProviderSettingScope, ProviderSettingValue, RemoteCourse, RemoteTask, SessionStatus,
-        TaskExecutionCapability, TaskInventoryCapability, VerificationLevel,
+        AnswerHistoryRetakeFacts, AuthChallenge, AuthenticationCapability, BrowserBridgeCapability,
+        BrowserSessionSpec, CaptureCredentialOutput, CaptureRecipe, CaptureValueSource,
+        CourseInventoryCapability, CredentialValidation, ExecutionEventSink, ExecutionOutcome,
+        ExecutionPlanningRequest, ExecutionRequest as ProviderExecutionRequest,
+        ProviderAuthContext, ProviderCapability, ProviderContext, ProviderEntry,
+        ProviderExecutionPlan, ProviderExecutionPlanArtifact, ProviderIdentity, ProviderMetadata,
+        ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior,
+        ProviderSettingDefinition, ProviderSettingKind, ProviderSettingScope, ProviderSettingValue,
+        RemoteCourse, RemoteTask, SessionStatus, TaskExecutionCapability, TaskInventoryCapability,
+        VerificationLevel,
     };
     use asterism_secrets::{CredentialBundle, SecretAccess, SecretActor, SecretKey, SecretValue};
     use asterism_storage::{
         AnswerCandidateRecord, AnswerCandidateRepository, AnswerEvidenceRepository,
-        CompletionWorkflowRepository, ExecutionQueryRepository, ProtocolObservationRecordRequest,
-        ProtocolObservationRepository, QuestionSnapshot, QuestionSnapshotRepository, SecretKeyring,
-        SqliteAnswerEvidenceRepository, SqliteBrowserBridgeSessionRepository,
-        SqliteCompletionWorkflowRepository, SqliteExecutionRepository,
-        SqliteProtocolObservationRepository, SqliteQuestionSnapshotRepository,
-        SubmissionDraftRepository, SubmissionResultRepository,
+        AnswerHistoryIngestRequest, AnswerHistoryIngestionRepository, CompletionWorkflowRepository,
+        ExecutionQueryRepository, ProtocolObservationRecordRequest, ProtocolObservationRepository,
+        QuestionSnapshot, QuestionSnapshotRepository, SecretKeyring,
+        SqliteAnswerEvidenceRepository, SqliteAnswerHistoryIngestionRepository,
+        SqliteBrowserBridgeSessionRepository, SqliteCompletionWorkflowRepository,
+        SqliteExecutionRepository, SqliteProtocolObservationRepository,
+        SqliteQuestionSnapshotRepository, SubmissionDraftRepository, SubmissionResultRepository,
     };
     use async_trait::async_trait;
     use axum::{
@@ -3641,6 +3675,179 @@ mod tests {
             owner_id.to_string()
         );
         assert!(present["score_improvement"].is_null());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the API test assembles the verified completion and exact history authority before exercising the owner opt-in"
+    )]
+    async fn score_improvement_opt_in_is_explicit_result_bound_and_idempotent() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let account_id = ProviderAccountId::from_str(&account_id).unwrap();
+        let owner_id: UserId = sqlx::query_scalar::<_, String>(
+            "SELECT owner_user_id FROM provider_accounts WHERE id = ?",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap()
+        .parse()
+        .unwrap();
+        let task_id = TaskId::new();
+        let now = Utc::now();
+        let created_at = now - ChronoDuration::seconds(4);
+        let timestamp = created_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+              assessment_class, title, remote_state, orchestration_state, discovered_at, \
+              updated_at, capabilities_json) \
+             VALUES (?, ?, 'score-opt-in-task', 'score-opt-in-fingerprint', 'work', \
+                     'formal', 'Score opt-in', 'completed', 'succeeded', ?, ?, '[]')",
+        )
+        .bind(task_id.to_string())
+        .bind(account_id.to_string())
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let mut strict = StrictCompletionWorkflow::new(
+            CompletionWorkflowBinding {
+                owner_user_id: owner_id,
+                provider_account_id: account_id,
+                task_id,
+            },
+            CompletionPolicySnapshot {
+                captured_at: created_at,
+                score_target_millis: 900,
+                score_improvement_attempt_limit: 2,
+                score_improvement_expires_at: Some(now + ChronoDuration::hours(2)),
+                ..CompletionPolicySnapshot::default()
+            },
+            None,
+            created_at,
+        )
+        .unwrap();
+        strict
+            .observe_verified_completion(
+                CompletionOutcome::Passed,
+                now - ChronoDuration::seconds(3),
+            )
+            .unwrap();
+        SqliteCompletionWorkflowRepository::new(database.clone())
+            .create_strict_completion_workflow(&strict)
+            .await
+            .unwrap();
+
+        let question = Question {
+            id: QuestionId::new(),
+            task_id,
+            remote_question_id: Some("score-opt-in-question".to_owned()),
+            kind: QuestionKind::SingleChoice,
+            stem: "Select one".to_owned(),
+            options: Vec::new(),
+            attachments: Vec::new(),
+            metadata_sanitized: serde_json::json!({}),
+            position: 1,
+        };
+        let snapshot = QuestionSnapshot {
+            id: QuestionSnapshotId::new(),
+            task_id,
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            provider_version: "score-opt-in-v1".to_owned(),
+            captured_at: now - ChronoDuration::seconds(2),
+            questions: vec![question],
+        };
+        let retake = AnswerHistoryRetakeFacts {
+            allowed: true,
+            remaining_attempts: Some(1),
+            closes_at: Some(now + ChronoDuration::hours(1)),
+            score_policy: RetakeScorePolicy::HighestScore,
+            metadata_sanitized: serde_json::json!({"entry": "redo"}),
+        };
+        let provenance = serde_json::json!({"surface": "result"});
+        SqliteAnswerHistoryIngestionRepository::new(database.clone())
+            .ingest_answer_history_task(AnswerHistoryIngestRequest {
+                owner_user_id: owner_id,
+                provider_account_id: account_id,
+                provider_attempt_digest: [11; 32],
+                result_digest: [12; 32],
+                snapshot: &snapshot,
+                candidates: &[],
+                evidence: &[],
+                score: Some(SubmissionScore {
+                    earned_milli_points: 80,
+                    possible_milli_points: 100,
+                }),
+                retake: Some(&retake),
+                provenance_sanitized: &provenance,
+                observed_at: now - ChronoDuration::seconds(1),
+                imported_at: now - ChronoDuration::seconds(1),
+            })
+            .await
+            .unwrap();
+
+        let path = format!("/api/v1/tasks/{task_id}/completion-workflows/score-improvement");
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::post(&path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(r#"{"explicitly_opted_in":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+
+        let post = || {
+            app.clone().oneshot(
+                Request::post(&path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(r#"{"explicitly_opted_in":true}"#))
+                    .unwrap(),
+            )
+        };
+        let created = post().await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
+        let created = response_json(created).await;
+        assert_eq!(created["created"], true);
+        assert_eq!(created["workflow"]["state"], "ready");
+        assert_eq!(
+            created["workflow"]["policy"]["score_improvement_attempt_limit"],
+            1
+        );
+        assert_eq!(
+            created["workflow"]["retake_authority"]["result_digest"],
+            serde_json::json!(vec![12; 32])
+        );
+        let workflow_id = created["workflow"]["id"].clone();
+
+        let replay = post().await.unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = response_json(replay).await;
+        assert_eq!(replay["created"], false);
+        assert_eq!(replay["workflow"]["id"], workflow_id);
+        let workflow_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM score_improvement_workflows")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(workflow_count, 1);
     }
 
     #[tokio::test]

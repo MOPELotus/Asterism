@@ -13,15 +13,16 @@ use asterism_engine::{
     ConservativeAnswerResolverService, CreateManualAnswerCandidateCommand, ExecuteTaskCommand,
     ExecutionRequestError, ExecutionRequestService, FormalAssessmentPolicy,
     ImportLocalAnswerCandidatesCommand, LocalAnswerCacheError, LocalAnswerCacheService,
-    ManualAnswerCandidateError, ManualAnswerCandidateService, ProviderAnswerResolveError,
-    ProviderAnswerResolveService, ProviderQuestionReadError, ProviderQuestionReadResult,
-    ProviderQuestionReadService, ProviderTaskBrowserSessionError,
+    ManualAnswerCandidateError, ManualAnswerCandidateService, OptInScoreImprovementCommand,
+    ProviderAnswerResolveError, ProviderAnswerResolveService, ProviderQuestionReadError,
+    ProviderQuestionReadResult, ProviderQuestionReadService, ProviderTaskBrowserSessionError,
     ProviderTaskBrowserSessionService, ProviderTaskDetailError, ProviderTaskDetailService,
     ProviderTaskDurationError, ProviderTaskDurationService, ProviderTaskProgressError,
     ProviderTaskProgressService, ReadTaskBrowserSessionCommand, ReadTaskDetailCommand,
     ReadTaskDurationCommand, ReadTaskProgressCommand, ReadTaskQuestionsCommand,
-    ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand, SubmissionDraftBuildError,
-    SubmissionDraftBuildService, TaskLifecycleCommand, TaskLifecycleError, TaskLifecycleService,
+    ResolveAnswerCandidatesCommand, ResolveProviderAnswersCommand, ScoreImprovementOptInError,
+    ScoreImprovementOptInService, SubmissionDraftBuildError, SubmissionDraftBuildService,
+    TaskLifecycleCommand, TaskLifecycleError, TaskLifecycleService,
 };
 use asterism_provider_api::{
     BrowserSessionSpec, ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail,
@@ -29,7 +30,8 @@ use asterism_provider_api::{
 use asterism_storage::{
     AnswerCandidateRepository, AnswerEvidenceClassCounts, AnswerEvidenceRepository,
     CompletionWorkflowRepository, ExecutionQueryRepository, ExecutionStrictCompletionRetryRequest,
-    QuestionSnapshotRepository, SqliteAnswerEvidenceRepository, SqliteCompletionWorkflowRepository,
+    QuestionSnapshotRepository, SqliteAnswerEvidenceRepository,
+    SqliteAnswerHistoryIngestionRepository, SqliteCompletionWorkflowRepository,
     SqliteExecutionRepository, SqliteProtocolObservationRepository,
     SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
     SqliteQuestionReadAttemptRepository, SqliteQuestionSnapshotRepository,
@@ -145,6 +147,62 @@ pub(super) async fn get_task_completion_workflows(
             score_improvement,
         })
         .into_response(),
+    ))
+}
+
+pub(super) async fn opt_in_score_improvement(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    payload: Result<Json<ScoreImprovementOptInRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let (owner_id, _) = auth.require_task_execute()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let Json(payload) = payload.map_err(|_| {
+        ApiError::bad_request(
+            "invalid_score_improvement_opt_in",
+            "score improvement opt-in body is invalid",
+        )
+    })?;
+    if !payload.explicitly_opted_in {
+        return Err(ApiError::bad_request(
+            "score_improvement_opt_in_required",
+            "explicitly_opted_in must be true",
+        ));
+    }
+    SqliteTaskQueryRepository::new(state.database.clone())
+        .find_owned_task(owner_id, task_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("task_not_found"))?;
+
+    let result = ScoreImprovementOptInService::new(
+        SqliteCompletionWorkflowRepository::new(state.database.clone()),
+        SqliteAnswerHistoryIngestionRepository::new(state.database),
+    )
+    .opt_in(OptInScoreImprovementCommand {
+        owner_id,
+        task_id,
+        at: Utc::now(),
+    })
+    .await
+    .map_err(map_score_improvement_opt_in_error)?;
+    let status = if result.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok(crate::auth::no_store(
+        (
+            status,
+            Json(ScoreImprovementOptInResponse {
+                revision: result.record.revision,
+                workflow: result.record.workflow,
+                created: result.created,
+            }),
+        )
+            .into_response(),
     ))
 }
 
@@ -1113,6 +1171,41 @@ fn map_execution_request_error(error: ExecutionRequestError) -> ApiError {
     }
 }
 
+fn map_score_improvement_opt_in_error(error: ScoreImprovementOptInError) -> ApiError {
+    match error {
+        ScoreImprovementOptInError::CompletionBaselineNotVerified => ApiError::conflict(
+            "completion_baseline_not_verified",
+            "score improvement requires a verified Completed or Passed baseline",
+        ),
+        ScoreImprovementOptInError::HistoryFactsUnavailable => ApiError::conflict(
+            "answer_history_facts_unavailable",
+            "no exact Provider result facts are available for this task",
+        ),
+        ScoreImprovementOptInError::HistoryFactsStaleOrMismatched => ApiError::conflict(
+            "answer_history_facts_stale",
+            "the latest Provider result facts are older than completion or cross-bound",
+        ),
+        ScoreImprovementOptInError::PolicyDisabled => ApiError::conflict(
+            "score_improvement_disabled",
+            "the frozen task policy disables score improvement",
+        ),
+        ScoreImprovementOptInError::PolicyExpired => ApiError::conflict(
+            "score_improvement_policy_expired",
+            "the frozen score improvement policy has expired",
+        ),
+        ScoreImprovementOptInError::RetakeUnavailable => ApiError::conflict(
+            "retake_unavailable",
+            "the latest Provider result does not authorize an available retake",
+        ),
+        ScoreImprovementOptInError::InvalidWorkflow
+        | ScoreImprovementOptInError::WorkflowConflict => ApiError::conflict(
+            "score_improvement_workflow_conflict",
+            "the score improvement workflow is invalid or changed concurrently",
+        ),
+        ScoreImprovementOptInError::Storage(_) => ApiError::internal(error),
+    }
+}
+
 fn map_task_lifecycle_error(error: TaskLifecycleError) -> ApiError {
     match error {
         TaskLifecycleError::TaskNotFound => ApiError::not_found("task_not_found"),
@@ -1896,6 +1989,19 @@ struct StrictCompletionWorkflowResponse {
 struct ScoreImprovementWorkflowResponse {
     revision: u32,
     workflow: ScoreImprovementWorkflow,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ScoreImprovementOptInRequest {
+    explicitly_opted_in: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ScoreImprovementOptInResponse {
+    revision: u32,
+    workflow: ScoreImprovementWorkflow,
+    created: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

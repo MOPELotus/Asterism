@@ -145,6 +145,7 @@ impl AnswerHistoryHarvestCapability for FakeHistoryProvider {
                 allowed: true,
                 remaining_attempts: Some(1),
                 closes_at: None,
+                score_policy: asterism_domain::RetakeScorePolicy::HighestScore,
                 metadata_sanitized: json!({"action": "redo"}),
             }),
             provenance_sanitized: json!({"surface": "result"}),

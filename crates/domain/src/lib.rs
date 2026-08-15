@@ -66,9 +66,9 @@ pub use browser_bridge_exchange::{
 pub use completion::{
     CompletionDiagnosis, CompletionOutcome, CompletionPolicySnapshot,
     CompletionPolicyValidationError, CompletionWorkflowBinding, RetakeScorePolicy,
-    ScoreImprovementState, ScoreImprovementWorkflow, ScoreImprovementWorkflowError,
-    StrictCompletionState, StrictCompletionWorkflow, StrictCompletionWorkflowError,
-    VerifiedCompletionBaseline,
+    ScoreImprovementRetakeAuthority, ScoreImprovementState, ScoreImprovementWorkflow,
+    ScoreImprovementWorkflowError, StrictCompletionState, StrictCompletionWorkflow,
+    StrictCompletionWorkflowError, VerifiedCompletionBaseline,
 };
 pub use credits::{
     CreditAccount, CreditAmount, CreditError, CreditReservation, CreditReservationState,

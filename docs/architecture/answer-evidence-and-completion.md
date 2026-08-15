@@ -193,6 +193,16 @@ evidence within answer policy. It is finitely bounded and not an unbounded
 background loop. Failure to improve, a lower later score or unavailable retake
 cannot reverse an already verified completed Task.
 
+The explicit opt-in record is created only from an existing verified
+Completed/Passed Strict Completion workflow and the latest owner/account/Task-
+bound Answer History result observed no earlier than that completion. It freezes
+the exact history import and result digest, Provider score-retention policy,
+remaining retake count and close time. Provider bounds may only tighten the
+frozen Core attempt/time policy. Creating this workflow performs no Provider
+call and starts no Attempt; beginning a retake still requires a separate exact
+authority and confirmation. Legacy workflows without a result authority remain
+readable but cannot begin a retake.
+
 ## Policy ownership and snapshots
 
 Product profiles may define Conservative, Balanced and StrictCompletion

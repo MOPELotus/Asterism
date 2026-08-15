@@ -152,6 +152,34 @@ async fn validate_existing_import(
         return Ok(record);
     }
 
+    let stored_retake_json = row.try_get::<Option<String>, _>("retake_json")?;
+    let stored_retake = stored_retake_json
+        .as_deref()
+        .map(serde_json::from_str::<AnswerHistoryRetakeFacts>)
+        .transpose()?;
+    let legacy_retake_policy = request.retake.is_some()
+        && stored_retake.as_ref() == request.retake
+        && request.retake.is_some_and(|retake| {
+            retake.score_policy == asterism_domain::RetakeScorePolicy::Unknown
+        })
+        && stored_digest.as_slice() == legacy_retake_policy_content_digest(request)?;
+    if legacy_retake_policy {
+        let updated = sqlx::query(
+            "UPDATE answer_history_imports SET content_digest = ?, retake_json = ? \
+             WHERE id = ? AND content_digest = ?",
+        )
+        .bind(validated.content_digest.to_vec())
+        .bind(request.retake.map(serde_json::to_string).transpose()?)
+        .bind(record.import_id.to_string())
+        .bind(stored_digest)
+        .execute(&mut **transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(invalid_import());
+        }
+        return Ok(record);
+    }
+
     let observed_at = decode_timestamp(row.try_get("observed_at")?)?;
     let imported_at = decode_timestamp(row.try_get("imported_at")?)?;
     let legacy_unknown = row.try_get::<Option<String>, _>("score_json")?.is_none()
@@ -283,6 +311,31 @@ fn legacy_content_digest(
     request: &AnswerHistoryIngestRequest<'_>,
 ) -> Result<[u8; 32], StorageError> {
     digest_material(&semantic_content_material(request)?)
+}
+
+fn legacy_retake_policy_content_digest(
+    request: &AnswerHistoryIngestRequest<'_>,
+) -> Result<[u8; 32], StorageError> {
+    let mut material = semantic_content_material(request)?;
+    let values = material.as_object_mut().ok_or_else(invalid_import)?;
+    values.insert("score".to_owned(), json!(request.score));
+    values.insert(
+        "retake".to_owned(),
+        request.retake.map_or(serde_json::Value::Null, |retake| {
+            json!({
+                "allowed": retake.allowed,
+                "remaining_attempts": retake.remaining_attempts,
+                "closes_at": retake.closes_at,
+                "metadata_sanitized": retake.metadata_sanitized,
+            })
+        }),
+    );
+    values.insert(
+        "provenance".to_owned(),
+        request.provenance_sanitized.clone(),
+    );
+    values.insert("observed_at".to_owned(), json!(request.observed_at));
+    digest_material(&material)
 }
 
 fn semantic_content_material(
@@ -624,6 +677,7 @@ mod tests {
                     allowed: true,
                     remaining_attempts: Some(2),
                     closes_at: Some(self.now + Duration::hours(1)),
+                    score_policy: asterism_domain::RetakeScorePolicy::HighestScore,
                     metadata_sanitized: json!({"action": "redo"}),
                 },
                 provenance_sanitized: json!({"surface": "history_result"}),
@@ -811,6 +865,67 @@ mod tests {
             .unwrap();
         assert_eq!(fact.score.unwrap().earned_milli_points, 80);
         assert!(fact.retake.unwrap().allowed);
+    }
+
+    #[tokio::test]
+    async fn legacy_retake_without_score_policy_upgrades_on_exact_replay() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteAnswerHistoryIngestionRepository::new(fixture.database.clone());
+        let attempt = [23; 32];
+        let result = [24; 32];
+        let mut bundle = fixture.bundle(attempt, result);
+        bundle.retake.score_policy = asterism_domain::RetakeScorePolicy::Unknown;
+        let inserted = repository
+            .ingest_answer_history_task(fixture.request(&bundle, attempt, result))
+            .await
+            .unwrap();
+        let legacy_digest =
+            legacy_retake_policy_content_digest(&fixture.request(&bundle, attempt, result))
+                .unwrap();
+        let legacy_retake = serde_json::json!({
+            "allowed": bundle.retake.allowed,
+            "remaining_attempts": bundle.retake.remaining_attempts,
+            "closes_at": bundle.retake.closes_at,
+            "metadata_sanitized": bundle.retake.metadata_sanitized,
+        });
+        sqlx::query(
+            "UPDATE answer_history_imports SET content_digest = ?, retake_json = ? WHERE task_id = ?",
+        )
+        .bind(legacy_digest.to_vec())
+        .bind(serde_json::to_string(&legacy_retake).unwrap())
+        .bind(fixture.task.to_string())
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(
+            repository
+                .ingest_answer_history_task(fixture.request(&bundle, attempt, result))
+                .await
+                .unwrap(),
+            match inserted {
+                AnswerHistoryIngestOutcome::Inserted(record) => {
+                    AnswerHistoryIngestOutcome::Duplicate(record)
+                }
+                AnswerHistoryIngestOutcome::Duplicate(_) => unreachable!(),
+            }
+        );
+        let upgraded_json: String =
+            sqlx::query_scalar("SELECT retake_json FROM answer_history_imports WHERE task_id = ?")
+                .bind(fixture.task.to_string())
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert!(upgraded_json.contains("\"score_policy\":\"unknown\""));
+
+        let mut changed = fixture.bundle(attempt, result);
+        changed.retake.score_policy = asterism_domain::RetakeScorePolicy::HighestScore;
+        assert!(
+            repository
+                .ingest_answer_history_task(fixture.request(&changed, attempt, result))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

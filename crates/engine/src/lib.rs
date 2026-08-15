@@ -23,6 +23,7 @@ mod question_read;
 mod scan;
 mod scan_job;
 mod scan_worker;
+mod score_improvement;
 mod submission_build;
 mod task_browser;
 mod task_detail;
@@ -124,6 +125,10 @@ pub use scan_job::{
     ScheduledScanFailure, ScheduledScanOutcome, ScheduledScanRunError, ScheduledScanRunner,
 };
 pub use scan_worker::{ScanSchedulerConfig, ScanSchedulerTickReport, ScanSchedulerWorker};
+pub use score_improvement::{
+    OptInScoreImprovementCommand, ScoreImprovementOptInError, ScoreImprovementOptInResult,
+    ScoreImprovementOptInService,
+};
 pub use submission_build::{
     BuildSubmissionDraftCommand, SubmissionDraftBuildError, SubmissionDraftBuildResult,
     SubmissionDraftBuildService,
