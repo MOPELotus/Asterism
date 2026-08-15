@@ -281,6 +281,11 @@ downloads directly through that line normalizer before the ffmpeg/Whisper
 branch and trims cached/inferred text. Asterism therefore also permits an exact
 bound subtitle response to enter the same bounded normalization, while audio
 and video remain behind the shared transcriber/model provenance contract.
+Its answer path iterates every module `media_sources` entry in source order,
+keeps each nonempty transcription and joins them only after the complete pass.
+Asterism freezes that complete ordered fetch set and its digest in the Provider;
+failure/retry and transcript aggregation remain explicit shared policy rather
+than being silently copied from the donor's best-effort loop.
 
 The current Rust donor also performs a separate Course-level progress read at
 `course_progress/{courseInstanceId}/{openid}/default` before the per-Unit

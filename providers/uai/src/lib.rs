@@ -142,7 +142,7 @@ pub use question::{
 pub use question_artifact::{
     EncodedUaiQuestionArtifact, EncodedUaiQuestionArtifactSet, UAI_QUESTION_ARTIFACT_PHASE,
     UAI_QUESTION_ARTIFACT_TYPE, UAI_QUESTION_SET_ARTIFACT_PHASE,
-    UAI_QUESTION_SET_ARTIFACT_TTL_SECONDS, UAI_QUESTION_SET_ARTIFACT_TYPE,
+    UAI_QUESTION_SET_ARTIFACT_TTL_SECONDS, UAI_QUESTION_SET_ARTIFACT_TYPE, UaiMediaFetchBatchPlan,
     UaiMediaFetchCredentialScope, UaiMediaFetchPlan, UaiMediaFetchResponse,
     UaiMediaSubtitleTranscript, UaiQuestionArtifact, UaiQuestionArtifactMediaSource,
     UaiQuestionArtifactSet,

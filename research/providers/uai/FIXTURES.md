@@ -100,6 +100,11 @@ response owner and bind the normalized secret-text digest to its response
 digest. Non-subtitle media, invalid UTF-8, empty cue sets and oversized sources
 fail before a transcript owner exists; audio/video transcription remains
 outside this Provider fixture boundary.
+Ordered fetch-batch fixtures retain the complete audio-then-subtitle source
+sequence from one rebound Question, reproduce the same nonzero digest for the
+same manifest, change the digest on reversal and reject a duplicate request or
+foreign Question. The batch contains no hidden retry, skip, transcription or
+prompt policy.
 DNS/private-range resolution and bounded streaming execution remain the shared
 downloader boundary.
 

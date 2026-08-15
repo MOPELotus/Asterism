@@ -620,6 +620,47 @@ impl UaiQuestionArtifactSet {
             source,
         )
     }
+
+    /// Freezes every media request for one exact Question in donor-observed
+    /// source order.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a missing, duplicate or media-free Question and any source
+    /// that cannot independently reproduce its immutable request authority.
+    pub fn prepare_media_fetch_batch(
+        &self,
+        remote_question_id: &str,
+    ) -> ProviderResult<UaiMediaFetchBatchPlan> {
+        valid_question_identity(remote_question_id)?;
+        let mut entries = self
+            .questions
+            .iter()
+            .filter(|question| question.remote_question_id.as_str() == remote_question_id);
+        let question = entries.next().ok_or_else(|| {
+            protocol_drift("UAI media fetch batch Question is missing or foreign")
+        })?;
+        if entries.next().is_some() || question.media_sources.is_empty() {
+            return Err(protocol_drift(
+                "UAI media fetch batch Question is ambiguous or media-free",
+            ));
+        }
+        let requests = question
+            .media_sources
+            .iter()
+            .map(|source| {
+                UaiMediaFetchPlan::try_new(
+                    &self.task_id,
+                    &self.remote_task_id,
+                    &question.remote_question_id,
+                    question.position,
+                    &question.question_fingerprint,
+                    source,
+                )
+            })
+            .collect::<ProviderResult<Vec<_>>>()?;
+        UaiMediaFetchBatchPlan::try_new(requests)
+    }
 }
 
 impl fmt::Debug for UaiQuestionArtifactSet {
@@ -985,6 +1026,90 @@ impl fmt::Debug for UaiMediaFetchPlan {
     }
 }
 
+/// Complete ordered media-request authority for one exact UAI Question.
+///
+/// It carries no retry, skip, transcription or prompt policy. Shared
+/// orchestration must report each independently bound result without changing
+/// this donor-observed order.
+pub struct UaiMediaFetchBatchPlan {
+    requests: Vec<UaiMediaFetchPlan>,
+    batch_digest: [u8; 32],
+}
+
+impl UaiMediaFetchBatchPlan {
+    fn try_new(requests: Vec<UaiMediaFetchPlan>) -> ProviderResult<Self> {
+        let first = requests
+            .first()
+            .ok_or_else(|| protocol_drift("UAI media fetch batch contains no request authority"))?;
+        if requests.len() > MAX_MEDIA_SOURCES {
+            return Err(invalid_response(
+                "UAI media fetch batch exceeds the source limit",
+            ));
+        }
+        let mut request_digests = BTreeSet::new();
+        for request in &requests {
+            if request.task_id != first.task_id
+                || request.remote_task_id != first.remote_task_id
+                || request.remote_question_id != first.remote_question_id
+                || request.position != first.position
+                || request.question_fingerprint != first.question_fingerprint
+                || !request_digests.insert(request.request_digest)
+            {
+                return Err(protocol_drift(
+                    "UAI media fetch batch contains a foreign or duplicate request",
+                ));
+            }
+        }
+        let batch_digest = media_fetch_batch_digest(&requests)?;
+        if batch_digest == [0; 32] {
+            return Err(invalid_response("UAI media fetch batch digest is invalid"));
+        }
+        Ok(Self {
+            requests,
+            batch_digest,
+        })
+    }
+
+    pub fn task_id(&self) -> &str {
+        self.requests[0].task_id()
+    }
+
+    pub fn remote_task_id(&self) -> &str {
+        self.requests[0].remote_task_id()
+    }
+
+    pub fn remote_question_id(&self) -> &str {
+        self.requests[0].remote_question_id()
+    }
+
+    pub const fn requests(&self) -> &[UaiMediaFetchPlan] {
+        self.requests.as_slice()
+    }
+
+    pub const fn request_count(&self) -> usize {
+        self.requests.len()
+    }
+
+    pub const fn batch_digest(&self) -> [u8; 32] {
+        self.batch_digest
+    }
+
+    pub fn into_requests(self) -> Vec<UaiMediaFetchPlan> {
+        self.requests
+    }
+}
+
+impl fmt::Debug for UaiMediaFetchBatchPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiMediaFetchBatchPlan")
+            .field("binding", &"[REDACTED]")
+            .field("request_count", &self.requests.len())
+            .field("batch_digest", &self.batch_digest)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Zeroizing media bytes accepted only for one exact immutable fetch plan.
 ///
 /// The response digest binds the byte digest and length to the request digest,
@@ -1167,6 +1292,18 @@ fn media_fetch_response_digest(
     digest.update(body_digest);
     digest.update(body_len.to_be_bytes());
     digest.finalize().into()
+}
+
+fn media_fetch_batch_digest(requests: &[UaiMediaFetchPlan]) -> ProviderResult<[u8; 32]> {
+    let request_count = u64::try_from(requests.len())
+        .map_err(|_| invalid_response("UAI media fetch batch count is invalid"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:media-fetch-batch:v1\0");
+    digest.update(request_count.to_be_bytes());
+    for request in requests {
+        digest.update(request.request_digest);
+    }
+    Ok(digest.finalize().into())
 }
 
 fn media_subtitle_transcript_digest(response_digest: [u8; 32], transcript: &[u8]) -> [u8; 32] {
@@ -1676,6 +1813,60 @@ mod tests {
             plan.validate_final_url("https://ucontent.unipus.cn.evil.example/media/listening.mp3")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn media_fetch_batch_freezes_complete_donor_source_order() {
+        let task_id = TaskId::new();
+        let task_id_text = task_id.to_string();
+        let (parsed, question) = parsed_question(task_id);
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[parsed],
+            std::slice::from_ref(&question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+        let batch = artifact.prepare_media_fetch_batch("9001").unwrap();
+
+        assert_eq!(batch.task_id(), task_id_text);
+        assert_eq!(batch.remote_task_id(), REMOTE_TASK_ID);
+        assert_eq!(batch.remote_question_id(), "9001");
+        assert_eq!(batch.request_count(), 2);
+        assert_eq!(batch.requests()[0].kind(), QuestionAttachmentKind::Audio);
+        assert_eq!(batch.requests()[1].kind(), QuestionAttachmentKind::File);
+        assert!(batch.requests()[1].is_subtitle());
+        assert_ne!(batch.batch_digest(), [0; 32]);
+        assert_eq!(
+            batch.batch_digest(),
+            artifact
+                .prepare_media_fetch_batch("9001")
+                .unwrap()
+                .batch_digest()
+        );
+        let debug = format!("{batch:?}");
+        assert!(!debug.contains(&task_id_text));
+        assert!(!debug.contains("media.example.edu"));
+
+        let mut reversed = artifact
+            .prepare_media_fetch_batch("9001")
+            .unwrap()
+            .into_requests();
+        reversed.reverse();
+        let reversed = UaiMediaFetchBatchPlan::try_new(reversed).unwrap();
+        assert_ne!(batch.batch_digest(), reversed.batch_digest());
+
+        let duplicate_id = artifact.media_sources_for_question("9001").unwrap()[0]
+            .attachment_id()
+            .to_owned();
+        assert!(
+            UaiMediaFetchBatchPlan::try_new(vec![
+                artifact.prepare_media_fetch("9001", &duplicate_id).unwrap(),
+                artifact.prepare_media_fetch("9001", &duplicate_id).unwrap(),
+            ])
+            .is_err()
+        );
+        assert!(artifact.prepare_media_fetch_batch("9002").is_err());
     }
 
     #[test]

@@ -805,6 +805,16 @@ response digest with the exact transcript bytes. A non-subtitle response cannot
 select this parser. Audio/video bytes still require the shared transcriber and
 model/configuration provenance contract.
 
+When a Question has multiple media sources, the same donor traverses all of
+them in captured order before joining nonempty transcription results. From the
+already rebound complete manifest, UAI can therefore materialize one bounded
+nonempty batch containing every exact fetch plan in that order. A batch digest
+hashes its count and ordered request digests; duplicate request authorities,
+foreign/media-free Questions and any later reordering fail closed. The batch
+does not decide whether one failed source is skippable, perform retries, join
+transcripts or truncate a model prompt. Those are durable shared
+AnswerResolve/transcriber policies and must preserve this frozen order.
+
 After a durable media submission yields its receipt, session-aware
 SubmissionVerify rebinds that same complete manifest to every immutable Draft
 Question before starting fresh Task or user-module reads. The existing
