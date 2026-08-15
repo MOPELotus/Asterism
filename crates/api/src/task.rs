@@ -30,10 +30,11 @@ use asterism_storage::{
     AnswerCandidateRepository, AnswerEvidenceClassCounts, AnswerEvidenceRepository,
     CompletionWorkflowRepository, ExecutionQueryRepository, ExecutionStrictCompletionRetryRequest,
     QuestionSnapshotRepository, SqliteAnswerEvidenceRepository, SqliteCompletionWorkflowRepository,
-    SqliteExecutionRepository, SqliteProviderAccountRepository,
-    SqliteProviderRuntimeSettingsRepository, SqliteQuestionReadAttemptRepository,
-    SqliteQuestionSnapshotRepository, SqliteTaskLifecycleRepository, SqliteTaskQueryRepository,
-    SubmissionDraftRepository, SubmissionResultRepository, TaskQueryRepository,
+    SqliteExecutionRepository, SqliteProtocolObservationRepository,
+    SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
+    SqliteQuestionReadAttemptRepository, SqliteQuestionSnapshotRepository,
+    SqliteTaskLifecycleRepository, SqliteTaskQueryRepository, SubmissionDraftRepository,
+    SubmissionResultRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -699,8 +700,11 @@ pub(super) async fn build_submission_draft(
         SqliteTaskQueryRepository::new(state.database.clone()),
         SqliteProviderAccountRepository::new(state.database.clone()),
         submissions,
-        SqliteProviderRuntimeSettingsRepository::new(state.database),
+        SqliteProviderRuntimeSettingsRepository::new(state.database.clone()),
     )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .build(BuildSubmissionDraftCommand {
         owner_id,
         task_id,
@@ -1623,6 +1627,13 @@ fn map_submission_draft_build_error(error: SubmissionDraftBuildError) -> ApiErro
         ),
         SubmissionDraftBuildError::ProviderPreviewInvalid => {
             tracing::warn!(%error, "Provider returned invalid SubmissionDraft preview");
+            ApiError::bad_gateway(
+                "provider_submission_preview_invalid",
+                "the Provider returned an inconsistent submission preview",
+            )
+        }
+        SubmissionDraftBuildError::InvalidProtocolObservation => {
+            tracing::warn!(%error, "Provider returned an invalid protocol observation");
             ApiError::bad_gateway(
                 "provider_submission_preview_invalid",
                 "the Provider returned an inconsistent submission preview",

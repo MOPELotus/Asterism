@@ -284,3 +284,8 @@ Their occurrence identity is account-and-correlation bound and the persisted
 Execution reference stays null. This allows unknown remote Task types found
 during ordinary discovery to enter the same review inbox without manufacturing
 an Attempt or weakening the scan's all-or-nothing ingestion boundary.
+SubmissionBuild also precedes an Execution. Its drift occurrence is therefore
+bound to the Task, immutable QuestionSnapshot and request correlation, retains
+a null Execution reference and must be durable before the Provider failure is
+returned. Candidate selection and coverage validation still happen first, and
+the failure path never persists a partial Draft.

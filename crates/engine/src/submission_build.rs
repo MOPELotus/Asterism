@@ -9,13 +9,18 @@ use asterism_provider_api::{
     ResolvedProviderRuntimeSettings,
 };
 use asterism_storage::{
-    AnswerCandidateRepository, ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRepository,
-    ProviderRuntimeSettingsTarget, QuestionSnapshotRepository, StorageError,
-    SubmissionDraftRepository, TaskQueryRepository,
+    AnswerCandidateRepository, ProtocolObservationRepository, ProviderAccountRuntimeRepository,
+    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget, QuestionSnapshotRepository,
+    StorageError, SubmissionDraftRepository, TaskQueryRepository,
 };
 use chrono::Utc;
 
-use crate::{AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action};
+use crate::{
+    AssessmentGuardError, FormalAssessmentPolicy, TaskAction, authorize_task_action,
+    protocol_observation::{
+        ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+    },
+};
 
 const MAX_CORRELATION_ID_BYTES: usize = 128;
 const MAX_SELECTED_CANDIDATES: usize = 5_000;
@@ -34,13 +39,14 @@ pub struct SubmissionDraftBuildResult {
     pub draft: SubmissionDraft,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SubmissionDraftBuildService<Q, A, S, R> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
     submissions: S,
     runtime_settings: R,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<Q, A, S, R> SubmissionDraftBuildService<Q, A, S, R> {
@@ -57,7 +63,34 @@ impl<Q, A, S, R> SubmissionDraftBuildService<Q, A, S, R> {
             accounts,
             submissions,
             runtime_settings,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<Q, A, S, R> std::fmt::Debug for SubmissionDraftBuildService<Q, A, S, R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SubmissionDraftBuildService")
+            .field("registry", &self.registry)
+            .field("tasks", &"configured")
+            .field("accounts", &"configured")
+            .field("submissions", &"configured")
+            .field("runtime_settings", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -183,14 +216,41 @@ where
             credential_refs: account.credential_refs,
             correlation_id: command.correlation_id,
         };
-        let payload_preview = builder
+        let payload_preview = match builder
             .build_submission_preview(
                 &context,
                 &task.remote_id,
                 &selected_questions,
                 &selected_answers,
             )
-            .await?;
+            .await
+        {
+            Ok(preview) => preview,
+            Err(error) => {
+                let occurrence_scope = format!(
+                    "submission-build:{}:{}:{}",
+                    task.id, snapshot.id, context.correlation_id
+                );
+                record_provider_protocol_observation(
+                    self.protocol_observations.as_deref(),
+                    &account.provider_id,
+                    None,
+                    &occurrence_scope,
+                    &error,
+                    Utc::now(),
+                )
+                .await
+                .map_err(|error| match error {
+                    ProviderProtocolObservationRecordError::Invalid => {
+                        SubmissionDraftBuildError::InvalidProtocolObservation
+                    }
+                    ProviderProtocolObservationRecordError::Storage(error) => {
+                        SubmissionDraftBuildError::Storage(error)
+                    }
+                })?;
+                return Err(error.into());
+            }
+        };
         let items = selected_questions
             .into_iter()
             .zip(selected_answers)
@@ -287,6 +347,8 @@ pub enum SubmissionDraftBuildError {
     CapabilityUnavailable(ProviderId),
     #[error("submission build correlation id is invalid")]
     InvalidCorrelationId,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error("Provider returned an invalid or unsafe submission preview")]
     ProviderPreviewInvalid,
     #[error("Provider runtime settings are invalid for submission coverage")]
@@ -311,18 +373,20 @@ mod tests {
 
     use asterism_domain::{
         AnswerCandidate, AnswerConfidence, AnswerSource, AssessmentClass, NormalizedAnswer,
-        OrchestrationState, ProviderAccount, ProviderAccountId, Question, QuestionId, QuestionKind,
-        QuestionSnapshotId, RemoteState, SecretId, SourceType, SubmissionPayloadEncoding,
-        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, Task, Timestamp,
+        OrchestrationState, ProtocolObservationKind, ProtocolSurface, ProviderAccount,
+        ProviderAccountId, Question, QuestionId, QuestionKind, QuestionSnapshotId, RemoteState,
+        SecretId, SourceType, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
+        SubmissionPayloadPreview, Task, Timestamp,
     };
     use asterism_provider_api::{
-        ProviderCapability, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
-        ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior, ProviderSettingDefinition,
-        ProviderSettingKind, ProviderSettingScope, ProviderSettingValue, SubmissionBuildCapability,
-        VerificationLevel,
+        ProviderCapability, ProviderEntry, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
+        ProviderResult, ProviderRuntimeSettingsSchema, ProviderSettingCoreBehavior,
+        ProviderSettingDefinition, ProviderSettingKind, ProviderSettingScope, ProviderSettingValue,
+        SubmissionBuildCapability, VerificationLevel,
     };
     use asterism_storage::{
-        AnswerCandidateRecord, QuestionSnapshot, SubmissionDraftRepository, TaskPage,
+        AnswerCandidateRecord, Database, QuestionSnapshot, SqliteProtocolObservationRepository,
+        SubmissionDraftRepository, TaskPage,
     };
     use async_trait::async_trait;
 
@@ -471,6 +535,7 @@ mod tests {
     struct FakeBuilder {
         metadata: ProviderMetadata,
         foreign_preview: bool,
+        protocol_drift: bool,
         called: AtomicBool,
     }
 
@@ -490,6 +555,18 @@ mod tests {
             _selected_answers: &[SelectedAnswer],
         ) -> ProviderResult<SubmissionPayloadPreview> {
             self.called.store(true, Ordering::Relaxed);
+            if self.protocol_drift {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "submission question type changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::SubmissionBuild,
+                    ProtocolObservationKind::UnknownQuestionKind,
+                    serde_json::json!({"question_type": 991, "page_kind": "work"}),
+                )
+                .unwrap());
+            }
             Ok(SubmissionPayloadPreview {
                 encoding: SubmissionPayloadEncoding::Form,
                 format: "fixture.work.v1".to_owned(),
@@ -507,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_explicit_selection_builds_and_persists_one_draft() {
-        let fixture = fixture(true, false, false);
+        let fixture = fixture(FixtureMode::Complete);
         let result = fixture
             .service
             .build(fixture.command(vec![fixture.repository.candidates[0].id]))
@@ -524,7 +601,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_selection_never_calls_provider_or_persists() {
-        let fixture = fixture(true, false, false);
+        let fixture = fixture(FixtureMode::Complete);
         assert!(matches!(
             fixture
                 .service
@@ -538,7 +615,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreign_provider_preview_is_rejected_without_persistence() {
-        let fixture = fixture(true, true, false);
+        let fixture = fixture(FixtureMode::ForeignPreview);
         assert!(matches!(
             fixture
                 .service
@@ -552,7 +629,7 @@ mod tests {
 
     #[tokio::test]
     async fn undeclared_submission_build_never_calls_provider() {
-        let fixture = fixture(false, false, false);
+        let fixture = fixture(FixtureMode::CapabilityUnavailable);
         assert!(matches!(
             fixture
                 .service
@@ -565,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn declared_partial_coverage_freezes_unanswered_snapshot_partition() {
-        let fixture = fixture(true, false, true);
+        let fixture = fixture(FixtureMode::PartialPolicy);
         let result = fixture
             .service
             .build(fixture.command(vec![fixture.repository.candidates[0].id]))
@@ -582,6 +659,43 @@ mod tests {
             result.draft.answer_coverage.unanswered_question_ids[0],
             fixture.repository.snapshot.questions[1].id
         );
+    }
+
+    #[tokio::test]
+    async fn provider_drift_is_observed_before_draft_build_fails() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let mut fixture = fixture(FixtureMode::ProtocolDrift);
+        fixture.service = fixture.service.with_protocol_observations(Arc::new(
+            SqliteProtocolObservationRepository::new(database.clone()),
+        ));
+
+        assert!(matches!(
+            fixture
+                .service
+                .build(fixture.command(vec![fixture.repository.candidates[0].id]))
+                .await,
+            Err(SubmissionDraftBuildError::Provider(error))
+                if error.kind == ProviderErrorKind::ProtocolDrift
+        ));
+
+        let observation: (String, String, i64, Option<String>) = sqlx::query_as(
+            "SELECT surface, kind, occurrence_count, last_execution_id \
+             FROM protocol_observations",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            observation,
+            (
+                "submission_build".to_owned(),
+                "unknown_question_kind".to_owned(),
+                1,
+                None,
+            )
+        );
+        assert!(fixture.repository.saved.lock().unwrap().is_empty());
     }
 
     struct Fixture {
@@ -610,11 +724,24 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum FixtureMode {
+        CapabilityUnavailable,
+        Complete,
+        ForeignPreview,
+        PartialPolicy,
+        ProtocolDrift,
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the fixture keeps Task, account, snapshot, Candidate and Provider bindings visible together"
     )]
-    fn fixture(advertises_build: bool, foreign_preview: bool, partial_policy: bool) -> Fixture {
+    fn fixture(mode: FixtureMode) -> Fixture {
+        let advertises_build = mode != FixtureMode::CapabilityUnavailable;
+        let foreign_preview = mode == FixtureMode::ForeignPreview;
+        let partial_policy = mode == FixtureMode::PartialPolicy;
+        let protocol_drift = mode == FixtureMode::ProtocolDrift;
         let owner = UserId::new();
         let account_id = ProviderAccountId::new();
         let provider_id = ProviderId::new("provider-alpha").unwrap();
@@ -717,6 +844,7 @@ mod tests {
         let builder = Arc::new(FakeBuilder {
             metadata: metadata.clone(),
             foreign_preview,
+            protocol_drift,
             called: AtomicBool::new(false),
         });
         let mut entry = ProviderEntry::metadata_only(metadata);

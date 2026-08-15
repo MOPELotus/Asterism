@@ -4598,3 +4598,23 @@ Coverage proves that replaying the same account scan correlation does not
 inflate the aggregate, retains the typed task-inventory/unknown-task-type
 classification, never invents Execution provenance and still leaves the scan
 ingestion batch empty after Provider failure.
+
+## Two-hundred-and-forty-ninth Phase 0 slice
+
+`SubmissionDraftBuildService` now accepts the shared observation repository and
+records a Provider-supplied shape when `SubmissionBuild` fails. The occurrence
+scope binds Task, immutable QuestionSnapshot and request correlation; it has no
+Execution reference because Draft construction precedes an Execution/Attempt.
+The API always injects the SQLite inbox repository.
+
+All existing authorization, snapshot/account binding, explicit Candidate
+selection and answer-coverage checks still run before the Provider call. A
+Provider failure is returned only after its present observation is durable, and
+no Draft is persisted. Invalid observation payloads map to the same fail-closed
+bad-gateway surface as an invalid submission preview; Inbox storage failure
+remains an internal persistence failure rather than being hidden behind the
+Provider error.
+
+Coverage uses an unknown numeric Question type and proves the typed
+SubmissionBuild/UnknownQuestionKind aggregate is stored without invented
+Execution provenance while the Draft repository remains empty.
