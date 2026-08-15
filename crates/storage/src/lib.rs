@@ -8,6 +8,7 @@ mod auth_bootstrap;
 mod auth_session;
 mod browser_bridge;
 mod browser_bridge_command;
+mod completion_workflow;
 mod credit;
 mod database;
 mod execution;
@@ -39,6 +40,7 @@ pub use auth_bootstrap::SqliteAuthBootstrapSessionRepository;
 pub use auth_session::SqliteAuthSessionRepository;
 pub use browser_bridge::SqliteBrowserBridgeSessionRepository;
 pub use browser_bridge_command::SqliteBrowserBridgeCommandArtifactRepository;
+pub use completion_workflow::SqliteCompletionWorkflowRepository;
 pub use credit::{CreditGrant, CreditGrantOutcome, CreditGrantResult, SqliteCreditRepository};
 pub use database::{Database, StorageError};
 pub use execution::SqliteExecutionRepository;
@@ -73,22 +75,22 @@ pub use repository::{
     BrowserBridgeRuntimeStateIssue, BrowserBridgeSessionRepository,
     BrowserBridgeWorkflowCommitOutcome, BrowserBridgeWorkflowCommitRequest,
     BrowserBridgeWorkflowContextIssue, BrowserBridgeWorkflowPlanIssue,
-    ClaimedAnswerBootstrapHarvest, CreditQueryRepository, CreditRepository,
-    CreditReservationDetail, CreditReservationPage, CreditTransactionPage,
-    DispatchedBrowserBridgeCommand, ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
-    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
-    ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
-    ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionBillingReservation,
-    ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
-    ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
-    ExecutionCapabilityStepState, ExecutionDetail, ExecutionLeaseRepository,
-    ExecutionLogAppendRequest, ExecutionLogPage, ExecutionPage, ExecutionProgressUpdate,
-    ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
-    ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, ExternalOauthClaim, GlobalAnswerCorpusEvidence,
-    OutboxRepository, PendingBrowserBridgeResult, PriorAnswerEvidence, ProviderAccountRepository,
-    ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
+    ClaimedAnswerBootstrapHarvest, CompletionWorkflowCreateOutcome, CompletionWorkflowRepository,
+    CreditQueryRepository, CreditRepository, CreditReservationDetail, CreditReservationPage,
+    CreditTransactionPage, DispatchedBrowserBridgeCommand, ExecutionAtomicMutation,
+    ExecutionAtomicMutationIssueOutcome, ExecutionAtomicMutationIssueRequest,
+    ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,
+    ExecutionAtomicMutationRepository, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
+    ExecutionBillingReservation, ExecutionCapabilityCallMutation, ExecutionCapabilityStep,
+    ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
+    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionDetail,
+    ExecutionLeaseRepository, ExecutionLogAppendRequest, ExecutionLogPage, ExecutionPage,
+    ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionQuestionStepFinishRequest,
+    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionRuntimeSettingsResolution,
+    ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome, ExecutionScheduleRequest,
+    ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, ExternalOauthClaim,
+    GlobalAnswerCorpusEvidence, OutboxRepository, PendingBrowserBridgeResult, PriorAnswerEvidence,
+    ProviderAccountRepository, ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
     ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
     ProviderRuntimeSettingsWriteOutcome, ProviderRuntimeSettingsWriteRequest,
     QuestionReadAttemptRepository, QuestionReadContinuation, QuestionReadContinuationAttachRequest,
@@ -107,13 +109,15 @@ pub use repository::{
     ResolvedBrowserBridgeCommand, ResolvedBrowserBridgeResult, ResolvedBrowserBridgeRuntimeState,
     ResolvedBrowserBridgeWorkflowContext, ResolvedBrowserBridgeWorkflowPlan,
     ResolvedQuestionReadContinuation, ResolvedQuestionSessionContinuation, ScanScheduleRepository,
-    SchedulerRepository, ServiceTokenPage, ServiceTokenQueryRepository, SessionRepository,
-    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
-    SubmissionResultRepository, TaskLifecycleMutation, TaskLifecycleMutationOutcome,
-    TaskLifecycleReceipt, TaskLifecycleRepository, TaskPage, TaskQueryRepository, TaskRepository,
-    TaskRuntimeRepository, UserAdminCreate, UserAdminCreateOutcome, UserAdminRepository,
-    UserAdminUpdate, UserAdminUpdateOutcome, UserProfilePage, UserRepository,
-    VerificationRecoveryStartRequest,
+    SchedulerRepository, ScoreImprovementBeginRequest, ScoreImprovementObserveRequest,
+    ScoreImprovementWorkflowRecord, ServiceTokenPage, ServiceTokenQueryRepository,
+    SessionRepository, StrictCompletionBeginRequest, StrictCompletionObserveRequest,
+    StrictCompletionWorkflowRecord, SubmissionDraftRepository, SubmissionReceiptPersistRequest,
+    SubmissionResultPersistRequest, SubmissionResultRepository, TaskLifecycleMutation,
+    TaskLifecycleMutationOutcome, TaskLifecycleReceipt, TaskLifecycleRepository, TaskPage,
+    TaskQueryRepository, TaskRepository, TaskRuntimeRepository, UserAdminCreate,
+    UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate, UserAdminUpdateOutcome,
+    UserProfilePage, UserRepository, VerificationRecoveryStartRequest,
 };
 pub use scan::{
     ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,

@@ -4196,3 +4196,26 @@ Every retake requires confirmation, preserves the original completion outcome,
 tracks the best observed score by normalized ratio and terminates at target,
 remote/attempt limits or diagnosis. A lower result cannot turn the completed
 baseline back into an incomplete Task.
+
+## Two-hundred-and-thirty-first Phase 0 slice
+
+Migration 059 persists Strict Completion and Score Improvement in separate
+tables with separate IDs, one owner/account/Task binding each, bounded state
+columns, the complete immutable workflow JSON and an optimistic revision. The
+Storage create boundary rechecks the real Task -> ProviderAccount -> owner
+relationship and is exactly idempotent; another workflow for the same Task or
+reused identity conflicts instead of replacing policy or history.
+
+Storage exposes operation-shaped transitions rather than a generic row update.
+Under one immediate transaction it loads and validates the persisted Domain
+state, verifies owner and expected revision, invokes the corresponding Domain
+`begin` or `observe` transition, validates the successor, and advances revision
+with compare-and-swap. Missing confirmation, stale callers, illegal terminal
+restarts, regressing time and malformed observations leave the durable workflow
+unchanged.
+
+Owner-scoped reads decode and cross-check every duplicated identity, state and
+timestamp column against the workflow document. Score Improvement persistence
+therefore cannot overwrite the immutable Completed/Passed baseline even when a
+retake score is lower, and Strict Completion cannot be revived after a verified
+terminal outcome.

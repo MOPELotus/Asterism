@@ -126,6 +126,110 @@ pub trait AnswerBootstrapHarvestRepository: Send + Sync {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictCompletionWorkflowRecord {
+    pub workflow: asterism_domain::StrictCompletionWorkflow,
+    pub revision: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScoreImprovementWorkflowRecord {
+    pub workflow: asterism_domain::ScoreImprovementWorkflow,
+    pub revision: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompletionWorkflowCreateOutcome<T> {
+    Created(T),
+    Existing(T),
+    Conflict,
+}
+
+#[derive(Clone, Debug)]
+pub struct StrictCompletionBeginRequest {
+    pub owner_user_id: UserId,
+    pub workflow_id: asterism_domain::StrictCompletionWorkflowId,
+    pub expected_revision: u32,
+    pub formal_assessment: bool,
+    pub retry_confirmed: bool,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct StrictCompletionObserveRequest {
+    pub owner_user_id: UserId,
+    pub workflow_id: asterism_domain::StrictCompletionWorkflowId,
+    pub expected_revision: u32,
+    pub outcome: Option<asterism_domain::CompletionOutcome>,
+    pub diagnosis: Option<asterism_domain::CompletionDiagnosis>,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScoreImprovementBeginRequest {
+    pub owner_user_id: UserId,
+    pub workflow_id: asterism_domain::ScoreImprovementWorkflowId,
+    pub expected_revision: u32,
+    pub explicitly_confirmed: bool,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScoreImprovementObserveRequest {
+    pub owner_user_id: UserId,
+    pub workflow_id: asterism_domain::ScoreImprovementWorkflowId,
+    pub expected_revision: u32,
+    pub score: Option<asterism_domain::SubmissionScore>,
+    pub retake_still_allowed: bool,
+    pub diagnosis: Option<asterism_domain::CompletionDiagnosis>,
+    pub at: Timestamp,
+}
+
+#[async_trait]
+pub trait CompletionWorkflowRepository: Send + Sync {
+    async fn create_strict_completion_workflow(
+        &self,
+        workflow: &asterism_domain::StrictCompletionWorkflow,
+    ) -> Result<CompletionWorkflowCreateOutcome<StrictCompletionWorkflowRecord>, StorageError>;
+
+    async fn find_owned_strict_completion_workflow(
+        &self,
+        owner_user_id: UserId,
+        task_id: TaskId,
+    ) -> Result<Option<StrictCompletionWorkflowRecord>, StorageError>;
+
+    async fn begin_strict_completion_attempt(
+        &self,
+        request: StrictCompletionBeginRequest,
+    ) -> Result<StrictCompletionWorkflowRecord, StorageError>;
+
+    async fn observe_strict_completion(
+        &self,
+        request: StrictCompletionObserveRequest,
+    ) -> Result<StrictCompletionWorkflowRecord, StorageError>;
+
+    async fn create_score_improvement_workflow(
+        &self,
+        workflow: &asterism_domain::ScoreImprovementWorkflow,
+    ) -> Result<CompletionWorkflowCreateOutcome<ScoreImprovementWorkflowRecord>, StorageError>;
+
+    async fn find_owned_score_improvement_workflow(
+        &self,
+        owner_user_id: UserId,
+        task_id: TaskId,
+    ) -> Result<Option<ScoreImprovementWorkflowRecord>, StorageError>;
+
+    async fn begin_score_improvement_attempt(
+        &self,
+        request: ScoreImprovementBeginRequest,
+    ) -> Result<ScoreImprovementWorkflowRecord, StorageError>;
+
+    async fn observe_score_improvement(
+        &self,
+        request: ScoreImprovementObserveRequest,
+    ) -> Result<ScoreImprovementWorkflowRecord, StorageError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimedAnswerBootstrapHarvest {
     pub harvest: AnswerBootstrapHarvest,
     pub worker_id: String,

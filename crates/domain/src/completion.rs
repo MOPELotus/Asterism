@@ -185,6 +185,61 @@ impl StrictCompletionWorkflow {
         })
     }
 
+    /// Validates a deserialized workflow before a persistence transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StrictCompletionWorkflowError`] when state, attempts,
+    /// outcome, diagnosis or timestamps violate the state machine.
+    pub fn validate(&self) -> Result<(), StrictCompletionWorkflowError> {
+        self.policy.validate()?;
+        if self.policy.captured_at > self.created_at
+            || self.updated_at < self.created_at
+            || self.attempts_started > self.policy.strict_attempt_limit
+            || self.finished_at.is_some_and(|finished_at| {
+                finished_at < self.created_at || finished_at > self.updated_at
+            })
+        {
+            return Err(StrictCompletionWorkflowError::InvalidTimestamp);
+        }
+        let valid = match self.state {
+            StrictCompletionState::Disabled => {
+                !self.policy.strict_completion_enabled
+                    && self.attempts_started == 0
+                    && self.verified_outcome.is_none()
+                    && self.last_diagnosis.is_none()
+                    && self.finished_at.is_some()
+            }
+            StrictCompletionState::Active => {
+                self.policy.strict_completion_enabled
+                    && self.attempts_started < self.policy.strict_attempt_limit
+                    && self.verified_outcome.is_none()
+                    && self.finished_at.is_none()
+            }
+            StrictCompletionState::AttemptRunning => {
+                self.policy.strict_completion_enabled
+                    && (1..=self.policy.strict_attempt_limit).contains(&self.attempts_started)
+                    && self.verified_outcome.is_none()
+                    && self.finished_at.is_none()
+            }
+            StrictCompletionState::Completed => {
+                self.verified_outcome.is_some()
+                    && self.last_diagnosis.is_none()
+                    && self.finished_at.is_some()
+            }
+            StrictCompletionState::Stopped => {
+                self.verified_outcome.is_none()
+                    && self.last_diagnosis.is_some()
+                    && self.finished_at.is_some()
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(StrictCompletionWorkflowError::StateConflict)
+        }
+    }
+
     /// Starts one bounded attempt without granting an unconfirmed formal retry.
     ///
     /// # Errors
@@ -390,6 +445,70 @@ impl ScoreImprovementWorkflow {
             updated_at: at,
             finished_at,
         })
+    }
+
+    /// Validates a deserialized retake workflow and its immutable baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScoreImprovementWorkflowError`] when state, attempts, scores,
+    /// opt-in policy, diagnosis or timestamps violate the state machine.
+    pub fn validate(&self) -> Result<(), ScoreImprovementWorkflowError> {
+        self.policy.validate()?;
+        if self.policy.captured_at > self.created_at
+            || self.completion_baseline.verified_at > self.created_at
+            || self.updated_at < self.created_at
+            || self.attempts_started > self.policy.score_improvement_attempt_limit
+            || self.finished_at.is_some_and(|finished_at| {
+                finished_at < self.created_at || finished_at > self.updated_at
+            })
+            || self
+                .completion_baseline
+                .score
+                .is_some_and(|score| score.validate().is_err())
+            || self
+                .best_observed_score
+                .is_some_and(|score| score.validate().is_err())
+            || matches!(
+                (self.completion_baseline.score, self.best_observed_score),
+                (Some(baseline), Some(best)) if score_is_higher(baseline, best)
+            )
+        {
+            return Err(ScoreImprovementWorkflowError::InvalidScore);
+        }
+        let enabled = self.policy.score_improvement_enabled && self.explicitly_opted_in;
+        let target_reached = self.best_observed_score.is_some_and(|score| {
+            score_millis(score) >= u128::from(self.policy.score_target_millis)
+        });
+        let valid = match self.state {
+            ScoreImprovementState::Disabled => {
+                !enabled
+                    && self.attempts_started == 0
+                    && self.last_diagnosis.is_none()
+                    && self.finished_at.is_some()
+            }
+            ScoreImprovementState::Ready => {
+                enabled
+                    && !target_reached
+                    && self.attempts_started < self.policy.score_improvement_attempt_limit
+                    && self.finished_at.is_none()
+            }
+            ScoreImprovementState::AttemptRunning => {
+                enabled
+                    && (1..=self.policy.score_improvement_attempt_limit)
+                        .contains(&self.attempts_started)
+                    && self.finished_at.is_none()
+            }
+            ScoreImprovementState::Finished => target_reached && self.finished_at.is_some(),
+            ScoreImprovementState::Stopped => {
+                enabled && self.last_diagnosis.is_some() && self.finished_at.is_some()
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(ScoreImprovementWorkflowError::StateConflict)
+        }
     }
 
     /// Starts one explicitly confirmed retake inside the frozen bounds.
