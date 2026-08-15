@@ -70,6 +70,7 @@ entity_id!(AnswerBootstrapHarvestId);
 entity_id!(AnswerHistoryImportId);
 entity_id!(StrictCompletionWorkflowId);
 entity_id!(ScoreImprovementWorkflowId);
+entity_id!(ProtocolObservationId);
 entity_id!(SubmissionDraftId);
 entity_id!(SubmissionResultId);
 entity_id!(ExecutionId);

@@ -187,6 +187,10 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/api/v1/audit", get(admin::list_audit))
         .route(
+            "/api/v1/admin/protocol-observations",
+            get(admin::list_protocol_observations),
+        )
+        .route(
             "/api/v1/admin/users",
             get(admin::list_users).post(admin::create_user),
         )
@@ -1124,6 +1128,13 @@ pub fn openapi_document() -> Value {
         .insert(
             "/api/v1/provider-accounts/{account_id}/health".to_owned(),
             provider_account_health_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/admin/protocol-observations".to_owned(),
+            protocol_observations_path(),
         );
     document["paths"]
         .as_object_mut()
@@ -2124,6 +2135,26 @@ fn provider_account_health_path() -> Value {
     }})
 }
 
+fn protocol_observations_path() -> Value {
+    json!({"get": {
+        "operationId": "listProtocolObservations",
+        "description": "Lists the Master-only instance Protocol Observation Inbox of bounded sanitized and replay-safe drift aggregates.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "provider_id", "in": "query", "schema": {"type": "string"}},
+            {"name": "kind", "in": "query", "schema": {"type": "string", "enum": ["unknown_question_kind", "unknown_result_shape", "unknown_task_type", "field_drift", "endpoint_version_drift", "other"]}},
+            {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+            {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}
+        ],
+        "responses": {
+            "200": {"description": "Paginated Protocol Observation aggregates ordered by newest occurrence"},
+            "400": {"description": "Invalid Provider, kind or pagination"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Master user-management authority is required"}
+        }
+    }})
+}
+
 fn submission_drafts_path() -> Value {
     json!({"post": {
         "operationId": "buildSubmissionDraft",
@@ -2461,12 +2492,13 @@ mod tests {
         AnswerCandidate, AnswerCandidateId, AnswerSource, AssessmentClass, AuthMethod, AuthState,
         BrowserBridgeExchange, BrowserBridgeRuntimeStateMetadata, BrowserBridgeSessionId,
         CompletionPolicySnapshot, CompletionWorkflowBinding, ExecutionAttemptId, ExecutionId,
-        NormalizedAnswer, ProviderAccountId, ProviderId, Question, QuestionId, QuestionKind,
-        QuestionSnapshotId, RemoteState, SelectedAnswer, SessionKind, SourceType,
-        StrictCompletionWorkflow, SubmissionDraft, SubmissionDraftId, SubmissionDraftItem,
-        SubmissionPayloadEncoding, SubmissionPayloadFieldPreview, SubmissionPayloadPreview,
-        SubmissionQuestionVerification, SubmissionQuestionVerificationStatus, SubmissionReceipt,
-        SubmissionResult, SubmissionResultId, SubmissionResultStatus, SubmissionScore,
+        NormalizedAnswer, ProtocolObservationKind, ProtocolSurface, ProviderAccountId, ProviderId,
+        Question, QuestionId, QuestionKind, QuestionSnapshotId, RemoteState, SelectedAnswer,
+        SessionKind, SourceType, StrictCompletionWorkflow, SubmissionDraft, SubmissionDraftId,
+        SubmissionDraftItem, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
+        SubmissionPayloadPreview, SubmissionQuestionVerification,
+        SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult,
+        SubmissionResultId, SubmissionResultStatus, SubmissionScore,
         SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId, UserId,
     };
     use asterism_provider_api::{
@@ -2483,11 +2515,12 @@ mod tests {
     use asterism_secrets::{CredentialBundle, SecretAccess, SecretActor, SecretKey, SecretValue};
     use asterism_storage::{
         AnswerCandidateRecord, AnswerCandidateRepository, AnswerEvidenceRepository,
-        CompletionWorkflowRepository, ExecutionQueryRepository, QuestionSnapshot,
-        QuestionSnapshotRepository, SecretKeyring, SqliteAnswerEvidenceRepository,
-        SqliteBrowserBridgeSessionRepository, SqliteCompletionWorkflowRepository,
-        SqliteExecutionRepository, SqliteQuestionSnapshotRepository, SubmissionDraftRepository,
-        SubmissionResultRepository,
+        CompletionWorkflowRepository, ExecutionQueryRepository, ProtocolObservationRecordRequest,
+        ProtocolObservationRepository, QuestionSnapshot, QuestionSnapshotRepository, SecretKeyring,
+        SqliteAnswerEvidenceRepository, SqliteBrowserBridgeSessionRepository,
+        SqliteCompletionWorkflowRepository, SqliteExecutionRepository,
+        SqliteProtocolObservationRepository, SqliteQuestionSnapshotRepository,
+        SubmissionDraftRepository, SubmissionResultRepository,
     };
     use async_trait::async_trait;
     use axum::{
@@ -3253,6 +3286,68 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audit_count, 3);
+    }
+
+    #[tokio::test]
+    async fn protocol_observation_inbox_is_master_only_filtered_and_sanitized() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let shape = json!({"missing_fields": ["resultCode"], "version": 3});
+        SqliteProtocolObservationRepository::new(database)
+            .record_protocol_observation(ProtocolObservationRecordRequest {
+                provider_id: ProviderId::new("provider-alpha").unwrap(),
+                surface: ProtocolSurface::SubmissionVerify,
+                kind: ProtocolObservationKind::FieldDrift,
+                shape_sanitized: &shape,
+                occurrence_digest: [7; 32],
+                execution_id: None,
+                observed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(
+                    "/api/v1/admin/protocol-observations?provider_id=provider-alpha&kind=field_drift&limit=10&offset=0",
+                )
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let response = response_json(response).await;
+        assert_eq!(response["total"], 1);
+        assert_eq!(response["items"][0]["provider_id"], "provider-alpha");
+        assert_eq!(response["items"][0]["surface"], "submission_verify");
+        assert_eq!(response["items"][0]["kind"], "field_drift");
+        assert_eq!(response["items"][0]["shape_sanitized"], shape);
+        assert_eq!(response["items"][0]["occurrence_count"], 1);
+
+        let invalid = app
+            .oneshot(
+                Request::get("/api/v1/admin/protocol-observations?kind=not-real")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(invalid).await["error"]["code"],
+            "invalid_protocol_observation_kind"
+        );
     }
 
     #[tokio::test]

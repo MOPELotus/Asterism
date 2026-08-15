@@ -15,6 +15,7 @@ pub mod credits;
 pub mod execution;
 pub mod external_oauth;
 pub mod id;
+pub mod protocol_observation;
 pub mod question;
 pub mod question_read_attempt;
 pub mod question_session;
@@ -82,6 +83,9 @@ pub use external_oauth::{
     ExternalOauthState, MAX_EXTERNAL_OAUTH_TTL_SECONDS,
 };
 pub use id::*;
+pub use protocol_observation::{
+    ProtocolObservation, ProtocolObservationError, ProtocolObservationKind, ProtocolSurface,
+};
 pub use question::{
     AnswerCandidate, AnswerConfidence, AnswerConfidenceError, AnswerPair, AnswerSource,
     NormalizedAnswer, Question, QuestionAttachment, QuestionAttachmentKind,

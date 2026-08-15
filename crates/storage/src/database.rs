@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 63);
+        assert_eq!(migration_count, 64);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -230,6 +230,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(question_read_attempt_continuations, 1);
+
+        let protocol_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' \
+             AND name IN ('protocol_observations', 'protocol_observation_occurrences')",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(protocol_tables, 2);
     }
 
     #[tokio::test]

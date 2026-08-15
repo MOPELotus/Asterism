@@ -1,11 +1,14 @@
 use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use asterism_auth::Argon2idPasswordService;
-use asterism_domain::{Permission, Role, Timestamp, User, UserId, UserStatus};
+use asterism_domain::{
+    Permission, ProtocolObservationKind, ProviderId, Role, Timestamp, User, UserId, UserStatus,
+};
 use asterism_secrets::SecretString;
 use asterism_storage::{
-    AuditFilter, AuditQueryRepository, SqliteAdminRepository, UserAdminCreate,
-    UserAdminCreateOutcome, UserAdminRepository, UserAdminUpdate, UserAdminUpdateOutcome,
+    AuditFilter, AuditQueryRepository, ProtocolObservationRepository, SqliteAdminRepository,
+    SqliteProtocolObservationRepository, UserAdminCreate, UserAdminCreateOutcome,
+    UserAdminRepository, UserAdminUpdate, UserAdminUpdateOutcome,
 };
 use axum::{
     Extension, Json,
@@ -208,6 +211,51 @@ pub(super) async fn list_audit(
     ))
 }
 
+pub(super) async fn list_protocol_observations(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    query: Result<Query<ProtocolObservationListQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    auth.require_user_manage()?;
+    let query = query.map(|Query(query)| query).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_protocol_observation_query",
+            "protocol observation query parameters are invalid",
+        )
+    })?;
+    let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE);
+    let offset = query.offset.unwrap_or_default();
+    validate_page(limit, offset)?;
+    let provider_id = query
+        .provider_id
+        .map(ProviderId::new)
+        .transpose()
+        .map_err(|_| ApiError::bad_request("invalid_provider_id", "provider ID is invalid"))?;
+    let kind: Option<ProtocolObservationKind> = query
+        .kind
+        .map(|kind| serde_json::from_value(serde_json::Value::String(kind)))
+        .transpose()
+        .map_err(|_| {
+            ApiError::bad_request(
+                "invalid_protocol_observation_kind",
+                "protocol observation kind is invalid",
+            )
+        })?;
+    let page = SqliteProtocolObservationRepository::new(state.database)
+        .list_protocol_observations(provider_id.as_ref(), kind, limit, offset)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(crate::auth::no_store(
+        Json(ProtocolObservationPageResponse {
+            items: page.items,
+            total: page.total,
+            limit,
+            offset,
+        })
+        .into_response(),
+    ))
+}
+
 fn parse_page(query: Result<Query<PageQuery>, QueryRejection>) -> Result<(u32, u64), ApiError> {
     let query = query.map(|Query(query)| query).map_err(|_| {
         ApiError::bad_request("invalid_admin_query", "admin query parameters are invalid")
@@ -269,6 +317,15 @@ fn required_request_id(headers: &HeaderMap) -> Result<&str, ApiError> {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PageQuery {
+    limit: Option<u32>,
+    offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProtocolObservationListQuery {
+    provider_id: Option<String>,
+    kind: Option<String>,
     limit: Option<u32>,
     offset: Option<u64>,
 }
@@ -352,6 +409,14 @@ struct UserProfilePageResponse {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 struct AuditPageResponse {
     items: Vec<asterism_domain::AuditRecord>,
+    total: u64,
+    limit: u32,
+    offset: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct ProtocolObservationPageResponse {
+    items: Vec<asterism_domain::ProtocolObservation>,
     total: u64,
     limit: u32,
     offset: u64,

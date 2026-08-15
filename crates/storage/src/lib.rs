@@ -16,6 +16,7 @@ mod execution;
 mod external_oauth;
 mod lease;
 mod outbox;
+mod protocol_observation;
 mod provider_account;
 mod provider_runtime_settings;
 mod question;
@@ -48,6 +49,7 @@ pub use database::{Database, StorageError};
 pub use execution::SqliteExecutionRepository;
 pub use lease::{LeaseAcquireOutcome, SqliteExecutionLeaseRepository};
 pub use outbox::{FailureDisposition, OutboxHealth, OutboxRecord, SqliteOutboxRepository};
+pub use protocol_observation::SqliteProtocolObservationRepository;
 pub use provider_account::SqliteProviderAccountRepository;
 pub use provider_runtime_settings::SqliteProviderRuntimeSettingsRepository;
 pub use question::SqliteQuestionSnapshotRepository;
@@ -94,17 +96,19 @@ pub use repository::{
     ExecutionStrictCompletionRetryConfirmation, ExecutionStrictCompletionRetryRequest,
     ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, ExternalOauthClaim,
     GlobalAnswerCorpusEvidence, OutboxRepository, PendingBrowserBridgeResult, PriorAnswerEvidence,
-    ProviderAccountRepository, ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRecord,
-    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget,
-    ProviderRuntimeSettingsWriteOutcome, ProviderRuntimeSettingsWriteRequest,
-    QuestionReadAttemptRepository, QuestionReadContinuation, QuestionReadContinuationAttachRequest,
-    QuestionReadContinuationRepository, QuestionReadContinuationRepositoryFactory,
-    QuestionReadMaterializeOutcome, QuestionReadMaterializeRequest, QuestionReadOperation,
-    QuestionReadOperationAcceptRequest, QuestionReadOperationFinishOutcome,
-    QuestionReadOperationIssueOutcome, QuestionReadOperationIssueRequest,
-    QuestionReadOperationState, QuestionSessionArtifactAttachRequest,
-    QuestionSessionArtifactRepository, QuestionSessionArtifactRepositoryFactory,
-    QuestionSessionClaimOutcome, QuestionSessionContinuation, QuestionSessionMaterializeRequest,
+    ProtocolObservationPage, ProtocolObservationRecordOutcome, ProtocolObservationRecordRequest,
+    ProtocolObservationRepository, ProviderAccountRepository, ProviderAccountRuntimeRepository,
+    ProviderRuntimeSettingsRecord, ProviderRuntimeSettingsRepository,
+    ProviderRuntimeSettingsTarget, ProviderRuntimeSettingsWriteOutcome,
+    ProviderRuntimeSettingsWriteRequest, QuestionReadAttemptRepository, QuestionReadContinuation,
+    QuestionReadContinuationAttachRequest, QuestionReadContinuationRepository,
+    QuestionReadContinuationRepositoryFactory, QuestionReadMaterializeOutcome,
+    QuestionReadMaterializeRequest, QuestionReadOperation, QuestionReadOperationAcceptRequest,
+    QuestionReadOperationFinishOutcome, QuestionReadOperationIssueOutcome,
+    QuestionReadOperationIssueRequest, QuestionReadOperationState,
+    QuestionSessionArtifactAttachRequest, QuestionSessionArtifactRepository,
+    QuestionSessionArtifactRepositoryFactory, QuestionSessionClaimOutcome,
+    QuestionSessionContinuation, QuestionSessionMaterializeRequest,
     QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
     QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
     QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,

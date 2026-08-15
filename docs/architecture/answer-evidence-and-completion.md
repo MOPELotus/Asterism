@@ -254,3 +254,21 @@ ordinary task failure never becomes account-level protocol change. The health
 read exposes the exact Execution and timestamp for a live drift diagnosis,
 performs no Provider call and remains bound to the account owner. Authentication
 fallback execution remains a separate Provider/Core recovery workflow.
+
+## Protocol Observation Inbox
+
+Unknown protocol shapes remain fail-closed, but Core may retain a bounded,
+sanitized observation for later donor audit. An observation contains Provider,
+shared protocol surface, drift kind, a digest-bound JSON shape, first/last seen
+times, occurrence count and an optional same-Provider Execution reference. It
+never stores an original response body, credential, Cookie, authorization
+header or other secret-shaped field.
+
+The shape digest groups equivalent drift. A separate occurrence digest makes a
+single event replay idempotent, so worker recovery cannot inflate the count;
+new occurrences increment the aggregate transactionally. Execution provenance
+is accepted only when its Task's ProviderAccount matches the declared
+Provider. The instance inbox is Master-only and filterable by Provider and kind.
+Provider call sites still own the decision to emit a redacted shape after they
+fail closed; adding the durable inbox does not make unconnected drift paths
+observable by itself.

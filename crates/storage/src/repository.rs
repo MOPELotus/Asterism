@@ -16,12 +16,13 @@ use asterism_domain::{
     ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
     GlobalAnswerCorpusEntryId, GlobalCorpusQuestionAsset, GlobalSemanticAnswer, LogLevel,
     OrchestrationState, PriceQuote, PrivateAnswerEvidence, PrivateAnswerEvidenceId,
-    ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
-    Question, QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId,
-    QuestionSession, QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId,
-    SubmissionAttemptReceipt, SubmissionDraft, SubmissionDraftId, SubmissionResult,
-    SubmissionResultId, Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction,
-    Timestamp, User, UserId, UserProfile, UserStatus, WebSession, WebSessionId,
+    ProtocolObservation, ProtocolObservationKind, ProtocolSurface, ProviderAccount,
+    ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
+    QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId, QuestionSession,
+    QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
+    SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
+    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
+    UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
     BrowserBridgeWorkflowResult, BrowserSessionSpec, ProviderExecutionPlanArtifact,
@@ -377,6 +378,46 @@ pub trait AccountHealthRepository: Send + Sync {
         owner_id: UserId,
         account_id: ProviderAccountId,
     ) -> Result<Option<AccountHealth>, StorageError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct ProtocolObservationRecordRequest<'a> {
+    pub provider_id: ProviderId,
+    pub surface: ProtocolSurface,
+    pub kind: ProtocolObservationKind,
+    pub shape_sanitized: &'a serde_json::Value,
+    pub occurrence_digest: [u8; 32],
+    pub execution_id: Option<ExecutionId>,
+    pub observed_at: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProtocolObservationRecordOutcome {
+    Created(ProtocolObservation),
+    Updated(ProtocolObservation),
+    Duplicate(ProtocolObservation),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProtocolObservationPage {
+    pub items: Vec<ProtocolObservation>,
+    pub total: u64,
+}
+
+#[async_trait]
+pub trait ProtocolObservationRepository: Send + Sync {
+    async fn record_protocol_observation(
+        &self,
+        request: ProtocolObservationRecordRequest<'_>,
+    ) -> Result<ProtocolObservationRecordOutcome, StorageError>;
+
+    async fn list_protocol_observations(
+        &self,
+        provider_id: Option<&ProviderId>,
+        kind: Option<ProtocolObservationKind>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<ProtocolObservationPage, StorageError>;
 }
 
 /// Internal Task lookup for an already authorized Scheduler execution.

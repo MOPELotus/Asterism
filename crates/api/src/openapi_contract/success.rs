@@ -132,6 +132,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("updateAdminUser", "UserProfile"),
     ("grantUserCredits", "CreditGrantResponse"),
     ("listAuditRecords", "AuditPageResponse"),
+    (
+        "listProtocolObservations",
+        "ProtocolObservationPageResponse",
+    ),
     ("getOwnCreditAccount", "CreditAccount"),
     ("listOwnCreditTransactions", "CreditTransactionPageResponse"),
     ("listOwnCreditReservations", "CreditReservationPageResponse"),
@@ -430,6 +434,11 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
         ),
         ("AuthState", auth_state_schema()),
         ("AccountHealth", account_health_schema()),
+        ("ProtocolObservation", protocol_observation_schema()),
+        (
+            "ProtocolObservationPageResponse",
+            page_response("ProtocolObservation"),
+        ),
         (
             "ProviderAccountResponse",
             object(
@@ -2285,6 +2294,35 @@ fn account_health_schema() -> Value {
             "protocol_drift_execution_id": nullable_uuid(),
             "protocol_drift_at": nullable_timestamp(),
             "observed_at": timestamp()
+        }),
+    )
+}
+
+fn protocol_observation_schema() -> Value {
+    object(
+        &[
+            "id",
+            "provider_id",
+            "surface",
+            "kind",
+            "shape_digest",
+            "shape_sanitized",
+            "occurrence_count",
+            "first_seen_at",
+            "last_seen_at",
+            "last_execution_id",
+        ],
+        json!({
+            "id": uuid(),
+            "provider_id": provider_id(),
+            "surface": string_enum(&["authentication", "course_inventory", "task_inventory", "task_detail", "task_progress", "question_inventory", "question_parse", "answer_resolve", "submission_build", "submission_execute", "submission_verify", "task_execution", "browser_bridge", "other"]),
+            "kind": string_enum(&["unknown_question_kind", "unknown_result_shape", "unknown_task_type", "field_drift", "endpoint_version_drift", "other"]),
+            "shape_digest": {"type": "array", "minItems": 32, "maxItems": 32, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+            "shape_sanitized": {},
+            "occurrence_count": {"type": "integer", "format": "int64", "minimum": 1},
+            "first_seen_at": timestamp(),
+            "last_seen_at": timestamp(),
+            "last_execution_id": nullable_uuid()
         }),
     )
 }

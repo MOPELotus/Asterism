@@ -4527,3 +4527,28 @@ coverage verifies a new Idle account reports typed AuthRequired. OpenAPI
 describes every health and reason value. This slice is observation only; the
 audited stored-session, renewal, BrowserBridge/Capture and HumanRequired
 fallback chain remains a later execution workflow.
+
+## Two-hundred-and-forty-sixth Phase 0 slice
+
+Migration 064 adds the Protocol Observation Inbox as an aggregate table plus a
+separate occurrence ledger. The aggregate is unique by Provider, protocol
+surface, drift kind and SHA-256 shape digest. Each occurrence has its own
+non-zero digest, optional Execution and observation time; replaying that digest
+returns the existing aggregate without incrementing its count, while a distinct
+occurrence updates first/last seen times and count in one immediate transaction.
+
+Domain accepts only JSON shapes at most 64 KiB, binds the stored digest to the
+canonical serialized shape and rejects secret-shaped keys such as Cookie,
+authorization, password and access/refresh/client/session secrets. Storage
+rechecks the bound. When an occurrence names an Execution, Storage proves its
+Task's ProviderAccount has the same Provider ID before any write. A mismatched
+or missing Execution, unsafe shape or malformed digest leaves both tables
+unchanged.
+
+Masters can list the instance inbox through a bounded `no-store` API filtered
+by Provider and drift kind. The response exposes only the sanitized shape and
+typed aggregate provenance; OpenAPI includes all surfaces and kinds. Storage
+coverage proves aggregation, replay safety, Provider/Execution binding and
+secret rejection, while API coverage proves filtered reads and typed query
+failure. Provider and Engine drift branches are not silently considered wired:
+each still needs an explicit fail-closed emission call in later slices.
