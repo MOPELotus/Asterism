@@ -36,6 +36,7 @@
 | Fill/short result text is assumed uniquely correct | `chaoxing-exam` uses editors and batch evidence reports pending manual grading | Require exact result DOM plus standard/reference/pending label fixtures before harvesting or confirming these types |
 | Synthetic history transport is mistaken for live support | The audited Chapter result is iframe-bound and no current Native list/read endpoint is established | Keep `AnswerHistoryHarvest` absent from the Native factory until a real BrowserBridge/Capture transport proves pagination, `workAnswerId` binding and read-only result access |
 | Generic incomplete state is over-diagnosed | `NotOpen` and Pending/InProgress collapse multiple donor causes, while only Expired is an exact closed-window fact | Map only fresh Expired verification to `WindowClosed`; leave the other states on Core's conservative `RemoteUnknown` path until result provenance distinguishes prerequisite, teacher review, duration or human action |
+| Protocol observation leaks response content | Unknown type/result branches can contain DOM text, answer values, route identities or ephemeral fields even when the final error message is sanitized | Observe only numeric codes, controlled enums, bounded counts and static field-presence booleans; collapse unknown strings to `other`/presence and leave branches unobserved when no safe shape is already available |
 
 ## Live-validation gate
 

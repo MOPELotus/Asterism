@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use asterism_domain::{
-    NormalizedAnswer, Question, QuestionKind, SelectedAnswer, SubmissionPayloadEncoding,
-    SubmissionPayloadFieldPreview, SubmissionPayloadPreview,
+    NormalizedAnswer, ProtocolObservationKind, ProtocolSurface, Question, QuestionKind,
+    SelectedAnswer, SubmissionPayloadEncoding, SubmissionPayloadFieldPreview,
+    SubmissionPayloadPreview,
 };
 use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
@@ -191,20 +192,54 @@ fn validate_answer_shape(
         {
             Ok(())
         }
-        (
-            QuestionKind::Matching
-            | QuestionKind::Ordering
-            | QuestionKind::Composite
-            | QuestionKind::Unknown,
-            _,
-        ) => Err(ProviderError::new(
-            ProviderErrorKind::UnsupportedTask,
-            "Chaoxing Exam/Work preview does not yet encode this Question kind",
-        )),
+        (QuestionKind::Unknown, _) => Err(unknown_question_kind(question)),
+        (QuestionKind::Matching | QuestionKind::Ordering | QuestionKind::Composite, _) => {
+            Err(ProviderError::new(
+                ProviderErrorKind::UnsupportedTask,
+                "Chaoxing Exam/Work preview does not yet encode this Question kind",
+            ))
+        }
         _ => Err(invalid_input(
             "Chaoxing Work answer type does not match its Question kind",
         )),
     }
+}
+
+fn unknown_question_kind(question: &Question) -> ProviderError {
+    let page_kind = match question
+        .metadata_sanitized
+        .get("page_kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("chapter_work_mobile") => "chapter_work_mobile",
+        Some("exam_mobile") => "exam_mobile",
+        Some("work_preview") => "work_preview",
+        Some("exam_preview") => "exam_preview",
+        _ => "unknown",
+    };
+    let shape = serde_json::json!({
+        "schema": "chaoxing.question-type-observation.v1",
+        "page_kind": page_kind,
+        "provider_type_code": question
+            .metadata_sanitized
+            .get("provider_type_code")
+            .and_then(serde_json::Value::as_u64),
+    });
+    ProviderError::new(
+        ProviderErrorKind::UnsupportedTask,
+        "Chaoxing Exam/Work preview does not yet encode this Question kind",
+    )
+    .try_with_protocol_observation(
+        ProtocolSurface::SubmissionBuild,
+        ProtocolObservationKind::UnknownQuestionKind,
+        shape,
+    )
+    .unwrap_or_else(|_| {
+        ProviderError::new(
+            ProviderErrorKind::UnsupportedTask,
+            "Chaoxing Exam/Work preview does not yet encode this Question kind",
+        )
+    })
 }
 
 fn selections_exist(question: &Question, values: &[String]) -> bool {
@@ -453,6 +488,27 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(unsupported.kind, ProviderErrorKind::UnsupportedTask);
+
+        questions[0].kind = QuestionKind::Unknown;
+        questions[0].metadata_sanitized["provider_type_code"] = serde_json::json!(12);
+        let observed = capability
+            .build_submission_preview(&context(), "work:100:200:work-1", &questions, &selected)
+            .await
+            .unwrap_err();
+        let observation = observed.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::SubmissionBuild);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownQuestionKind
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            serde_json::json!({
+                "schema": "chaoxing.question-type-observation.v1",
+                "page_kind": "work_preview",
+                "provider_type_code": 12,
+            })
+        );
     }
 
     #[tokio::test]

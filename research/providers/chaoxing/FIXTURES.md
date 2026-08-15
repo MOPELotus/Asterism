@@ -281,3 +281,8 @@ every fixture before staging it.
 - Completion-diagnosis regression maps only a fresh Expired verification to
   `WindowClosed`. Pending, InProgress, NotOpen, Removed, Unknown and Completed
   must not be guessed as prerequisite, teacher review, duration or score facts.
+- Protocol-observation regressions cover unknown numeric Question type,
+  unknown Chapter resource structure and unknown Work result shape. Deliberate
+  `PRIVATE_*` raw values must remain absent from serialized observations; only
+  controlled page/module classes, counts and known-field presence may cross the
+  boundary.

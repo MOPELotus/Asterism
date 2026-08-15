@@ -4,10 +4,10 @@ use std::{
 };
 
 use asterism_domain::{
-    AnswerCandidate, AnswerConfidence, AnswerSource, NormalizedAnswer, Question, QuestionId,
-    QuestionKind, RemoteState, SubmissionDraft, SubmissionQuestionVerification,
-    SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionScore,
-    SubmissionVerificationSnapshot, SubmissionVerificationStatus,
+    AnswerCandidate, AnswerConfidence, AnswerSource, NormalizedAnswer, ProtocolObservationKind,
+    ProtocolSurface, Question, QuestionId, QuestionKind, RemoteState, SubmissionDraft,
+    SubmissionQuestionVerification, SubmissionQuestionVerificationStatus, SubmissionReceipt,
+    SubmissionScore, SubmissionVerificationSnapshot, SubmissionVerificationStatus,
 };
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use chrono::Utc;
@@ -1324,9 +1324,7 @@ fn parse_view_snapshot(
         &text,
         &["作业详情", "我的答案", "待批阅", "已批阅", "已提交"],
     ) {
-        return Err(protocol_drift(
-            "Chaoxing Work view has no submitted-state evidence",
-        ));
+        return Err(unknown_work_view_shape(html));
     }
     let mut remote_answers = BTreeMap::new();
     for node in html.select(&selector(".questionLi")) {
@@ -1398,6 +1396,32 @@ fn parse_view_snapshot(
         verified_at: Utc::now(),
     };
     validate_snapshot(snapshot)
+}
+
+fn unknown_work_view_shape(html: &Html) -> ProviderError {
+    let shape = json!({
+        "schema": "chaoxing.work-result-shape.v1",
+        "question_count": html.select(&selector(".questionLi")).count(),
+        "has_type_input": html
+            .select(&selector("input[id^='answertype']"))
+            .next()
+            .is_some(),
+        "has_visible_answer_node": html
+            .select(&selector(".mark_answer, .stem_answer, .my-answer"))
+            .next()
+            .is_some(),
+        "has_submission_form": html.select(&selector("form")).next().is_some(),
+    });
+    ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        "Chaoxing Work view has no submitted-state evidence",
+    )
+    .try_with_protocol_observation(
+        ProtocolSurface::SubmissionVerify,
+        ProtocolObservationKind::UnknownResultShape,
+        shape,
+    )
+    .unwrap_or_else(|_| protocol_drift("Chaoxing Work view has no submitted-state evidence"))
 }
 
 fn pending_snapshot(
@@ -1865,6 +1889,38 @@ mod tests {
         let pending = parse_verification_snapshot(&editor, &plan, &draft).unwrap();
         assert_eq!(pending.status, SubmissionVerificationStatus::Pending);
         assert_eq!(pending.remote_state, Some(RemoteState::Pending));
+    }
+
+    #[tokio::test]
+    async fn unknown_work_view_shape_is_observed_without_page_content() {
+        let draft = draft().await;
+        let plan = ChaoxingSubmissionPlan::from_draft(&draft).unwrap();
+        let view = ChaoxingWorkVerificationDocument::try_new(
+            ChaoxingWorkVerificationRoute::View,
+            "<html><body><form><div class='questionLi'><input id='answertypePRIVATE_ID' value='PRIVATE_TYPE'><div class='mark_answer'>PRIVATE_RESULT_TEXT</div></div></form></body></html>".to_owned(),
+        )
+        .unwrap();
+        let error = parse_verification_snapshot(&view, &plan, &draft).unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::SubmissionVerify);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({
+                "schema": "chaoxing.work-result-shape.v1",
+                "question_count": 1,
+                "has_type_input": true,
+                "has_visible_answer_node": true,
+                "has_submission_form": true,
+            })
+        );
+        let encoded = serde_json::to_string(&observation).unwrap();
+        assert!(!encoded.contains("PRIVATE_ID"));
+        assert!(!encoded.contains("PRIVATE_TYPE"));
+        assert!(!encoded.contains("PRIVATE_RESULT_TEXT"));
     }
 
     #[tokio::test]

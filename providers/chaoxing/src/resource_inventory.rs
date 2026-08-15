@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
+use asterism_domain::{
+    AssessmentClass, ProtocolObservationKind, ProtocolSurface, RemoteState, SourceType,
+    TaskCapability,
+};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult, RemoteTask};
 use asterism_secrets::SecretString;
 use serde_json::{Map, Value, json};
@@ -855,9 +858,8 @@ fn parse_resource_attachment(
     if !passed && !job && !read_pending {
         return Ok(None);
     }
-    let kind = classify_resource_kind(&card_type, property).ok_or_else(|| {
-        protocol_drift("Chaoxing chapter contains an unknown job attachment type")
-    })?;
+    let kind = classify_resource_kind(&card_type, property)
+        .ok_or_else(|| unknown_resource_type(card, property, passed, job, &card_type))?;
     let task_id = resource_identity(card, property)?;
     validate_component(&task_id, "resource identity")?;
     let remote_id = format!(
@@ -1022,6 +1024,52 @@ fn classify_resource_kind(card_type: &str, property: &Map<String, Value>) -> Opt
             _ => None,
         }
     }
+}
+
+fn unknown_resource_type(
+    card: &Map<String, Value>,
+    property: &Map<String, Value>,
+    passed: bool,
+    job: bool,
+    card_type: &str,
+) -> ProviderError {
+    let module_class = match optional_unchecked_string(property, "module")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "insertvideo" => "insertvideo",
+        "insertaudio" => "insertaudio",
+        "insertdoc" => "insertdoc",
+        "insertbook" => "insertbook",
+        "insertflash" => "insertflash",
+        "work" => "work",
+        "" => "absent",
+        _ => "other",
+    };
+    let shape = json!({
+        "schema": "chaoxing.chapter-resource-shape.v1",
+        "outer_type_present": !card_type.is_empty(),
+        "module_class": module_class,
+        "job": job,
+        "passed": passed,
+        "has_job_id": card.contains_key("jobid"),
+        "has_object_id": card.contains_key("objectId"),
+        "has_property_id": property.contains_key("id"),
+        "has_read_marker": property.contains_key("read"),
+        "has_live_markers": property.contains_key("liveId")
+            || property.contains_key("streamName")
+            || property.contains_key("vdoid"),
+    });
+    ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        "Chaoxing chapter contains an unknown job attachment type",
+    )
+    .try_with_protocol_observation(
+        ProtocolSurface::TaskInventory,
+        ProtocolObservationKind::UnknownTaskType,
+        shape,
+    )
+    .unwrap_or_else(|_| protocol_drift("Chaoxing chapter contains an unknown job attachment type"))
 }
 
 fn resource_identity(
@@ -1269,14 +1317,35 @@ mod tests {
 
     #[test]
     fn card_parser_rejects_unknown_jobs_duplicates_and_malformed_marg() {
+        let unknown = parse_chapter_resource_inventory(
+            &CARDS_MIXED.replacen("\"type\":\"video\"", "\"type\":\"PRIVATE_UNKNOWN_TYPE\"", 1),
+            &scope(),
+            "4001",
+            0,
+        )
+        .unwrap_err();
+        let observation = unknown.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(observation.kind, ProtocolObservationKind::UnknownTaskType);
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({
+                "schema": "chaoxing.chapter-resource-shape.v1",
+                "outer_type_present": true,
+                "module_class": "insertvideo",
+                "job": true,
+                "passed": false,
+                "has_job_id": true,
+                "has_object_id": true,
+                "has_property_id": false,
+                "has_read_marker": false,
+                "has_live_markers": false,
+            })
+        );
         assert!(
-            parse_chapter_resource_inventory(
-                &CARDS_MIXED.replace("\"type\":\"video\"", "\"type\":\"unknown\""),
-                &scope(),
-                "4001",
-                0,
-            )
-            .is_err()
+            !serde_json::to_string(&observation)
+                .unwrap()
+                .contains("PRIVATE_UNKNOWN_TYPE")
         );
         assert!(
             parse_chapter_resource_inventory(

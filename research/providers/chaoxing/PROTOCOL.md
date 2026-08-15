@@ -607,6 +607,23 @@ teacher review. Those states return no Provider override and Core retains its
 conservative `RemoteUnknown` diagnosis. A completed result always wins in Core,
 and score or answer mismatch is not reclassified as a completion reason here.
 
+## Protocol drift observations
+
+Three fail-closed Provider branches attach Core-validated structural evidence:
+
+- SubmissionBuild records an unknown numeric Provider Question type code plus a
+  controlled page-kind enum;
+- TaskInventory records an unknown Chapter attachment using only known module
+  classification and field-presence booleans;
+- SubmissionVerify records an unrecognized Work result using only Question
+  count and known selector-presence booleans.
+
+The observations never contain source HTML/JSON, route values, task or Question
+identities, status/answer text, Cookies or ephemeral credentials. Unknown raw
+type/module values are deliberately collapsed to presence or `other`. Branches
+which have no already-parsed safe structural fact retain their legacy sanitized
+error without an observation rather than deriving one from the error message.
+
 Strict Completion stops after independently verified completion. Score
 Improvement evaluates fresh score and result-route retake eligibility under a
 separate bounded policy. Chapter `redoTest` and formal Exam `reTest` create new
