@@ -15,9 +15,9 @@ use crate::execution::{assert_worker_claims, validate_worker_token};
 use crate::{
     CompletionWorkflowCreateOutcome, CompletionWorkflowRepository, Database,
     ScoreImprovementBeginRequest, ScoreImprovementObserveRequest, ScoreImprovementWorkflowRecord,
-    StorageError, StrictCompletionBeginRequest, StrictCompletionExecutionObservationRecord,
-    StrictCompletionExecutionObservationRequest, StrictCompletionObserveRequest,
-    StrictCompletionWorkflowRecord,
+    SqliteExecutionRepository, StorageError, StrictCompletionBeginRequest,
+    StrictCompletionExecutionObservationRecord, StrictCompletionExecutionObservationRequest,
+    StrictCompletionObserveRequest, StrictCompletionWorkflowRecord,
 };
 
 #[derive(Clone, Debug)]
@@ -388,6 +388,92 @@ impl CompletionWorkflowRepository for SqliteCompletionWorkflowRepository {
         .await?;
         transaction.commit().await?;
         Ok(record)
+    }
+}
+
+#[async_trait]
+impl CompletionWorkflowRepository for SqliteExecutionRepository {
+    async fn create_strict_completion_workflow(
+        &self,
+        workflow: &StrictCompletionWorkflow,
+    ) -> Result<CompletionWorkflowCreateOutcome<StrictCompletionWorkflowRecord>, StorageError> {
+        SqliteCompletionWorkflowRepository::new(self.database().clone())
+            .create_strict_completion_workflow(workflow)
+            .await
+    }
+
+    async fn find_owned_strict_completion_workflow(
+        &self,
+        owner_user_id: UserId,
+        task_id: TaskId,
+    ) -> Result<Option<StrictCompletionWorkflowRecord>, StorageError> {
+        SqliteCompletionWorkflowRepository::new(self.database().clone())
+            .find_owned_strict_completion_workflow(owner_user_id, task_id)
+            .await
+    }
+
+    async fn begin_strict_completion_attempt(
+        &self,
+        request: StrictCompletionBeginRequest,
+    ) -> Result<StrictCompletionWorkflowRecord, StorageError> {
+        SqliteCompletionWorkflowRepository::new(self.database().clone())
+            .begin_strict_completion_attempt(request)
+            .await
+    }
+
+    async fn observe_strict_completion(
+        &self,
+        request: StrictCompletionObserveRequest,
+    ) -> Result<StrictCompletionWorkflowRecord, StorageError> {
+        SqliteCompletionWorkflowRepository::new(self.database().clone())
+            .observe_strict_completion(request)
+            .await
+    }
+
+    async fn record_strict_completion_execution_observation(
+        &self,
+        request: StrictCompletionExecutionObservationRequest<'_>,
+    ) -> Result<StrictCompletionExecutionObservationRecord, StorageError> {
+        SqliteCompletionWorkflowRepository::new(self.database().clone())
+            .record_strict_completion_execution_observation(request)
+            .await
+    }
+
+    async fn create_score_improvement_workflow(
+        &self,
+        workflow: &ScoreImprovementWorkflow,
+    ) -> Result<CompletionWorkflowCreateOutcome<ScoreImprovementWorkflowRecord>, StorageError> {
+        SqliteCompletionWorkflowRepository::new(self.database().clone())
+            .create_score_improvement_workflow(workflow)
+            .await
+    }
+
+    async fn find_owned_score_improvement_workflow(
+        &self,
+        owner_user_id: UserId,
+        task_id: TaskId,
+    ) -> Result<Option<ScoreImprovementWorkflowRecord>, StorageError> {
+        SqliteCompletionWorkflowRepository::new(self.database().clone())
+            .find_owned_score_improvement_workflow(owner_user_id, task_id)
+            .await
+    }
+
+    async fn begin_score_improvement_attempt(
+        &self,
+        request: ScoreImprovementBeginRequest,
+    ) -> Result<ScoreImprovementWorkflowRecord, StorageError> {
+        SqliteCompletionWorkflowRepository::new(self.database().clone())
+            .begin_score_improvement_attempt(request)
+            .await
+    }
+
+    async fn observe_score_improvement(
+        &self,
+        request: ScoreImprovementObserveRequest,
+    ) -> Result<ScoreImprovementWorkflowRecord, StorageError> {
+        SqliteCompletionWorkflowRepository::new(self.database().clone())
+            .observe_score_improvement(request)
+            .await
     }
 }
 

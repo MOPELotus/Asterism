@@ -4295,3 +4295,25 @@ diagnosis. Storage coverage exercises replay plus three separate Executions:
 retryable diagnosis, attempt-limit stop, then verified completion. The runner
 call sites are intentionally the next slice; this slice establishes their
 atomic crash-recovery boundary first.
+
+## Two-hundred-and-thirty-sixth Phase 0 slice
+
+The execution worker now writes final reliable completion observations through
+the atomic Strict workflow ledger before it closes the worker-owned Execution.
+This covers ordinary single-capability results which satisfy their verified
+execution goal, fresh goal verification without replaying mutation, terminal
+SubmissionVerify results, and terminal submission readback after verification
+recovery is exhausted. The existing SQLite execution repository delegates the
+completion aggregate on the same Database, so daemon construction and worker
+concurrency ownership do not gain a second mutable connection or a parallel
+state owner.
+
+Execution success remains separate from Task completion. A verified
+DurationReport may finish its requested operation while a Pending/InProgress or
+Unknown completion observation stops Strict Completion as `RemoteUnknown` when
+the Provider has no stronger audited diagnosis. A fresh generic Completed or
+Submission Confirmed observation instead creates a Completed workflow and
+ledger row. Runner integration tests assert all three cases against durable
+rows. Composite execution and generic execution-recovery final observations
+remain explicit next slices; intermediate results which are still entering
+verification recovery are deliberately not recorded as final observations.

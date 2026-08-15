@@ -30,23 +30,23 @@ use asterism_scheduler::{
 };
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
-    ExecutionAtomicMutationIssueOutcome, ExecutionAtomicMutationIssueRequest,
-    ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,
-    ExecutionAtomicMutationRepository, ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest,
-    ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
-    ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
-    ExecutionCapabilityStepState, ExecutionLeaseRepository, ExecutionLogAppendRequest,
-    ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
-    ExecutionRepository, ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository,
-    LeaseAcquireOutcome, ProviderAccountRuntimeRepository, QuestionSessionArtifactRepository,
-    QuestionSessionArtifactRepositoryFactory, QuestionSessionNextMaterializeOutcome,
-    QuestionSessionNextMaterializeRequest, QuestionSessionOperation,
-    QuestionSessionOperationAcceptRequest, QuestionSessionOperationFinishOutcome,
-    QuestionSessionOperationIssueOutcome, QuestionSessionOperationIssueRequest,
-    QuestionSessionOperationState, QuestionSessionTransition, QuestionSnapshot,
-    ResolvedQuestionSessionContinuation, SchedulerRepository, StorageError,
-    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, TaskRuntimeRepository,
-    VerificationRecoveryStartRequest,
+    CompletionWorkflowRepository, ExecutionAtomicMutationIssueOutcome,
+    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
+    ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
+    ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionCapabilityCallMutation,
+    ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
+    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
+    ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest,
+    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionSubmissionRepository,
+    ExecutionVerificationRecoveryRepository, LeaseAcquireOutcome, ProviderAccountRuntimeRepository,
+    QuestionSessionArtifactRepository, QuestionSessionArtifactRepositoryFactory,
+    QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
+    QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
+    QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
+    QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionTransition,
+    QuestionSnapshot, ResolvedQuestionSessionContinuation, SchedulerRepository, StorageError,
+    StrictCompletionExecutionObservationRequest, SubmissionReceiptPersistRequest,
+    SubmissionResultPersistRequest, TaskRuntimeRepository, VerificationRecoveryStartRequest,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -261,7 +261,8 @@ where
         + ExecutionAtomicMutationRepository
         + ExecutionCapabilityStepRepository
         + ExecutionSubmissionRepository
-        + ExecutionVerificationRecoveryRepository,
+        + ExecutionVerificationRecoveryRepository
+        + CompletionWorkflowRepository,
     L: ExecutionLeaseRepository,
     S: SchedulerRepository,
     A: ProviderAccountRuntimeRepository,
@@ -1059,6 +1060,15 @@ where
                 at,
             })
             .await?;
+        self.record_submission_completion_observation(
+            job,
+            attempt_id,
+            prepared,
+            &result.verification,
+            at,
+            correlation_id,
+        )
+        .await?;
         self.finish_recovery_from_submission_result(job, &result, at, correlation_id)
             .await
     }
@@ -2202,6 +2212,81 @@ where
         }))
     }
 
+    async fn record_provider_completion_observation(
+        &self,
+        job: &ScheduledJob,
+        attempt: &ExecutionAttempt,
+        prepared: &PreparedProviderCall,
+        outcome: &asterism_provider_api::ExecutionOutcome,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<(), ScheduledExecutionRunError> {
+        let diagnosis = prepared
+            .capability
+            .completion_diagnosis(&prepared.request, outcome);
+        let observation = crate::observe_execution_completion(outcome, diagnosis)
+            .map_err(|_| ScheduledExecutionRunError::StateConflict)?;
+        self.record_completion_observation(
+            job,
+            attempt.id,
+            attempt.execution_id,
+            observation,
+            at,
+            correlation_id,
+        )
+        .await
+    }
+
+    async fn record_submission_completion_observation(
+        &self,
+        job: &ScheduledJob,
+        execution_attempt_id: asterism_domain::ExecutionAttemptId,
+        prepared: &PreparedSubmissionCall,
+        verification: &SubmissionVerificationSnapshot,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<(), ScheduledExecutionRunError> {
+        let diagnosis = prepared.verify.completion_diagnosis(verification);
+        let observation = crate::observe_submission_completion(verification, diagnosis)
+            .map_err(|_| ScheduledExecutionRunError::StateConflict)?;
+        self.record_completion_observation(
+            job,
+            execution_attempt_id,
+            claimed_execution_id(job)?,
+            observation,
+            at,
+            correlation_id,
+        )
+        .await
+    }
+
+    async fn record_completion_observation(
+        &self,
+        job: &ScheduledJob,
+        execution_attempt_id: asterism_domain::ExecutionAttemptId,
+        execution_id: ExecutionId,
+        observation: crate::CompletionObservation,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<(), ScheduledExecutionRunError> {
+        self.executions
+            .record_strict_completion_execution_observation(
+                StrictCompletionExecutionObservationRequest {
+                    execution_id,
+                    execution_attempt_id,
+                    scheduler_job_id: job.id,
+                    worker_id: claimed_worker(job)?,
+                    retry_confirmed: false,
+                    outcome: observation.outcome,
+                    diagnosis: observation.diagnosis,
+                    at,
+                    correlation_id,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the Provider call keeps lease renewal, persisted events and the verify-only mutation boundary visible together"
@@ -2273,8 +2358,17 @@ where
             Ok(outcome)
                 if execution_goal_verified(&prepared.request.requested_capabilities, &outcome) =>
             {
-                self.finish_success(job, attempt, Utc::now().max(now), correlation_id)
-                    .await
+                let at = Utc::now().max(now);
+                self.record_provider_completion_observation(
+                    job,
+                    attempt,
+                    prepared,
+                    &outcome,
+                    at,
+                    correlation_id,
+                )
+                .await?;
+                self.finish_success(job, attempt, at, correlation_id).await
             }
             Ok(_) => {
                 self.finish_failure(
@@ -2361,13 +2455,17 @@ where
                     &verification,
                 ) =>
             {
-                self.finish_success(
+                let at = Utc::now().max(attempt.started_at);
+                self.record_provider_completion_observation(
                     job,
                     attempt,
-                    Utc::now().max(attempt.started_at),
+                    prepared,
+                    &verification,
+                    at,
                     correlation_id,
                 )
-                .await
+                .await?;
+                self.finish_success(job, attempt, at, correlation_id).await
             }
             Ok(_) => {
                 self.begin_verification_recovery(
@@ -3056,6 +3154,15 @@ where
                 at: now,
             })
             .await?;
+        self.record_submission_completion_observation(
+            job,
+            attempt.id,
+            prepared,
+            &result.verification,
+            now,
+            correlation_id,
+        )
+        .await?;
         match status {
             SubmissionResultStatus::Confirmed => {
                 self.finish_success(job, attempt, now, correlation_id).await
@@ -4790,6 +4897,28 @@ mod tests {
         assert_eq!(mutation.2, vec![41; 32]);
         assert_eq!(mutation.3, vec![42; 32]);
         assert!(mutation.4);
+        let completion: (String, i64, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT workflow.state, json_extract(workflow.workflow_json, '$.attempts_started'), \
+                    observation.completion_outcome, \
+                    observation.diagnosis \
+             FROM strict_completion_workflows AS workflow \
+             INNER JOIN strict_completion_execution_observations AS observation \
+                     ON observation.workflow_id = workflow.id \
+             WHERE observation.execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            completion,
+            (
+                "completed".to_owned(),
+                0,
+                Some("completed".to_owned()),
+                None
+            )
+        );
     }
 
     #[tokio::test]
@@ -4981,6 +5110,22 @@ mod tests {
         assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
         assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
         assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 0);
+        let completion: (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT workflow.state, json_extract(workflow.workflow_json, '$.attempts_started'), \
+                    observation.diagnosis \
+             FROM strict_completion_workflows AS workflow \
+             INNER JOIN strict_completion_execution_observations AS observation \
+                     ON observation.workflow_id = workflow.id \
+             WHERE observation.execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            completion,
+            ("stopped".to_owned(), 1, Some("remote_unknown".to_owned()))
+        );
     }
 
     #[tokio::test]
@@ -5113,6 +5258,21 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(counts, (1, 1));
+        let completion: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT workflow.state, observation.completion_outcome, observation.diagnosis \
+             FROM strict_completion_workflows AS workflow \
+             INNER JOIN strict_completion_execution_observations AS observation \
+                     ON observation.workflow_id = workflow.id \
+             WHERE observation.execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            completion,
+            ("completed".to_owned(), Some("completed".to_owned()), None)
+        );
     }
 
     #[tokio::test]

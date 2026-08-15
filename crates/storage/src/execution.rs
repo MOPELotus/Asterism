@@ -58,6 +58,10 @@ impl SqliteExecutionRepository {
     pub const fn new(database: Database) -> Self {
         Self { database }
     }
+
+    pub(crate) const fn database(&self) -> &Database {
+        &self.database
+    }
 }
 
 #[async_trait]
