@@ -128,6 +128,10 @@ The joint durable-artifact recovery checkpoint repeated those queries again;
 all three heads and Fanyuchang's sole tag remained unchanged. It only binds the
 already-audited parent, batch and child persistence values and adds no donor
 protocol behavior.
+The pre-final recovery-evidence checkpoint repeated the three remote head/tag
+queries with the same result. Its hash-only time binding and read-only recovery
+verifier preserve the existing Fanyuchang lifecycle; they add no donor request
+or completion claim.
 
 ## Source selection
 

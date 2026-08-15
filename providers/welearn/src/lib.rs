@@ -8,6 +8,7 @@
 
 mod atomic_duration_completion;
 mod atomic_mutation_digest;
+mod atomic_recovery;
 mod authentication;
 mod batch_plan;
 mod cmi;
@@ -34,6 +35,10 @@ pub use atomic_duration_completion::{
     WellearnAtomicDurationCompletionPlan, WellearnAtomicDurationCompletionReceipts,
     WellearnAtomicDurationCompletionTransport, WellearnAtomicDurationCompletionVerification,
     WellearnAtomicMutationKind, verify_atomic_duration_completion,
+};
+pub use atomic_recovery::{
+    WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE, WellearnAtomicPreFinalObservation,
+    verify_atomic_duration_completion_recovery,
 };
 pub use authentication::{
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCookieSession,

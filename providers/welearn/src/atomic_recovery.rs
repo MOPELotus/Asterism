@@ -1,0 +1,528 @@
+use std::fmt;
+
+use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{
+    WellearnAtomicChildPlan, WellearnAtomicCompletionProfile,
+    WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionVerification,
+    WellearnCmiDocument,
+    atomic_duration_completion::{atomic_goal_changed, verify_atomic_final_snapshot},
+    parse_cmi_snapshot,
+};
+
+/// Namespaced Provider-private type for one pre-final Fanyuchang observation.
+pub const WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE: &str =
+    "welearn.atomic-pre-final-observation.v1";
+
+const WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_VERSION: u16 = 1;
+const MAX_ATOMIC_PRE_FINAL_OBSERVATION_BYTES: usize = 512;
+const PRE_FINAL_TIME_DOMAIN: &[u8] = b"asterism.welearn.atomic-pre-final-time.v1\0";
+const RECOVERY_OBSERVATION_DOMAIN: &[u8] = b"asterism.welearn.atomic-recovery-observation.v1\0";
+
+/// Hash-only evidence of the Fanyuchang time values read after its duration
+/// phase and before its completion-bearing set/save mutations.
+///
+/// Core must bind the encoded value to the same execution attempt before the
+/// set is issued. The value carries no raw CMI, route or credential material
+/// and never grants mutation or resume authority.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WellearnAtomicPreFinalObservation {
+    version: u16,
+    binding_digest: [u8; 32],
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WellearnAtomicPreFinalObservationWire {
+    version: u16,
+    binding_digest: [u8; 32],
+}
+
+impl WellearnAtomicPreFinalObservation {
+    /// Captures only the child-bound hash of Fanyuchang's fresh post-duration
+    /// time pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for an invalid/non-Fanyuchang child, malformed CMI
+    /// or missing post-duration time evidence.
+    pub fn capture(
+        child: &WellearnAtomicChildPlan,
+        after_duration: &WellearnCmiDocument,
+    ) -> ProviderResult<Self> {
+        child.validate()?;
+        if child.atomic_completion_profile()
+            != WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100
+        {
+            return Err(invalid_pre_final_observation());
+        }
+        let snapshot = parse_cmi_snapshot(after_duration.as_str())?;
+        let (session_time, total_time) = required_time_pair(&snapshot).ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                "WELearn Fanyuchang post-duration CMI has no complete time evidence",
+            )
+        })?;
+        let observation = Self {
+            version: WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_VERSION,
+            binding_digest: pre_final_time_digest(child, session_time, total_time)?,
+        };
+        observation.validate()?;
+        Ok(observation)
+    }
+
+    pub const fn binding_digest(&self) -> [u8; 32] {
+        self.binding_digest
+    }
+
+    /// Encodes the hash-only observation under the bounded v1 schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the observation is invalid, cannot be
+    /// serialized or exceeds the local 512-byte bound.
+    pub fn encode(&self) -> ProviderResult<Vec<u8>> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(&WellearnAtomicPreFinalObservationWire {
+            version: self.version,
+            binding_digest: self.binding_digest,
+        })
+        .map_err(|_| invalid_pre_final_observation())?;
+        if encoded.is_empty() || encoded.len() > MAX_ATOMIC_PRE_FINAL_OBSERVATION_BYTES {
+            return Err(invalid_pre_final_observation());
+        }
+        Ok(encoded)
+    }
+
+    /// Restores and validates one bounded hash-only observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for empty, oversized, malformed, unknown,
+    /// version-drifted or zero-digest input.
+    pub fn decode(encoded: &[u8]) -> ProviderResult<Self> {
+        if encoded.is_empty() || encoded.len() > MAX_ATOMIC_PRE_FINAL_OBSERVATION_BYTES {
+            return Err(invalid_pre_final_observation());
+        }
+        let wire: WellearnAtomicPreFinalObservationWire =
+            serde_json::from_slice(encoded).map_err(|_| invalid_pre_final_observation())?;
+        let observation = Self {
+            version: wire.version,
+            binding_digest: wire.binding_digest,
+        };
+        observation.validate()?;
+        Ok(observation)
+    }
+
+    fn validate(&self) -> ProviderResult<()> {
+        if self.version != WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_VERSION
+            || self.binding_digest == [0; 32]
+        {
+            return Err(invalid_pre_final_observation());
+        }
+        Ok(())
+    }
+
+    fn verify_final_snapshot(
+        &self,
+        child: &WellearnAtomicChildPlan,
+        final_snapshot: &crate::WellearnCmiSnapshot,
+    ) -> ProviderResult<()> {
+        self.validate()?;
+        let (session_time, total_time) =
+            required_time_pair(final_snapshot).ok_or_else(atomic_goal_changed)?;
+        if pre_final_time_digest(child, session_time, total_time)? != self.binding_digest {
+            return Err(atomic_goal_changed());
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for WellearnAtomicPreFinalObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WellearnAtomicPreFinalObservation")
+            .field("version", &self.version)
+            .field("binding_digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+/// Performs read-only recovery verification from a fresh final CMI document.
+///
+/// Fanyuchang requires the attempt-bound pre-final observation so the final
+/// time pair is proven equal to the values read before its set/save. Auto has
+/// no evidenced time predicate and therefore rejects an invented observation.
+/// Receipt shape determines the response-dependent final-save ordinal without
+/// replaying any mutation.
+///
+/// # Errors
+///
+/// Returns a typed error for child/receipt/evidence drift or when the exact
+/// completion, progress, score and required time-preservation goal is absent.
+pub fn verify_atomic_duration_completion_recovery(
+    child: &WellearnAtomicChildPlan,
+    receipts: &WellearnAtomicDurationCompletionReceipts,
+    pre_final: Option<&WellearnAtomicPreFinalObservation>,
+    fresh_final: &WellearnCmiDocument,
+) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+    child.validate()?;
+    let plan = child.duration_completion_plan()?;
+    receipts.validate_for_plan(plan, pre_final.is_some())?;
+    let final_snapshot = parse_cmi_snapshot(fresh_final.as_str())?;
+    verify_atomic_final_snapshot(plan, &final_snapshot)?;
+    let time_preservation_verified = match plan.profile() {
+        WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+            pre_final
+                .ok_or_else(invalid_pre_final_observation)?
+                .verify_final_snapshot(child, &final_snapshot)?;
+            Some(true)
+        }
+        WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => None,
+    };
+    let final_save_ordinal = receipts.final_save_ordinal(plan)?;
+    let observation_digest =
+        recovery_observation_digest(child, final_save_ordinal, pre_final, fresh_final.as_str())?;
+    Ok(WellearnAtomicDurationCompletionVerification {
+        profile: plan.profile(),
+        score_percent: plan.completion().score_percent,
+        time_preservation_verified,
+        final_save_ordinal,
+        final_save_accepted: receipts.save_accepted(),
+        observation_digest,
+    })
+}
+
+fn required_time_pair(snapshot: &crate::WellearnCmiSnapshot) -> Option<(&str, &str)> {
+    if !snapshot.cmi_present() {
+        return None;
+    }
+    Some((snapshot.session_time_raw()?, snapshot.total_time_raw()?))
+}
+
+fn pre_final_time_digest(
+    child: &WellearnAtomicChildPlan,
+    session_time: &str,
+    total_time: &str,
+) -> ProviderResult<[u8; 32]> {
+    child.validate()?;
+    if child.atomic_completion_profile()
+        != WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100
+    {
+        return Err(invalid_pre_final_observation());
+    }
+    let mut hash = Sha256::new();
+    hash.update(PRE_FINAL_TIME_DOMAIN);
+    hash_child_binding(&mut hash, child)?;
+    hash_component(&mut hash, session_time.as_bytes())?;
+    hash_component(&mut hash, total_time.as_bytes())?;
+    let digest = hash.finalize().into();
+    if digest == [0; 32] {
+        return Err(invalid_pre_final_observation());
+    }
+    Ok(digest)
+}
+
+fn recovery_observation_digest(
+    child: &WellearnAtomicChildPlan,
+    final_save_ordinal: u32,
+    pre_final: Option<&WellearnAtomicPreFinalObservation>,
+    fresh_final: &str,
+) -> ProviderResult<[u8; 32]> {
+    if !(1..=100_000).contains(&final_save_ordinal) || fresh_final.is_empty() {
+        return Err(invalid_pre_final_observation());
+    }
+    let mut hash = Sha256::new();
+    hash.update(RECOVERY_OBSERVATION_DOMAIN);
+    hash.update(final_save_ordinal.to_be_bytes());
+    hash_child_binding(&mut hash, child)?;
+    match pre_final {
+        Some(observation) => {
+            observation.validate()?;
+            hash.update([1]);
+            hash.update(observation.binding_digest);
+        }
+        None => hash.update([0]),
+    }
+    hash_component(&mut hash, fresh_final.as_bytes())?;
+    let digest = hash.finalize().into();
+    if digest == [0; 32] {
+        return Err(invalid_pre_final_observation());
+    }
+    Ok(digest)
+}
+
+fn hash_child_binding(hash: &mut Sha256, child: &WellearnAtomicChildPlan) -> ProviderResult<()> {
+    child.validate()?;
+    hash.update(child.version().to_be_bytes());
+    hash.update(child.entry_index().to_be_bytes());
+    hash.update(child.target_seconds().to_be_bytes());
+    hash_component(hash, child.course_remote_id().as_bytes())?;
+    hash_component(hash, child.remote_task_id().as_bytes())?;
+    hash_component(
+        hash,
+        match child.atomic_completion_profile() {
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+                b"fanyuchang_fresh_set_save_100".as_slice()
+            }
+            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => {
+                b"auto_zero_time_save_only_0".as_slice()
+            }
+        },
+    )
+}
+
+fn hash_component(hash: &mut Sha256, value: &[u8]) -> ProviderResult<()> {
+    hash.update(
+        u64::try_from(value.len())
+            .map_err(|_| invalid_pre_final_observation())?
+            .to_be_bytes(),
+    );
+    hash.update(value);
+    Ok(())
+}
+
+fn invalid_pre_final_observation() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn atomic pre-final observation is invalid or inconsistent",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fanyuchang_pre_final_observation_round_trips_and_verifies_recovery() {
+        let child = fanyuchang_child(3);
+        let after_duration = cmi("incomplete", "0.25", "20", Some("15"), Some("45"));
+        let observation =
+            WellearnAtomicPreFinalObservation::capture(&child, &after_duration).unwrap();
+        assert_eq!(
+            WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE,
+            "welearn.atomic-pre-final-observation.v1"
+        );
+        assert_ne!(observation.binding_digest(), [0; 32]);
+        let encoded = observation.encode().unwrap();
+        assert!(encoded.len() <= MAX_ATOMIC_PRE_FINAL_OBSERVATION_BYTES);
+        let encoded_value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let encoded_object = encoded_value.as_object().unwrap();
+        assert_eq!(encoded_object.len(), 2);
+        assert!(encoded_object.contains_key("version"));
+        assert!(encoded_object.contains_key("binding_digest"));
+        assert_eq!(
+            WellearnAtomicPreFinalObservation::decode(&encoded).unwrap(),
+            observation
+        );
+        let debug = format!("{observation:?}");
+        assert!(debug.contains("[HASHED]"));
+        assert!(!debug.contains(&format!("{:?}", observation.binding_digest())));
+
+        let receipts = WellearnAtomicDurationCompletionReceipts::new(
+            true,
+            vec![true, true, true],
+            Some(true),
+            true,
+        );
+        let verification = verify_atomic_duration_completion_recovery(
+            &child,
+            &receipts,
+            Some(&observation),
+            &cmi("completed", "1", "100", Some("15"), Some("45")),
+        )
+        .unwrap();
+        assert_eq!(verification.final_save_ordinal(), 6);
+        assert!(verification.final_save_accepted());
+        assert_eq!(verification.time_preservation_verified(), Some(true));
+        assert_ne!(verification.observation_digest(), [0; 32]);
+    }
+
+    #[test]
+    fn fanyuchang_recovery_rejects_time_child_or_schema_drift() {
+        let child = fanyuchang_child(3);
+        let observation = WellearnAtomicPreFinalObservation::capture(
+            &child,
+            &cmi("incomplete", "0.25", "20", Some("15"), Some("45")),
+        )
+        .unwrap();
+        let receipts = WellearnAtomicDurationCompletionReceipts::new(
+            true,
+            vec![true, false],
+            Some(false),
+            true,
+        );
+        for (candidate_child, session_time) in
+            [(fanyuchang_child(3), "16"), (fanyuchang_child(4), "15")]
+        {
+            assert_eq!(
+                verify_atomic_duration_completion_recovery(
+                    &candidate_child,
+                    &receipts,
+                    Some(&observation),
+                    &cmi("completed", "1", "100", Some(session_time), Some("45")),
+                )
+                .unwrap_err()
+                .kind,
+                ProviderErrorKind::RemoteChanged
+            );
+        }
+
+        let encoded = observation.encode().unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let mut zero_digest = original.clone();
+        zero_digest["binding_digest"] = serde_json::Value::Array(vec![serde_json::json!(0); 32]);
+        for drifted in [
+            serde_json::json!({"version": 2, "binding_digest": original["binding_digest"]}),
+            serde_json::json!({
+                "version": 1,
+                "binding_digest": original["binding_digest"],
+                "unexpected": true,
+            }),
+            zero_digest,
+        ] {
+            assert!(
+                WellearnAtomicPreFinalObservation::decode(&serde_json::to_vec(&drifted).unwrap())
+                    .is_err()
+            );
+        }
+        assert!(WellearnAtomicPreFinalObservation::decode(&[]).is_err());
+        assert!(
+            WellearnAtomicPreFinalObservation::decode(&vec![
+                b'x';
+                MAX_ATOMIC_PRE_FINAL_OBSERVATION_BYTES
+                    + 1
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn recovery_preserves_conditional_fanyuchang_and_deterministic_auto_receipts() {
+        let child = fanyuchang_child(3);
+        let observation = WellearnAtomicPreFinalObservation::capture(
+            &child,
+            &cmi("incomplete", "0.25", "20", Some("15"), Some("45")),
+        )
+        .unwrap();
+        let final_cmi = cmi("completed", "1", "100", Some("15"), Some("45"));
+        let terminal_rejection = WellearnAtomicDurationCompletionReceipts::new(
+            true,
+            vec![true, false],
+            Some(false),
+            true,
+        );
+        assert_eq!(
+            verify_atomic_duration_completion_recovery(
+                &child,
+                &terminal_rejection,
+                Some(&observation),
+                &final_cmi,
+            )
+            .unwrap()
+            .final_save_ordinal(),
+            5
+        );
+        for invalid in [
+            WellearnAtomicDurationCompletionReceipts::new(
+                true,
+                vec![true, false, true],
+                Some(true),
+                true,
+            ),
+            WellearnAtomicDurationCompletionReceipts::new(true, vec![true, true], Some(true), true),
+        ] {
+            assert!(
+                verify_atomic_duration_completion_recovery(
+                    &child,
+                    &invalid,
+                    Some(&observation),
+                    &final_cmi,
+                )
+                .is_err()
+            );
+        }
+
+        let auto = auto_child(120);
+        let auto_receipts =
+            WellearnAtomicDurationCompletionReceipts::new(false, vec![true, false], None, true);
+        let auto_verification = verify_atomic_duration_completion_recovery(
+            &auto,
+            &auto_receipts,
+            None,
+            &cmi("completed", "1", "0", Some("87"), Some("120")),
+        )
+        .unwrap();
+        assert_eq!(auto_verification.final_save_ordinal(), 4);
+        assert_eq!(auto_verification.time_preservation_verified(), None);
+        assert!(
+            verify_atomic_duration_completion_recovery(
+                &auto,
+                &auto_receipts,
+                Some(&observation),
+                &cmi("completed", "1", "0", Some("87"), Some("120")),
+            )
+            .is_err()
+        );
+        assert!(WellearnAtomicPreFinalObservation::capture(&auto, &final_cmi).is_err());
+    }
+
+    fn fanyuchang_child(target_seconds: u64) -> WellearnAtomicChildPlan {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "entry_index": 0,
+            "course_remote_id": "course:1001",
+            "remote_task_id": "sco:1001:301",
+            "flow": "fanyuchang_duration",
+            "execution_shape": "atomic_duration_completion",
+            "atomic_completion_profile": "fanyuchang_fresh_set_save100",
+            "target_seconds": target_seconds,
+        }))
+        .unwrap()
+    }
+
+    fn auto_child(target_seconds: u64) -> WellearnAtomicChildPlan {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "entry_index": 1,
+            "course_remote_id": "course:1001",
+            "remote_task_id": "sco:1001:302",
+            "flow": "auto_duration",
+            "execution_shape": "atomic_duration_completion",
+            "atomic_completion_profile": "auto_zero_time_save_only0",
+            "target_seconds": target_seconds,
+        }))
+        .unwrap()
+    }
+
+    fn cmi(
+        completion: &str,
+        progress: &str,
+        score: &str,
+        session_time: Option<&str>,
+        total_time: Option<&str>,
+    ) -> WellearnCmiDocument {
+        let mut cmi = serde_json::json!({
+            "completion_status": completion,
+            "progress_measure": progress,
+            "score": {"scaled": score},
+            "success_status": "unknown",
+        });
+        if let Some(session_time) = session_time {
+            cmi["session_time"] = serde_json::json!(session_time);
+        }
+        if let Some(total_time) = total_time {
+            cmi["total_time"] = serde_json::json!(total_time);
+        }
+        WellearnCmiDocument::try_new(
+            serde_json::json!({
+                "ret": 0,
+                "comment": serde_json::json!({"cmi": cmi}).to_string(),
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+}

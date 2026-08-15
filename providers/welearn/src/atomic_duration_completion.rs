@@ -48,12 +48,12 @@ impl WellearnAtomicMutationKind {
 /// duration-completion result.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct WellearnAtomicDurationCompletionVerification {
-    profile: WellearnAtomicCompletionProfile,
-    score_percent: u8,
-    time_preservation_verified: Option<bool>,
-    final_save_ordinal: u32,
-    final_save_accepted: bool,
-    observation_digest: [u8; 32],
+    pub(crate) profile: WellearnAtomicCompletionProfile,
+    pub(crate) score_percent: u8,
+    pub(crate) time_preservation_verified: Option<bool>,
+    pub(crate) final_save_ordinal: u32,
+    pub(crate) final_save_accepted: bool,
+    pub(crate) observation_digest: [u8; 32],
 }
 
 impl WellearnAtomicDurationCompletionVerification {
@@ -113,15 +113,8 @@ pub fn verify_atomic_duration_completion(
 ) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
     documents.validate_for_plan(plan)?;
     let final_snapshot = parse_cmi_snapshot(documents.after_completion().as_str())?;
+    verify_atomic_final_snapshot(plan, &final_snapshot)?;
     let score_percent = plan.completion().score_percent;
-    let expected_score = score_percent.to_string();
-    if !final_snapshot.cmi_present()
-        || final_snapshot.remote_state() != RemoteState::Completed
-        || final_snapshot.percent() != Some(100)
-        || final_snapshot.score_scaled_raw() != Some(expected_score.as_str())
-    {
-        return Err(atomic_goal_changed());
-    }
 
     let time_preservation_verified = match plan.profile() {
         WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
@@ -154,7 +147,23 @@ pub fn verify_atomic_duration_completion(
     })
 }
 
-fn atomic_goal_changed() -> ProviderError {
+pub(crate) fn verify_atomic_final_snapshot(
+    plan: WellearnAtomicDurationCompletionPlan,
+    snapshot: &crate::WellearnCmiSnapshot,
+) -> ProviderResult<()> {
+    plan.validate()?;
+    let expected_score = plan.completion().score_percent.to_string();
+    if !snapshot.cmi_present()
+        || snapshot.remote_state() != RemoteState::Completed
+        || snapshot.percent() != Some(100)
+        || snapshot.score_scaled_raw() != Some(expected_score.as_str())
+    {
+        return Err(atomic_goal_changed());
+    }
+    Ok(())
+}
+
+pub(crate) fn atomic_goal_changed() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::RemoteChanged,
         "WELearn atomic duration-completion goal was not visible in fresh CMI",
@@ -359,6 +368,55 @@ impl WellearnAtomicDurationCompletionReceipts {
     pub const fn save_accepted(&self) -> bool {
         self.save_accepted
     }
+
+    pub(crate) fn validate_for_plan(
+        &self,
+        plan: WellearnAtomicDurationCompletionPlan,
+        has_after_duration_evidence: bool,
+    ) -> ProviderResult<()> {
+        plan.validate()?;
+        let valid = match plan.profile() {
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+                has_after_duration_evidence
+                    && self.start_accepted
+                    && self.set_accepted.is_some()
+                    && valid_client_counter_receipts(
+                        &self.heartbeat_acceptances,
+                        plan.target_seconds(),
+                    )
+            }
+            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => {
+                let expected =
+                    usize::try_from(plan.target_seconds() / plan.heartbeat_interval_seconds())
+                        .map_err(|_| invalid_atomic_documents())?;
+                !has_after_duration_evidence
+                    && self.set_accepted.is_none()
+                    && self.heartbeat_acceptances.len() == expected
+            }
+        };
+        if !valid {
+            return Err(invalid_atomic_documents());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn final_save_ordinal(
+        &self,
+        plan: WellearnAtomicDurationCompletionPlan,
+    ) -> ProviderResult<u32> {
+        let has_after_duration = matches!(
+            plan.profile(),
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100
+        );
+        self.validate_for_plan(plan, has_after_duration)?;
+        let heartbeat_count = u32::try_from(self.heartbeat_acceptances.len())
+            .map_err(|_| invalid_atomic_documents())?;
+        2_u32
+            .checked_add(heartbeat_count)
+            .and_then(|ordinal| ordinal.checked_add(u32::from(self.set_accepted.is_some())))
+            .filter(|ordinal| *ordinal <= 100_000)
+            .ok_or_else(invalid_atomic_documents)
+    }
 }
 
 /// Independent CMI evidence and mutation receipts returned by one complete
@@ -428,15 +486,7 @@ impl WellearnAtomicDurationCompletionDocuments {
         plan: WellearnAtomicDurationCompletionPlan,
     ) -> ProviderResult<u32> {
         self.validate_for_plan(plan)?;
-        let heartbeat_count = u32::try_from(self.receipts.heartbeat_acceptances.len())
-            .map_err(|_| invalid_atomic_documents())?;
-        2_u32
-            .checked_add(heartbeat_count)
-            .and_then(|ordinal| {
-                ordinal.checked_add(u32::from(self.receipts.set_accepted.is_some()))
-            })
-            .filter(|ordinal| *ordinal <= 100_000)
-            .ok_or_else(invalid_atomic_documents)
+        self.receipts.final_save_ordinal(plan)
     }
 
     /// Revalidates an evidence bundle before parsing its CMI documents.
@@ -450,29 +500,8 @@ impl WellearnAtomicDurationCompletionDocuments {
     ) -> ProviderResult<()> {
         plan.validate()?;
         validate_atomic_initial_cmi(&self.initial)?;
-        let valid = match plan.profile() {
-            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
-                self.after_duration.is_some()
-                    && self.receipts.start_accepted
-                    && self.receipts.set_accepted.is_some()
-                    && valid_client_counter_receipts(
-                        &self.receipts.heartbeat_acceptances,
-                        plan.target_seconds(),
-                    )
-            }
-            WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => {
-                let expected =
-                    usize::try_from(plan.target_seconds() / plan.heartbeat_interval_seconds())
-                        .map_err(|_| invalid_atomic_documents())?;
-                self.after_duration.is_none()
-                    && self.receipts.set_accepted.is_none()
-                    && self.receipts.heartbeat_acceptances.len() == expected
-            }
-        };
-        if !valid {
-            return Err(invalid_atomic_documents());
-        }
-        Ok(())
+        self.receipts
+            .validate_for_plan(plan, self.after_duration.is_some())
     }
 }
 

@@ -572,6 +572,28 @@ attaches verification to start/keep/set or an explicit negative receipt. A
 missing sink or persistence failure occurs after the remote lifecycle and is
 therefore non-retryable `HumanRequired`, with no mutation replay.
 
+Crash recovery uses a smaller independent proof surface. Current Fanyuchang's
+`welearn.atomic-pre-final-observation.v1` value is a deny-unknown, 512-byte
+bounded v1 envelope containing only a nonzero hash. It binds the exact child
+version/ordinal/Course/Task/profile/target and the fresh post-duration
+`session_time`/`total_time`; no raw CMI, route or credential value is encoded or
+rendered by Debug. Core must persist it against the same attempt after the
+post-duration read and before issuing the dependent set. Failure to persist
+stops the remaining mutations as `HumanRequired`. The observation never grants
+permission to resume a set/save after a crash.
+
+`verify_atomic_duration_completion_recovery` consumes the rebound child, the
+durable receipt sequence, optional pre-final observation and one new read-only
+final CMI. It retains Fanyuchang's response-conditional keep count, including a
+single terminal rejected keep, when deriving the actual set/save ordinals; Auto
+still requires its deterministic complete-minute receipt count. Both profiles
+must expose exact completed/progress/profile-score. Fanyuchang additionally
+rehashes final time fields against the attempt-bound pre-final observation,
+while Auto requires no observation and invents no time predicate. The returned
+verification has the same sanitized fields as immediate verification. Core may
+attach it only to the accepted final-save ledger entry and may never replay a
+mutation to obtain the proof.
+
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 `WellearnAtomicMutationKind` has stable operation strings for start,
 counter/implicit keep, set and save. Core's generic `ExecutionMutationIssue`

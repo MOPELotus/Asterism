@@ -174,9 +174,9 @@ child only when the encoded parent authority, complete batch snapshot and exact
 namespaced child artifact jointly rebind across Course, flow, Unit selection,
 Auto aggregate or Fany target, expected Task and ordinal; it still performs no
 I/O or grants mutation authority. Neither boundary is present in Provider
-capability registration or reachable from singleton TaskExecution. Core must still
-persist, authorize and recover the composite attempt before an execution entry
-may call it without inserting a bare save or second start.
+capability registration or reachable from singleton TaskExecution. Core must
+still persist, authorize and recover the composite attempt before an execution
+entry may call it without inserting a bare save or second start.
 
 `verify_atomic_duration_completion` is a separate pure readback boundary over
 the validated plan and combined documents. It requires exact
@@ -191,6 +191,17 @@ does not attach verification to start/keep/set or a rejected save. The prepared
 coordinator now records that proof through Core's durable sink only for an
 accepted final save; missing/failed persistence is post-mutation HumanRequired
 and never replays the lifecycle.
+
+Read-only crash recovery now has a separate Provider proof boundary. The
+bounded hash-only `welearn.atomic-pre-final-observation.v1` value binds a Fany
+child and its post-duration time pair without persisting raw CMI; Core must bind
+it to the same attempt before set issue. Recovery revalidates the exact
+response-conditional receipt shape and actual final-save ordinal, then compares
+fresh final time values with that observation. Auto uses its deterministic
+receipt count and exact score-0 final goal without a time observation. This
+closes Provider proof construction only; shared attempt-bound observation
+persistence and recovery dispatch remain Core work, and neither path resumes or
+replays mutation.
 
 The native atomic transport now consumes Core's storage-agnostic generic
 `ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. WELearn
