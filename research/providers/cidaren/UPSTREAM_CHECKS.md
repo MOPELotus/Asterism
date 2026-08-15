@@ -759,6 +759,21 @@ zeroizing document and do not cross the observation boundary. Fresh binding
 changes remain `RemoteChanged` with no protocol observation, and existing
 unknown-`jv` observations are preserved rather than overwritten.
 
+### 2026-08-15 Question-payload observation follow-up
+
+The donor refs, public/historical tags and releases and public issue update head
+remained unchanged after the answer-evidence unit. No new topic mode or mode-73
+direct-answer encoding entered scope.
+
+Known-mode Question and reading-card payload failures now attach a bounded
+`QuestionParse / UnknownResultShape` observation after caller Task/position
+binding succeeds. It retains only root and known field kinds, object/array and
+field-kind counts, and the numeric topic mode. Rotating topic code, stem,
+option, answer-tag and relation values remain excluded. The existing exact
+`UnknownQuestionKind` observation for an unaudited numeric mode is preserved,
+while invalid caller binding remains an unobserved local protocol error. This
+does not weaken mode-73's explicit Skip-only execution evidence boundary.
+
 ## Check procedure
 
 For the next checkpoint:

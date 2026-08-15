@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fmt, fmt::Write};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    fmt::Write,
+};
 
 use asterism_domain::{
     ProtocolObservationKind, ProtocolSurface, Question, QuestionId, QuestionKind, QuestionOption,
@@ -11,7 +15,9 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::protocol_observation::protocol_drift_with_observation;
+use crate::protocol_observation::{
+    error_with_protocol_observation, json_value_kind, protocol_drift_with_observation,
+};
 
 const MAX_TOPIC_CODE_BYTES: usize = 4_096;
 const MAX_REMOTE_STEP_ID_BYTES: usize = 512;
@@ -194,7 +200,12 @@ pub fn parse_attempt_step(
         .as_object()
         .and_then(|object| object.get("topic_mode"))
         .and_then(Value::as_i64)
-        .ok_or_else(|| protocol_drift("Cidaren attempt payload has no topic mode"))?;
+        .ok_or_else(|| {
+            question_payload_observation(
+                protocol_drift("Cidaren attempt payload has no topic mode"),
+                payload,
+            )
+        })?;
     if mode == 0 {
         parse_reading_card(payload, remote_task_id, position)
             .map(ParsedCidarenAttemptStep::ReadingCard)
@@ -379,56 +390,59 @@ pub fn parse_attempt_question(
             "Cidaren attempt Question binding is invalid",
         ));
     }
-    let object = payload
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren attempt payload is not an object"))?;
-    let remote_progress = parse_remote_progress(object)?;
-    let topic_code = Zeroizing::new(required_text(
-        object.get("topic_code"),
-        MAX_TOPIC_CODE_BYTES,
-        "topic code",
-    )?);
-    let mode = object
-        .get("topic_mode")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| protocol_drift("Cidaren attempt payload has no topic mode"))?;
-    let kind = question_kind(mode)?;
-    let stem_object = object
-        .get("stem")
-        .and_then(Value::as_object)
-        .ok_or_else(|| protocol_drift("Cidaren attempt payload has no stem object"))?;
-    let mut stem = Zeroizing::new(parse_stem(stem_object)?);
-    let options = ZeroizingQuestionOptions::new(parse_options(object.get("options"), kind)?);
-    let metadata_sanitized = ZeroizingQuestionMetadata::new(sanitized_metadata(
-        object,
-        remote_task_id,
-        mode,
-        kind,
-        stem.as_str(),
-        options.as_slice(),
-    )?);
-    let remote_id = question_remote_id(
-        mode,
-        stem.as_str(),
-        options.as_slice(),
-        metadata_sanitized.as_value(),
-    )?;
-    let parsed = ParsedCidarenAttemptQuestion {
-        topic_code,
-        remote_task_id: remote_task_id.to_owned(),
-        remote_id,
-        kind,
-        stem: std::mem::take(&mut *stem),
-        options: options.finish(),
-        metadata_sanitized: metadata_sanitized.finish(),
-        position,
-        remote_progress,
-    };
-    // Validate through both public contracts before handing the ephemeral
-    // attempt material to a caller.
-    parsed.question_ref()?;
-    parsed.to_question(TaskId::new())?;
-    Ok(parsed)
+    (|| {
+        let object = payload
+            .as_object()
+            .ok_or_else(|| protocol_drift("Cidaren attempt payload is not an object"))?;
+        let remote_progress = parse_remote_progress(object)?;
+        let topic_code = Zeroizing::new(required_text(
+            object.get("topic_code"),
+            MAX_TOPIC_CODE_BYTES,
+            "topic code",
+        )?);
+        let mode = object
+            .get("topic_mode")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| protocol_drift("Cidaren attempt payload has no topic mode"))?;
+        let kind = question_kind(mode)?;
+        let stem_object = object
+            .get("stem")
+            .and_then(Value::as_object)
+            .ok_or_else(|| protocol_drift("Cidaren attempt payload has no stem object"))?;
+        let mut stem = Zeroizing::new(parse_stem(stem_object)?);
+        let options = ZeroizingQuestionOptions::new(parse_options(object.get("options"), kind)?);
+        let metadata_sanitized = ZeroizingQuestionMetadata::new(sanitized_metadata(
+            object,
+            remote_task_id,
+            mode,
+            kind,
+            stem.as_str(),
+            options.as_slice(),
+        )?);
+        let remote_id = question_remote_id(
+            mode,
+            stem.as_str(),
+            options.as_slice(),
+            metadata_sanitized.as_value(),
+        )?;
+        let parsed = ParsedCidarenAttemptQuestion {
+            topic_code,
+            remote_task_id: remote_task_id.to_owned(),
+            remote_id,
+            kind,
+            stem: std::mem::take(&mut *stem),
+            options: options.finish(),
+            metadata_sanitized: metadata_sanitized.finish(),
+            position,
+            remote_progress,
+        };
+        // Validate through both public contracts before handing the ephemeral
+        // attempt material to a caller.
+        parsed.question_ref()?;
+        parsed.to_question(TaskId::new())?;
+        Ok(parsed)
+    })()
+    .map_err(|error| question_payload_observation(error, payload))
 }
 
 fn parse_reading_card(
@@ -439,54 +453,144 @@ fn parse_reading_card(
     if position == 0 || position > MAX_POSITION || !valid_remote_task_id(remote_task_id) {
         return Err(protocol_drift("Cidaren reading-card binding is invalid"));
     }
-    let object = payload
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren reading-card payload is not an object"))?;
-    let remote_progress = parse_remote_progress(object)?;
-    if object.get("topic_mode").and_then(Value::as_i64) != Some(0) {
-        return Err(protocol_drift(
-            "Cidaren reading-card parser received another topic mode",
-        ));
-    }
-    match object.get("options") {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(values)) if values.is_empty() => {}
-        _ => {
+    (|| {
+        let object = payload
+            .as_object()
+            .ok_or_else(|| protocol_drift("Cidaren reading-card payload is not an object"))?;
+        let remote_progress = parse_remote_progress(object)?;
+        if object.get("topic_mode").and_then(Value::as_i64) != Some(0) {
             return Err(protocol_drift(
-                "Cidaren reading-card payload unexpectedly contains answer options",
+                "Cidaren reading-card parser received another topic mode",
             ));
         }
+        match object.get("options") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(values)) if values.is_empty() => {}
+            _ => {
+                return Err(protocol_drift(
+                    "Cidaren reading-card payload unexpectedly contains answer options",
+                ));
+            }
+        }
+        let topic_code = Zeroizing::new(required_text(
+            object.get("topic_code"),
+            MAX_TOPIC_CODE_BYTES,
+            "topic code",
+        )?);
+        let stem_object = object
+            .get("stem")
+            .and_then(Value::as_object)
+            .ok_or_else(|| protocol_drift("Cidaren reading-card payload has no stem object"))?;
+        let mut stem_sanitized = Zeroizing::new(parse_stem(stem_object)?);
+        let mut identity = json!({
+            "remote_task_id": remote_task_id,
+            "topic_mode": 0,
+            "stem": stem_sanitized.as_str(),
+        });
+        let material = serde_json::to_vec(&identity);
+        zeroize_json(&mut identity);
+        let mut material = material
+            .map_err(|_| invalid_response("Cidaren reading-card identity cannot be encoded"))?;
+        let remote_id = format!("reading-card:{:x}", Sha256::digest(&material));
+        material.zeroize();
+        let card = ParsedCidarenReadingCard {
+            topic_code,
+            remote_id,
+            stem_sanitized: std::mem::take(&mut *stem_sanitized),
+            position,
+            remote_progress,
+        };
+        card.route_context()?;
+        Ok(card)
+    })()
+    .map_err(|error| question_payload_observation(error, payload))
+}
+
+fn question_payload_observation(error: ProviderError, payload: &Value) -> ProviderError {
+    if error.protocol_observation.is_some()
+        || !matches!(
+            error.kind,
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse
+        )
+    {
+        return error;
     }
-    let topic_code = Zeroizing::new(required_text(
-        object.get("topic_code"),
-        MAX_TOPIC_CODE_BYTES,
-        "topic code",
-    )?);
-    let stem_object = object
-        .get("stem")
-        .and_then(Value::as_object)
-        .ok_or_else(|| protocol_drift("Cidaren reading-card payload has no stem object"))?;
-    let mut stem_sanitized = Zeroizing::new(parse_stem(stem_object)?);
-    let mut identity = json!({
-        "remote_task_id": remote_task_id,
-        "topic_mode": 0,
-        "stem": stem_sanitized.as_str(),
-    });
-    let material = serde_json::to_vec(&identity);
-    zeroize_json(&mut identity);
-    let mut material = material
-        .map_err(|_| invalid_response("Cidaren reading-card identity cannot be encoded"))?;
-    let remote_id = format!("reading-card:{:x}", Sha256::digest(&material));
-    material.zeroize();
-    let card = ParsedCidarenReadingCard {
-        topic_code,
-        remote_id,
-        stem_sanitized: std::mem::take(&mut *stem_sanitized),
-        position,
-        remote_progress,
-    };
-    card.route_context()?;
-    Ok(card)
+    let object = payload.as_object();
+    let stem = object.and_then(|object| object.get("stem"));
+    let stem_object = stem.and_then(Value::as_object);
+    let options = object.and_then(|object| object.get("options"));
+    let word_lengths = object.and_then(|object| object.get("w_lens"));
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::QuestionParse,
+        ProtocolObservationKind::UnknownResultShape,
+        json!({
+            "schema": "cidaren.question-payload-observation.v1",
+            "root_kind": json_value_kind(Some(payload)),
+            "object_fields": object.map(Map::len),
+            "topic_mode_kind": json_value_kind(
+                object.and_then(|object| object.get("topic_mode"))
+            ),
+            "topic_mode_value": object
+                .and_then(|object| object.get("topic_mode"))
+                .and_then(Value::as_i64),
+            "topic_code_kind": json_value_kind(
+                object.and_then(|object| object.get("topic_code"))
+            ),
+            "topic_done_num_kind": json_value_kind(
+                object.and_then(|object| object.get("topic_done_num"))
+            ),
+            "topic_total_kind": json_value_kind(
+                object.and_then(|object| object.get("topic_total"))
+            ),
+            "stem_kind": json_value_kind(stem),
+            "stem_fields": stem_object.map(Map::len),
+            "stem_content_kind": json_value_kind(
+                stem_object.and_then(|stem| stem.get("content"))
+            ),
+            "stem_remark_kind": json_value_kind(
+                stem_object.and_then(|stem| stem.get("remark"))
+            ),
+            "stem_remark_count": stem_object
+                .and_then(|stem| stem.get("remark"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            "options_kind": json_value_kind(options),
+            "option_count": options.and_then(Value::as_array).map(Vec::len),
+            "option_row_kinds": array_value_kind_counts(options),
+            "option_content_field_kinds": array_field_kind_counts(options, "content"),
+            "answer_tag_field_kinds": array_field_kind_counts(options, "answer_tag"),
+            "sub_options_field_kinds": array_field_kind_counts(options, "sub_options"),
+            "word_lengths_kind": json_value_kind(word_lengths),
+            "word_lengths_count": word_lengths.and_then(Value::as_array).map(Vec::len),
+            "word_tip_kind": json_value_kind(object.and_then(|object| object.get("w_tip"))),
+            "answer_num_kind": json_value_kind(
+                object.and_then(|object| object.get("answer_num"))
+            ),
+        }),
+    )
+}
+
+fn array_value_kind_counts(value: Option<&Value>) -> Option<BTreeMap<&'static str, usize>> {
+    let values = value.and_then(Value::as_array)?;
+    let mut counts = BTreeMap::new();
+    for value in values {
+        *counts.entry(json_value_kind(Some(value))).or_default() += 1;
+    }
+    Some(counts)
+}
+
+fn array_field_kind_counts(
+    value: Option<&Value>,
+    field: &'static str,
+) -> Option<BTreeMap<&'static str, usize>> {
+    let values = value.and_then(Value::as_array)?;
+    let mut counts = BTreeMap::new();
+    for value in values {
+        let field_value = value.as_object().and_then(|object| object.get(field));
+        *counts.entry(json_value_kind(field_value)).or_default() += 1;
+    }
+    Some(counts)
 }
 
 fn question_kind(topic_mode: i64) -> ProviderResult<QuestionKind> {
@@ -1222,6 +1326,50 @@ mod tests {
         );
         assert!(parse_attempt_question(&payload, "foreign-task", 1).is_err());
         assert!(parse_attempt_question(&payload, "class-task:2002", 0).is_err());
+    }
+
+    #[test]
+    fn known_question_shape_drift_excludes_content_and_bindings() {
+        let mut payload: Value = serde_json::from_str(SINGLE).unwrap();
+        payload["stem"]["remark"] = json!({"raw": "must-not-cross-stem"});
+        payload["options"][0]["content"] = json!(["must-not-cross-option"]);
+        payload["options"][1]["answer_tag"] = json!({"raw": "must-not-cross-answer-tag"});
+        let error = parse_attempt_question(&payload, "class-task:2002", 1).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::QuestionParse);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(observation.shape_sanitized["topic_mode_value"], 17);
+        assert_eq!(observation.shape_sanitized["stem_remark_kind"], "object");
+        assert_eq!(
+            observation.shape_sanitized["option_content_field_kinds"],
+            json!({"array": 1, "string": 1})
+        );
+        assert_eq!(
+            observation.shape_sanitized["answer_tag_field_kinds"],
+            json!({"number": 1, "object": 1})
+        );
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("synthetic-topic-code"));
+        assert!(!sanitized.contains("synthetic-word"));
+        assert!(!sanitized.contains("must-not-cross"));
+
+        let binding_error = parse_attempt_question(&payload, "foreign-task", 1).unwrap_err();
+        assert!(binding_error.protocol_observation.is_none());
+
+        payload.as_object_mut().unwrap().remove("topic_mode");
+        let error = parse_attempt_step(&payload, "class-task:2002", 1).unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(observation.shape_sanitized["topic_mode_kind"], "missing");
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
     }
 
     #[test]

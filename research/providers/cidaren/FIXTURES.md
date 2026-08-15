@@ -244,6 +244,11 @@ placeholder identities, result codes, status values and pagination shape.
   observation boundary; synthetic words, meanings and Course/list identities
   remain absent, while a valid-shape identity change remains `RemoteChanged`
   with no observation.
+- Known-mode Question shape tests inject incompatible stem, option-content and
+  answer-tag types, retaining only field kinds, counts and numeric mode in the
+  observation. Synthetic topic code, stem, option and answer-tag values remain
+  absent; missing mode is shape drift, unknown numeric mode keeps its existing
+  exact classification and invalid caller Task binding has no observation.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

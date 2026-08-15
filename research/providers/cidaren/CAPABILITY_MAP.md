@@ -254,6 +254,12 @@ The current checkpoint (not a completion boundary):
     code, object/array counts and known word/list/evidence field-kind counts are
     retained. Word, meaning, example, Course/list identity and raw response
     values remain excluded; binding changes stay unobserved `RemoteChanged`.
+50. observes known-mode Question and reading-card payload-shape drift while
+    preserving the existing exact unknown-mode observation. Only root/known
+    field kinds, object/array counts, field-kind counts and numeric topic mode
+    are retained; topic code, stem, option, answer tag and matching content are
+    excluded. Invalid caller Task/position binding remains unobserved local
+    protocol failure rather than remote drift.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

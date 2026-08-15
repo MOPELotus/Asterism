@@ -584,6 +584,11 @@ retaining response or user data:
   family, JSON value kinds, optional numeric code and bounded structural counts
   on `AnswerResolve / UnknownResultShape`; answer text and binding identities
   stay excluded, and `RemoteChanged` is not relabeled as drift.
+- known-mode Question and reading-card shape failures record only root/known
+  field kinds, object/array and field-kind counts plus numeric mode on
+  `QuestionParse / UnknownResultShape`; topic code, stem, options, answer tags
+  and relations stay excluded. Unknown numeric modes retain the smaller
+  `UnknownQuestionKind` shape, while caller binding errors remain unobserved.
 
 These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
 failure only. They do not authorize guessing, retrying a mutation or accepting
