@@ -269,6 +269,12 @@ authority, rebuilds one complete fresh Unit/SCO batch, and produces the exact
 child artifact without scheduling. The shared single-Task async planning hook
 does not carry those parent/selection/membership facts and therefore remains
 unimplemented for WELearn rather than inferring them from one Task.
+The complete atomic batch can now also be projected once into an ordered
+`WellearnAtomicBatchDispatchPlan`. Every child item binds its target authority,
+Provider child plan, exact Core artifact and artifact-bound conditional
+sequence, and whole-plan validation rejects cardinality, ordinal, artifact or
+sequence mixing. This remains pure Provider planning evidence: it does not
+create, persist, restore or authorize any parent/child Execution.
 The parent authority itself now has a credential-free, versioned v1 encoding
 bounded to 4 KiB. Restore rejects unknown fields, version drift, malformed or
 duplicate Unit selections, cross-flow target mixtures and an Auto `actual`

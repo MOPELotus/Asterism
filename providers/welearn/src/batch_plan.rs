@@ -1178,6 +1178,20 @@ pub fn materialize_atomic_child_plan(
     frozen_fanyuchang_target_seconds: Option<u64>,
 ) -> ProviderResult<WellearnAtomicChildPlan> {
     validate_batch_plan_integrity(batch)?;
+    materialize_atomic_child_plan_for_validated_batch(
+        batch,
+        entry_index,
+        frozen_fanyuchang_target_seconds,
+    )
+}
+
+/// Materializes one child after the caller has validated the complete batch.
+/// This keeps whole-batch projection linear at the audited 8,192-child bound.
+pub(crate) fn materialize_atomic_child_plan_for_validated_batch(
+    batch: &WellearnBatchPlan,
+    entry_index: usize,
+    frozen_fanyuchang_target_seconds: Option<u64>,
+) -> ProviderResult<WellearnAtomicChildPlan> {
     let entry = batch
         .entries
         .get(entry_index)

@@ -158,6 +158,16 @@ The native runtime assembly checkpoint repeated the same queries without a
 delta. It exposes no new Provider capability or donor behavior; it only makes
 the existing native execution/read-only recovery boundaries constructible for
 future Core-owned dispatch.
+The complete atomic-batch projection checkpoint repeated all three default-head
+queries and the Fanyuchang tag after Core added an acceptance-short-circuit
+sequence condition. Heads remain `afa87fb7c86d6b3fdaa63ed08b4a02b4b112e2a2`,
+`bd160e91d0452b8bf483087fbdd3bdd58d855e13` and
+`85918caaccd93b73b1e41fe537b4e9a11377b759`; `v4.0.0` remains
+`5d1df60cb0078f70679be2a22f2afbf1ef4fa88a`. No donor delta supports retrying
+an explicitly rejected atomic mutation until acceptance, so existing WELearn
+phase semantics remain unchanged. The new ordered child/artifact/sequence
+projection is only Asterism dispatch-planning composition over already-audited
+facts and adds no donor route, setting or result claim.
 
 ## Source selection
 

@@ -289,7 +289,12 @@ only structural field names, response codes and bounded placeholder shapes.
   terminal-rejection keep phase, phase-3 observation-gated set and final save;
   Auto freezes start, exactly `floor(target / 60)` keeps and final save. Zero
   targets retain the donor-distinct empty keep phases, and a foreign child
-  artifact fails before sequence preparation.
+  artifact fails before sequence preparation. Whole-batch dispatch fixtures
+  additionally project every Fanyuchang target and every Auto zero-floor child
+  in frozen order, then reject missing/extra target authority, singleton flow,
+  child reorder and cross-child artifact or sequence substitution. They also
+  freeze that neither evidenced profile uses Core's unrelated
+  acceptance-short-circuit retry condition.
 - Durable atomic-executor fixtures prove encoded parent/batch/child input
   returns the same outcome as the prepared path and prepares its own exact
   sequence once. Malformed parent authority stops before another TaskDetail or

@@ -549,6 +549,13 @@ transport remains absent from capability registration until Core wires durable
 parent/child creation and recovery dispatch to this already-persistent
 per-transition boundary.
 
+Core's later `AcceptedOrMaximumReached` sequence condition does not alter this
+mapping. Neither audited WELearn atomic flow retries a definitely rejected
+mutation until one succeeds: Fanyuchang's keep rejection terminates that phase
+and enters the observation-gated set, while every Auto phase has a fixed
+cardinality. Both profiles therefore retain their existing phase conditions
+and plan digests.
+
 `WellearnAtomicDurationCompletion` now supplies the unregistered high-level
 Provider coordinator for a fully prepared child. It revalidates the rebuilt
 batch/child projection, fetches one complete fresh `TaskDetail`, applies the
@@ -824,6 +831,14 @@ requires provider `welearn` and the exact artifact type, then runs the existing
 bound decode against the complete batch, expected child ordinal and frozen
 Fanyuchang target authority. Merely deserializing a valid payload, including a
 valid plan for another child, never authorizes recovery.
+`materialize_atomic_batch_dispatch_plan` projects the whole validated atomic
+batch in one linear pass. Each immutable ordered item keeps its Fanyuchang
+target authority (or Auto's deliberate absence of external authority), child
+plan, exact Core artifact and artifact-bound conditional sequence together.
+Its `validate` method replays every ordinal projection and rejects missing,
+extra, reordered or cross-child substituted values. The projection is neither
+serialized authority nor a scheduler: it does not choose Execution IDs,
+persist attempts, create/recover children or grant mutation permission.
 `WellearnPreparedAtomicChildPlan::restore_from_provider_execution_plan_artifact`
 is the lower-level in-memory recovery constructor. It consumes a validated
 complete batch, ordinal, frozen target authority and exact Core artifact,
