@@ -91,6 +91,11 @@ Fanyuchang's sole tag. Revisions remain `afa87fb7c86d`, `bd160e91d045` and
 `85918caaccd9`, with `v4.0.0` still at `5d1df60cb007`; no upstream delta was
 available. This checkpoint therefore adds only value-free observations to
 already-audited fail-closed Course/Unit/SCO envelope and CMI-result branches.
+The HumanRequired-observation checkpoint repeated the same remote queries;
+every revision and tag remains unchanged. It adds no new donor behavior: it
+records only the already-audited missing/non-integer mutation `ret` structure
+and preserves that validated shape across the existing no-replay manual-review
+mapping enabled by Core `9883473`.
 
 ## Source selection
 

@@ -1,6 +1,6 @@
 use std::{fmt, future::Future, sync::Arc, time::Duration};
 
-use asterism_domain::{HumanRequiredReason, LogLevel};
+use asterism_domain::{HumanRequiredReason, LogLevel, ProtocolObservationKind, ProtocolSurface};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSink,
@@ -29,6 +29,7 @@ use crate::{
     },
     course_context::{parse_course_context, parse_course_context_for_id},
     course_inventory::course_id_from_remote,
+    protocol_observation::{json_value_kind, protocol_drift_with_observation},
     runtime_settings::LEGACY_DURATION_REQUEST_INTERVAL_SECONDS,
     task_inventory::unit_count,
 };
@@ -924,7 +925,8 @@ impl WellearnResourceExecutionTransport for NativeWellearnInventoryTransport {
 
 fn resource_mutation_error(error: ProviderError) -> ProviderError {
     match error.kind {
-        ProviderErrorKind::Authentication => ProviderError::human_required(
+        ProviderErrorKind::Authentication => mutation_human_required(
+            error,
             "WELearn session expired after resource mutation began; execution was not replayed",
             HumanRequiredReason::SessionExpired,
         ),
@@ -932,7 +934,8 @@ fn resource_mutation_error(error: ProviderError) -> ProviderError {
         | ProviderErrorKind::Network
         | ProviderErrorKind::ProviderUnavailable
         | ProviderErrorKind::ProtocolDrift
-        | ProviderErrorKind::InvalidResponse => ProviderError::human_required(
+        | ProviderErrorKind::InvalidResponse => mutation_human_required(
+            error,
             "WELearn resource mutation outcome is uncertain and requires fresh manual review",
             HumanRequiredReason::ManualIntervention,
         ),
@@ -954,10 +957,21 @@ fn atomic_post_mutation_error(error: ProviderError) -> ProviderError {
     } else {
         HumanRequiredReason::ManualIntervention
     };
-    ProviderError::human_required(
+    mutation_human_required(
+        error,
         "WELearn atomic mutation began and was not replayed; fresh manual review is required",
         reason,
     )
+}
+
+fn mutation_human_required(
+    mut error: ProviderError,
+    message: &'static str,
+    reason: HumanRequiredReason,
+) -> ProviderError {
+    let mut mapped = ProviderError::human_required(message, reason);
+    mapped.protocol_observation = error.protocol_observation.take();
+    mapped
 }
 
 fn atomic_stage_error(error: ProviderError, mutation_started: bool) -> ProviderError {
@@ -1604,13 +1618,24 @@ fn mutation_accepted(document: &str, kind: MutationResponseKind) -> ProviderResu
         .as_object()
         .and_then(|object| object.get("ret"))
         .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| {
-            ProviderError::new(
-                ProviderErrorKind::ProtocolDrift,
-                "WELearn SCO mutation response has no integer result",
-            )
-        })?;
+        .ok_or_else(|| mutation_result_shape_drift(&value))?;
     Ok(result == 0 || matches!(kind, MutationResponseKind::Heartbeat) && result == 1)
+}
+
+fn mutation_result_shape_drift(root: &serde_json::Value) -> ProviderError {
+    let result = root.get("ret");
+    protocol_drift_with_observation(
+        "WELearn SCO mutation response has no integer result",
+        ProtocolSurface::TaskExecution,
+        ProtocolObservationKind::UnknownResultShape,
+        serde_json::json!({
+            "document": "sco_mutation",
+            "root_type": json_value_kind(Some(root)),
+            "result_field": "ret",
+            "result_type": json_value_kind(result),
+            "result_state": if result.is_some() { "not_integer" } else { "missing" },
+        }),
+    )
 }
 
 fn resource_completion_cmi(
@@ -2331,9 +2356,43 @@ mod tests {
         assert!(mutation_accepted(r#"{"ret":1}"#, MutationResponseKind::Heartbeat).unwrap());
         assert!(!mutation_accepted(r#"{"ret":1}"#, MutationResponseKind::StrictSuccess).unwrap());
         assert!(!mutation_accepted(r#"{"ret":2}"#, MutationResponseKind::Heartbeat).unwrap());
-        for document in [r#"{"ret":"0"}"#, r#"{"ok":true}"#, "not-json"] {
-            assert!(mutation_accepted(document, MutationResponseKind::StrictSuccess).is_err());
-        }
+        let string_result = mutation_accepted(
+            r#"{"ret":"must-not-cross"}"#,
+            MutationResponseKind::StrictSuccess,
+        )
+        .unwrap_err();
+        let observation = string_result.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskExecution);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            serde_json::json!({
+                "document": "sco_mutation",
+                "root_type": "object",
+                "result_field": "ret",
+                "result_type": "string",
+                "result_state": "not_integer",
+            })
+        );
+        assert!(
+            !observation
+                .shape_sanitized
+                .to_string()
+                .contains("must-not-cross")
+        );
+        let missing =
+            mutation_accepted(r#"{"ok":true}"#, MutationResponseKind::StrictSuccess).unwrap_err();
+        assert_eq!(
+            missing.protocol_observation.unwrap().shape_sanitized["result_state"],
+            "missing"
+        );
+        let malformed =
+            mutation_accepted("not-json", MutationResponseKind::StrictSuccess).unwrap_err();
+        assert_eq!(malformed.kind, ProviderErrorKind::InvalidResponse);
+        assert!(malformed.protocol_observation.is_none());
         assert!(!mutation_accepted(r#"{"ret":7}"#, MutationResponseKind::StrictSuccess).unwrap());
 
         let (mut accepted, mut rejected) = (0, 0);
@@ -2637,7 +2696,14 @@ mod tests {
             let mapped = atomic_post_mutation_error(ProviderError::new(kind, "fixture"));
             assert_eq!(mapped.kind, ProviderErrorKind::HumanRequired);
             assert!(!mapped.is_retryable());
-            assert!(mapped.human_required_reason.is_some());
+            assert_eq!(
+                mapped.human_required_reason,
+                Some(if kind == ProviderErrorKind::Authentication {
+                    HumanRequiredReason::SessionExpired
+                } else {
+                    HumanRequiredReason::ManualIntervention
+                })
+            );
         }
     }
 
@@ -2816,13 +2882,53 @@ mod tests {
         ] {
             let mapped = resource_mutation_error(ProviderError::new(kind, "fixture"));
             assert_eq!(mapped.kind, ProviderErrorKind::HumanRequired);
-            assert!(mapped.human_required_reason.is_some());
+            assert_eq!(
+                mapped.human_required_reason,
+                Some(if kind == ProviderErrorKind::Authentication {
+                    HumanRequiredReason::SessionExpired
+                } else {
+                    HumanRequiredReason::ManualIntervention
+                })
+            );
         }
         let rejected = resource_mutation_error(ProviderError::new(
             ProviderErrorKind::RemoteChanged,
             "fixture",
         ));
         assert_eq!(rejected.kind, ProviderErrorKind::RemoteChanged);
+    }
+
+    #[test]
+    fn post_mutation_review_preserves_sanitized_shape_and_no_replay_disposition() {
+        let error = mutation_accepted(
+            r#"{"ret":"must-not-cross"}"#,
+            MutationResponseKind::StrictSuccess,
+        )
+        .unwrap_err();
+        let expected = error.protocol_observation.clone();
+
+        for mapped in [
+            resource_mutation_error(error.clone()),
+            atomic_post_mutation_error(error),
+        ] {
+            assert_eq!(mapped.kind, ProviderErrorKind::HumanRequired);
+            assert_eq!(
+                mapped.human_required_reason,
+                Some(HumanRequiredReason::ManualIntervention)
+            );
+            assert!(!mapped.is_retryable());
+            assert_eq!(mapped.protocol_observation, expected);
+            assert!(!mapped.message.contains("must-not-cross"));
+            assert!(
+                !mapped
+                    .protocol_observation
+                    .as_ref()
+                    .unwrap()
+                    .shape_sanitized
+                    .to_string()
+                    .contains("must-not-cross")
+            );
+        }
     }
 
     #[test]

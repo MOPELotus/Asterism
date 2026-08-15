@@ -57,8 +57,11 @@ progress, score and success status identical while changing only opaque raw time
 observations. Injected lifecycle tests freeze provider/task runtime overrides,
 reject completion/score drift, reject absent/partial preservation fields and
 reject a final read with no time change.
-Native-boundary tests separately reject malformed or unsupported mutation result
-codes and prove the preserved CMI form state. Wire-plan regressions keep
+Native-boundary tests separately reject malformed mutation results, classify
+well-formed unsupported integer codes as explicit negative receipts, and prove
+the preserved CMI form state. Missing/non-integer `ret` tests assert the exact
+value-free TaskExecution observation and sentinel non-disclosure. Wire-plan
+regressions keep
 YZBRH's conditional start/initial keep, current Fanyuchang's unconditional
 start and `0,1,2...` paired client counters, and Auto_WeLearn's delayed
 60-second implicit plan distinct. Native request tests also keep the audited
@@ -92,7 +95,10 @@ Injected execution fixtures separately prove `set_then_save` and `save_only`.
 They also return explicit negative receipts while presenting an exact fresh CMI
 goal: execution succeeds only because the readback matches, and exposes false
 start/set/save acceptance fields for diagnostics. Malformed or ambiguous
-responses remain covered by HumanRequired no-replay tests.
+responses remain covered by HumanRequired no-replay tests. Dedicated resource
+and atomic mapper tests prove the validated shape survives reclassification,
+the reason remains `ManualIntervention`, the error remains non-retryable and no
+sentinel response value enters either message or observation.
 
 ## Full-sweep regression disposition
 
@@ -277,7 +283,9 @@ only structural field names, response codes and bounded placeholder shapes.
   plain endpoint/simple Referer and switches only final completion to the
   task-specific Referer. Renewal-stage tests allow Authentication renewal only
   before start and during final read-only verification; every error after the
-  first mutation maps to non-retryable HumanRequired. The transport trait and
+  first mutation maps to non-retryable HumanRequired. A safe mutation-result
+  observation survives that mapping without becoming a receipt or replay
+  authority. The transport trait and
   native implementation remain unregistered and unreachable from singleton
   TaskExecution.
 - Pure atomic verification tests require exact completed/progress-100/profile

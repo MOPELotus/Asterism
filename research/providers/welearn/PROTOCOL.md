@@ -282,6 +282,14 @@ modes record every well-formed integer receipt and continue their donor
 sequence. Missing,
 string, malformed, authentication or network outcomes remain ambiguous and
 stop with no replay or later-mutation authority.
+For a valid JSON document whose `ret` is missing or non-integer, the parser
+attaches `UnknownResultShape` containing only fixed `sco_mutation`/`ret` labels,
+root/result JSON types and `missing` or `not_integer`. It never copies the
+result or any other response value. Malformed JSON remains an unobserved
+`InvalidResponse` because no safe internal field shape was parsed. Once a
+resource or atomic mutation has begun, reclassification to typed
+`HumanRequired` transfers this already-validated observation while preserving
+`ManualIntervention`/`SessionExpired`, non-retryability and no replay.
 The phase and final-mutation forms remain independently encoded and auditable.
 Only the YZBRH and Auto single-file preservation/bare-save modes are complete
 singleton DurationReport lifecycles; the two completion-bearing flows require
@@ -515,7 +523,9 @@ ordinary singleton request. Before the first start request it may renew one
 authentication failure during session/route/initial-CMI resolution. The first
 start send is the mutation boundary: every later request, parse, event or
 intermediate read error becomes non-retryable `HumanRequired`, with no renewal
-or mutation replay. Current Fanyuchang uses query-uid/simple-Referer full start,
+or mutation replay. An already-attached mutation-result observation survives
+that disposition change but does not create a receipt or verification fact.
+Current Fanyuchang uses query-uid/simple-Referer full start,
 counter keeps, a same-session fresh-time read, one set and one score-100 save.
 Modular Auto uses plain/simple-Referer minimal start and implicit keeps, then
 switches only its completion-bearing score-0 save to the task-specific Referer;
