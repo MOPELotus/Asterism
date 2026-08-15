@@ -1,6 +1,6 @@
 # UAI research sources
 
-Audit dates: 2026-08-09, 2026-08-11, 2026-08-13 and 2026-08-14. Recorded revisions are
+Audit dates: 2026-08-09, 2026-08-11, 2026-08-13, 2026-08-14 and 2026-08-15. Recorded revisions are
 reproducible implementation snapshots; each checkpoint also refreshes default
 branches, tags/releases and relevant protocol commits for incremental audit.
 
@@ -9,7 +9,7 @@ branches, tags/releases and relevant protocol commits for incremental audit.
 | [`create-try-now/AutoFinish_UxiaoyuanAI`](https://github.com/create-try-now/AutoFinish_UxiaoyuanAI) | `bef0d29155cef727e05ba6b72336ee212c94fe84` | Current Password/JWT, Course/progress, encrypted content/answer, typed objective/subjective/compound execution, discussion, exit-ticket, oral-empty, upload and external AI behavior | Reference | Apache-2.0 |
 | [`Duster-Cule/UnipusHelperPro`](https://github.com/Duster-Cule/UnipusHelperPro) | `590b4a58fe175240fe9a08fdd69948effcf4f193` | Independent Course/task progress and duration reads; encrypted answer, ordered single/multi-module submit builders and fresh user-module verification routes | Reference | MIT |
 | [`uxudjs/UnipusAIAutoPlayer`](https://github.com/uxudjs/UnipusAIAutoPlayer) | `cc6bdc86a13e7c80a54dff50819607a488ed952e` | Current Unit/Section/Micro DOM and iframe discovery, Tab/Task interaction, popup handling, page-residence distribution and optional video playback/keepalive | Reference | GPL-3.0 |
-| [`Zzj-klwgxdz/UnipusAI`](https://github.com/Zzj-klwgxdz/UnipusAI) | `40ead69c7dabf7a2f3a215ff69f3feba73a736f6` | Current Rust progress-leaf `tab_type`, required/minimum-score/time-window/statistic strategy, text/video mark-seen, generic ordered child answer body, content-derived judge types, external LLM and media transcription | Reference | GPL-3.0 |
+| [`Zzj-klwgxdz/UnipusAI`](https://github.com/Zzj-klwgxdz/UnipusAI) | `525c7ecfc2b46daa9877c93ad2f6422cf5084937` | Current Rust progress-leaf `tab_type`, required/minimum-score/time-window/statistic strategy, text/video mark-seen, generic ordered child answer body, content-derived judge types, external LLM and media transcription | Reference | GPL-3.0 |
 
 The Apache backend donor is the primary current HTTP reference. The MIT donor
 is an independent route/schema cross-check and proves that completion,
@@ -385,3 +385,15 @@ recorded donor heads and tags. Apache remained `bef0d29155ce`, MIT remained
 `40ead69c7dab`; no new tag or protocol delta appeared. The observation schemas
 therefore describe local fail-closed diagnostics only and do not extend donor
 capability evidence.
+
+The next ordinary delta check later on 2026-08-15 found one new Rust default-
+branch commit, `525c7ecfc2b46daa9877c93ad2f6422cf5084937`. It changes only the
+donor CLI's local `course_id`-to-Chinese-display-name heuristic in
+`src/api/course.rs`; no route, response field, authentication, task,
+submission, media or Browser behavior changed, and tag `3.0` remained the only
+release tag. Asterism already reads bounded authoritative Course and
+CourseResource `name` values from `getCourseListByStudent`, so it deliberately
+does not port this guessed code-name mapping. Apache, MIT and AutoPlayer default
+revisions and complete tag sets remained unchanged. Their visible issue lists
+still contain no new capability-bearing issue beyond the previously audited
+surfaces.

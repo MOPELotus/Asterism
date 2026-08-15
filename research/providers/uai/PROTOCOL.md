@@ -1,6 +1,6 @@
 # UAI protocol notes
 
-Audit date: 2026-08-13. These are static donor observations and synthetic
+Audit dates: 2026-08-13 and incremental 2026-08-15. These are static donor observations and synthetic
 parser coverage, not live compatibility claims. The recorded donor default
 branches, tags and releases were refreshed on this date; unchanged revisions
 remain reproducible audit snapshots rather than permanent update ceilings.
@@ -104,6 +104,12 @@ identity is the bounded resource `id`, not a mutable title, class ID or current
 instance route. The detail response must repeat `courseResourceId` and supplies
 a fresh `courseInstanceId`; that route is held only in a redacted operation
 context.
+
+The 2026-08-15 Rust donor delta adds only a local display-name heuristic over
+the opaque Course instance string. It is not protocol evidence for a new title
+field and can fabricate `unknown` labels. Asterism therefore continues to use
+the bounded Course and CourseResource `name` fields returned by the management
+API and never derives a user-facing title from `courseInstanceId`.
 
 The native CourseInventory resolves one account-bound composite session and
 reads the fixed Course-list route with the raw JWT in a sensitive Authorization
