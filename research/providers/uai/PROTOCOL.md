@@ -874,21 +874,24 @@ entirely uncounted summary yields no score fact. Progress and Task completion
 are never inferred from this value. With no receipt the result is
 Inconclusive and no version route is guessed or read.
 
-For the ordinary answer verifier, the same already-bound document can also
-produce a Provider-private policy-evidence owner. It hashes the exact bounded
-result bytes and retains the Group/version binding, positive `strategyId`,
-exact boolean `required`, `record_every_submit` and `record_max_submit`, decimal
-`task_mini_score_pct` in fixed-point thousandths, second-resolution
-`startTime`/`endTime`, and submit-state `expired`, `not_start` and `lastSubmit`.
+For the ordinary answer verifier and the independently bound single-upload
+verifier, the same already-bound document can also produce a Provider-private
+policy-evidence owner. It hashes the exact bounded result bytes and retains the
+Group/version binding, positive `strategyId`, exact boolean `required`,
+`record_every_submit` and `record_max_submit`, decimal `task_mini_score_pct` in
+fixed-point thousandths, second-resolution `startTime`/`endTime`, and
+submit-state `expired`, `not_start` and `lastSubmit`.
 Zero time endpoints mean no bounded window and zero `lastSubmit` means absent,
 matching the other UAI strategy parsers. A document with neither `strategyId`
 nor `strategy` keeps the legacy verification path; once either appears, the
 complete typed policy is mandatory and malformed, partial, reversed-window or
 out-of-range material fails closed. The result owner is evidence only: the
 shared verification projection remains unchanged, recording flags grant no
-retake authority, and no score-policy precedence is inferred. Upload and
-compound verification keep their independent owners until a shared evidence
-contract can consume the policy without conflating adapter shapes.
+retake authority, and no score-policy precedence is inferred. Single-upload
+verification first proves the exact immutable object key and then attaches that
+same policy owner; compound verification keeps its independent owners until a
+shared evidence contract can consume the policy without conflating adapter
+shapes.
 
 Unknown or structurally ambiguous types still fail closed, but this is a drift
 guard rather than a policy exclusion. Discussion, exit-ticket, oral-empty and

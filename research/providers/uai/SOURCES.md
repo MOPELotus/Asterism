@@ -59,9 +59,10 @@ That exact MIT response also carries receipt-scoped Task policy and submit
 state. Asterism now retains the complete typed `strategyId`, `required`,
 recording flags, Task minimum score, availability window, submit-window flags
 and last-submit time in a result-digest-bound Provider-private owner for the
-ordinary verifier. These observations neither authorize a completed-Task
-retake nor establish precedence over Group, Unit or Course scoring facts;
-shared ingestion/reconciliation remains a Main-owned contract gap.
+ordinary verifier and, after exact object-key readback, the single-upload
+verifier. These observations neither authorize a completed-Task retake nor
+establish precedence over Group, Unit or Course scoring facts; shared
+ingestion/reconciliation remains a Main-owned contract gap.
 
 The MIT donor separately calls `courseStudyStrategy/detail` with the fresh
 CourseResource strategy ID, then uses the returned per-Unit `requiredTask`
@@ -213,6 +214,12 @@ completion-diagnosis audit on 2026-08-15. The same Apache `bef0d29155ce`, MIT
 `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and Rust `40ead69c7dabf` revisions
 remained current; the narrow `WindowClosed` mapping uses existing strategy
 evidence and introduces no donor protocol delta.
+
+The same four default branches and complete tag refs were refreshed at the
+single-upload policy-evidence checkpoint on 2026-08-15. Apache
+`bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and Rust
+`40ead69c7dabf` remained current, so reusing the receipt-bound policy parser
+after exact upload-key verification introduces no donor protocol delta.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends

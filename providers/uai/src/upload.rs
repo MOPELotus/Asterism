@@ -14,7 +14,10 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     encrypted::ZeroizingJsonValue,
     submission_execute::valid_submission_version,
-    submission_verify::{bound_verification_state, verified_submission_score},
+    submission_verify::{
+        UaiSubmissionPolicyEvidence, bound_verification_state, verified_submission_policy,
+        verified_submission_score,
+    },
 };
 
 const MAX_UPLOAD_GRANT_RESPONSE_BYTES: usize = 64 * 1_024;
@@ -461,6 +464,7 @@ pub struct UaiUploadVerification {
     artifact_digest: String,
     submission_version: String,
     score: Option<SubmissionScore>,
+    policy: Option<UaiSubmissionPolicyEvidence>,
     verified_at: Timestamp,
 }
 
@@ -481,6 +485,10 @@ impl UaiUploadVerification {
         self.score
     }
 
+    pub const fn policy(&self) -> Option<&UaiSubmissionPolicyEvidence> {
+        self.policy.as_ref()
+    }
+
     pub const fn verified_at(&self) -> Timestamp {
         self.verified_at
     }
@@ -498,6 +506,7 @@ impl fmt::Debug for UaiUploadVerification {
             .field("artifact_digest", &self.artifact_digest)
             .field("submission_version", &self.submission_version)
             .field("score", &self.score)
+            .field("policy", &self.policy)
             .field("verified_at", &self.verified_at)
             .finish()
     }
@@ -1189,11 +1198,18 @@ pub fn parse_upload_verification(
     let state = bound_verification_state(response.as_value(), submission.group_id(), version)?;
     let score = verified_submission_score(state)?;
     validate_upload_question_data(state, submission.expose_file_key())?;
+    let policy = verified_submission_policy(
+        state,
+        submission.group_id(),
+        version,
+        Sha256::digest(document.as_bytes()).into(),
+    )?;
     Ok(UaiUploadVerification {
         remote_task_id: submission.remote_task_id.clone(),
         artifact_digest: submission.artifact_digest.clone(),
         submission_version: version.to_owned(),
         score,
+        policy,
         verified_at: Utc::now(),
     })
 }
@@ -1684,8 +1700,11 @@ mod tests {
         assert_eq!(verified.artifact_digest(), submission.artifact_digest());
         assert_eq!(verified.submission_version(), "upload-v1");
         assert_eq!(verified.score(), None);
+        assert!(verified.policy().is_none());
         assert!(verified.requires_fresh_progress_read());
         assert!(!format!("{verified:?}").contains(submission.expose_file_key()));
+
+        assert_upload_policy_evidence(&document, &submission, &receipt);
 
         assert!(
             parse_upload_verification(
@@ -1710,6 +1729,73 @@ mod tests {
         receipt_without_version.provider_trace_id = None;
         assert!(
             parse_upload_verification(&document, &submission, &receipt_without_version).is_err()
+        );
+    }
+
+    fn assert_upload_policy_evidence(
+        document: &str,
+        submission: &UaiUploadSubmission,
+        receipt: &SubmissionReceipt,
+    ) {
+        let mut policy_document: Value = serde_json::from_str(document).unwrap();
+        let submit_info = policy_document["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]
+            .as_object_mut()
+            .unwrap();
+        submit_info.insert("strategyId".to_owned(), serde_json::json!(3001));
+        submit_info.insert(
+            "strategy".to_owned(),
+            serde_json::json!({
+                "endTime": 1_790_812_800,
+                "record_every_submit": false,
+                "record_max_submit": true,
+                "required": true,
+                "startTime": 1_785_542_400,
+                "task_mini_score_pct": "60.000",
+            }),
+        );
+        submit_info.insert(
+            "state".to_owned(),
+            serde_json::json!({
+                "expired": false,
+                "lastSubmit": 1_786_752_000,
+                "not_start": false,
+            }),
+        );
+        let policy_document = serde_json::to_string(&policy_document).unwrap();
+        let verified = parse_upload_verification(&policy_document, submission, receipt).unwrap();
+        let policy = verified.policy().unwrap();
+        assert_eq!(policy.group_id(), "group-upload");
+        assert_eq!(policy.submission_version(), "upload-v1");
+        assert_eq!(policy.strategy_id(), 3001);
+        assert!(policy.required());
+        assert!(!policy.record_every_submit());
+        assert!(policy.record_max_submit());
+        assert_eq!(policy.task_minimum_score_milli_percent(), 60_000);
+        assert_eq!(policy.opens_at().unwrap().timestamp(), 1_785_542_400);
+        assert_eq!(policy.closes_at().unwrap().timestamp(), 1_790_812_800);
+        assert_eq!(policy.last_submit_at().unwrap().timestamp(), 1_786_752_000);
+        assert!(!policy.submit_expired());
+        assert!(!policy.submit_not_started());
+        assert_eq!(
+            policy.result_digest(),
+            <[u8; 32]>::from(Sha256::digest(policy_document.as_bytes()))
+        );
+        let debug = format!("{policy:?}");
+        assert!(!debug.contains("group-upload"));
+        assert!(!debug.contains("upload-v1"));
+
+        let mut partial_policy: Value = serde_json::from_str(&policy_document).unwrap();
+        partial_policy["data"]["state"]["__EXTEND_DATA__"]["__SUBMIT_INFO__"]
+            .as_object_mut()
+            .unwrap()
+            .remove("strategy");
+        assert!(
+            parse_upload_verification(
+                &serde_json::to_string(&partial_policy).unwrap(),
+                submission,
+                receipt,
+            )
+            .is_err()
         );
     }
 

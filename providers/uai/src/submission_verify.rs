@@ -536,7 +536,7 @@ pub(crate) fn verified_submission_score(
     Ok(Some(score))
 }
 
-fn verified_submission_policy(
+pub(crate) fn verified_submission_policy(
     state: &serde_json::Map<String, Value>,
     expected_group_id: &str,
     expected_version: &str,
