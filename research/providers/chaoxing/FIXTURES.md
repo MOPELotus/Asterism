@@ -355,6 +355,10 @@ every fixture before staging it.
   mutation responses and a genuinely independent account sign-result readback.
   `signDetail` alone is not completion evidence, and an opaque `stuSignajax`
   string is a Receipt at most and never authorizes replay after ambiguity.
+  Provider unit regressions additionally derive one ordinary-sign preparation
+  from these fixtures, assert its exact two query field sets and actor-bound
+  digest, redact UID/name, and reject foreign snapshots, non-normal variants
+  and malformed actor inputs without issuing HTTP.
 - Learning-count fixtures must expose a fresh server-visible count before and
   after one visit. `studentstudyAjax`, `setlog` and monitor responses alone are
   insufficient, and a synthetic local target counter is not verification.

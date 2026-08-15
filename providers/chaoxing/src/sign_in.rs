@@ -101,6 +101,14 @@ impl ChaoxingSignActivity {
         &self.fingerprint
     }
 
+    pub(crate) fn course_id(&self) -> &str {
+        &self.course_id
+    }
+
+    pub(crate) fn class_id(&self) -> &str {
+        &self.class_id
+    }
+
     fn belongs_to(&self, route: ChaoxingCourseRoute<'_>) -> bool {
         self.remote_course_id == route.remote_course_id()
             && self.course_id == route.course_id()
@@ -160,6 +168,21 @@ impl ChaoxingSignDetailRequest {
     pub fn discovery_fingerprint(&self) -> &str {
         &self.discovery_fingerprint
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(activity: &ChaoxingSignActivity) -> Self {
+        Self {
+            remote_id: activity.remote_id.clone(),
+            remote_course_id: activity.remote_course_id.clone(),
+            course_id: activity.course_id.clone(),
+            class_id: activity.class_id.clone(),
+            activity_id: activity.activity_id.clone(),
+            expected_other_id: activity.other_id,
+            expected_start_time_millis: activity.start_time_millis,
+            expected_end_time_millis: activity.end_time_millis,
+            discovery_fingerprint: activity.fingerprint.clone(),
+        }
+    }
 }
 
 impl fmt::Debug for ChaoxingSignDetailRequest {
@@ -186,6 +209,7 @@ impl fmt::Debug for ChaoxingSignDetailRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChaoxingSignDetail {
     remote_id: String,
+    discovery_fingerprint: String,
     variant: ChaoxingSignVariant,
     provider_status: i64,
     start_time_millis: Option<i64>,
@@ -221,6 +245,10 @@ impl ChaoxingSignDetail {
 
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    pub(crate) fn discovery_fingerprint(&self) -> &str {
+        &self.discovery_fingerprint
     }
 }
 
@@ -597,6 +625,7 @@ pub fn parse_sign_detail(
     }))?;
     Ok(ChaoxingSignDetail {
         remote_id: request.remote_id.clone(),
+        discovery_fingerprint: request.discovery_fingerprint.clone(),
         variant,
         provider_status,
         start_time_millis,
@@ -880,17 +909,7 @@ mod tests {
     }
 
     fn detail_request(activity: &ChaoxingSignActivity) -> ChaoxingSignDetailRequest {
-        ChaoxingSignDetailRequest {
-            remote_id: activity.remote_id.clone(),
-            remote_course_id: activity.remote_course_id.clone(),
-            course_id: activity.course_id.clone(),
-            class_id: activity.class_id.clone(),
-            activity_id: activity.activity_id.clone(),
-            expected_other_id: activity.other_id,
-            expected_start_time_millis: activity.start_time_millis,
-            expected_end_time_millis: activity.end_time_millis,
-            discovery_fingerprint: activity.fingerprint.clone(),
-        }
+        ChaoxingSignDetailRequest::for_test(activity)
     }
 
     struct FixtureTransport;

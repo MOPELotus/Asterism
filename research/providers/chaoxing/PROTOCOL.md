@@ -735,6 +735,28 @@ inputs, durable non-idempotent authority, receipt classification, and a fresh
 account-bound readback which proves the exact activity was completed. No
 `preSign` or `stuSignajax` call exists in the current implementation.
 
+The Provider-local ordinary-sign preparation closes only the immutable request
+shape. From one exact list/detail pair and explicit bounded UID/FID/name, it
+freezes two separate zeroizing query templates:
+
+```text
+newsign/preSign:
+  courseId, classId, activePrimaryId, general=1, sys=1, ls=1,
+  appType=15, tid="", uid, ut=s, isTeacherViewOpen=0
+
+pptSign/stuSignajax:
+  activeId, uid, clientip="", latitude=-1, longitude=-1,
+  appType=15, fid, name
+```
+
+The resulting digest binds actor fields, activity/detail fingerprints and both
+canonical queries. Only static route names, the two-request count and the
+digest leave the object; the zeroizing queries have no public getter and no
+transport implementation consumes them. Status codes do not authorize the
+preparation. Photo upload/object identity, location fields, gesture/code
+prerequisites and QR `enc` differ or require extra dynamic evidence across the
+donors, so every non-normal variant remains unsupported at preparation time.
+
 Samueli commit `38a269811c9bb4a44bb31beaf02c552168c50864` implements
 post-task learning-count traffic by loading `studentstudyAjax`, extracting one
 absolute `fystat-ans.chaoxing.com/log/setlog` script URL, sending it, sending two

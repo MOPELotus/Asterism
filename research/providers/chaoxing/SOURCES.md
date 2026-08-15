@@ -81,6 +81,13 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-15: compared Samueli `741d5c1884aa84ea50c650897c870229c1de812e`
+  with both newly pinned sign-in sources at the parameter level. The ordinary
+  `preSign`/`stuSignajax` field core is now frozen into an actor- and
+  snapshot-bound, zeroizing Provider-local preparation with no send method.
+  Gesture/code prerequisites, location field sets, photo upload/object identity
+  and QR dynamic `enc` are not consistent or self-contained enough to prepare;
+  all remain explicit blockers rather than guessed request shapes.
 - 2026-08-15: added and fully pinned the current MIT `Ylim314/chaoxing-sign`
   PortSource at `7ed64ff547d352708066ff61f1b1dc1fb1be32f1` and GPL-3.0-or-later
   `superdaobo/mini-hbut` Reference at

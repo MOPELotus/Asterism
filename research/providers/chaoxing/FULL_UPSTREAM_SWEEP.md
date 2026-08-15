@@ -221,3 +221,12 @@ marks `otherId=5` ambiguous, binds `ifPhoto=1 + otherId=0` as the separately
 observed photo shape, and exposes only course-bound list/detail reads. It does
 not copy GPL source, advertise sign-in, issue a mutation or call structural
 detail a completion readback.
+
+A follow-up parameter audit compared Samueli's `741d5c1` methods with the two
+new pins. Only the ordinary-sign core is sufficiently consistent for immutable
+preparation: the course/activity-bound `preSign` fields and the identity-bound
+normal `stuSignajax` fields are frozen into separate zeroizing templates and a
+single digest. Gesture has conflicting code-validation prerequisites, location
+has conflicting field sets, photo requires an uploaded `objectId`, and QR
+requires dynamic `enc`; none is prepared. The preparation has no HTTP consumer
+and does not weaken the durable-authority/readback gate.
