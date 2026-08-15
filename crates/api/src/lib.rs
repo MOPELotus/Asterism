@@ -307,6 +307,10 @@ fn task_routes() -> Router<ApiState> {
     Router::new()
         .route("/api/v1/tasks", get(task::list_tasks))
         .route("/api/v1/tasks/{task_id}", get(task::get_task))
+        .route(
+            "/api/v1/tasks/{task_id}/completion-workflows",
+            get(task::get_task_completion_workflows),
+        )
         .route("/api/v1/tasks/{task_id}/detail", get(task::get_task_detail))
         .route(
             "/api/v1/tasks/{task_id}/browser-session-spec",
@@ -1079,6 +1083,13 @@ pub fn openapi_document() -> Value {
         .insert(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates".to_owned(),
             answer_candidates_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/tasks/{task_id}/completion-workflows".to_owned(),
+            task_completion_workflows_path(),
         );
     document["paths"]
         .as_object_mut()
@@ -1995,6 +2006,24 @@ fn answer_resolution_path() -> Value {
     }})
 }
 
+fn task_completion_workflows_path() -> Value {
+    json!({"get": {
+        "operationId": "getTaskCompletionWorkflows",
+        "description": "Reads the owner-scoped Strict Completion and Score Improvement workflow snapshots and revisions for one Task without starting or mutating either workflow.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Current workflow snapshots; each absent workflow is returned as null"},
+            "400": {"description": "Invalid Task ID"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Task read permission is required"},
+            "404": {"description": "Owner-scoped Task not found"}
+        }
+    }})
+}
+
 fn submission_drafts_path() -> Value {
     json!({"post": {
         "operationId": "buildSubmissionDraft",
@@ -2331,12 +2360,13 @@ mod tests {
     use asterism_domain::{
         AnswerCandidate, AnswerCandidateId, AnswerSource, AssessmentClass, AuthMethod, AuthState,
         BrowserBridgeExchange, BrowserBridgeRuntimeStateMetadata, BrowserBridgeSessionId,
-        ExecutionAttemptId, ExecutionId, NormalizedAnswer, ProviderId, Question, QuestionId,
-        QuestionKind, QuestionSnapshotId, RemoteState, SelectedAnswer, SessionKind, SourceType,
-        SubmissionDraft, SubmissionDraftId, SubmissionDraftItem, SubmissionPayloadEncoding,
-        SubmissionPayloadFieldPreview, SubmissionPayloadPreview, SubmissionQuestionVerification,
-        SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionResult,
-        SubmissionResultId, SubmissionResultStatus, SubmissionScore,
+        CompletionPolicySnapshot, CompletionWorkflowBinding, ExecutionAttemptId, ExecutionId,
+        NormalizedAnswer, ProviderAccountId, ProviderId, Question, QuestionId, QuestionKind,
+        QuestionSnapshotId, RemoteState, SelectedAnswer, SessionKind, SourceType,
+        StrictCompletionWorkflow, SubmissionDraft, SubmissionDraftId, SubmissionDraftItem,
+        SubmissionPayloadEncoding, SubmissionPayloadFieldPreview, SubmissionPayloadPreview,
+        SubmissionQuestionVerification, SubmissionQuestionVerificationStatus, SubmissionReceipt,
+        SubmissionResult, SubmissionResultId, SubmissionResultStatus, SubmissionScore,
         SubmissionVerificationSnapshot, SubmissionVerificationStatus, TaskId, UserId,
     };
     use asterism_provider_api::{
@@ -2352,8 +2382,9 @@ mod tests {
     };
     use asterism_secrets::{CredentialBundle, SecretAccess, SecretActor, SecretKey, SecretValue};
     use asterism_storage::{
-        AnswerCandidateRecord, AnswerCandidateRepository, QuestionSnapshot,
-        QuestionSnapshotRepository, SecretKeyring, SqliteBrowserBridgeSessionRepository,
+        AnswerCandidateRecord, AnswerCandidateRepository, CompletionWorkflowRepository,
+        QuestionSnapshot, QuestionSnapshotRepository, SecretKeyring,
+        SqliteBrowserBridgeSessionRepository, SqliteCompletionWorkflowRepository,
         SqliteQuestionSnapshotRepository, SubmissionDraftRepository, SubmissionResultRepository,
     };
     use async_trait::async_trait;
@@ -3295,6 +3326,102 @@ mod tests {
             response_json(selected).await["session"]["required_recipe_version"],
             4
         );
+    }
+
+    #[tokio::test]
+    async fn completion_workflows_are_owner_scoped_read_only_snapshots() {
+        let (app, database) = test_app(false, None).await;
+        let bootstrap = bootstrap(&app).await;
+        let cookie = bootstrap.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let account_id = create_test_provider_account(&app, &cookie).await;
+        let task_id = TaskId::new();
+        let now = Utc::now();
+        let now_text = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, provider_account_id, remote_id, remote_fingerprint, source_type, \
+              assessment_class, title, remote_state, orchestration_state, discovered_at, \
+              updated_at, capabilities_json) \
+             VALUES (?, ?, 'completion-status-task', 'completion-status-fingerprint', 'work', \
+                     'routine', 'Completion status', 'pending', 'ready', ?, ?, '[]')",
+        )
+        .bind(task_id.to_string())
+        .bind(&account_id)
+        .bind(&now_text)
+        .bind(&now_text)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let path = format!("/api/v1/tasks/{task_id}/completion-workflows");
+        let absent = app
+            .clone()
+            .oneshot(
+                Request::get(&path)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(absent.status(), StatusCode::OK);
+        assert_eq!(absent.headers()[header::CACHE_CONTROL], "no-store");
+        let absent = response_json(absent).await;
+        assert!(absent["strict_completion"].is_null());
+        assert!(absent["score_improvement"].is_null());
+
+        let owner_id: UserId = sqlx::query_scalar::<_, String>(
+            "SELECT owner_user_id FROM provider_accounts WHERE id = ?",
+        )
+        .bind(&account_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap()
+        .parse()
+        .unwrap();
+        let workflow = StrictCompletionWorkflow::new(
+            CompletionWorkflowBinding {
+                owner_user_id: owner_id,
+                provider_account_id: ProviderAccountId::from_str(&account_id).unwrap(),
+                task_id,
+            },
+            CompletionPolicySnapshot {
+                captured_at: now,
+                ..CompletionPolicySnapshot::default()
+            },
+            None,
+            now,
+        )
+        .unwrap();
+        SqliteCompletionWorkflowRepository::new(database)
+            .create_strict_completion_workflow(&workflow)
+            .await
+            .unwrap();
+
+        let present = app
+            .oneshot(
+                Request::get(path)
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(present.status(), StatusCode::OK);
+        let present = response_json(present).await;
+        assert_eq!(present["task_id"], task_id.to_string());
+        assert_eq!(present["strict_completion"]["revision"], 1);
+        assert_eq!(present["strict_completion"]["workflow"]["state"], "active");
+        assert_eq!(
+            present["strict_completion"]["workflow"]["binding"]["owner_user_id"],
+            owner_id.to_string()
+        );
+        assert!(present["score_improvement"].is_null());
     }
 
     #[tokio::test]

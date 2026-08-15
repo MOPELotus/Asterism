@@ -2,8 +2,9 @@ use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
     AnswerCandidate, AnswerCandidateId, AnswerConfidence, Execution, NormalizedAnswer,
-    ProviderAccountId, ProviderId, Question, QuestionId, QuestionSnapshotId, SubmissionDraftId,
-    SubmissionResultId, Task, TaskCapability, TaskId, TaskLifecycleAction, Timestamp,
+    ProviderAccountId, ProviderId, Question, QuestionId, QuestionSnapshotId,
+    ScoreImprovementWorkflow, StrictCompletionWorkflow, SubmissionDraftId, SubmissionResultId,
+    Task, TaskCapability, TaskId, TaskLifecycleAction, Timestamp,
 };
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
@@ -24,11 +25,11 @@ use asterism_provider_api::{
     BrowserSessionSpec, ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail,
 };
 use asterism_storage::{
-    AnswerCandidateRepository, QuestionSnapshotRepository, SqliteExecutionRepository,
-    SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
-    SqliteQuestionReadAttemptRepository, SqliteQuestionSnapshotRepository,
-    SqliteTaskLifecycleRepository, SqliteTaskQueryRepository, SubmissionDraftRepository,
-    SubmissionResultRepository, TaskQueryRepository,
+    AnswerCandidateRepository, CompletionWorkflowRepository, QuestionSnapshotRepository,
+    SqliteCompletionWorkflowRepository, SqliteExecutionRepository, SqliteProviderAccountRepository,
+    SqliteProviderRuntimeSettingsRepository, SqliteQuestionReadAttemptRepository,
+    SqliteQuestionSnapshotRepository, SqliteTaskLifecycleRepository, SqliteTaskQueryRepository,
+    SubmissionDraftRepository, SubmissionResultRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -100,6 +101,46 @@ pub(super) async fn get_task(
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("task_not_found"))?;
     Ok(crate::auth::no_store(Json(task).into_response()))
+}
+
+pub(super) async fn get_task_completion_workflows(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    SqliteTaskQueryRepository::new(state.database.clone())
+        .find_owned_task(owner_id, task_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("task_not_found"))?;
+    let workflows = SqliteCompletionWorkflowRepository::new(state.database);
+    let strict_completion = workflows
+        .find_owned_strict_completion_workflow(owner_id, task_id)
+        .await
+        .map_err(ApiError::internal)?
+        .map(|record| StrictCompletionWorkflowResponse {
+            revision: record.revision,
+            workflow: record.workflow,
+        });
+    let score_improvement = workflows
+        .find_owned_score_improvement_workflow(owner_id, task_id)
+        .await
+        .map_err(ApiError::internal)?
+        .map(|record| ScoreImprovementWorkflowResponse {
+            revision: record.revision,
+            workflow: record.workflow,
+        });
+    Ok(crate::auth::no_store(
+        Json(TaskCompletionWorkflowsResponse {
+            task_id,
+            strict_completion,
+            score_improvement,
+        })
+        .into_response(),
+    ))
 }
 
 pub(super) async fn get_task_detail(
@@ -1499,6 +1540,25 @@ struct TaskPageResponse {
     limit: u32,
     offset: u64,
     items: Vec<Task>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskCompletionWorkflowsResponse {
+    task_id: TaskId,
+    strict_completion: Option<StrictCompletionWorkflowResponse>,
+    score_improvement: Option<ScoreImprovementWorkflowResponse>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct StrictCompletionWorkflowResponse {
+    revision: u32,
+    workflow: StrictCompletionWorkflow,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ScoreImprovementWorkflowResponse {
+    revision: u32,
+    workflow: ScoreImprovementWorkflow,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

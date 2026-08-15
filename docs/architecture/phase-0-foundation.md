@@ -4378,3 +4378,26 @@ attempts of the same Execution, observes two numbered retries, then proves the
 third observation stops at the frozen attempt limit with three unique ledger
 bindings. A separate formal-assessment regression enables execution, records
 the first incomplete observation and proves that no Retry job is created.
+
+## Two-hundred-and-fortieth Phase 0 slice
+
+Owners can now read both completion state machines through one Task-bound,
+read-only API resource. The response contains the Strict Completion workflow
+and Score Improvement workflow independently, including each optimistic
+revision and complete frozen Domain snapshot. A workflow which has never been
+created is returned as null; the read does not create, restart or otherwise
+advance either state machine.
+
+The route first proves the Task belongs to the authenticated reader, then uses
+the owner-and-Task scoped completion repository for both lookups and returns a
+`no-store` response. Invalid or foreign Task identities therefore cannot be
+used to probe whether a workflow exists. The OpenAPI client contract describes
+the complete binding, policy, state, diagnosis, completion baseline and score
+shapes rather than collapsing the two workflows into one completion flag.
+
+API integration coverage reads an existing Task before a workflow exists,
+persists one Strict workflow through the real Storage boundary, and then reads
+back its owner binding, Active state and revision while Score Improvement
+remains independently absent. This observable revision boundary is required
+before later confirmation and fresh Snapshot/Draft retry commands can safely
+use compare-and-swap semantics.

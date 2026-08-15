@@ -91,6 +91,10 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("putTaskRuntimeSettings", "ProviderRuntimeSettingsResponse"),
     ("listTasks", "TaskPageResponse"),
     ("getTask", "Task"),
+    (
+        "getTaskCompletionWorkflows",
+        "TaskCompletionWorkflowsResponse",
+    ),
     ("getTaskDetail", "TaskDetailResponse"),
     (
         "getTaskBrowserSessionSpec",
@@ -1019,6 +1023,45 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 }),
             ),
         ),
+        (
+            "CompletionWorkflowBinding",
+            completion_workflow_binding_schema(),
+        ),
+        ("CompletionPolicySnapshot", completion_policy_schema()),
+        ("SubmissionScore", submission_score_schema()),
+        ("StrictCompletionWorkflow", strict_completion_schema()),
+        ("ScoreImprovementWorkflow", score_improvement_schema()),
+        (
+            "StrictCompletionWorkflowResponse",
+            object(
+                &["revision", "workflow"],
+                json!({
+                    "revision": unsigned_integer(),
+                    "workflow": schema_ref("StrictCompletionWorkflow")
+                }),
+            ),
+        ),
+        (
+            "ScoreImprovementWorkflowResponse",
+            object(
+                &["revision", "workflow"],
+                json!({
+                    "revision": unsigned_integer(),
+                    "workflow": schema_ref("ScoreImprovementWorkflow")
+                }),
+            ),
+        ),
+        (
+            "TaskCompletionWorkflowsResponse",
+            object(
+                &["task_id", "strict_completion", "score_improvement"],
+                json!({
+                    "task_id": uuid(),
+                    "strict_completion": nullable_schema_ref("StrictCompletionWorkflowResponse"),
+                    "score_improvement": nullable_schema_ref("ScoreImprovementWorkflowResponse")
+                }),
+            ),
+        ),
         ("ExecutionPageResponse", page_response("Execution")),
         (
             "ExecutionDetailResponse",
@@ -1064,6 +1107,141 @@ fn provider_scan_report_schema() -> Value {
             }
         }),
     )
+}
+
+fn completion_workflow_binding_schema() -> Value {
+    object(
+        &["owner_user_id", "provider_account_id", "task_id"],
+        json!({
+            "owner_user_id": uuid(),
+            "provider_account_id": uuid(),
+            "task_id": uuid()
+        }),
+    )
+}
+
+fn completion_policy_schema() -> Value {
+    object(
+        &[
+            "strict_completion_enabled",
+            "score_improvement_enabled",
+            "strict_attempt_limit",
+            "score_improvement_attempt_limit",
+            "score_target_millis",
+            "strict_expires_at",
+            "score_improvement_expires_at",
+            "formal_retry_requires_confirmation",
+            "captured_at",
+        ],
+        json!({
+            "strict_completion_enabled": {"type": "boolean"},
+            "score_improvement_enabled": {"type": "boolean"},
+            "strict_attempt_limit": unsigned_integer(),
+            "score_improvement_attempt_limit": unsigned_integer(),
+            "score_target_millis": unsigned_integer(),
+            "strict_expires_at": nullable_timestamp(),
+            "score_improvement_expires_at": nullable_timestamp(),
+            "formal_retry_requires_confirmation": {"type": "boolean"},
+            "captured_at": timestamp()
+        }),
+    )
+}
+
+fn submission_score_schema() -> Value {
+    object(
+        &["earned_milli_points", "possible_milli_points"],
+        json!({
+            "earned_milli_points": unsigned_integer(),
+            "possible_milli_points": unsigned_integer()
+        }),
+    )
+}
+
+fn strict_completion_schema() -> Value {
+    object(
+        &[
+            "id",
+            "binding",
+            "policy",
+            "state",
+            "attempts_started",
+            "last_diagnosis",
+            "verified_outcome",
+            "created_at",
+            "updated_at",
+            "finished_at",
+        ],
+        json!({
+            "id": uuid(),
+            "binding": schema_ref("CompletionWorkflowBinding"),
+            "policy": schema_ref("CompletionPolicySnapshot"),
+            "state": string_enum(&["disabled", "active", "attempt_running", "completed", "stopped"]),
+            "attempts_started": unsigned_integer(),
+            "last_diagnosis": completion_diagnosis(),
+            "verified_outcome": nullable_string_enum(&["completed", "passed"]),
+            "created_at": timestamp(),
+            "updated_at": timestamp(),
+            "finished_at": nullable_timestamp()
+        }),
+    )
+}
+
+fn score_improvement_schema() -> Value {
+    object(
+        &[
+            "id",
+            "binding",
+            "policy",
+            "completion_baseline",
+            "retake_score_policy",
+            "explicitly_opted_in",
+            "state",
+            "attempts_started",
+            "best_observed_score",
+            "last_diagnosis",
+            "created_at",
+            "updated_at",
+            "finished_at",
+        ],
+        json!({
+            "id": uuid(),
+            "binding": schema_ref("CompletionWorkflowBinding"),
+            "policy": schema_ref("CompletionPolicySnapshot"),
+            "completion_baseline": object(
+                &["outcome", "score", "verified_at"],
+                json!({
+                    "outcome": string_enum(&["completed", "passed"]),
+                    "score": nullable_schema_ref("SubmissionScore"),
+                    "verified_at": timestamp()
+                }),
+            ),
+            "retake_score_policy": string_enum(&["highest_score", "last_attempt", "average", "teacher_rule", "unknown"]),
+            "explicitly_opted_in": {"type": "boolean"},
+            "state": string_enum(&["disabled", "ready", "attempt_running", "finished", "stopped"]),
+            "attempts_started": unsigned_integer(),
+            "best_observed_score": nullable_schema_ref("SubmissionScore"),
+            "last_diagnosis": completion_diagnosis(),
+            "created_at": timestamp(),
+            "updated_at": timestamp(),
+            "finished_at": nullable_timestamp()
+        }),
+    )
+}
+
+fn completion_diagnosis() -> Value {
+    nullable_string_enum(&[
+        "score_below_threshold",
+        "duration_insufficient",
+        "required_children_pending",
+        "prerequisite_locked",
+        "teacher_review_pending",
+        "human_action_required",
+        "unsupported_capability",
+        "protocol_drift",
+        "attempt_limit_reached",
+        "window_closed",
+        "remote_unknown",
+    ])
 }
 
 fn credit_account_schema() -> Value {
