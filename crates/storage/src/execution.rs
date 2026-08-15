@@ -2727,9 +2727,10 @@ async fn strict_completion_retry_is_valid(
             "strict completion retry workflow binding is invalid".to_owned(),
         ));
     }
-    let retry_required = assessment_class == "formal"
-        && workflow.state == StrictCompletionState::Active
-        && workflow.attempts_started > 0;
+    let retry_required = workflow.state == StrictCompletionState::Active
+        && workflow.attempts_started > 0
+        && (assessment_class == "formal"
+            || execution.requested_capabilities == [TaskCapability::SubmissionExecute]);
     let Some(confirmation) = request.strict_completion_retry else {
         return Ok(!retry_required);
     };
@@ -3819,16 +3820,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn formal_submission_retry_requires_fresh_snapshot_and_draft() {
+    async fn scored_submission_retry_requires_confirmation_fresh_snapshot_and_draft() {
         let (database, owner, task_id) = fixture().await;
         let repository = SqliteExecutionRepository::new(database.clone());
         let now = Utc::now();
         let workflow = insert_active_formal_workflow(&database, owner, task_id, now).await;
+        sqlx::query("UPDATE tasks SET assessment_class = 'routine' WHERE id = ?")
+            .bind(task_id.to_string())
+            .execute(database.pool())
+            .await
+            .unwrap();
         let old_draft =
             insert_submission_draft(&database, task_id, now - chrono::Duration::seconds(2)).await;
         let mut old_execution = scheduled_execution(owner, task_id, now);
         old_execution.requested_capabilities = vec![TaskCapability::SubmissionExecute];
         old_execution.submission_draft_id = Some(old_draft);
+        assert_eq!(
+            repository
+                .schedule_execution(test_request(
+                    &old_execution,
+                    owner,
+                    "submission-without-confirmation",
+                ))
+                .await
+                .unwrap(),
+            ExecutionScheduleOutcome::StrictCompletionRetryConflict
+        );
         let mut old_request = test_request(&old_execution, owner, "formal-old-draft");
         old_request.strict_completion_retry = Some(ExecutionStrictCompletionRetryRequest {
             workflow_id: workflow.id,

@@ -4428,3 +4428,28 @@ over an old Snapshot, accept a fully fresh pair, and carry the persisted
 confirmation through a live claimed Attempt into workflow attempt two. API
 coverage rejects a stale revision, accepts the exact confirmation and returns
 the original Execution on an exact idempotent replay.
+
+## Two-hundred-and-forty-second Phase 0 slice
+
+Submission terminal handling now consumes the atomic Strict Completion
+workflow result instead of treating the Provider result status as an
+independent completion decision. A fresh remote Completed/Passed observation
+therefore finishes the Execution successfully even when weaker status fields
+conflict, preserving monotonic completion. A rejected or below-threshold
+Submission leaves the workflow Active and moves both Execution and Task to
+HumanRequired without scheduling an automatic retry or replaying the old
+Draft. Terminal states outside those two cases retain their conservative
+status mapping.
+
+The same rule applies during recovery. When a SubmissionResult already exists,
+the recovery worker first records its exactly-once completion observation and
+then finishes from the resulting workflow state; it cannot bypass the ledger
+because a crash happened between result persistence and Execution finish.
+
+Retry confirmation now covers every already-attempted Active
+SubmissionExecute workflow, regardless of whether the Task is classified as
+Formal or Routine. Storage still requires a current workflow revision and a
+QuestionSnapshot plus immutable Draft created after the prior observation.
+Formal non-Submission Strict retries retain the same confirmation boundary,
+while routine idempotent completion work remains eligible for its bounded
+automatic retry policy.

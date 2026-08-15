@@ -151,6 +151,7 @@ where
         self.validate_strict_completion_retry(
             command.owner_id,
             &task,
+            &command.requested_capabilities,
             command.strict_completion_retry,
         )
         .await?;
@@ -312,17 +313,19 @@ where
         &self,
         owner_id: UserId,
         task: &Task,
+        requested_capabilities: &[TaskCapability],
         confirmation: Option<ExecutionStrictCompletionRetryRequest>,
     ) -> Result<(), ExecutionRequestError> {
         let workflow = self
             .executions
             .find_owned_strict_completion_workflow(owner_id, task.id)
             .await?;
-        let retry_required = task.assessment_class == asterism_domain::AssessmentClass::Formal
-            && workflow.as_ref().is_some_and(|record| {
-                record.workflow.state == StrictCompletionState::Active
-                    && record.workflow.attempts_started > 0
-            });
+        let retry_required = workflow.as_ref().is_some_and(|record| {
+            record.workflow.state == StrictCompletionState::Active
+                && record.workflow.attempts_started > 0
+        }) && (task.assessment_class
+            == asterism_domain::AssessmentClass::Formal
+            || requested_capabilities == [TaskCapability::SubmissionExecute]);
         let valid = match (retry_required, workflow, confirmation) {
             (false, _, None) => true,
             (true, Some(record), Some(confirmation)) => {

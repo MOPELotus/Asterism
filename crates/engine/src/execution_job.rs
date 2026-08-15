@@ -781,8 +781,24 @@ where
             .find_active_submission_result(execution_id)
             .await?
         {
+            let completion = self
+                .record_submission_completion_observation(
+                    job,
+                    result.execution_attempt_id,
+                    &prepared,
+                    &result.verification,
+                    now.max(result.created_at),
+                    correlation_id,
+                )
+                .await?;
             return self
-                .finish_recovery_from_submission_result(job, &result, now, correlation_id)
+                .finish_recovery_from_submission_result(
+                    job,
+                    &result,
+                    completion.workflow.workflow.state,
+                    now.max(result.created_at),
+                    correlation_id,
+                )
                 .await;
         }
         let Some(attempt_id) = self
@@ -1104,17 +1120,24 @@ where
                 at,
             })
             .await?;
-        self.record_submission_completion_observation(
+        let completion = self
+            .record_submission_completion_observation(
+                job,
+                attempt_id,
+                prepared,
+                &result.verification,
+                at,
+                correlation_id,
+            )
+            .await?;
+        self.finish_recovery_from_submission_result(
             job,
-            attempt_id,
-            prepared,
-            &result.verification,
+            &result,
+            completion.workflow.workflow.state,
             at,
             correlation_id,
         )
-        .await?;
-        self.finish_recovery_from_submission_result(job, &result, at, correlation_id)
-            .await
+        .await
     }
 
     async fn defer_or_require_submission_review(
@@ -1143,19 +1166,29 @@ where
         &self,
         job: &ScheduledJob,
         result: &SubmissionResult,
+        completion_state: StrictCompletionState,
         at: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
-        let (state, error_class) = match result.status {
-            SubmissionResultStatus::Confirmed => (ExecutionState::Succeeded, None),
-            SubmissionResultStatus::Rejected => (
-                ExecutionState::Failed,
-                Some(ProviderErrorClass::InvalidRemoteState),
-            ),
-            SubmissionResultStatus::ExecutionFailed | SubmissionResultStatus::Inconclusive => (
+        let (state, error_class) = if completion_state == StrictCompletionState::Completed {
+            (ExecutionState::Succeeded, None)
+        } else if completion_state == StrictCompletionState::Active {
+            (
                 ExecutionState::HumanRequired,
                 Some(ProviderErrorClass::InvalidRemoteState),
-            ),
+            )
+        } else {
+            match result.status {
+                SubmissionResultStatus::Confirmed => (ExecutionState::Succeeded, None),
+                SubmissionResultStatus::Rejected => (
+                    ExecutionState::Failed,
+                    Some(ProviderErrorClass::InvalidRemoteState),
+                ),
+                SubmissionResultStatus::ExecutionFailed | SubmissionResultStatus::Inconclusive => (
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::InvalidRemoteState),
+                ),
+            }
         };
         self.finish_recovery(job, state, error_class, None, at, correlation_id)
             .await
@@ -3263,6 +3296,10 @@ where
         clippy::too_many_arguments,
         reason = "submission verification must retain the exact worker, Draft and receipt bindings"
     )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "submission finish keeps result persistence, completion observation and terminal state mapping visible together"
+    )]
     async fn finish_submission_verification(
         &self,
         job: &ScheduledJob,
@@ -3326,33 +3363,50 @@ where
                 at: now,
             })
             .await?;
-        self.record_submission_completion_observation(
-            job,
-            attempt.id,
-            prepared,
-            &result.verification,
-            now,
-            correlation_id,
-        )
-        .await?;
-        match status {
-            SubmissionResultStatus::Confirmed => {
+        let completion = self
+            .record_submission_completion_observation(
+                job,
+                attempt.id,
+                prepared,
+                &result.verification,
+                now,
+                correlation_id,
+            )
+            .await?;
+        match completion.workflow.workflow.state {
+            StrictCompletionState::Completed => {
                 self.finish_success(job, attempt, now, correlation_id).await
             }
-            SubmissionResultStatus::Rejected => {
+            StrictCompletionState::Active => {
                 self.finish_failure(
                     job,
                     attempt,
                     ProviderErrorClass::InvalidRemoteState,
-                    FailureDisposition::Failed,
+                    FailureDisposition::HumanRequired,
                     now,
                     correlation_id,
                 )
                 .await
             }
-            SubmissionResultStatus::ExecutionFailed | SubmissionResultStatus::Inconclusive => {
-                unreachable!("only terminal verification statuses are persisted here")
-            }
+            _ => match status {
+                SubmissionResultStatus::Confirmed => {
+                    self.finish_success(job, attempt, now, correlation_id).await
+                }
+                SubmissionResultStatus::Rejected => {
+                    self.finish_failure(
+                        job,
+                        attempt,
+                        ProviderErrorClass::InvalidRemoteState,
+                        FailureDisposition::Failed,
+                        now,
+                        correlation_id,
+                    )
+                    .await
+                }
+                SubmissionResultStatus::ExecutionFailed | SubmissionResultStatus::Inconclusive => {
+                    unreachable!("only terminal verification statuses are persisted here")
+                }
+            },
         }
     }
 
@@ -4499,6 +4553,7 @@ mod tests {
         DurationNetworkFailure,
         CompositeSuccess,
         SubmissionConfirmed,
+        SubmissionRejected,
         SubmissionPending,
         SubmissionExecuteNetwork,
         DurableSubmissionConfirmed,
@@ -4639,6 +4694,7 @@ mod tests {
                 | ProviderBehavior::DurationNetworkFailure => vec![TaskCapability::DurationReport],
                 ProviderBehavior::CompositeSuccess => request.requested_capabilities.clone(),
                 ProviderBehavior::SubmissionConfirmed
+                | ProviderBehavior::SubmissionRejected
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork
                 | ProviderBehavior::DurableSubmissionConfirmed
@@ -4715,6 +4771,7 @@ mod tests {
                     result_sanitized: serde_json::json!({"completion_changed": true}),
                 }),
                 ProviderBehavior::SubmissionConfirmed
+                | ProviderBehavior::SubmissionRejected
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork
                 | ProviderBehavior::DurableSubmissionConfirmed
@@ -4776,6 +4833,7 @@ mod tests {
                     result_sanitized: serde_json::json!({"goal_matched": true}),
                 }),
                 ProviderBehavior::SubmissionConfirmed
+                | ProviderBehavior::SubmissionRejected
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork
                 | ProviderBehavior::DurableSubmissionConfirmed
@@ -4853,6 +4911,7 @@ mod tests {
                     panic!("composite recovery must use phase-bound execution verification")
                 }
                 ProviderBehavior::SubmissionConfirmed
+                | ProviderBehavior::SubmissionRejected
                 | ProviderBehavior::SubmissionPending
                 | ProviderBehavior::SubmissionExecuteNetwork
                 | ProviderBehavior::DurableSubmissionConfirmed
@@ -5072,19 +5131,25 @@ mod tests {
         ) -> ProviderResult<SubmissionVerificationSnapshot> {
             *self.submission_verify_calls.lock().unwrap() += 1;
             let pending = self.behavior == ProviderBehavior::SubmissionPending;
+            let rejected = self.behavior == ProviderBehavior::SubmissionRejected;
             Ok(SubmissionVerificationSnapshot {
                 status: if pending {
                     SubmissionVerificationStatus::Pending
+                } else if rejected {
+                    SubmissionVerificationStatus::Rejected
                 } else {
                     SubmissionVerificationStatus::Confirmed
                 },
-                remote_state: Some(if pending {
+                remote_state: Some(if pending || rejected {
                     RemoteState::InProgress
                 } else {
                     RemoteState::Completed
                 }),
-                score: None,
-                progress_percent: Some(if pending { 50 } else { 100 }),
+                score: rejected.then_some(asterism_domain::SubmissionScore {
+                    earned_milli_points: 0,
+                    possible_milli_points: 1_000,
+                }),
+                progress_percent: Some(if pending || rejected { 50 } else { 100 }),
                 questions: draft
                     .items
                     .iter()
@@ -5092,6 +5157,8 @@ mod tests {
                         question_id: item.question.id,
                         status: if pending {
                             asterism_domain::SubmissionQuestionVerificationStatus::Unverified
+                        } else if rejected {
+                            asterism_domain::SubmissionQuestionVerificationStatus::Rejected
                         } else {
                             asterism_domain::SubmissionQuestionVerificationStatus::Confirmed
                         },
@@ -5677,6 +5744,52 @@ mod tests {
         assert_eq!(
             completion,
             ("completed".to_owned(), Some("completed".to_owned()), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_submission_requires_fresh_explicit_retry_without_replay() {
+        let fixture = Fixture::submission(ProviderBehavior::SubmissionRejected).await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ScheduledExecutionOutcome::HumanRequired {
+                error_class: ProviderErrorClass::InvalidRemoteState,
+                ..
+            }
+        ));
+        assert_eq!(*fixture.provider.calls.lock().unwrap(), 1);
+        assert_eq!(*fixture.provider.submission_verify_calls.lock().unwrap(), 1);
+
+        let persisted: (String, String, String, i64, Option<String>, i64) = sqlx::query_as(
+            "SELECT execution.state, task.orchestration_state, workflow.state, \
+                    json_extract(workflow.workflow_json, '$.attempts_started'), \
+                    json_extract(workflow.workflow_json, '$.last_diagnosis'), \
+                    (SELECT COUNT(*) FROM scheduled_jobs \
+                     WHERE job_kind IN ('retry', 'recovery')) \
+             FROM executions AS execution \
+             INNER JOIN tasks AS task ON task.id = execution.task_id \
+             INNER JOIN strict_completion_workflows AS workflow ON workflow.task_id = task.id \
+             WHERE execution.id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted,
+            (
+                "human_required".to_owned(),
+                "human_required".to_owned(),
+                "active".to_owned(),
+                1,
+                Some("score_below_threshold".to_owned()),
+                0,
+            )
         );
     }
 
