@@ -237,6 +237,13 @@ Preparation-bound pure parsers now preserve those as controlled preflight or
 Receipt facts with response digests; they reject all other text. No Receipt is
 called completion, and no parser provides dispatch, retry or recovery.
 
+The same fixed source explicitly describes `preSign` as required before the
+later operation can produce a normal sign record, and `handleSign` always
+issues it before variant dispatch. Consequently its HTTP GET method is not a
+read-only authorization boundary. Asterism keeps it transport-free until the
+whole pre-sign/submission sequence has durable issue authority, ambiguous-step
+recovery and an independent Chaoxing account-result readback.
+
 The post-checkpoint delta audit also recovered Ylim's WebIM monitor. It obtains
 three secret fields from `im.chaoxing.com/webim/me`, opens the pinned Easemob
 application and treats `ext.attachment.att_chat_course.atype=2` as a sign-event

@@ -757,6 +757,16 @@ preparation. Photo upload/object identity, location fields, gesture/code
 prerequisites and QR `enc` differ or require extra dynamic evidence across the
 donors, so every non-normal variant remains unsupported at preparation time.
 
+The pinned Ylim source states that the `preSign` request must be sent before a
+later sign record can be created, and its `handleSign` path always issues that
+request before dispatching a variant. `preSign` is therefore not classified as
+read-only merely because the remote method is GET. It is the first protocol
+step of the non-idempotent sign sequence. Any future transport must persist its
+issue before I/O, bind it to the exact fresh activity/detail/actor snapshot,
+separate its observation from the later `stuSignajax` Receipt, and never replay
+an ambiguous issued step unless independent donor evidence establishes a safe
+recovery rule.
+
 Bounded pure parsers cover the donor-observed responses without adding a
 transport. The pre-sign HTML must contain exactly one structural
 `#statuscontent`: empty text becomes `NoCompletionMarker` and exact `签到成功`

@@ -372,6 +372,11 @@ every fixture before staging it.
   missing/duplicate/unknown `#statuscontent`, unknown opaque mutation text and
   oversized bodies, while keeping preflight evidence, mutation Receipt and
   independent completion verification as three distinct concepts.
+  A future transport fixture must additionally ledger `preSign` as the first
+  issued operation in the sign mutation sequence, because the PortSource says
+  that request is required for the later sign record. GET method semantics must
+  not bypass issue persistence, and an ambiguous pre-sign outcome must not be
+  replayed without a separately evidenced recovery rule.
   WebIM fixtures separately cover the exact three bootstrap selectors, one
   `atype=2` `att_chat_course` identity and one non-sign activity. Tests bind
   credentials to account/correlation without exposing token/UID/name, retain

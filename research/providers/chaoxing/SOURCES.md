@@ -84,6 +84,13 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-15: re-checked Ylim's ordinary `handleSign` chain at the fixed pin.
+  Its source explicitly requires issuing `preSign` before a later sign record
+  can be created and always calls it before variant dispatch. Asterism
+  therefore treats that GET as a mutation-sequence operation requiring durable
+  issue authority and ambiguous-outcome recovery, not as a free read or remote
+  completion readback. The existing preparation and parser remain
+  transport-free.
 - 2026-08-15: refreshed all eight recorded donor default branches, tags and
   latest Releases. Revisions remain
   `9699e632b492`/`1589eac9c07c`/`7ed64ff547d3`/`64fb2f06e10c`/
