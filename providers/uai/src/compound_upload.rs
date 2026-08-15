@@ -833,6 +833,24 @@ mod tests {
         assert!(sequence_artifact.contains(&draft.id.to_string()));
         assert!(!sequence_artifact.contains(uploaded.file_key()));
 
+        let request =
+            build_compound_upload_submission_request(&submission, "course-instance-1", "openid-1")
+                .unwrap();
+        let outcome = request
+            .classify_final_response(
+                1,
+                r#"{"code":0,"data":{"course_id":"course-instance-1","group_id":"group-upload","version":"compound-upload-v1"}}"#,
+                "course-instance-1",
+                "group-upload",
+            )
+            .unwrap();
+        let result_state = sequence.accepted_result_state(&outcome).unwrap();
+        assert_eq!(
+            result_state.kind(),
+            crate::UaiUploadFinalSubmissionKind::Compound
+        );
+        assert_eq!(result_state.submission_version(), "compound-upload-v1");
+
         let body =
             build_compound_upload_submission_body(&submission, "course-instance-1", "openid-1")
                 .unwrap();

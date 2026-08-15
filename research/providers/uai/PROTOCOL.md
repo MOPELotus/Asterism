@@ -1291,6 +1291,19 @@ single/compound paths use this same classifier but retain their legacy typed
 `RateLimited` result until the shared stage-state executor can own the whole
 workflow.
 
+A definite accepted outcome can now materialize a bounded zeroizing
+`uai.upload.final-result.v1` owner and deterministic secret bytes. It retains
+the accepted submission version independently of Core's hash-only receipt and
+binds the single/compound kind, ordinal, sequence plan/artifact digests,
+semantic plan binding, exact request digest and response digest. Decoding
+requires an accepted `uai.upload.final-submit` recovery record with the same
+ordinal and request/response lineage; rejected results, unknown fields, digest
+substitution or a foreign otherwise-valid sequence fail closed. This owner is
+only the Provider input for the future atomic receipt-plus-encrypted-state
+transaction. It is not stored by the current sequence sink, contains no object
+key or compound selected answer and therefore cannot independently authorize
+readback, replay or final mutation verification.
+
 ### Minimal durable upload stage state
 
 The smallest shared contract that closes this gap has one immutable encrypted

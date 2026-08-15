@@ -182,8 +182,10 @@ pub use upload::{
     parse_upload_verification,
 };
 pub use upload_sequence::{
-    UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS, UAI_UPLOAD_FINAL_OPERATION_TYPE,
-    UAI_UPLOAD_FINAL_PLAN_ARTIFACT_TYPE, UAI_UPLOAD_FINAL_RETRY_SECONDS,
-    UAI_UPLOAD_FINAL_SEQUENCE_TYPE, UaiUploadFinalRetryCode, UaiUploadFinalSubmissionKind,
-    UaiUploadFinalSubmissionOutcome, UaiUploadFinalSubmissionSequence,
+    EncodedUaiUploadFinalResultState, UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS,
+    UAI_UPLOAD_FINAL_OPERATION_TYPE, UAI_UPLOAD_FINAL_PLAN_ARTIFACT_TYPE,
+    UAI_UPLOAD_FINAL_RESULT_STATE_TYPE, UAI_UPLOAD_FINAL_RETRY_SECONDS,
+    UAI_UPLOAD_FINAL_SEQUENCE_TYPE, UaiUploadFinalResultState, UaiUploadFinalRetryCode,
+    UaiUploadFinalSubmissionKind, UaiUploadFinalSubmissionOutcome,
+    UaiUploadFinalSubmissionSequence,
 };

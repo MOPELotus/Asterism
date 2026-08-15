@@ -454,3 +454,12 @@ added a version-free user-module read or an object-key-independent verification
 surface. Exact recovery therefore still needs Apache/MIT's accepted submission
 version plus the immutable single/compound answer material; a response hash or
 fresh completion progress is not substitute evidence.
+
+The accepted final-result state checkpoint later on 2026-08-15 queried every
+default ref and complete tag ref again. Apache remained `bef0d29155ce`, MIT
+remained `590b4a58fe17`, AutoPlayer remained `cc6bdc86a13e` and Rust remained
+`525c7ecfc2b`; their tag sets were unchanged. The Provider codec therefore
+preserves the already audited code-0 submission version and exact request/body
+response lineage without adding donor semantics. Its encrypted state is a
+future atomic recovery input, not a substitute for the exact final plan or
+receipt-versioned readback.

@@ -2,11 +2,15 @@ use std::fmt;
 
 use asterism_domain::{ProviderId, SubmissionReceipt};
 use asterism_provider_api::{
-    ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSequenceAdvanceCondition,
-    ExecutionMutationSequencePhase, ExecutionMutationSequencePlan, ExecutionMutationSink,
-    ProviderError, ProviderErrorKind, ProviderExecutionPlanArtifact, ProviderResult,
+    ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationRecoveryRecord,
+    ExecutionMutationSequenceAdvanceCondition, ExecutionMutationSequencePhase,
+    ExecutionMutationSequencePlan, ExecutionMutationSink, ProviderError, ProviderErrorKind,
+    ProviderExecutionPlanArtifact, ProviderResult,
 };
+use asterism_secrets::SecretValue;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
     UaiCompoundUploadSubmission, UaiCompoundUploadSubmissionRequest, UaiUploadSubmission,
@@ -14,10 +18,13 @@ use crate::{
 };
 
 pub const UAI_UPLOAD_FINAL_PLAN_ARTIFACT_TYPE: &str = "uai.upload.final-plan.v1";
+pub const UAI_UPLOAD_FINAL_RESULT_STATE_TYPE: &str = "uai.upload.final-result.v1";
 pub const UAI_UPLOAD_FINAL_SEQUENCE_TYPE: &str = "uai.upload.final-submit.v1";
 pub const UAI_UPLOAD_FINAL_OPERATION_TYPE: &str = "uai.upload.final-submit";
 pub const UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS: u32 = 2;
 pub const UAI_UPLOAD_FINAL_RETRY_SECONDS: u64 = 120;
+
+const MAX_UPLOAD_FINAL_RESULT_STATE_BYTES: usize = 16 * 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UaiUploadFinalSubmissionKind {
@@ -141,6 +148,62 @@ impl UaiUploadFinalSubmissionSequence {
 
     pub fn into_parts(self) -> (ProviderExecutionPlanArtifact, ExecutionMutationSequencePlan) {
         (self.artifact, self.plan)
+    }
+
+    /// Freezes the accepted donor version and exact request/response lineage
+    /// for a future atomic receipt-plus-state persistence boundary.
+    ///
+    /// This state deliberately does not contain the object key or compound
+    /// answer. Recovery-time verification additionally requires the exact
+    /// encrypted final plan; this result state alone grants no replay or
+    /// verification authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a rejected outcome, malformed accepted receipt or outcome from
+    /// another valid final-upload sequence.
+    pub fn accepted_result_state(
+        &self,
+        outcome: &UaiUploadFinalSubmissionOutcome,
+    ) -> ProviderResult<UaiUploadFinalResultState> {
+        let UaiUploadFinalSubmissionOutcome::Accepted {
+            ordinal,
+            kind,
+            sequence_binding_digest,
+            request_digest,
+            response_digest,
+            receipt,
+        } = outcome
+        else {
+            return Err(foreign_result_state());
+        };
+        receipt.validate().map_err(|_| foreign_result_state())?;
+        let submission_version = receipt
+            .provider_trace_id
+            .as_deref()
+            .filter(|version| {
+                receipt.remote_status == "accepted"
+                    && crate::submission_execute::valid_submission_version(version)
+            })
+            .ok_or_else(foreign_result_state)?;
+        if *kind != self.kind
+            || *sequence_binding_digest != self.sequence_binding_digest
+            || !(1..=UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS).contains(ordinal)
+            || *request_digest == [0; 32]
+            || *response_digest == [0; 32]
+        {
+            return Err(foreign_result_state());
+        }
+        Ok(UaiUploadFinalResultState {
+            ordinal: *ordinal,
+            kind: *kind,
+            plan_digest: self.plan.plan_digest(),
+            artifact_digest: self.artifact.artifact_digest(),
+            sequence_binding_digest: *sequence_binding_digest,
+            request_digest: *request_digest,
+            response_digest: *response_digest,
+            submission_version: Zeroizing::new(submission_version.to_owned()),
+        })
     }
 
     /// Freezes the exact final-submit phase machine before request issuance.
@@ -283,6 +346,193 @@ impl UaiUploadFinalSubmissionSequence {
         } else {
             Ok(())
         }
+    }
+}
+
+/// Encoded accepted-result state intended only for a future encrypted Provider
+/// execution-state store.
+pub struct EncodedUaiUploadFinalResultState {
+    value: SecretValue,
+    digest: [u8; 32],
+}
+
+impl EncodedUaiUploadFinalResultState {
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub fn into_secret_value(self) -> SecretValue {
+        self.value
+    }
+}
+
+impl fmt::Debug for EncodedUaiUploadFinalResultState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncodedUaiUploadFinalResultState")
+            .field("value", &"[REDACTED]")
+            .field("digest", &"[HASHED]")
+            .finish()
+    }
+}
+
+/// Accepted final-upload response authority rebound to one immutable sequence
+/// and one exact Core mutation record.
+pub struct UaiUploadFinalResultState {
+    ordinal: u32,
+    kind: UaiUploadFinalSubmissionKind,
+    plan_digest: [u8; 32],
+    artifact_digest: [u8; 32],
+    sequence_binding_digest: [u8; 32],
+    request_digest: [u8; 32],
+    response_digest: [u8; 32],
+    submission_version: Zeroizing<String>,
+}
+
+impl UaiUploadFinalResultState {
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    pub const fn kind(&self) -> UaiUploadFinalSubmissionKind {
+        self.kind
+    }
+
+    pub const fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    pub const fn artifact_digest(&self) -> [u8; 32] {
+        self.artifact_digest
+    }
+
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    pub const fn response_digest(&self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    pub fn submission_version(&self) -> &str {
+        &self.submission_version
+    }
+
+    /// Encodes the accepted result into deterministic bounded secret bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-response error if the state cannot be encoded within
+    /// its encrypted continuation bound.
+    pub fn encode(&self) -> ProviderResult<EncodedUaiUploadFinalResultState> {
+        let mut encoded = Zeroizing::new(
+            serde_json::to_vec(&UploadFinalResultStateWireRef {
+                schema: UAI_UPLOAD_FINAL_RESULT_STATE_TYPE,
+                ordinal: self.ordinal,
+                submission_kind: self.kind.as_str(),
+                plan_digest: self.plan_digest,
+                artifact_digest: self.artifact_digest,
+                sequence_binding_digest: self.sequence_binding_digest,
+                request_digest: self.request_digest,
+                response_digest: self.response_digest,
+                submission_version: &self.submission_version,
+            })
+            .map_err(|_| invalid_result_state())?,
+        );
+        if encoded.is_empty() || encoded.len() > MAX_UPLOAD_FINAL_RESULT_STATE_BYTES {
+            return Err(invalid_result_state());
+        }
+        let digest = Sha256::digest(encoded.as_slice()).into();
+        let value = SecretValue::new(std::mem::take(&mut *encoded));
+        Ok(EncodedUaiUploadFinalResultState { value, digest })
+    }
+
+    /// Decodes the encrypted state only after rebinding its complete sequence,
+    /// issued request and accepted response identities.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed, oversized, digest-mismatched, rejected or foreign
+    /// state before exposing the accepted submission version.
+    pub fn decode_bound(
+        value: &SecretValue,
+        expected_digest: [u8; 32],
+        sequence: &UaiUploadFinalSubmissionSequence,
+        record: &ExecutionMutationRecoveryRecord,
+    ) -> ProviderResult<Self> {
+        let bytes = value.expose_secret();
+        if bytes.is_empty() || bytes.len() > MAX_UPLOAD_FINAL_RESULT_STATE_BYTES {
+            return Err(invalid_result_state());
+        }
+        if <[u8; 32]>::from(Sha256::digest(bytes)) != expected_digest {
+            return Err(foreign_result_state());
+        }
+        let wire: UploadFinalResultStateWire =
+            serde_json::from_slice(bytes).map_err(|_| foreign_result_state())?;
+        let kind = match wire.submission_kind.as_str() {
+            "single" => UaiUploadFinalSubmissionKind::Single,
+            "compound" => UaiUploadFinalSubmissionKind::Compound,
+            _ => return Err(foreign_result_state()),
+        };
+        let receipt = record.receipt().filter(|receipt| receipt.accepted());
+        if wire.schema != UAI_UPLOAD_FINAL_RESULT_STATE_TYPE
+            || wire.ordinal != record.issue().ordinal()
+            || record.issue().operation_type() != UAI_UPLOAD_FINAL_OPERATION_TYPE
+            || record.issue().request_digest() != wire.request_digest
+            || receipt.map(ExecutionMutationReceipt::response_digest) != Some(wire.response_digest)
+            || !(1..=UAI_UPLOAD_FINAL_MAXIMUM_ATTEMPTS).contains(&wire.ordinal)
+            || kind != sequence.kind
+            || wire.plan_digest != sequence.plan.plan_digest()
+            || wire.artifact_digest != sequence.artifact.artifact_digest()
+            || wire.sequence_binding_digest != sequence.sequence_binding_digest
+            || [
+                wire.plan_digest,
+                wire.artifact_digest,
+                wire.sequence_binding_digest,
+                wire.request_digest,
+                wire.response_digest,
+            ]
+            .contains(&[0; 32])
+            || !crate::submission_execute::valid_submission_version(&wire.submission_version)
+        {
+            return Err(foreign_result_state());
+        }
+        Ok(Self {
+            ordinal: wire.ordinal,
+            kind,
+            plan_digest: wire.plan_digest,
+            artifact_digest: wire.artifact_digest,
+            sequence_binding_digest: wire.sequence_binding_digest,
+            request_digest: wire.request_digest,
+            response_digest: wire.response_digest,
+            submission_version: Zeroizing::new(wire.submission_version.clone()),
+        })
+    }
+}
+
+impl fmt::Debug for UaiUploadFinalResultState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiUploadFinalResultState")
+            .field("ordinal", &self.ordinal)
+            .field("kind", &self.kind)
+            .field("plan_digest", &"[HASHED]")
+            .field("artifact_digest", &"[HASHED]")
+            .field("sequence_binding_digest", &"[HASHED]")
+            .field("request_digest", &"[HASHED]")
+            .field("response_digest", &"[HASHED]")
+            .field("submission_version", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for UaiUploadFinalResultState {
+    fn drop(&mut self) {
+        self.plan_digest.zeroize();
+        self.artifact_digest.zeroize();
+        self.sequence_binding_digest.zeroize();
+        self.request_digest.zeroize();
+        self.response_digest.zeroize();
     }
 }
 
@@ -549,6 +799,33 @@ fn retry_error(code: UaiUploadFinalRetryCode) -> ProviderError {
     error
 }
 
+#[derive(Serialize)]
+struct UploadFinalResultStateWireRef<'a> {
+    schema: &'static str,
+    ordinal: u32,
+    submission_kind: &'static str,
+    plan_digest: [u8; 32],
+    artifact_digest: [u8; 32],
+    sequence_binding_digest: [u8; 32],
+    request_digest: [u8; 32],
+    response_digest: [u8; 32],
+    submission_version: &'a str,
+}
+
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+struct UploadFinalResultStateWire {
+    schema: String,
+    ordinal: u32,
+    submission_kind: String,
+    plan_digest: [u8; 32],
+    artifact_digest: [u8; 32],
+    sequence_binding_digest: [u8; 32],
+    request_digest: [u8; 32],
+    response_digest: [u8; 32],
+    submission_version: String,
+}
+
 async fn issue_request(
     ordinal: u32,
     request_digest: [u8; 32],
@@ -573,6 +850,20 @@ fn invalid_sequence() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
         "UAI final upload retry sequence projection is invalid",
+    )
+}
+
+fn invalid_result_state() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::InvalidResponse,
+        "UAI final upload accepted-result state is invalid",
+    )
+}
+
+fn foreign_result_state() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::ProtocolDrift,
+        "UAI final upload accepted-result state is stale or foreign",
     )
 }
 
@@ -647,6 +938,86 @@ mod tests {
             .unwrap();
         assert!(sequence.issue_single(2, &request, &sink).await.is_err());
         assert_eq!(sink.snapshot(), (1, 1, vec![true]));
+    }
+
+    #[test]
+    fn accepted_result_state_round_trips_only_against_exact_recovery_lineage() {
+        let submission = UaiUploadSubmission::fixture("course/42/nothing.mp3", "fixture-a");
+        let sequence = UaiUploadFinalSubmissionSequence::for_single(&submission).unwrap();
+        let request =
+            crate::build_upload_submission_request(&submission, "course-instance-1", "openid-1")
+                .unwrap();
+        let outcome = request
+            .classify_final_response(1, ACCEPTED, "course-instance-1", "group-upload")
+            .unwrap();
+        let state = sequence.accepted_result_state(&outcome).unwrap();
+        assert_eq!(state.ordinal(), 1);
+        assert_eq!(state.kind(), UaiUploadFinalSubmissionKind::Single);
+        assert_eq!(state.plan_digest(), sequence.plan().plan_digest());
+        assert_eq!(
+            state.artifact_digest(),
+            sequence.artifact().artifact_digest()
+        );
+        assert_eq!(state.request_digest(), request.request_digest());
+        assert_eq!(state.response_digest(), outcome.response_digest());
+        assert_eq!(state.submission_version(), "upload-v1");
+        assert!(!format!("{state:?}").contains("upload-v1"));
+
+        let encoded = state.encode().unwrap();
+        let digest = encoded.digest();
+        assert!(!format!("{encoded:?}").contains("upload-v1"));
+        let value = encoded.into_secret_value();
+        let record = ExecutionMutationRecoveryRecord::try_new(
+            ExecutionMutationIssue::new(
+                1,
+                UAI_UPLOAD_FINAL_OPERATION_TYPE,
+                request.request_digest(),
+            )
+            .unwrap(),
+            Some(ExecutionMutationReceipt::new(1, outcome.response_digest(), true).unwrap()),
+            None,
+        )
+        .unwrap();
+        let decoded =
+            UaiUploadFinalResultState::decode_bound(&value, digest, &sequence, &record).unwrap();
+        assert_eq!(decoded.submission_version(), "upload-v1");
+
+        assert!(
+            UaiUploadFinalResultState::decode_bound(&value, [7; 32], &sequence, &record).is_err()
+        );
+        let foreign_record = ExecutionMutationRecoveryRecord::try_new(
+            ExecutionMutationIssue::new(
+                1,
+                UAI_UPLOAD_FINAL_OPERATION_TYPE,
+                request.request_digest(),
+            )
+            .unwrap(),
+            Some(ExecutionMutationReceipt::new(1, [8; 32], true).unwrap()),
+            None,
+        )
+        .unwrap();
+        assert!(
+            UaiUploadFinalResultState::decode_bound(&value, digest, &sequence, &foreign_record,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejected_result_cannot_create_accepted_state() {
+        let submission = UaiUploadSubmission::fixture("course/42/nothing.mp3", "fixture-a");
+        let sequence = UaiUploadFinalSubmissionSequence::for_single(&submission).unwrap();
+        let request =
+            crate::build_upload_submission_request(&submission, "course-instance-1", "openid-1")
+                .unwrap();
+        let rejected = request
+            .classify_final_response(
+                1,
+                r#"{"code":600001,"msg":"retry"}"#,
+                "course-instance-1",
+                "group-upload",
+            )
+            .unwrap();
+        assert!(sequence.accepted_result_state(&rejected).is_err());
     }
 
     #[tokio::test]
