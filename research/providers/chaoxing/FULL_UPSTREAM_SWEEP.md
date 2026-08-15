@@ -157,6 +157,14 @@ value as empty. Partial mobile Exam remains a Provider continuation gap because
 its encrypted v2 state still advances a complete sequential Question cursor.
 The other shared gaps above remain independently tracked.
 
+The same checkpoint closes the Provider-owned portion of the recovered CxKitty
+QR chain: bounded Native login/create/single-poll parsing, Chaoxing-scoped
+zeroizing Cookies, exact account/AuthSession/correlation binding and fresh
+Course validation now have code and synthetic regression coverage. Registration
+still waits for Main's encrypted restart-safe interactive-auth continuation and
+atomic terminal credential commit, plus a sanitized live validation of the 2024
+route. An in-memory challenge is not treated as completion of that shared gap.
+
 ## Re-audit outcome
 
 No donor revision changed. The sweep recovered genuine omitted scope, most

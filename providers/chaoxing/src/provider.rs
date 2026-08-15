@@ -123,6 +123,7 @@ fn compose_development_provider(
 
 #[cfg(test)]
 mod tests {
+    use asterism_domain::AuthMethod;
     use asterism_networking::NetworkProfile;
     use asterism_provider_api::{ProviderCapability, ProviderContext, ProviderRegistry};
     use asterism_secrets::{
@@ -184,6 +185,7 @@ mod tests {
     }
 
     fn assert_registry_consistent(entry: ProviderEntry) {
+        assert!(!entry.metadata.auth_methods.contains(&AuthMethod::QrCode));
         assert!(entry.authentication.is_some());
         assert!(entry.course_inventory.is_some());
         assert!(entry.task_inventory.is_some());

@@ -6,7 +6,7 @@ source modules even when their assessments share field names or HTML shapes.
 | Asterism capability | Primary source | Secondary source | Planned use | Current evidence |
 |---|---|---|---|---|
 | Authentication / Password | `Samueli924/chaoxing` | CxKitty | PortSource | AES-CBC `fanyalogin`, derived Composite credential and Cookie revalidation are offline-covered; live validation pending |
-| Authentication / QR | CxKitty | BrowserBridge capture | Reference | QR creation and polling chain is statically complete but old; current browser/session fallback is required first-batch work |
+| Authentication / QR | CxKitty | BrowserBridge capture | Reference | Clean-room Native begin/poll boundary is offline-covered: exact Web `uuid`/`enc`, `createqr`, secret `toauthlogin` payload, typed one-request `getauthstatus`, scoped zeroizing Cookie jar and fresh Course-list validation. It remains unregistered because Core has no durable interactive-auth continuation/poll/atomic credential-commit lifecycle; current browser/session fallback and live validation remain first-batch work |
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
@@ -66,6 +66,16 @@ policy and remains independently guarded.
 - Password and ImportedCookie now compose behind `AuthenticationCapability`.
   Password derives username/password/Cookie as a Core-revalidated Composite;
   captcha and SMS outcomes stop with typed `HumanRequired` reasons.
+- A separate unregistered QR transport implements the pinned CxKitty session
+  chain without placing challenge values in metadata or diagnostics. Begin and
+  every single poll require the same ProviderAccount/AuthSession/correlation
+  binding; scanned identity text is ignored, terminal states cannot be polled
+  again, response bodies and Cookie values are zeroized, and host-only Passport
+  Cookies never cross to Course hosts. `status=true` is provisional until the
+  resulting `_uid` Cookie passes a fresh Course-list read. The development
+  factory still advertises only Password/ImportedCookie because process-local
+  challenge ownership cannot replace Main's missing durable interactive-auth
+  continuation and atomic SecretStore commit.
 - The Native HTTP adapter fetches the root list, discovers bounded folder IDs
   from the interaction page, and fetches every folder using one short-lived
   resolved session. Any request or parse failure aborts the entire inventory.

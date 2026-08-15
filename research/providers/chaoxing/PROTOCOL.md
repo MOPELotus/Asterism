@@ -375,6 +375,26 @@ two values. A clean-room Provider command can own parsing and polling semantics,
 but shared challenge presentation and atomic owner-bound credential commit are
 required before the authentication method can be advertised.
 
+The Provider-owned boundary now implements that chain. `begin_qr` requires a
+Core account/AuthSession/correlation binding, uses the donor Web User-Agent,
+parses exactly one `uuid` and `enc`, activates one QR and returns the
+`toauthlogin` payload only through a secret wrapper. `poll_qr` repeats the same
+binding and performs exactly one `getauthstatus` POST; no Provider loop, sleep or
+automatic retry exists. Missing type means awaiting scan, type `4` means scanned
+and awaiting confirmation, `1` is rejected, `2` is expired, and unknown states
+fail as protocol drift. Nickname/UID/message fields are ignored and the bounded
+body is zeroized.
+
+The manual Cookie jar validates Chaoxing-only HTTPS domain/path scope, keeps
+host-only Passport Cookies off Course hosts, applies replacement/deletion and
+zeroizes both stored values and assembled headers. A terminal success must yield
+an `_uid`/`UID` Cookie applicable to the Course host and pass one fresh
+`courselistdata` read before the transport returns an authenticated session.
+Rejected, expired and authenticated challenges become terminal and cannot be
+polled again. This remains an offline/native-boundary implementation: Core still
+needs an encrypted restart-safe interactive continuation plus atomic AuthSession
+and SecretStore commit before `AuthMethod::QrCode` can be registered.
+
 ## Native independent Work submission
 
 The primary donor names every answer field `answer{qid}` and every type field

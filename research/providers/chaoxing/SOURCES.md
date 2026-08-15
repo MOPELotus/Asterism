@@ -59,12 +59,21 @@ distinguish post-result evidence from pre-submission resolution.
 
 The same audit confirmed CxKitty's separate QR session sequence: read `uuid` and
 `enc` from the Web login page under one Cookie jar, activate `createqr`, display
-the `toauthlogin` URL, and poll `getauthstatus`. That is the next Provider-owned
-authentication candidate, but challenge presentation, owner-bound polling and
-atomic credential commit remain shared runtime responsibilities.
+the `toauthlogin` URL, and poll `getauthstatus`. Asterism now implements this as
+an unregistered Provider-owned bounded Native transport. Its challenge binds the
+Core account/AuthSession/correlation, every call performs exactly one poll, the
+Cookie jar enforces Chaoxing domain/path scope and zeroization, and a reported
+success must pass a fresh Course-list read. Challenge presentation, durable
+encrypted continuation polling and atomic credential commit remain shared
+runtime responsibilities, so metadata does not advertise `QrCode` yet.
 
 ## Refresh log
 
+- 2026-08-15: re-read the complete pinned CxKitty QR call chain after the
+  workspace checkpoint. No donor revision changed. Added a clean-room bounded
+  Native QR begin/poll boundary and synthetic state/Cookie fixtures; it remains
+  unregistered pending a shared durable interactive-auth continuation and live
+  validation of the 2024 route.
 - 2026-08-15: refreshed all six donor default branches, tag counts, latest
   Releases and issue updates after the partial-coverage Core checkpoint. Every
   recorded revision remains unchanged; tag counts remain 45/0/0/321/0/29,

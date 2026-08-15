@@ -3,6 +3,8 @@
 | Risk | Evidence | Required response |
 |---|---|---|
 | Browser-bound `uf` Cookie blocks reqwest | 2026 agent donor explicitly uses same-origin Browser fetch | Compare Native HTTP and Browser fetch with the same sanitized live case; select transport per capability |
+| Native QR route or state codes drift | The only complete request chain is the pinned 2024 CxKitty implementation | Keep QR unregistered until a sanitized live run proves login/create/poll/Course validation; unknown states and redirects fail closed, and BrowserBridge remains the current fallback |
+| Process-local QR state is mistaken for a durable auth workflow | Provider begin/poll can bind one in-memory account/AuthSession/correlation, but `AuthenticationCapability` cannot persist or rotate its secret continuation | Main must encrypt the QR continuation, CAS every poll revision and atomically commit the terminal credential with AuthSession state; do not advertise `QrCode` from the development factory before that contract exists |
 | `enc` expires or changes | Current Work routes require a fresh course/session value | Never persist `enc` as identity; reacquire it before Work scanning |
 | Mobile API behavior is stale | CxKitty implementation revision is from 2024 | Treat all `mooc1-api` mobile paths as unverified fallbacks |
 | Domain variants change | Donors use `mooc1`, `mooc1-api`, `mooc2-ans` and historical institutional mirrors | Allow only audited hosts and classify unexpected redirects as protocol drift |

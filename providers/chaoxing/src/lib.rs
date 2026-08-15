@@ -15,6 +15,7 @@ mod inventory;
 mod metadata;
 mod native_http;
 mod provider;
+mod qr_authentication;
 mod question_parser;
 mod question_read;
 mod resource_execution;
@@ -59,6 +60,10 @@ pub use native_http::{
     ChaoxingCookieSession, ChaoxingSessionResolver, NativeChaoxingInventoryTransport,
 };
 pub use provider::{build_development_provider, build_development_provider_with_renewal};
+pub use qr_authentication::{
+    ChaoxingQrAuthenticationTransport, ChaoxingQrChallenge, ChaoxingQrPollOutcome,
+    NativeChaoxingQrAuthenticationTransport,
+};
 pub use question_parser::{
     ParsedChaoxingQuestion, parse_chapter_work_question_page, parse_exam_preview_question_page,
     parse_exam_question_page, parse_work_preview_question_page,

@@ -15,6 +15,12 @@ fixtures/providers/chaoxing/
     password-rejected.json
     password-captcha.json
     password-sms.json
+    qr-login.html
+    qr-awaiting.json
+    qr-scanned.json
+    qr-authenticated.json
+    qr-rejected.json
+    qr-expired.json
   courses/
     interaction-folders.html
     list-mixed.html
@@ -57,8 +63,16 @@ fixtures/providers/chaoxing/
     cards-mixed.expected.json
 ```
 
-The Auth fixtures cover bounded JSON outcome classification only; synthetic
-`Set-Cookie` headers remain in unit tests. The Course fixtures cover bounded
+The Password Auth fixtures cover bounded JSON outcome classification only;
+synthetic `Set-Cookie` headers remain in unit tests. The QR fixtures cover one
+strict login-page `uuid`/`enc` pair and the donor-observed awaiting, scanned,
+authenticated, rejected and expired JSON states. Nickname, UID and message text
+use deliberate `PRIVATE_*` sentinels which tests never retain. Separate Cookie
+tests prove Chaoxing-only domain/path scope, host-only isolation, replacement,
+deletion and zeroized header assembly. No fixture claims a durable Core poll
+lifecycle or live QR compatibility.
+
+The Course fixtures cover bounded
 folder discovery, class-scoped identity,
 unopened-course filtering, bounded metadata, ephemeral `cpi`, and strict
 allowlisting of the current course entry route. The Work course-page fixture
