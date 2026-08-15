@@ -5,6 +5,7 @@ use asterism_provider_api::{ProviderEntry, ProviderResult};
 use asterism_secrets::{ProviderCredentialRenewer, ProviderCredentialResolver};
 
 use crate::{
+    WellearnAtomicDurationCompletion, WellearnAtomicDurationCompletionRecovery,
     WellearnAuthentication, WellearnAuthenticationTransport, WellearnCmiTransport,
     WellearnCourseInventory, WellearnCourseInventoryTransport, WellearnDurationRead,
     WellearnDurationReport, WellearnDurationReportTransport, WellearnResourceExecution,
@@ -15,6 +16,33 @@ use crate::{
     native_http::NativeWellearnInventoryTransport, runtime_settings::runtime_settings_schema,
     stored_session::StoredWellearnSessionResolver,
 };
+
+/// Native, unregistered boundaries for Core-owned atomic batch dispatch and
+/// verification-only recovery.
+pub struct WellearnAtomicDurationCompletionRuntime {
+    execution: Arc<WellearnAtomicDurationCompletion>,
+    recovery: Arc<WellearnAtomicDurationCompletionRecovery>,
+}
+
+impl WellearnAtomicDurationCompletionRuntime {
+    pub const fn execution(&self) -> &Arc<WellearnAtomicDurationCompletion> {
+        &self.execution
+    }
+
+    pub const fn recovery(&self) -> &Arc<WellearnAtomicDurationCompletionRecovery> {
+        &self.recovery
+    }
+}
+
+impl std::fmt::Debug for WellearnAtomicDurationCompletionRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WellearnAtomicDurationCompletionRuntime")
+            .field("execution", &"configured")
+            .field("recovery", &"configured")
+            .finish()
+    }
+}
 
 /// Composes the complete development entry around injected authentication and
 /// inventory boundaries. Calling this function does not register the Provider
@@ -104,6 +132,43 @@ pub fn build_development_provider_with_native_inventory(
     )
 }
 
+/// Composes the unregistered native atomic execution and read-only recovery
+/// boundaries around one shared HTTP transport and one fresh `TaskDetail` path.
+///
+/// This function does not add a Provider registry capability. Core must still
+/// own parent/child creation, durable attempt record loading and dispatch.
+///
+/// # Errors
+///
+/// Returns a sanitized Provider error if metadata or the shared HTTP client
+/// cannot be initialized.
+pub fn build_native_atomic_duration_completion_runtime(
+    network: &ResolvedNetworkProfile,
+    sessions: Arc<dyn WellearnSessionResolver>,
+) -> ProviderResult<WellearnAtomicDurationCompletionRuntime> {
+    let inventory = Arc::new(NativeWellearnInventoryTransport::try_new(
+        network, sessions,
+    )?);
+    let course_inventory = Arc::new(WellearnCourseInventory::try_new(inventory.clone())?);
+    let task_inventory = Arc::new(WellearnTaskInventory::try_new(inventory.clone())?);
+    let task_detail = Arc::new(WellearnTaskDetail::try_new(
+        course_inventory,
+        task_inventory,
+    )?);
+    let execution = Arc::new(WellearnAtomicDurationCompletion::try_new(
+        task_detail.clone(),
+        inventory.clone(),
+    )?);
+    let recovery = Arc::new(WellearnAtomicDurationCompletionRecovery::try_new(
+        task_detail,
+        inventory,
+    )?);
+    Ok(WellearnAtomicDurationCompletionRuntime {
+        execution,
+        recovery,
+    })
+}
+
 /// Composes the Development entry with native Password/OIDC, Cookie validation
 /// and Course/Task HTTP around one injected stored-session resolver. Calling
 /// this function does not register the Provider or raise its verification level.
@@ -162,8 +227,8 @@ pub fn build_development_provider_with_renewal(
 mod tests {
     use asterism_networking::NetworkProfile;
     use asterism_provider_api::{
-        ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderRegistry,
-        RemoteCourse,
+        ExecutionEventSink, ProviderContext, ProviderError, ProviderErrorKind, ProviderIdentity,
+        ProviderRegistry, RemoteCourse,
     };
     use asterism_secrets::{
         ProviderCredential, ProviderCredentialRenewal, ProviderCredentialRenewer,
@@ -343,6 +408,16 @@ mod tests {
         .unwrap();
         let mut registry = ProviderRegistry::default();
         registry.register(native).unwrap();
+
+        let atomic_runtime =
+            build_native_atomic_duration_completion_runtime(&network, Arc::new(UnusedBoundaries))
+                .unwrap();
+        assert_eq!(atomic_runtime.execution().metadata().id.as_str(), "welearn");
+        assert_eq!(atomic_runtime.recovery().metadata().id.as_str(), "welearn");
+        assert_eq!(
+            format!("{atomic_runtime:?}"),
+            "WellearnAtomicDurationCompletionRuntime { execution: \"configured\", recovery: \"configured\" }"
+        );
 
         let native =
             build_development_provider_native(&network, Arc::new(UnusedBoundaries)).unwrap();

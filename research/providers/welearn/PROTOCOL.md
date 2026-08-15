@@ -568,6 +568,13 @@ same prepared path. Invalid or cross-attempt artifacts stop before fresh
 TaskDetail, sequence preparation, session resolution or mutation; successful
 input cannot select a different execution behavior from the prepared value.
 
+`build_native_atomic_duration_completion_runtime` makes the production-native
+executor and recovery coordinator constructible without exposing the private
+HTTP transport. Both share one native inventory transport and one fresh
+TaskDetail graph. The returned runtime is intentionally separate from
+`ProviderEntry`: construction does not register the composite capability or
+bypass Core's parent/child dispatch authority.
+
 Fresh goal proof remains independent from that mutation lifecycle.
 `verify_atomic_duration_completion` first revalidates the plan/document shape,
 then parses only the returned evidence and requires exact `completed`, progress

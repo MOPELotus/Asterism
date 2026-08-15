@@ -294,6 +294,9 @@ only structural field names, response codes and bounded placeholder shapes.
   returns the same outcome as the prepared path and prepares its own exact
   sequence once. Malformed parent authority stops before another TaskDetail or
   transport call.
+- Factory regression constructs the unregistered native atomic runtime, checks
+  both executor and recovery retain WELearn identity, and keeps the ordinary
+  development `ProviderEntry` slot set unchanged.
 - Native atomic transport tests bind current duration/completion to the
   query-uid endpoint and simple Referer, while Auto binds its duration phase to
   plain endpoint/simple Referer and switches only final completion to the

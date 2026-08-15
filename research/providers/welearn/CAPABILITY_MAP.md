@@ -183,6 +183,9 @@ start.
 The execution coordinator also accepts the three encoded durable artifacts as
 one entry, restores them jointly and only then enters the identical prepared
 path; malformed artifacts cannot reach discovery, sequence preparation or I/O.
+A native runtime builder now composes that executor and the read-only recovery
+coordinator over one shared native inventory/fresh-detail graph, while keeping
+both outside `ProviderEntry` until Core owns composite dispatch and recovery.
 
 `verify_atomic_duration_completion` is a separate pure readback boundary over
 the validated plan and combined documents. It requires exact

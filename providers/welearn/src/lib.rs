@@ -82,9 +82,10 @@ pub use metadata::development_metadata;
 pub use native_authentication::NativeWellearnAuthenticationTransport;
 pub use native_http::NativeWellearnInventoryTransport;
 pub use provider::{
-    build_development_provider, build_development_provider_native,
-    build_development_provider_with_native_inventory, build_development_provider_with_renewal,
-    build_development_provider_with_stored_session,
+    WellearnAtomicDurationCompletionRuntime, build_development_provider,
+    build_development_provider_native, build_development_provider_with_native_inventory,
+    build_development_provider_with_renewal, build_development_provider_with_stored_session,
+    build_native_atomic_duration_completion_runtime,
 };
 pub use resource_execution::{
     WellearnResourceExecution, WellearnResourceExecutionDocuments, WellearnResourceExecutionPlan,

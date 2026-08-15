@@ -154,6 +154,10 @@ an Asterism persistence composition and adds no donor request or result claim.
 The symmetric durable execution-entry checkpoint found the same revisions and
 tag. It changes only how Asterism reconstructs existing Provider authority
 before the already-audited lifecycle and adds no donor protocol behavior.
+The native runtime assembly checkpoint repeated the same queries without a
+delta. It exposes no new Provider capability or donor behavior; it only makes
+the existing native execution/read-only recovery boundaries constructible for
+future Core-owned dispatch.
 
 ## Source selection
 
