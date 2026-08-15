@@ -276,8 +276,11 @@ pub(super) async fn get_task_detail(
     let result = ProviderTaskDetailService::new(
         state.providers,
         SqliteTaskQueryRepository::new(state.database.clone()),
-        SqliteProviderAccountRepository::new(state.database),
+        SqliteProviderAccountRepository::new(state.database.clone()),
     )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .read(ReadTaskDetailCommand {
         owner_id,
         task_id,
@@ -1142,7 +1145,8 @@ fn map_task_detail_error(error: ProviderTaskDetailError) -> ApiError {
             "invalid_request_id",
             "the request correlation ID is invalid",
         ),
-        ProviderTaskDetailError::ProviderResponseInvalid => {
+        ProviderTaskDetailError::ProviderResponseInvalid
+        | ProviderTaskDetailError::InvalidProtocolObservation => {
             tracing::warn!(%error, "Provider returned invalid Task detail");
             ApiError::bad_gateway(
                 "provider_task_detail_invalid",

@@ -5,9 +5,17 @@ use asterism_provider_api::{
     ProviderContext, ProviderError, ProviderMetadata, ProviderRegistry, RemoteTask,
     RemoteTaskDetail,
 };
-use asterism_storage::{ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository};
+use asterism_storage::{
+    ProtocolObservationRepository, ProviderAccountRuntimeRepository, StorageError,
+    TaskQueryRepository,
+};
 
-use crate::scan::task_provider_capability;
+use crate::{
+    protocol_observation::{
+        ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+    },
+    scan::task_provider_capability,
+};
 
 const MAX_CORRELATION_ID_BYTES: usize = 128;
 const MAX_REMOTE_ID_BYTES: usize = 512;
@@ -29,11 +37,12 @@ pub struct ProviderTaskDetailResult {
     pub detail: RemoteTaskDetail,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProviderTaskDetailService<Q, A> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<Q, A> ProviderTaskDetailService<Q, A> {
@@ -42,7 +51,32 @@ impl<Q, A> ProviderTaskDetailService<Q, A> {
             registry,
             tasks,
             accounts,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<Q, A> std::fmt::Debug for ProviderTaskDetailService<Q, A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderTaskDetailService")
+            .field("registry", &self.registry)
+            .field("tasks", &"configured")
+            .field("accounts", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -87,17 +121,42 @@ where
         let capability = entry.task_detail.as_ref().ok_or_else(|| {
             ProviderTaskDetailError::CapabilityUnavailable(account.provider_id.clone())
         })?;
-        let detail = capability
+        let detail = match capability
             .task_detail(
                 &ProviderContext {
                     provider_id: account.provider_id.clone(),
                     account_id: account.id,
                     credential_refs: account.credential_refs,
-                    correlation_id: command.correlation_id,
+                    correlation_id: command.correlation_id.clone(),
                 },
                 &task.remote_id,
             )
-            .await?;
+            .await
+        {
+            Ok(detail) => detail,
+            Err(error) => {
+                let occurrence_scope =
+                    format!("task-detail:{}:{}", task.id, command.correlation_id);
+                record_provider_protocol_observation(
+                    self.protocol_observations.as_deref(),
+                    &account.provider_id,
+                    None,
+                    &occurrence_scope,
+                    &error,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(|error| match error {
+                    ProviderProtocolObservationRecordError::Invalid => {
+                        ProviderTaskDetailError::InvalidProtocolObservation
+                    }
+                    ProviderProtocolObservationRecordError::Storage(error) => {
+                        ProviderTaskDetailError::Storage(error)
+                    }
+                })?;
+                return Err(error.into());
+            }
+        };
         validate_detail(&entry.metadata, &task, &detail)?;
         Ok(ProviderTaskDetailResult {
             task_id: task.id,
@@ -197,6 +256,8 @@ pub enum ProviderTaskDetailError {
     CapabilityUnavailable(ProviderId),
     #[error("task detail correlation id is invalid")]
     InvalidCorrelationId,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error("Provider returned an inconsistent, oversized, or unsanitized Task detail")]
     ProviderResponseInvalid,
     #[error(transparent)]
@@ -207,17 +268,23 @@ pub enum ProviderTaskDetailError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Mutex};
+    use std::{
+        collections::BTreeSet,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use asterism_domain::{
-        AssessmentClass, OrchestrationState, ProviderAccount, ProviderAccountId, RemoteState,
-        SourceType, UserId,
+        AssessmentClass, OrchestrationState, ProtocolObservationKind, ProtocolSurface,
+        ProviderAccount, ProviderAccountId, RemoteState, SourceType, UserId,
     };
     use asterism_provider_api::{
-        ProviderCapability, ProviderEntry, ProviderIdentity, ProviderResult,
+        ProviderCapability, ProviderEntry, ProviderErrorKind, ProviderIdentity, ProviderResult,
         ProviderRuntimeSettingsSchema, TaskDetailCapability, VerificationLevel,
     };
-    use asterism_storage::TaskPage;
+    use asterism_storage::{Database, SqliteProtocolObservationRepository, TaskPage};
     use async_trait::async_trait;
     use chrono::Utc;
 
@@ -276,6 +343,7 @@ mod tests {
         metadata: ProviderMetadata,
         detail: Mutex<RemoteTaskDetail>,
         contexts: Mutex<Vec<(ProviderContext, String)>>,
+        protocol_drift: AtomicBool,
     }
 
     impl ProviderIdentity for FakeTaskDetail {
@@ -295,6 +363,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((context.clone(), remote_task_id.to_owned()));
+            if self.protocol_drift.load(Ordering::Relaxed) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "task detail schema changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::TaskDetail,
+                    ProtocolObservationKind::FieldDrift,
+                    serde_json::json!({"document": "task_detail", "missing": "state"}),
+                )
+                .unwrap());
+            }
             Ok(self.detail.lock().unwrap().clone())
         }
     }
@@ -371,6 +451,42 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn task_detail_drift_is_observed_before_read_fails() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let mut fixture = make_fixture();
+        fixture
+            .capability
+            .protocol_drift
+            .store(true, Ordering::Relaxed);
+        fixture.service = fixture.service.with_protocol_observations(Arc::new(
+            SqliteProtocolObservationRepository::new(database.clone()),
+        ));
+
+        assert!(matches!(
+            fixture
+                .service
+                .read(ReadTaskDetailCommand {
+                    owner_id: fixture.owner_id,
+                    task_id: fixture.task_id,
+                    correlation_id: "detail-drift".to_owned(),
+                })
+                .await,
+            Err(ProviderTaskDetailError::Provider(error))
+                if error.kind == ProviderErrorKind::ProtocolDrift
+        ));
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            ("task_detail".to_owned(), "field_drift".to_owned(), None,)
+        );
+    }
+
     struct Fixture {
         service: ProviderTaskDetailService<FakeTaskRepository, FakeAccountRepository>,
         owner_id: UserId,
@@ -445,6 +561,7 @@ mod tests {
                 normalized_detail: serde_json::json!({"question_count": 3}),
             }),
             contexts: Mutex::new(Vec::new()),
+            protocol_drift: AtomicBool::new(false),
         });
         let service = service(owner_id, task.clone(), account.clone(), capability.clone());
         Fixture {

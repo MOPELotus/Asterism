@@ -4658,3 +4658,17 @@ bad-gateway response and Inbox storage failures remain internal.
 Coverage proves both read paths persist typed result-shape observations without
 an Execution reference before returning their original ProtocolDrift or
 InvalidResponse error.
+
+## Two-hundred-and-fifty-second Phase 0 slice
+
+Owner-scoped TaskDetail reads now use the shared protocol observation sink.
+After ownership, account authentication and capability checks, a
+Provider-supplied structural shape is persisted under a Task-and-correlation
+occurrence before the original Provider error is returned. The observation has
+no Execution reference and cannot cause the returned detail or local Task to be
+updated.
+
+The API injects the SQLite repository. Invalid shape payloads share the existing
+invalid-detail bad-gateway response, while Inbox storage failure stays an
+internal persistence error. Coverage proves a typed TaskDetail/FieldDrift shape
+is stored without Execution provenance before the read fails.

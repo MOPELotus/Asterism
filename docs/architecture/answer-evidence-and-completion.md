@@ -298,3 +298,6 @@ Fresh owner reads of progress and duration also feed the inbox when their
 Provider reports a safe structural shape. These calls remain read-only and
 Task/account bound; recording a shape does not update local completion state,
 duration, score or evidence.
+TaskDetail behaves the same way: a safe field-shape observation may be retained
+after the authorized Provider call fails, but it cannot update the persisted
+Task or expose route text, remote URLs or raw detail through the Inbox.
