@@ -95,6 +95,7 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
         "getTaskCompletionWorkflows",
         "TaskCompletionWorkflowsResponse",
     ),
+    ("listTaskAttemptHistory", "TaskAttemptHistoryPageResponse"),
     ("getTaskDetail", "TaskDetailResponse"),
     (
         "getTaskBrowserSessionSpec",
@@ -1062,6 +1063,77 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
                 }),
             ),
         ),
+        (
+            "AnswerEvidenceCountsResponse",
+            object(
+                &["official", "verified_historical", "negative"],
+                json!({
+                    "official": unsigned_integer(),
+                    "verified_historical": unsigned_integer(),
+                    "negative": unsigned_integer()
+                }),
+            ),
+        ),
+        (
+            "TaskAttemptHistoryAttempt",
+            object(
+                &["attempt", "learned_evidence"],
+                json!({
+                    "attempt": schema_ref("ExecutionAttempt"),
+                    "learned_evidence": schema_ref("AnswerEvidenceCountsResponse")
+                }),
+            ),
+        ),
+        (
+            "AnswerSourceCountsResponse",
+            object(
+                &[
+                    "manual",
+                    "local_cache",
+                    "provider_native",
+                    "external_bank",
+                    "other",
+                ],
+                json!({
+                    "manual": unsigned_integer(),
+                    "local_cache": unsigned_integer(),
+                    "provider_native": unsigned_integer(),
+                    "external_bank": unsigned_integer(),
+                    "other": unsigned_integer()
+                }),
+            ),
+        ),
+        (
+            "SubmissionQuestionResultCountsResponse",
+            object(
+                &["confirmed", "rejected", "unverified"],
+                json!({
+                    "confirmed": unsigned_integer(),
+                    "rejected": unsigned_integer(),
+                    "unverified": unsigned_integer()
+                }),
+            ),
+        ),
+        (
+            "TaskSubmissionResultHistory",
+            task_submission_result_history_schema(),
+        ),
+        ("TaskSubmissionHistory", task_submission_history_schema()),
+        (
+            "TaskAttemptHistoryEntry",
+            object(
+                &["execution", "attempts", "submission"],
+                json!({
+                    "execution": schema_ref("Execution"),
+                    "attempts": {"type": "array", "items": schema_ref("TaskAttemptHistoryAttempt")},
+                    "submission": nullable_schema_ref("TaskSubmissionHistory")
+                }),
+            ),
+        ),
+        (
+            "TaskAttemptHistoryPageResponse",
+            page_response("TaskAttemptHistoryEntry"),
+        ),
         ("ExecutionPageResponse", page_response("Execution")),
         (
             "ExecutionDetailResponse",
@@ -1629,6 +1701,62 @@ fn submission_result_schema() -> Value {
             "receipt": nullable_schema_ref("SubmissionReceipt"),
             "verification": schema_ref("SubmissionVerificationSnapshot"),
             "created_at": timestamp()
+        }),
+    )
+}
+
+fn task_submission_result_history_schema() -> Value {
+    object(
+        &[
+            "submission_result_id",
+            "execution_attempt_id",
+            "status",
+            "score",
+            "previous_score",
+            "score_delta_millis",
+            "remote_state",
+            "progress_percent",
+            "question_results",
+            "verified_at",
+            "created_at",
+        ],
+        json!({
+            "submission_result_id": uuid(),
+            "execution_attempt_id": uuid(),
+            "status": string_enum(&["confirmed", "rejected", "execution_failed", "inconclusive"]),
+            "score": nullable_schema_ref("SubmissionScore"),
+            "previous_score": nullable_schema_ref("SubmissionScore"),
+            "score_delta_millis": {"type": ["integer", "null"], "minimum": -1000, "maximum": 1000},
+            "remote_state": nullable_string_enum(&["unknown", "not_open", "pending", "in_progress", "completed", "expired", "removed"]),
+            "progress_percent": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+            "question_results": schema_ref("SubmissionQuestionResultCountsResponse"),
+            "verified_at": timestamp(),
+            "created_at": timestamp()
+        }),
+    )
+}
+
+fn task_submission_history_schema() -> Value {
+    object(
+        &[
+            "submission_draft_id",
+            "question_snapshot_id",
+            "item_count",
+            "total_question_count",
+            "unanswered_question_count",
+            "answer_sources",
+            "created_at",
+            "result",
+        ],
+        json!({
+            "submission_draft_id": uuid(),
+            "question_snapshot_id": uuid(),
+            "item_count": unsigned_integer(),
+            "total_question_count": unsigned_integer(),
+            "unanswered_question_count": unsigned_integer(),
+            "answer_sources": schema_ref("AnswerSourceCountsResponse"),
+            "created_at": timestamp(),
+            "result": nullable_schema_ref("TaskSubmissionResultHistory")
         }),
     )
 }

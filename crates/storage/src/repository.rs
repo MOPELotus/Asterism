@@ -72,6 +72,13 @@ pub struct GlobalAnswerCorpusEvidence {
     pub last_verified_at: Option<Timestamp>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AnswerEvidenceClassCounts {
+    pub official: u64,
+    pub verified_historical: u64,
+    pub negative: u64,
+}
+
 /// Durable two-layer Answer Evidence boundary. Private provenance is accepted
 /// here, while reads expose only the identity-free global projection.
 #[async_trait]
@@ -85,6 +92,12 @@ pub trait AnswerEvidenceRepository: Send + Sync {
         &self,
         question_content_fingerprint: &QuestionContentFingerprint,
     ) -> Result<Vec<GlobalAnswerCorpusEvidence>, StorageError>;
+
+    async fn count_owned_execution_attempt_evidence(
+        &self,
+        owner_id: UserId,
+        execution_attempt_id: ExecutionAttemptId,
+    ) -> Result<Option<AnswerEvidenceClassCounts>, StorageError>;
 }
 
 #[async_trait]
@@ -1015,6 +1028,13 @@ pub trait SubmissionResultRepository: Send + Sync {
         owner_id: UserId,
         submission_draft_id: SubmissionDraftId,
     ) -> Result<Option<SubmissionResult>, StorageError>;
+
+    async fn find_previous_owned_submission_score(
+        &self,
+        owner_id: UserId,
+        task_id: TaskId,
+        submission_result_id: SubmissionResultId,
+    ) -> Result<Option<asterism_domain::SubmissionScore>, StorageError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

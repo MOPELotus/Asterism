@@ -2,8 +2,8 @@ use std::{fmt::Display, str::FromStr};
 
 use asterism_domain::{
     AnswerCandidate, AnswerEvidenceClass, AnswerSource, CorpusProjectionEligibility,
-    GlobalAnswerCorpusEntryId, GlobalCorpusQuestionAsset, GlobalSemanticAnswer,
-    PrivateAnswerEvidence, QuestionContentFingerprint, UnmatchedEvidenceReason,
+    ExecutionAttemptId, GlobalAnswerCorpusEntryId, GlobalCorpusQuestionAsset, GlobalSemanticAnswer,
+    PrivateAnswerEvidence, QuestionContentFingerprint, UnmatchedEvidenceReason, UserId,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -12,8 +12,9 @@ use sqlx::{Row, Sqlite, Transaction};
 
 use crate::auth_session::{decode_timestamp, encode_timestamp};
 use crate::{
-    AnswerEvidenceProjectionState, AnswerEvidenceRecord, AnswerEvidenceRecordOutcome,
-    AnswerEvidenceRepository, Database, GlobalAnswerCorpusEvidence, StorageError,
+    AnswerEvidenceClassCounts, AnswerEvidenceProjectionState, AnswerEvidenceRecord,
+    AnswerEvidenceRecordOutcome, AnswerEvidenceRepository, Database, GlobalAnswerCorpusEvidence,
+    StorageError,
 };
 
 const MAX_GLOBAL_ANSWERS_PER_QUESTION: usize = 1_024;
@@ -65,6 +66,42 @@ impl AnswerEvidenceRepository for SqliteAnswerEvidenceRepository {
             return Err(invalid_evidence("global answer set exceeds its bound"));
         }
         rows.iter().map(decode_global_evidence).collect()
+    }
+
+    async fn count_owned_execution_attempt_evidence(
+        &self,
+        owner_id: UserId,
+        execution_attempt_id: ExecutionAttemptId,
+    ) -> Result<Option<AnswerEvidenceClassCounts>, StorageError> {
+        let row = sqlx::query(
+            "SELECT COUNT(DISTINCT attempt.id) AS owned_attempts, \
+                    COALESCE(SUM(CASE WHEN evidence.evidence_class = 'official' THEN 1 ELSE 0 END), 0) AS official, \
+                    COALESCE(SUM(CASE WHEN evidence.evidence_class = 'verified_historical' THEN 1 ELSE 0 END), 0) AS verified_historical, \
+                    COALESCE(SUM(CASE WHEN evidence.evidence_class = 'negative' THEN 1 ELSE 0 END), 0) AS negative \
+             FROM execution_attempts AS attempt \
+             INNER JOIN executions AS execution ON execution.id = attempt.execution_id \
+             INNER JOIN tasks AS task ON task.id = execution.task_id \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             LEFT JOIN private_answer_evidence AS evidence \
+                    ON evidence.execution_attempt_id = attempt.id \
+                   AND evidence.owner_user_id = account.owner_user_id \
+             WHERE attempt.id = ? AND account.owner_user_id = ?",
+        )
+        .bind(execution_attempt_id.to_string())
+        .bind(owner_id.to_string())
+        .fetch_one(self.database.pool())
+        .await?;
+        if row.try_get::<i64, _>("owned_attempts")? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(AnswerEvidenceClassCounts {
+            official: u64::try_from(row.try_get::<i64, _>("official")?)
+                .map_err(|_| invalid_evidence("official evidence count is invalid"))?,
+            verified_historical: u64::try_from(row.try_get::<i64, _>("verified_historical")?)
+                .map_err(|_| invalid_evidence("verified evidence count is invalid"))?,
+            negative: u64::try_from(row.try_get::<i64, _>("negative")?)
+                .map_err(|_| invalid_evidence("negative evidence count is invalid"))?,
+        }))
     }
 }
 

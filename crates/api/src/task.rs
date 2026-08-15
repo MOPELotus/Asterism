@@ -1,11 +1,12 @@
 use std::{str::FromStr, sync::Arc};
 
 use asterism_domain::{
-    AnswerCandidate, AnswerCandidateId, AnswerConfidence, Execution, NormalizedAnswer,
-    ProviderAccountId, ProviderId, Question, QuestionId, QuestionSnapshotId,
-    ScoreImprovementWorkflow, StrictCompletionWorkflow, StrictCompletionWorkflowId,
-    SubmissionDraftId, SubmissionResultId, Task, TaskCapability, TaskId, TaskLifecycleAction,
-    Timestamp,
+    AnswerCandidate, AnswerCandidateId, AnswerConfidence, AnswerSource, Execution,
+    ExecutionAttempt, NormalizedAnswer, ProviderAccountId, ProviderId, Question, QuestionId,
+    QuestionSnapshotId, RemoteState, ScoreImprovementWorkflow, StrictCompletionWorkflow,
+    StrictCompletionWorkflowId, SubmissionDraftId, SubmissionQuestionVerificationStatus,
+    SubmissionResultId, SubmissionResultStatus, SubmissionScore, Task, TaskCapability, TaskId,
+    TaskLifecycleAction, Timestamp,
 };
 use asterism_engine::{
     BuildSubmissionDraftCommand, ConservativeAnswerResolverError,
@@ -26,12 +27,13 @@ use asterism_provider_api::{
     BrowserSessionSpec, ProviderErrorKind, RemoteDuration, RemoteProgress, RemoteTaskDetail,
 };
 use asterism_storage::{
-    AnswerCandidateRepository, CompletionWorkflowRepository, ExecutionStrictCompletionRetryRequest,
-    QuestionSnapshotRepository, SqliteCompletionWorkflowRepository, SqliteExecutionRepository,
-    SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
-    SqliteQuestionReadAttemptRepository, SqliteQuestionSnapshotRepository,
-    SqliteTaskLifecycleRepository, SqliteTaskQueryRepository, SubmissionDraftRepository,
-    SubmissionResultRepository, TaskQueryRepository,
+    AnswerCandidateRepository, AnswerEvidenceClassCounts, AnswerEvidenceRepository,
+    CompletionWorkflowRepository, ExecutionQueryRepository, ExecutionStrictCompletionRetryRequest,
+    QuestionSnapshotRepository, SqliteAnswerEvidenceRepository, SqliteCompletionWorkflowRepository,
+    SqliteExecutionRepository, SqliteProviderAccountRepository,
+    SqliteProviderRuntimeSettingsRepository, SqliteQuestionReadAttemptRepository,
+    SqliteQuestionSnapshotRepository, SqliteTaskLifecycleRepository, SqliteTaskQueryRepository,
+    SubmissionDraftRepository, SubmissionResultRepository, TaskQueryRepository,
 };
 use axum::{
     Extension, Json,
@@ -140,6 +142,121 @@ pub(super) async fn get_task_completion_workflows(
             task_id,
             strict_completion,
             score_improvement,
+        })
+        .into_response(),
+    ))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the owner-scoped history assembly keeps Execution, evidence, Draft and Result bindings visible together"
+)]
+pub(super) async fn list_task_attempt_history(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(task_id): Path<String>,
+    query: Result<Query<TaskAttemptHistoryQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_task_read()?;
+    let task_id = TaskId::from_str(&task_id)
+        .map_err(|_| ApiError::bad_request("invalid_task_id", "task ID is invalid"))?;
+    let query = query.map(|Query(query)| query).map_err(|_| {
+        ApiError::bad_request(
+            "invalid_attempt_history_query",
+            "attempt history query parameters have an invalid format",
+        )
+    })?;
+    let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE);
+    let offset = query.offset.unwrap_or_default();
+    if limit == 0 || limit > MAX_PAGE_SIZE || offset > MAX_OFFSET {
+        return Err(ApiError::bad_request(
+            "invalid_attempt_history_pagination",
+            "attempt history limit must be 1-200 and offset must not exceed 1000000",
+        ));
+    }
+    SqliteTaskQueryRepository::new(state.database.clone())
+        .find_owned_task(owner_id, task_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("task_not_found"))?;
+
+    let executions = SqliteExecutionRepository::new(state.database.clone());
+    let submissions = SqliteQuestionSnapshotRepository::new(state.database.clone());
+    let evidence = SqliteAnswerEvidenceRepository::new(state.database);
+    let page = executions
+        .list_owned_executions(owner_id, Some(task_id), limit, offset)
+        .await
+        .map_err(ApiError::internal)?;
+    let mut items = Vec::with_capacity(page.items.len());
+    for execution in page.items {
+        let detail = executions
+            .find_owned_execution_detail(owner_id, execution.id)
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| inconsistent_attempt_history("owned Execution detail disappeared"))?;
+        let mut attempts = Vec::with_capacity(detail.attempts.len());
+        for attempt in detail.attempts {
+            let learned_evidence = evidence
+                .count_owned_execution_attempt_evidence(owner_id, attempt.id)
+                .await
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| {
+                    inconsistent_attempt_history("ExecutionAttempt owner binding is invalid")
+                })?;
+            attempts.push(TaskAttemptHistoryAttempt {
+                attempt,
+                learned_evidence: learned_evidence.into(),
+            });
+        }
+        let submission = if let Some(draft_id) = detail.execution.submission_draft_id {
+            let draft = submissions
+                .find_owned_submission_draft(owner_id, draft_id)
+                .await
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| {
+                    inconsistent_attempt_history("Execution Draft binding is invalid")
+                })?;
+            let result = submissions
+                .find_latest_owned_submission_result(owner_id, draft.id)
+                .await
+                .map_err(ApiError::internal)?;
+            let result = if let Some(result) = result {
+                let previous_score = submissions
+                    .find_previous_owned_submission_score(owner_id, task_id, result.id)
+                    .await
+                    .map_err(ApiError::internal)?;
+                Some(submission_result_history(&result, previous_score))
+            } else {
+                None
+            };
+            Some(TaskSubmissionHistory {
+                submission_draft_id: draft.id,
+                question_snapshot_id: draft.question_snapshot_id,
+                item_count: u32::try_from(draft.items.len()).map_err(ApiError::internal)?,
+                total_question_count: draft.answer_coverage.total_question_count,
+                unanswered_question_count: u32::try_from(
+                    draft.answer_coverage.unanswered_question_ids.len(),
+                )
+                .map_err(ApiError::internal)?,
+                answer_sources: answer_source_counts(&draft),
+                created_at: draft.created_at,
+                result,
+            })
+        } else {
+            None
+        };
+        items.push(TaskAttemptHistoryEntry {
+            execution: detail.execution,
+            attempts,
+            submission,
+        });
+    }
+    Ok(crate::auth::no_store(
+        Json(TaskAttemptHistoryPageResponse {
+            total: page.total,
+            limit,
+            offset,
+            items,
         })
         .into_response(),
     ))
@@ -1581,6 +1698,151 @@ struct TaskCompletionWorkflowsResponse {
     task_id: TaskId,
     strict_completion: Option<StrictCompletionWorkflowResponse>,
     score_improvement: Option<ScoreImprovementWorkflowResponse>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TaskAttemptHistoryQuery {
+    limit: Option<u32>,
+    offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskAttemptHistoryPageResponse {
+    total: u64,
+    limit: u32,
+    offset: u64,
+    items: Vec<TaskAttemptHistoryEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskAttemptHistoryEntry {
+    execution: Execution,
+    attempts: Vec<TaskAttemptHistoryAttempt>,
+    submission: Option<TaskSubmissionHistory>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskAttemptHistoryAttempt {
+    attempt: ExecutionAttempt,
+    learned_evidence: AnswerEvidenceCountsResponse,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+struct AnswerEvidenceCountsResponse {
+    official: u64,
+    verified_historical: u64,
+    negative: u64,
+}
+
+impl From<AnswerEvidenceClassCounts> for AnswerEvidenceCountsResponse {
+    fn from(value: AnswerEvidenceClassCounts) -> Self {
+        Self {
+            official: value.official,
+            verified_historical: value.verified_historical,
+            negative: value.negative,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskSubmissionHistory {
+    submission_draft_id: SubmissionDraftId,
+    question_snapshot_id: QuestionSnapshotId,
+    item_count: u32,
+    total_question_count: u32,
+    unanswered_question_count: u32,
+    answer_sources: AnswerSourceCountsResponse,
+    created_at: Timestamp,
+    result: Option<TaskSubmissionResultHistory>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+struct AnswerSourceCountsResponse {
+    manual: u32,
+    local_cache: u32,
+    provider_native: u32,
+    external_bank: u32,
+    other: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TaskSubmissionResultHistory {
+    submission_result_id: SubmissionResultId,
+    execution_attempt_id: asterism_domain::ExecutionAttemptId,
+    status: SubmissionResultStatus,
+    score: Option<SubmissionScore>,
+    previous_score: Option<SubmissionScore>,
+    score_delta_millis: Option<i32>,
+    remote_state: Option<RemoteState>,
+    progress_percent: Option<u8>,
+    question_results: SubmissionQuestionResultCountsResponse,
+    verified_at: Timestamp,
+    created_at: Timestamp,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+struct SubmissionQuestionResultCountsResponse {
+    confirmed: u32,
+    rejected: u32,
+    unverified: u32,
+}
+
+fn answer_source_counts(draft: &asterism_domain::SubmissionDraft) -> AnswerSourceCountsResponse {
+    let mut counts = AnswerSourceCountsResponse::default();
+    for item in &draft.items {
+        let count = match item.selected.source {
+            AnswerSource::Manual => &mut counts.manual,
+            AnswerSource::LocalCache => &mut counts.local_cache,
+            AnswerSource::ProviderNative => &mut counts.provider_native,
+            AnswerSource::ExternalBank => &mut counts.external_bank,
+            AnswerSource::Other => &mut counts.other,
+        };
+        *count = count.saturating_add(1);
+    }
+    counts
+}
+
+fn submission_result_history(
+    result: &asterism_domain::SubmissionResult,
+    previous_score: Option<SubmissionScore>,
+) -> TaskSubmissionResultHistory {
+    let mut question_results = SubmissionQuestionResultCountsResponse::default();
+    for question in &result.verification.questions {
+        let count = match question.status {
+            SubmissionQuestionVerificationStatus::Confirmed => &mut question_results.confirmed,
+            SubmissionQuestionVerificationStatus::Rejected => &mut question_results.rejected,
+            SubmissionQuestionVerificationStatus::Unverified => &mut question_results.unverified,
+        };
+        *count = count.saturating_add(1);
+    }
+    TaskSubmissionResultHistory {
+        submission_result_id: result.id,
+        execution_attempt_id: result.execution_attempt_id,
+        status: result.status,
+        score: result.verification.score,
+        previous_score,
+        score_delta_millis: result
+            .verification
+            .score
+            .zip(previous_score)
+            .map(|(score, previous)| score_millis(score) - score_millis(previous)),
+        remote_state: result.verification.remote_state,
+        progress_percent: result.verification.progress_percent,
+        question_results,
+        verified_at: result.verification.verified_at,
+        created_at: result.created_at,
+    }
+}
+
+fn score_millis(score: SubmissionScore) -> i32 {
+    let millis =
+        u128::from(score.earned_milli_points) * 1_000 / u128::from(score.possible_milli_points);
+    i32::try_from(millis).expect("validated score ratio fits i32")
+}
+
+fn inconsistent_attempt_history(message: &'static str) -> ApiError {
+    ApiError::internal(std::io::Error::other(message))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

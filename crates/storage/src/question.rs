@@ -898,6 +898,41 @@ impl SubmissionResultRepository for SqliteQuestionSnapshotRepository {
             None => Ok(None),
         }
     }
+
+    async fn find_previous_owned_submission_score(
+        &self,
+        owner_id: UserId,
+        task_id: TaskId,
+        submission_result_id: SubmissionResultId,
+    ) -> Result<Option<asterism_domain::SubmissionScore>, StorageError> {
+        let verification_json: Option<String> = sqlx::query_scalar(
+            "SELECT prior.verification_json \
+             FROM submission_results AS current \
+             INNER JOIN tasks AS task ON task.id = current.task_id \
+             INNER JOIN provider_accounts AS account ON account.id = task.provider_account_id \
+             INNER JOIN submission_results AS prior ON prior.task_id = current.task_id \
+             WHERE account.owner_user_id = ? AND current.task_id = ? AND current.id = ? \
+               AND json_type(prior.verification_json, '$.score') = 'object' \
+               AND (prior.created_at < current.created_at \
+                    OR (prior.created_at = current.created_at AND prior.id < current.id)) \
+             ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1",
+        )
+        .bind(owner_id.to_string())
+        .bind(task_id.to_string())
+        .bind(submission_result_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        verification_json
+            .map(|json| serde_json::from_str::<SubmissionVerificationSnapshot>(&json))
+            .transpose()?
+            .map(|verification| {
+                verification
+                    .validate()
+                    .map_err(|_| invalid_submission_result())?;
+                verification.score.ok_or_else(invalid_submission_result)
+            })
+            .transpose()
+    }
 }
 
 async fn project_submission_result_evidence(
@@ -1350,6 +1385,7 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
+    use crate::AnswerEvidenceRepository;
 
     #[tokio::test]
     async fn snapshots_are_immutable_latest_and_owner_scoped() {
@@ -1698,6 +1734,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the result history regression keeps both scored attempts, evidence projection and owner boundaries in one fixture"
+    )]
     async fn submission_results_bind_draft_execution_attempt_and_owner() {
         let fixture = Fixture::new().await;
         let repository = SqliteQuestionSnapshotRepository::new(fixture.database.clone());
@@ -1747,6 +1787,68 @@ mod tests {
         assert_eq!(
             count_rows(&fixture.database, "private_answer_evidence").await,
             1
+        );
+        assert_eq!(
+            crate::SqliteAnswerEvidenceRepository::new(fixture.database.clone())
+                .count_owned_execution_attempt_evidence(fixture.owner, attempt_id)
+                .await
+                .unwrap(),
+            Some(crate::AnswerEvidenceClassCounts {
+                official: 0,
+                verified_historical: 1,
+                negative: 0,
+            })
+        );
+        assert_eq!(
+            repository
+                .find_previous_owned_submission_score(fixture.owner, fixture.task, result.id)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let later = fixture.now + chrono::Duration::seconds(1);
+        let mut later_snapshot = fixture.snapshot("Later result question", later);
+        later_snapshot.questions[0].attachments.clear();
+        repository
+            .save_question_snapshot(&later_snapshot)
+            .await
+            .unwrap();
+        let later_candidate = Fixture::candidate(&later_snapshot, AnswerSource::Manual, later);
+        repository
+            .save_answer_candidate_batch(std::slice::from_ref(&later_candidate))
+            .await
+            .unwrap();
+        let later_draft = fixture.draft(&later_snapshot, &later_candidate);
+        repository
+            .save_submission_draft(&later_draft)
+            .await
+            .unwrap();
+        let (later_execution_id, later_attempt_id) = fixture.execution_attempt().await;
+        let mut later_result = fixture.result(&later_draft, later_execution_id, later_attempt_id);
+        later_result.verification.score = Some(SubmissionScore {
+            earned_milli_points: 90_000,
+            possible_milli_points: 100_000,
+        });
+        later_result.verification.verified_at = later;
+        later_result.created_at = later;
+        repository
+            .save_submission_result(&later_result)
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .find_previous_owned_submission_score(fixture.owner, fixture.task, later_result.id,)
+                .await
+                .unwrap(),
+            result.verification.score
+        );
+        assert!(
+            crate::SqliteAnswerEvidenceRepository::new(fixture.database.clone())
+                .count_owned_execution_attempt_evidence(UserId::new(), attempt_id)
+                .await
+                .unwrap()
+                .is_none()
         );
         assert!(repository.save_submission_result(&result).await.is_err());
     }

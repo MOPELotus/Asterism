@@ -4453,3 +4453,28 @@ QuestionSnapshot plus immutable Draft created after the prior observation.
 Formal non-Submission Strict retries retain the same confirmation boundary,
 while routine idempotent completion work remains eligible for its bounded
 automatic retry policy.
+
+## Two-hundred-and-forty-third Phase 0 slice
+
+Tasks now expose a paginated, owner-scoped Attempt History index. Each entry
+groups one Execution with all of its durable ExecutionAttempts and, when it is
+a submission, includes immutable Draft/QuestionSnapshot references,
+answer-source counts and the latest SubmissionResult reference. The result
+summary preserves status, score, remote state, progress, verified time and
+confirmed/rejected/unverified Question counts without duplicating the full
+Question payload; clients use the existing bound Draft and Result resources
+for complete selected-answer and readback detail.
+
+Every listed ExecutionAttempt also reports counts of Official,
+VerifiedHistorical and Negative private evidence learned by that exact
+attempt. Storage proves the attempt belongs to the requesting owner before
+counting. Scored results include the previous scored result on the same owner
+and Task and a normalized `-1000..1000` score delta, so differing raw score
+denominators cannot produce a false comparison. The first scored result has no
+previous score or delta.
+
+The endpoint performs no Provider call, is `no-store`, validates bounded
+pagination and returns 404 for missing or foreign Tasks. OpenAPI describes the
+complete index and its references. Integration coverage traverses a real
+persisted Candidate, Draft, ExecutionAttempt, SubmissionResult and automatic
+VerifiedHistorical projection through the API while preserving owner scope.

@@ -311,6 +311,10 @@ fn task_routes() -> Router<ApiState> {
             "/api/v1/tasks/{task_id}/completion-workflows",
             get(task::get_task_completion_workflows),
         )
+        .route(
+            "/api/v1/tasks/{task_id}/attempt-history",
+            get(task::list_task_attempt_history),
+        )
         .route("/api/v1/tasks/{task_id}/detail", get(task::get_task_detail))
         .route(
             "/api/v1/tasks/{task_id}/browser-session-spec",
@@ -1090,6 +1094,13 @@ pub fn openapi_document() -> Value {
         .insert(
             "/api/v1/tasks/{task_id}/completion-workflows".to_owned(),
             task_completion_workflows_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
+            "/api/v1/tasks/{task_id}/attempt-history".to_owned(),
+            task_attempt_history_path(),
         );
     document["paths"]
         .as_object_mut()
@@ -2034,6 +2045,26 @@ fn task_completion_workflows_path() -> Value {
     }})
 }
 
+fn task_attempt_history_path() -> Value {
+    json!({"get": {
+        "operationId": "listTaskAttemptHistory",
+        "description": "Lists owner-scoped Execution attempts for one Task with learned evidence counts, immutable Submission references, answer-source counts, verification summaries and normalized score deltas.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+            {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+            {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}}
+        ],
+        "responses": {
+            "200": {"description": "Paginated Task attempt history; full selected answers and per-Question readback remain available through the referenced Draft and Result resources"},
+            "400": {"description": "Invalid Task ID or pagination"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Task read permission is required"},
+            "404": {"description": "Owner-scoped Task not found"}
+        }
+    }})
+}
+
 fn submission_drafts_path() -> Value {
     json!({"post": {
         "operationId": "buildSubmissionDraft",
@@ -2392,10 +2423,12 @@ mod tests {
     };
     use asterism_secrets::{CredentialBundle, SecretAccess, SecretActor, SecretKey, SecretValue};
     use asterism_storage::{
-        AnswerCandidateRecord, AnswerCandidateRepository, CompletionWorkflowRepository,
-        QuestionSnapshot, QuestionSnapshotRepository, SecretKeyring,
+        AnswerCandidateRecord, AnswerCandidateRepository, AnswerEvidenceRepository,
+        CompletionWorkflowRepository, ExecutionQueryRepository, QuestionSnapshot,
+        QuestionSnapshotRepository, SecretKeyring, SqliteAnswerEvidenceRepository,
         SqliteBrowserBridgeSessionRepository, SqliteCompletionWorkflowRepository,
-        SqliteQuestionSnapshotRepository, SubmissionDraftRepository, SubmissionResultRepository,
+        SqliteExecutionRepository, SqliteQuestionSnapshotRepository, SubmissionDraftRepository,
+        SubmissionResultRepository,
     };
     use async_trait::async_trait;
     use axum::{
@@ -5401,7 +5434,7 @@ mod tests {
                      'answer work', 'pending', 'ready', ?, ?, '[]')",
         )
         .bind(task_id.to_string())
-        .bind(account_id)
+        .bind(&account_id)
         .bind(&now_text)
         .bind(&now_text)
         .execute(database.pool())
@@ -5513,11 +5546,13 @@ mod tests {
         let execution_attempt_id = ExecutionAttemptId::new();
         sqlx::query(
             "INSERT INTO executions \
-             (id, task_id, request_source, state, started_at, created_at) \
-             VALUES (?, ?, 'api', 'running', ?, ?)",
+             (id, task_id, requested_capabilities_json, submission_draft_id, request_source, \
+              state, started_at, created_at) \
+             VALUES (?, ?, '[\"submission_execute\"]', ?, 'web_ui', 'running', ?, ?)",
         )
         .bind(execution_id.to_string())
         .bind(task_id.to_string())
+        .bind(draft.id.to_string())
         .bind(&now_text)
         .bind(&now_text)
         .execute(database.pool())
@@ -5566,6 +5601,107 @@ mod tests {
             created_at: now,
         };
         repository.save_submission_result(&result).await.unwrap();
+
+        let owner_id: UserId = sqlx::query_scalar::<_, String>(
+            "SELECT owner_user_id FROM provider_accounts WHERE id = ?",
+        )
+        .bind(account_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap()
+        .parse()
+        .unwrap();
+        let execution_repository = SqliteExecutionRepository::new(database.clone());
+        assert_eq!(
+            execution_repository
+                .list_owned_executions(owner_id, Some(task_id), 10, 0)
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+        assert!(
+            execution_repository
+                .find_owned_execution_detail(owner_id, execution_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            SqliteAnswerEvidenceRepository::new(database.clone())
+                .count_owned_execution_attempt_evidence(owner_id, execution_attempt_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            repository
+                .find_previous_owned_submission_score(owner_id, task_id, result.id)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let history = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/tasks/{task_id}/attempt-history?limit=10&offset=0"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let history_status = history.status();
+        let history_headers = history.headers().clone();
+        let history = response_json(history).await;
+        assert_eq!(history_status, StatusCode::OK, "{history}");
+        assert_eq!(history_headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(history["total"], 1);
+        assert_eq!(
+            history["items"][0]["execution"]["id"],
+            execution_id.to_string()
+        );
+        assert_eq!(
+            history["items"][0]["attempts"][0]["attempt"]["id"],
+            execution_attempt_id.to_string()
+        );
+        assert_eq!(
+            history["items"][0]["attempts"][0]["learned_evidence"]["verified_historical"],
+            1
+        );
+        assert_eq!(
+            history["items"][0]["submission"]["submission_draft_id"],
+            draft.id.to_string()
+        );
+        assert_eq!(
+            history["items"][0]["submission"]["answer_sources"]["manual"],
+            1
+        );
+        assert_eq!(
+            history["items"][0]["submission"]["result"]["submission_result_id"],
+            result.id.to_string()
+        );
+        assert_eq!(
+            history["items"][0]["submission"]["result"]["question_results"]["confirmed"],
+            1
+        );
+        assert!(history["items"][0]["submission"]["result"]["previous_score"].is_null());
+        assert!(history["items"][0]["submission"]["result"]["score_delta_millis"].is_null());
+
+        let foreign_history = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/tasks/{}/attempt-history", TaskId::new()))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign_history.status(), StatusCode::NOT_FOUND);
 
         let snapshot_response = app
             .clone()

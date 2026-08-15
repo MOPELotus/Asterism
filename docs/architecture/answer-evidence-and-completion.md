@@ -122,6 +122,16 @@ the complete snapshot partition and resolved policy. Attempt History records
 every attempt's state, score, Question results, selected candidates/sources/
 evidence, newly learned evidence and score delta.
 
+The owner-scoped Task Attempt History index groups these facts by Execution
+without copying the full Question payload into every list entry. It returns
+each durable ExecutionAttempt, per-class counts of evidence learned by that
+attempt, immutable Draft and QuestionSnapshot references, answer-source counts,
+the SubmissionResult reference, verification/Question-result summary and a
+normalized score delta from the preceding scored result on the same Task. The
+existing bound Draft and Result resources remain the canonical full-detail
+reads. History reads perform no Provider call and never expose another owner's
+private evidence or provenance.
+
 ## Strict Completion
 
 Strict Completion means fresh remote verification reaches platform-defined
