@@ -46,6 +46,7 @@ impl fmt::Debug for EncodedCidarenPreQuestionArtifact {
 pub struct CidarenPreQuestionArtifact {
     task_id: Zeroizing<String>,
     remote_task_id: Zeroizing<String>,
+    remote_attempt_task_id: Option<i64>,
     state: CidarenPreQuestionState,
 }
 
@@ -99,8 +100,22 @@ impl CidarenPreQuestionArtifact {
         Self {
             task_id: Zeroizing::new(task_id.to_string()),
             remote_task_id: Zeroizing::new(remote_task_id.to_owned()),
+            remote_attempt_task_id: None,
             state,
         }
+    }
+
+    pub(crate) fn with_remote_attempt_task_id(
+        mut self,
+        remote_attempt_task_id: Option<i64>,
+    ) -> ProviderResult<Self> {
+        if remote_attempt_task_id.is_some_and(|task_id| task_id <= 0) {
+            return Err(protocol_drift(
+                "Cidaren pre-Question remote attempt allocation is invalid",
+            ));
+        }
+        self.remote_attempt_task_id = remote_attempt_task_id;
+        Ok(self)
     }
 
     pub const fn phase(&self) -> &'static str {
@@ -152,6 +167,7 @@ impl CidarenPreQuestionArtifact {
                 schema: CIDAREN_PRE_QUESTION_ARTIFACT_TYPE,
                 task_id: &self.task_id,
                 remote_task_id: &self.remote_task_id,
+                remote_attempt_task_id: self.remote_attempt_task_id,
                 phase: self.phase(),
                 topic_code,
                 reading_card_id,
@@ -201,6 +217,9 @@ impl CidarenPreQuestionArtifact {
             || wire.task_id != expected_task_id.to_string()
             || wire.remote_task_id != expected_remote_task_id
             || !valid_remote_task_id(&wire.remote_task_id)
+            || wire
+                .remote_attempt_task_id
+                .is_some_and(|task_id| task_id <= 0)
         {
             return Err(protocol_drift(
                 "Cidaren pre-Question artifact binding is stale or foreign",
@@ -248,7 +267,12 @@ impl CidarenPreQuestionArtifact {
                 ));
             }
         };
-        Ok(Self::new(expected_task_id, expected_remote_task_id, state))
+        Self::new(expected_task_id, expected_remote_task_id, state)
+            .with_remote_attempt_task_id(wire.remote_attempt_task_id)
+    }
+
+    pub(crate) const fn remote_attempt_task_id(&self) -> Option<i64> {
+        self.remote_attempt_task_id
     }
 
     pub(crate) fn into_state(self) -> CidarenPreQuestionState {
@@ -261,9 +285,13 @@ impl fmt::Debug for CidarenPreQuestionArtifact {
         formatter
             .debug_struct("CidarenPreQuestionArtifact")
             .field("binding", &"configured")
+            .field(
+                "has_remote_attempt_task_id",
+                &self.remote_attempt_task_id.is_some(),
+            )
             .field("phase", &self.phase())
             .field("payload", &"[REDACTED]")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -272,6 +300,7 @@ struct ArtifactWireRef<'a> {
     schema: &'static str,
     task_id: &'a str,
     remote_task_id: &'a str,
+    remote_attempt_task_id: Option<i64>,
     phase: &'static str,
     topic_code: Option<&'a str>,
     reading_card_id: Option<&'a str>,
@@ -287,6 +316,7 @@ struct ArtifactWire {
     schema: String,
     task_id: String,
     remote_task_id: String,
+    remote_attempt_task_id: Option<i64>,
     phase: String,
     topic_code: Option<String>,
     reading_card_id: Option<String>,
@@ -350,7 +380,9 @@ mod tests {
     fn pre_question_artifact_roundtrips_and_redacts_bindings() {
         let task_id = TaskId::new();
         let artifact =
-            CidarenPreQuestionArtifact::ready_to_select_words(task_id, REMOTE_TASK_ID, 9);
+            CidarenPreQuestionArtifact::ready_to_select_words(task_id, REMOTE_TASK_ID, 9)
+                .with_remote_attempt_task_id(Some(92_002))
+                .unwrap();
         assert_eq!(artifact.phase(), CIDAREN_READY_TO_SELECT_WORDS_PHASE);
         assert!(!format!("{artifact:?}").contains(REMOTE_TASK_ID));
 
@@ -363,11 +395,28 @@ mod tests {
                 .unwrap();
 
         assert_eq!(decoded.phase(), CIDAREN_READY_TO_SELECT_WORDS_PHASE);
+        assert_eq!(decoded.remote_attempt_task_id(), Some(92_002));
         assert!(!format!("{decoded:?}").contains(REMOTE_TASK_ID));
         assert!(matches!(
             decoded.into_state(),
             CidarenPreQuestionState::ReadyToSelectWords(9)
         ));
+
+        let mut legacy = ready_wire(task_id, CIDAREN_READY_TO_START_PHASE);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .insert("position".to_owned(), json!(9));
+        let legacy_value = SecretValue::new(serde_json::to_vec(&legacy).unwrap());
+        let legacy_digest = Sha256::digest(legacy_value.expose_secret()).into();
+        let legacy = CidarenPreQuestionArtifact::decode_bound(
+            &legacy_value,
+            legacy_digest,
+            task_id,
+            REMOTE_TASK_ID,
+        )
+        .unwrap();
+        assert_eq!(legacy.remote_attempt_task_id(), None);
     }
 
     #[test]
@@ -398,6 +447,17 @@ mod tests {
             .unwrap()
             .insert("position".to_owned(), json!(0));
         assert_decode_rejected(&zero_position, task_id);
+
+        let mut invalid_remote_attempt = ready_wire(task_id, CIDAREN_READY_TO_START_PHASE);
+        invalid_remote_attempt
+            .as_object_mut()
+            .unwrap()
+            .insert("position".to_owned(), json!(1));
+        invalid_remote_attempt
+            .as_object_mut()
+            .unwrap()
+            .insert("remote_attempt_task_id".to_owned(), json!(0));
+        assert_decode_rejected(&invalid_remote_attempt, task_id);
 
         assert_decode_rejected(&ready_wire(task_id, CIDAREN_READY_TO_START_PHASE), task_id);
 
@@ -464,6 +524,7 @@ mod tests {
             "schema": CIDAREN_PRE_QUESTION_ARTIFACT_TYPE,
             "task_id": task_id.to_string(),
             "remote_task_id": REMOTE_TASK_ID,
+            "remote_attempt_task_id": null,
             "phase": phase,
             "topic_code": null,
             "reading_card_id": null,
@@ -479,6 +540,7 @@ mod tests {
             "schema": CIDAREN_PRE_QUESTION_ARTIFACT_TYPE,
             "task_id": task_id.to_string(),
             "remote_task_id": REMOTE_TASK_ID,
+            "remote_attempt_task_id": null,
             "phase": CIDAREN_READING_CARD_PHASE,
             "topic_code": "synthetic-topic-code",
             "reading_card_id": "reading-card:0123456789abcdef",

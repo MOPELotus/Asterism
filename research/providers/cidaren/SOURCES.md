@@ -46,6 +46,10 @@ not credentials or executable request material:
   `StudyTask/Info` response using the legacy `jv=2_1254` inserted-byte base64
   family; the published payload is evidence only and is not copied into a
   fixture;
+- [issues 48](https://github.com/ularch/Easy_Cidaren/issues/48) and
+  [49](https://github.com/ularch/Easy_Cidaren/issues/49) repeatedly record the
+  same definite incomplete-section `SubmitChoseWord` rejection; shared blocked
+  Question-step representation remains a Core Gap;
 - [issue 72](https://github.com/ularch/Easy_Cidaren/issues/72) records the
   exact remote-state response `code=20001`, `msg=需要选词！`, `data=null` from
   `StartAnswer`; release 1.5.2 reported a fix even though the reopened shared
@@ -55,6 +59,11 @@ not credentials or executable request material:
   paired integer Task row identity, two answers, two bounded word lengths and
   no options. Only structural, redacted facts were extracted; no raw log,
   account content, real Task identity or topic code is retained;
+- [issues 70](https://github.com/ularch/Easy_Cidaren/issues/70),
+  [77](https://github.com/ularch/Easy_Cidaren/issues/77) and
+  [85](https://github.com/ularch/Easy_Cidaren/issues/85) contain multi-step
+  decoded Question logs. Value-free equality/cardinality checks establish one
+  response Task allocation while topic tokens rotate; no raw value is retained;
 - [issue 106](https://github.com/ularch/Easy_Cidaren/issues/106) records the
   identity hazard around `task_id=-1`, so a class task must be rebound through
   its release identity before later operations;

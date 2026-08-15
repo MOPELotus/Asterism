@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::{CidarenAttemptProgress, ParsedCidarenAttemptQuestion};
+use crate::{CidarenAttemptProgress, CidarenAttemptResponseIdentity, ParsedCidarenAttemptQuestion};
 
 pub const CIDAREN_QUESTION_ARTIFACT_TYPE: &str = "cidaren.question-attempt.v2";
 pub const CIDAREN_QUESTION_ARTIFACT_PHASE: &str = "cidaren.current-question";
@@ -53,6 +53,7 @@ impl fmt::Debug for EncodedCidarenQuestionArtifact {
 pub struct CidarenQuestionArtifact {
     task_id: Zeroizing<String>,
     remote_task_id: Zeroizing<String>,
+    remote_attempt_task_id: Option<i64>,
     remote_question_id: Zeroizing<String>,
     position: u32,
     question_fingerprint: Zeroizing<String>,
@@ -72,6 +73,18 @@ impl CidarenQuestionArtifact {
     pub fn from_parsed(
         parsed: &ParsedCidarenAttemptQuestion,
         question: &Question,
+    ) -> ProviderResult<Self> {
+        let remote_attempt_task_id = parsed
+            .response_identity()
+            .map(CidarenAttemptResponseIdentity::task_id)
+            .filter(|task_id| *task_id > 0);
+        Self::from_parsed_with_remote_attempt_task_id(parsed, question, remote_attempt_task_id)
+    }
+
+    pub(crate) fn from_parsed_with_remote_attempt_task_id(
+        parsed: &ParsedCidarenAttemptQuestion,
+        question: &Question,
+        remote_attempt_task_id: Option<i64>,
     ) -> ProviderResult<Self> {
         question
             .validate()
@@ -93,10 +106,22 @@ impl CidarenQuestionArtifact {
                 "Cidaren artifact does not match the freshly parsed Question",
             ));
         }
+        if remote_attempt_task_id.is_some_and(|task_id| task_id <= 0)
+            || parsed
+                .response_identity()
+                .map(CidarenAttemptResponseIdentity::task_id)
+                .filter(|task_id| *task_id > 0)
+                .is_some_and(|observed| Some(observed) != remote_attempt_task_id)
+        {
+            return Err(remote_changed(
+                "Cidaren Question artifact changed the remote attempt allocation",
+            ));
+        }
 
         Ok(Self {
             task_id: Zeroizing::new(question.task_id.to_string()),
             remote_task_id: Zeroizing::new(parsed.remote_task_id().to_owned()),
+            remote_attempt_task_id,
             remote_question_id: Zeroizing::new(parsed.remote_id().to_owned()),
             position: parsed.position(),
             question_fingerprint: Zeroizing::new(fingerprint.to_string()),
@@ -119,6 +144,7 @@ impl CidarenQuestionArtifact {
                 schema: CIDAREN_QUESTION_ARTIFACT_TYPE,
                 task_id: &self.task_id,
                 remote_task_id: &self.remote_task_id,
+                remote_attempt_task_id: self.remote_attempt_task_id,
                 remote_question_id: &self.remote_question_id,
                 position: self.position,
                 question_fingerprint: &self.question_fingerprint,
@@ -222,6 +248,9 @@ impl CidarenQuestionArtifact {
             || wire.position > MAX_POSITION
             || wire.position != expected_question.position
             || wire.task_id != expected_question.task_id.to_string()
+            || wire
+                .remote_attempt_task_id
+                .is_some_and(|task_id| task_id <= 0)
             || parsed_fingerprint != expected_fingerprint
             || !valid_topic_code(&wire.topic_code)
             || wire.verified_steps > MAX_VERIFIED_STEPS
@@ -234,6 +263,7 @@ impl CidarenQuestionArtifact {
         Ok(Self {
             task_id: Zeroizing::new(std::mem::take(&mut wire.task_id)),
             remote_task_id: Zeroizing::new(std::mem::take(&mut wire.remote_task_id)),
+            remote_attempt_task_id: wire.remote_attempt_task_id,
             remote_question_id: Zeroizing::new(std::mem::take(&mut wire.remote_question_id)),
             position: wire.position,
             question_fingerprint: Zeroizing::new(std::mem::take(&mut wire.question_fingerprint)),
@@ -254,6 +284,10 @@ impl CidarenQuestionArtifact {
     pub(crate) const fn remote_progress(&self) -> Option<CidarenAttemptProgress> {
         self.remote_progress
     }
+
+    pub(crate) const fn remote_attempt_task_id(&self) -> Option<i64> {
+        self.remote_attempt_task_id
+    }
 }
 
 impl fmt::Debug for CidarenQuestionArtifact {
@@ -261,6 +295,10 @@ impl fmt::Debug for CidarenQuestionArtifact {
         formatter
             .debug_struct("CidarenQuestionArtifact")
             .field("binding", &"configured")
+            .field(
+                "has_remote_attempt_task_id",
+                &self.remote_attempt_task_id.is_some(),
+            )
             .field("position", &self.position)
             .field("question_fingerprint", &self.question_fingerprint)
             .field("topic_code", &"[REDACTED]")
@@ -275,6 +313,7 @@ struct ArtifactWireRef<'a> {
     schema: &'static str,
     task_id: &'a str,
     remote_task_id: &'a str,
+    remote_attempt_task_id: Option<i64>,
     remote_question_id: &'a str,
     position: u32,
     question_fingerprint: &'a str,
@@ -290,6 +329,7 @@ struct ArtifactWire {
     schema: String,
     task_id: String,
     remote_task_id: String,
+    remote_attempt_task_id: Option<i64>,
     remote_question_id: String,
     position: u32,
     question_fingerprint: String,
@@ -321,6 +361,10 @@ fn invalid_response(message: &'static str) -> ProviderError {
 
 fn protocol_drift(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::ProtocolDrift, message)
+}
+
+fn remote_changed(message: &'static str) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::RemoteChanged, message)
 }
 
 #[cfg(test)]
@@ -357,6 +401,7 @@ mod tests {
                 .unwrap();
         assert_eq!(decoded.topic_code(), "synthetic-topic-code");
         assert_eq!(decoded.verified_steps(), 0);
+        assert_eq!(decoded.remote_attempt_task_id(), None);
         let remote_progress = decoded.remote_progress().unwrap();
         assert_eq!(remote_progress.completed(), 1);
         assert_eq!(remote_progress.total(), 127);
@@ -384,6 +429,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(previous.remote_progress(), None);
+        assert_eq!(previous.remote_attempt_task_id(), None);
 
         let checkpoint = CidarenQuestionArtifact::from_parsed(&parsed, &question)
             .unwrap()
@@ -495,6 +541,32 @@ mod tests {
             CidarenQuestionArtifact::decode_bound(
                 &invalid_checkpoint,
                 invalid_checkpoint_digest,
+                "class-task:2002",
+                &question,
+            )
+            .is_err()
+        );
+
+        let invalid_remote_attempt = SecretValue::new(
+            serde_json::to_vec(&json!({
+                "schema": CIDAREN_QUESTION_ARTIFACT_TYPE,
+                "task_id": question.task_id.to_string(),
+                "remote_task_id": "class-task:2002",
+                "remote_attempt_task_id": -1,
+                "remote_question_id": question.remote_question_id,
+                "position": 1,
+                "question_fingerprint": question.content_fingerprint().unwrap(),
+                "topic_code": "synthetic-topic-code",
+                "verified_steps": 0
+            }))
+            .unwrap(),
+        );
+        let invalid_remote_attempt_digest =
+            Sha256::digest(invalid_remote_attempt.expose_secret()).into();
+        assert!(
+            CidarenQuestionArtifact::decode_bound(
+                &invalid_remote_attempt,
+                invalid_remote_attempt_digest,
                 "class-task:2002",
                 &question,
             )

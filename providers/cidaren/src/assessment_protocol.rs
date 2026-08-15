@@ -141,6 +141,26 @@ impl CidarenAssessmentBinding {
         Ok(())
     }
 
+    pub(crate) fn rebind_remote_attempt_task_id(
+        &self,
+        remote_attempt_task_id: Option<i64>,
+    ) -> ProviderResult<Option<i64>> {
+        if remote_attempt_task_id.is_some_and(|task_id| task_id <= 0) {
+            return Err(protocol_drift(
+                "Cidaren remote attempt Task allocation is invalid",
+            ));
+        }
+        if self.task_id > 0 {
+            if remote_attempt_task_id.is_some_and(|task_id| task_id != self.task_id) {
+                return Err(remote_changed(
+                    "Cidaren fresh Task row changed the remote attempt allocation",
+                ));
+            }
+            return Ok(Some(self.task_id));
+        }
+        Ok(remote_attempt_task_id)
+    }
+
     fn endpoint(&self, operation: &str) -> String {
         format!("{}/{operation}", self.family.endpoint_family())
     }

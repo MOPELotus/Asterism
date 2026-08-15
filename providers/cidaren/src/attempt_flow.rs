@@ -84,6 +84,7 @@ pub struct CidarenAttemptFlow {
     context_binding: [u8; 32],
     flow_binding: [u8; 32],
     remote_task_id: String,
+    remote_attempt_task_id: Option<i64>,
     task_id: TaskId,
     position: u32,
     phase: Option<CidarenAttemptPhase>,
@@ -349,6 +350,7 @@ impl CidarenAttemptFlow {
         }
         let context_binding = context_binding(context);
         let flow_binding = flow_binding(context_binding, task_id, remote_task_id);
+        let remote_attempt_task_id = binding.rebind_remote_attempt_task_id(None)?;
         let phase = word_selection.map_or(
             CidarenAttemptPhase::ReadyToStart,
             CidarenAttemptPhase::ReadyToSelectWords,
@@ -358,6 +360,7 @@ impl CidarenAttemptFlow {
             context_binding,
             flow_binding,
             remote_task_id: remote_task_id.to_owned(),
+            remote_attempt_task_id,
             task_id,
             position: 1,
             phase: Some(phase),
@@ -383,6 +386,8 @@ impl CidarenAttemptFlow {
     ) -> ProviderResult<Self> {
         validate_context(context)?;
         let binding = CidarenAssessmentBinding::from_fresh_detail(remote_task_id, detail)?;
+        let remote_attempt_task_id =
+            binding.rebind_remote_attempt_task_id(artifact.remote_attempt_task_id())?;
         let phase = match (artifact.into_state(), fresh_word_selection) {
             (CidarenPreQuestionState::ReadyToSelectWords(position), Some(plan))
                 if plan.is_bound_to(remote_task_id) =>
@@ -409,6 +414,7 @@ impl CidarenAttemptFlow {
             context_binding,
             flow_binding: flow_binding(context_binding, task_id, remote_task_id),
             remote_task_id: remote_task_id.to_owned(),
+            remote_attempt_task_id,
             task_id,
             position,
             phase: Some(phase),
@@ -436,6 +442,8 @@ impl CidarenAttemptFlow {
     ) -> ProviderResult<Self> {
         validate_context(context)?;
         let binding = CidarenAssessmentBinding::from_fresh_detail(remote_task_id, detail)?;
+        let remote_attempt_task_id =
+            binding.rebind_remote_attempt_task_id(artifact.remote_attempt_task_id())?;
         let verified_steps = artifact.verified_steps();
         let parsed = ParsedCidarenAttemptQuestion::from_artifact(
             artifact.topic_code().to_owned(),
@@ -507,6 +515,7 @@ impl CidarenAttemptFlow {
             context_binding,
             flow_binding: flow_binding(context_binding, question.task_id, remote_task_id),
             remote_task_id: remote_task_id.to_owned(),
+            remote_attempt_task_id,
             task_id: question.task_id,
             position: question.position,
             phase: Some(restored_phase),
@@ -587,7 +596,8 @@ impl CidarenAttemptFlow {
                 self.position,
             ),
             _ => return Ok(None),
-        };
+        }
+        .with_remote_attempt_task_id(self.remote_attempt_task_id)?;
         let phase = artifact.phase();
         Ok(Some(CidarenPreQuestionContinuation {
             artifact: artifact.encode()?,
@@ -655,8 +665,11 @@ impl CidarenAttemptFlow {
                 "Cidaren current Question has no accepted response binding",
             )
         })?;
-        let mut artifact =
-            CidarenQuestionArtifact::from_parsed(&current.parsed, &current.question)?;
+        let mut artifact = CidarenQuestionArtifact::from_parsed_with_remote_attempt_task_id(
+            &current.parsed,
+            &current.question,
+            self.remote_attempt_task_id,
+        )?;
         if let Some(topic_code) = rotated_topic_code {
             artifact = artifact.checkpoint_after_verify(topic_code, verified_steps)?;
         }
@@ -731,7 +744,10 @@ impl CidarenAttemptFlow {
                 "Cidaren word-selection plan belongs to another Task",
             ));
         }
-        self.binding = CidarenAssessmentBinding::from_fresh_detail(&self.remote_task_id, detail)?;
+        let binding = CidarenAssessmentBinding::from_fresh_detail(&self.remote_task_id, detail)?;
+        self.remote_attempt_task_id =
+            binding.rebind_remote_attempt_task_id(self.remote_attempt_task_id)?;
+        self.binding = binding;
         self.phase = Some(CidarenAttemptPhase::ReadyToSelectWords(plan));
         Ok(())
     }
@@ -1288,7 +1304,7 @@ impl CidarenAttemptFlow {
                 match parse_attempt_step(payload.as_value(), &self.remote_task_id, position)? {
                     ParsedCidarenAttemptStep::Question(parsed) => {
                         if let Some(identity) = parsed.response_identity() {
-                            self.binding.validate_attempt_response_identity(identity)?;
+                            self.accept_attempt_response_identity(identity)?;
                         }
                         let question = parsed.to_question(self.task_id)?;
                         self.phase = Some(CidarenAttemptPhase::CurrentQuestion(Box::new(
@@ -1297,7 +1313,7 @@ impl CidarenAttemptFlow {
                     }
                     ParsedCidarenAttemptStep::ReadingCard(card) => {
                         if let Some(identity) = card.response_identity() {
-                            self.binding.validate_attempt_response_identity(identity)?;
+                            self.accept_attempt_response_identity(identity)?;
                         }
                         self.phase = Some(CidarenAttemptPhase::CurrentReadingCard(card));
                     }
@@ -1323,6 +1339,24 @@ impl CidarenAttemptFlow {
             } => Err(protocol_drift(
                 "Cidaren assessment step returned only a generic acknowledgement",
             )),
+        }
+    }
+
+    fn accept_attempt_response_identity(
+        &mut self,
+        identity: crate::CidarenAttemptResponseIdentity,
+    ) -> ProviderResult<()> {
+        self.binding.validate_attempt_response_identity(identity)?;
+        let observed = identity.task_id();
+        match self.remote_attempt_task_id {
+            Some(expected) if observed != expected => Err(remote_changed(
+                "Cidaren attempt response changed its remote Task allocation",
+            )),
+            None if observed > 0 => {
+                self.remote_attempt_task_id = Some(observed);
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
 
@@ -2406,6 +2440,95 @@ mod tests {
                 CidarenAttemptOperation::StartAnswer,
                 CidarenAttemptOperation::SkipAnswer,
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_attempt_rejects_a_changed_dynamic_task_allocation() {
+        let mut changed = start_payload();
+        changed["task_id"] = json!(92_003);
+        changed["task_type"] = json!(2);
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(&mode_73_payload()),
+                response(&changed),
+            ])),
+            operations: Mutex::new(Vec::new()),
+        });
+        let context = context();
+        let task_id = TaskId::new();
+        let mut flow =
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &detail(), None)
+                .unwrap();
+        let outcome = flow
+            .issue_start(request_at())
+            .unwrap()
+            .execute(transport.clone(), &context)
+            .await
+            .unwrap();
+        flow.accept(outcome).unwrap();
+        let materialization = flow.current_question_materialization().unwrap().unwrap();
+        let recovered = recovered_context(&context);
+        let (mut flow, _, _) = restore_materialization(&recovered, materialization, None, None);
+
+        let outcome = flow
+            .issue_skip(&settings(), request_at())
+            .unwrap()
+            .execute(transport, &recovered)
+            .await
+            .unwrap();
+        assert_eq!(
+            flow.accept(outcome).unwrap_err().kind,
+            ProviderErrorKind::RemoteChanged
+        );
+        assert_eq!(
+            flow.status(),
+            CidarenAttemptFlowStatus::FailedClosed(CidarenAttemptOperation::SkipAnswer)
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_a_fresh_row_with_another_dynamic_allocation() {
+        let transport = Arc::new(FixtureTransport {
+            responses: Mutex::new(VecDeque::from([response(&mode_73_payload())])),
+            operations: Mutex::new(Vec::new()),
+        });
+        let context = context();
+        let task_id = TaskId::new();
+        let mut flow =
+            CidarenAttemptFlow::try_new(&context, task_id, "class-task:2002", &detail(), None)
+                .unwrap();
+        let outcome = flow
+            .issue_start(request_at())
+            .unwrap()
+            .execute(transport, &context)
+            .await
+            .unwrap();
+        flow.accept(outcome).unwrap();
+        let materialization = flow.current_question_materialization().unwrap().unwrap();
+        let (question, encoded, phase, _, _) = materialization.into_parts();
+        let digest = encoded.digest();
+        let value = encoded.into_secret_value();
+        let artifact =
+            CidarenQuestionArtifact::decode_bound(&value, digest, "class-task:2002", &question)
+                .unwrap();
+        let mut changed_detail = detail();
+        changed_detail.task.normalized["task_id"] = json!(92_003);
+        changed_detail.normalized_detail["task"]["task_id"] = json!(92_003);
+
+        assert_eq!(
+            CidarenAttemptFlow::restore_question(
+                &recovered_context(&context),
+                "class-task:2002",
+                &changed_detail,
+                &artifact,
+                phase,
+                &question,
+                None,
+            )
+            .unwrap_err()
+            .kind,
+            ProviderErrorKind::RemoteChanged
         );
     }
 

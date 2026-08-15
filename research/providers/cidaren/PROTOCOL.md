@@ -693,10 +693,14 @@ the attempt flow requires the echoed type to match the freshly rebound Task
 row; when the fresh row already has a positive `task_id`, the echo must match
 it exactly. A fresh `task_id=-1` may legitimately receive a newly allocated
 positive echo, but that value is not promoted to release/course/list identity
-or persisted in the Question/artifact. Missing pairs remain compatible because
-not every sanitized fixture establishes the field; malformed pairs fail
-closed with field-kind-only observation, and mismatches fail the issued
-operation closed as `RemoteChanged` without replay.
+or persisted in the Domain Question. Issues 70/77/85 establish multiple
+rotating topic tokens under one response allocation; issue 77 has one Start,
+21 Next operations and 22 distinct tokens with one Task ID/type. The first
+positive allocation is therefore retained only inside both encrypted Provider
+v2 continuation families. Recovery and later Question/reading-card responses
+must keep it; a change is `RemoteChanged` and fails the issued operation closed
+without replay. Older v2 artifacts and missing payload pairs remain compatible,
+while malformed pairs expose only field kinds.
 
 `SubmitChoseWord` is acknowledgement-only in the donor: it validates the
 success envelope but does not decode a next Question. Asterism therefore uses
@@ -714,6 +718,14 @@ false/zero `20001` data fails closed. The same typed receipt after
 only to fresh verification. Other localized completion/word-selection text is
 classified only after numeric success; `code=0` cannot become a receipt by
 copying donor UI text.
+
+Issues 48/49 establish one exact `code=0` prerequisite shape: repeated
+class-learning runs receive null data and a stable incomplete-section message
+after `SubmitChoseWord`. This is a definite rejected mutation and semantically
+`RequiredChildrenPending`, but the shared Question remote-step outcome has no
+blocked variant carrying response digest/time and diagnosis. Until Main adds
+that contract, Cidaren keeps it non-replayable and fail-closed rather than
+relabelling it Completed, HumanRequired or retryable.
 
 Before `StartAnswer`, eligible learning Tasks build the donor's exact flat or
 self-built grouped word map from a fresh Task-bound inventory. After start,
@@ -933,10 +945,12 @@ no Provider override and remain Core `RemoteUnknown`.
 This mapping does not use task score: no passing threshold is evidenced. The
 donor exposes accumulated `time_spent`, but no required-duration threshold or
 duration-failure result fact, so progress cannot be diagnosed as
-`DurationInsufficient`; the same absence prevents `RequiredChildrenPending`.
-No audited field establishes a prerequisite lock, teacher review, human action,
-attempt limit or retake rule. Cidaren also has no registered TaskExecution slot;
-only the verified submission readback supplies completion-diagnosis facts.
+`DurationInsufficient`. A fresh Task snapshot alone also cannot diagnose
+`RequiredChildrenPending`; issues 48/49 establish it only for one definite
+mid-attempt rejection pending a shared blocked-step contract. No audited field
+establishes a prerequisite lock, teacher review, human action, attempt limit or
+retake rule. Cidaren also has no registered TaskExecution slot; only the
+verified submission readback supplies terminal completion facts.
 
 The later Core Strict Completion attempt ledger does not add a Cidaren retry
 protocol. A verified `WindowClosed` diagnosis and Core's fallback

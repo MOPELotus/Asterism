@@ -930,6 +930,29 @@ course/list identity. Malformed/partial shapes attach only value kinds;
 mismatches are `RemoteChanged` and leave the issued non-idempotent operation
 FailedClosed without replay.
 
+### 2026-08-15 dynamic attempt-allocation and prerequisite re-audit
+
+The donor refs/tags/releases remain unchanged. A value-free scan of 30 public
+diagnostic attachments found multi-step decoded Question sequences in issues
+70, 77 and 85. Issue 77 has one Start, 21 Next operations, 22 distinct topic
+tokens and exactly one response Task ID/type; the other two independently keep
+one allocation across 9 and 34 Question rows. Raw IDs, tokens, Questions,
+accounts and logs were not retained or copied into fixtures.
+
+The first positive response allocation after a fresh `task_id=-1` is now bound
+to the attempt, but never promoted to stable Task identity. Both encrypted v2
+continuation families carry the optional positive ID and accept older v2 state
+without it. Recovery reconciles it with a newly positive fresh row; later
+Question/reading-card responses must match. Invalid or switched allocations
+fail closed as `RemoteChanged` without replay.
+
+The same re-audit confirmed a separate Core Gap. Issues 48/49 repeatedly show
+`SubmitChoseWord` definitely rejected with `code=0`, null data and the exact
+incomplete-section prerequisite message. `ProviderQuestionReadStepOutcome`
+cannot persist a blocked `RequiredChildrenPending` result with response digest
+and observation time. Cidaren therefore keeps the response fail-closed and
+non-replayable; Main owns the required shared blocked-step extension.
+
 ## Check procedure
 
 For the next checkpoint:
