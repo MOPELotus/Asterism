@@ -672,6 +672,22 @@ the parsed integer. It never includes the surrounding row, Course/Task
 identity, title, score, progress, timing, response body or authentication
 material, and it does not normalize an unknown value into an executable Task.
 
+### 2026-08-15 assessment-envelope observation follow-up
+
+The recorded donor refs, tag sets, public `1.5.4` release head, public issue
+ordering and imported OAuth handoff manifest remained unchanged after the Task
+vocabulary unit. No new result code, envelope shape, route or mutation entered
+the capability map.
+
+The shared assessment-step parser and separate word-selection receipt parser
+now attach one bounded `Other / UnknownResultShape` observation to malformed
+or unrecognized JSON envelopes. The observation records only the fixed parser
+family, root/code/message/data/jv value kinds, an optional numeric code and
+data truthiness. It omits every localized message and `data`/`jv` value,
+including answers and rotating topic codes. The original `ProtocolDrift` or
+`InvalidResponse` remains the returned error, and the issued mutation remains
+non-replayable under the existing QuestionSession operation ledger.
+
 ## Check procedure
 
 For the next checkpoint:

@@ -556,11 +556,14 @@ retaining response or user data:
   and classification without retaining its `StudyTask/List` row;
 - an unknown numeric class-page `over_status` records only
   `{ "over_status": i64 }` on `TaskInventory / FieldDrift`.
+- malformed or unrecognized assessment-step/word-selection envelopes record
+  only a fixed family, root/code/message/data/jv value kinds, an optional
+  numeric code and data truthiness on `Other / UnknownResultShape`.
 
 These observations decorate the existing `ProtocolDrift` failure only. They do
 not authorize guessing, retrying a mutation or accepting the new shape. No raw
-response, Question text, answer, remote identity, credential, Cookie or token
-crosses this boundary.
+response, localized message, response-version string, Question text, answer,
+topic code, remote identity, credential, Cookie or token crosses this boundary.
 
 The current clean-room protocol layer additionally freezes:
 

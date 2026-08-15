@@ -218,6 +218,11 @@ placeholder identities, result codes, status values and pagination shape.
   shapes contain only their parsed integer; the encoding-version shape contains
   only ASCII classification and byte length, never the original `jv`, response
   row or body.
+- Assessment-envelope observation tests cover both the shared assessment-step
+  parser and the separate word-selection receipt parser. Unknown codes and
+  malformed root/code/message/data/jv shapes retain only a fixed family, value
+  kinds, optional numeric code and data truthiness; synthetic message, answer,
+  topic-code, version and payload values must not cross the observation.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

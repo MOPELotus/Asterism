@@ -223,6 +223,13 @@ The current checkpoint (not a completion boundary):
     policy validation through persisted completion and returns only a
     `BrowserBridgeCredentialResult::try_new`-validated replacement + completed
     exchange pair. Result bytes and caller metadata cannot select the recipe.
+45. decorates malformed or unrecognized assessment-step and word-selection
+    envelopes with one bounded `UnknownResultShape` observation. It retains
+    only the fixed family, JSON value kinds, an optional numeric result code
+    and data truthiness; messages, payload values, answers, topic codes and
+    response-version strings remain outside the observation. Existing
+    `ProtocolDrift`/`InvalidResponse` classification and ambiguous no-replay
+    behavior are unchanged.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

@@ -1,13 +1,16 @@
 use std::fmt;
 
+use asterism_domain::{ProtocolObservationKind, ProtocolSurface};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
-use serde_json::Value;
+use serde_json::{Value, json};
 use zeroize::Zeroize;
 
 use crate::{CidarenCryptoContext, decode_response_data};
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_MESSAGE_BYTES: usize = 2_048;
+const ASSESSMENT_STEP_FAMILY: &str = "assessment_step";
+const WORD_SELECTION_FAMILY: &str = "word_selection";
 
 /// Bounded donor acknowledgement classification. A terminal acknowledgement
 /// is only a mutation receipt; it never substitutes for fresh verification.
@@ -120,14 +123,30 @@ fn parse_root(
     root: &Value,
     crypto: Option<&CidarenCryptoContext>,
 ) -> ProviderResult<CidarenAssessmentResponse> {
-    let object = root
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren assessment response is not an object"))?;
-    let code = object
-        .get("code")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| protocol_drift("Cidaren assessment response has no numeric code"))?;
-    let message = optional_message(object.get("msg"))?;
+    let Some(object) = root.as_object() else {
+        return Err(result_shape_error(
+            ProviderErrorKind::ProtocolDrift,
+            "Cidaren assessment response is not an object",
+            ASSESSMENT_STEP_FAMILY,
+            root,
+        ));
+    };
+    let Some(code) = object.get("code").and_then(Value::as_i64) else {
+        return Err(result_shape_error(
+            ProviderErrorKind::ProtocolDrift,
+            "Cidaren assessment response has no numeric code",
+            ASSESSMENT_STEP_FAMILY,
+            root,
+        ));
+    };
+    let message = optional_message(object.get("msg")).map_err(|_| {
+        result_shape_error(
+            ProviderErrorKind::ProtocolDrift,
+            "Cidaren assessment response message is invalid",
+            ASSESSMENT_STEP_FAMILY,
+            root,
+        )
+    })?;
 
     if code == 20_004 {
         return Ok(CidarenAssessmentResponse::Receipt {
@@ -142,9 +161,11 @@ fn parse_root(
         });
     }
     if code != 1 && !(code == 20_001 && object.get("data").is_some_and(json_truthy)) {
-        return Err(ProviderError::new(
+        return Err(result_shape_error(
             ProviderErrorKind::InvalidResponse,
             "Cidaren assessment endpoint returned a non-success code",
+            ASSESSMENT_STEP_FAMILY,
+            root,
         ));
     }
     if message.as_deref() == Some("任务已完成！") {
@@ -159,16 +180,23 @@ fn parse_root(
             message_sanitized: message,
         });
     }
-    let data = object
-        .get("data")
-        .filter(|value| !value.is_null())
-        .ok_or_else(|| protocol_drift("Cidaren assessment response has no data"))?;
+    let Some(data) = object.get("data").filter(|value| !value.is_null()) else {
+        return Err(result_shape_error(
+            ProviderErrorKind::ProtocolDrift,
+            "Cidaren assessment response has no data",
+            ASSESSMENT_STEP_FAMILY,
+            root,
+        ));
+    };
     let jv = match object.get("jv") {
         None | Some(Value::Null) => "0",
         Some(Value::String(value)) if !value.is_empty() && value.len() <= 64 => value,
         _ => {
-            return Err(protocol_drift(
+            return Err(result_shape_error(
+                ProviderErrorKind::ProtocolDrift,
                 "Cidaren assessment response has an invalid jv",
+                ASSESSMENT_STEP_FAMILY,
+                root,
             ));
         }
     };
@@ -178,14 +206,30 @@ fn parse_root(
 }
 
 fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentResponse> {
-    let object = root
-        .as_object()
-        .ok_or_else(|| protocol_drift("Cidaren word-selection response is not an object"))?;
-    let code = object
-        .get("code")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| protocol_drift("Cidaren word-selection response has no numeric code"))?;
-    let message = optional_message(object.get("msg"))?;
+    let Some(object) = root.as_object() else {
+        return Err(result_shape_error(
+            ProviderErrorKind::ProtocolDrift,
+            "Cidaren word-selection response is not an object",
+            WORD_SELECTION_FAMILY,
+            root,
+        ));
+    };
+    let Some(code) = object.get("code").and_then(Value::as_i64) else {
+        return Err(result_shape_error(
+            ProviderErrorKind::ProtocolDrift,
+            "Cidaren word-selection response has no numeric code",
+            WORD_SELECTION_FAMILY,
+            root,
+        ));
+    };
+    let message = optional_message(object.get("msg")).map_err(|_| {
+        result_shape_error(
+            ProviderErrorKind::ProtocolDrift,
+            "Cidaren assessment response message is invalid",
+            WORD_SELECTION_FAMILY,
+            root,
+        )
+    })?;
     if code == 20_004 {
         return Ok(CidarenAssessmentResponse::Receipt {
             kind: CidarenAssessmentReceiptKind::Completed,
@@ -199,9 +243,11 @@ fn parse_word_selection_root(root: &Value) -> ProviderResult<CidarenAssessmentRe
         });
     }
     if code != 1 && !(code == 20_001 && object.get("data").is_some_and(json_truthy)) {
-        return Err(ProviderError::new(
+        return Err(result_shape_error(
             ProviderErrorKind::InvalidResponse,
             "Cidaren word-selection endpoint returned a non-success code",
+            WORD_SELECTION_FAMILY,
+            root,
         ));
     }
     if message.as_deref() == Some("任务已完成！") {
@@ -241,6 +287,47 @@ fn optional_message(value: Option<&Value>) -> ProviderResult<Option<String>> {
         _ => Err(protocol_drift(
             "Cidaren assessment response message is invalid",
         )),
+    }
+}
+
+fn result_shape_error(
+    kind: ProviderErrorKind,
+    message: &'static str,
+    family: &'static str,
+    root: &Value,
+) -> ProviderError {
+    let object = root.as_object();
+    let code = object.and_then(|object| object.get("code"));
+    let data = object.and_then(|object| object.get("data"));
+    let shape = json!({
+        "schema": "cidaren.assessment-result-observation.v1",
+        "family": family,
+        "root_kind": json_value_kind(Some(root)),
+        "code_kind": json_value_kind(code),
+        "code_value": code.and_then(Value::as_i64),
+        "message_kind": json_value_kind(object.and_then(|object| object.get("msg"))),
+        "data_kind": json_value_kind(data),
+        "data_truthy": data.map(json_truthy),
+        "jv_kind": json_value_kind(object.and_then(|object| object.get("jv"))),
+    });
+    ProviderError::new(kind, message)
+        .try_with_protocol_observation(
+            ProtocolSurface::Other,
+            ProtocolObservationKind::UnknownResultShape,
+            shape,
+        )
+        .unwrap_or_else(|_| ProviderError::new(kind, message))
+}
+
+const fn json_value_kind(value: Option<&Value>) -> &'static str {
+    match value {
+        None => "missing",
+        Some(Value::Null) => "null",
+        Some(Value::Bool(_)) => "boolean",
+        Some(Value::Number(_)) => "number",
+        Some(Value::String(_)) => "string",
+        Some(Value::Array(_)) => "array",
+        Some(Value::Object(_)) => "object",
     }
 }
 
@@ -369,6 +456,99 @@ mod tests {
                 .kind,
             ProviderErrorKind::Authentication
         );
+    }
+
+    #[test]
+    fn unknown_envelope_shapes_expose_only_bounded_structure() {
+        let document = serde_json::json!({
+            "code": 991,
+            "msg": "must-not-cross-message",
+            "data": {
+                "answer": "must-not-cross-answer",
+                "topic_code": "must-not-cross-topic-code",
+            },
+            "jv": "must-not-cross-jv",
+        });
+        let encoded = serde_json::to_vec(&document).unwrap();
+        for (error, family) in [
+            (
+                parse_assessment_response(&encoded, None).unwrap_err(),
+                ASSESSMENT_STEP_FAMILY,
+            ),
+            (
+                parse_word_selection_response(&encoded).unwrap_err(),
+                WORD_SELECTION_FAMILY,
+            ),
+        ] {
+            assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+            let observation = error.protocol_observation.unwrap();
+            assert_eq!(observation.surface, ProtocolSurface::Other);
+            assert_eq!(
+                observation.kind,
+                ProtocolObservationKind::UnknownResultShape
+            );
+            assert_eq!(
+                observation.shape_sanitized,
+                serde_json::json!({
+                    "schema": "cidaren.assessment-result-observation.v1",
+                    "family": family,
+                    "root_kind": "object",
+                    "code_kind": "number",
+                    "code_value": 991,
+                    "message_kind": "string",
+                    "data_kind": "object",
+                    "data_truthy": true,
+                    "jv_kind": "string",
+                })
+            );
+            let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+            assert!(!sanitized.contains("must-not-cross"));
+            assert!(!sanitized.contains("answer"));
+            assert!(!sanitized.contains("topic_code"));
+        }
+
+        let error = parse_assessment_response(br#"["must-not-cross"]"#, None).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        assert_eq!(
+            error.protocol_observation.unwrap().shape_sanitized,
+            serde_json::json!({
+                "schema": "cidaren.assessment-result-observation.v1",
+                "family": ASSESSMENT_STEP_FAMILY,
+                "root_kind": "array",
+                "code_kind": "missing",
+                "code_value": null,
+                "message_kind": "missing",
+                "data_kind": "missing",
+                "data_truthy": null,
+                "jv_kind": "missing",
+            })
+        );
+
+        for document in [
+            serde_json::json!({"code": "must-not-cross-code"}),
+            serde_json::json!({"code": 1, "msg": ["must-not-cross-message"]}),
+            serde_json::json!({"code": 1, "msg": "synthetic"}),
+            serde_json::json!({
+                "code": 1,
+                "msg": "synthetic",
+                "data": {},
+                "jv": ["must-not-cross-jv"],
+            }),
+        ] {
+            let error = parse_assessment_response(&serde_json::to_vec(&document).unwrap(), None)
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+            let observation = error.protocol_observation.unwrap();
+            assert_eq!(
+                observation.kind,
+                ProtocolObservationKind::UnknownResultShape
+            );
+            assert!(
+                !serde_json::to_string(&observation.shape_sanitized)
+                    .unwrap()
+                    .contains("must-not-cross")
+            );
+        }
     }
 
     #[test]
