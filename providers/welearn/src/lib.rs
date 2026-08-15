@@ -41,6 +41,7 @@ pub use atomic_recovery::{
     WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_PHASE_POSITION,
     WELLEARN_ATOMIC_PRE_FINAL_OBSERVATION_TYPE, WellearnAtomicPreFinalObservation,
     verify_atomic_duration_completion_recovery,
+    verify_atomic_duration_completion_recovery_from_sequence_records,
 };
 pub use atomic_sequence::{
     WELLEARN_ATOMIC_DURATION_COMPLETION_SEQUENCE_TYPE, build_atomic_mutation_sequence_plan,

@@ -205,7 +205,10 @@ response-conditional receipt shape and actual final-save ordinal, then compares
 fresh final time values with that observation. Auto uses its deterministic
 receipt count and exact score-0 final goal without a time observation. This
 closes Provider proof construction and live observation persistence; recovery
-query/dispatch remains Core work, and neither path resumes or replays mutation.
+query/dispatch remains Core work. A pure Provider adapter now consumes the exact
+child-bound sequence plan plus contiguous generic issue/receipt records and the
+optional Core observation, rejects operation/ordinal/plan drift, and reuses the
+same fresh-CMI recovery proof. Neither path resumes or replays mutation.
 
 The native atomic transport now consumes Core's storage-agnostic generic
 `ExecutionMutationSink` through `ExecutionEventSink::mutation_sink`. Both the

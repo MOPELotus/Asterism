@@ -609,6 +609,15 @@ verification has the same sanitized fields as immediate verification. Core may
 attach it only to the accepted final-save ledger entry and may never replay a
 mutation to obtain the proof.
 
+`verify_atomic_duration_completion_recovery_from_sequence_records` is the
+storage-agnostic adapter for Core's loaded records. It requires the exact
+child-artifact-bound sequence plan, equal issue/receipt counts, contiguous
+1-based ordinals and the donor-specific start/keep/set/save operation shape.
+It converts only the acceptance bits and exact phase-3 observation into the
+Provider proof above; request/response digests remain opaque and redacted. The
+caller must load every value from the same attempt. The adapter performs no
+storage query, network mutation, resume or replay.
+
 Durable mutation persistence crosses a deliberately narrow Provider boundary.
 The child-artifact-bound conditional sequence freezes the only legal operation
 families, dynamic occurrence bounds, response-dependent advancement and

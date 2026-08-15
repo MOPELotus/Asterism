@@ -137,6 +137,10 @@ default-head and tag queries after Core commit `f56ee89`; all revisions remain
 unchanged. The artifact-bound phase projection and attempt-bound phase-3
 observation only persist the already-audited response-conditional lifecycle and
 add no donor request, setting or completion claim.
+The adjacent recovery-record adapter checkpoint queried the same three heads
+and Fanyuchang tag again with identical revisions. Its issue/receipt/operation
+shape validation is an Asterism read-only recovery boundary over existing
+evidence and adds no donor behavior.
 
 ## Source selection
 

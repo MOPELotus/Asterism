@@ -380,6 +380,11 @@ only structural field names, response codes and bounded placeholder shapes.
   preserve the terminal-rejected-keep ordinal shape, adapt only the exact Core
   phase-3/type/digest observation, and verify Auto from its deterministic
   receipts without inventing a pre-final time observation.
+- Generic sequence-record recovery tests require the exact child-bound plan,
+  equal issue/receipt records, contiguous ordinals and donor-specific operation
+  order. They recover Fanyuchang's early-rejection final ordinal and Auto's
+  deterministic floor count, while rejecting foreign plans, mislabeled keeps
+  and ordinal drift before fresh-CMI proof.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

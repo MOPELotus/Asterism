@@ -1,17 +1,18 @@
 use std::fmt;
 
 use asterism_provider_api::{
-    ExecutionMutationSequenceObservation, ProviderError, ProviderErrorKind, ProviderResult,
+    ExecutionMutationIssue, ExecutionMutationReceipt, ExecutionMutationSequenceObservation,
+    ExecutionMutationSequencePlan, ProviderError, ProviderErrorKind, ProviderResult,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    WellearnAtomicChildPlan, WellearnAtomicCompletionProfile,
+    WellearnAtomicChildPlan, WellearnAtomicCompletionProfile, WellearnAtomicDurationCompletionPlan,
     WellearnAtomicDurationCompletionReceipts, WellearnAtomicDurationCompletionVerification,
-    WellearnCmiDocument,
+    WellearnAtomicMutationKind, WellearnCmiDocument,
     atomic_duration_completion::{atomic_goal_changed, verify_atomic_final_snapshot},
-    parse_cmi_snapshot,
+    build_atomic_mutation_sequence_plan, parse_cmi_snapshot,
 };
 
 /// Namespaced Provider-private type for one pre-final Fanyuchang observation.
@@ -236,6 +237,144 @@ pub fn verify_atomic_duration_completion_recovery(
     })
 }
 
+/// Rebuilds `WELearn` recovery evidence from Core's exact durable sequence
+/// records, then performs the same read-only final-CMI proof.
+///
+/// The caller remains responsible for loading all values from the same bound
+/// attempt. This adapter verifies the complete child-bound plan, contiguous
+/// issue/receipt pairs and donor-specific operation shape; it never authorizes
+/// or replays a mutation.
+///
+/// # Errors
+///
+/// Returns a typed error for plan, ordinal, operation, receipt, observation or
+/// final-goal drift.
+pub fn verify_atomic_duration_completion_recovery_from_sequence_records(
+    child: &WellearnAtomicChildPlan,
+    sequence_plan: &ExecutionMutationSequencePlan,
+    issues: &[ExecutionMutationIssue],
+    receipts: &[ExecutionMutationReceipt],
+    observation: Option<&ExecutionMutationSequenceObservation>,
+    fresh_final: &WellearnCmiDocument,
+) -> ProviderResult<WellearnAtomicDurationCompletionVerification> {
+    child.validate()?;
+    let artifact = child.to_provider_execution_plan_artifact()?;
+    if build_atomic_mutation_sequence_plan(child, &artifact)? != *sequence_plan {
+        return Err(invalid_recovery_sequence_records());
+    }
+    let plan = child.duration_completion_plan()?;
+    let receipts = recovery_receipts_from_sequence_records(plan, issues, receipts)?;
+    let pre_final = observation
+        .map(WellearnAtomicPreFinalObservation::from_sequence_observation)
+        .transpose()?;
+    verify_atomic_duration_completion_recovery(child, &receipts, pre_final.as_ref(), fresh_final)
+}
+
+fn recovery_receipts_from_sequence_records(
+    plan: WellearnAtomicDurationCompletionPlan,
+    issues: &[ExecutionMutationIssue],
+    receipts: &[ExecutionMutationReceipt],
+) -> ProviderResult<WellearnAtomicDurationCompletionReceipts> {
+    plan.validate()?;
+    if issues.len() != receipts.len()
+        || issues
+            .iter()
+            .zip(receipts)
+            .enumerate()
+            .any(|(index, (issue, receipt))| {
+                let ordinal = u32::try_from(index + 1).ok();
+                ordinal != Some(issue.ordinal()) || ordinal != Some(receipt.ordinal())
+            })
+    {
+        return Err(invalid_recovery_sequence_records());
+    }
+
+    let (heartbeat_count, set_accepted) = match plan.profile() {
+        WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100 => {
+            let heartbeat_count = issues
+                .len()
+                .checked_sub(3)
+                .ok_or_else(invalid_recovery_sequence_records)?;
+            let maximum = usize::try_from(plan.target_seconds())
+                .map_err(|_| invalid_recovery_sequence_records())?;
+            if heartbeat_count > maximum
+                || !operation_shape_matches(
+                    issues,
+                    heartbeat_count,
+                    WellearnAtomicMutationKind::CounterKeep,
+                    true,
+                )
+            {
+                return Err(invalid_recovery_sequence_records());
+            }
+            (
+                heartbeat_count,
+                Some(receipts[heartbeat_count + 1].accepted()),
+            )
+        }
+        WellearnAtomicCompletionProfile::AutoZeroTimeSaveOnly0 => {
+            let heartbeat_count =
+                usize::try_from(plan.target_seconds() / plan.heartbeat_interval_seconds())
+                    .map_err(|_| invalid_recovery_sequence_records())?;
+            if issues.len() != heartbeat_count + 2
+                || !operation_shape_matches(
+                    issues,
+                    heartbeat_count,
+                    WellearnAtomicMutationKind::ImplicitKeep,
+                    false,
+                )
+            {
+                return Err(invalid_recovery_sequence_records());
+            }
+            (heartbeat_count, None)
+        }
+    };
+
+    let heartbeat_acceptances = receipts
+        .iter()
+        .skip(1)
+        .take(heartbeat_count)
+        .map(|receipt| receipt.accepted())
+        .collect();
+    let restored = WellearnAtomicDurationCompletionReceipts::new(
+        receipts[0].accepted(),
+        heartbeat_acceptances,
+        set_accepted,
+        receipts[receipts.len() - 1].accepted(),
+    );
+    restored.validate_for_plan(
+        plan,
+        matches!(
+            plan.profile(),
+            WellearnAtomicCompletionProfile::FanyuchangFreshSetSave100
+        ),
+    )?;
+    Ok(restored)
+}
+
+fn operation_shape_matches(
+    issues: &[ExecutionMutationIssue],
+    heartbeat_count: usize,
+    heartbeat_kind: WellearnAtomicMutationKind,
+    has_set: bool,
+) -> bool {
+    issues
+        .first()
+        .is_some_and(|issue| issue.operation_type() == WellearnAtomicMutationKind::Start.as_str())
+        && issues
+            .iter()
+            .skip(1)
+            .take(heartbeat_count)
+            .all(|issue| issue.operation_type() == heartbeat_kind.as_str())
+        && (!has_set
+            || issues.get(heartbeat_count + 1).is_some_and(|issue| {
+                issue.operation_type() == WellearnAtomicMutationKind::Set.as_str()
+            }))
+        && issues.last().is_some_and(|issue| {
+            issue.operation_type() == WellearnAtomicMutationKind::Save.as_str()
+        })
+}
+
 fn required_time_pair(snapshot: &crate::WellearnCmiSnapshot) -> Option<(&str, &str)> {
     if !snapshot.cmi_present() {
         return None;
@@ -329,6 +468,13 @@ fn invalid_pre_final_observation() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
         "WELearn atomic pre-final observation is invalid or inconsistent",
+    )
+}
+
+fn invalid_recovery_sequence_records() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn durable atomic recovery sequence records are invalid or inconsistent",
     )
 }
 
@@ -537,6 +683,110 @@ mod tests {
         assert!(WellearnAtomicPreFinalObservation::capture(&auto, &final_cmi).is_err());
     }
 
+    #[test]
+    fn sequence_records_restore_conditional_fanyuchang_recovery_without_replay() {
+        let child = fanyuchang_child(3);
+        let artifact = child.to_provider_execution_plan_artifact().unwrap();
+        let sequence_plan = build_atomic_mutation_sequence_plan(&child, &artifact).unwrap();
+        let (issues, receipts) = sequence_records(&[
+            (WellearnAtomicMutationKind::Start, true),
+            (WellearnAtomicMutationKind::CounterKeep, true),
+            (WellearnAtomicMutationKind::CounterKeep, false),
+            (WellearnAtomicMutationKind::Set, true),
+            (WellearnAtomicMutationKind::Save, true),
+        ]);
+        let observation = WellearnAtomicPreFinalObservation::capture(
+            &child,
+            &cmi("incomplete", "0.25", "20", Some("15"), Some("45")),
+        )
+        .unwrap()
+        .to_sequence_observation()
+        .unwrap();
+        let verification = verify_atomic_duration_completion_recovery_from_sequence_records(
+            &child,
+            &sequence_plan,
+            &issues,
+            &receipts,
+            Some(&observation),
+            &cmi("completed", "1", "100", Some("15"), Some("45")),
+        )
+        .unwrap();
+        assert_eq!(verification.final_save_ordinal(), 5);
+        assert_eq!(verification.time_preservation_verified(), Some(true));
+
+        let foreign = fanyuchang_child(2);
+        let foreign_artifact = foreign.to_provider_execution_plan_artifact().unwrap();
+        let foreign_plan =
+            build_atomic_mutation_sequence_plan(&foreign, &foreign_artifact).unwrap();
+        assert!(
+            verify_atomic_duration_completion_recovery_from_sequence_records(
+                &child,
+                &foreign_plan,
+                &issues,
+                &receipts,
+                Some(&observation),
+                &cmi("completed", "1", "100", Some("15"), Some("45")),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sequence_records_reject_operation_or_ordinal_drift_and_preserve_auto_shape() {
+        let auto = auto_child(120);
+        let artifact = auto.to_provider_execution_plan_artifact().unwrap();
+        let sequence_plan = build_atomic_mutation_sequence_plan(&auto, &artifact).unwrap();
+        let (issues, receipts) = sequence_records(&[
+            (WellearnAtomicMutationKind::Start, false),
+            (WellearnAtomicMutationKind::ImplicitKeep, true),
+            (WellearnAtomicMutationKind::ImplicitKeep, false),
+            (WellearnAtomicMutationKind::Save, true),
+        ]);
+        let verification = verify_atomic_duration_completion_recovery_from_sequence_records(
+            &auto,
+            &sequence_plan,
+            &issues,
+            &receipts,
+            None,
+            &cmi("completed", "1", "0", Some("87"), Some("120")),
+        )
+        .unwrap();
+        assert_eq!(verification.final_save_ordinal(), 4);
+
+        let mut wrong_operation = issues.clone();
+        wrong_operation[1] = ExecutionMutationIssue::new(
+            2,
+            WellearnAtomicMutationKind::CounterKeep.as_str(),
+            [2; 32],
+        )
+        .unwrap();
+        assert!(
+            verify_atomic_duration_completion_recovery_from_sequence_records(
+                &auto,
+                &sequence_plan,
+                &wrong_operation,
+                &receipts,
+                None,
+                &cmi("completed", "1", "0", Some("87"), Some("120")),
+            )
+            .is_err()
+        );
+
+        let mut wrong_ordinal = receipts.clone();
+        wrong_ordinal[1] = ExecutionMutationReceipt::new(3, [2; 32], true).unwrap();
+        assert!(
+            verify_atomic_duration_completion_recovery_from_sequence_records(
+                &auto,
+                &sequence_plan,
+                &issues,
+                &wrong_ordinal,
+                None,
+                &cmi("completed", "1", "0", Some("87"), Some("120")),
+            )
+            .is_err()
+        );
+    }
+
     fn fanyuchang_child(target_seconds: u64) -> WellearnAtomicChildPlan {
         serde_json::from_value(serde_json::json!({
             "version": 1,
@@ -563,6 +813,22 @@ mod tests {
             "target_seconds": target_seconds,
         }))
         .unwrap()
+    }
+
+    fn sequence_records(
+        records: &[(WellearnAtomicMutationKind, bool)],
+    ) -> (Vec<ExecutionMutationIssue>, Vec<ExecutionMutationReceipt>) {
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, (kind, accepted))| {
+                let ordinal = u32::try_from(index + 1).unwrap();
+                (
+                    ExecutionMutationIssue::new(ordinal, kind.as_str(), [1; 32]).unwrap(),
+                    ExecutionMutationReceipt::new(ordinal, [2; 32], *accepted).unwrap(),
+                )
+            })
+            .unzip()
     }
 
     fn cmi(
