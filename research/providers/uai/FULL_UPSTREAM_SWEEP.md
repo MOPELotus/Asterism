@@ -141,10 +141,11 @@ Core; UAI contributes facts rather than owning either state machine.
   `scoreType`, Course `scoringMode`, and Task `scoreTaskFlag` are separate facts.
   No donor establishes a universal precedence rule, so live/provider-specific
   policy reconciliation must fail closed rather than choosing one threshold.
-  The ordinary and exact single-upload verifiers now preserve the complete
-  receipt-bound user-module fact and exact-result digest Provider-privately;
-  this does not choose a shared precedence rule, and compound evidence
-  projection remains separate.
+  All four ordinary, single-upload, compound-upload and compound-oral verifiers
+  preserve the complete receipt-bound user-module fact and exact-result digest
+  in their separate Provider-private owners after adapter-specific readback;
+  this does not choose a shared precedence rule or remove the shared compound
+  contract gap.
 - Strict Completion may submit another normal Attempt only while a fresh Group
   remains incomplete, is exact `tab_type=task`, and is inside its availability
   window. The usual immutable Draft, mutation ledger and verification rules

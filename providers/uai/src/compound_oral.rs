@@ -21,7 +21,8 @@ use crate::{
     metadata::development_metadata,
     submission_execute::{UaiSubmissionQuestionPlan, valid_submission_version},
     submission_verify::{
-        bound_verification_state, parse_remote_question, verified_submission_score,
+        UaiSubmissionPolicyEvidence, bound_verification_state, parse_remote_question,
+        verified_submission_policy, verified_submission_score,
     },
 };
 
@@ -267,6 +268,7 @@ pub struct UaiCompoundOralVerification {
     oral_instance_id: String,
     submission_version: String,
     score: Option<SubmissionScore>,
+    policy: Option<UaiSubmissionPolicyEvidence>,
     verified_at: Timestamp,
 }
 
@@ -291,6 +293,10 @@ impl UaiCompoundOralVerification {
         self.score
     }
 
+    pub const fn policy(&self) -> Option<&UaiSubmissionPolicyEvidence> {
+        self.policy.as_ref()
+    }
+
     pub const fn verified_at(&self) -> Timestamp {
         self.verified_at
     }
@@ -309,6 +315,7 @@ impl fmt::Debug for UaiCompoundOralVerification {
             .field("oral_instance_id", &"[REMOTE]")
             .field("submission_version", &self.submission_version)
             .field("score", &self.score)
+            .field("policy", &self.policy)
             .field("verified_at", &self.verified_at)
             .finish()
     }
@@ -934,12 +941,19 @@ pub fn parse_compound_oral_verification(
         &submission.oral_instance_id,
         &submission.oral_children,
     )?;
+    let policy = verified_submission_policy(
+        state,
+        submission.group_id(),
+        version,
+        Sha256::digest(document.as_bytes()).into(),
+    )?;
     Ok(UaiCompoundOralVerification {
         ordinary_draft_id: submission.ordinary_draft_id,
         remote_task_id: submission.remote_task_id.clone(),
         oral_instance_id: submission.oral_instance_id.clone(),
         submission_version: version.to_owned(),
         score,
+        policy,
         verified_at: Utc::now(),
     })
 }
@@ -1375,6 +1389,14 @@ mod tests {
                 possible_milli_points: 100_000,
             })
         );
+        let policy = verified.policy().unwrap();
+        assert_eq!(policy.group_id(), "group-oral");
+        assert_eq!(policy.submission_version(), "compound-oral-v1");
+        assert_eq!(policy.strategy_id(), 3001);
+        assert_eq!(
+            policy.result_digest(),
+            <[u8; 32]>::from(Sha256::digest(document.as_bytes()))
+        );
         assert!(verified.requires_fresh_progress_read());
 
         let changed_oral = json!({
@@ -1622,7 +1644,21 @@ mod tests {
                         "course_id":"course-instance-1",
                         "group_id":"group-oral",
                         "version":"compound-oral-v1",
-                        "state":{"score_avg":88.5}
+                        "strategyId":3001,
+                        "strategy":{
+                            "endTime":1_790_812_800,
+                            "record_every_submit":false,
+                            "record_max_submit":true,
+                            "required":true,
+                            "startTime":1_785_542_400,
+                            "task_mini_score_pct":60
+                        },
+                        "state":{
+                            "expired":false,
+                            "lastSubmit":1_786_752_000,
+                            "not_start":false,
+                            "score_avg":88.5
+                        }
                     }, "__SUMMARY__": {"answerList": {
                         "0":{"questionType":1},
                         "1":{"questionType":2}

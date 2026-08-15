@@ -58,11 +58,12 @@ carry verified score.
 That exact MIT response also carries receipt-scoped Task policy and submit
 state. Asterism now retains the complete typed `strategyId`, `required`,
 recording flags, Task minimum score, availability window, submit-window flags
-and last-submit time in a result-digest-bound Provider-private owner for the
-ordinary verifier and, after exact object-key readback, the single-upload
-verifier. These observations neither authorize a completed-Task retake nor
-establish precedence over Group, Unit or Course scoring facts; shared
-ingestion/reconciliation remains a Main-owned contract gap.
+and last-submit time in result-digest-bound Provider-private owners for the
+ordinary, single-upload, compound-upload and compound-oral verifiers. Each
+owner is returned only after its adapter-specific exact readback succeeds.
+These observations neither authorize a completed-Task retake nor establish
+precedence over Group, Unit or Course scoring facts; shared ingestion and
+compound-attempt integration remain Main-owned contract gaps.
 
 The MIT donor separately calls `courseStudyStrategy/detail` with the fresh
 CourseResource strategy ID, then uses the returned per-Unit `requiredTask`
@@ -220,6 +221,12 @@ single-upload policy-evidence checkpoint on 2026-08-15. Apache
 `bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and Rust
 `40ead69c7dabf` remained current, so reusing the receipt-bound policy parser
 after exact upload-key verification introduces no donor protocol delta.
+
+All four default branches and complete tag refs were refreshed again at the
+compound upload/oral policy-evidence checkpoint on 2026-08-15. Apache
+`bef0d29155ce`, MIT `590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and Rust
+`40ead69c7dabf` remained current; attaching the same owner after both exact
+two-module readbacks introduces no donor protocol delta.
 
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends

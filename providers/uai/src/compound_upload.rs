@@ -20,7 +20,8 @@ use crate::{
     metadata::development_metadata,
     submission_execute::{UaiSubmissionQuestionPlan, valid_submission_version},
     submission_verify::{
-        bound_verification_state, parse_remote_question, verified_submission_score,
+        UaiSubmissionPolicyEvidence, bound_verification_state, parse_remote_question,
+        verified_submission_policy, verified_submission_score,
     },
     upload::validate_upload_readback_question,
 };
@@ -273,6 +274,7 @@ pub struct UaiCompoundUploadVerification {
     artifact_digest: String,
     submission_version: String,
     score: Option<SubmissionScore>,
+    policy: Option<UaiSubmissionPolicyEvidence>,
     verified_at: Timestamp,
 }
 
@@ -297,6 +299,10 @@ impl UaiCompoundUploadVerification {
         self.score
     }
 
+    pub const fn policy(&self) -> Option<&UaiSubmissionPolicyEvidence> {
+        self.policy.as_ref()
+    }
+
     pub const fn verified_at(&self) -> Timestamp {
         self.verified_at
     }
@@ -315,6 +321,7 @@ impl fmt::Debug for UaiCompoundUploadVerification {
             .field("artifact_digest", &self.artifact_digest)
             .field("submission_version", &self.submission_version)
             .field("score", &self.score)
+            .field("policy", &self.policy)
             .field("verified_at", &self.verified_at)
             .finish()
     }
@@ -705,12 +712,19 @@ pub fn parse_compound_upload_verification(
         .ok_or_else(|| remote_changed("UAI compound upload readback is not exactly two modules"))?;
     parse_remote_question(&entries[0], submission.ordinary_question()?)?;
     validate_upload_readback_question(&entries[1], submission.expose_file_key())?;
+    let policy = verified_submission_policy(
+        state,
+        submission.group_id(),
+        version,
+        Sha256::digest(document.as_bytes()).into(),
+    )?;
     Ok(UaiCompoundUploadVerification {
         ordinary_draft_id: submission.ordinary_draft_id,
         remote_task_id: submission.remote_task_id.clone(),
         artifact_digest: submission.artifact_digest.clone(),
         submission_version: version.to_owned(),
         score,
+        policy,
         verified_at: Utc::now(),
     })
 }
@@ -923,6 +937,14 @@ mod tests {
         assert_eq!(verified.ordinary_draft_id(), draft.id);
         assert_eq!(verified.artifact_digest(), uploaded.artifact_digest());
         assert_eq!(verified.score(), None);
+        let policy = verified.policy().unwrap();
+        assert_eq!(policy.group_id(), "group-upload");
+        assert_eq!(policy.submission_version(), "compound-v1");
+        assert_eq!(policy.strategy_id(), 3001);
+        assert_eq!(
+            policy.result_digest(),
+            <[u8; 32]>::from(Sha256::digest(document.as_bytes()))
+        );
         assert!(verified.requires_fresh_progress_read());
 
         assert!(
@@ -1071,7 +1093,21 @@ mod tests {
                     "__EXTEND_DATA__": {"__SUBMIT_INFO__": {
                         "course_id":"course-instance-1",
                         "group_id":"group-upload",
-                        "version":"compound-v1"
+                        "version":"compound-v1",
+                        "strategyId":3001,
+                        "strategy":{
+                            "endTime":1_790_812_800,
+                            "record_every_submit":false,
+                            "record_max_submit":true,
+                            "required":true,
+                            "startTime":1_785_542_400,
+                            "task_mini_score_pct":60
+                        },
+                        "state":{
+                            "expired":false,
+                            "lastSubmit":1_786_752_000,
+                            "not_start":false
+                        }
                     }}
                 }
             }
