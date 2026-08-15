@@ -272,3 +272,6 @@ every fixture before staging it.
 - Retake fixtures must show fresh QIDs/option mappings and separate Chapter
   `redoTest` from Exam `reTest`; they may not authorize mutation during the
   read-only bootstrap test path.
+- Completion-diagnosis regression maps only a fresh Expired verification to
+  `WindowClosed`. Pending, InProgress, NotOpen, Removed, Unknown and Completed
+  must not be guessed as prerequisite, teacher review, duration or score facts.

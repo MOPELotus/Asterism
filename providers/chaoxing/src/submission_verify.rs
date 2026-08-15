@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use asterism_domain::{
-    RemoteState, SubmissionDraft, SubmissionQuestionVerification,
+    CompletionDiagnosis, RemoteState, SubmissionDraft, SubmissionQuestionVerification,
     SubmissionQuestionVerificationStatus, SubmissionReceipt, SubmissionVerificationSnapshot,
     SubmissionVerificationStatus,
 };
@@ -263,6 +263,20 @@ impl SubmissionVerifyCapability for ChaoxingSubmissionVerify {
         )
         .await
     }
+
+    fn completion_diagnosis(
+        &self,
+        verification: &SubmissionVerificationSnapshot,
+    ) -> Option<CompletionDiagnosis> {
+        diagnose_incomplete_submission(verification)
+    }
+}
+
+fn diagnose_incomplete_submission(
+    verification: &SubmissionVerificationSnapshot,
+) -> Option<CompletionDiagnosis> {
+    (verification.remote_state == Some(RemoteState::Expired))
+        .then_some(CompletionDiagnosis::WindowClosed)
 }
 
 async fn fresh_exam_verification(
@@ -464,4 +478,38 @@ fn task_state_snapshot(
         invalid_response("Chaoxing task-state verification snapshot is invalid")
     })?;
     Ok(snapshot)
+}
+
+#[cfg(test)]
+mod completion_diagnosis_tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_expiry_maps_to_window_closed() {
+        assert_eq!(
+            diagnose_incomplete_submission(&snapshot(RemoteState::Expired)),
+            Some(CompletionDiagnosis::WindowClosed)
+        );
+        for state in [
+            RemoteState::Pending,
+            RemoteState::InProgress,
+            RemoteState::NotOpen,
+            RemoteState::Removed,
+            RemoteState::Unknown,
+            RemoteState::Completed,
+        ] {
+            assert_eq!(diagnose_incomplete_submission(&snapshot(state)), None);
+        }
+    }
+
+    fn snapshot(remote_state: RemoteState) -> SubmissionVerificationSnapshot {
+        SubmissionVerificationSnapshot {
+            status: SubmissionVerificationStatus::Inconclusive,
+            remote_state: Some(remote_state),
+            score: None,
+            progress_percent: None,
+            questions: Vec::new(),
+            verified_at: Utc::now(),
+        }
+    }
 }

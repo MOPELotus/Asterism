@@ -579,6 +579,22 @@ advertise this capability until BrowserBridge/Capture provides a verified
 read-only list/result implementation; the synthetic transport is test-only and
 does not invent a native endpoint.
 
+## Verified completion diagnosis
+
+The current TaskExecution paths return a successful `ExecutionOutcome` only
+after a fresh card/status read proves Completed. Human challenges, unsupported
+resources and protocol failures are typed errors rather than verified
+incomplete outcomes, so TaskExecution has no evidence-backed diagnosis override.
+
+SubmissionVerify can return an explicit fresh `RemoteState::Expired` from the
+bound Work/Chapter Work/Exam inventory. That fact maps exactly to
+`CompletionDiagnosis::WindowClosed`. No other current snapshot state is safely
+specific enough: `NotOpen` can mean a time gate or an upstream prerequisite,
+and Pending/InProgress can mean an unchanged editor, an active attempt or
+teacher review. Those states return no Provider override and Core retains its
+conservative `RemoteUnknown` diagnosis. A completed result always wins in Core,
+and score or answer mismatch is not reclassified as a completion reason here.
+
 Strict Completion stops after independently verified completion. Score
 Improvement evaluates fresh score and result-route retake eligibility under a
 separate bounded policy. Chapter `redoTest` and formal Exam `reTest` create new
