@@ -18,11 +18,11 @@ use asterism_secrets::{
     SecretStoreError, SecretString, SecretValue,
 };
 use asterism_storage::{
-    AuthSessionRepository, ProviderAccountRepository, ProviderAccountRuntimeRepository,
-    ProviderRuntimeSettingsRepository, ProviderRuntimeSettingsTarget, ScanScheduleRepository,
-    SqliteAuthSessionRepository, SqliteProviderAccountRepository,
-    SqliteProviderRuntimeSettingsRepository, SqliteProviderScanRepository,
-    SqliteSchedulerRepository, StorageError,
+    AccountHealthRepository, AuthSessionRepository, ProviderAccountRepository,
+    ProviderAccountRuntimeRepository, ProviderRuntimeSettingsRepository,
+    ProviderRuntimeSettingsTarget, ScanScheduleRepository, SqliteAuthSessionRepository,
+    SqliteProviderAccountRepository, SqliteProviderRuntimeSettingsRepository,
+    SqliteProviderScanRepository, SqliteSchedulerRepository, StorageError,
 };
 use axum::{
     Extension, Json,
@@ -71,6 +71,21 @@ pub(super) async fn get_provider_account(
     Ok(crate::auth::no_store(
         Json(ProviderAccountResponse::from(&account)).into_response(),
     ))
+}
+
+pub(super) async fn get_provider_account_health(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(account_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let owner_id = auth.require_account_read()?;
+    let account_id = parse_account_id(&account_id)?;
+    let health = SqliteProviderAccountRepository::new(state.database)
+        .find_owned_account_health(owner_id, account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("provider_account_not_found"))?;
+    Ok(crate::auth::no_store(Json(health).into_response()))
 }
 
 pub(super) async fn create_provider_account(

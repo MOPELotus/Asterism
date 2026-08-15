@@ -57,7 +57,7 @@ pub use question_read_continuation::SqliteQuestionReadContinuationRepository;
 pub use question_session::SqliteQuestionSessionRepository;
 pub use recovery::RecoveryReport;
 pub use repository::{
-    AnswerBootstrapHarvestCheckpoint, AnswerBootstrapHarvestCompletion,
+    AccountHealthRepository, AnswerBootstrapHarvestCheckpoint, AnswerBootstrapHarvestCompletion,
     AnswerBootstrapHarvestFailure, AnswerBootstrapHarvestRepository, AnswerBootstrapHarvestYield,
     AnswerCacheRepository, AnswerCandidateRecord, AnswerCandidateRepository,
     AnswerEvidenceClassCounts, AnswerEvidenceProjectionState, AnswerEvidenceRecord,

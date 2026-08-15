@@ -37,6 +37,7 @@ const JSON_SUCCESS_SCHEMAS: &[(&str, &str)] = &[
     ("listProviderAccounts", "ProviderAccountListResponse"),
     ("createProviderAccount", "ProviderAccountResponse"),
     ("getProviderAccount", "ProviderAccountResponse"),
+    ("getProviderAccountHealth", "AccountHealth"),
     ("updateProviderAccount", "ProviderAccountResponse"),
     ("scanProviderAccount", "ProviderScanReport"),
     (
@@ -428,6 +429,7 @@ fn schemas_for_client() -> Vec<(&'static str, Value)> {
             list_response("ProviderMetadata"),
         ),
         ("AuthState", auth_state_schema()),
+        ("AccountHealth", account_health_schema()),
         (
             "ProviderAccountResponse",
             object(
@@ -2262,6 +2264,29 @@ fn auth_state_schema() -> Value {
             }))
         ]
     })
+}
+
+fn account_health_schema() -> Value {
+    object(
+        &[
+            "provider_account_id",
+            "state",
+            "auth_state",
+            "human_required_reason",
+            "protocol_drift_execution_id",
+            "protocol_drift_at",
+            "observed_at",
+        ],
+        json!({
+            "provider_account_id": uuid(),
+            "state": string_enum(&["healthy", "checking", "expiring_soon", "expired", "human_action_required", "broken", "protocol_changed"]),
+            "auth_state": schema_ref("AuthState"),
+            "human_required_reason": nullable_string_enum(&["auth_required", "session_expired", "qr_required", "sms_verification", "image_captcha", "browser_callback_required", "session_import_required", "user_confirmation", "browser_required", "unsupported_task", "remote_changed", "manual_intervention"]),
+            "protocol_drift_execution_id": nullable_uuid(),
+            "protocol_drift_at": nullable_timestamp(),
+            "observed_at": timestamp()
+        }),
+    )
 }
 
 fn auth_bootstrap_session_schema() -> Value {

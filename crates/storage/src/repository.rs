@@ -5,14 +5,15 @@ use std::{
 
 use asterism_auth::TokenDigest;
 use asterism_domain::{
-    AnswerBootstrapHarvest, AnswerCandidate, AnswerCandidateId, AttemptResult, AuditActor,
-    AuditRecord, AuthBootstrapClientEvent, AuthBootstrapSession, AuthBootstrapSessionId,
-    AuthSession, AuthSessionId, BrowserBridgeExchange, BrowserBridgeResultArtifactMetadata,
-    BrowserBridgeRuntimeBinding, BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession,
-    BrowserBridgeSessionId, CompletionPolicySnapshot, Course, CourseAggregateProgress, CourseId,
-    CreditAccount, CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId,
-    Execution, ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease,
-    ExecutionLogEvent, ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
+    AccountHealth, AnswerBootstrapHarvest, AnswerCandidate, AnswerCandidateId, AttemptResult,
+    AuditActor, AuditRecord, AuthBootstrapClientEvent, AuthBootstrapSession,
+    AuthBootstrapSessionId, AuthSession, AuthSessionId, BrowserBridgeExchange,
+    BrowserBridgeResultArtifactMetadata, BrowserBridgeRuntimeBinding,
+    BrowserBridgeRuntimeStateMetadata, BrowserBridgeSession, BrowserBridgeSessionId,
+    CompletionPolicySnapshot, Course, CourseAggregateProgress, CourseId, CreditAccount,
+    CreditReservation, CreditReservationId, CreditTransaction, CreditTransactionId, Execution,
+    ExecutionAttempt, ExecutionAttemptId, ExecutionId, ExecutionLease, ExecutionLogEvent,
+    ExecutionProgress, ExecutionStage, ExecutionState, ExternalOauthPending,
     GlobalAnswerCorpusEntryId, GlobalCorpusQuestionAsset, GlobalSemanticAnswer, LogLevel,
     OrchestrationState, PriceQuote, PrivateAnswerEvidence, PrivateAnswerEvidenceId,
     ProviderAccount, ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId,
@@ -367,6 +368,15 @@ pub trait CourseProgressRepository: Send + Sync {
         owner_id: UserId,
         course_id: CourseId,
     ) -> Result<Option<CourseAggregateProgressRecord>, StorageError>;
+}
+
+#[async_trait]
+pub trait AccountHealthRepository: Send + Sync {
+    async fn find_owned_account_health(
+        &self,
+        owner_id: UserId,
+        account_id: ProviderAccountId,
+    ) -> Result<Option<AccountHealth>, StorageError>;
 }
 
 /// Internal Task lookup for an already authorized Scheduler execution.

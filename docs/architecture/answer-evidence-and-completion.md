@@ -237,3 +237,20 @@ not distort the Course score. Required-task and duration aggregates are typed
 optional dimensions: until audited Provider or dependency facts establish
 them, they remain null rather than being reported as zero. The read performs no
 Provider call and never crosses ProviderAccount ownership.
+
+## Account health
+
+Account Health is an owner-scoped Core read model, separate from any one
+Provider's authentication wire. Persisted `AuthState` maps to Healthy,
+Checking, ExpiringSoon, Expired, HumanActionRequired, Broken or
+ProtocolChanged without treating an in-progress credential exchange as a
+failure. HumanActionRequired retains the typed QR, SMS, callback, import or
+other intervention reason.
+
+An attempt-bound `protocol_drift` failure may override otherwise healthy
+authentication only when its observed time is at or after the account's latest
+state update. Reauthentication or repair therefore supersedes stale drift;
+ordinary task failure never becomes account-level protocol change. The health
+read exposes the exact Execution and timestamp for a live drift diagnosis,
+performs no Provider call and remains bound to the account owner. Authentication
+fallback execution remains a separate Provider/Core recovery workflow.

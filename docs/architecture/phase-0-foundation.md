@@ -4503,3 +4503,27 @@ Courses. Storage coverage verifies Removed exclusion, completion and diagnostic
 counts, newest-score selection and owner isolation. API coverage reads the
 Course and Task created by a real scan and confirms unknown dimensions remain
 null. OpenAPI describes the complete response.
+
+## Two-hundred-and-forty-fifth Phase 0 slice
+
+Core now exposes a typed Account Health read model for each owner-scoped
+ProviderAccount. Authenticated maps to Healthy; active credential validation is
+Checking; Refreshing is ExpiringSoon; expired, human-action, failed/provider-
+unavailable and client-update states remain independently visible as Expired,
+HumanActionRequired, Broken and ProtocolChanged. Idle and cancelled accounts
+report AuthRequired rather than pretending to be healthy.
+
+Storage also searches the account's Task Executions for the newest
+attempt-bound `protocol_drift` error. It overrides the authentication-derived
+health only when the drift timestamp is not older than the account's latest
+state update, so a later repair or reauthentication clears stale protocol
+diagnosis. The response retains the exact Execution ID and observation time;
+ordinary failures cannot trigger this state.
+
+The endpoint is `no-store`, requires account-read authority and returns 404 for
+missing or foreign accounts. Domain coverage fixes the precedence rule,
+Storage coverage proves live Attempt provenance and owner isolation, and API
+coverage verifies a new Idle account reports typed AuthRequired. OpenAPI
+describes every health and reason value. This slice is observation only; the
+audited stored-session, renewal, BrowserBridge/Capture and HumanRequired
+fallback chain remains a later execution workflow.

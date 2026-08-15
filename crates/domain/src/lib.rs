@@ -23,8 +23,9 @@ pub mod task;
 pub mod user;
 
 pub use account::{
-    Course, CourseAggregateProgress, CourseAggregateProgressError, CourseDurationProgress,
-    CourseRequiredProgress, CourseScoreProgress, ProviderAccount, ProviderId,
+    AccountHealth, AccountHealthState, Course, CourseAggregateProgress,
+    CourseAggregateProgressError, CourseDurationProgress, CourseRequiredProgress,
+    CourseScoreProgress, ProviderAccount, ProviderId,
 };
 pub use answer_evidence::{
     AnswerBootstrapHarvest, AnswerBootstrapHarvestState, AnswerBootstrapHarvestValidationError,

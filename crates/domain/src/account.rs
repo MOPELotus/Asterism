@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CourseId, ProviderAccountId, SecretId, Timestamp, UserId};
+use crate::{
+    AuthState, CourseId, ExecutionId, HumanRequiredReason, ProviderAccountId, SecretId, Timestamp,
+    UserId, WaitingUserState,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -54,6 +57,92 @@ pub struct ProviderAccount {
     pub credential_refs: Vec<SecretId>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountHealthState {
+    Healthy,
+    Checking,
+    ExpiringSoon,
+    Expired,
+    HumanActionRequired,
+    Broken,
+    ProtocolChanged,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountHealth {
+    pub provider_account_id: ProviderAccountId,
+    pub state: AccountHealthState,
+    pub auth_state: AuthState,
+    pub human_required_reason: Option<HumanRequiredReason>,
+    pub protocol_drift_execution_id: Option<ExecutionId>,
+    pub protocol_drift_at: Option<Timestamp>,
+    pub observed_at: Timestamp,
+}
+
+impl AccountHealth {
+    pub fn from_account(
+        account: &ProviderAccount,
+        protocol_drift: Option<(ExecutionId, Timestamp)>,
+    ) -> Self {
+        if let Some((execution_id, drift_at)) =
+            protocol_drift.filter(|(_, drift_at)| *drift_at >= account.updated_at)
+        {
+            return Self {
+                provider_account_id: account.id,
+                state: AccountHealthState::ProtocolChanged,
+                auth_state: account.auth_state.clone(),
+                human_required_reason: None,
+                protocol_drift_execution_id: Some(execution_id),
+                protocol_drift_at: Some(drift_at),
+                observed_at: drift_at,
+            };
+        }
+        let (state, reason) = match account.auth_state {
+            AuthState::Authenticated => (AccountHealthState::Healthy, None),
+            AuthState::Starting
+            | AuthState::ExchangingCredential
+            | AuthState::ValidatingCredential => (AccountHealthState::Checking, None),
+            AuthState::Refreshing => (AccountHealthState::ExpiringSoon, None),
+            AuthState::Expired => (AccountHealthState::Expired, None),
+            AuthState::ClientUpdateRequired => (AccountHealthState::ProtocolChanged, None),
+            AuthState::AuthFailed | AuthState::ProviderUnavailable => {
+                (AccountHealthState::Broken, None)
+            }
+            AuthState::HumanRequired(reason) => {
+                (AccountHealthState::HumanActionRequired, Some(reason))
+            }
+            AuthState::WaitingUser(waiting) => (
+                AccountHealthState::HumanActionRequired,
+                Some(waiting_user_reason(waiting)),
+            ),
+            AuthState::Idle | AuthState::Cancelled => (
+                AccountHealthState::HumanActionRequired,
+                Some(HumanRequiredReason::AuthRequired),
+            ),
+        };
+        Self {
+            provider_account_id: account.id,
+            state,
+            auth_state: account.auth_state.clone(),
+            human_required_reason: reason,
+            protocol_drift_execution_id: None,
+            protocol_drift_at: None,
+            observed_at: account.updated_at,
+        }
+    }
+}
+
+const fn waiting_user_reason(waiting: WaitingUserState) -> HumanRequiredReason {
+    match waiting {
+        WaitingUserState::CredentialInput => HumanRequiredReason::AuthRequired,
+        WaitingUserState::QrScan | WaitingUserState::QrConfirm => HumanRequiredReason::QrRequired,
+        WaitingUserState::BrowserCallback => HumanRequiredReason::BrowserCallbackRequired,
+        WaitingUserState::SmsCode => HumanRequiredReason::SmsVerification,
+        WaitingUserState::SessionImport => HumanRequiredReason::SessionImportRequired,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -207,5 +296,37 @@ mod tests {
         let mut invalid = progress;
         invalid.remaining_task_count = 4;
         assert_eq!(invalid.validate(), Err(CourseAggregateProgressError));
+    }
+
+    #[test]
+    fn account_health_prefers_fresh_protocol_drift_over_authentication_health() {
+        let now = chrono::Utc::now();
+        let account = ProviderAccount {
+            id: ProviderAccountId::new(),
+            owner_id: UserId::new(),
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            display_name: "Account".to_owned(),
+            tenant: None,
+            auth_state: AuthState::Authenticated,
+            network_profile_id: None,
+            credential_refs: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        assert_eq!(
+            AccountHealth::from_account(&account, None).state,
+            AccountHealthState::Healthy
+        );
+        let execution_id = ExecutionId::new();
+        let drift_at = now + chrono::Duration::seconds(1);
+        let health = AccountHealth::from_account(&account, Some((execution_id, drift_at)));
+        assert_eq!(health.state, AccountHealthState::ProtocolChanged);
+        assert_eq!(health.protocol_drift_execution_id, Some(execution_id));
+
+        let stale = AccountHealth::from_account(
+            &account,
+            Some((ExecutionId::new(), now - chrono::Duration::seconds(1))),
+        );
+        assert_eq!(stale.state, AccountHealthState::Healthy);
     }
 }

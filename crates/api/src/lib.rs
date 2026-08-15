@@ -134,6 +134,10 @@ pub fn build_router(state: ApiState) -> Router {
                 .delete(account::delete_provider_account),
         )
         .route(
+            "/api/v1/provider-accounts/{account_id}/health",
+            get(account::get_provider_account_health),
+        )
+        .route(
             "/api/v1/provider-accounts/{account_id}/scan",
             post(account::scan_provider_account),
         )
@@ -1118,6 +1122,13 @@ pub fn openapi_document() -> Value {
         .as_object_mut()
         .expect("static OpenAPI paths object")
         .insert(
+            "/api/v1/provider-accounts/{account_id}/health".to_owned(),
+            provider_account_health_path(),
+        );
+    document["paths"]
+        .as_object_mut()
+        .expect("static OpenAPI paths object")
+        .insert(
             "/api/v1/tasks/{task_id}/question-snapshots/{snapshot_id}/answer-candidates/import-local-cache".to_owned(),
             local_answer_cache_path(),
         );
@@ -2091,6 +2102,24 @@ fn course_progress_path() -> Value {
             "401": {"description": "Authentication required"},
             "403": {"description": "Task read permission is required"},
             "404": {"description": "Owner-scoped Course not found"}
+        }
+    }})
+}
+
+fn provider_account_health_path() -> Value {
+    json!({"get": {
+        "operationId": "getProviderAccountHealth",
+        "description": "Reads owner-scoped account health derived from the persisted authentication state and any newer attempt-bound ProtocolDrift fact.",
+        "security": [{"cookieAuth": []}, {"bearerAuth": []}],
+        "parameters": [
+            {"name": "account_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {
+            "200": {"description": "Current Account Health with exact authentication and ProtocolDrift provenance"},
+            "400": {"description": "Invalid ProviderAccount ID"},
+            "401": {"description": "Authentication required"},
+            "403": {"description": "Provider account read permission is required"},
+            "404": {"description": "Owner-scoped ProviderAccount not found"}
         }
     }})
 }
@@ -3098,6 +3127,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the account integration keeps CRUD, audit, owner scope and the derived health surface in one fixture"
+    )]
     async fn provider_account_api_is_owner_scoped_and_audited() {
         let (app, database) = test_app(false, None).await;
         let unauthorized = app
@@ -3139,6 +3172,24 @@ mod tests {
         let account_id = created["id"].as_str().unwrap();
         assert_eq!(created["credential_count"], 0);
         assert!(created.get("credential_refs").is_none());
+
+        let health = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/provider-accounts/{account_id}/health"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store");
+        let health = response_json(health).await;
+        assert_eq!(health["provider_account_id"], account_id);
+        assert_eq!(health["state"], "human_action_required");
+        assert_eq!(health["human_required_reason"], "auth_required");
+        assert!(health["protocol_drift_execution_id"].is_null());
 
         let updated = app
             .clone()

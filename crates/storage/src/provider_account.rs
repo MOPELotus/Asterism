@@ -1,14 +1,17 @@
 use std::{collections::BTreeSet, str::FromStr};
 
 use asterism_domain::{
-    AuditActor, AuditRecordId, ProviderAccount, ProviderAccountId, ProviderId, SecretId, Timestamp,
-    UserId,
+    AccountHealth, AuditActor, AuditRecordId, ExecutionId, ProviderAccount, ProviderAccountId,
+    ProviderId, SecretId, Timestamp, UserId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
-use crate::{Database, ProviderAccountRepository, ProviderAccountRuntimeRepository, StorageError};
+use crate::{
+    AccountHealthRepository, Database, ProviderAccountRepository, ProviderAccountRuntimeRepository,
+    StorageError,
+};
 
 #[derive(Clone, Debug)]
 pub struct SqliteProviderAccountRepository {
@@ -218,6 +221,39 @@ impl ProviderAccountRuntimeRepository for SqliteProviderAccountRepository {
     }
 }
 
+#[async_trait]
+impl AccountHealthRepository for SqliteProviderAccountRepository {
+    async fn find_owned_account_health(
+        &self,
+        owner_id: UserId,
+        account_id: ProviderAccountId,
+    ) -> Result<Option<AccountHealth>, StorageError> {
+        let Some(account) = self.find_provider_account(owner_id, account_id).await? else {
+            return Ok(None);
+        };
+        let drift = sqlx::query(
+            "SELECT execution.id, COALESCE(attempt.finished_at, attempt.started_at) AS drift_at \
+             FROM tasks AS task \
+             INNER JOIN executions AS execution ON execution.task_id = task.id \
+             INNER JOIN execution_attempts AS attempt ON attempt.execution_id = execution.id \
+             WHERE task.provider_account_id = ? AND attempt.error_class = 'protocol_drift' \
+             ORDER BY drift_at DESC, attempt.id DESC LIMIT 1",
+        )
+        .bind(account_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?
+        .map(|row| {
+            Ok::<_, StorageError>((
+                ExecutionId::from_str(row.try_get("id")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                decode_timestamp(row.try_get("drift_at")?)?,
+            ))
+        })
+        .transpose()?;
+        Ok(Some(AccountHealth::from_account(&account, drift)))
+    }
+}
+
 impl SqliteProviderAccountRepository {
     async fn decode_account(&self, row: &SqliteRow) -> Result<ProviderAccount, StorageError> {
         let account_id = ProviderAccountId::from_str(row.try_get("id")?)
@@ -329,7 +365,7 @@ fn decode_timestamp(value: &str) -> Result<Timestamp, StorageError> {
 
 #[cfg(test)]
 mod tests {
-    use asterism_domain::{AuthState, Role};
+    use asterism_domain::{AccountHealthState, AuthState, Role, TaskId};
     use sqlx::Row;
 
     use super::*;
@@ -429,6 +465,100 @@ mod tests {
                 "provider_account_updated",
                 "provider_account_deleted"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn account_health_uses_only_fresh_attempt_bound_protocol_drift() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let owner = UserId::new();
+        let other_owner = UserId::new();
+        insert_user(&database, owner).await;
+        insert_user(&database, other_owner).await;
+        let repository = SqliteProviderAccountRepository::new(database.clone());
+        let now = Utc::now();
+        let account = ProviderAccount {
+            id: ProviderAccountId::new(),
+            owner_id: owner,
+            provider_id: ProviderId::new("provider-alpha").unwrap(),
+            display_name: "primary".to_owned(),
+            tenant: None,
+            auth_state: AuthState::Authenticated,
+            network_profile_id: None,
+            credential_refs: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        repository
+            .create_provider_account(&account, AuditActor::User(owner))
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .find_owned_account_health(owner, account.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            AccountHealthState::Healthy
+        );
+
+        let task_id = TaskId::new();
+        let drift_at = now + chrono::Duration::seconds(1);
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, provider_account_id, remote_id, remote_fingerprint, source_type, assessment_class, \
+              title, remote_state, orchestration_state, discovered_at, updated_at, capabilities_json) \
+             VALUES (?, ?, 'task', 'fingerprint', 'work', 'routine', 'Task', 'pending', \
+                     'failed', ?, ?, '[]')",
+        )
+        .bind(task_id.to_string())
+        .bind(account.id.to_string())
+        .bind(now.to_rfc3339())
+        .bind(drift_at.to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let execution_id = ExecutionId::new();
+        sqlx::query(
+            "INSERT INTO executions (id, task_id, request_source, state, started_at, finished_at, created_at) \
+             VALUES (?, ?, 'system', 'failed', ?, ?, ?)",
+        )
+        .bind(execution_id.to_string())
+        .bind(task_id.to_string())
+        .bind(now.to_rfc3339())
+        .bind(drift_at.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO execution_attempts \
+             (id, execution_id, attempt_no, started_at, finished_at, result, error_class) \
+             VALUES (?, ?, 1, ?, ?, 'failed', 'protocol_drift')",
+        )
+        .bind(asterism_domain::ExecutionAttemptId::new().to_string())
+        .bind(execution_id.to_string())
+        .bind(now.to_rfc3339())
+        .bind(drift_at.to_rfc3339())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let health = repository
+            .find_owned_account_health(owner, account.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(health.state, AccountHealthState::ProtocolChanged);
+        assert_eq!(health.protocol_drift_execution_id, Some(execution_id));
+        assert_eq!(health.protocol_drift_at, Some(drift_at));
+        assert!(
+            repository
+                .find_owned_account_health(other_owner, account.id)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
