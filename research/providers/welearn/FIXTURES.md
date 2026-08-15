@@ -363,6 +363,10 @@ only structural field names, response codes and bounded placeholder shapes.
   within the independent 8 MiB bound, and reject empty/oversized input, unknown
   fields, version drift, dispatch drift and Auto child-target drift. Decode
   always re-enters full frozen-plan integrity validation.
+- Durable atomic-child recovery tests decode the parent authority and complete
+  batch snapshot together, accept both Fanyuchang and Auto target shapes, and
+  reject cross-attempt Course, flow, Unit selection, aggregate, expected-child
+  and child-artifact substitutions before fresh I/O.
 - Provider/account concurrency accepts the Auto_WeLearn donor's bounded
   1–100 worker setting while preserving conservative defaults.
 - Hidden SCO execution rebinds the same Course/SCO and fresh visibility

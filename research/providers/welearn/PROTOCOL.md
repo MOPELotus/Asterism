@@ -741,11 +741,17 @@ bound decode against the complete batch, expected child ordinal and frozen
 Fanyuchang target authority. Merely deserializing a valid payload, including a
 valid plan for another child, never authorizes recovery.
 `WellearnPreparedAtomicChildPlan::restore_from_provider_execution_plan_artifact`
-is the corresponding process-recovery constructor. It consumes the complete
-independently durable batch, ordinal, frozen target authority and exact Core
-artifact, revalidates all four together and only then rebuilds the prepared
-child accepted by the high-level coordinator. It performs no I/O and grants no
-mutation authority; a complete fresh TaskDetail rebind remains mandatory before
+is the lower-level in-memory recovery constructor. It consumes a validated
+complete batch, ordinal, frozen target authority and exact Core artifact,
+revalidates all four together and only then rebuilds the prepared child
+accepted by the high-level coordinator. The durable entry point
+`restore_from_durable_artifacts` first strictly decodes both the parent
+authority and complete batch snapshot, then binds their Course, flow, exact
+Unit selection and Auto aggregate, locates the authority's expected Task in the
+frozen membership, and applies the same child-artifact rebind. This prevents
+independently valid parent, batch and child values from different attempts from
+being cross-assembled. Neither boundary performs I/O or grants mutation
+authority; a complete fresh TaskDetail rebind remains mandatory before
 transport.
 
 `WellearnAtomicBatchPlanningAuthority` now expresses the minimum input that

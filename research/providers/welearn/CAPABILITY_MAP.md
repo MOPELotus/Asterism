@@ -170,10 +170,11 @@ unregistered high-level `WellearnAtomicDurationCompletion` coordinator now also
 revalidates one prepared batch child, fresh-rebinds its complete TaskDetail,
 calls that transport once and applies the exact verifier before returning a
 sanitized outcome. A process-recovery constructor can rebuild that prepared
-child only when the durable full batch, ordinal, external target authority and
-exact namespaced child artifact all rebind; it still performs no I/O or grants
-mutation authority. Neither boundary is present in Provider capability
-registration or reachable from singleton TaskExecution. Core must still
+child only when the encoded parent authority, complete batch snapshot and exact
+namespaced child artifact jointly rebind across Course, flow, Unit selection,
+Auto aggregate or Fany target, expected Task and ordinal; it still performs no
+I/O or grants mutation authority. Neither boundary is present in Provider
+capability registration or reachable from singleton TaskExecution. Core must still
 persist, authorize and recover the composite attempt before an execution entry
 may call it without inserting a bare save or second start.
 

@@ -124,6 +124,10 @@ The complete-batch snapshot checkpoint repeated the same three remote head/tag
 queries after the pushed workspace gate and found no delta. Its versioned
 bounded encoding persists already-audited membership and target derivations;
 it adds no WELearn request, setting or execution behavior.
+The joint durable-artifact recovery checkpoint repeated those queries again;
+all three heads and Fanyuchang's sole tag remained unchanged. It only binds the
+already-audited parent, batch and child persistence values and adds no donor
+protocol behavior.
 
 ## Source selection
 

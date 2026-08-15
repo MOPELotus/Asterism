@@ -786,6 +786,53 @@ impl WellearnPreparedAtomicChildPlan {
         Ok(prepared)
     }
 
+    /// Restores one prepared child from the three independently durable
+    /// Provider values that Core must atomically bind to the parent attempt.
+    ///
+    /// This boundary decodes and revalidates the parent authority and complete
+    /// batch snapshot, binds their Course, flow, Unit selection, expected child
+    /// and Auto aggregate, then rebinds the exact child artifact. It performs
+    /// no fresh I/O and grants no execution authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for malformed or inconsistent parent, batch
+    /// or child artifacts, including a missing expected child.
+    pub fn restore_from_durable_artifacts(
+        encoded_parent_authority: &[u8],
+        encoded_batch_snapshot: &[u8],
+        child_artifact: &ProviderExecutionPlanArtifact,
+    ) -> ProviderResult<Self> {
+        let authority = WellearnAtomicBatchPlanningAuthority::decode(encoded_parent_authority)?;
+        let batch_plan = WellearnBatchPlan::decode_snapshot(encoded_batch_snapshot)?;
+        let aggregate_duration_seconds = authority
+            .frozen_auto_duration_minutes()
+            .map(|minutes| {
+                minutes
+                    .checked_mul(60)
+                    .ok_or_else(invalid_atomic_recovery_artifacts)
+            })
+            .transpose()?;
+        if batch_plan.course_remote_id != authority.course_remote_id
+            || batch_plan.flow != authority.flow
+            || batch_plan.selection != authority.selection
+            || batch_plan.aggregate_duration_seconds != aggregate_duration_seconds
+        {
+            return Err(invalid_atomic_recovery_artifacts());
+        }
+        let expected_entry_index = batch_plan
+            .entries
+            .iter()
+            .position(|entry| entry.remote_task_id == authority.expected_remote_task_id)
+            .ok_or_else(invalid_atomic_recovery_artifacts)?;
+        Self::restore_from_provider_execution_plan_artifact(
+            batch_plan,
+            expected_entry_index,
+            authority.frozen_fanyuchang_target_seconds,
+            child_artifact,
+        )
+    }
+
     /// Revalidates the exact child projection against its rebuilt batch.
     ///
     /// # Errors
@@ -1229,6 +1276,13 @@ fn invalid_atomic_planning_authority() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
         "WELearn atomic batch planning authority is incomplete or inconsistent",
+    )
+}
+
+fn invalid_atomic_recovery_artifacts() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Internal,
+        "WELearn durable atomic recovery artifacts are inconsistent",
     )
 }
 
@@ -2657,6 +2711,165 @@ mod tests {
                 1,
                 Some(37),
                 &artifact,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn prepared_atomic_child_restores_all_durable_artifacts_together() {
+        let fanyuchang_authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+            "sco:1001:301",
+            Some(37),
+            None,
+        )
+        .unwrap();
+        let fanyuchang = prepare_atomic_child_plan_from_fresh_inventory(
+            &tasks(),
+            &units(),
+            &fanyuchang_authority,
+        )
+        .unwrap();
+        let fanyuchang_artifact = fanyuchang.provider_plan_artifact().unwrap();
+        let restored = WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
+            &fanyuchang_authority.encode().unwrap(),
+            &fanyuchang.batch_plan().encode_snapshot().unwrap(),
+            &fanyuchang_artifact,
+        )
+        .unwrap();
+        assert_eq!(restored, fanyuchang);
+
+        let auto_authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::AutoDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:302",
+            None,
+            Some(WellearnAutoDurationBudget::try_new(1, 0, 0).unwrap()),
+        )
+        .unwrap();
+        let auto =
+            prepare_atomic_child_plan_from_fresh_inventory(&tasks(), &units(), &auto_authority)
+                .unwrap();
+        let auto_artifact = auto.provider_plan_artifact().unwrap();
+        assert_eq!(
+            WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
+                &auto_authority.encode().unwrap(),
+                &auto.batch_plan().encode_snapshot().unwrap(),
+                &auto_artifact,
+            )
+            .unwrap(),
+            auto
+        );
+    }
+
+    #[test]
+    fn durable_atomic_child_restore_rejects_parent_identity_and_selection_drift() {
+        let authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+            "sco:1001:301",
+            Some(37),
+            None,
+        )
+        .unwrap();
+        let prepared =
+            prepare_atomic_child_plan_from_fresh_inventory(&tasks(), &units(), &authority).unwrap();
+        let artifact = prepared.provider_plan_artifact().unwrap();
+        for mismatched_authority in [
+            WellearnAtomicBatchPlanningAuthority::try_new(
+                "course:2002",
+                WellearnBatchFlow::FanyuchangDuration,
+                WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+                "sco:2002:301",
+                Some(37),
+                None,
+            )
+            .unwrap(),
+            WellearnAtomicBatchPlanningAuthority::try_new(
+                "course:1001",
+                WellearnBatchFlow::FanyuchangDuration,
+                WellearnBatchUnitSelection::All,
+                "sco:1001:301",
+                Some(37),
+                None,
+            )
+            .unwrap(),
+        ] {
+            assert!(
+                WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
+                    &mismatched_authority.encode().unwrap(),
+                    &prepared.batch_plan().encode_snapshot().unwrap(),
+                    &artifact,
+                )
+                .is_err()
+            );
+        }
+
+        let missing_child = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::FanyuchangDuration,
+            WellearnBatchUnitSelection::Explicit(vec![1, 0]),
+            "sco:1001:missing",
+            Some(37),
+            None,
+        )
+        .unwrap();
+        assert!(
+            WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
+                &missing_child.encode().unwrap(),
+                &prepared.batch_plan().encode_snapshot().unwrap(),
+                &artifact,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn durable_atomic_child_restore_rejects_auto_aggregate_or_child_drift() {
+        let auto_authority = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::AutoDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:302",
+            None,
+            Some(WellearnAutoDurationBudget::try_new(1, 0, 0).unwrap()),
+        )
+        .unwrap();
+        let auto =
+            prepare_atomic_child_plan_from_fresh_inventory(&tasks(), &units(), &auto_authority)
+                .unwrap();
+        let auto_artifact = auto.provider_plan_artifact().unwrap();
+        let other_child = materialize_atomic_child_plan(auto.batch_plan(), 0, None)
+            .unwrap()
+            .to_provider_execution_plan_artifact()
+            .unwrap();
+        assert!(
+            WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
+                &auto_authority.encode().unwrap(),
+                &auto.batch_plan().encode_snapshot().unwrap(),
+                &other_child,
+            )
+            .is_err()
+        );
+        let mismatched_auto_budget = WellearnAtomicBatchPlanningAuthority::try_new(
+            "course:1001",
+            WellearnBatchFlow::AutoDuration,
+            WellearnBatchUnitSelection::All,
+            "sco:1001:302",
+            None,
+            Some(WellearnAutoDurationBudget::try_new(2, 0, 0).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            WellearnPreparedAtomicChildPlan::restore_from_durable_artifacts(
+                &mismatched_auto_budget.encode().unwrap(),
+                &auto.batch_plan().encode_snapshot().unwrap(),
+                &auto_artifact,
             )
             .is_err()
         );
