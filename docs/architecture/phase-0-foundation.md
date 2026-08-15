@@ -4575,3 +4575,26 @@ Coverage proves that an identical bound occurrence is idempotent and a distinct
 occurrence aggregates into the same shape. The shared path is now wired; each
 Provider must still attach observations only at explicit unknown type/result/
 field branches where it can produce a redacted structural fact without guessing.
+
+## Two-hundred-and-forty-eighth Phase 0 slice
+
+The occurrence validator and digest builder are now one Engine-internal path
+shared by Execution and account scan calls. Its bounded occurrence scope joins
+Provider, optional Execution, Provider error kind, protocol surface, drift kind
+and shape digest. This keeps idempotency semantics identical when later Core
+services gain observation sinks instead of allowing each worker to invent its
+own hash format.
+
+`ProviderScanService` now records a present observation from CourseInventory or
+TaskInventory before returning the Provider failure to the scheduler. Scan
+observations deliberately carry no Execution ID; their occurrence scope is
+bound to the ProviderAccount and validated scan correlation. The daemon injects
+the same SQLite inbox repository into both scan and Execution workers. A valid
+Provider failure is returned only after observation persistence succeeds; an
+invalid payload becomes non-retryable InvalidInventory, while an Inbox storage
+failure remains a retryable scan storage failure.
+
+Coverage proves that replaying the same account scan correlation does not
+inflate the aggregate, retains the typed task-inventory/unknown-task-type
+classification, never invents Execution provenance and still leaves the scan
+ingestion batch empty after Provider failure.

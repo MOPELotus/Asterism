@@ -1181,7 +1181,8 @@ fn map_scan_error(error: ProviderScanError) -> ApiError {
             ProviderErrorKind::Internal => ApiError::internal(provider_error),
         },
         ProviderScanError::CourseScopeMismatch { .. }
-        | ProviderScanError::UnadvertisedTaskCapability { .. } => {
+        | ProviderScanError::UnadvertisedTaskCapability { .. }
+        | ProviderScanError::InvalidProtocolObservation => {
             tracing::warn!(%error, "Provider returned inconsistent scan inventory");
             ApiError::bad_gateway(
                 "provider_inventory_invalid",

@@ -18,6 +18,7 @@ mod execution_worker;
 mod local_answer_cache;
 mod manual_answer;
 mod outbox;
+mod protocol_observation;
 mod question_read;
 mod scan;
 mod scan_job;

@@ -279,3 +279,8 @@ policy and binds replay identity to the exact job and Execution. The daemon
 configures this sink by default; a storage failure remains visible and retry-
 safe instead of silently losing the observation. Providers attach the payload
 only where their parser has an explicit structural fact.
+Inventory scans use the same recorder even though no Task Execution exists yet.
+Their occurrence identity is account-and-correlation bound and the persisted
+Execution reference stays null. This allows unknown remote Task types found
+during ordinary discovery to enter the same review inbox without manufacturing
+an Attempt or weakening the scan's all-or-nothing ingestion boundary.

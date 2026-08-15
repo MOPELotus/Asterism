@@ -10,9 +10,9 @@ use std::{
 use asterism_domain::{
     AttemptResult, AuthState, Execution, ExecutionAttempt, ExecutionId, ExecutionLease,
     ExecutionProgress, ExecutionStage, ExecutionState, HumanRequiredReason, OrchestrationState,
-    ProtocolObservation, ProviderAccountId, ProviderErrorClass, ProviderId, QuestionSnapshotId,
-    RemoteState, StrictCompletionState, SubmissionAttemptReceipt, SubmissionDraft,
-    SubmissionResult, SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot,
+    ProviderAccountId, ProviderErrorClass, ProviderId, QuestionSnapshotId, RemoteState,
+    StrictCompletionState, SubmissionAttemptReceipt, SubmissionDraft, SubmissionResult,
+    SubmissionResultId, SubmissionResultStatus, SubmissionVerificationSnapshot,
     SubmissionVerificationStatus, Task, TaskCapability, Timestamp,
 };
 use asterism_provider_api::{
@@ -38,24 +38,28 @@ use asterism_storage::{
     ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLeaseRepository,
     ExecutionLogAppendRequest, ExecutionProgressUpdate, ExecutionQuestionStepFinishRequest,
     ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, LeaseAcquireOutcome, ProtocolObservationRecordRequest,
-    ProtocolObservationRepository, ProviderAccountRuntimeRepository,
-    QuestionSessionArtifactRepository, QuestionSessionArtifactRepositoryFactory,
-    QuestionSessionNextMaterializeOutcome, QuestionSessionNextMaterializeRequest,
-    QuestionSessionOperation, QuestionSessionOperationAcceptRequest,
-    QuestionSessionOperationFinishOutcome, QuestionSessionOperationIssueOutcome,
-    QuestionSessionOperationIssueRequest, QuestionSessionOperationState, QuestionSessionTransition,
-    QuestionSnapshot, ResolvedQuestionSessionContinuation, SchedulerRepository, StorageError,
+    ExecutionVerificationRecoveryRepository, LeaseAcquireOutcome, ProtocolObservationRepository,
+    ProviderAccountRuntimeRepository, QuestionSessionArtifactRepository,
+    QuestionSessionArtifactRepositoryFactory, QuestionSessionNextMaterializeOutcome,
+    QuestionSessionNextMaterializeRequest, QuestionSessionOperation,
+    QuestionSessionOperationAcceptRequest, QuestionSessionOperationFinishOutcome,
+    QuestionSessionOperationIssueOutcome, QuestionSessionOperationIssueRequest,
+    QuestionSessionOperationState, QuestionSessionTransition, QuestionSnapshot,
+    ResolvedQuestionSessionContinuation, SchedulerRepository, StorageError,
     StrictCompletionExecutionObservationRecord, StrictCompletionExecutionObservationRequest,
     SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, TaskRuntimeRepository,
     VerificationRecoveryStartRequest,
 };
 use async_trait::async_trait;
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
-use crate::{FormalAssessmentPolicy, TaskAction, authorize_task_action};
+use crate::{
+    FormalAssessmentPolicy, TaskAction, authorize_task_action,
+    protocol_observation::{
+        ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+    },
+};
 
 const MAX_DURABLE_SUBMISSION_OPERATIONS: usize = 512;
 const MAX_DURABLE_SUBMISSION_DELAY_SECONDS: u64 = 15 * 60;
@@ -1563,20 +1567,9 @@ where
         observed_at: Timestamp,
         correlation_id: &str,
     ) -> Result<(), ScheduledExecutionRunError> {
-        let Some(observation) = error.protocol_observation.as_ref() else {
+        if error.protocol_observation.is_none() {
             return Ok(());
-        };
-        if !matches!(
-            error.kind,
-            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse
-        ) {
-            return Err(ScheduledExecutionRunError::InvalidProviderProtocolObservation);
         }
-        let shape_digest = ProtocolObservation::shape_digest(&observation.shape_sanitized)
-            .map_err(|_| ScheduledExecutionRunError::InvalidProviderProtocolObservation)?;
-        let Some(repository) = self.protocol_observations.as_ref() else {
-            return Ok(());
-        };
         let execution_id = claimed_execution_id(job)?;
         let task_id = execution_id_to_task(&self.executions, execution_id).await?;
         let task = self
@@ -1589,33 +1582,22 @@ where
             .find_runtime_provider_account(task.provider_account_id)
             .await?
             .ok_or(ScheduledExecutionRunError::StateConflict)?;
-        let occurrence = serde_json::json!({
-            "provider_id": account.provider_id.as_str(),
-            "execution_id": execution_id,
-            "scheduler_job_id": job.id,
-            "correlation_id": correlation_id,
-            "error_kind": error.kind,
-            "surface": observation.surface,
-            "observation_kind": observation.kind,
-            "shape_digest": shape_digest,
-        });
-        let occurrence_digest = Sha256::digest(
-            serde_json::to_vec(&occurrence)
-                .map_err(|_| ScheduledExecutionRunError::InvalidProviderProtocolObservation)?,
+        let occurrence_scope = format!("execution:{}:{correlation_id}", job.id);
+        record_provider_protocol_observation(
+            self.protocol_observations.as_deref(),
+            &account.provider_id,
+            Some(execution_id),
+            &occurrence_scope,
+            error,
+            observed_at,
         )
-        .into();
-        repository
-            .record_protocol_observation(ProtocolObservationRecordRequest {
-                provider_id: account.provider_id,
-                surface: observation.surface,
-                kind: observation.kind,
-                shape_sanitized: &observation.shape_sanitized,
-                occurrence_digest,
-                execution_id: Some(execution_id),
-                observed_at,
-            })
-            .await?;
-        Ok(())
+        .await
+        .map_err(|error| match error {
+            ProviderProtocolObservationRecordError::Invalid => {
+                ScheduledExecutionRunError::InvalidProviderProtocolObservation
+            }
+            ProviderProtocolObservationRecordError::Storage(error) => error.into(),
+        })
     }
 
     fn recovery_retry_at(

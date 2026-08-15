@@ -221,10 +221,11 @@ fn classify_scan_error(error: &ProviderScanError) -> (ScheduledScanFailure, bool
             (ScheduledScanFailure::ProviderNotReady, false, None)
         }
         ProviderScanError::CourseScopeMismatch { .. }
-        | ProviderScanError::UnadvertisedTaskCapability { .. } => {
+        | ProviderScanError::UnadvertisedTaskCapability { .. }
+        | ProviderScanError::InvalidProtocolObservation
+        | ProviderScanError::InvalidCorrelationId => {
             (ScheduledScanFailure::InvalidInventory, false, None)
         }
-        ProviderScanError::InvalidCorrelationId => (ScheduledScanFailure::Internal, false, None),
     }
 }
 

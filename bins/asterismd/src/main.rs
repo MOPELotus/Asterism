@@ -503,7 +503,10 @@ fn start_scan_scheduler(
             ProviderScanService::new(
                 providers,
                 SqliteProviderScanRepository::new(database.clone()),
-            ),
+            )
+            .with_protocol_observations(Arc::new(
+                SqliteProtocolObservationRepository::new(database.clone()),
+            )),
             ScanSchedulerConfig {
                 worker_id: format!("asterismd-scan-{}", std::process::id()),
                 materialize_limit: config.scheduler.materialize_limit,

@@ -8,10 +8,14 @@ use asterism_provider_api::{
     RemoteCourse, RemoteTask,
 };
 use asterism_storage::{
-    ProviderScanBatch, ProviderScanReport, ProviderScanRepository, ScannedCourse, ScannedTask,
-    StorageError,
+    ProtocolObservationRepository, ProviderScanBatch, ProviderScanReport, ProviderScanRepository,
+    ScannedCourse, ScannedTask, StorageError,
 };
 use async_trait::async_trait;
+
+use crate::protocol_observation::{
+    ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+};
 
 #[async_trait]
 pub trait ProviderAccountScanner: Send + Sync {
@@ -24,10 +28,11 @@ pub trait ProviderAccountScanner: Send + Sync {
     ) -> Result<ProviderScanReport, ProviderScanError>;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProviderScanService<R> {
     registry: Arc<ProviderRegistry>,
     repository: R,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<R> ProviderScanService<R> {
@@ -35,7 +40,31 @@ impl<R> ProviderScanService<R> {
         Self {
             registry,
             repository,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<R: std::fmt::Debug> std::fmt::Debug for ProviderScanService<R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderScanService")
+            .field("registry", &self.registry)
+            .field("repository", &self.repository)
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -81,15 +110,34 @@ where
             correlation_id: correlation_id.clone(),
         };
         let remote_courses = match &entry.course_inventory {
-            Some(inventory) => inventory.list_courses(&context).await?,
+            Some(inventory) => match inventory.list_courses(&context).await {
+                Ok(courses) => courses,
+                Err(error) => {
+                    self.record_protocol_observation(account, &correlation_id, &error, observed_at)
+                        .await?;
+                    return Err(error.into());
+                }
+            },
             None => Vec::new(),
         };
-        let remote_tasks = match &entry.task_inventory {
+        let remote_tasks_result = match &entry.task_inventory {
             Some(inventory) if entry.course_inventory.is_some() => {
-                collect_course_tasks(inventory.as_ref(), &context, &remote_courses).await?
+                collect_course_tasks(inventory.as_ref(), &context, &remote_courses).await
             }
-            Some(inventory) => inventory.list_tasks(&context, None).await?,
-            None => Vec::new(),
+            Some(inventory) => inventory
+                .list_tasks(&context, None)
+                .await
+                .map_err(ProviderScanError::from),
+            None => Ok(Vec::new()),
+        };
+        let remote_tasks = match remote_tasks_result {
+            Ok(tasks) => tasks,
+            Err(ProviderScanError::Provider(error)) => {
+                self.record_protocol_observation(account, &correlation_id, &error, observed_at)
+                    .await?;
+                return Err(error.into());
+            }
+            Err(error) => return Err(error),
         };
         validate_task_capabilities(&entry.metadata, &remote_tasks)?;
         let batch = ProviderScanBatch {
@@ -103,6 +151,33 @@ where
             tasks: remote_tasks.into_iter().map(scanned_task).collect(),
         };
         Ok(self.repository.ingest_scan(&batch).await?)
+    }
+
+    async fn record_protocol_observation(
+        &self,
+        account: &ProviderAccount,
+        correlation_id: &str,
+        error: &ProviderError,
+        observed_at: Timestamp,
+    ) -> Result<(), ProviderScanError> {
+        let occurrence_scope = format!("scan:{}:{correlation_id}", account.id);
+        record_provider_protocol_observation(
+            self.protocol_observations.as_deref(),
+            &account.provider_id,
+            None,
+            &occurrence_scope,
+            error,
+            observed_at,
+        )
+        .await
+        .map_err(|error| match error {
+            ProviderProtocolObservationRecordError::Invalid => {
+                ProviderScanError::InvalidProtocolObservation
+            }
+            ProviderProtocolObservationRecordError::Storage(error) => {
+                ProviderScanError::Storage(error)
+            }
+        })
     }
 }
 
@@ -232,6 +307,8 @@ pub enum ProviderScanError {
     AccountNotAuthenticated(asterism_domain::ProviderAccountId),
     #[error("scan correlation id is invalid")]
     InvalidCorrelationId,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error("task inventory escaped course scope `{expected}` with `{actual}`")]
     CourseScopeMismatch { expected: String, actual: String },
     #[error("provider `{provider_id}` returned unadvertised task capability `{capability:?}`")]
@@ -253,14 +330,15 @@ mod tests {
     };
 
     use asterism_domain::{
-        AssessmentClass, AuthState, ProviderAccountId, RemoteState, SourceType, TaskCapability,
-        UserId,
+        AssessmentClass, AuthState, ProtocolObservationKind, ProtocolSurface, ProviderAccountId,
+        RemoteState, SourceType, TaskCapability, UserId,
     };
     use asterism_provider_api::{
         CourseInventoryCapability, ProviderCapability, ProviderEntry, ProviderErrorKind,
         ProviderIdentity, ProviderMetadata, ProviderResult, TaskInventoryCapability,
         VerificationLevel,
     };
+    use asterism_storage::{Database, SqliteProtocolObservationRepository};
     use async_trait::async_trait;
     use chrono::Utc;
 
@@ -293,6 +371,7 @@ mod tests {
         metadata: ProviderMetadata,
         contexts: Mutex<Vec<ProviderContext>>,
         fail_tasks: bool,
+        drift_tasks: bool,
         task_capabilities: Vec<TaskCapability>,
     }
 
@@ -335,6 +414,18 @@ mod tests {
                     "sanitized inventory failure",
                 ));
             }
+            if self.drift_tasks {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "task inventory shape changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::TaskInventory,
+                    ProtocolObservationKind::UnknownTaskType,
+                    serde_json::json!({"task_type": 991, "fields": ["id", "type"]}),
+                )
+                .unwrap());
+            }
             assert_eq!(
                 course.map(|course| course.remote_id.as_str()),
                 Some("course-a")
@@ -367,6 +458,7 @@ mod tests {
             metadata: metadata.clone(),
             contexts: Mutex::new(Vec::new()),
             fail_tasks: false,
+            drift_tasks: false,
             task_capabilities: Vec::new(),
         });
         let mut registry = ProviderRegistry::default();
@@ -444,6 +536,7 @@ mod tests {
             metadata: metadata.clone(),
             contexts: Mutex::new(Vec::new()),
             fail_tasks: true,
+            drift_tasks: false,
             task_capabilities: Vec::new(),
         });
         let mut registry = ProviderRegistry::default();
@@ -481,6 +574,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_records_drift_without_inventing_execution_provenance() {
+        let metadata = metadata([
+            ProviderCapability::CourseInventory,
+            ProviderCapability::TaskInventory,
+        ]);
+        let inventory = Arc::new(FakeInventory {
+            metadata: metadata.clone(),
+            contexts: Mutex::new(Vec::new()),
+            fail_tasks: false,
+            drift_tasks: true,
+            task_capabilities: Vec::new(),
+        });
+        let mut registry = ProviderRegistry::default();
+        registry
+            .register(ProviderEntry {
+                metadata,
+                runtime_settings: asterism_provider_api::ProviderRuntimeSettingsSchema::default(),
+                authentication: None,
+                course_inventory: Some(inventory.clone()),
+                task_inventory: Some(inventory),
+                task_detail: None,
+                task_progress: None,
+                duration_read: None,
+                question_inventory: None,
+                question_parse: None,
+                answer_resolve: None,
+                submission_build: None,
+                submission_execute: None,
+                submission_verify: None,
+                answer_history_harvest: None,
+                task_execution: None,
+                browser_bridge: None,
+            })
+            .unwrap();
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let repository = RecordingRepository::default();
+        let service = ProviderScanService::new(Arc::new(registry), repository.clone())
+            .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+                database.clone(),
+            )));
+        let observed_at = Utc::now();
+        let account = account();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                service
+                    .scan_account(&account, "scan-drift", None, observed_at)
+                    .await,
+                Err(ProviderScanError::Provider(error))
+                    if error.kind == ProviderErrorKind::ProtocolDrift
+            ));
+        }
+
+        let observation: (String, String, i64, Option<String>) = sqlx::query_as(
+            "SELECT surface, kind, occurrence_count, last_execution_id \
+             FROM protocol_observations",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        let occurrences: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM protocol_observation_occurrences")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            (
+                "task_inventory".to_owned(),
+                "unknown_task_type".to_owned(),
+                1,
+                None,
+            )
+        );
+        assert_eq!(occurrences, 1);
+        assert!(repository.batches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn scan_rejects_task_capabilities_missing_from_provider_metadata() {
         let metadata = metadata([
             ProviderCapability::CourseInventory,
@@ -490,6 +663,7 @@ mod tests {
             metadata: metadata.clone(),
             contexts: Mutex::new(Vec::new()),
             fail_tasks: false,
+            drift_tasks: false,
             task_capabilities: vec![TaskCapability::ProgressRead],
         });
         let mut registry = ProviderRegistry::default();
