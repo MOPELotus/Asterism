@@ -1224,15 +1224,18 @@ one compound Draft that owns both slots remain active Core integration work. A
 grant, object-store response, accepted final receipt or even exact two-module
 readback alone is never Group completion evidence.
 
-Core's fixed mutation topology and issue-time dynamic request digest now cover
-the structural shape of staged upload, but its dependency gate intentionally
-requires an independently verified predecessor. The Qiniu POST response
-repeating the exact key is the mutation receipt itself; no audited donor route
-performs a separate object-store readback before final UAI submission.
-Asterism therefore does not record that response again as verification merely
-to satisfy the DAG. Upload integration needs a receipt-dependent step contract
-matching this protocol (or new independent donor evidence), in addition to the
-existing Artifact/Draft capability.
+Core's receipt-conditional atomic sequence now covers the structural shape of
+staged upload as three bounded phases: grant acquisition, Qiniu upload and
+final UAI submission. Each phase advances only from its definite parsed receipt,
+while its exact request digest is persisted at issue time. The Qiniu POST
+response repeating the exact key remains a mutation receipt; no audited donor
+route performs a separate object-store readback, and Asterism does not relabel
+that response as verification. The remaining integration blocker is authority,
+not topology: Core's sanitized scheduling artifact cannot own or recover the
+bounded audio bytes, and an artifact digest alone is not a recoverable
+owner/account/Task-bound handle. The upload sequence must therefore remain
+Provider-private until the shared Artifact/Draft capability can bind those bytes
+and, for mixed Groups, the ordinary sub-Draft into one durable Attempt.
 
 The donor's `basic-scoop-content,oral-sentence` path is likewise atomic rather
 than a normal matching submit followed by an unrelated oral completion. The
