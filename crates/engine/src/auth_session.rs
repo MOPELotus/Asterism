@@ -762,7 +762,8 @@ fn credential_failure_state(error: &CredentialProvisionError) -> AuthState {
         | CredentialProvisionError::AccountNotFound(_)
         | CredentialProvisionError::AccountMismatch
         | CredentialProvisionError::CredentialRejected
-        | CredentialProvisionError::InvalidProviderStatus => AuthState::AuthFailed,
+        | CredentialProvisionError::InvalidProviderStatus
+        | CredentialProvisionError::InvalidProtocolObservation => AuthState::AuthFailed,
     }
 }
 

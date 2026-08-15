@@ -207,6 +207,9 @@ pub(super) async fn put_provider_credentials(
     };
     let bundle = credential_bundle(account, request);
     let committed = ProviderCredentialService::new(state.providers, accounts, secret_store)
+        .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+            state.database,
+        )))
         .validate_and_store(owner_id, account_id, bundle, &access)
         .await
         .map_err(map_credential_error)?;
@@ -1038,6 +1041,10 @@ pub(super) fn map_credential_error(error: CredentialProvisionError) -> ApiError 
         CredentialProvisionError::InvalidProviderStatus => ApiError::bad_gateway(
             "provider_authentication_invalid",
             "the Provider returned an inconsistent authentication result",
+        ),
+        CredentialProvisionError::InvalidProtocolObservation => ApiError::bad_gateway(
+            "provider_authentication_invalid",
+            "the Provider returned inconsistent authentication data",
         ),
         CredentialProvisionError::Provider(error) => map_credential_provider_error(error),
         CredentialProvisionError::Storage(error) => ApiError::internal(error),

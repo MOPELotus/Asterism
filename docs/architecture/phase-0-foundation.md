@@ -4746,3 +4746,19 @@ credentials or widen allowed origins. Invalid observation payloads share the
 existing unsafe-policy bad-gateway response; Inbox storage failure remains
 internal. Coverage proves BrowserBridge/EndpointVersionDrift is retained while
 the browser-session table stays empty.
+
+## Two-hundred-and-fifty-eighth Phase 0 slice
+
+Direct owner credential validation now records a Provider-supplied protocol
+shape before returning the authentication failure. The occurrence binds the
+ProviderAccount and request correlation and carries no Execution reference.
+The API injects the shared SQLite observation repository into the credential
+service.
+
+Observation is diagnostic only. The candidate credential is never persisted,
+the ProviderAccount does not transition out of Idle, and no successful
+authentication fact is created. Invalid observation payloads fail through the
+existing inconsistent-authentication bad-gateway boundary, while observation
+storage failures remain internal. Coverage proves a typed
+Authentication/FieldDrift shape is retained with zero secret blobs and no
+account-state mutation.

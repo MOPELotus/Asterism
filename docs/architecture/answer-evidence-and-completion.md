@@ -318,3 +318,7 @@ manual/recovery workflow.
 BrowserBridge policy drift may likewise be observed without creating a helper
 session or performing browser work. The Inbox records structure, not authority:
 it cannot grant navigation, origin, credential-read or mutation permission.
+Credential validation follows the same separation. A safe authentication shape
+may enter the Inbox after a candidate is rejected, but no candidate field or
+secret is stored, the account is not authenticated, and the observation cannot
+serve as answer evidence or completion authority.

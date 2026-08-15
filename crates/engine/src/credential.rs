@@ -11,13 +11,18 @@ use asterism_secrets::{
     CredentialBundle, CredentialBundleError, ProviderCredential, ProviderCredentialStore,
     SecretAccess, SecretStoreError,
 };
-use asterism_storage::{ProviderAccountRepository, StorageError};
+use asterism_storage::{ProtocolObservationRepository, ProviderAccountRepository, StorageError};
 
-#[derive(Clone, Debug)]
+use crate::protocol_observation::{
+    ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+};
+
+#[derive(Clone)]
 pub struct ProviderCredentialService<A, C> {
     registry: Arc<ProviderRegistry>,
     accounts: A,
     credentials: C,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<A, C> ProviderCredentialService<A, C> {
@@ -26,7 +31,32 @@ impl<A, C> ProviderCredentialService<A, C> {
             registry,
             accounts,
             credentials,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<A, C> std::fmt::Debug for ProviderCredentialService<A, C> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCredentialService")
+            .field("registry", &self.registry)
+            .field("accounts", &"configured")
+            .field("credentials", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -51,7 +81,8 @@ where
         bundle: CredentialBundle,
         access: &SecretAccess,
     ) -> Result<CredentialCommit, CredentialProvisionError> {
-        let (bundle, status) = validate_candidate(
+        let provider_id = bundle.provider_id.clone();
+        let validation = validate_candidate(
             self.registry.as_ref(),
             &self.accounts,
             owner_user_id,
@@ -60,7 +91,35 @@ where
             None,
             access,
         )
-        .await?;
+        .await;
+        let (bundle, status) = match validation {
+            Ok(validated) => validated,
+            Err(CredentialProvisionError::Provider(error)) => {
+                let occurrence_scope = format!(
+                    "credential-validation:{provider_account_id}:{}",
+                    access.correlation_id
+                );
+                record_provider_protocol_observation(
+                    self.protocol_observations.as_deref(),
+                    &provider_id,
+                    None,
+                    &occurrence_scope,
+                    &error,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(|error| match error {
+                    ProviderProtocolObservationRecordError::Invalid => {
+                        CredentialProvisionError::InvalidProtocolObservation
+                    }
+                    ProviderProtocolObservationRecordError::Storage(error) => {
+                        CredentialProvisionError::Storage(error)
+                    }
+                })?;
+                return Err(CredentialProvisionError::Provider(error));
+            }
+            Err(error) => return Err(error),
+        };
         let credentials = self
             .credentials
             .replace_provider_credentials(owner_user_id, provider_account_id, bundle, access)
@@ -182,6 +241,8 @@ pub enum CredentialProvisionError {
     CredentialRejected,
     #[error("provider returned an inconsistent credential status")]
     InvalidProviderStatus,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error(transparent)]
     Provider(#[from] ProviderError),
     #[error(transparent)]
@@ -217,20 +278,27 @@ fn validate_status(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::{
+        collections::{BTreeMap, BTreeSet, HashMap},
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
-    use asterism_domain::{AuditActor, AuthState, ProviderAccount, Role, Timestamp};
+    use asterism_domain::{
+        AuditActor, AuthState, ProtocolObservationKind, ProtocolSurface, ProviderAccount, Role,
+        Timestamp,
+    };
     use asterism_provider_api::{
         AuthChallenge, AuthenticationCapability, CredentialReplacement, CredentialValidation,
-        ProviderCapability, ProviderContext, ProviderEntry, ProviderIdentity, ProviderMetadata,
-        ProviderResult, VerificationLevel,
+        ProviderCapability, ProviderContext, ProviderEntry, ProviderErrorKind, ProviderIdentity,
+        ProviderMetadata, ProviderResult, VerificationLevel,
     };
     use asterism_secrets::{
         CredentialAcquisition, CredentialField, SecretActor, SecretKey, SecretPurpose, SecretStore,
         SecretValue,
     };
     use asterism_storage::{
-        Database, SecretKeyring, SqliteProviderAccountRepository, SqliteSecretStore,
+        Database, SecretKeyring, SqliteProtocolObservationRepository,
+        SqliteProviderAccountRepository, SqliteSecretStore,
     };
     use async_trait::async_trait;
     use chrono::Utc;
@@ -383,6 +451,51 @@ mod tests {
         assert_eq!(blob_count, 0);
     }
 
+    #[tokio::test]
+    async fn credential_drift_is_observed_without_secret_or_account_commit() {
+        let fixture = fixture(true, SessionKind::Cookie).await;
+        fixture
+            .authentication
+            .protocol_drift
+            .store(true, Ordering::Relaxed);
+        let error = fixture
+            .service
+            .validate_and_store(
+                fixture.owner_id,
+                fixture.account_id,
+                bundle(Utc::now(), b"candidate-cookie"),
+                &fixture.access,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CredentialProvisionError::Provider(error)
+                if error.kind == ProviderErrorKind::ProtocolDrift
+        ));
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(fixture.database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            ("authentication".to_owned(), "field_drift".to_owned(), None,)
+        );
+        let blob_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM secret_blobs")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+        assert_eq!(blob_count, 0);
+        let account = fixture
+            .accounts
+            .find_provider_account(fixture.owner_id, fixture.account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.auth_state, AuthState::Idle);
+    }
+
     struct Fixture {
         database: Database,
         owner_id: UserId,
@@ -390,6 +503,7 @@ mod tests {
         accounts: SqliteProviderAccountRepository,
         store: SqliteSecretStore,
         service: ProviderCredentialService<SqliteProviderAccountRepository, SqliteSecretStore>,
+        authentication: Arc<TestAuthentication>,
         access: SecretAccess,
     }
 
@@ -454,11 +568,12 @@ mod tests {
             },
             derive_replacement,
             invalid_replacement,
+            protocol_drift: AtomicBool::new(false),
         });
         let mut registry = ProviderRegistry::default();
         registry
             .register(ProviderEntry {
-                authentication: Some(authentication),
+                authentication: Some(authentication.clone()),
                 ..ProviderEntry::metadata_only(metadata)
             })
             .unwrap();
@@ -473,7 +588,10 @@ mod tests {
             ),
         );
         let service =
-            ProviderCredentialService::new(Arc::new(registry), accounts.clone(), store.clone());
+            ProviderCredentialService::new(Arc::new(registry), accounts.clone(), store.clone())
+                .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+                    database.clone(),
+                )));
         let access = SecretAccess {
             actor: SecretActor::User(owner_id),
             correlation_id: "credential-validation-test".to_owned(),
@@ -486,6 +604,7 @@ mod tests {
             accounts,
             store,
             service,
+            authentication,
             access,
         }
     }
@@ -554,6 +673,7 @@ mod tests {
         status: SessionStatus,
         derive_replacement: bool,
         invalid_replacement: bool,
+        protocol_drift: AtomicBool,
     }
 
     impl ProviderIdentity for TestAuthentication {
@@ -592,6 +712,18 @@ mod tests {
                     .iter()
                     .all(|field| !field.value.expose_secret().is_empty())
             );
+            if self.protocol_drift.load(Ordering::Relaxed) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "credential status shape changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::Authentication,
+                    ProtocolObservationKind::FieldDrift,
+                    serde_json::json!({"document": "session_status", "missing": "valid"}),
+                )
+                .unwrap());
+            }
             let replacement = self.derive_replacement.then(|| CredentialReplacement {
                 session_kind: SessionKind::Composite,
                 fields: vec![
