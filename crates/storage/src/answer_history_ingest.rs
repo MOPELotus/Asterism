@@ -1,10 +1,14 @@
 use std::{collections::BTreeSet, str::FromStr};
 
-use asterism_domain::{AnswerHistoryImportId, QuestionContentFingerprint};
+use asterism_domain::{
+    AnswerHistoryImportId, ProviderAccountId, ProviderId, QuestionContentFingerprint,
+    SubmissionScore, TaskId, UserId,
+};
+use asterism_provider_api::AnswerHistoryRetakeFacts;
 use async_trait::async_trait;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 
 use crate::answer_evidence::record_answer_evidence_in_transaction;
 use crate::auth_session::{decode_timestamp, encode_timestamp};
@@ -13,7 +17,8 @@ use crate::question::{
 };
 use crate::{
     AnswerEvidenceRecordOutcome, AnswerHistoryImportRecord, AnswerHistoryIngestOutcome,
-    AnswerHistoryIngestRequest, AnswerHistoryIngestionRepository, Database, StorageError,
+    AnswerHistoryIngestRequest, AnswerHistoryIngestionRepository, AnswerHistoryTaskFact, Database,
+    StorageError,
 };
 
 #[derive(Clone, Debug)]
@@ -37,7 +42,8 @@ impl AnswerHistoryIngestionRepository for SqliteAnswerHistoryIngestionRepository
         let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
         let existing = sqlx::query(
             "SELECT id, question_snapshot_id, candidate_count, evidence_count, \
-                    content_digest, imported_at \
+                    content_digest, score_json, retake_json, provenance_sanitized_json, \
+                    observed_at, imported_at \
              FROM answer_history_imports \
              WHERE provider_account_id = ? AND task_id = ? \
                AND provider_attempt_digest = ? AND result_digest = ?",
@@ -49,21 +55,17 @@ impl AnswerHistoryIngestionRepository for SqliteAnswerHistoryIngestionRepository
         .fetch_optional(&mut *transaction)
         .await?;
         if let Some(row) = existing {
-            let record = decode_record(&row)?;
-            let stored_digest: Vec<u8> = row.try_get("content_digest")?;
-            let _: asterism_domain::Timestamp = decode_timestamp(row.try_get("imported_at")?)?;
-            if stored_digest.as_slice() != validated.content_digest
-                || record.candidate_count != validated.candidate_count
-                || record.evidence_count != validated.evidence_count
-            {
-                return Err(invalid_import());
-            }
+            let record =
+                validate_existing_import(&mut transaction, &row, &request, &validated).await?;
             transaction.commit().await?;
             return Ok(AnswerHistoryIngestOutcome::Duplicate(record));
         }
 
         save_question_snapshot_in_transaction(&mut transaction, request.snapshot).await?;
-        save_answer_candidate_batch_in_transaction(&mut transaction, request.candidates).await?;
+        if !request.candidates.is_empty() {
+            save_answer_candidate_batch_in_transaction(&mut transaction, request.candidates)
+                .await?;
+        }
         for evidence in request.evidence {
             if !matches!(
                 record_answer_evidence_in_transaction(&mut transaction, evidence).await?,
@@ -82,8 +84,9 @@ impl AnswerHistoryIngestionRepository for SqliteAnswerHistoryIngestionRepository
             "INSERT INTO answer_history_imports \
              (id, owner_user_id, provider_id, provider_account_id, task_id, \
               provider_attempt_digest, result_digest, content_digest, question_snapshot_id, \
-              candidate_count, evidence_count, imported_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              candidate_count, evidence_count, score_json, retake_json, \
+              provenance_sanitized_json, observed_at, imported_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(record.import_id.to_string())
         .bind(request.owner_user_id.to_string())
@@ -96,12 +99,92 @@ impl AnswerHistoryIngestionRepository for SqliteAnswerHistoryIngestionRepository
         .bind(request.snapshot.id.to_string())
         .bind(i64::from(record.candidate_count))
         .bind(i64::from(record.evidence_count))
+        .bind(
+            request
+                .score
+                .map(|score| serde_json::to_string(&score))
+                .transpose()?,
+        )
+        .bind(request.retake.map(serde_json::to_string).transpose()?)
+        .bind(serde_json::to_string(request.provenance_sanitized)?)
+        .bind(encode_timestamp(request.observed_at))
         .bind(encode_timestamp(request.imported_at))
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
         Ok(AnswerHistoryIngestOutcome::Inserted(record))
     }
+
+    async fn find_latest_owned_answer_history_task_fact(
+        &self,
+        owner_user_id: UserId,
+        task_id: TaskId,
+    ) -> Result<Option<AnswerHistoryTaskFact>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, owner_user_id, provider_id, provider_account_id, task_id, \
+                    provider_attempt_digest, result_digest, score_json, retake_json, \
+                    provenance_sanitized_json, observed_at, imported_at \
+             FROM answer_history_imports WHERE owner_user_id = ? AND task_id = ? \
+             ORDER BY observed_at DESC, imported_at DESC, id DESC LIMIT 1",
+        )
+        .bind(owner_user_id.to_string())
+        .bind(task_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        row.as_ref().map(decode_task_fact).transpose()
+    }
+}
+
+async fn validate_existing_import(
+    transaction: &mut Transaction<'_, Sqlite>,
+    row: &sqlx::sqlite::SqliteRow,
+    request: &AnswerHistoryIngestRequest<'_>,
+    validated: &ValidatedImport,
+) -> Result<AnswerHistoryImportRecord, StorageError> {
+    let record = decode_record(row)?;
+    let stored_digest: Vec<u8> = row.try_get("content_digest")?;
+    if record.candidate_count != validated.candidate_count
+        || record.evidence_count != validated.evidence_count
+    {
+        return Err(invalid_import());
+    }
+    if stored_digest.as_slice() == validated.content_digest {
+        return Ok(record);
+    }
+
+    let observed_at = decode_timestamp(row.try_get("observed_at")?)?;
+    let imported_at = decode_timestamp(row.try_get("imported_at")?)?;
+    let legacy_unknown = row.try_get::<Option<String>, _>("score_json")?.is_none()
+        && row.try_get::<Option<String>, _>("retake_json")?.is_none()
+        && row.try_get::<&str, _>("provenance_sanitized_json")? == "{}"
+        && observed_at == imported_at;
+    if !legacy_unknown || stored_digest.as_slice() != legacy_content_digest(request)? {
+        return Err(invalid_import());
+    }
+
+    let updated = sqlx::query(
+        "UPDATE answer_history_imports SET content_digest = ?, score_json = ?, \
+                retake_json = ?, provenance_sanitized_json = ?, observed_at = ? \
+         WHERE id = ? AND content_digest = ?",
+    )
+    .bind(validated.content_digest.to_vec())
+    .bind(
+        request
+            .score
+            .map(|score| serde_json::to_string(&score))
+            .transpose()?,
+    )
+    .bind(request.retake.map(serde_json::to_string).transpose()?)
+    .bind(serde_json::to_string(request.provenance_sanitized)?)
+    .bind(encode_timestamp(request.observed_at))
+    .bind(record.import_id.to_string())
+    .bind(stored_digest)
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(invalid_import());
+    }
+    Ok(record)
 }
 
 struct ValidatedImport {
@@ -115,7 +198,12 @@ fn validate_request(
 ) -> Result<ValidatedImport, StorageError> {
     if request.provider_attempt_digest == [0; 32]
         || request.result_digest == [0; 32]
-        || request.candidates.is_empty()
+        || request.score.is_some_and(|score| score.validate().is_err())
+        || request
+            .retake
+            .is_some_and(|retake| retake.validate().is_err())
+        || !valid_private_provenance(request.provenance_sanitized)
+        || request.observed_at > request.imported_at
     {
         return Err(invalid_import());
     }
@@ -179,6 +267,27 @@ fn validate_request(
 }
 
 fn content_digest(request: &AnswerHistoryIngestRequest<'_>) -> Result<[u8; 32], StorageError> {
+    let mut material = semantic_content_material(request)?;
+    let values = material.as_object_mut().ok_or_else(invalid_import)?;
+    values.insert("score".to_owned(), json!(request.score));
+    values.insert("retake".to_owned(), json!(request.retake));
+    values.insert(
+        "provenance".to_owned(),
+        request.provenance_sanitized.clone(),
+    );
+    values.insert("observed_at".to_owned(), json!(request.observed_at));
+    digest_material(&material)
+}
+
+fn legacy_content_digest(
+    request: &AnswerHistoryIngestRequest<'_>,
+) -> Result<[u8; 32], StorageError> {
+    digest_material(&semantic_content_material(request)?)
+}
+
+fn semantic_content_material(
+    request: &AnswerHistoryIngestRequest<'_>,
+) -> Result<serde_json::Value, StorageError> {
     let positions = request
         .snapshot
         .questions
@@ -237,12 +346,15 @@ fn content_digest(request: &AnswerHistoryIngestRequest<'_>) -> Result<[u8; 32], 
         })
         .collect::<Result<Vec<_>, StorageError>>()?;
     sort_json(&mut evidence)?;
-    let material = serde_json::to_vec(&json!({
+    Ok(json!({
         "questions": questions,
         "candidates": candidates,
         "evidence": evidence,
-    }))?;
-    Ok(Sha256::digest(material).into())
+    }))
+}
+
+fn digest_material(material: &serde_json::Value) -> Result<[u8; 32], StorageError> {
+    Ok(Sha256::digest(serde_json::to_vec(material)?).into())
 }
 
 fn sort_json(values: &mut [serde_json::Value]) -> Result<(), StorageError> {
@@ -272,6 +384,81 @@ fn decode_record(row: &sqlx::sqlite::SqliteRow) -> Result<AnswerHistoryImportRec
     })
 }
 
+fn decode_task_fact(row: &sqlx::sqlite::SqliteRow) -> Result<AnswerHistoryTaskFact, StorageError> {
+    let score = row
+        .try_get::<Option<String>, _>("score_json")?
+        .map(|value| serde_json::from_str::<SubmissionScore>(&value))
+        .transpose()?;
+    if score.is_some_and(|score| score.validate().is_err()) {
+        return Err(invalid_import());
+    }
+    let retake = row
+        .try_get::<Option<String>, _>("retake_json")?
+        .map(|value| serde_json::from_str::<AnswerHistoryRetakeFacts>(&value))
+        .transpose()?;
+    if retake
+        .as_ref()
+        .is_some_and(|retake| retake.validate().is_err())
+    {
+        return Err(invalid_import());
+    }
+    let provenance_sanitized =
+        serde_json::from_str(row.try_get::<&str, _>("provenance_sanitized_json")?)?;
+    if !valid_private_provenance(&provenance_sanitized) {
+        return Err(invalid_import());
+    }
+    Ok(AnswerHistoryTaskFact {
+        import_id: AnswerHistoryImportId::from_str(row.try_get("id")?)
+            .map_err(|_| invalid_import())?,
+        owner_user_id: UserId::from_str(row.try_get("owner_user_id")?)
+            .map_err(|_| invalid_import())?,
+        provider_id: ProviderId::new(row.try_get::<String, _>("provider_id")?)
+            .map_err(|_| invalid_import())?,
+        provider_account_id: ProviderAccountId::from_str(row.try_get("provider_account_id")?)
+            .map_err(|_| invalid_import())?,
+        task_id: TaskId::from_str(row.try_get("task_id")?).map_err(|_| invalid_import())?,
+        provider_attempt_digest: decode_digest(row.try_get("provider_attempt_digest")?)?,
+        result_digest: decode_digest(row.try_get("result_digest")?)?,
+        score,
+        retake,
+        provenance_sanitized,
+        observed_at: decode_timestamp(row.try_get("observed_at")?)?,
+        imported_at: decode_timestamp(row.try_get("imported_at")?)?,
+    })
+}
+
+fn decode_digest(value: Vec<u8>) -> Result<[u8; 32], StorageError> {
+    value.try_into().map_err(|_| invalid_import())
+}
+
+fn valid_private_provenance(value: &serde_json::Value) -> bool {
+    serde_json::to_vec(value)
+        .ok()
+        .is_some_and(|bytes| !bytes.is_empty() && bytes.len() <= 256 * 1_024)
+        && !contains_sensitive_key(value)
+}
+
+fn contains_sensitive_key(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+            let normalized = key
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            ["cookie", "authorization", "password", "token", "secret"]
+                .iter()
+                .any(|needle| normalized.contains(needle))
+                || contains_sensitive_key(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(contains_sensitive_key),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
 fn invalid_import() -> StorageError {
     StorageError::InvalidData(
         "answer history import is invalid, cross-bound or conflicts with an existing result"
@@ -287,6 +474,7 @@ mod tests {
         PrivateAnswerEvidenceId, ProviderAccountId, ProviderId, Question, QuestionId, QuestionKind,
         QuestionOption, QuestionSnapshotId, TaskId, UserId,
     };
+    use asterism_provider_api::AnswerHistoryRetakeFacts;
     use chrono::{Duration, Utc};
 
     use crate::{AnswerCandidateRecord, QuestionSnapshot};
@@ -306,6 +494,8 @@ mod tests {
         snapshot: QuestionSnapshot,
         candidates: Vec<AnswerCandidateRecord>,
         evidence: Vec<PrivateAnswerEvidence>,
+        retake: AnswerHistoryRetakeFacts,
+        provenance_sanitized: serde_json::Value,
     }
 
     impl Fixture {
@@ -430,6 +620,13 @@ mod tests {
                 snapshot,
                 candidates: vec![submitted, official],
                 evidence,
+                retake: AnswerHistoryRetakeFacts {
+                    allowed: true,
+                    remaining_attempts: Some(2),
+                    closes_at: Some(self.now + Duration::hours(1)),
+                    metadata_sanitized: json!({"action": "redo"}),
+                },
+                provenance_sanitized: json!({"surface": "history_result"}),
             }
         }
 
@@ -502,6 +699,13 @@ mod tests {
                 snapshot: &bundle.snapshot,
                 candidates: &bundle.candidates,
                 evidence: &bundle.evidence,
+                score: Some(SubmissionScore {
+                    earned_milli_points: 80,
+                    possible_milli_points: 100,
+                }),
+                retake: Some(&bundle.retake),
+                provenance_sanitized: &bundle.provenance_sanitized,
+                observed_at: self.now,
                 imported_at: self.now + Duration::seconds(2),
             }
         }
@@ -529,8 +733,49 @@ mod tests {
             .unwrap();
         assert_eq!(
             duplicate,
-            AnswerHistoryIngestOutcome::Duplicate(inserted_record)
+            AnswerHistoryIngestOutcome::Duplicate(inserted_record.clone())
         );
+        let fact = repository
+            .find_latest_owned_answer_history_task_fact(fixture.owner, fixture.task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fact.provider_attempt_digest, attempt);
+        assert_eq!(fact.result_digest, result);
+        assert_eq!(fact.score.unwrap().earned_milli_points, 80);
+        assert_eq!(fact.retake.unwrap().remaining_attempts, Some(2));
+        assert!(
+            repository
+                .find_latest_owned_answer_history_task_fact(UserId::new(), fixture.task)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let legacy_digest =
+            legacy_content_digest(&fixture.request(&replay, attempt, result)).unwrap();
+        sqlx::query(
+            "UPDATE answer_history_imports SET content_digest = ?, score_json = NULL, \
+                    retake_json = NULL, provenance_sanitized_json = '{}', \
+                    observed_at = imported_at",
+        )
+        .bind(legacy_digest.to_vec())
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+        let upgrade_replay = fixture.bundle(attempt, result);
+        assert_eq!(
+            repository
+                .ingest_answer_history_task(fixture.request(&upgrade_replay, attempt, result))
+                .await
+                .unwrap(),
+            AnswerHistoryIngestOutcome::Duplicate(inserted_record.clone())
+        );
+        let upgraded = repository
+            .find_latest_owned_answer_history_task_fact(fixture.owner, fixture.task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(upgraded.retake.unwrap().remaining_attempts, Some(2));
         assert_counts(&fixture.database, (1, 2, 2, 2, 1)).await;
 
         let mut changed = fixture.bundle(attempt, result);
@@ -542,6 +787,30 @@ mod tests {
                 .is_err()
         );
         assert_counts(&fixture.database, (1, 2, 2, 2, 1)).await;
+    }
+
+    #[tokio::test]
+    async fn score_and_retake_facts_persist_without_answer_candidates() {
+        let fixture = Fixture::new().await;
+        let repository = SqliteAnswerHistoryIngestionRepository::new(fixture.database.clone());
+        let attempt = [21; 32];
+        let result = [22; 32];
+        let mut bundle = fixture.bundle(attempt, result);
+        bundle.candidates.clear();
+        bundle.evidence.clear();
+        let outcome = repository
+            .ingest_answer_history_task(fixture.request(&bundle, attempt, result))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, AnswerHistoryIngestOutcome::Inserted(_)));
+        assert_counts(&fixture.database, (1, 0, 0, 0, 1)).await;
+        let fact = repository
+            .find_latest_owned_answer_history_task_fact(fixture.owner, fixture.task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fact.score.unwrap().earned_milli_points, 80);
+        assert!(fact.retake.unwrap().allowed);
     }
 
     #[tokio::test]

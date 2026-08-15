@@ -374,17 +374,14 @@ where
         if provider_evidence.observed_at > now {
             return Err(PageError::InvalidProviderEvidence);
         }
-        let Some(material) = build_import_material(
+        let material = build_import_material(
             &claimed.harvest,
             &task,
             provider_version,
             &request.reference,
             &provider_evidence,
             now,
-        )?
-        else {
-            return Ok(false);
-        };
+        )?;
         self.imports
             .ingest_answer_history_task(AnswerHistoryIngestRequest {
                 owner_user_id: claimed.harvest.owner_user_id,
@@ -394,6 +391,10 @@ where
                 snapshot: &material.snapshot,
                 candidates: &material.candidates,
                 evidence: &material.evidence,
+                score: material.score,
+                retake: material.retake.as_ref(),
+                provenance_sanitized: &material.provenance_sanitized,
+                observed_at: material.observed_at,
                 imported_at: now,
             })
             .await
@@ -586,6 +587,10 @@ struct ImportMaterial {
     snapshot: QuestionSnapshot,
     candidates: Vec<AnswerCandidateRecord>,
     evidence: Vec<PrivateAnswerEvidence>,
+    score: Option<asterism_domain::SubmissionScore>,
+    retake: Option<asterism_provider_api::AnswerHistoryRetakeFacts>,
+    provenance_sanitized: Value,
+    observed_at: Timestamp,
 }
 
 fn build_import_material(
@@ -595,7 +600,7 @@ fn build_import_material(
     reference: &AnswerHistoryTaskRef,
     provider_evidence: &asterism_provider_api::ProviderAnswerHistoryTaskEvidence,
     verified_at: Timestamp,
-) -> Result<Option<ImportMaterial>, PageError> {
+) -> Result<ImportMaterial, PageError> {
     let snapshot_id = QuestionSnapshotId::new();
     let snapshot = QuestionSnapshot {
         id: snapshot_id,
@@ -659,16 +664,17 @@ fn build_import_material(
             )?;
         }
     }
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(ImportMaterial {
+    Ok(ImportMaterial {
         provider_attempt_digest: provider_evidence.provider_attempt_digest,
         result_digest: provider_evidence.result_digest,
         snapshot,
         candidates,
         evidence,
-    }))
+        score: provider_evidence.score,
+        retake: provider_evidence.retake.clone(),
+        provenance_sanitized: provider_evidence.provenance_sanitized.clone(),
+        observed_at: provider_evidence.observed_at,
+    })
 }
 
 struct HistoryAnswerInput<'a> {

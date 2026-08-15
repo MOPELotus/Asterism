@@ -137,7 +137,7 @@ mod tests {
             .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(migration_count, 65);
+        assert_eq!(migration_count, 66);
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(database.pool())
@@ -324,6 +324,77 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(counts, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn answer_history_task_fact_migration_preserves_legacy_imports_as_unknown() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE users (id TEXT PRIMARY KEY NOT NULL) STRICT;\
+             CREATE TABLE provider_accounts (\
+                 id TEXT PRIMARY KEY NOT NULL,\
+                 provider_id TEXT NOT NULL,\
+                 UNIQUE (id, provider_id)\
+             ) STRICT;\
+             CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL) STRICT;\
+             CREATE TABLE question_snapshots (\
+                 id TEXT PRIMARY KEY NOT NULL,\
+                 task_id TEXT NOT NULL,\
+                 provider_id TEXT NOT NULL,\
+                 UNIQUE (id, task_id, provider_id)\
+             ) STRICT;\
+             CREATE TABLE answer_history_imports (\
+                 id TEXT PRIMARY KEY NOT NULL,\
+                 owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,\
+                 provider_id TEXT NOT NULL,\
+                 provider_account_id TEXT NOT NULL,\
+                 task_id TEXT NOT NULL,\
+                 provider_attempt_digest BLOB NOT NULL CHECK (length(provider_attempt_digest) = 32),\
+                 result_digest BLOB NOT NULL CHECK (length(result_digest) = 32),\
+                 content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),\
+                 question_snapshot_id TEXT NOT NULL,\
+                 candidate_count INTEGER NOT NULL CHECK (candidate_count > 0),\
+                 evidence_count INTEGER NOT NULL CHECK (evidence_count >= 0),\
+                 imported_at TEXT NOT NULL,\
+                 UNIQUE (provider_account_id, task_id, provider_attempt_digest, result_digest),\
+                 FOREIGN KEY (provider_account_id, provider_id) \
+                     REFERENCES provider_accounts(id, provider_id) ON DELETE CASCADE,\
+                 FOREIGN KEY (question_snapshot_id, task_id, provider_id) \
+                     REFERENCES question_snapshots(id, task_id, provider_id) ON DELETE CASCADE\
+             ) STRICT;\
+             CREATE INDEX idx_answer_history_imports_owner_task \
+                 ON answer_history_imports (owner_user_id, task_id, imported_at DESC, id);\
+             INSERT INTO users VALUES ('owner-a');\
+             INSERT INTO provider_accounts VALUES ('account-a', 'provider-a');\
+             INSERT INTO tasks VALUES ('task-a');\
+             INSERT INTO question_snapshots VALUES ('snapshot-a', 'task-a', 'provider-a');\
+             INSERT INTO answer_history_imports VALUES (\
+                 'import-a', 'owner-a', 'provider-a', 'account-a', 'task-a',\
+                 zeroblob(32), randomblob(32), randomblob(32), 'snapshot-a', 1, 0,\
+                 '2026-08-15T10:00:00+00:00'\
+             );",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/066_answer_history_task_facts.sql"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let row: (Option<String>, Option<String>, String, String, String) = sqlx::query_as(
+            "SELECT score_json, retake_json, provenance_sanitized_json, observed_at, imported_at \
+             FROM answer_history_imports WHERE id = 'import-a'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(row.0, None);
+        assert_eq!(row.1, None);
+        assert_eq!(row.2, "{}");
+        assert_eq!(row.3, row.4);
     }
 
     #[tokio::test]

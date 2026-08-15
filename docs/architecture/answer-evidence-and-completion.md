@@ -351,3 +351,9 @@ migration: an account already authenticated before the harvest tables existed
 gets one generation-1 job, while unbound accounts do not. Credential refresh,
 reauthentication and duplicate terminal receipts never schedule repeated full
 history scans.
+Historical Task facts needed for a later explicit retake are retained once per
+import: score, typed allowed/remaining/closes-at facts, sanitized Provider
+provenance and observation time remain owner-private and content-digest bound.
+They are queryable only through the exact owner and Task. Results without
+answer candidates may still retain these Task facts, but cannot create private
+answer evidence or a Global Corpus projection.

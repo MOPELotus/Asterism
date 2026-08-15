@@ -4860,3 +4860,21 @@ snapshots are not rewritten; migration 060's historical backfill remains an
 immutable record of the policy frozen at that earlier revision. Coverage proves
 the new canonical policy enables both switches while a non-opted-in Score
 Improvement workflow remains Disabled.
+
+## Two-hundred-and-sixty-fifth Phase 0 slice
+
+Answer History ingestion now retains owner-private Task-level score, typed
+retake facts, sanitized result provenance and Provider observation time in the
+same atomic import ledger as the immutable Question snapshot and answer
+evidence. All four fields participate in the semantic content digest, so replay
+with changed retake eligibility, remaining attempts, score or provenance fails
+closed instead of being accepted as the same result.
+
+Migration 066 preserves existing imports with explicit unknown score/retake,
+empty sanitized provenance and observation time equal to their prior import
+time. The owner-and-Task query returns only the latest exact fact and revalidates
+score, retake metadata, digests and timestamps. A historical result with no
+available answer candidate may now persist its snapshot and Task facts with
+zero candidates/evidence; it still contributes nothing to the Global Corpus.
+This read model is the prerequisite for a safe Score Improvement opt-in path and
+does not itself create a retake workflow.

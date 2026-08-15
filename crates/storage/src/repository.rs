@@ -20,14 +20,14 @@ use asterism_domain::{
     ProviderAccountId, ProviderErrorClass, ProviderId, ProviderRuntimeSettingsId, Question,
     QuestionContentFingerprint, QuestionReadAttempt, QuestionReadAttemptId, QuestionSession,
     QuestionSnapshotId, ScheduleId, ServiceToken, ServiceTokenId, SubmissionAttemptReceipt,
-    SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, Task,
-    TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User, UserId,
-    UserProfile, UserStatus, WebSession, WebSessionId,
+    SubmissionDraft, SubmissionDraftId, SubmissionResult, SubmissionResultId, SubmissionScore,
+    Task, TaskActionReceiptId, TaskCapability, TaskId, TaskLifecycleAction, Timestamp, User,
+    UserId, UserProfile, UserStatus, WebSession, WebSessionId,
 };
 use asterism_provider_api::{
-    BrowserBridgeWorkflowResult, BrowserSessionSpec, ProviderExecutionPlanArtifact,
-    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema,
-    ProviderSettingScope, ResolvedProviderRuntimeSettings,
+    AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
+    ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
+    ProviderRuntimeSettingsSchema, ProviderSettingScope, ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
@@ -1025,6 +1025,10 @@ pub struct AnswerHistoryIngestRequest<'a> {
     pub snapshot: &'a QuestionSnapshot,
     pub candidates: &'a [AnswerCandidateRecord],
     pub evidence: &'a [PrivateAnswerEvidence],
+    pub score: Option<SubmissionScore>,
+    pub retake: Option<&'a AnswerHistoryRetakeFacts>,
+    pub provenance_sanitized: &'a serde_json::Value,
+    pub observed_at: Timestamp,
     pub imported_at: Timestamp,
 }
 
@@ -1034,6 +1038,22 @@ pub struct AnswerHistoryImportRecord {
     pub question_snapshot_id: QuestionSnapshotId,
     pub candidate_count: u32,
     pub evidence_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnswerHistoryTaskFact {
+    pub import_id: asterism_domain::AnswerHistoryImportId,
+    pub owner_user_id: UserId,
+    pub provider_id: ProviderId,
+    pub provider_account_id: ProviderAccountId,
+    pub task_id: TaskId,
+    pub provider_attempt_digest: [u8; 32],
+    pub result_digest: [u8; 32],
+    pub score: Option<SubmissionScore>,
+    pub retake: Option<AnswerHistoryRetakeFacts>,
+    pub provenance_sanitized: serde_json::Value,
+    pub observed_at: Timestamp,
+    pub imported_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1048,6 +1068,12 @@ pub trait AnswerHistoryIngestionRepository: Send + Sync {
         &self,
         request: AnswerHistoryIngestRequest<'_>,
     ) -> Result<AnswerHistoryIngestOutcome, StorageError>;
+
+    async fn find_latest_owned_answer_history_task_fact(
+        &self,
+        owner_user_id: UserId,
+        task_id: TaskId,
+    ) -> Result<Option<AnswerHistoryTaskFact>, StorageError>;
 }
 
 /// Read boundary for conservative `LocalCache` imports. Implementations must

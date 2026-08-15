@@ -222,7 +222,13 @@ pub struct AnswerHistoryRetakeFacts {
 }
 
 impl AnswerHistoryRetakeFacts {
-    fn validate(&self) -> Result<(), AnswerHistoryContractError> {
+    /// Validates bounded, internally consistent Provider retake facts.
+    ///
+    /// # Errors
+    ///
+    /// Rejects positive remaining attempts when retake is forbidden and
+    /// unbounded or secret-shaped metadata.
+    pub fn validate(&self) -> Result<(), AnswerHistoryContractError> {
         if (!self.allowed
             && self
                 .remaining_attempts

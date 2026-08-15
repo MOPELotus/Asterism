@@ -314,6 +314,30 @@ async fn two_pages_yield_then_complete_with_private_and_global_evidence() {
         }
     );
     assert_counts(&fixture.database, (2, 4, 3, 2, 2)).await;
+    let facts: (String, String, String) = sqlx::query_as(
+        "SELECT score_json, retake_json, provenance_sanitized_json \
+         FROM answer_history_imports ORDER BY imported_at DESC, id DESC LIMIT 1",
+    )
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<SubmissionScore>(&facts.0).unwrap(),
+        SubmissionScore {
+            earned_milli_points: 50_000,
+            possible_milli_points: 100_000,
+        }
+    );
+    assert_eq!(
+        serde_json::from_str::<AnswerHistoryRetakeFacts>(&facts.1)
+            .unwrap()
+            .remaining_attempts,
+        Some(1)
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&facts.2).unwrap(),
+        json!({"surface": "result"})
+    );
     let progress: (String, i64, Option<i64>) = sqlx::query_as(
         "SELECT state, scanned_task_count, total_task_count FROM answer_bootstrap_harvests",
     )
