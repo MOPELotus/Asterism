@@ -195,3 +195,29 @@ fixtures rather than speculative parsing.
 This one-time full-sweep requirement is complete for Chaoxing. Future meaningful
 checkpoints return to normal revision/delta refresh while implementation
 continues through the recorded shared and live-validation blockers.
+
+## 2026-08-15 sign-in supplemental sweep
+
+The next Provider checkpoint added two current sign-in sources after the
+one-time six-donor sweep. Their complete relevant default-branch surface was
+re-enumerated before implementation:
+
+- `Ylim314/chaoxing-sign` `main` at
+  `7ed64ff547d352708066ff61f1b1dc1fb1be32f1` (MIT, PortSource): README and
+  configuration, `server/protocol/cx/index.ts`, `cx.d.ts`, tests, exact
+  `activelist`/`signDetail` routes, `type=2`, `status=1` active filtering,
+  structured `Time.time`, and normal/QR/gesture/location/code dispatch;
+- `superdaobo/mini-hbut` `main` at
+  `64fb2f06e10c95a77a39f17d45c6e2b573ad63a2` (GPL-3.0-or-later,
+  Reference): README/configuration, complete `chaoxing_checkin` module and
+  tests, the same list/detail routes, numeric-or-string IDs/times, and its
+  independent variant/status normalization.
+
+This sweep found a material semantic conflict: `chaoxing-sign` treats
+`status=1` as an active/doing activity and `otherId=5` as a code sign, while
+`mini-hbut` treats them as signed and photo respectively. The clean-room Rust
+boundary accepts only the corroborated structure. It retains status codes,
+marks `otherId=5` ambiguous, binds `ifPhoto=1 + otherId=0` as the separately
+observed photo shape, and exposes only course-bound list/detail reads. It does
+not copy GPL source, advertise sign-in, issue a mutation or call structural
+detail a completion readback.

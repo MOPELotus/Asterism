@@ -699,12 +699,41 @@ low-level activity-list, `preSign` and `pptSign/stuSignajax` requests plus
 normal/gesture/location numeric modes. It also adds an `--auto-sign` argument,
 but no caller dispatches that argument or classifies an activity into a safe
 sign-in command. The final request returns opaque text and the donor performs
-no independent activity readback. Asterism therefore has protocol evidence for
-the route family, but not enough evidence to inventory exact sign-in variants,
-freeze required object/location inputs, classify a receipt or recover an
-ambiguous mutation. Registration requires a Core sign-in inventory/operation
-contract, sanitized active-list/pre-sign/result fixtures and a fresh readback
-which proves the exact activity was completed.
+no independent activity readback.
+
+The current pinned `Ylim314/chaoxing-sign` and `superdaobo/mini-hbut` sources
+independently corroborate these read-only calls:
+
+```text
+GET https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist
+    ?fid={fid}&courseId={courseId}&classId={classId}
+    &showNotStartedActive=0&_=...
+GET https://mobilelearn.chaoxing.com/newsign/signDetail
+    ?activePrimaryId={activityId}&type=1
+```
+
+The list envelope is `result=1 -> data.activeList`. Sign rows carry `type=2`;
+activity/course/class identities may be numeric or decimal strings, and times
+are observed both directly and as typed `Time.time` objects. Asterism now has
+an unregistered Provider-local Native reader for these two GETs. Each bounded,
+zeroizing document is parsed atomically, list rows are bound to the exact fresh
+course/class route, duplicates fail closed, and `signDetail` must retain the
+same activity/type/`otherId` and any jointly present start/end time.
+
+The donors do not agree on the higher-level semantics: `status=1` means
+`Doing` in `chaoxing-sign` but is treated as `Signed` by `mini-hbut`, while
+`otherId=5` is code-sign in the former and photo-sign in the latter. The parser
+therefore keeps status/user-status as raw bounded codes and represents
+`otherId=5` as `AmbiguousCodeOrPhoto`. It does not infer account completion or
+mutation eligibility. `ifPhoto=1` on `otherId=0`, and `otherId=0/2/3/4`, are the
+only non-conflicting normal/photo/QR/gesture/location classifications.
+
+`signDetail` is an activity-structure read, not an independent account sign
+result. Registration still requires a Core sign-in inventory/operation
+contract, sanitized `preSign` and result fixtures, explicit object/location
+inputs, durable non-idempotent authority, receipt classification, and a fresh
+account-bound readback which proves the exact activity was completed. No
+`preSign` or `stuSignajax` call exists in the current implementation.
 
 Samueli commit `38a269811c9bb4a44bb31beaf02c552168c50864` implements
 post-task learning-count traffic by loading `studentstudyAjax`, extracting one

@@ -21,6 +21,7 @@ mod question_read;
 mod resource_execution;
 mod resource_inventory;
 mod runtime_settings;
+mod sign_in;
 mod stored_session;
 mod submission_build;
 mod submission_execute;
@@ -71,6 +72,11 @@ pub use question_parser::{
 pub use question_read::{ChaoxingQuestionRead, ChaoxingQuestionTransport};
 pub use resource_execution::ChaoxingResourceExecution;
 pub use resource_inventory::{ChaoxingChapterWorkTarget, parse_chapter_resource_inventory};
+pub use sign_in::{
+    ChaoxingSignActivity, ChaoxingSignActivityListDocument, ChaoxingSignActivityRead,
+    ChaoxingSignActivityReadTransport, ChaoxingSignDetail, ChaoxingSignDetailDocument,
+    ChaoxingSignDetailRequest, ChaoxingSignVariant, parse_sign_activity_list, parse_sign_detail,
+};
 pub use stored_session::StoredChaoxingSessionResolver;
 pub use submission_build::ChaoxingSubmissionBuild;
 pub use submission_execute::{ChaoxingSubmissionExecute, ChaoxingSubmissionTransport};

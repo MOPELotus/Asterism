@@ -10,6 +10,8 @@ pending.
 |---|---|---|---|---|---|
 | [`Samueli924/chaoxing`](https://github.com/Samueli924/chaoxing) | `9699e632b492cdc55ea35a1ab05b6dfcbfb7cf70` | 2026-08-14 | Reference | Password/Cookie login, course/folder inventory, Chapter cards, Video/Audio fallback, Document, Live, Read, Chapter Work, sign-in and learning-count behavior | Pending |
 | [`surinrasu/CxKitty`](https://github.com/surinrasu/CxKitty) | `1589eac9c07c4bab71f79d762b45210643dd537d` | 2024-09-29 | Reference | Password/QR login, SSO validation, mobile course/Chapter APIs, Video/Document, Work/Exam export/save/submit, retake facts, face/captcha branches | Pending; protocol age is a risk |
+| [`Ylim314/chaoxing-sign`](https://github.com/Ylim314/chaoxing-sign) | `7ed64ff547d352708066ff61f1b1dc1fb1be32f1` | 2026-03-09 | PortSource | Current `activelist`/`signDetail` reads, sign activity/status codes, structured time fields and normal/QR/gesture/location/code dispatch | Pending |
+| [`superdaobo/mini-hbut`](https://github.com/superdaobo/mini-hbut) | `64fb2f06e10c95a77a39f17d45c6e2b573ad63a2` | 2026-08-14 | Reference | Independent current activity-list/detail routes, numeric-or-string identities/times, variant normalization and sign-state heuristics | Pending |
 | [`iwillwill-ALLWILL/chaoxing-agent-skill`](https://github.com/iwillwill-ALLWILL/chaoxing-agent-skill) | `f72619a0b36996d27d00577015663ec39e782500` | 2026-06-17 | PortSource | Browser Work/Exam inventory, rich editor filling, result inspection, retry/retake policy and current DOM reliability rules | Donor reports real use; Asterism validation pending |
 | [`ocsjs/ocsjs`](https://github.com/ocsjs/ocsjs) | `890686a5e54f9a6d52d1169bae9ea5971e0863c7` | 2026-07-01 | Reference | Current media/PPT/Read/Chapter-test/Work/Exam lifecycle, thresholded save/submit, extended Question types and browser controls | Pending |
 | [`LangHY/chaoxing-exam`](https://github.com/LangHY/chaoxing-exam) | `14e1dfd9cf11cd54dabb494dd01e318856d9b8d3` | 2026-06-19 | Reference | Chapter-test navigation, fill/short editor behavior, result standards, score and `redoTest` pitfalls | Donor reports Chapter-test coverage; Asterism validation pending |
@@ -24,6 +26,13 @@ pending.
 - Use `Samueli924/chaoxing` for the existing Chapter path and account/session behavior.
 - Use CxKitty to understand the complete mobile API call chain and typed failure
   branches, but do not assume its 2024 transport still works in 2026.
+- Use `chaoxing-sign` as the primary current source for the read-only activity
+  list/detail shape. Use `mini-hbut` only as independent corroboration and keep
+  its GPL implementation reference-only.
+- The two current sign-in donors conflict on `status=1` and `otherId=5`.
+  Asterism therefore retains raw status codes and models `otherId=5` as
+  ambiguous instead of inferring account completion, eligibility or a mutation
+  variant.
 - Use `chaoxing-exam` only as a Browser/DOM reference for non-formal Chapter tests.
 - Use `cxmooc-tools` only to diagnose historical route variants.
 
@@ -72,6 +81,16 @@ validation is still required.
 
 ## Refresh log
 
+- 2026-08-15: added and fully pinned the current MIT `Ylim314/chaoxing-sign`
+  PortSource at `7ed64ff547d352708066ff61f1b1dc1fb1be32f1` and GPL-3.0-or-later
+  `superdaobo/mini-hbut` Reference at
+  `64fb2f06e10c95a77a39f17d45c6e2b573ad63a2`. Their complete sign-in modules,
+  types, tests, README/configuration surface, default branches and license
+  metadata were inspected. Both corroborate `student/activelist` and
+  `newsign/signDetail`; their conflicting status/variant interpretations are
+  now an explicit fail-closed boundary. Asterism adds only unregistered,
+  read-only, course-bound list/detail parsing and Native GET transport with
+  synthetic fixtures. It does not call `preSign` or `stuSignajax`.
 - 2026-08-15: re-read Samueli sign-in commit `741d5c1`, learning-count commit
   `38a2698` and OCS's pinned hyperlink/timed-reader/in-video implementation.
   The sign-in CLI flag is unwired and its low-level request returns opaque text;

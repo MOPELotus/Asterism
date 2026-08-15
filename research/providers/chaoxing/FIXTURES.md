@@ -2,7 +2,7 @@
 
 No real-account fixture was added during the 2026-08-09 static donor audit.
 The repository currently contains explicitly labelled synthetic, sanitized
-Course, Work and Exam inventory/detail fixtures for parser development. They
+Course, sign-in, Work and Exam inventory/detail fixtures for parser development. They
 prove parser invariants only and are not evidence of current live-platform
 compatibility.
 
@@ -25,6 +25,9 @@ fixtures/providers/chaoxing/
     interaction-folders.html
     list-mixed.html
     list-mixed.expected.json
+  sign/
+    activities-mixed.json
+    detail-normal.json
   work/
     course-page-with-work-iframe.html
     list-mixed.html
@@ -343,11 +346,15 @@ every fixture before staging it.
 - Retake fixtures must show fresh QIDs/option mappings and separate Chapter
   `redoTest` from Exam `reTest`; they may not authorize mutation during the
   read-only bootstrap test path.
-- Sign-in fixtures must include the exact active-list envelope, a separately
-  bound `preSign` document, each supported normal/gesture/location mode, the
-  semantics of any required `objectId`, and a fresh exact activity readback. An
-  opaque `stuSignajax` string is a Receipt at most and never authorizes replay
-  after an ambiguous request.
+- Sign-in now has synthetic exact active-list and separately bound
+  `signDetail` fixtures. They cover mixed sign/non-sign rows, numeric/string
+  identities, direct/nested times, photo refinement, the non-conflicting
+  normal/QR/gesture/location mappings, explicit `otherId=5` ambiguity, raw
+  status retention, duplicate rejection and course/detail drift. Remaining
+  fixtures must include `preSign`, required object/location inputs, opaque
+  mutation responses and a genuinely independent account sign-result readback.
+  `signDetail` alone is not completion evidence, and an opaque `stuSignajax`
+  string is a Receipt at most and never authorizes replay after ambiguity.
 - Learning-count fixtures must expose a fresh server-visible count before and
   after one visit. `studentstudyAjax`, `setlog` and monitor responses alone are
   insufficient, and a synthetic local target counter is not verification.

@@ -25,9 +25,11 @@ use crate::{
     ChaoxingExamDetailRequest, ChaoxingExamQuestionArtifact, ChaoxingExamQuestionRequest,
     ChaoxingExamSubmissionCommand, ChaoxingExamSubmissionResponse,
     ChaoxingExamVerificationDocument, ChaoxingInventoryDocument, ChaoxingInventoryTransport,
-    ChaoxingQuestionTransport, ChaoxingSubmissionPlan, ChaoxingSubmissionTransport,
-    ChaoxingSubmissionVerificationTransport, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState,
-    ChaoxingWorkVerificationDocument, ChaoxingWorkVerificationRoute, classify_work_detail,
+    ChaoxingQuestionTransport, ChaoxingSignActivityListDocument, ChaoxingSignActivityReadTransport,
+    ChaoxingSignDetailDocument, ChaoxingSignDetailRequest, ChaoxingSubmissionPlan,
+    ChaoxingSubmissionTransport, ChaoxingSubmissionVerificationTransport,
+    ChaoxingWorkDetailRequest, ChaoxingWorkDetailState, ChaoxingWorkVerificationDocument,
+    ChaoxingWorkVerificationRoute, classify_work_detail,
     exam_attempt::{
         ChaoxingExamStartCommand, ChaoxingExamStartOutcome, parse_exam_attempt, parse_exam_cover,
     },
@@ -81,6 +83,9 @@ const EXAM_REQUESTED_WITH: &str = "com.chaoxing.mobile";
 const WORK_LIST_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const WORK_LIST_PATH: &str = "/mooc2/work/list";
 const WORK_SUBMISSION_BASE: &str = "https://mooc1.chaoxing.com/mooc-ans/work/addStudentWorkNew";
+const SIGN_ACTIVITY_LIST_BASE: &str =
+    "https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist";
+const SIGN_DETAIL_BASE: &str = "https://mobilelearn.chaoxing.com/newsign/signDetail";
 const MAX_COOKIE_BYTES: usize = 64 * 1_024;
 const MAX_HTML_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_COURSE_FOLDERS: usize = 256;
@@ -233,6 +238,25 @@ impl NativeChaoxingInventoryTransport {
         classify_response(response).await
     }
 
+    async fn get_sign_json(
+        &self,
+        session: &ChaoxingCookieSession,
+        url: Url,
+    ) -> ProviderResult<SensitiveHtml> {
+        let response = self
+            .client
+            .get(url)
+            .header(COOKIE, session.header_value()?)
+            .header(ACCEPT, "application/json")
+            .header("x-requested-with", EXAM_REQUESTED_WITH)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        validate_response_status(&response)?;
+        validate_json_response_head(&response)?;
+        read_response_body(response).await
+    }
+
     async fn post_course_list(
         &self,
         session: &ChaoxingCookieSession,
@@ -284,6 +308,27 @@ impl NativeChaoxingInventoryTransport {
         self.get_html(session, exam_list_url(route)?)
             .await?
             .into_inventory_document()
+    }
+
+    async fn fetch_sign_activity_list_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        route: ChaoxingCourseRoute<'_>,
+    ) -> ProviderResult<ChaoxingSignActivityListDocument> {
+        let fid = session.cookie_value(&["fid"]).unwrap_or("1024");
+        self.get_sign_json(session, sign_activity_list_url(route, fid)?)
+            .await
+            .and_then(|document| ChaoxingSignActivityListDocument::try_new(document.into_string()))
+    }
+
+    async fn fetch_sign_detail_once(
+        &self,
+        session: &ChaoxingCookieSession,
+        request: &ChaoxingSignDetailRequest,
+    ) -> ProviderResult<ChaoxingSignDetailDocument> {
+        self.get_sign_json(session, sign_detail_url(request)?)
+            .await
+            .and_then(|document| ChaoxingSignDetailDocument::try_new(document.into_string()))
     }
 
     async fn fetch_chapter_resource_inventories_once(
@@ -1436,6 +1481,39 @@ impl ChaoxingCourseInventoryTransport for NativeChaoxingInventoryTransport {
     }
 }
 
+#[async_trait]
+impl ChaoxingSignActivityReadTransport for NativeChaoxingInventoryTransport {
+    async fn fetch_sign_activity_list(
+        &self,
+        context: &ProviderContext,
+        route: ChaoxingCourseRoute<'_>,
+    ) -> ProviderResult<ChaoxingSignActivityListDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_sign_activity_list_once(&session, route).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_sign_activity_list_once(&session, route).await
+            }
+            result => result,
+        }
+    }
+
+    async fn fetch_sign_detail(
+        &self,
+        context: &ProviderContext,
+        request: &ChaoxingSignDetailRequest,
+    ) -> ProviderResult<ChaoxingSignDetailDocument> {
+        let (session, renewed) = self.session_for_operation(context).await?;
+        match self.fetch_sign_detail_once(&session, request).await {
+            Err(error) if should_renew_after(&error, renewed) => {
+                let session = self.sessions.renew_session(context).await?;
+                self.fetch_sign_detail_once(&session, request).await
+            }
+            result => result,
+        }
+    }
+}
+
 fn should_renew_after(error: &ProviderError, already_renewed: bool) -> bool {
     !already_renewed && error.kind == ProviderErrorKind::Authentication
 }
@@ -1514,6 +1592,27 @@ fn course_page_url(route: ChaoxingCourseRoute<'_>) -> ProviderResult<Url> {
             ("cpi", route.cpi()),
             ("ut", "s"),
         ],
+    )
+}
+
+fn sign_activity_list_url(route: ChaoxingCourseRoute<'_>, fid: &str) -> ProviderResult<Url> {
+    let timestamp = Utc::now().timestamp_millis().to_string();
+    build_url(
+        SIGN_ACTIVITY_LIST_BASE,
+        &[
+            ("fid", fid),
+            ("courseId", route.course_id()),
+            ("classId", route.class_id()),
+            ("showNotStartedActive", "0"),
+            ("_", &timestamp),
+        ],
+    )
+}
+
+fn sign_detail_url(request: &ChaoxingSignDetailRequest) -> ProviderResult<Url> {
+    build_url(
+        SIGN_DETAIL_BASE,
+        &[("activePrimaryId", request.activity_id()), ("type", "1")],
     )
 }
 
@@ -2124,6 +2223,34 @@ fn validate_html_response_head(response: &Response) -> ProviderResult<()> {
     Ok(())
 }
 
+fn validate_json_response_head(response: &Response) -> ProviderResult<()> {
+    if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
+        let content_type = content_type.to_str().map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing sign-in endpoint returned an invalid Content-Type",
+            )
+        })?;
+        let media_type = content_type.split(';').next().unwrap_or_default().trim();
+        if !media_type.eq_ignore_ascii_case("application/json")
+            && !media_type.eq_ignore_ascii_case("text/json")
+            && !media_type.eq_ignore_ascii_case("text/plain")
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Chaoxing sign-in endpoint returned a non-JSON response",
+            ));
+        }
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_HTML_BYTES as u64)
+    {
+        return Err(oversized_response());
+    }
+    Ok(())
+}
+
 async fn read_response_body(response: Response) -> ProviderResult<SensitiveHtml> {
     read_bounded_response_body(response, true).await
 }
@@ -2599,6 +2726,47 @@ mod tests {
     }
 
     #[test]
+    fn sign_reads_bind_exact_course_and_activity_routes() {
+        let course = course();
+        let route = ChaoxingCourseRoute::from_remote_course(&course).unwrap();
+        let list_url = sign_activity_list_url(route, "400").unwrap();
+        assert_eq!(
+            list_url.origin().ascii_serialization(),
+            "https://mobilelearn.chaoxing.com"
+        );
+        assert_eq!(list_url.path(), "/v2/apis/active/student/activelist");
+        assert_eq!(query(&list_url, "fid").as_deref(), Some("400"));
+        assert_eq!(query(&list_url, "courseId").as_deref(), Some("100"));
+        assert_eq!(query(&list_url, "classId").as_deref(), Some("200"));
+        assert_eq!(
+            query(&list_url, "showNotStartedActive").as_deref(),
+            Some("0")
+        );
+        assert!(query(&list_url, "_").is_some_and(|value| value.parse::<i64>().is_ok()));
+
+        let scope = route.parser_scope().unwrap();
+        let document = ChaoxingSignActivityListDocument::try_new(
+            r#"{"result":1,"data":{"activeList":[{"id":7001,"type":2,"otherId":0,"status":1,"name":"attendance"}]}}"#,
+        )
+        .unwrap();
+        let activity = crate::parse_sign_activity_list(&document, &scope)
+            .unwrap()
+            .remove(0);
+        let detail_request = ChaoxingSignDetailRequest::try_new(route, &activity).unwrap();
+        let detail_url = sign_detail_url(&detail_request).unwrap();
+        assert_eq!(
+            detail_url.origin().ascii_serialization(),
+            "https://mobilelearn.chaoxing.com"
+        );
+        assert_eq!(detail_url.path(), "/newsign/signDetail");
+        assert_eq!(
+            query(&detail_url, "activePrimaryId").as_deref(),
+            Some("7001")
+        );
+        assert_eq!(query(&detail_url, "type").as_deref(), Some("1"));
+    }
+
+    #[test]
     fn cookie_sessions_require_identity_and_redact_debug_output() {
         let session = ChaoxingCookieSession::try_new("_uid=SAFE_UID; uf=SAFE_UF").unwrap();
         assert!(!format!("{session:?}").contains("SAFE_UID"));
@@ -2684,6 +2852,24 @@ mod tests {
         ))
         .await
         .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+    }
+
+    #[test]
+    fn sign_json_content_type_is_fail_closed() {
+        let json = response(
+            StatusCode::OK,
+            &[("content-type", "application/json; charset=utf-8")],
+            b"{}".to_vec(),
+        );
+        assert!(validate_json_response_head(&json).is_ok());
+
+        let html = response(
+            StatusCode::OK,
+            &[("content-type", "text/html")],
+            b"{}".to_vec(),
+        );
+        let error = validate_json_response_head(&html).unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
     }
 

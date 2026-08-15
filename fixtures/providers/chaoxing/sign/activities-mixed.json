@@ -1,0 +1,75 @@
+{
+  "result": 1,
+  "msg": "ok",
+  "data": {
+    "activeList": [
+      {
+        "id": 7001,
+        "courseId": "1001",
+        "clazzId": 2001,
+        "type": 2,
+        "activeType": 2,
+        "otherId": 0,
+        "status": 1,
+        "userStatus": 0,
+        "name": "Morning attendance",
+        "startTime": {
+          "time": 1786800000000,
+          "timezoneOffset": -480
+        },
+        "endTime": {
+          "time": 1786803600000,
+          "timezoneOffset": -480
+        },
+        "ifPhoto": 0
+      },
+      {
+        "id": "7002",
+        "courseId": 1001,
+        "classId": "2001",
+        "type": 2,
+        "otherId": 0,
+        "status": 1,
+        "nameOne": "Photo attendance",
+        "startTime": "1786800000000",
+        "endTime": 1786803600000,
+        "ifPhoto": 1
+      },
+      {
+        "id": 7003,
+        "type": 2,
+        "otherId": 2,
+        "status": 1,
+        "name": "QR attendance"
+      },
+      {
+        "id": 7004,
+        "type": 2,
+        "otherId": 3,
+        "status": 1,
+        "name": "Gesture attendance"
+      },
+      {
+        "id": 7005,
+        "type": 2,
+        "otherId": 4,
+        "status": 1,
+        "name": "Location attendance"
+      },
+      {
+        "id": 7006,
+        "type": 2,
+        "otherId": 5,
+        "status": 2,
+        "name": "Conflicted variant"
+      },
+      {
+        "id": 8001,
+        "type": 4,
+        "otherId": 0,
+        "status": 1,
+        "name": "Non-sign activity"
+      }
+    ]
+  }
+}
