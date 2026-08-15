@@ -660,8 +660,12 @@ payload's paired integer `chance_num`/`answer_state` fields are retained under
 `cidaren_current_question_state` as bounded raw current-Question observations.
 They are excluded from the stable remote Question identity, and a partial,
 fractional, negative or oversized pair fails closed with a value-free shape
-observation. They remain neither correctness nor history/retake authority. The
-common `SkipAnswer` mutation remains available, so the attempt can continue. No
+observation. The public read-only `CidarenCurrentQuestionState` and attempt-
+flow accessor expose only the two raw codes; artifact recovery reconstructs
+that type from the exact fingerprint-bound Question metadata and rejects a
+malformed or extended state object. The values remain neither correctness nor
+history/retake authority. The common `SkipAnswer` mutation remains available,
+so the attempt can continue. No
 evidence defines whether two answers are comma-joined, separately verified or
 encoded another way; AnswerResolve and ordinary answer Build/Verify therefore
 fail closed for mode 73 instead of inventing a score-affecting wire format.

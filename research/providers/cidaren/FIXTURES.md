@@ -79,10 +79,12 @@ text/token values. Parser tests require `FillBlank`, answer-count/length
 agreement, paired bounded `chance_num`/`answer_state` projection and token
 omission from serialized Questions. State-only changes do not change the
 stable remote Question identity; malformed/partial state fails closed and its
-observation contains field kinds rather than values. The state pair remains
-current-Question metadata, not correctness, history or retake authority. It is
-not answer-wire evidence; AnswerResolve and ordinary answer Build/Verify stay
-fail-closed,
+observation contains field kinds rather than values. Parser and attempt-flow
+tests expose the exact pair through `CidarenCurrentQuestionState`, reconstruct
+it from the fingerprint-bound Question after artifact recovery and reject
+malformed restored metadata. The state pair remains current-Question metadata,
+not correctness, history or retake authority. It is not answer-wire evidence;
+AnswerResolve and ordinary answer Build/Verify stay fail-closed,
 while the distinct explicit Skip Draft/execution path is available.
 
 The BrowserBridge fixtures are synthetic result transport documents generated

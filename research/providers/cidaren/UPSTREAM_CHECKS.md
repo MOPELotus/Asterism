@@ -896,6 +896,22 @@ rotated Question recovery expose the same remote observation again without
 using it as local position, Question identity, answer selection or mutation
 routing. Reading-card recovery retains its existing equivalent boundary.
 
+### 2026-08-15 typed current-Question state recovery follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth V2 handoff manifest remained unchanged before and after this unit. No
+result, retake or direct mode-73 answer route entered scope.
+
+The already bounded public-issue-99 `chance_num`/`answer_state` pair now has
+a read-only `CidarenCurrentQuestionState` boundary. Fresh parsing and
+fingerprint-bound Question recovery both construct the same type, and
+`CidarenAttemptFlow::current_question_state` exposes it before and after
+encrypted continuation recovery. Restored metadata must contain exactly the two
+bounded integer fields; malformed or extended objects fail closed. The remote
+progress and state-code helpers also use their own named bounds rather than
+cross-referencing equal-valued constants. Neither code is interpreted as
+correctness, history, Task-retake authority or mode-73 answer encoding.
+
 ## Check procedure
 
 For the next checkpoint:

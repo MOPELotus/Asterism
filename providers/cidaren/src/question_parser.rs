@@ -58,6 +58,39 @@ impl CidarenAttemptProgress {
     }
 }
 
+/// Bounded raw state codes observed on the donor's current Question payload.
+///
+/// These values are not correctness, attempt-history or Task-retake facts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CidarenCurrentQuestionState {
+    chance_num: u32,
+    answer_state: u32,
+}
+
+impl CidarenCurrentQuestionState {
+    pub const fn chance_num(self) -> u32 {
+        self.chance_num
+    }
+
+    pub const fn answer_state(self) -> u32 {
+        self.answer_state
+    }
+
+    fn try_new(chance_num: u32, answer_state: u32) -> ProviderResult<Self> {
+        if chance_num > MAX_CURRENT_QUESTION_STATE_CODE
+            || answer_state > MAX_CURRENT_QUESTION_STATE_CODE
+        {
+            return Err(protocol_drift(
+                "Cidaren current Question state code exceeds its bound",
+            ));
+        }
+        Ok(Self {
+            chance_num,
+            answer_state,
+        })
+    }
+}
+
 /// One decoded current Cidaren question bound to the remote attempt token.
 ///
 /// The one-time `topic_code` is deliberately absent from the normalized
@@ -73,6 +106,7 @@ pub struct ParsedCidarenAttemptQuestion {
     metadata_sanitized: Value,
     position: u32,
     remote_progress: Option<CidarenAttemptProgress>,
+    current_question_state: Option<CidarenCurrentQuestionState>,
 }
 
 /// One decoded donor attempt step. Reading cards are executable advance stages
@@ -241,6 +275,8 @@ impl ParsedCidarenAttemptQuestion {
             .as_deref()
             .filter(|value| valid_optional_text(value, MAX_REMOTE_STEP_ID_BYTES))
             .ok_or_else(|| protocol_drift("Cidaren restored Question has no remote identity"))?;
+        let current_question_state =
+            current_question_state_from_metadata(&question.metadata_sanitized)?;
         if !valid_remote_task_id(&remote_task_id)
             || !valid_optional_text(&topic_code, MAX_TOPIC_CODE_BYTES)
             || !question.attachments.is_empty()
@@ -261,6 +297,7 @@ impl ParsedCidarenAttemptQuestion {
             metadata_sanitized: question.metadata_sanitized.clone(),
             position: question.position,
             remote_progress,
+            current_question_state,
         };
         let rebuilt = parsed.to_question(question.task_id)?;
         let rebuilt_fingerprint = rebuilt
@@ -344,6 +381,10 @@ impl ParsedCidarenAttemptQuestion {
     pub const fn remote_progress(&self) -> Option<CidarenAttemptProgress> {
         self.remote_progress
     }
+
+    pub const fn current_question_state(&self) -> Option<CidarenCurrentQuestionState> {
+        self.current_question_state
+    }
 }
 
 impl fmt::Debug for ParsedCidarenAttemptQuestion {
@@ -355,6 +396,7 @@ impl fmt::Debug for ParsedCidarenAttemptQuestion {
             .field("kind", &self.kind)
             .field("position", &self.position)
             .field("remote_progress", &self.remote_progress)
+            .field("current_question_state", &self.current_question_state)
             .finish_non_exhaustive()
     }
 }
@@ -407,6 +449,7 @@ pub fn parse_attempt_question(
             .and_then(Value::as_i64)
             .ok_or_else(|| protocol_drift("Cidaren attempt payload has no topic mode"))?;
         let kind = question_kind(mode)?;
+        let current_question_state = parse_current_question_state(object)?;
         let stem_object = object
             .get("stem")
             .and_then(Value::as_object)
@@ -420,6 +463,7 @@ pub fn parse_attempt_question(
             kind,
             stem.as_str(),
             options.as_slice(),
+            current_question_state,
         )?);
         let remote_id = question_remote_id(
             mode,
@@ -437,6 +481,7 @@ pub fn parse_attempt_question(
             metadata_sanitized: metadata_sanitized.finish(),
             position,
             remote_progress,
+            current_question_state,
         };
         // Validate through both public contracts before handing the ephemeral
         // attempt material to a caller.
@@ -653,7 +698,7 @@ fn optional_remote_counter(
         Some(Value::Number(value)) => value
             .as_u64()
             .and_then(|value| u32::try_from(value).ok())
-            .filter(|value| *value <= MAX_CURRENT_QUESTION_STATE_CODE)
+            .filter(|value| *value <= MAX_REMOTE_TOPIC_TOTAL)
             .map(Some)
             .ok_or_else(|| {
                 protocol_drift(format!("Cidaren attempt {label}-topic count is invalid"))
@@ -664,17 +709,46 @@ fn optional_remote_counter(
     }
 }
 
-fn parse_current_question_state(object: &Map<String, Value>) -> ProviderResult<Option<(u32, u32)>> {
+fn parse_current_question_state(
+    object: &Map<String, Value>,
+) -> ProviderResult<Option<CidarenCurrentQuestionState>> {
     let chance_num = optional_current_question_state_code(object.get("chance_num"), "chance_num")?;
     let answer_state =
         optional_current_question_state_code(object.get("answer_state"), "answer_state")?;
     match (chance_num, answer_state) {
         (None, None) => Ok(None),
-        (Some(chance_num), Some(answer_state)) => Ok(Some((chance_num, answer_state))),
+        (Some(chance_num), Some(answer_state)) => {
+            CidarenCurrentQuestionState::try_new(chance_num, answer_state).map(Some)
+        }
         _ => Err(protocol_drift(
             "Cidaren current Question state fields are incomplete",
         )),
     }
+}
+
+fn current_question_state_from_metadata(
+    metadata: &Value,
+) -> ProviderResult<Option<CidarenCurrentQuestionState>> {
+    let metadata = metadata
+        .as_object()
+        .ok_or_else(|| protocol_drift("Cidaren restored Question metadata is not an object"))?;
+    let Some(state) = metadata.get("cidaren_current_question_state") else {
+        return Ok(None);
+    };
+    let state = state
+        .as_object()
+        .filter(|state| state.len() == 2)
+        .ok_or_else(|| protocol_drift("Cidaren restored current Question state is invalid"))?;
+    let chance_num = optional_current_question_state_code(state.get("chance_num"), "chance_num")?
+        .ok_or_else(|| {
+        protocol_drift("Cidaren restored current Question chance_num is missing")
+    })?;
+    let answer_state =
+        optional_current_question_state_code(state.get("answer_state"), "answer_state")?
+            .ok_or_else(|| {
+                protocol_drift("Cidaren restored current Question answer_state is missing")
+            })?;
+    CidarenCurrentQuestionState::try_new(chance_num, answer_state).map(Some)
 }
 
 fn optional_current_question_state_code(
@@ -686,7 +760,7 @@ fn optional_current_question_state_code(
         Some(Value::Number(value)) => value
             .as_u64()
             .and_then(|value| u32::try_from(value).ok())
-            .filter(|value| *value <= MAX_REMOTE_TOPIC_TOTAL)
+            .filter(|value| *value <= MAX_CURRENT_QUESTION_STATE_CODE)
             .map(Some)
             .ok_or_else(|| {
                 protocol_drift(format!("Cidaren current Question {label} code is invalid"))
@@ -976,6 +1050,7 @@ fn sanitized_metadata(
     kind: QuestionKind,
     stem: &str,
     options: &[QuestionOption],
+    current_question_state: Option<CidarenCurrentQuestionState>,
 ) -> ProviderResult<Value> {
     let stem_object = object
         .get("stem")
@@ -1042,7 +1117,6 @@ fn sanitized_metadata(
         ));
     }
     let word_tip = optional_text(object.get("w_tip"), MAX_OPTION_BYTES, "word tip")?;
-    let current_question_state = parse_current_question_state(object)?;
     let mut metadata = json!({
         "schema": "cidaren.attempt-question.v1",
         "remote_task_id": remote_task_id,
@@ -1057,15 +1131,15 @@ fn sanitized_metadata(
         "stem_sha256": format!("{:x}", Sha256::digest(stem.as_bytes())),
         "option_count": options.len(),
     });
-    if let Some((chance_num, answer_state)) = current_question_state {
+    if let Some(current_question_state) = current_question_state {
         metadata
             .as_object_mut()
             .ok_or_else(|| invalid_response("Cidaren Question metadata is not an object"))?
             .insert(
                 "cidaren_current_question_state".to_owned(),
                 json!({
-                    "chance_num": chance_num,
-                    "answer_state": answer_state,
+                    "chance_num": current_question_state.chance_num(),
+                    "answer_state": current_question_state.answer_state(),
                 }),
             );
     }
@@ -1319,6 +1393,9 @@ mod tests {
         .unwrap();
         let parsed = parse_attempt_question(&payload, "class-task:2002", 2).unwrap();
         assert!(!format!("{parsed:?}").contains("synthetic-mode-73-topic-code"));
+        let current_state = parsed.current_question_state().unwrap();
+        assert_eq!(current_state.chance_num(), 2);
+        assert_eq!(current_state.answer_state(), 1);
         let question = parsed.to_question(TaskId::new()).unwrap();
         assert_eq!(question.kind, QuestionKind::FillBlank);
         assert!(question.options.is_empty());
@@ -1411,6 +1488,39 @@ mod tests {
                 .kind,
             ProviderErrorKind::ProtocolDrift
         );
+    }
+
+    #[test]
+    fn current_question_state_round_trips_through_bound_question_metadata() {
+        let payload: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/providers/cidaren/questions/start-answer-fill-blank-73.json"
+        ))
+        .unwrap();
+        let parsed = parse_attempt_question(&payload, "class-task:2002", 2).unwrap();
+        let mut question = parsed.to_question(TaskId::new()).unwrap();
+        let restore = |question: &Question| {
+            ParsedCidarenAttemptQuestion::from_artifact(
+                parsed.topic_code().to_owned(),
+                "class-task:2002".to_owned(),
+                question,
+                parsed.remote_progress(),
+            )
+        };
+        let restored = restore(&question).unwrap();
+        assert_eq!(
+            restored.current_question_state(),
+            parsed.current_question_state()
+        );
+
+        question.metadata_sanitized["cidaren_current_question_state"]["chance_num"] = json!("2");
+        assert!(restore(&question).is_err());
+
+        question.metadata_sanitized["cidaren_current_question_state"] = json!({
+            "chance_num": 2,
+            "answer_state": 1,
+            "unexpected": true,
+        });
+        assert!(restore(&question).is_err());
     }
 
     #[test]

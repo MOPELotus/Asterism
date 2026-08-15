@@ -17,9 +17,9 @@ use crate::pre_question_artifact::CidarenPreQuestionState;
 use crate::{
     CIDAREN_QUESTION_ARTIFACT_PHASE, CIDAREN_READY_TO_ADVANCE_PHASE, CIDAREN_READY_TO_VERIFY_PHASE,
     CidarenAssessmentBinding, CidarenAssessmentReceiptKind, CidarenAssessmentResponse,
-    CidarenAssessmentTransport, CidarenAttemptProgress, CidarenMutationRequest,
-    CidarenPreQuestionArtifact, CidarenQuestionArtifact, CidarenRuntimeSettings,
-    CidarenStartAnswerRequest, CidarenWireAnswer, CidarenWordSelectionPlan,
+    CidarenAssessmentTransport, CidarenAttemptProgress, CidarenCurrentQuestionState,
+    CidarenMutationRequest, CidarenPreQuestionArtifact, CidarenQuestionArtifact,
+    CidarenRuntimeSettings, CidarenStartAnswerRequest, CidarenWireAnswer, CidarenWordSelectionPlan,
     EncodedCidarenPreQuestionArtifact, EncodedCidarenQuestionArtifact,
     ParsedCidarenAttemptQuestion, ParsedCidarenAttemptStep, ParsedCidarenReadingCard,
     build_skip_answer_request, build_start_answer_request, build_submit_answer_and_save_request,
@@ -686,6 +686,20 @@ impl CidarenAttemptFlow {
                 | CidarenAttemptPhase::ReadyToAdvance { current, .. },
             ) => current.parsed.remote_progress(),
             Some(CidarenAttemptPhase::CurrentReadingCard(card)) => card.remote_progress(),
+            _ => None,
+        }
+    }
+
+    /// Returns the bounded raw donor state codes for the current Question.
+    ///
+    /// The observation has no correctness, history or Task-retake semantics.
+    pub fn current_question_state(&self) -> Option<CidarenCurrentQuestionState> {
+        match self.phase.as_ref() {
+            Some(
+                CidarenAttemptPhase::CurrentQuestion(current)
+                | CidarenAttemptPhase::ReadyToVerify { current, .. }
+                | CidarenAttemptPhase::ReadyToAdvance { current, .. },
+            ) => current.parsed.current_question_state(),
             _ => None,
         }
     }
@@ -2356,12 +2370,18 @@ mod tests {
             flow.current_question().unwrap().kind,
             QuestionKind::FillBlank
         );
+        let current_state = flow.current_question_state().unwrap();
+        assert_eq!(current_state.chance_num(), 2);
+        assert_eq!(current_state.answer_state(), 1);
         let materialization = flow.current_question_materialization().unwrap().unwrap();
         let recovered = recovered_context(&context);
         let (mut flow, question, verified_steps) =
             restore_materialization(&recovered, materialization, None, None);
         assert_eq!(question.kind, QuestionKind::FillBlank);
         assert_eq!(verified_steps, 0);
+        let current_state = flow.current_question_state().unwrap();
+        assert_eq!(current_state.chance_num(), 2);
+        assert_eq!(current_state.answer_state(), 1);
 
         let outcome = flow
             .issue_skip(&settings(), request_at())
