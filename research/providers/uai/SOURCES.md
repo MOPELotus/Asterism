@@ -208,6 +208,12 @@ receipt-bound user-module policy-evidence checkpoint on 2026-08-15. Apache
 `40ead69c7dabf` remained unchanged, so preserving the already-evidenced policy
 fields introduced no upstream protocol or capability delta.
 
+All four default branches and complete tag refs were refreshed again for the
+completion-diagnosis audit on 2026-08-15. The same Apache `bef0d29155ce`, MIT
+`590b4a58fe17`, AutoPlayer `cc6bdc86a13e` and Rust `40ead69c7dabf` revisions
+remained current; the narrow `WindowClosed` mapping uses existing strategy
+evidence and introduces no donor protocol delta.
+
 The rendered entry-route audit also uses two corroborating behaviors without
 copying implementation code: the current Rust donor sends
 `https://ucontent.unipus.cn/_explorationpc_default/pc.html` as the browser
@@ -240,6 +246,11 @@ The same current progress model exposes per-leaf `required`, `min_score_pct`,
 `start_time`, `end_time` and `statistic_mode_out`; Asterism retains those facts
 for Task selection and applies the donor time-window rule to every native
 mutation rather than relying on stale tree labels.
+The same evidenced strict window supports one conservative post-verification
+diagnosis: an exact incomplete Group observed at or after its positive close
+time is `WindowClosed`. No donor source gives causal meanings to individual
+`pass`/`pass2`/`perm` zeros, so score, duration, prerequisite, child and review
+diagnoses remain intentionally unmapped.
 
 The 2026-08-13 re-audit also checked the current Rust donor's media path. It
 downloads audio/video and invokes local Whisper transcription for answer

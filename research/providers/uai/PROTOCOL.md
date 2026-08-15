@@ -963,6 +963,24 @@ per-Unit Group progress read; only `pass=pass2=perm=1` returns a verified
 Completed outcome. Unknown progress remains unverified so Core can retry the
 read-only verifier without replaying the mutation.
 
+Completion diagnosis is narrower than progress parsing. The same fresh Task
+detail preserves the exact Group `closes_at`, and the subsequent exact progress
+read supplies its observation time. If the Group is still incomplete and its
+positive close time is at or before that observation, the sanitized verified
+execution result records `window_closed=true`; only that exact versioned result
+maps to shared `WindowClosed`. A future start time is not mislabeled as closed.
+No donor assigns stable reason semantics to an individual zero among `pass`,
+`pass2` and `perm`, or proves that Group/Course score, duration, `required`,
+`statistic_mode_out`, prerequisite or review facts caused this Group to remain
+incomplete, so those cases deliberately retain `RemoteUnknown`.
+
+SubmissionVerify has no corresponding safe override. Its shared snapshot
+contains answer persistence and an optional overall score but cannot carry the
+Provider-private user-module strategy/window owner. Neither fact explains the
+three completion flags, and smuggling a diagnosis through score, percentage or
+status would destroy their existing semantics. Shared typed policy evidence is
+required before receipt `expired`/`not_start` can participate directly.
+
 Asterism registers ResourceExecution for a non-empty set containing those five
 audited labels and, independently, for exact `exit-ticket`, exact single
 `discussion`, exact `short_answer`, `oral-sentence`, `video-dub` and

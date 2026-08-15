@@ -1,6 +1,8 @@
 use std::{fmt, sync::Arc};
 
-use asterism_domain::{RemoteState, SubmissionReceipt, TaskCapability};
+use asterism_domain::{
+    CompletionDiagnosis, RemoteState, SubmissionReceipt, TaskCapability, Timestamp,
+};
 use asterism_provider_api::{
     ExecutionEventSink, ExecutionOutcome, ExecutionRequest, ProviderContext, ProviderError,
     ProviderErrorKind, ProviderExecutionLog, ProviderIdentity, ProviderMetadata, ProviderProgress,
@@ -17,6 +19,8 @@ use crate::{
 
 const MAX_REMOTE_TASK_ID_BYTES: usize = 512;
 const MAX_REMOTE_COMPONENT_BYTES: usize = 128;
+const EMPTY_COMPLETION_VERIFICATION_SCHEMA: &str = "uai.empty-completion-verification.v1";
+const FRESH_PROGRESS_VERIFICATION: &str = "fresh_exact_group_progress_no_mutation";
 
 /// Native boundary for an audited marker or placeholder completion mutation.
 /// Implementations must not retry an ambiguous mutation failure.
@@ -653,17 +657,52 @@ impl TaskExecutionCapability for UaiResourceExecution {
             .read_progress(context, &request.remote_task_id)
             .await?;
         let goal_matched = progress.remote_state == RemoteState::Completed;
+        let window_closed = window_closed_at(detail.task.closes_at, progress.updated_at);
         Ok(ExecutionOutcome {
             remote_state: progress.remote_state,
             verified: goal_matched,
             result_sanitized: serde_json::json!({
-                "schema": "uai.empty-completion-verification.v1",
+                "schema": EMPTY_COMPLETION_VERIFICATION_SCHEMA,
                 "resource_kind": completion_kind.resource_kind(),
                 "goal_matched": goal_matched,
-                "verification": "fresh_exact_group_progress_no_mutation",
+                "window_closed": window_closed,
+                "verification": FRESH_PROGRESS_VERIFICATION,
             }),
         })
     }
+
+    fn completion_diagnosis(
+        &self,
+        request: &ExecutionRequest,
+        outcome: &ExecutionOutcome,
+    ) -> Option<CompletionDiagnosis> {
+        if request.requested_capabilities != [TaskCapability::ResourceExecution]
+            || outcome.remote_state == RemoteState::Completed
+            || outcome.verified
+        {
+            return None;
+        }
+        let result = outcome.result_sanitized.as_object()?;
+        (result.get("schema").and_then(serde_json::Value::as_str)
+            == Some(EMPTY_COMPLETION_VERIFICATION_SCHEMA)
+            && result
+                .get("verification")
+                .and_then(serde_json::Value::as_str)
+                == Some(FRESH_PROGRESS_VERIFICATION)
+            && result
+                .get("goal_matched")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            && result
+                .get("window_closed")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true))
+        .then_some(CompletionDiagnosis::WindowClosed)
+    }
+}
+
+fn window_closed_at(closes_at: Option<Timestamp>, observed_at: Timestamp) -> bool {
+    closes_at.is_some_and(|closes_at| closes_at <= observed_at)
 }
 
 pub(crate) fn supports_preset_execution(task_types: &[String]) -> bool {
@@ -1666,12 +1705,61 @@ mod tests {
                 .unwrap();
             assert_eq!(outcome.remote_state, remote_state);
             assert_eq!(outcome.verified, expected_verified);
+            assert_eq!(outcome.result_sanitized["window_closed"], false);
+            assert_eq!(execution.completion_diagnosis(&request(), &outcome), None);
             assert_eq!(
                 progress.calls.lock().unwrap().as_slice(),
                 &["group:2001:unit-1:group-1".to_owned()]
             );
             assert!(transport.calls.lock().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn completion_diagnosis_requires_exact_verified_closed_window_fact() {
+        let observed_at = Utc::now();
+        assert!(!window_closed_at(None, observed_at));
+        assert!(!window_closed_at(
+            Some(observed_at + chrono::Duration::seconds(1)),
+            observed_at,
+        ));
+        assert!(window_closed_at(Some(observed_at), observed_at));
+
+        let execution = UaiResourceExecution::try_new(
+            Arc::new(FixtureDetail {
+                task_types: vec!["rich-text-read".to_owned()],
+            }),
+            fixture_progress(RemoteState::Unknown),
+            Arc::new(FixtureTransport::default()),
+        )
+        .unwrap();
+        let mut outcome = ExecutionOutcome {
+            remote_state: RemoteState::Unknown,
+            verified: false,
+            result_sanitized: serde_json::json!({
+                "schema": EMPTY_COMPLETION_VERIFICATION_SCHEMA,
+                "resource_kind": "preset_marker",
+                "goal_matched": false,
+                "window_closed": true,
+                "verification": FRESH_PROGRESS_VERIFICATION,
+            }),
+        };
+        assert_eq!(
+            execution.completion_diagnosis(&request(), &outcome),
+            Some(CompletionDiagnosis::WindowClosed)
+        );
+
+        outcome.result_sanitized["window_closed"] = serde_json::json!(false);
+        assert_eq!(execution.completion_diagnosis(&request(), &outcome), None);
+        outcome.result_sanitized["window_closed"] = serde_json::json!(true);
+        outcome.result_sanitized["schema"] = serde_json::json!("foreign.verification");
+        assert_eq!(execution.completion_diagnosis(&request(), &outcome), None);
+
+        outcome.result_sanitized["schema"] =
+            serde_json::json!(EMPTY_COMPLETION_VERIFICATION_SCHEMA);
+        outcome.remote_state = RemoteState::Completed;
+        outcome.verified = true;
+        assert_eq!(execution.completion_diagnosis(&request(), &outcome), None);
     }
 
     fn fixture_progress(remote_state: RemoteState) -> Arc<FixtureProgress> {

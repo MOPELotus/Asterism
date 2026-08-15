@@ -129,6 +129,12 @@ Core; UAI contributes facts rather than owning either state machine.
 - Strict Task completion is fresh `pass=1 && pass2=1 && perm=1`. A receipt,
   submitted-answer equality, score, `finishProgress`, duration or one of the
   three flags alone is not completion.
+- The only audited incomplete-cause mapping is an exact Group whose fresh
+  positive close time is at or before the following progress observation;
+  ResourceExecution may report `WindowClosed`. Donors do not define causal
+  meanings for individual zero completion flags, and SubmissionVerify cannot
+  expose its private policy through the shared snapshot, so every other UAI
+  completion diagnosis stays unknown.
 - Course/Unit `finishProgress=100` is an aggregate checkpoint. It cannot replace
   exact Group completion when the policy is operating on one Task.
 - Group `min_score_pct`, user-module `task_mini_score_pct`, Unit `passScore` plus
