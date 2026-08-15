@@ -4317,3 +4317,22 @@ ledger row. Runner integration tests assert all three cases against durable
 rows. Composite execution and generic execution-recovery final observations
 remain explicit next slices; intermediate results which are still entering
 verification recovery are deliberately not recorded as final observations.
+
+## Two-hundred-and-thirty-seventh Phase 0 slice
+
+Composite execution now records exactly one Strict Completion observation from
+the final Provider call's verified outcome. Earlier calls still durably finish
+their own capability steps but cannot consume the Execution-level observation
+key or stop the workflow from an intermediate DurationReport. Both ordinary
+multi-call plans and one-call atomic composite plans therefore converge through
+the same final ledger boundary.
+
+Generic recovery now resolves the exact unfinished ExecutionAttempt before a
+Provider verification read. A final verified outcome is ledgered before
+recovery closes; a reliable incomplete observation is ledgered only when the
+recovery retry budget is exhausted. Recovery which will retry writes no final
+observation. Providers without goal-bound ExecutionVerify may instead recover
+through fresh TaskProgress: Completed is recorded as a monotonic completion,
+while Pending/InProgress which schedules another retry remains unrecorded.
+Tests cover final composite uniqueness, recovered completion and the absence of
+an observation on a pending retry.

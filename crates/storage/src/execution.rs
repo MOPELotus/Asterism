@@ -312,6 +312,26 @@ impl ExecutionRepository for SqliteExecutionRepository {
         row.as_ref().map(decode_provider_plan_artifact).transpose()
     }
 
+    async fn find_active_execution_attempt_id(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionAttemptId>, StorageError> {
+        let attempt_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM execution_attempts \
+             WHERE execution_id = ? AND finished_at IS NULL \
+             ORDER BY attempt_no DESC LIMIT 1",
+        )
+        .bind(execution_id.to_string())
+        .fetch_optional(self.database.pool())
+        .await?;
+        attempt_id
+            .map(|value| {
+                ExecutionAttemptId::from_str(&value)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))
+            })
+            .transpose()
+    }
+
     async fn start_attempt(
         &self,
         request: ExecutionAttemptStartRequest<'_>,

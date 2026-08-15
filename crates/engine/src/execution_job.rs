@@ -379,6 +379,10 @@ where
             .await
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "recovery keeps dispatch selection, active-attempt binding and final verified observation in one fail-closed chain"
+    )]
     async fn recover_execution(
         &self,
         job: &ScheduledJob,
@@ -440,6 +444,22 @@ where
                 .await;
         }
         let execution_id = claimed_execution_id(job)?;
+        let Some(attempt_id) = self
+            .executions
+            .find_active_execution_attempt_id(execution_id)
+            .await?
+        else {
+            return self
+                .finish_recovery(
+                    job,
+                    ExecutionState::HumanRequired,
+                    Some(ProviderErrorClass::Internal),
+                    None,
+                    now,
+                    correlation_id,
+                )
+                .await;
+        };
         let _admission = self
             .acquire_admission(job, execution_id, &prepared.context, prepared.concurrency)
             .await?;
@@ -463,7 +483,8 @@ where
             Ok(verification) => {
                 self.finish_from_execution_verification(
                     job,
-                    &prepared.request.requested_capabilities,
+                    attempt_id,
+                    &prepared,
                     &verification,
                     finished_at,
                     correlation_id,
@@ -642,6 +663,16 @@ where
                     .iter()
                     .all(|candidate| candidate.position <= call.position)
                 {
+                    self.record_provider_completion_observation_for_attempt(
+                        job,
+                        attempt_id,
+                        execution_id,
+                        &prepared,
+                        &verification,
+                        finished_at,
+                        correlation_id,
+                    )
+                    .await?;
                     self.finish_recovery(
                         job,
                         ExecutionState::Succeeded,
@@ -656,10 +687,22 @@ where
                         .await
                 }
             }
-            Ok(_) => {
+            Ok(verification) => {
                 if let Some(retry_at) = self.recovery_retry_at(job, finished_at)? {
                     self.defer_recovery(job, retry_at, finished_at).await
                 } else {
+                    if verification.verified && verification.validate().is_ok() {
+                        self.record_provider_completion_observation_for_attempt(
+                            job,
+                            attempt_id,
+                            execution_id,
+                            &prepared,
+                            &verification,
+                            finished_at,
+                            correlation_id,
+                        )
+                        .await?;
+                    }
                     self.finish_recovery(
                         job,
                         ExecutionState::HumanRequired,
@@ -1246,6 +1289,24 @@ where
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
         match remote_state {
             RemoteState::Completed => {
+                let execution_id = claimed_execution_id(job)?;
+                let execution_attempt_id = self
+                    .executions
+                    .find_active_execution_attempt_id(execution_id)
+                    .await?
+                    .ok_or(ScheduledExecutionRunError::StateConflict)?;
+                self.record_completion_observation(
+                    job,
+                    execution_attempt_id,
+                    execution_id,
+                    crate::CompletionObservation {
+                        outcome: Some(asterism_domain::CompletionOutcome::Completed),
+                        diagnosis: None,
+                    },
+                    at,
+                    correlation_id,
+                )
+                .await?;
                 self.finish_recovery(
                     job,
                     ExecutionState::Succeeded,
@@ -1314,12 +1375,24 @@ where
     async fn finish_from_execution_verification(
         &self,
         job: &ScheduledJob,
-        capabilities: &[TaskCapability],
+        execution_attempt_id: asterism_domain::ExecutionAttemptId,
+        prepared: &PreparedProviderCall,
         verification: &asterism_provider_api::ExecutionOutcome,
         at: Timestamp,
         correlation_id: &str,
     ) -> Result<ScheduledExecutionOutcome, ScheduledExecutionRunError> {
-        if execution_goal_verified(capabilities, verification) {
+        let reliable = verification.verified && verification.validate().is_ok();
+        if execution_goal_verified(&prepared.request.requested_capabilities, verification) {
+            self.record_provider_completion_observation_for_attempt(
+                job,
+                execution_attempt_id,
+                claimed_execution_id(job)?,
+                prepared,
+                verification,
+                at,
+                correlation_id,
+            )
+            .await?;
             return self
                 .finish_recovery(
                     job,
@@ -1336,6 +1409,18 @@ where
                 if let Some(retry_at) = self.recovery_retry_at(job, at)? {
                     self.defer_recovery(job, retry_at, at).await
                 } else {
+                    if reliable {
+                        self.record_provider_completion_observation_for_attempt(
+                            job,
+                            execution_attempt_id,
+                            claimed_execution_id(job)?,
+                            prepared,
+                            verification,
+                            at,
+                            correlation_id,
+                        )
+                        .await?;
+                    }
                     self.finish_recovery(
                         job,
                         ExecutionState::HumanRequired,
@@ -1351,6 +1436,18 @@ where
             | RemoteState::NotOpen
             | RemoteState::Expired
             | RemoteState::Removed => {
+                if reliable {
+                    self.record_provider_completion_observation_for_attempt(
+                        job,
+                        execution_attempt_id,
+                        claimed_execution_id(job)?,
+                        prepared,
+                        verification,
+                        at,
+                        correlation_id,
+                    )
+                    .await?;
+                }
                 self.finish_recovery(
                     job,
                     ExecutionState::HumanRequired,
@@ -1831,7 +1928,7 @@ where
                         .await;
                 }
             };
-            if prepared.verification {
+            let verified_outcome = if prepared.verification {
                 let verification = prepared
                     .capability
                     .verify_execution(&prepared.context, &prepared.request);
@@ -1847,7 +1944,10 @@ where
                         if execution_goal_verified(
                             &prepared.request.requested_capabilities,
                             &outcome,
-                        ) => {}
+                        ) =>
+                    {
+                        outcome
+                    }
                     Ok(_) => {
                         return self
                             .begin_verification_recovery(
@@ -1869,17 +1969,19 @@ where
                             .await;
                     }
                 }
-            } else if !execution_goal_verified(&prepared.request.requested_capabilities, &mutation)
-            {
-                return self
-                    .begin_verification_recovery(
-                        job,
-                        attempt,
-                        ProviderErrorClass::InvalidRemoteState,
-                        correlation_id,
-                    )
-                    .await;
-            }
+            } else {
+                if !execution_goal_verified(&prepared.request.requested_capabilities, &mutation) {
+                    return self
+                        .begin_verification_recovery(
+                            job,
+                            attempt,
+                            ProviderErrorClass::InvalidRemoteState,
+                            correlation_id,
+                        )
+                        .await;
+                }
+                mutation
+            };
             let succeeded_at = Utc::now().max(issued_at);
             if call.capabilities.len() == 1 {
                 self.executions
@@ -1906,6 +2008,22 @@ where
                         at: succeeded_at,
                     })
                     .await?;
+            }
+            if call.position
+                == calls
+                    .last()
+                    .expect("composite calls are non-empty")
+                    .position
+            {
+                self.record_provider_completion_observation(
+                    job,
+                    attempt,
+                    &prepared,
+                    &verified_outcome,
+                    succeeded_at,
+                    correlation_id,
+                )
+                .await?;
             }
         }
         self.finish_success(
@@ -2221,6 +2339,32 @@ where
         at: Timestamp,
         correlation_id: &str,
     ) -> Result<(), ScheduledExecutionRunError> {
+        self.record_provider_completion_observation_for_attempt(
+            job,
+            attempt.id,
+            attempt.execution_id,
+            prepared,
+            outcome,
+            at,
+            correlation_id,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "completion observation retains exact worker, attempt, Provider request and timestamp bindings"
+    )]
+    async fn record_provider_completion_observation_for_attempt(
+        &self,
+        job: &ScheduledJob,
+        execution_attempt_id: asterism_domain::ExecutionAttemptId,
+        execution_id: ExecutionId,
+        prepared: &PreparedProviderCall,
+        outcome: &asterism_provider_api::ExecutionOutcome,
+        at: Timestamp,
+        correlation_id: &str,
+    ) -> Result<(), ScheduledExecutionRunError> {
         let diagnosis = prepared
             .capability
             .completion_diagnosis(&prepared.request, outcome);
@@ -2228,8 +2372,8 @@ where
             .map_err(|_| ScheduledExecutionRunError::StateConflict)?;
         self.record_completion_observation(
             job,
-            attempt.id,
-            attempt.execution_id,
+            execution_attempt_id,
+            execution_id,
             observation,
             at,
             correlation_id,
@@ -5154,6 +5298,21 @@ mod tests {
                 (2, "resource_execution".to_owned(), "succeeded".to_owned()),
             ]
         );
+        let completion: (i64, String, Option<String>) = sqlx::query_as(
+            "SELECT COUNT(*), workflow.state, observation.completion_outcome \
+             FROM strict_completion_execution_observations AS observation \
+             INNER JOIN strict_completion_workflows AS workflow \
+                     ON workflow.id = observation.workflow_id \
+             WHERE observation.execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            completion,
+            (1, "completed".to_owned(), Some("completed".to_owned()))
+        );
     }
 
     #[tokio::test]
@@ -5573,6 +5732,21 @@ mod tests {
         assert_eq!(*fixture.provider.progress_calls.lock().unwrap(), 1);
         let state = fixture.persisted_state().await;
         assert_eq!(state, ("succeeded".to_owned(), "succeeded".to_owned(), 100));
+        let completion: (String, Option<String>) = sqlx::query_as(
+            "SELECT workflow.state, observation.completion_outcome \
+             FROM strict_completion_execution_observations AS observation \
+             INNER JOIN strict_completion_workflows AS workflow \
+                     ON workflow.id = observation.workflow_id \
+             WHERE observation.execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            completion,
+            ("completed".to_owned(), Some("completed".to_owned()))
+        );
     }
 
     #[tokio::test]
@@ -5661,6 +5835,15 @@ mod tests {
         assert!(jobs.contains(&("execution".to_owned(), "cancelled".to_owned())));
         assert!(jobs.contains(&("recovery".to_owned(), "completed".to_owned())));
         assert!(jobs.contains(&("retry".to_owned(), "pending".to_owned())));
+        let observation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM strict_completion_execution_observations \
+             WHERE execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(observation_count, 0);
     }
 
     #[tokio::test]

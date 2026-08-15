@@ -2250,6 +2250,11 @@ pub trait ExecutionRepository: Send + Sync {
         execution_id: ExecutionId,
     ) -> Result<Option<ProviderExecutionPlanArtifact>, StorageError>;
 
+    async fn find_active_execution_attempt_id(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionAttemptId>, StorageError>;
+
     async fn start_attempt(
         &self,
         request: ExecutionAttemptStartRequest<'_>,
