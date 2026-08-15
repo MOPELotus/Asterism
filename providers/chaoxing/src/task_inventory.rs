@@ -1137,7 +1137,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(tasks.len(), 16);
+        assert_eq!(tasks.len(), 17);
         assert_eq!(
             tasks
                 .iter()
@@ -1150,7 +1150,7 @@ mod tests {
                 .iter()
                 .filter(|task| task.source_type == SourceType::Resource)
                 .count(),
-            4
+            5
         );
         assert_eq!(
             tasks

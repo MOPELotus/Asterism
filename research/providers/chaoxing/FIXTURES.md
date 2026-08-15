@@ -68,9 +68,11 @@ Exam result fixture covers the same facts after a strictly bound fresh preview
 read, while the Work detail fixtures cover conservative redirect classification.
 The Chapter and Resource fixtures cover stable knowledge/job identity, locked
 and completed state, the exact resource type split, empty card slots, execution
-token redaction, immediate Document/Read routing, Video object/report metadata,
-donor-compatible signature construction, bounded playback settings, and Live
-route identity redaction plus ordered heartbeat issue/receipt sequencing.
+token redaction, immediate Document/Read routing, structurally distinct
+`insertvideo`/`insertaudio` media with separate object/report metadata,
+donor-compatible signature/Referer/`dtype` construction, bounded playback
+settings, and Live route identity redaction plus ordered heartbeat issue/receipt
+sequencing.
 Resource mutation receipts remain provisional until fresh-card result
 verification.
 The Question fixtures separate CxKitty's mobile Chapter Work and Exam structures
@@ -233,6 +235,10 @@ every fixture before staging it.
   the complete scan, and redirects are not accepted as result evidence.
 - Remote IDs remain stable across scans while mutable status/time facts produce a
   typed diff.
+- Audio regression must require an exact fresh `property.module=insertaudio`,
+  use the Audio Referer and `dtype=Audio`, retain the same signed object/job
+  binding, and verify completion from a separate fresh card read. No fixture may
+  authorize switching from Video to Audio after an ambiguous request failure.
 - Exam start fixtures must prove that the read-only cover freezes the exact
   course/class/exam/attempt request, that a second fresh discovery matches the
   encrypted continuation, and that only normalized Questions plus bounded

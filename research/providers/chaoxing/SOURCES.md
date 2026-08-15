@@ -65,6 +65,12 @@ atomic credential commit remain shared runtime responsibilities.
 
 ## Refresh log
 
+- 2026-08-15: refreshed all six donor default branches; every recorded revision
+  remains unchanged. The Audio checkpoint re-audited Samueli's shared
+  status/report/signature flow and Audio Referer/`dtype`, plus OCS's exact
+  `property.module=insertaudio|insertvideo` card distinction. Asterism uses the
+  structural distinction and deliberately rejects Samueli's undifferentiated
+  Video-failure-to-Audio fallback.
 - 2026-08-14: completed the mandatory one-time full upstream sweep in
   `FULL_UPSTREAM_SWEEP.md`: complete default-branch trees, README/config,
   implementation, tags/Releases, issues/examples and known fixtures were

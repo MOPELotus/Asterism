@@ -23,6 +23,28 @@ pub(crate) enum ChaoxingImmediateResourceKind {
     Read,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChaoxingMediaKind {
+    Video,
+    Audio,
+}
+
+impl ChaoxingMediaKind {
+    pub(crate) const fn resource_kind(self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::Audio => "audio",
+        }
+    }
+
+    pub(crate) const fn dtype(self) -> &'static str {
+        match self {
+            Self::Video => "Video",
+            Self::Audio => "Audio",
+        }
+    }
+}
+
 pub(crate) struct ChaoxingImmediateResourceTarget {
     kind: ChaoxingImmediateResourceKind,
     remote_state: RemoteState,
@@ -45,7 +67,8 @@ impl ChaoxingVideoRt {
     }
 }
 
-pub(crate) struct ChaoxingVideoResourceTarget {
+pub(crate) struct ChaoxingMediaResourceTarget {
+    kind: ChaoxingMediaKind,
     remote_state: RemoteState,
     job_id: String,
     object_id: SecretString,
@@ -117,7 +140,11 @@ impl Drop for ChaoxingChapterWorkTarget {
     }
 }
 
-impl ChaoxingVideoResourceTarget {
+impl ChaoxingMediaResourceTarget {
+    pub(crate) const fn kind(&self) -> ChaoxingMediaKind {
+        self.kind
+    }
+
     pub(crate) const fn remote_state(&self) -> RemoteState {
         self.remote_state
     }
@@ -155,10 +182,11 @@ impl ChaoxingVideoResourceTarget {
     }
 }
 
-impl std::fmt::Debug for ChaoxingVideoResourceTarget {
+impl std::fmt::Debug for ChaoxingMediaResourceTarget {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("ChaoxingVideoResourceTarget")
+            .debug_struct("ChaoxingMediaResourceTarget")
+            .field("kind", &self.kind)
             .field("remote_state", &self.remote_state)
             .field("job_id", &"[REDACTED]")
             .field("object_id", &"[REDACTED]")
@@ -422,19 +450,19 @@ pub(crate) fn locate_immediate_resource_target(
     Ok(found)
 }
 
-/// Locates one fresh Video target without persisting its report credentials.
+/// Locates one fresh Video or Audio target without persisting report credentials.
 ///
 /// # Errors
 ///
 /// Returns a typed error for foreign identities, duplicate cards, malformed
-/// video metadata, or a task which is not a Video resource.
-pub(crate) fn locate_video_resource_target(
+/// media metadata, or a task which is not a supported media resource.
+pub(crate) fn locate_media_resource_target(
     html: &str,
     scope: &ChaoxingCourseScope,
     knowledge_id: &str,
     card_index: u8,
     remote_task_id: &str,
-) -> ProviderResult<Option<ChaoxingVideoResourceTarget>> {
+) -> ProviderResult<Option<ChaoxingMediaResourceTarget>> {
     if html.is_empty() || html.len() > MAX_CARD_DOCUMENT_BYTES {
         return Err(invalid_response(
             "Chaoxing chapter card document is empty or exceeds the size limit",
@@ -453,7 +481,7 @@ pub(crate) fn locate_video_resource_target(
     );
     let expected_task_id = remote_task_id
         .strip_prefix(&prefix)
-        .ok_or_else(|| protocol_drift("Chaoxing Video target is outside the current scope"))?;
+        .ok_or_else(|| protocol_drift("Chaoxing media target is outside the current scope"))?;
     validate_component(expected_task_id, "resource identity")?;
     if html.contains("章节未开放") {
         return Ok(None);
@@ -472,37 +500,42 @@ pub(crate) fn locate_video_resource_target(
         }
         if found.is_some() {
             return Err(protocol_drift(
-                "Chaoxing chapter card contains a duplicate Video target",
+                "Chaoxing chapter card contains a duplicate media target",
             ));
         }
-        if task.normalized.get("resource_kind").and_then(Value::as_str) != Some("video") {
-            return Err(ProviderError::new(
-                ProviderErrorKind::UnsupportedTask,
-                "Chaoxing resource kind is not a Video task",
-            ));
-        }
+        let kind = match task.normalized.get("resource_kind").and_then(Value::as_str) {
+            Some("video") => ChaoxingMediaKind::Video,
+            Some("audio") => ChaoxingMediaKind::Audio,
+            _ => {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::UnsupportedTask,
+                    "Chaoxing resource kind is not a supported media task",
+                ));
+            }
+        };
         let card = attachment
             .as_object()
             .ok_or_else(|| protocol_drift("Chaoxing chapter attachment is not an object"))?;
         let property = optional_object(card, "property")?;
         let job_id = optional_string(card, "jobid")?
             .filter(|job_id| *job_id == expected_task_id)
-            .ok_or_else(|| protocol_drift("Chaoxing Video has no matching job identity"))?
+            .ok_or_else(|| protocol_drift("Chaoxing media has no matching job identity"))?
             .to_owned();
-        let object_id = required_ephemeral_string(card, "objectId", "Video object identity")?;
-        validate_component(object_id, "Video object identity")?;
-        let other_info = required_ephemeral_string(card, "otherInfo", "Video report context")?
+        let object_id = required_ephemeral_string(card, "objectId", "media object identity")?;
+        validate_component(object_id, "media object identity")?;
+        let other_info = required_ephemeral_string(card, "otherInfo", "media report context")?
             .split('&')
             .next()
-            .ok_or_else(|| protocol_drift("Chaoxing Video report context is empty"))?;
+            .ok_or_else(|| protocol_drift("Chaoxing media report context is empty"))?;
         let initial_play_time_millis = optional_u64(card, "playTime")?.unwrap_or_default();
         if initial_play_time_millis > MAX_VIDEO_PLAY_TIME_MILLIS {
             return Err(protocol_drift(
-                "Chaoxing Video initial progress exceeds the safety limit",
+                "Chaoxing media initial progress exceeds the safety limit",
             ));
         }
         let rt = parse_video_rt(optional_string(property, "rt")?, other_info)?;
-        found = Some(ChaoxingVideoResourceTarget {
+        found = Some(ChaoxingMediaResourceTarget {
+            kind,
             remote_state: task.remote_state,
             job_id,
             object_id: SecretString::new(object_id),
@@ -877,11 +910,11 @@ fn parse_resource_attachment(
                 TaskCapability::SubmissionExecute,
                 TaskCapability::SubmissionVerify,
             ],
-            ("document" | "read" | "video" | "live", RemoteState::Pending) => vec![
+            ("document" | "read" | "video" | "audio" | "live", RemoteState::Pending) => vec![
                 TaskCapability::ProgressRead,
                 TaskCapability::ResourceExecution,
             ],
-            ("document" | "read" | "video", RemoteState::Completed) => {
+            ("document" | "read" | "video" | "audio", RemoteState::Completed) => {
                 vec![TaskCapability::ProgressRead]
             }
             ("live", RemoteState::Completed) => vec![TaskCapability::ProgressRead],
@@ -970,6 +1003,7 @@ fn skip_ascii_whitespace(bytes: &[u8], cursor: &mut usize) {
 fn classify_resource_kind(card_type: &str, property: &Map<String, Value>) -> Option<&'static str> {
     let property_type = optional_unchecked_string(property, "type").to_ascii_lowercase();
     let resource_type = optional_unchecked_string(property, "resourceType").to_ascii_lowercase();
+    let property_module = optional_unchecked_string(property, "module").to_ascii_lowercase();
     let live = card_type.contains("live")
         || property_type.contains("live")
         || resource_type.contains("live")
@@ -980,6 +1014,7 @@ fn classify_resource_kind(card_type: &str, property: &Map<String, Value>) -> Opt
         Some("live")
     } else {
         match card_type {
+            "video" if property_module == "insertaudio" => Some("audio"),
             "video" => Some("video"),
             "document" => Some("document"),
             "workid" => Some("chapter_work"),
@@ -1154,48 +1189,26 @@ mod tests {
             selected,
             serde_json::from_str::<Value>(CARDS_EXPECTED).unwrap()
         );
-        assert_eq!(
-            tasks
-                .iter()
-                .find(|task| task.remote_id.ends_with(":job-read"))
-                .map(|task| task.capabilities.as_slice()),
-            Some(
-                [
-                    TaskCapability::ProgressRead,
-                    TaskCapability::ResourceExecution,
-                ]
-                .as_slice()
-            )
-        );
-        assert!(
-            tasks
-                .iter()
-                .find(|task| task.remote_id.ends_with(":job-video"))
-                .is_some_and(|task| {
-                    task.capabilities
-                        == [
-                            TaskCapability::ProgressRead,
-                            TaskCapability::ResourceExecution,
-                        ]
-                })
-        );
+        for suffix in ["read", "video", "audio", "live"] {
+            assert!(
+                tasks
+                    .iter()
+                    .find(|task| task.remote_id.ends_with(&format!(":job-{suffix}")))
+                    .is_some_and(|task| {
+                        task.capabilities
+                            == [
+                                TaskCapability::ProgressRead,
+                                TaskCapability::ResourceExecution,
+                            ]
+                    }),
+                "{suffix} capability mismatch"
+            );
+        }
         assert!(
             tasks
                 .iter()
                 .find(|task| task.remote_id.ends_with(":job-document"))
                 .is_some_and(|task| task.capabilities == [TaskCapability::ProgressRead])
-        );
-        assert!(
-            tasks
-                .iter()
-                .find(|task| task.remote_id.ends_with(":job-live"))
-                .is_some_and(|task| {
-                    task.capabilities
-                        == [
-                            TaskCapability::ProgressRead,
-                            TaskCapability::ResourceExecution,
-                        ]
-                })
         );
         assert!(
             tasks
@@ -1222,6 +1235,8 @@ mod tests {
             "PRIVATE_READ_TOKEN",
             "SAFE_VIDEO_OBJECT",
             "SAFE_VIDEO_REPORT",
+            "SAFE_AUDIO_OBJECT",
+            "SAFE_AUDIO_REPORT",
             "SAFE_FACE_ENC",
         ] {
             assert!(!serialized.contains(private));
@@ -1374,8 +1389,8 @@ mod tests {
     }
 
     #[test]
-    fn video_locator_keeps_report_credentials_ephemeral_and_bounded() {
-        let video = locate_video_resource_target(
+    fn media_locator_keeps_kind_and_report_credentials_ephemeral_and_bounded() {
+        let video = locate_media_resource_target(
             CARDS_MIXED,
             &scope(),
             "4001",
@@ -1384,6 +1399,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        assert_eq!(video.kind(), ChaoxingMediaKind::Video);
         assert_eq!(video.remote_state(), RemoteState::Pending);
         assert_eq!(video.job_id(), "job-video");
         assert_eq!(video.object_id().expose_secret(), "SAFE_VIDEO_OBJECT");
@@ -1398,8 +1414,24 @@ mod tests {
         assert!(!debug.contains("SAFE_VIDEO_OBJECT"));
         assert!(!debug.contains("SAFE_VIDEO_REPORT"));
 
+        let audio = locate_media_resource_target(
+            CARDS_MIXED,
+            &scope(),
+            "4001",
+            0,
+            "resource:100:200:4001:job-audio",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(audio.kind(), ChaoxingMediaKind::Audio);
+        assert_eq!(audio.job_id(), "job-audio");
+        assert_eq!(audio.object_id().expose_secret(), "SAFE_AUDIO_OBJECT");
+        assert_eq!(audio.other_info().expose_secret(), "SAFE_AUDIO_REPORT-rt_1");
+        assert_eq!(audio.initial_play_time_millis(), 5_000);
+        assert_eq!(audio.rt(), Some(ChaoxingVideoRt::One));
+
         assert!(
-            locate_video_resource_target(
+            locate_media_resource_target(
                 &CARDS_MIXED.replace("\"objectId\":\"SAFE_VIDEO_OBJECT\"", "\"objectId\":null"),
                 &scope(),
                 "4001",
@@ -1409,7 +1441,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            locate_video_resource_target(
+            locate_media_resource_target(
                 CARDS_MIXED,
                 &scope(),
                 "4001",

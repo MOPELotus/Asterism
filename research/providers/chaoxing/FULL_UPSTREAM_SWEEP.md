@@ -31,7 +31,7 @@ The refreshed symbolic revisions are unchanged:
 | Donor behavior | Asterism mapping | Classification |
 |---|---|---|
 | Password/Cookie login, session validation, Course/folder/Chapter inventory | Authentication, CourseInventory and TaskInventory | Implemented; QR remains a shared interactive-auth gap |
-| Video, Document, Read, Live, Audio and hyperlink cards | Resource inventory/execution families | Video, Document, Read and Live checkpoints implemented; Audio and hyperlink require fresh fixtures and bounded execution verification |
+| Video, Document, Read, Live, Audio and hyperlink cards | Resource inventory/execution families | Video, Audio, Document, Read and Live checkpoints implemented with fresh-card verification; hyperlink still requires a Browser fixture and bounded execution verification |
 | Chapter Work, independent Work and formal Exam discovery | Distinct Task source/assessment facts | Implemented for audited inventory routes |
 | Work/Exam question read and mutation | QuestionInventory/Parse and Submission capabilities | Native subsets implemented; rendered long-tail controls require BrowserBridge |
 | `submit` plus `cover_rate=0.9` | minimum submission coverage over the complete snapshot | Shared Core Gap; current Core requires one selected candidate per Question |
@@ -50,9 +50,11 @@ Video-to-Audio fallback; CxKitty's QR session, face upload and independent Exam
 export; OCS's PPT/book page turns, timed Read, in-video questions and repeated
 study controls; and historical `cxmooc-tools` Audio, Document, result collection
 and course-wide Exam lookup. They remain explicit capability candidates rather
-than being treated as out of scope. Sign-in, learning-count manipulation,
-Audio, in-video Questions and Browser-only long-tail interactions need separate
-fresh fixtures and durable mutation/verification designs before registration.
+than being treated as out of scope. Audio is now implemented only from OCS's
+explicit `insertaudio` card fact and never through failure-driven fallback.
+Sign-in, learning-count manipulation, in-video Questions and Browser-only
+long-tail interactions still need separate fresh fixtures and durable
+mutation/verification designs before registration.
 
 ## Observed Question boundary
 

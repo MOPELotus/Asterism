@@ -17,8 +17,8 @@ use crate::{
     parse_chapter_inventory, parse_chapter_resource_inventory,
     resource_inventory::{
         ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget, ChaoxingLiveResourceTarget,
-        ChaoxingVideoResourceTarget, locate_immediate_resource_target, locate_live_resource_target,
-        locate_video_resource_target,
+        ChaoxingMediaResourceTarget, locate_immediate_resource_target, locate_live_resource_target,
+        locate_media_resource_target,
     },
     runtime_settings::ChaoxingRuntimeSettings,
     task_inventory::CHAPTER_RESOURCE_CARD_COUNT,
@@ -93,14 +93,14 @@ pub(crate) trait ChaoxingVideoTransport: Send + Sync {
     async fn video_status(
         &self,
         context: &ProviderContext,
-        target: &ChaoxingVideoResourceTarget,
+        target: &ChaoxingMediaResourceTarget,
     ) -> ProviderResult<ChaoxingVideoStatus>;
 
     async fn report_video_progress(
         &self,
         context: &ProviderContext,
         route: ChaoxingCourseRoute<'_>,
-        target: &ChaoxingVideoResourceTarget,
+        target: &ChaoxingMediaResourceTarget,
         status: &ChaoxingVideoStatus,
         playing_time_seconds: u64,
     ) -> ProviderResult<bool>;
@@ -312,17 +312,17 @@ impl ChaoxingResourceExecution {
         locate_target(documents, route, request, remote_task_id)
     }
 
-    async fn fetch_video_target(
+    async fn fetch_media_target(
         &self,
         context: &ProviderContext,
         route: ChaoxingCourseRoute<'_>,
         request: &ChaoxingChapterResourceRequest,
         remote_task_id: &str,
-    ) -> ProviderResult<ChaoxingVideoResourceTarget> {
+    ) -> ProviderResult<ChaoxingMediaResourceTarget> {
         let documents = self
             .fetch_resource_documents(context, route, request)
             .await?;
-        locate_video_target(documents, route, request, remote_task_id)
+        locate_media_target(documents, route, request, remote_task_id)
     }
 
     async fn fetch_resource_documents(
@@ -356,7 +356,7 @@ impl ChaoxingResourceExecution {
         if !matches!(
             kind,
             ExecutableResourceKind::Immediate
-                | ExecutableResourceKind::Video
+                | ExecutableResourceKind::Media
                 | ExecutableResourceKind::Live
         ) {
             return Err(ProviderError::new(
@@ -463,25 +463,25 @@ impl ChaoxingResourceExecution {
         clippy::too_many_arguments,
         reason = "the video call keeps its Execution, route, fresh target, settings and event boundaries explicit"
     )]
-    async fn execute_video(
+    async fn execute_media(
         &self,
         context: &ProviderContext,
         route: ChaoxingCourseRoute<'_>,
         resource_request: &ChaoxingChapterResourceRequest,
         remote_task_id: &str,
-        target: &ChaoxingVideoResourceTarget,
+        target: &ChaoxingMediaResourceTarget,
         settings: ChaoxingRuntimeSettings,
         events: &(dyn ExecutionEventSink + Send + Sync),
     ) -> ProviderResult<ExecutionOutcome> {
         if target.remote_state() == RemoteState::Completed {
             events
                 .log(execution_log(
-                    "video_finalize",
-                    "视频已在远端完成，跳过重复上报",
+                    "media_finalize",
+                    "媒体已在远端完成，跳过重复上报",
                     None,
                 ))
                 .await?;
-            return Ok(video_outcome(true));
+            return Ok(media_outcome(target.kind().resource_kind(), true));
         }
         let status = self.video.video_status(context, target).await?;
         let duration = status.duration_seconds();
@@ -491,8 +491,8 @@ impl ChaoxingResourceExecution {
             .min(duration);
         events
             .log(execution_log(
-                "video_execute",
-                "开始按冻结运行参数上报视频进度",
+                "media_execute",
+                "开始按冻结运行参数上报媒体进度",
                 Some(serde_json::json!({
                     "playback_rate_millis": settings.video_playback_rate_millis,
                     "progress_interval_seconds": settings.video_progress_interval_seconds,
@@ -520,8 +520,8 @@ impl ChaoxingResourceExecution {
             events
                 .report(ProviderProgress {
                     percent: Some(percent),
-                    stage: "video_execute".to_owned(),
-                    status_text: Some("视频进度已上报".to_owned()),
+                    stage: "media_execute".to_owned(),
+                    status_text: Some("媒体进度已上报".to_owned()),
                     completed_items: Some(u32::from(passed)),
                     total_items: Some(1),
                 })
@@ -532,37 +532,40 @@ impl ChaoxingResourceExecution {
         }
         events
             .log(execution_log(
-                "video_verify",
-                "视频进度上报结束，开始复核远端任务状态",
+                "media_verify",
+                "媒体进度上报结束，开始复核远端任务状态",
                 None,
             ))
             .await?;
         let verified = self
-            .fetch_video_target(context, route, resource_request, remote_task_id)
+            .fetch_media_target(context, route, resource_request, remote_task_id)
             .await?;
         if verified.remote_state() != RemoteState::Completed {
             return Err(ProviderError::new(
                 ProviderErrorKind::RemoteChanged,
-                "Chaoxing Video did not become completed after progress reporting",
+                "Chaoxing media did not become completed after progress reporting",
             ));
         }
         events
             .report(ProviderProgress {
                 percent: Some(100),
-                stage: "video_verified".to_owned(),
-                status_text: Some("视频远端完成状态已复核".to_owned()),
+                stage: "media_verified".to_owned(),
+                status_text: Some("媒体远端完成状态已复核".to_owned()),
                 completed_items: Some(1),
                 total_items: Some(1),
             })
             .await?;
         events
             .log(execution_log(
-                "video_verified",
-                "视频远端完成状态已复核",
-                Some(serde_json::json!({"resource_kind": "video", "verified": true})),
+                "media_verified",
+                "媒体远端完成状态已复核",
+                Some(serde_json::json!({
+                    "resource_kind": target.kind().resource_kind(),
+                    "verified": true,
+                })),
             ))
             .await?;
-        Ok(video_outcome(false))
+        Ok(media_outcome(target.kind().resource_kind(), false))
     }
 
     #[allow(
@@ -776,14 +779,14 @@ impl TaskExecutionCapability for ChaoxingResourceExecution {
                 )
                 .await
             }
-            ExecutableResourceKind::Video => {
-                let target = locate_video_target(
+            ExecutableResourceKind::Media => {
+                let target = locate_media_target(
                     documents,
                     route,
                     &resource_request,
                     &request.remote_task_id,
                 )?;
-                self.execute_video(
+                self.execute_media(
                     context,
                     route,
                     &resource_request,
@@ -957,7 +960,7 @@ fn locate_live_target(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutableResourceKind {
     Immediate,
-    Video,
+    Media,
     Live,
     Unsupported,
 }
@@ -1004,7 +1007,7 @@ fn locate_resource_fact(
                 .and_then(serde_json::Value::as_str)
             {
                 Some("document" | "read") => ExecutableResourceKind::Immediate,
-                Some("video") => ExecutableResourceKind::Video,
+                Some("video" | "audio") => ExecutableResourceKind::Media,
                 Some("live") => ExecutableResourceKind::Live,
                 Some(_) => ExecutableResourceKind::Unsupported,
                 None => {
@@ -1023,15 +1026,15 @@ fn locate_resource_fact(
     found.ok_or_else(remote_resource_changed)
 }
 
-fn locate_video_target(
+fn locate_media_target(
     documents: Vec<ChaoxingChapterResourceDocument>,
     route: ChaoxingCourseRoute<'_>,
     request: &ChaoxingChapterResourceRequest,
     remote_task_id: &str,
-) -> ProviderResult<ChaoxingVideoResourceTarget> {
+) -> ProviderResult<ChaoxingMediaResourceTarget> {
     if documents.len() != usize::from(CHAPTER_RESOURCE_CARD_COUNT) {
         return Err(protocol_drift(
-            "Chaoxing Video execution received an incomplete card set",
+            "Chaoxing media execution received an incomplete card set",
         ));
     }
     let mut indexed = BTreeMap::new();
@@ -1040,7 +1043,7 @@ fn locate_video_target(
             || indexed.insert(document.card_index(), document).is_some()
         {
             return Err(protocol_drift(
-                "Chaoxing Video execution received a foreign or duplicate card",
+                "Chaoxing media execution received a foreign or duplicate card",
             ));
         }
     }
@@ -1049,8 +1052,8 @@ fn locate_video_target(
     for card_index in 0..CHAPTER_RESOURCE_CARD_COUNT {
         let document = indexed
             .remove(&card_index)
-            .ok_or_else(|| protocol_drift("Chaoxing Video execution omitted a card"))?;
-        let Some(target) = locate_video_resource_target(
+            .ok_or_else(|| protocol_drift("Chaoxing media execution omitted a card"))?;
+        let Some(target) = locate_media_resource_target(
             document.as_str(),
             &scope,
             request.knowledge_id(),
@@ -1062,7 +1065,7 @@ fn locate_video_target(
         };
         if found.replace(target).is_some() {
             return Err(protocol_drift(
-                "Chaoxing Video execution found the task on multiple cards",
+                "Chaoxing media execution found the task on multiple cards",
             ));
         }
     }
@@ -1130,13 +1133,13 @@ fn completed_outcome(
     }
 }
 
-fn video_outcome(already_completed: bool) -> ExecutionOutcome {
+fn media_outcome(resource_kind: &str, already_completed: bool) -> ExecutionOutcome {
     ExecutionOutcome {
         remote_state: RemoteState::Completed,
         verified: true,
         result_sanitized: serde_json::json!({
-            "schema": "chaoxing.video-result.v1",
-            "resource_kind": "video",
+            "schema": "chaoxing.media-result.v1",
+            "resource_kind": resource_kind,
             "already_completed": already_completed,
             "verification": "fresh_card_state",
         }),
@@ -1219,6 +1222,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::resource_inventory::ChaoxingMediaKind;
     use crate::{ChaoxingInventoryDocument, ChaoxingWorkDetailRequest, ChaoxingWorkDetailState};
 
     const CHAPTER_MIXED: &str =
@@ -1230,6 +1234,7 @@ mod tests {
         metadata: ProviderMetadata,
         completed_read: AtomicBool,
         completed_video: AtomicBool,
+        completed_audio: AtomicBool,
         completed_live: AtomicBool,
         reject_next_live: AtomicBool,
         resource_calls: AtomicUsize,
@@ -1246,6 +1251,7 @@ mod tests {
                 metadata: development_metadata().unwrap(),
                 completed_read: AtomicBool::new(completed_read),
                 completed_video: AtomicBool::new(false),
+                completed_audio: AtomicBool::new(false),
                 completed_live: AtomicBool::new(false),
                 reject_next_live: AtomicBool::new(false),
                 resource_calls: AtomicUsize::new(0),
@@ -1319,6 +1325,12 @@ mod tests {
                     "\"jobid\":\"job-video\",\"isPassed\":true",
                 );
             }
+            if self.completed_audio.load(Ordering::Relaxed) {
+                first = first.replace(
+                    "\"jobid\":\"job-audio\",\"isPassed\":false",
+                    "\"jobid\":\"job-audio\",\"isPassed\":true",
+                );
+            }
             if self.completed_live.load(Ordering::Relaxed) {
                 first = first.replace(
                     "\"jobid\":\"job-live\",\"isPassed\":false",
@@ -1384,17 +1396,25 @@ mod tests {
         async fn video_status(
             &self,
             _context: &ProviderContext,
-            target: &ChaoxingVideoResourceTarget,
+            target: &ChaoxingMediaResourceTarget,
         ) -> ProviderResult<ChaoxingVideoStatus> {
-            assert_eq!(target.job_id(), "job-video");
-            ChaoxingVideoStatus::try_new("SAFE_REPORT_TOKEN", 135, 15)
+            match target.kind() {
+                ChaoxingMediaKind::Video => {
+                    assert_eq!(target.job_id(), "job-video");
+                    ChaoxingVideoStatus::try_new("SAFE_VIDEO_TOKEN", 135, 15)
+                }
+                ChaoxingMediaKind::Audio => {
+                    assert_eq!(target.job_id(), "job-audio");
+                    ChaoxingVideoStatus::try_new("SAFE_AUDIO_TOKEN", 65, 5)
+                }
+            }
         }
 
         async fn report_video_progress(
             &self,
             _context: &ProviderContext,
             _route: ChaoxingCourseRoute<'_>,
-            _target: &ChaoxingVideoResourceTarget,
+            target: &ChaoxingMediaResourceTarget,
             _status: &ChaoxingVideoStatus,
             playing_time_seconds: u64,
         ) -> ProviderResult<bool> {
@@ -1402,8 +1422,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(playing_time_seconds);
-            let completed = playing_time_seconds == 135;
-            self.completed_video.store(completed, Ordering::Relaxed);
+            let completed = match target.kind() {
+                ChaoxingMediaKind::Video => playing_time_seconds == 135,
+                ChaoxingMediaKind::Audio => playing_time_seconds == 65,
+            };
+            match target.kind() {
+                ChaoxingMediaKind::Video => {
+                    self.completed_video.store(completed, Ordering::Relaxed);
+                }
+                ChaoxingMediaKind::Audio => {
+                    self.completed_audio.store(completed, Ordering::Relaxed);
+                }
+            }
             Ok(completed)
         }
     }
@@ -1573,6 +1603,13 @@ mod tests {
         assert_eq!(pending_video.remote_state, RemoteState::Pending);
         assert_eq!(pending_video.percent, Some(0));
 
+        let pending_audio = execution
+            .read_progress(&context(), "resource:100:200:4001:job-audio")
+            .await
+            .unwrap();
+        assert_eq!(pending_audio.remote_state, RemoteState::Pending);
+        assert_eq!(pending_audio.percent, Some(0));
+
         let pending_live = execution
             .read_progress(&context(), "resource:100:200:4001:job-live")
             .await
@@ -1648,6 +1685,41 @@ mod tests {
         assert_eq!(fixture.resource_calls.load(Ordering::Relaxed), 2);
         assert_eq!(fixture.execute_calls.load(Ordering::Relaxed), 0);
         assert_eq!(events.progress.load(Ordering::Relaxed), 3);
+        assert_eq!(events.logs.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn audio_execution_uses_explicit_kind_and_fresh_card_verification() {
+        let fixture = Arc::new(FixtureProvider::new(false));
+        let mut execution = ChaoxingResourceExecution::try_new(
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        execution.video_sleeper = fixture.clone();
+        let events = RecordingEvents::default();
+        let outcome = execution
+            .execute(
+                &context(),
+                &execution_request_with_speed("resource:100:200:4001:job-audio", 2_000),
+                &events,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.remote_state, RemoteState::Completed);
+        assert!(outcome.verified);
+        assert_eq!(outcome.result_sanitized["resource_kind"], "audio");
+        assert_eq!(*fixture.video_reports.lock().unwrap(), [65_u64]);
+        assert_eq!(
+            *fixture.video_sleeps.lock().unwrap(),
+            [Duration::from_secs(30)]
+        );
+        assert_eq!(fixture.resource_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(events.progress.load(Ordering::Relaxed), 2);
         assert_eq!(events.logs.load(Ordering::Relaxed), 3);
     }
 

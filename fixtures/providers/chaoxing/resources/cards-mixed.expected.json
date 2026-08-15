@@ -7,6 +7,13 @@
     "resource_kind": "video"
   },
   {
+    "remote_id": "resource:100:200:4001:job-audio",
+    "title": "音频导论",
+    "source_type": "resource",
+    "remote_state": "pending",
+    "resource_kind": "audio"
+  },
+  {
     "remote_id": "resource:100:200:4001:job-document",
     "title": "课程讲义",
     "source_type": "resource",

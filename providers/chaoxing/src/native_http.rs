@@ -38,7 +38,8 @@ use crate::{
     },
     resource_inventory::{
         ChaoxingChapterWorkTarget, ChaoxingImmediateResourceKind, ChaoxingImmediateResourceTarget,
-        ChaoxingLiveResourceTarget, ChaoxingVideoResourceTarget, ChaoxingVideoRt,
+        ChaoxingLiveResourceTarget, ChaoxingMediaKind, ChaoxingMediaResourceTarget,
+        ChaoxingVideoRt,
     },
     submission_support::ChaoxingSubmissionForm,
     task_inventory::{
@@ -60,6 +61,8 @@ const VIDEO_STATUS_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const VIDEO_REPORT_ORIGIN: &str = "https://mooc1.chaoxing.com";
 const VIDEO_REFERER: &str =
     "https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2025-0725-1842";
+const AUDIO_REFERER: &str =
+    "https://mooc1.chaoxing.com/ananas/modules/audio/index_new.html?v=2025-0725-1842";
 const LIVE_STATUS_BASE: &str = "https://mooc1.chaoxing.com/ananas/live/liveinfo";
 const LIVE_REPORT_BASE: &str = "https://zhibo.chaoxing.com/saveTimePc";
 const LIVE_REFERER: &str =
@@ -760,14 +763,14 @@ impl NativeChaoxingInventoryTransport {
     async fn video_status_once(
         &self,
         session: &ChaoxingCookieSession,
-        target: &ChaoxingVideoResourceTarget,
+        target: &ChaoxingMediaResourceTarget,
     ) -> ProviderResult<ChaoxingVideoStatus> {
         let response = self
             .client
             .get(video_status_url(session, target)?)
             .header(COOKIE, session.header_value()?)
             .header(ACCEPT, "application/json,text/plain,*/*")
-            .header(REFERER, VIDEO_REFERER)
+            .header(REFERER, media_referer(target.kind()))
             .send()
             .await
             .map_err(|error| classify_reqwest_error(&error))?;
@@ -791,7 +794,7 @@ impl NativeChaoxingInventoryTransport {
         &self,
         session: &ChaoxingCookieSession,
         route: ChaoxingCourseRoute<'_>,
-        target: &ChaoxingVideoResourceTarget,
+        target: &ChaoxingMediaResourceTarget,
         status: &ChaoxingVideoStatus,
         playing_time_seconds: u64,
     ) -> ProviderResult<bool> {
@@ -812,7 +815,7 @@ impl NativeChaoxingInventoryTransport {
                 )?)
                 .header(COOKIE, session.header_value()?)
                 .header(ACCEPT, "application/json,text/plain,*/*")
-                .header(REFERER, VIDEO_REFERER)
+                .header(REFERER, media_referer(target.kind()))
                 .send()
                 .await
                 .map_err(|error| classify_reqwest_error(&error))?;
@@ -1323,7 +1326,7 @@ impl ChaoxingVideoTransport for NativeChaoxingInventoryTransport {
     async fn video_status(
         &self,
         context: &ProviderContext,
-        target: &ChaoxingVideoResourceTarget,
+        target: &ChaoxingMediaResourceTarget,
     ) -> ProviderResult<ChaoxingVideoStatus> {
         let (session, renewed) = self.session_for_operation(context).await?;
         match self.video_status_once(&session, target).await {
@@ -1339,7 +1342,7 @@ impl ChaoxingVideoTransport for NativeChaoxingInventoryTransport {
         &self,
         context: &ProviderContext,
         route: ChaoxingCourseRoute<'_>,
-        target: &ChaoxingVideoResourceTarget,
+        target: &ChaoxingMediaResourceTarget,
         status: &ChaoxingVideoStatus,
         playing_time_seconds: u64,
     ) -> ProviderResult<bool> {
@@ -1682,7 +1685,7 @@ fn immediate_resource_url(
 
 fn video_status_url(
     session: &ChaoxingCookieSession,
-    target: &ChaoxingVideoResourceTarget,
+    target: &ChaoxingMediaResourceTarget,
 ) -> ProviderResult<Url> {
     let mut url = static_url(VIDEO_STATUS_ORIGIN)?;
     url.path_segments_mut()
@@ -1698,7 +1701,7 @@ fn video_status_url(
 fn video_report_url(
     session: &ChaoxingCookieSession,
     route: ChaoxingCourseRoute<'_>,
-    target: &ChaoxingVideoResourceTarget,
+    target: &ChaoxingMediaResourceTarget,
     status: &ChaoxingVideoStatus,
     playing_time_seconds: u64,
     rt: ChaoxingVideoRt,
@@ -1760,7 +1763,7 @@ fn video_report_url(
             .append_pair("isdrag", "3")
             .append_pair("view", "pc")
             .append_pair("enc", &signature)
-            .append_pair("dtype", "Video")
+            .append_pair("dtype", target.kind().dtype())
             .append_pair("rt", rt.as_str())
             .append_pair("_t", &timestamp);
         if let Some(value) = target.face_capture_enc() {
@@ -1774,6 +1777,13 @@ fn video_report_url(
         }
     }
     Ok(url)
+}
+
+const fn media_referer(kind: ChaoxingMediaKind) -> &'static str {
+    match kind {
+        ChaoxingMediaKind::Video => VIDEO_REFERER,
+        ChaoxingMediaKind::Audio => AUDIO_REFERER,
+    }
 }
 
 fn live_status_url(
@@ -2247,7 +2257,7 @@ mod tests {
         let course = course();
         let route = ChaoxingCourseRoute::from_remote_course(&course).unwrap();
         let scope = route.parser_scope().unwrap();
-        let target = crate::resource_inventory::locate_video_resource_target(
+        let target = crate::resource_inventory::locate_media_resource_target(
             RESOURCE_MIXED,
             &scope,
             "4001",
@@ -2297,6 +2307,45 @@ mod tests {
             !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
         }));
         assert!(!report.as_str().contains("SAFE_UF"));
+
+        let audio = crate::resource_inventory::locate_media_resource_target(
+            RESOURCE_MIXED,
+            &scope,
+            "4001",
+            0,
+            "resource:100:200:4001:job-audio",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(audio.kind(), ChaoxingMediaKind::Audio);
+        assert_eq!(media_referer(audio.kind()), AUDIO_REFERER);
+        let audio_status = ChaoxingVideoStatus::try_new("SAFE_AUDIO_TOKEN", 65, 5).unwrap();
+        let audio_report = video_report_url(
+            &session,
+            route,
+            &audio,
+            &audio_status,
+            65,
+            ChaoxingVideoRt::One,
+        )
+        .unwrap();
+        assert_eq!(
+            audio_report.path(),
+            "/mooc-ans/multimedia/log/a/300/SAFE_AUDIO_TOKEN"
+        );
+        for (key, expected) in [
+            ("objectId", "SAFE_AUDIO_OBJECT"),
+            ("otherInfo", "SAFE_AUDIO_REPORT-rt_1"),
+            ("jobid", "job-audio"),
+            ("dtype", "Audio"),
+            ("rt", "1"),
+        ] {
+            assert_eq!(
+                query(&audio_report, key).as_deref(),
+                Some(expected),
+                "{key}"
+            );
+        }
     }
 
     #[test]

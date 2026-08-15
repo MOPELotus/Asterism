@@ -10,11 +10,11 @@ source modules even when their assessments share field names or HTML shapes.
 | Session persistence and expiry | `Samueli924/chaoxing` | CxKitty | Reference | Cookie import plus `_uid`/SSO or course-list validation |
 | CourseInventory | `Samueli924/chaoxing` | CxKitty | PortSource | Web `courselistdata`, interaction folder discovery and merge are offline-covered; live session validation remains pending |
 | ChapterModule inventory | `Samueli924/chaoxing` | CxKitty | Reference | Native chapter tree and bounded 0-6 card inventory are offline-covered; live pending |
-| ResourceExecution | `Samueli924/chaoxing` | CxKitty | Reference | Document/Read native calls, signed interval-based Video progress and Live `liveinfo` -> durable `saveTimePc` heartbeats -> fresh ProgressRead verification are offline-covered; every Live heartbeat is issue/receipt ledgered and ambiguous outcomes are never replayed |
+| ResourceExecution | `Samueli924/chaoxing` | OCS, CxKitty | Reference | Document/Read native calls, structurally distinguished signed interval-based Video/Audio progress and Live `liveinfo` -> durable `saveTimePc` heartbeats -> fresh ProgressRead verification are offline-covered; every Live heartbeat is issue/receipt ledgered and ambiguous outcomes are never replayed |
 | WorkModule TaskInventory | agent skill | OCS, current task pages | PortSource | Course Work list requires a fresh session-bound `enc`; task-page redirect determines submittability |
 | ExamModule TaskInventory | agent skill | CxKitty mobile list | PortSource | Browser exam-list route has no `enc`; status text is parsed after removing scripts, while bounded score and structural `reTest(...)` availability remain read-only facts |
 | TaskDetail | current inventory pipeline | CxKitty, OCS | Reference | Fresh course-bound rediscovery returns the exact Chapter/Resource/Work/Exam task; Work includes followed final-route state, while completed Exams with a strictly bound preview entry add fresh result score/retake provenance without enabling retake execution |
-| TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Document/Read/Video/Live resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live-account validation still pending |
+| TaskProgressRead | current inventory and Chapter cards | agent skill, CxKitty | Reference | Document/Read/Video/Audio/Live resource recovery keeps targeted fresh-card reads; Chapter/Work/Exam use exact fresh Task rediscovery and return conservative state/binary completion, with live-account validation still pending |
 | QuestionInventory / QuestionParse | `Samueli924/chaoxing`, OCS current preview pages | CxKitty, `chaoxing-exam` | PortSource / Reference | Independent Work and Chapter Work have offline-covered fresh-page reads with account/correlation/task-bound attempt caches; Chapter Work rebinds all seven cards and its ephemeral `jobid`/`enc`/`ktoken` before one non-replayed attempt GET; pending Exam tasks use cover -> one-shot start -> full attempt-bound mobile preview and retain only the rotated bounded attempt state, while exam-code/face/captcha gates return typed BrowserRequired |
 | AnswerResolve | `chaoxing-exam` completed Chapter result | Samueli Tiku, CxKitty searchers, OCS wrappers/cache, agent pre-computed answers | Reference | A typed but unregistered component rebinds fresh completed Chapter Work detail and consumes one abstract bound result document before producing strict ProviderNative candidates; all other donor sources are external/manual/random and no pending Work/Exam standard-answer protocol exists |
 | AnswerHistoryHarvest | `chaoxing-exam` completed Chapter result | Samueli issue #607, OCS result cache | Reference | A typed capability pages only completed Chapter Work references supplied by a bounded read-only transport, binds the audited `workAnswerId` into a Provider attempt digest, hashes the exact result document, applies Core's TaskId to parsed Questions and emits submitted/official/correctness/score/structural `RedoTest` facts. The native development factory does not advertise it until a real BrowserBridge/Capture list/read transport exists |
@@ -27,7 +27,7 @@ source modules even when their assessments share field names or HTML shapes.
 
 ```text
 ChapterModule
-  - Video
+  - Video / Audio
   - Document
   - Read
   - Chapter Work
@@ -89,17 +89,19 @@ policy and remains independently guarded.
   reqwest.
 - Chaoxing stays at `Development`; the daemon keeps it absent by default and
   registers it only through the explicit local-validation opt-in.
-- Pending Document, Read and Live cards advertise task-level `ResourceExecution`.
+- Pending Document, Read, Video, Audio and Live cards advertise task-level
+  `ResourceExecution`.
   The immediate Document/Read path rediscovers the current course/cpi and
   Chapter card, submits only a fresh zeroizing `jtoken`, then refetches all seven
   cards and accepts success only when the remote attachment is completed. Live
   uses the separately ledgered duration/heartbeat path below. Chapter Work
   execution remains on its immutable-Draft path; no resource kind is routed
   through the wrong mutation family.
-- Document, Read, Video and Live advertise `ProgressRead`; the capability performs the
-  same bounded course/chapter/card rediscovery without invoking the completion
-  endpoint and returns only normalized remote state and percentage. This is the
-  safe remote-fact input for crash recovery, not live-account verification.
+- Document, Read, Video, Audio and Live advertise `ProgressRead`; the capability
+  performs the same bounded course/chapter/card rediscovery without invoking the
+  completion endpoint and returns only normalized remote state and percentage.
+  This is the safe remote-fact input for crash recovery, not live-account
+  verification.
 - Live execution resolves fresh card-only `liveId`, `streamName`, `vdoid` and
   optional status job material, reads a strict bounded `liveinfo` duration, and
   freezes the status `_uid` across the run. Every `saveTimePc` heartbeat records
@@ -109,9 +111,12 @@ policy and remains independently guarded.
   and is not renewed or replayed. The final proof is a separate fresh
   `ProgressRead` whose exact resource must report Completed; the fixture does
   not claim live-account validation.
-- Video execution now re-resolves fresh non-persisted Card metadata, obtains one
-  bounded status/dtoken response, reports monotonic intervals with the donor
-  signature, and accepts completion only after a fresh Card reports passed.
+- Video/Audio execution now re-resolves fresh non-persisted Card metadata,
+  obtains one bounded status/dtoken response, reports monotonic intervals with
+  the donor signature, and accepts completion only after a fresh Card reports
+  passed. Audio is selected only when the current OCS-observed
+  `property.module` is exactly `insertaudio`; its request uses the audited Audio
+  Referer and `dtype=Audio`. A failed Video request is never retried as Audio.
   Playback rate and report interval come from the immutable Master-controlled
   Execution settings snapshot. The native boundary stops captcha responses as
   typed `HumanRequired` before blind retry; the audited solver and bounded
@@ -260,6 +265,6 @@ contracts:
   matching/child/shared-context boundary. The current parser recognizes the
   families, while BrowserBridge mutation and shared child modeling remain
   required for lossless completion;
-- Audio, sign-in, post-task learning-count, in-video Questions and hyperlink
-  execution remain evidenced donor capabilities requiring their own fixtures,
-  durable mutation design and verification rather than deletion from scope.
+- Sign-in, post-task learning-count, in-video Questions and hyperlink execution
+  remain evidenced donor capabilities requiring their own fixtures, durable
+  mutation design and verification rather than deletion from scope.

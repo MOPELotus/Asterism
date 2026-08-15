@@ -109,10 +109,15 @@ Already-completed attachments are idempotent and make no mutation request.
 Video, Live and Chapter Work use different duration/question lifecycles and are
 not routed through this immediate path.
 
-## Video execution checkpoint
+## Video and Audio execution checkpoint
 
-The audited primary donor obtains fresh Video metadata from the Chapter Card,
-then reads the current media status before reporting progress:
+The audited primary donor obtains fresh media metadata from the Chapter Card,
+then reads the current media status before reporting progress. Its Audio request
+uses the same route, signature and progress fields with `dtype=Audio` and the
+versioned `/ananas/modules/audio/index_new.html` Referer. Current OCS card
+evidence distinguishes Audio from Video as
+`property.module=insertaudio|insertvideo` even though the outer attachment type
+is `video`:
 
 ```text
 GET /ananas/status/{objectId}?k={fid}&flag=normal
@@ -120,7 +125,7 @@ GET /ananas/status/{objectId}?k={fid}&flag=normal
 
 GET /mooc-ans/multimedia/log/a/{cpi}/{dtoken}
   ?clazzId&playingTime&duration&clipTime&objectId&otherInfo
-  &courseId&jobid&userid&isdrag=3&view=pc&enc&dtype=Video&rt&_t
+  &courseId&jobid&userid&isdrag=3&view=pc&enc&dtype={Video|Audio}&rt&_t
 ```
 
 `enc` is the lowercase MD5 of the donor-observed ordered report tuple containing
@@ -131,11 +136,18 @@ attendance fields remain redacted, zeroizing execution material and never enter
 Task snapshots, logs or results.
 
 The Core-owned Execution snapshot supplies a bounded playback rate from 1.0 to
-2.0 and a 30-90 second video-progress interval. Video time advances monotonically;
-the real wait for each interval is divided by the frozen playback rate. Retry
-starts from freshly reported server/Card progress, not from a persisted token.
-HTTP/JSON success is still provisional: the complete seven-card matrix is
-re-fetched and the exact stable resource identity must report `isPassed = true`.
+2.0 and a 30-90 second media-progress interval. Media time advances
+monotonically; the real wait for each interval is divided by the frozen playback
+rate. Retry starts from freshly reported server/Card progress, not from a
+persisted token. HTTP/JSON success is still provisional: the complete seven-card
+matrix is re-fetched and the exact stable resource identity must report
+`isPassed = true`.
+
+Samueli currently falls back from Video to Audio after an undifferentiated
+Video failure because its own parsed job shape does not retain the module. That
+behavior is not ported: a progress request may already have remote effect, so
+Asterism issues Audio only from the fresh structural `insertaudio` fact and
+fails closed when the media kind cannot be established.
 
 The donor includes automatic captcha solving. The current Native HTTP boundary
 turns a captcha/validation response into typed `HumanRequired(ImageCaptcha)`
@@ -251,8 +263,8 @@ facts into the fresh Task, records separate `detail_score` and
 detail scores conflict or the transport omits, duplicates or adds a Task.
 Unsupported Exam entry variants remain list-level evidence pending fixtures.
 
-`TaskProgressRead` preserves the same module split. Document, Read, Video and
-Live Resource tasks retain the targeted fresh-card lookup used for crash
+`TaskProgressRead` preserves the same module split. Document, Read, Video, Audio
+and Live Resource tasks retain the targeted fresh-card lookup used for crash
 recovery. Chapter, Work and Exam tasks use exact Task rediscovery; `Completed`
 and `Pending` expose only binary 100/0 completion while all other remote states
 leave percentage absent.
