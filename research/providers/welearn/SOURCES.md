@@ -145,6 +145,9 @@ The prepared recovery-read checkpoint repeated those queries once more and
 found no revision or tag delta. Fresh child rebinding and profile-specific final
 CMI selection compose existing inventory/read behavior and add no donor route
 or mutation claim.
+The shared verification-record adapter checkpoint found the same heads and tag.
+It only normalizes Asterism's accepted-final-save proof handoff between
+immediate and recovery paths and adds no donor protocol behavior.
 
 ## Source selection
 

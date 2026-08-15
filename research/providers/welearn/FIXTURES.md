@@ -330,6 +330,9 @@ only structural field names, response codes and bounded placeholder shapes.
   only after fresh CMI proof. A changed but still valid fresh observation
   changes the digest; Debug remains hash-redacted. The proof also exposes the
   final receipt acceptance bit without treating a negative receipt as verified.
+  Its shared Core-record adapter emits the same ordinal/digest with
+  `verified=true` only for an accepted final save and emits no record for an
+  explicit rejection.
 - Prepared coordinator tests record exactly one Core verification for an
   accepted final Fanyuchang save after fresh proof, bind it to the derived save
   ordinal and never record one for Auto's explicit negative final receipt. A

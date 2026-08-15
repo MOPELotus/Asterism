@@ -584,6 +584,12 @@ accepted, and records `verified=true` against that exact ordinal. It never
 attaches verification to start/keep/set or an explicit negative receipt. A
 missing sink or persistence failure occurs after the remote lifecycle and is
 therefore non-retryable `HumanRequired`, with no mutation replay.
+`WellearnAtomicDurationCompletionVerification::to_execution_mutation_verification`
+is the single public adapter used by immediate execution and available to the
+recovery dispatcher: an accepted final save yields the exact generic
+ordinal/digest/`verified=true` record, while an explicit negative final receipt
+yields no record. Callers do not reconstruct that decision from sanitized
+outcome fields.
 
 Crash recovery uses a smaller independent proof surface. Current Fanyuchang's
 `welearn.atomic-pre-final-observation.v1` value is a deny-unknown, 512-byte

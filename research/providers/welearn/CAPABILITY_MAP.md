@@ -193,7 +193,10 @@ over the frozen goal plus exact fresh proof documents. It performs no I/O and
 does not attach verification to start/keep/set or a rejected save. The prepared
 coordinator now records that proof through Core's durable sink only for an
 accepted final save; missing/failed persistence is post-mutation HumanRequired
-and never replays the lifecycle.
+and never replays the lifecycle. Immediate and recovery paths share one public
+verification-record adapter: accepted final save maps to the exact generic
+ordinal/digest proof, while an explicit rejection maps to no Core verification
+record.
 
 Read-only crash recovery now has a separate Provider proof boundary. The
 bounded hash-only `welearn.atomic-pre-final-observation.v1` value binds a Fany

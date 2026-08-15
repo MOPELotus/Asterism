@@ -79,6 +79,34 @@ impl WellearnAtomicDurationCompletionVerification {
     pub const fn observation_digest(self) -> [u8; 32] {
         self.observation_digest
     }
+
+    /// Adapts an accepted final-save proof to Core's generic durable value.
+    /// An explicit negative final receipt remains diagnostic and therefore
+    /// produces no verification record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if the Provider proof cannot satisfy Core's
+    /// bounded ordinal/digest contract.
+    pub fn to_execution_mutation_verification(
+        self,
+    ) -> ProviderResult<Option<ExecutionMutationVerification>> {
+        if !self.final_save_accepted {
+            return Ok(None);
+        }
+        ExecutionMutationVerification::new(
+            self.final_save_ordinal,
+            self.observation_digest,
+            true,
+        )
+        .map(Some)
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Internal,
+                "WELearn atomic completion verification cannot satisfy the Core record contract",
+            )
+        })
+    }
 }
 
 impl fmt::Debug for WellearnAtomicDurationCompletionVerification {
@@ -283,18 +311,15 @@ async fn persist_atomic_completion_verification(
     events: &(dyn ExecutionEventSink + Send + Sync),
     verification: WellearnAtomicDurationCompletionVerification,
 ) -> ProviderResult<bool> {
-    if !verification.final_save_accepted() {
+    let Some(record) = verification
+        .to_execution_mutation_verification()
+        .map_err(|_| atomic_verification_persistence_error())?
+    else {
         return Ok(false);
-    }
+    };
     let sink = events
         .mutation_sink()
         .ok_or_else(atomic_verification_persistence_error)?;
-    let record = ExecutionMutationVerification::new(
-        verification.final_save_ordinal(),
-        verification.observation_digest(),
-        true,
-    )
-    .map_err(|_| atomic_verification_persistence_error())?;
     sink.record_verification(record)
         .await
         .map_err(|_| atomic_verification_persistence_error())?;
@@ -1114,9 +1139,38 @@ mod tests {
         assert_eq!(verification.final_save_ordinal(), 4);
         assert!(!verification.final_save_accepted());
         assert_ne!(verification.observation_digest(), [0; 32]);
+        assert!(
+            verification
+                .to_execution_mutation_verification()
+                .unwrap()
+                .is_none()
+        );
         let debug = format!("{verification:?}");
         assert!(debug.contains("[HASHED]"));
         assert!(!debug.contains(&format!("{:?}", verification.observation_digest())));
+
+        let accepted_documents = WellearnAtomicDurationCompletionDocuments::try_new(
+            plan,
+            cmi(),
+            Some(snapshot_cmi(
+                "incomplete",
+                "0.25",
+                "20",
+                Some("15"),
+                Some("45"),
+            )),
+            snapshot_cmi("completed", "1", "100", Some("15"), Some("45")),
+            WellearnAtomicDurationCompletionReceipts::new(true, vec![true], Some(false), true),
+        )
+        .unwrap();
+        let accepted = verify_atomic_duration_completion(plan, &accepted_documents).unwrap();
+        let record = accepted
+            .to_execution_mutation_verification()
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.ordinal(), accepted.final_save_ordinal());
+        assert_eq!(record.observation_digest(), accepted.observation_digest());
+        assert!(record.verified());
     }
 
     #[test]
@@ -1140,6 +1194,12 @@ mod tests {
         assert_eq!(verification.time_preservation_verified(), None);
         assert_eq!(verification.final_save_ordinal(), 2);
         assert!(!verification.final_save_accepted());
+        assert!(
+            verification
+                .to_execution_mutation_verification()
+                .unwrap()
+                .is_none()
+        );
 
         let changed_documents = WellearnAtomicDurationCompletionDocuments::try_new(
             plan,
