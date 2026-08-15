@@ -1097,6 +1097,44 @@ impl UaiMediaFetchBatchPlan {
     pub fn into_requests(self) -> Vec<UaiMediaFetchPlan> {
         self.requests
     }
+
+    /// Consumes one complete successful downloader result for every frozen
+    /// request, preserving the exact donor-observed order.
+    ///
+    /// This does not define behavior for failed or skipped sources; those
+    /// outcomes require an explicit shared attempt policy and cannot be
+    /// represented by silently omitting a slot here.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing, extra, duplicate, reordered or foreign responses.
+    pub fn accept_complete_responses(
+        self,
+        responses: Vec<UaiMediaFetchResponse>,
+    ) -> ProviderResult<UaiMediaFetchBatchResponseSet> {
+        if responses.len() != self.requests.len()
+            || responses
+                .iter()
+                .zip(&self.requests)
+                .any(|(response, request)| response.plan.request_digest != request.request_digest)
+        {
+            return Err(protocol_drift(
+                "UAI media fetch batch responses are missing, reordered or foreign",
+            ));
+        }
+        let response_set_digest =
+            media_fetch_batch_response_set_digest(self.batch_digest, &responses)?;
+        if response_set_digest == [0; 32] {
+            return Err(invalid_response(
+                "UAI media fetch batch response-set digest is invalid",
+            ));
+        }
+        Ok(UaiMediaFetchBatchResponseSet {
+            batch: self,
+            responses,
+            response_set_digest,
+        })
+    }
 }
 
 impl fmt::Debug for UaiMediaFetchBatchPlan {
@@ -1106,6 +1144,47 @@ impl fmt::Debug for UaiMediaFetchBatchPlan {
             .field("binding", &"[REDACTED]")
             .field("request_count", &self.requests.len())
             .field("batch_digest", &self.batch_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Complete ordered successful response set for one immutable media batch.
+pub struct UaiMediaFetchBatchResponseSet {
+    batch: UaiMediaFetchBatchPlan,
+    responses: Vec<UaiMediaFetchResponse>,
+    response_set_digest: [u8; 32],
+}
+
+impl UaiMediaFetchBatchResponseSet {
+    pub const fn batch(&self) -> &UaiMediaFetchBatchPlan {
+        &self.batch
+    }
+
+    pub const fn responses(&self) -> &[UaiMediaFetchResponse] {
+        self.responses.as_slice()
+    }
+
+    pub const fn response_count(&self) -> usize {
+        self.responses.len()
+    }
+
+    pub const fn response_set_digest(&self) -> [u8; 32] {
+        self.response_set_digest
+    }
+
+    pub fn into_parts(self) -> (UaiMediaFetchBatchPlan, Vec<UaiMediaFetchResponse>) {
+        (self.batch, self.responses)
+    }
+}
+
+impl fmt::Debug for UaiMediaFetchBatchResponseSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UaiMediaFetchBatchResponseSet")
+            .field("binding", &"[REDACTED]")
+            .field("response_count", &self.responses.len())
+            .field("batch_digest", &self.batch.batch_digest)
+            .field("response_set_digest", &self.response_set_digest)
             .finish_non_exhaustive()
     }
 }
@@ -1302,6 +1381,22 @@ fn media_fetch_batch_digest(requests: &[UaiMediaFetchPlan]) -> ProviderResult<[u
     digest.update(request_count.to_be_bytes());
     for request in requests {
         digest.update(request.request_digest);
+    }
+    Ok(digest.finalize().into())
+}
+
+fn media_fetch_batch_response_set_digest(
+    batch_digest: [u8; 32],
+    responses: &[UaiMediaFetchResponse],
+) -> ProviderResult<[u8; 32]> {
+    let response_count = u64::try_from(responses.len())
+        .map_err(|_| invalid_response("UAI media fetch response-set count is invalid"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"asterism:uai:media-fetch-response-set:v1\0");
+    digest.update(batch_digest);
+    digest.update(response_count.to_be_bytes());
+    for response in responses {
+        digest.update(response.response_digest);
     }
     Ok(digest.finalize().into())
 }
@@ -1557,6 +1652,32 @@ mod tests {
         .unwrap();
         let question = parsed.to_question(task_id).unwrap();
         (parsed, question)
+    }
+
+    fn accepted_batch_responses(
+        artifact: &UaiQuestionArtifactSet,
+        changed_last: bool,
+    ) -> Vec<UaiMediaFetchResponse> {
+        let requests = artifact
+            .prepare_media_fetch_batch("9001")
+            .unwrap()
+            .into_requests();
+        let last = requests.len().saturating_sub(1);
+        requests
+            .into_iter()
+            .enumerate()
+            .map(|(index, request)| {
+                let url = request.expose_url().to_owned();
+                let body = if changed_last && index == last {
+                    vec![b'z']
+                } else {
+                    vec![b'a' + u8::try_from(index).unwrap()]
+                };
+                request
+                    .accept_response(200, &url, SecretValue::new(body))
+                    .unwrap()
+            })
+            .collect()
     }
 
     #[test]
@@ -1867,6 +1988,92 @@ mod tests {
             .is_err()
         );
         assert!(artifact.prepare_media_fetch_batch("9002").is_err());
+    }
+
+    #[test]
+    fn media_fetch_batch_response_set_rejects_missing_duplicate_and_reordered_slots() {
+        let task_id = TaskId::new();
+        let task_id_text = task_id.to_string();
+        let (parsed, question) = parsed_question(task_id);
+        let artifact = UaiQuestionArtifactSet::from_parsed_questions(
+            &[parsed],
+            std::slice::from_ref(&question),
+            REMOTE_TASK_ID,
+        )
+        .unwrap()
+        .unwrap();
+
+        let response_set = artifact
+            .prepare_media_fetch_batch("9001")
+            .unwrap()
+            .accept_complete_responses(accepted_batch_responses(&artifact, false))
+            .unwrap();
+        assert_eq!(response_set.response_count(), 2);
+        assert_eq!(
+            response_set.batch().request_count(),
+            response_set.responses().len()
+        );
+        assert_ne!(response_set.response_set_digest(), [0; 32]);
+        let stable_digest = response_set.response_set_digest();
+        assert_eq!(
+            stable_digest,
+            artifact
+                .prepare_media_fetch_batch("9001")
+                .unwrap()
+                .accept_complete_responses(accepted_batch_responses(&artifact, false))
+                .unwrap()
+                .response_set_digest()
+        );
+        assert_ne!(
+            stable_digest,
+            artifact
+                .prepare_media_fetch_batch("9001")
+                .unwrap()
+                .accept_complete_responses(accepted_batch_responses(&artifact, true))
+                .unwrap()
+                .response_set_digest()
+        );
+        let debug = format!("{response_set:?}");
+        assert!(!debug.contains(&task_id_text));
+        assert!(!debug.contains("media.example.edu"));
+
+        let mut missing = accepted_batch_responses(&artifact, false);
+        missing.pop();
+        assert!(
+            artifact
+                .prepare_media_fetch_batch("9001")
+                .unwrap()
+                .accept_complete_responses(missing)
+                .is_err()
+        );
+        let mut reordered = accepted_batch_responses(&artifact, false);
+        reordered.reverse();
+        assert!(
+            artifact
+                .prepare_media_fetch_batch("9001")
+                .unwrap()
+                .accept_complete_responses(reordered)
+                .is_err()
+        );
+        let first = artifact.media_sources_for_question("9001").unwrap()[0]
+            .attachment_id()
+            .to_owned();
+        let duplicate = (0..2)
+            .map(|_| {
+                let request = artifact.prepare_media_fetch("9001", &first).unwrap();
+                let url = request.expose_url().to_owned();
+                request
+                    .accept_response(200, &url, SecretValue::new(vec![b'a']))
+                    .unwrap()
+            })
+            .collect();
+        assert!(
+            artifact
+                .prepare_media_fetch_batch("9001")
+                .unwrap()
+                .accept_complete_responses(duplicate)
+                .is_err()
+        );
     }
 
     #[test]

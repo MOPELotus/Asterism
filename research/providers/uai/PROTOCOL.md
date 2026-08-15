@@ -814,6 +814,12 @@ foreign/media-free Questions and any later reordering fail closed. The batch
 does not decide whether one failed source is skippable, perform retries, join
 transcripts or truncate a model prompt. Those are durable shared
 AnswerResolve/transcriber policies and must preserve this frozen order.
+When every source succeeds, the batch can consume one response owner per
+request only in that same order. A separate set digest hashes the batch digest,
+response count and every ordered response digest; missing, extra, duplicate,
+reordered or foreign responses fail closed. This complete-success owner does
+not imply that a partial donor-style best-effort result is acceptable; that
+decision still needs an explicit shared policy and durable per-slot outcomes.
 
 After a durable media submission yields its receipt, session-aware
 SubmissionVerify rebinds that same complete manifest to every immutable Draft

@@ -104,7 +104,10 @@ Ordered fetch-batch fixtures retain the complete audio-then-subtitle source
 sequence from one rebound Question, reproduce the same nonzero digest for the
 same manifest, change the digest on reversal and reject a duplicate request or
 foreign Question. The batch contains no hidden retry, skip, transcription or
-prompt policy.
+prompt policy. Complete-response-set fixtures require one accepted response per
+ordered request, reproduce their set digest, change it with one response body
+and reject missing, duplicate or reordered slots. They do not represent a
+partial-success decision.
 DNS/private-range resolution and bounded streaming execution remain the shared
 downloader boundary.
 
