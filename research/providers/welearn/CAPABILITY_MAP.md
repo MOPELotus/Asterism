@@ -111,8 +111,8 @@ repeat start/setscoinfo/save.
 
 The write-mode setting keeps exercise `set_then_save` separate from Auto's
 completion-bearing `save_only` final tuple. It encodes the latter for the
-pending atomic boundary; a standalone ResourceExecution is not claimed as the
-exact modular duration sequence. Each mutation response exposes an acceptance
+conditional atomic sequence; a standalone ResourceExecution is not claimed as
+the exact modular duration sequence. Each mutation response exposes an acceptance
 boolean. A well-formed explicit rejection does not falsely prove failure or
 suppress the donor's later independent save; exact fresh CMI remains the sole
 success predicate. Network, authentication, malformed-response and other
@@ -284,5 +284,6 @@ it with parent selection/entropy authority and each child artifact rather than
 treating the snapshot alone as scheduling or mutation permission.
 Immutable Core Execution identity now makes donor-style per-Execution random
 duration and uniform/clamped-Gaussian score selection retry-safe, and Core's
-persisted capability-step plan still needs the atomic duration-completion
-extension described above.
+remaining plan work is the parent/child Execution and composite dispatch layer,
+not another fixed capability-step approximation of the existing conditional
+sequence.

@@ -40,7 +40,7 @@ not executed or reverse engineered.
 | Fresh SCO identity/detail and CMI read | TaskDetail, TaskProgressRead and DurationRead | Implemented with full fresh rediscovery, fingerprint/capability/state rebinding and fail-closed result parsing |
 | Direct completion/progress/score writes | ResourceExecution | Current dual-save, legacy set/save and Auto save-only profiles are separately frozen and independently verified; ambiguous mutation is never replayed |
 | YZBRH preservation duration and Auto single-file duration | DurationReport | Implemented with donor-specific start/keep/finalize/readback evidence and goal-specific Core verification |
-| Current Fanyuchang and modular Auto duration plus completion in one start session | atomic duration-completion child | Provider plan, artifact, digest, issue/receipt transport and pure verifier are implemented but deliberately unregistered until Core persists and recovers one compound authority |
+| Current Fanyuchang and modular Auto duration plus completion in one start session | atomic duration-completion child | Provider plan/artifacts, conditional sequence, issue/receipt/observation transport, native runtime and immediate/read-only verification are implemented but deliberately unregistered until Core creates and dispatches durable parent/child attempts |
 | Auto aggregate duration budget and equal-floor child allocation | bounded parent batch authority and child targets | Provider modeling is implemented; shared parent runtime scope, entropy, orchestration and API remain missing |
 | Per-account 1-100 worker setting and independent sessions | Provider/account concurrency bound | Implemented; global and cross-account admission remain Core-owned |
 | Account add/remove, nickname/status, CSV/TXT import/export and batch-account queue | shared account/API/UI behavior | Not WELearn wire behavior; plaintext donor password export must not be copied |
@@ -84,9 +84,10 @@ Consequently:
 1. Durable parent/child batch execution must persist the selected Unit order,
    complete SCO membership, one aggregate sample, every child target and child
    attempt independently.
-2. Atomic duration-completion needs one Core-owned compound mutation authority,
-   ordered operation ledger, crash recovery and final verification lifecycle
-   before the existing Provider coordinator can be registered.
+2. Atomic duration-completion now has a Core-owned conditional operation ledger,
+   attempt-bound observation and final verification values. Core still needs
+   durable parent/child creation, same-attempt record loading, recovery dispatch
+   and composite registration before the native Provider runtime is reachable.
 3. Capture/BrowserBridge still needs active browser session injection, action
    dispatch, callback handling and bounded recovery for interactive login.
 4. Cross-account bulk import/export and queueing are shared product surfaces and
