@@ -284,6 +284,12 @@ The current checkpoint (not a completion boundary):
     UTF-8 retain only fixed route/state, observed byte length and route maximum;
     body bytes remain zeroized and excluded. Chunk-read transport failures keep
     their existing unobserved Network/InvalidResponse classification.
+55. observes class and ordinary-study Task row field-shape drift after a valid
+    complete envelope. Only row kind, object field count and fixed known field
+    kinds are retained; Task/Course/list identity, title, score, progress and
+    time values remain excluded. Existing unknown task/status observations are
+    preserved without replacement and the complete inventory still fails
+    atomically.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

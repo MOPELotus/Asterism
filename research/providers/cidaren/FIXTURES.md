@@ -269,6 +269,10 @@ placeholder identities, result codes, status values and pagination shape.
   body, invalid UTF-8 and a valid bounded JSON body. Failure observations retain
   only fixed route/state, observed byte length and configured maximum; body
   bytes remain absent and already accumulated bytes are zeroized before return.
+- Class/study Task-row shape tests inject a string-valued progress field and
+  assert that only row/object and fixed known-field kinds cross the observation
+  boundary. Synthetic progress text, Course/list identity and titles remain
+  absent; unknown task/status codes keep their existing smaller observations.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

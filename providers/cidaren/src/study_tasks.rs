@@ -145,7 +145,8 @@ fn parse_snapshot(document: &CidarenStudyTaskDocument) -> ProviderResult<StudyTa
 
     let mut tasks = BTreeMap::new();
     for value in records {
-        let row = parse_row(value, &course_id)?;
+        let row =
+            parse_row(value, &course_id).map_err(|error| study_row_observation(error, value))?;
         if tasks.insert(row.list_id.clone(), row).is_some() {
             return Err(protocol_drift(
                 "Cidaren study-task response contains a duplicate list identity",
@@ -198,6 +199,38 @@ fn parsed_i64(value: &Value) -> Option<i64> {
         Value::String(value) => value.trim().parse::<i64>().ok(),
         _ => None,
     }
+}
+
+fn study_row_observation(error: ProviderError, row: &Value) -> ProviderError {
+    if error.protocol_observation.is_some()
+        || !matches!(
+            error.kind,
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse
+        )
+    {
+        return error;
+    }
+    let object = row.as_object();
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::TaskInventory,
+        ProtocolObservationKind::FieldDrift,
+        json!({
+            "schema": "cidaren.study-task-row-observation.v1",
+            "row_kind": json_value_kind(Some(row)),
+            "object_fields": object.map(serde_json::Map::len),
+            "task_id_kind": json_value_kind(object.and_then(|object| object.get("task_id"))),
+            "task_type_kind": json_value_kind(object.and_then(|object| object.get("task_type"))),
+            "task_name_kind": json_value_kind(object.and_then(|object| object.get("task_name"))),
+            "course_id_kind": json_value_kind(object.and_then(|object| object.get("course_id"))),
+            "list_id_kind": json_value_kind(object.and_then(|object| object.get("list_id"))),
+            "progress_kind": json_value_kind(object.and_then(|object| object.get("progress"))),
+            "score_kind": json_value_kind(object.and_then(|object| object.get("score"))),
+            "time_spent_kind": json_value_kind(object.and_then(|object| object.get("time_spent"))),
+            "free_kind": json_value_kind(object.and_then(|object| object.get("free"))),
+            "sort_no_kind": json_value_kind(object.and_then(|object| object.get("sort_no"))),
+        }),
+    )
 }
 
 fn parse_row(value: &Value, selected_course_id: &str) -> ProviderResult<StudyTaskRow> {
@@ -515,6 +548,26 @@ mod tests {
                 .and_then(|document| parse_study_task_inventory(None, &document))
                 .is_err()
         );
+
+        let field_drift = raw.replace(
+            "\"progress\": 35,\n        \"time_spent\": 125000",
+            "\"progress\": \"must-not-cross-progress\",\n        \"time_spent\": 125000",
+        );
+        let error = CidarenStudyTaskDocument::try_new("course-a", field_drift)
+            .and_then(|document| parse_study_task_inventory(None, &document))
+            .unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(observation.kind, ProtocolObservationKind::FieldDrift);
+        assert_eq!(
+            observation.shape_sanitized["schema"],
+            "cidaren.study-task-row-observation.v1"
+        );
+        assert_eq!(observation.shape_sanitized["progress_kind"], "string");
+        assert_eq!(observation.shape_sanitized["list_id_kind"], "string");
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
+        assert!(!sanitized.contains("course-a"));
 
         let unknown_task_type = raw.replacen("\"task_type\": 3", "\"task_type\": 9", 1);
         let error = CidarenStudyTaskDocument::try_new("course-a", unknown_task_type)

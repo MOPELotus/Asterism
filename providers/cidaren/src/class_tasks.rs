@@ -274,7 +274,7 @@ fn parse_page(document: &str) -> ProviderResult<(usize, Vec<ClassTaskRow>)> {
     }
     records
         .iter()
-        .map(parse_row)
+        .map(|value| parse_row(value).map_err(|error| class_row_observation(error, value)))
         .collect::<ProviderResult<Vec<_>>>()
         .map(|rows| (total, rows))
 }
@@ -319,6 +319,42 @@ fn parsed_u64(value: &Value) -> Option<u64> {
         Value::String(value) => value.trim().parse::<u64>().ok(),
         _ => None,
     }
+}
+
+fn class_row_observation(error: ProviderError, row: &Value) -> ProviderError {
+    if error.protocol_observation.is_some()
+        || !matches!(
+            error.kind,
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse
+        )
+    {
+        return error;
+    }
+    let object = row.as_object();
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::TaskInventory,
+        ProtocolObservationKind::FieldDrift,
+        json!({
+            "schema": "cidaren.class-task-row-observation.v1",
+            "row_kind": json_value_kind(Some(row)),
+            "object_fields": object.map(serde_json::Map::len),
+            "release_id_kind": json_value_kind(object.and_then(|object| object.get("release_id"))),
+            "task_id_kind": json_value_kind(object.and_then(|object| object.get("task_id"))),
+            "task_type_kind": json_value_kind(object.and_then(|object| object.get("task_type"))),
+            "task_name_kind": json_value_kind(object.and_then(|object| object.get("task_name"))),
+            "course_id_kind": json_value_kind(object.and_then(|object| object.get("course_id"))),
+            "course_name_kind": json_value_kind(object.and_then(|object| object.get("course_name"))),
+            "over_status_kind": json_value_kind(object.and_then(|object| object.get("over_status"))),
+            "progress_kind": json_value_kind(object.and_then(|object| object.get("progress"))),
+            "score_kind": json_value_kind(object.and_then(|object| object.get("score"))),
+            "source_kind": json_value_kind(object.and_then(|object| object.get("source"))),
+            "release_time_kind": json_value_kind(object.and_then(|object| object.get("release_time"))),
+            "start_time_kind": json_value_kind(object.and_then(|object| object.get("start_time"))),
+            "over_time_kind": json_value_kind(object.and_then(|object| object.get("over_time"))),
+            "time_spent_kind": json_value_kind(object.and_then(|object| object.get("time_spent"))),
+        }),
+    )
 }
 
 pub(crate) fn class_task_total(document: &str) -> ProviderResult<usize> {
@@ -783,6 +819,27 @@ mod tests {
             )
             .is_err()
         );
+        let error = parse_task_inventory(
+            None,
+            &[invalid(&base.replace(
+                "\"progress\":0",
+                "\"progress\":\"must-not-cross-progress\"",
+            ))],
+        )
+        .unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(observation.kind, ProtocolObservationKind::FieldDrift);
+        assert_eq!(
+            observation.shape_sanitized["schema"],
+            "cidaren.class-task-row-observation.v1"
+        );
+        assert_eq!(observation.shape_sanitized["row_kind"], "object");
+        assert_eq!(observation.shape_sanitized["progress_kind"], "string");
+        assert_eq!(observation.shape_sanitized["course_id_kind"], "string");
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains("must-not-cross"));
+        assert!(!sanitized.contains("Course"));
         assert!(
             parse_task_inventory(None, &[invalid(&base.replace("\"course\"", "\"bad/id\""))])
                 .is_err()

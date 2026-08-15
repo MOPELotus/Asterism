@@ -586,6 +586,10 @@ retaining response or user data:
   root/code/data/records/list field kinds, an optional numeric code and bounded
   structural counts on `TaskInventory / UnknownResultShape`; no row, identity,
   title, score or progress value is retained.
+- malformed class/study Task rows record only row kind, object field count and
+  fixed known field kinds on `TaskInventory / FieldDrift`; row values remain
+  excluded, existing unknown task/status observations remain smaller and the
+  complete inventory still rejects atomically.
 - malformed successful `Student/Main` envelopes and selected-Course field drift
   record only account-envelope value kinds, numeric success code and profile
   field count on `Authentication / UnknownResultShape` or `FieldDrift`;

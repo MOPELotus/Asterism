@@ -838,6 +838,20 @@ rejected return. Chunk-read transport failures keep their existing unobserved
 Network/InvalidResponse classification; no body replay or relaxed bound was
 added.
 
+### 2026-08-15 Task-row shape observation follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth V2 handoff manifest remained unchanged after the response-body unit.
+No Task row field or vocabulary value entered scope.
+
+After a valid complete class/study envelope, malformed Task rows now attach a
+bounded `TaskInventory / FieldDrift` observation. It retains only row kind,
+object field count and fixed known field kinds. Task/Course/list identities,
+titles, score, progress and time values remain excluded. Existing exact
+unknown-task-type and unknown-class-status observations are preserved rather
+than replaced. Every row failure still rejects the complete inventory before
+any partial or stale Task can reach TaskDetail, progress or terminal readback.
+
 ## Check procedure
 
 For the next checkpoint:
