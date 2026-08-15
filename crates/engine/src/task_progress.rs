@@ -2,7 +2,14 @@ use std::sync::Arc;
 
 use asterism_domain::{AuthState, ProviderId, TaskCapability, TaskId, UserId};
 use asterism_provider_api::{ProviderContext, ProviderError, ProviderRegistry, RemoteProgress};
-use asterism_storage::{ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository};
+use asterism_storage::{
+    ProtocolObservationRepository, ProviderAccountRuntimeRepository, StorageError,
+    TaskQueryRepository,
+};
+
+use crate::protocol_observation::{
+    ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+};
 
 const MAX_CORRELATION_ID_BYTES: usize = 128;
 
@@ -21,11 +28,12 @@ pub struct ProviderTaskProgressResult {
     pub progress: RemoteProgress,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProviderTaskProgressService<Q, A> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<Q, A> ProviderTaskProgressService<Q, A> {
@@ -34,7 +42,32 @@ impl<Q, A> ProviderTaskProgressService<Q, A> {
             registry,
             tasks,
             accounts,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<Q, A> std::fmt::Debug for ProviderTaskProgressService<Q, A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderTaskProgressService")
+            .field("registry", &self.registry)
+            .field("tasks", &"configured")
+            .field("accounts", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -81,17 +114,42 @@ where
         let capability = entry.task_progress.as_ref().ok_or_else(|| {
             ProviderTaskProgressError::CapabilityUnavailable(account.provider_id.clone())
         })?;
-        let progress = capability
+        let progress = match capability
             .read_progress(
                 &ProviderContext {
                     provider_id: account.provider_id.clone(),
                     account_id: account.id,
                     credential_refs: account.credential_refs,
-                    correlation_id: command.correlation_id,
+                    correlation_id: command.correlation_id.clone(),
                 },
                 &task.remote_id,
             )
-            .await?;
+            .await
+        {
+            Ok(progress) => progress,
+            Err(error) => {
+                let occurrence_scope =
+                    format!("task-progress:{}:{}", task.id, command.correlation_id);
+                record_provider_protocol_observation(
+                    self.protocol_observations.as_deref(),
+                    &account.provider_id,
+                    None,
+                    &occurrence_scope,
+                    &error,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(|error| match error {
+                    ProviderProtocolObservationRecordError::Invalid => {
+                        ProviderTaskProgressError::InvalidProtocolObservation
+                    }
+                    ProviderProtocolObservationRecordError::Storage(error) => {
+                        ProviderTaskProgressError::Storage(error)
+                    }
+                })?;
+                return Err(error.into());
+            }
+        };
         if progress.percent.is_some_and(|percent| percent > 100) {
             return Err(ProviderTaskProgressError::ProviderResponseInvalid);
         }
@@ -125,6 +183,8 @@ pub enum ProviderTaskProgressError {
     CapabilityUnavailable(ProviderId),
     #[error("task progress correlation id is invalid")]
     InvalidCorrelationId,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error("Provider returned invalid Task progress")]
     ProviderResponseInvalid,
     #[error(transparent)]
@@ -135,17 +195,23 @@ pub enum ProviderTaskProgressError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Mutex};
+    use std::{
+        collections::BTreeSet,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use asterism_domain::{
-        AssessmentClass, OrchestrationState, ProviderAccount, ProviderAccountId, RemoteState,
-        SourceType, Task, UserId,
+        AssessmentClass, OrchestrationState, ProtocolObservationKind, ProtocolSurface,
+        ProviderAccount, ProviderAccountId, RemoteState, SourceType, Task, UserId,
     };
     use asterism_provider_api::{
-        ProviderCapability, ProviderEntry, ProviderIdentity, ProviderMetadata, ProviderResult,
-        ProviderRuntimeSettingsSchema, TaskProgressCapability, VerificationLevel,
+        ProviderCapability, ProviderEntry, ProviderErrorKind, ProviderIdentity, ProviderMetadata,
+        ProviderResult, ProviderRuntimeSettingsSchema, TaskProgressCapability, VerificationLevel,
     };
-    use asterism_storage::TaskPage;
+    use asterism_storage::{Database, SqliteProtocolObservationRepository, TaskPage};
     use async_trait::async_trait;
     use chrono::Utc;
 
@@ -204,6 +270,7 @@ mod tests {
         metadata: ProviderMetadata,
         progress: Mutex<RemoteProgress>,
         calls: Mutex<Vec<(ProviderContext, String)>>,
+        protocol_drift: AtomicBool,
     }
 
     impl ProviderIdentity for FakeTaskProgress {
@@ -223,6 +290,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((context.clone(), remote_task_id.to_owned()));
+            if self.protocol_drift.load(Ordering::Relaxed) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "CMI result shape changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::TaskProgress,
+                    ProtocolObservationKind::UnknownResultShape,
+                    serde_json::json!({"document": "cmi", "root_kind": "array"}),
+                )
+                .unwrap());
+            }
             Ok(self.progress.lock().unwrap().clone())
         }
     }
@@ -292,6 +371,46 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn progress_drift_is_observed_before_read_fails() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let mut fixture = fixture(true, 50);
+        fixture
+            .capability
+            .protocol_drift
+            .store(true, Ordering::Relaxed);
+        fixture.service = fixture.service.with_protocol_observations(Arc::new(
+            SqliteProtocolObservationRepository::new(database.clone()),
+        ));
+
+        assert!(matches!(
+            fixture
+                .service
+                .read(ReadTaskProgressCommand {
+                    owner_id: fixture.owner_id,
+                    task_id: fixture.task_id,
+                    correlation_id: "progress-drift".to_owned(),
+                })
+                .await,
+            Err(ProviderTaskProgressError::Provider(error))
+                if error.kind == ProviderErrorKind::ProtocolDrift
+        ));
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            (
+                "task_progress".to_owned(),
+                "unknown_result_shape".to_owned(),
+                None,
+            )
+        );
+    }
+
     struct Fixture {
         service: ProviderTaskProgressService<FakeTaskRepository, FakeAccountRepository>,
         owner_id: UserId,
@@ -358,6 +477,7 @@ mod tests {
                 updated_at: now,
             }),
             calls: Mutex::new(Vec::new()),
+            protocol_drift: AtomicBool::new(false),
         });
         let mut registry = ProviderRegistry::default();
         registry

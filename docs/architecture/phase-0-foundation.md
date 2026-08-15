@@ -4638,3 +4638,23 @@ invalid-Questions API surface, while Inbox storage failure remains internal.
 Coverage proves a parser-reported unknown Question type enters the typed
 QuestionParse/UnknownQuestionKind aggregate and the failed all-or-nothing read
 persists no QuestionSnapshot.
+
+## Two-hundred-and-fifty-first Phase 0 slice
+
+Owner-triggered TaskProgress and DurationRead services now inject the same
+protocol observation repository as background workers. Present Provider shapes
+are recorded before the read error is returned, with a Task-and-correlation
+occurrence scope and no invented Execution provenance. Authorization, declared
+capability checks and authenticated account binding still precede every
+Provider call.
+
+The Provider owns the protocol surface classification. A shared remote document
+such as WELearn CMI may therefore classify both normalized progress and duration
+read failures as TaskProgress/UnknownResultShape; Core keeps distinct
+`task-progress` and `task-duration` occurrence scopes while the Inbox aggregates
+the equivalent shape. Invalid payloads use the corresponding invalid-read
+bad-gateway response and Inbox storage failures remain internal.
+
+Coverage proves both read paths persist typed result-shape observations without
+an Execution reference before returning their original ProtocolDrift or
+InvalidResponse error.

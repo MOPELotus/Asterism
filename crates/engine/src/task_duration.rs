@@ -2,7 +2,14 @@ use std::sync::Arc;
 
 use asterism_domain::{AuthState, ProviderId, TaskCapability, TaskId, UserId};
 use asterism_provider_api::{ProviderContext, ProviderError, ProviderRegistry, RemoteDuration};
-use asterism_storage::{ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository};
+use asterism_storage::{
+    ProtocolObservationRepository, ProviderAccountRuntimeRepository, StorageError,
+    TaskQueryRepository,
+};
+
+use crate::protocol_observation::{
+    ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+};
 
 const MAX_CORRELATION_ID_BYTES: usize = 128;
 
@@ -21,11 +28,12 @@ pub struct ProviderTaskDurationResult {
     pub duration: RemoteDuration,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProviderTaskDurationService<Q, A> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<Q, A> ProviderTaskDurationService<Q, A> {
@@ -34,7 +42,32 @@ impl<Q, A> ProviderTaskDurationService<Q, A> {
             registry,
             tasks,
             accounts,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<Q, A> std::fmt::Debug for ProviderTaskDurationService<Q, A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderTaskDurationService")
+            .field("registry", &self.registry)
+            .field("tasks", &"configured")
+            .field("accounts", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -81,17 +114,42 @@ where
         let capability = entry.duration_read.as_ref().ok_or_else(|| {
             ProviderTaskDurationError::CapabilityUnavailable(account.provider_id.clone())
         })?;
-        let duration = capability
+        let duration = match capability
             .read_duration(
                 &ProviderContext {
                     provider_id: account.provider_id.clone(),
                     account_id: account.id,
                     credential_refs: account.credential_refs,
-                    correlation_id: command.correlation_id,
+                    correlation_id: command.correlation_id.clone(),
                 },
                 &task.remote_id,
             )
-            .await?;
+            .await
+        {
+            Ok(duration) => duration,
+            Err(error) => {
+                let occurrence_scope =
+                    format!("task-duration:{}:{}", task.id, command.correlation_id);
+                record_provider_protocol_observation(
+                    self.protocol_observations.as_deref(),
+                    &account.provider_id,
+                    None,
+                    &occurrence_scope,
+                    &error,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(|error| match error {
+                    ProviderProtocolObservationRecordError::Invalid => {
+                        ProviderTaskDurationError::InvalidProtocolObservation
+                    }
+                    ProviderProtocolObservationRecordError::Storage(error) => {
+                        ProviderTaskDurationError::Storage(error)
+                    }
+                })?;
+                return Err(error.into());
+            }
+        };
         Ok(ProviderTaskDurationResult {
             task_id: task.id,
             provider_id: account.provider_id,
@@ -122,6 +180,8 @@ pub enum ProviderTaskDurationError {
     CapabilityUnavailable(ProviderId),
     #[error("task duration correlation id is invalid")]
     InvalidCorrelationId,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error(transparent)]
     Provider(#[from] ProviderError),
     #[error(transparent)]
@@ -130,17 +190,24 @@ pub enum ProviderTaskDurationError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Mutex};
+    use std::{
+        collections::BTreeSet,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use asterism_domain::{
-        AssessmentClass, OrchestrationState, ProviderAccount, ProviderAccountId, RemoteState,
-        SourceType, Task,
+        AssessmentClass, OrchestrationState, ProtocolObservationKind, ProtocolSurface,
+        ProviderAccount, ProviderAccountId, RemoteState, SourceType, Task,
     };
     use asterism_provider_api::{
-        DurationReadCapability, ProviderCapability, ProviderEntry, ProviderIdentity,
-        ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema, VerificationLevel,
+        DurationReadCapability, ProviderCapability, ProviderEntry, ProviderErrorKind,
+        ProviderIdentity, ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema,
+        VerificationLevel,
     };
-    use asterism_storage::TaskPage;
+    use asterism_storage::{Database, SqliteProtocolObservationRepository, TaskPage};
     use async_trait::async_trait;
     use chrono::Utc;
 
@@ -198,6 +265,7 @@ mod tests {
     struct FakeDurationRead {
         metadata: ProviderMetadata,
         calls: Mutex<Vec<(ProviderContext, String)>>,
+        protocol_drift: AtomicBool,
     }
 
     impl ProviderIdentity for FakeDurationRead {
@@ -217,6 +285,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((context.clone(), remote_task_id.to_owned()));
+            if self.protocol_drift.load(Ordering::Relaxed) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "duration CMI shape changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::TaskProgress,
+                    ProtocolObservationKind::UnknownResultShape,
+                    serde_json::json!({"document": "cmi", "ret_kind": "string"}),
+                )
+                .unwrap());
+            }
             Ok(RemoteDuration {
                 duration_seconds: 445,
                 updated_at: Utc::now(),
@@ -267,6 +347,46 @@ mod tests {
             assert!(fixture.service.read(command).await.is_err());
         }
         assert!(fixture.capability.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn duration_drift_is_observed_before_read_fails() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let mut fixture = fixture(true);
+        fixture
+            .capability
+            .protocol_drift
+            .store(true, Ordering::Relaxed);
+        fixture.service = fixture.service.with_protocol_observations(Arc::new(
+            SqliteProtocolObservationRepository::new(database.clone()),
+        ));
+
+        assert!(matches!(
+            fixture
+                .service
+                .read(ReadTaskDurationCommand {
+                    owner_id: fixture.owner_id,
+                    task_id: fixture.task_id,
+                    correlation_id: "duration-drift".to_owned(),
+                })
+                .await,
+            Err(ProviderTaskDurationError::Provider(error))
+                if error.kind == ProviderErrorKind::InvalidResponse
+        ));
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            (
+                "task_progress".to_owned(),
+                "unknown_result_shape".to_owned(),
+                None,
+            )
+        );
     }
 
     struct Fixture {
@@ -329,6 +449,7 @@ mod tests {
         let capability = Arc::new(FakeDurationRead {
             metadata,
             calls: Mutex::new(Vec::new()),
+            protocol_drift: AtomicBool::new(false),
         });
         let mut registry = ProviderRegistry::default();
         registry

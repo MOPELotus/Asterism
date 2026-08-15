@@ -342,8 +342,11 @@ pub(super) async fn get_task_progress(
     let result = ProviderTaskProgressService::new(
         state.providers,
         SqliteTaskQueryRepository::new(state.database.clone()),
-        SqliteProviderAccountRepository::new(state.database),
+        SqliteProviderAccountRepository::new(state.database.clone()),
     )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .read(ReadTaskProgressCommand {
         owner_id,
         task_id,
@@ -375,8 +378,11 @@ pub(super) async fn get_task_duration(
     let result = ProviderTaskDurationService::new(
         state.providers,
         SqliteTaskQueryRepository::new(state.database.clone()),
-        SqliteProviderAccountRepository::new(state.database),
+        SqliteProviderAccountRepository::new(state.database.clone()),
     )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .read(ReadTaskDurationCommand {
         owner_id,
         task_id,
@@ -1272,7 +1278,8 @@ fn map_task_progress_error(error: ProviderTaskProgressError) -> ApiError {
             "invalid_request_id",
             "the request correlation ID is invalid",
         ),
-        ProviderTaskProgressError::ProviderResponseInvalid => {
+        ProviderTaskProgressError::ProviderResponseInvalid
+        | ProviderTaskProgressError::InvalidProtocolObservation => {
             tracing::warn!(%error, "Provider returned invalid Task progress");
             ApiError::bad_gateway(
                 "provider_task_progress_invalid",
@@ -1340,6 +1347,13 @@ fn map_task_duration_error(error: ProviderTaskDurationError) -> ApiError {
             "invalid_request_id",
             "the request correlation ID is invalid",
         ),
+        ProviderTaskDurationError::InvalidProtocolObservation => {
+            tracing::warn!(%error, "Provider returned an invalid protocol observation");
+            ApiError::bad_gateway(
+                "provider_task_duration_invalid",
+                "the Provider returned inconsistent task duration",
+            )
+        }
         ProviderTaskDurationError::Provider(provider_error) => match provider_error.kind {
             ProviderErrorKind::RateLimited => ApiError::provider_rate_limited(
                 provider_error

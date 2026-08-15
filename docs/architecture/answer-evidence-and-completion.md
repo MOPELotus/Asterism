@@ -294,3 +294,7 @@ may create a shape observation but never a partial QuestionSnapshot. Durable
 pre-Question operations first persist an issued failure as Ambiguous and only
 then record its shape, preserving the no-replay boundary even if Inbox storage
 itself fails.
+Fresh owner reads of progress and duration also feed the inbox when their
+Provider reports a safe structural shape. These calls remain read-only and
+Task/account bound; recording a shape does not update local completion state,
+duration, score or evidence.
