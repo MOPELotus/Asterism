@@ -539,6 +539,21 @@ establishes the `2_1254` family, but its
 textbook word payload is not retained as a fixture. Missing `jv=99` context is
 Authentication; malformed framing/tag/plaintext is InvalidResponse.
 
+Three high-value fail-closed branches attach Core protocol observations without
+retaining response or user data:
+
+- an unknown numeric `topic_mode` records only `{ "topic_mode": i64 }` on
+  `QuestionParse / UnknownQuestionKind`;
+- an unknown response `jv` records only whether the value is ASCII and its byte
+  length on `Other / EndpointVersionDrift`; the `jv` string itself is omitted;
+- an unknown numeric class-page `task_type` records only
+  `{ "task_type": i64 }` on `TaskInventory / UnknownTaskType`.
+
+These observations decorate the existing `ProtocolDrift` failure only. They do
+not authorize guessing, retrying a mutation or accepting the new shape. No raw
+response, Question text, answer, remote identity, credential, Cookie or token
+crosses this boundary.
+
 The current clean-room protocol layer additionally freezes:
 
 - fresh class/study identity rebinding before using mutable `task_id`;

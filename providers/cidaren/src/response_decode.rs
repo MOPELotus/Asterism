@@ -1,9 +1,10 @@
+use asterism_domain::{ProtocolObservationKind, ProtocolSurface};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::Value;
+use serde_json::{Value, json};
 use zeroize::Zeroize;
 
-use crate::CidarenCryptoContext;
+use crate::{CidarenCryptoContext, protocol_observation::protocol_drift_with_observation};
 
 const MAX_ENCODED_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_DECODED_BYTES: usize = 2 * 1_024 * 1_024;
@@ -61,9 +62,16 @@ pub fn decode_response_data(
                 .decrypt_payload(data);
         }
         _ => {
-            return Err(ProviderError::new(
-                ProviderErrorKind::ProtocolDrift,
+            return Err(protocol_drift_with_observation(
                 "Cidaren response uses an unknown encoding version",
+                ProtocolSurface::Other,
+                ProtocolObservationKind::EndpointVersionDrift,
+                json!({
+                    "jv_shape": {
+                        "ascii": jv.is_ascii(),
+                        "byte_length": jv.len(),
+                    }
+                }),
             ));
         }
     };
@@ -346,11 +354,17 @@ mod tests {
                 .kind,
             ProviderErrorKind::Authentication
         );
+        let error = decode_legacy_response_data(&payload, "future").unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::Other);
         assert_eq!(
-            decode_legacy_response_data(&payload, "future")
-                .unwrap_err()
-                .kind,
-            ProviderErrorKind::ProtocolDrift
+            observation.kind,
+            ProtocolObservationKind::EndpointVersionDrift
+        );
+        assert_eq!(
+            observation.shape_sanitized,
+            json!({"jv_shape": {"ascii": true, "byte_length": 6}})
         );
         assert!(
             decode_legacy_response_data(&Value::String("not-base64".to_owned()), "2_1254").is_err()

@@ -633,6 +633,25 @@ Routine classification therefore remains unchanged. The four blockers in
 account validation, authorized live mutations and mode-73 answer encoding.
 This checkpoint adds no speculative Provider code or fixture.
 
+### 2026-08-15 sanitized protocol-observation checkpoint
+
+Immediately before this checkpoint, the recorded refs were re-read as
+`ularch/master@bce9559f536ebbdad791f41ed4e111b30accb05d`, public tag
+`1.5.4@7e29ee43692f4c0807fae8cf7f74a5a674793097`,
+`MOPELotus/master@a74b4a2c1cdc5d38f568d41ccb11bb4d441ee4f1` and historical
+`main@1409858800f3c4bd27577a08049bf1f8d17a069c`. None moved, so no donor
+capability or protocol delta entered scope.
+
+Core `63a71a6` introduced validated, bounded Provider protocol observations.
+Cidaren now attaches them to three already fail-closed branches: unknown
+numeric Question mode, unknown class-page task type and unknown response
+encoding version. The first two retain only their integer discriminator; the
+last retains only ASCII classification and byte length. Raw responses,
+identities, Question/answer content and authentication material remain outside
+the observation boundary. Ordinary-study task-type drift, unknown
+`over_status` and generic malformed-field/result shapes remain unobserved for
+future bounded work rather than being inferred from error messages.
+
 ## Check procedure
 
 For the next checkpoint:

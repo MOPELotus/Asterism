@@ -62,6 +62,7 @@ mod native_http;
 mod oauth_authorization;
 mod oauth_exchange;
 mod pre_question_artifact;
+mod protocol_observation;
 mod provider;
 mod question_artifact;
 mod question_inventory;

@@ -1,12 +1,17 @@
 use std::{collections::BTreeSet, fmt, fmt::Write};
 
-use asterism_domain::{Question, QuestionId, QuestionKind, QuestionOption, TaskId};
+use asterism_domain::{
+    ProtocolObservationKind, ProtocolSurface, Question, QuestionId, QuestionKind, QuestionOption,
+    TaskId,
+};
 use asterism_provider_api::{
     ProviderError, ProviderErrorKind, ProviderResult, ProviderRouteContext, RemoteQuestionRef,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
+
+use crate::protocol_observation::protocol_drift_with_observation;
 
 const MAX_TOPIC_CODE_BYTES: usize = 4_096;
 const MAX_REMOTE_STEP_ID_BYTES: usize = 512;
@@ -494,9 +499,11 @@ fn question_kind(topic_mode: i64) -> ProviderResult<QuestionKind> {
         31 => Ok(QuestionKind::Matching),
         32 | 51..=54 => Ok(QuestionKind::ShortAnswer),
         73 => Ok(QuestionKind::FillBlank),
-        _ => Err(ProviderError::new(
-            ProviderErrorKind::UnsupportedTask,
+        _ => Err(protocol_drift_with_observation(
             "Cidaren attempt uses an unaudited topic mode",
+            ProtocolSurface::QuestionParse,
+            ProtocolObservationKind::UnknownQuestionKind,
+            json!({"topic_mode": topic_mode}),
         )),
     }
 }
@@ -1195,12 +1202,15 @@ mod tests {
         assert!(!format!("{card:?}").contains("synthetic-topic-code"));
 
         payload["topic_mode"] = json!(999);
+        let error = parse_attempt_question(&payload, "class-task:2002", 1).unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::QuestionParse);
         assert_eq!(
-            parse_attempt_question(&payload, "class-task:2002", 1)
-                .unwrap_err()
-                .kind,
-            ProviderErrorKind::UnsupportedTask
+            observation.kind,
+            ProtocolObservationKind::UnknownQuestionKind
         );
+        assert_eq!(observation.shape_sanitized, json!({"topic_mode": 999}));
         let mut payload: Value = serde_json::from_str(SINGLE).unwrap();
         payload["topic_mode"] = json!(17);
         payload["options"][1]["answer_tag"] = json!(0);

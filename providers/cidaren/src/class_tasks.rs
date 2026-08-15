@@ -1,15 +1,19 @@
 use std::collections::BTreeMap;
 
-use asterism_domain::{AssessmentClass, RemoteState, SourceType, TaskCapability};
+use asterism_domain::{
+    AssessmentClass, ProtocolObservationKind, ProtocolSurface, RemoteState, SourceType,
+    TaskCapability,
+};
 use asterism_provider_api::{
     ProviderError, ProviderErrorKind, ProviderResult, ProviderRouteContext, RemoteCourse,
     RemoteTask,
 };
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::inventory::CidarenClassTaskPageDocument;
+use crate::protocol_observation::protocol_drift_with_observation;
 
 const PAGE_SIZE: usize = 10;
 const MAX_TASKS: usize = 10_000;
@@ -270,12 +274,16 @@ fn parse_row(value: &Value) -> ProviderResult<ClassTaskRow> {
             "Cidaren class-task row contains an invalid task ID",
         ));
     }
-    let task_type = match required_i64(object.get("task_type"), "task type")? {
+    let task_type_raw = required_i64(object.get("task_type"), "task type")?;
+    let task_type = match task_type_raw {
         1 => TaskType::Learning,
         2 => TaskType::Test,
         _ => {
-            return Err(protocol_drift(
+            return Err(protocol_drift_with_observation(
                 "Cidaren class-task row contains an unknown task type",
+                ProtocolSurface::TaskInventory,
+                ProtocolObservationKind::UnknownTaskType,
+                json!({"task_type": task_type_raw}),
             ));
         }
     };
@@ -680,13 +688,16 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            parse_task_inventory(
-                None,
-                &[invalid(&base.replace("\"task_type\":1", "\"task_type\":9"))]
-            )
-            .is_err()
-        );
+        let error = parse_task_inventory(
+            None,
+            &[invalid(&base.replace("\"task_type\":1", "\"task_type\":9"))],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::TaskInventory);
+        assert_eq!(observation.kind, ProtocolObservationKind::UnknownTaskType);
+        assert_eq!(observation.shape_sanitized, json!({"task_type": 9}));
         assert!(
             parse_task_inventory(
                 None,
