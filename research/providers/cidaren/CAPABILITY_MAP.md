@@ -273,6 +273,12 @@ The current checkpoint (not a completion boundary):
     AAD and ciphertext values remain excluded. Unknown `jv` keeps its smaller
     `EndpointVersionDrift` shape and missing `jv=99` context stays unobserved
     Authentication.
+53. observes protocol-level Native HTTP response-head drift across every fixed
+    route. Redirect/404 and other unexpected non-success statuses retain only
+    route plus status; missing/invalid/non-JSON Content-Type retains only header
+    presence/UTF-8, media-type length/ASCII, parameter count and JSON-suffix
+    fact. Header values, URLs, bodies and credentials remain excluded, while
+    401/403, 429 and 5xx stay unobserved operational errors.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

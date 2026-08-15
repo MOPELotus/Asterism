@@ -261,6 +261,10 @@ placeholder identities, result codes, status values and pagination shape.
   fixed decoder family, data/payload kinds and counts, ASCII/whitespace facts
   and encoded lengths; synthetic encoded content and the exact `jv` remain
   absent.
+- Native HTTP response-head tests keep 429 retry timing and 401 Authentication
+  unobserved, while redirect and invalid/missing Content-Type attach only fixed
+  route/status or header/media-type structural facts. Raw Content-Type, URL,
+  response body and credentials remain absent from every observation.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

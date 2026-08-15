@@ -807,6 +807,22 @@ continue to use the smaller value-free `EndpointVersionDrift` shape, while a
 missing `jv=99` crypto context remains unobserved Authentication. No decoder
 fallback, candidate guessing or mutation retry was added.
 
+### 2026-08-15 Native HTTP response-head observation follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth V2 handoff manifest remained unchanged after the response-framing
+unit. No route, redirect behavior or content type entered scope.
+
+All fixed Native HTTP routes now attach a bounded `Other /
+UnknownResultShape` observation for redirect/404 and other unexpected
+non-success statuses, or missing/invalid/non-JSON Content-Type. Status shapes
+retain only fixed route and numeric status; content-type shapes retain only
+header presence/UTF-8, media-type ASCII/length, parameter count and JSON-suffix
+fact. URL, raw header, response body and credential values remain excluded.
+401/403 Authentication, 429 with bounded Retry-After and 5xx
+ProviderUnavailable remain unobserved operational errors, and redirects remain
+disabled rather than followed.
+
 ## Check procedure
 
 For the next checkpoint:

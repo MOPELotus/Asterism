@@ -81,6 +81,12 @@ Content-Type and UTF-8, and caps the account body at 64 KiB. HTTP 401/403 maps
 to Authentication, 429 retains a bounded Retry-After, redirects/404 map to
 ProtocolDrift and server failures remain ProviderUnavailable. Response bodies
 are zeroized after validation.
+Redirect/404 and other unexpected non-success statuses attach only the fixed
+route and numeric status as `Other / UnknownResultShape`; missing, invalid or
+non-JSON Content-Type attaches only header-presence/UTF-8, media-type
+ASCII/length, parameter-count and JSON-suffix facts. URL, header value, body and
+credential material are never retained. Authentication, rate-limit and server
+availability classifications remain unobserved ordinary operational errors.
 
 ## BrowserBridge Capture command/result boundary
 
@@ -602,6 +608,10 @@ retaining response or user data:
   ciphertext values stay excluded. Unknown `jv` retains its smaller
   `EndpointVersionDrift` shape and missing `jv=99` context remains unobserved
   Authentication.
+- protocol-level Native HTTP response-head drift records only fixed route plus
+  unexpected status, or header-presence/UTF-8 and media-type structural facts,
+  on `Other / UnknownResultShape`; URL, raw header, body and credential values
+  stay excluded. 401/403, 429 and 5xx remain unobserved operational errors.
 
 These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
 failure only. They do not authorize guessing, retrying a mutation or accepting

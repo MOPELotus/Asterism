@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use asterism_domain::{ProtocolObservationKind, ProtocolSurface};
 use asterism_networking::{ResolvedNetworkProfile, build_http_client};
 use asterism_provider_api::{
     CredentialReplacement, ExternalOauthCallbackBinding, ProviderContext, ProviderError,
@@ -16,6 +17,7 @@ use reqwest::{
     },
 };
 use serde::Serialize;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -40,6 +42,7 @@ use crate::{
     classify_token_validation_response, parse_assessment_response, parse_course_page_response,
     parse_study_task_info_response, parse_word_info_response, parse_word_prototype_response,
     parse_word_selection_response,
+    protocol_observation::error_with_protocol_observation,
     score_read::{
         CidarenTaskScoreRequest, build_task_score_request, normalized_task_score,
         parse_task_score_response,
@@ -933,12 +936,16 @@ fn validate_status(
         ));
     }
     if status == StatusCode::NOT_FOUND || status.is_redirection() {
-        return Err(ProviderError::new(
-            ProviderErrorKind::ProtocolDrift,
-            format!(
-                "Cidaren {} route changed or redirected unexpectedly",
-                route.label()
+        return Err(http_status_observation(
+            ProviderError::new(
+                ProviderErrorKind::ProtocolDrift,
+                format!(
+                    "Cidaren {} route changed or redirected unexpectedly",
+                    route.label()
+                ),
             ),
+            route,
+            status,
         ));
     }
     if status.is_server_error() {
@@ -951,43 +958,102 @@ fn validate_status(
         ));
     }
     if !status.is_success() {
-        return Err(ProviderError::new(
-            ProviderErrorKind::InvalidResponse,
-            format!(
-                "Cidaren {} endpoint returned an unexpected status",
-                route.label()
+        return Err(http_status_observation(
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!(
+                    "Cidaren {} endpoint returned an unexpected status",
+                    route.label()
+                ),
             ),
+            route,
+            status,
         ));
     }
     Ok(())
 }
 
 fn validate_json_content_type(headers: &HeaderMap, route: ResponseRoute) -> ProviderResult<()> {
-    let content_type = headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| {
+    let header = headers.get(CONTENT_TYPE);
+    let content_type = header.and_then(|value| value.to_str().ok());
+    let Some(content_type) = content_type else {
+        return Err(http_content_type_observation(
             ProviderError::new(
                 ProviderErrorKind::InvalidResponse,
                 format!(
                     "Cidaren {} endpoint returned no valid Content-Type",
                     route.label()
                 ),
-            )
-        })?;
+            ),
+            route,
+            header,
+            None,
+        ));
+    };
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
     if !media_type.eq_ignore_ascii_case("application/json")
         && !media_type.to_ascii_lowercase().ends_with("+json")
     {
-        return Err(ProviderError::new(
-            ProviderErrorKind::InvalidResponse,
-            format!(
-                "Cidaren {} endpoint returned an unexpected content type",
-                route.label()
+        return Err(http_content_type_observation(
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!(
+                    "Cidaren {} endpoint returned an unexpected content type",
+                    route.label()
+                ),
             ),
+            route,
+            header,
+            Some(content_type),
         ));
     }
     Ok(())
+}
+
+fn http_status_observation(
+    error: ProviderError,
+    route: ResponseRoute,
+    status: StatusCode,
+) -> ProviderError {
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::Other,
+        ProtocolObservationKind::UnknownResultShape,
+        json!({
+            "schema": "cidaren.http-response-head-observation.v1",
+            "stage": "status",
+            "route": route.label(),
+            "status": status.as_u16(),
+        }),
+    )
+}
+
+fn http_content_type_observation(
+    error: ProviderError,
+    route: ResponseRoute,
+    header: Option<&HeaderValue>,
+    content_type: Option<&str>,
+) -> ProviderError {
+    let media_type = content_type.map(|value| value.split(';').next().unwrap_or_default().trim());
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::Other,
+        ProtocolObservationKind::UnknownResultShape,
+        json!({
+            "schema": "cidaren.http-response-head-observation.v1",
+            "stage": "content_type",
+            "route": route.label(),
+            "header_present": header.is_some(),
+            "header_utf8": header.is_some_and(|value| value.to_str().is_ok()),
+            "media_type_ascii": media_type.map(str::is_ascii),
+            "media_type_length": media_type.map(str::len),
+            "parameter_count": content_type.map(|value| value.split(';').count().saturating_sub(1)),
+            "json_suffix": media_type.map(|value| {
+                value.eq_ignore_ascii_case("application/json")
+                    || value.to_ascii_lowercase().ends_with("+json")
+            }),
+        }),
+    )
 }
 
 fn current_timestamp_millis() -> ProviderResult<u64> {
@@ -1511,32 +1577,82 @@ mod tests {
         .unwrap_err();
         assert_eq!(limited.kind, ProviderErrorKind::RateLimited);
         assert_eq!(limited.retry_after_seconds, Some(9));
+        assert!(limited.protocol_observation.is_none());
+        let unauthorized = validate_status(
+            StatusCode::UNAUTHORIZED,
+            &HeaderMap::new(),
+            ResponseRoute::AccountValidation,
+        )
+        .unwrap_err();
+        assert_eq!(unauthorized.kind, ProviderErrorKind::Authentication);
+        assert!(unauthorized.protocol_observation.is_none());
+
+        let redirect = validate_status(
+            StatusCode::FOUND,
+            &HeaderMap::new(),
+            ResponseRoute::ClassTaskPage,
+        )
+        .unwrap_err();
+        assert_eq!(redirect.kind, ProviderErrorKind::ProtocolDrift);
+        let observation = redirect.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::Other);
         assert_eq!(
-            validate_status(
-                StatusCode::UNAUTHORIZED,
-                &HeaderMap::new(),
-                ResponseRoute::AccountValidation,
-            )
-            .unwrap_err()
-            .kind,
-            ProviderErrorKind::Authentication
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
         );
         assert_eq!(
-            validate_status(
-                StatusCode::FOUND,
-                &HeaderMap::new(),
-                ResponseRoute::ClassTaskPage,
-            )
-            .unwrap_err()
-            .kind,
-            ProviderErrorKind::ProtocolDrift
+            observation.shape_sanitized,
+            serde_json::json!({
+                "schema": "cidaren.http-response-head-observation.v1",
+                "stage": "status",
+                "route": "class-task",
+                "status": 302,
+            })
         );
 
         let mut content = HeaderMap::new();
         content.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         validate_json_content_type(&content, ResponseRoute::ClassTaskPage).unwrap();
         content.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
-        assert!(validate_json_content_type(&content, ResponseRoute::AccountValidation).is_err());
+        let error =
+            validate_json_content_type(&content, ResponseRoute::AccountValidation).unwrap_err();
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(
+            observation.shape_sanitized,
+            serde_json::json!({
+                "schema": "cidaren.http-response-head-observation.v1",
+                "stage": "content_type",
+                "route": "account-validation",
+                "header_present": true,
+                "header_utf8": true,
+                "media_type_ascii": true,
+                "media_type_length": 9,
+                "parameter_count": 0,
+                "json_suffix": false,
+            })
+        );
+        assert!(
+            !serde_json::to_string(&observation.shape_sanitized)
+                .unwrap()
+                .contains("text/html")
+        );
+
+        let error =
+            validate_json_content_type(&HeaderMap::new(), ResponseRoute::TaskScore).unwrap_err();
+        assert_eq!(
+            error.protocol_observation.unwrap().shape_sanitized,
+            serde_json::json!({
+                "schema": "cidaren.http-response-head-observation.v1",
+                "stage": "content_type",
+                "route": "task-score",
+                "header_present": false,
+                "header_utf8": false,
+                "media_type_ascii": null,
+                "media_type_length": null,
+                "parameter_count": null,
+                "json_suffix": null,
+            })
+        );
     }
 
     #[test]
