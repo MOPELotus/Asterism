@@ -4731,3 +4731,18 @@ review and prohibiting automatic replay.
 An untyped `HumanRequired` observation remains invalid. Coverage proves a typed
 manual-intervention error can carry a SubmissionExecute result shape through
 the Core recorder and that removing its reason fails closed.
+
+## Two-hundred-and-fifty-seventh Phase 0 slice
+
+Owner-scoped BrowserBridge policy reads now record Provider-supplied protocol
+shapes under a Task-and-correlation occurrence before returning the Provider
+failure. The API injects the shared SQLite repository. Account authentication,
+declared BrowserBridge capability and exact owner/Task/Provider binding still
+precede the call.
+
+This service only reads and validates a credential-free `BrowserSessionSpec`.
+Observation persistence cannot create a BrowserBridge session, navigate, inject
+credentials or widen allowed origins. Invalid observation payloads share the
+existing unsafe-policy bad-gateway response; Inbox storage failure remains
+internal. Coverage proves BrowserBridge/EndpointVersionDrift is retained while
+the browser-session table stays empty.

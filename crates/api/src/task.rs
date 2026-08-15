@@ -312,8 +312,11 @@ pub(super) async fn get_task_browser_session_spec(
     let result = ProviderTaskBrowserSessionService::new(
         state.providers,
         SqliteTaskQueryRepository::new(state.database.clone()),
-        SqliteProviderAccountRepository::new(state.database),
+        SqliteProviderAccountRepository::new(state.database.clone()),
     )
+    .with_protocol_observations(Arc::new(SqliteProtocolObservationRepository::new(
+        state.database,
+    )))
     .read(ReadTaskBrowserSessionCommand {
         owner_id,
         task_id,
@@ -1217,7 +1220,8 @@ pub(super) fn map_task_browser_session_error(error: ProviderTaskBrowserSessionEr
             "invalid_request_id",
             "the request correlation ID is invalid",
         ),
-        ProviderTaskBrowserSessionError::ProviderResponseInvalid => {
+        ProviderTaskBrowserSessionError::ProviderResponseInvalid
+        | ProviderTaskBrowserSessionError::InvalidProtocolObservation => {
             tracing::warn!(%error, "Provider returned invalid BrowserBridge session policy");
             ApiError::bad_gateway(
                 "provider_browser_session_invalid",

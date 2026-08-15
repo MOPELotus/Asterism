@@ -315,3 +315,6 @@ unknown result after a mutation has started may retain its sanitized shape while
 the Provider returns typed HumanRequired to prevent replay. The observation
 does not make the mutation successful or verified and cannot relax the required
 manual/recovery workflow.
+BrowserBridge policy drift may likewise be observed without creating a helper
+session or performing browser work. The Inbox records structure, not authority:
+it cannot grant navigation, origin, credential-read or mutation permission.

@@ -2,7 +2,14 @@ use std::sync::Arc;
 
 use asterism_domain::{AuthState, ProviderAccountId, ProviderId, TaskCapability, TaskId, UserId};
 use asterism_provider_api::{BrowserSessionSpec, ProviderContext, ProviderError, ProviderRegistry};
-use asterism_storage::{ProviderAccountRuntimeRepository, StorageError, TaskQueryRepository};
+use asterism_storage::{
+    ProtocolObservationRepository, ProviderAccountRuntimeRepository, StorageError,
+    TaskQueryRepository,
+};
+
+use crate::protocol_observation::{
+    ProviderProtocolObservationRecordError, record_provider_protocol_observation,
+};
 
 const MAX_CORRELATION_ID_BYTES: usize = 128;
 
@@ -22,11 +29,12 @@ pub struct ProviderTaskBrowserSessionResult {
     pub spec: BrowserSessionSpec,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProviderTaskBrowserSessionService<Q, A> {
     registry: Arc<ProviderRegistry>,
     tasks: Q,
     accounts: A,
+    protocol_observations: Option<Arc<dyn ProtocolObservationRepository>>,
 }
 
 impl<Q, A> ProviderTaskBrowserSessionService<Q, A> {
@@ -35,7 +43,32 @@ impl<Q, A> ProviderTaskBrowserSessionService<Q, A> {
             registry,
             tasks,
             accounts,
+            protocol_observations: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_observations(
+        mut self,
+        observations: Arc<dyn ProtocolObservationRepository>,
+    ) -> Self {
+        self.protocol_observations = Some(observations);
+        self
+    }
+}
+
+impl<Q, A> std::fmt::Debug for ProviderTaskBrowserSessionService<Q, A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderTaskBrowserSessionService")
+            .field("registry", &self.registry)
+            .field("tasks", &"configured")
+            .field("accounts", &"configured")
+            .field(
+                "protocol_observations",
+                &self.protocol_observations.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -83,17 +116,42 @@ where
         let capability = entry.browser_bridge.as_ref().ok_or_else(|| {
             ProviderTaskBrowserSessionError::CapabilityUnavailable(account.provider_id.clone())
         })?;
-        let spec = capability
+        let spec = match capability
             .browser_session_spec(
                 &ProviderContext {
                     provider_id: account.provider_id.clone(),
                     account_id: account.id,
                     credential_refs: account.credential_refs,
-                    correlation_id: command.correlation_id,
+                    correlation_id: command.correlation_id.clone(),
                 },
                 &task.remote_id,
             )
-            .await?;
+            .await
+        {
+            Ok(spec) => spec,
+            Err(error) => {
+                let occurrence_scope =
+                    format!("task-browser:{}:{}", task.id, command.correlation_id);
+                record_provider_protocol_observation(
+                    self.protocol_observations.as_deref(),
+                    &account.provider_id,
+                    None,
+                    &occurrence_scope,
+                    &error,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(|error| match error {
+                    ProviderProtocolObservationRecordError::Invalid => {
+                        ProviderTaskBrowserSessionError::InvalidProtocolObservation
+                    }
+                    ProviderProtocolObservationRecordError::Storage(error) => {
+                        ProviderTaskBrowserSessionError::Storage(error)
+                    }
+                })?;
+                return Err(error.into());
+            }
+        };
         spec.validate()
             .map_err(|_| ProviderTaskBrowserSessionError::ProviderResponseInvalid)?;
         Ok(ProviderTaskBrowserSessionResult {
@@ -127,6 +185,8 @@ pub enum ProviderTaskBrowserSessionError {
     CapabilityUnavailable(ProviderId),
     #[error("browser session correlation id is invalid")]
     InvalidCorrelationId,
+    #[error("Provider supplied an invalid protocol observation")]
+    InvalidProtocolObservation,
     #[error("Provider returned an unsafe or inconsistent BrowserBridge session policy")]
     ProviderResponseInvalid,
     #[error(transparent)]
@@ -137,17 +197,24 @@ pub enum ProviderTaskBrowserSessionError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Mutex};
+    use std::{
+        collections::BTreeSet,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use asterism_domain::{
-        AssessmentClass, OrchestrationState, ProviderAccount, ProviderAccountId, RemoteState,
-        SourceType,
+        AssessmentClass, OrchestrationState, ProtocolObservationKind, ProtocolSurface,
+        ProviderAccount, ProviderAccountId, RemoteState, SourceType,
     };
     use asterism_provider_api::{
-        BrowserBridgeCapability, ProviderCapability, ProviderEntry, ProviderIdentity,
-        ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema, VerificationLevel,
+        BrowserBridgeCapability, ProviderCapability, ProviderEntry, ProviderErrorKind,
+        ProviderIdentity, ProviderMetadata, ProviderResult, ProviderRuntimeSettingsSchema,
+        VerificationLevel,
     };
-    use asterism_storage::TaskPage;
+    use asterism_storage::{Database, SqliteProtocolObservationRepository, TaskPage};
     use async_trait::async_trait;
     use chrono::Utc;
 
@@ -206,6 +273,7 @@ mod tests {
         metadata: ProviderMetadata,
         spec: Mutex<BrowserSessionSpec>,
         calls: Mutex<Vec<(ProviderContext, String)>>,
+        protocol_drift: AtomicBool,
     }
 
     impl ProviderIdentity for FakeBrowser {
@@ -225,6 +293,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((context.clone(), remote_task_id.to_owned()));
+            if self.protocol_drift.load(Ordering::Relaxed) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolDrift,
+                    "browser route version changed",
+                )
+                .try_with_protocol_observation(
+                    ProtocolSurface::BrowserBridge,
+                    ProtocolObservationKind::EndpointVersionDrift,
+                    serde_json::json!({"route_family": "task", "version": 2}),
+                )
+                .unwrap());
+            }
             Ok(self.spec.lock().unwrap().clone())
         }
     }
@@ -313,6 +393,51 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn browser_policy_drift_is_observed_without_creating_a_session() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        let mut fixture = fixture();
+        fixture
+            .capability
+            .protocol_drift
+            .store(true, Ordering::Relaxed);
+        fixture.service = fixture.service.with_protocol_observations(Arc::new(
+            SqliteProtocolObservationRepository::new(database.clone()),
+        ));
+
+        assert!(matches!(
+            fixture
+                .service
+                .read(ReadTaskBrowserSessionCommand {
+                    owner_id: fixture.owner_id,
+                    task_id: fixture.task_id,
+                    correlation_id: "browser-drift".to_owned(),
+                })
+                .await,
+            Err(ProviderTaskBrowserSessionError::Provider(error))
+                if error.kind == ProviderErrorKind::ProtocolDrift
+        ));
+        let observation: (String, String, Option<String>) =
+            sqlx::query_as("SELECT surface, kind, last_execution_id FROM protocol_observations")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            observation,
+            (
+                "browser_bridge".to_owned(),
+                "endpoint_version_drift".to_owned(),
+                None,
+            )
+        );
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM browser_bridge_sessions")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(sessions, 0);
+    }
+
     fn fixture() -> Fixture {
         let owner_id = UserId::new();
         let provider_id = ProviderId::new("provider-alpha").unwrap();
@@ -370,6 +495,7 @@ mod tests {
                 headless: false,
             }),
             calls: Mutex::new(Vec::new()),
+            protocol_drift: AtomicBool::new(false),
         });
         let mut entry = ProviderEntry::metadata_only(metadata);
         entry.runtime_settings = ProviderRuntimeSettingsSchema::default();
