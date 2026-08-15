@@ -255,6 +255,12 @@ placeholder identities, result codes, status values and pagination shape.
   kinds/counts, protocol booleans, fixed-AAD match and encoded lengths; OAuth
   code, server public key, salt, IV, ciphertext, version and token values remain
   absent while the complete response still zeroizes on every return path.
+- Response-data framing tests distinguish an unknown `jv`
+  (`EndpointVersionDrift`) and missing `jv=99` crypto context (unobserved
+  Authentication) from malformed known-version data. The latter retains only
+  fixed decoder family, data/payload kinds and counts, ASCII/whitespace facts
+  and encoded lengths; synthetic encoded content and the exact `jv` remain
+  absent.
 - Captured shared-secret and salt bytes become `Zeroizing<Vec<u8>>` at the
   base64 decode boundary, so a later field failure or size rejection also
   clears already decoded key material.

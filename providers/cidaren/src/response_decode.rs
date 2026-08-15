@@ -1,10 +1,15 @@
 use asterism_domain::{ProtocolObservationKind, ProtocolSurface};
 use asterism_provider_api::{ProviderError, ProviderErrorKind, ProviderResult};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use zeroize::Zeroize;
 
-use crate::{CidarenCryptoContext, protocol_observation::protocol_drift_with_observation};
+use crate::{
+    CidarenCryptoContext,
+    protocol_observation::{
+        error_with_protocol_observation, json_value_kind, protocol_drift_with_observation,
+    },
+};
 
 const MAX_ENCODED_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_DECODED_BYTES: usize = 2 * 1_024 * 1_024;
@@ -59,7 +64,8 @@ pub fn decode_response_data(
         "99" => {
             return crypto
                 .ok_or_else(missing_crypto_context)?
-                .decrypt_payload(data);
+                .decrypt_payload(data)
+                .map_err(|error| response_data_observation(error, data, jv));
         }
         _ => {
             return Err(protocol_drift_with_observation(
@@ -76,50 +82,108 @@ pub fn decode_response_data(
         }
     };
 
-    if matches!(data, Value::Object(_) | Value::Array(_)) {
-        return bounded_json_clone(data);
-    }
-    let encoded = data.as_str().filter(|value| {
-        !value.is_empty()
-            && value.len() <= MAX_ENCODED_BYTES
-            && value.is_ascii()
-            && !value.bytes().any(|byte| byte.is_ascii_whitespace())
-    });
-    let encoded = encoded.ok_or_else(invalid_encoded_response)?;
-    if let Some(decoded) = decode_json(encoded.as_bytes()) {
-        return Ok(decoded);
-    }
-    match jv {
-        "3_1021" => {
-            return decode_unique_candidates([
+    (|| {
+        if matches!(data, Value::Object(_) | Value::Array(_)) {
+            return bounded_json_clone(data);
+        }
+        let encoded = data.as_str().filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_ENCODED_BYTES
+                && value.is_ascii()
+                && !value.bytes().any(|byte| byte.is_ascii_whitespace())
+        });
+        let encoded = encoded.ok_or_else(invalid_encoded_response)?;
+        if let Some(decoded) = decode_json(encoded.as_bytes()) {
+            return Ok(decoded);
+        }
+        match jv {
+            "3_1021" => decode_unique_candidates([
                 remove_confusion_bytes(encoded.as_bytes(), JV_3_1021_FIXED),
                 remove_confusion_and_unshuffle(
                     encoded.as_bytes(),
                     JV_3_1021_SPANS,
                     JV_3_1021_ORDER,
                 ),
-            ]);
-        }
-        "3_2265" => {
-            return decode_transformed(remove_confusion_and_unshuffle(
+            ]),
+            "3_2265" => decode_transformed(remove_confusion_and_unshuffle(
                 encoded.as_bytes(),
                 JV_3_2265_SPANS,
                 JV_3_2265_2277_ORDER,
-            )?);
-        }
-        "3_2277" => {
-            return decode_transformed(remove_confusion_and_unshuffle(
+            )?),
+            "3_2277" => decode_transformed(remove_confusion_and_unshuffle(
                 encoded.as_bytes(),
                 JV_3_2277_SPANS,
                 JV_3_2265_2277_ORDER,
-            )?);
+            )?),
+            _ => {
+                let indices = indices.ok_or_else(invalid_encoded_response)?;
+                decode_transformed(remove_confusion_bytes(encoded.as_bytes(), indices)?)
+            }
         }
-        _ => {}
+    })()
+    .map_err(|error| response_data_observation(error, data, jv))
+}
+
+fn response_data_observation(error: ProviderError, data: &Value, jv: &str) -> ProviderError {
+    if error.protocol_observation.is_some()
+        || !matches!(
+            error.kind,
+            ProviderErrorKind::ProtocolDrift | ProviderErrorKind::InvalidResponse
+        )
+    {
+        return error;
     }
-    let Some(indices) = indices else {
-        return Err(invalid_encoded_response());
-    };
-    decode_transformed(remove_confusion_bytes(encoded.as_bytes(), indices)?)
+    let object = data.as_object();
+    let payload = object
+        .and_then(|object| object.get("payload"))
+        .and_then(Value::as_object)
+        .or(object);
+    let ciphertext = payload.and_then(|payload| {
+        payload
+            .get("cipher_text")
+            .or_else(|| payload.get("cipherText"))
+    });
+    error_with_protocol_observation(
+        error,
+        ProtocolSurface::Other,
+        ProtocolObservationKind::UnknownResultShape,
+        json!({
+            "schema": "cidaren.response-data-observation.v1",
+            "version_family": known_version_family(jv),
+            "data_kind": json_value_kind(Some(data)),
+            "data_object_fields": object.map(Map::len),
+            "data_array_count": data.as_array().map(Vec::len),
+            "encoded_ascii": data.as_str().map(str::is_ascii),
+            "encoded_has_whitespace": data
+                .as_str()
+                .map(|value| value.bytes().any(|byte| byte.is_ascii_whitespace())),
+            "encoded_length": data.as_str().map(str::len),
+            "payload_kind": json_value_kind(
+                object.and_then(|object| object.get("payload"))
+            ),
+            "payload_fields": payload.map(Map::len),
+            "iv_kind": json_value_kind(payload.and_then(|payload| payload.get("iv"))),
+            "iv_length": string_length(payload.and_then(|payload| payload.get("iv"))),
+            "aad_kind": json_value_kind(payload.and_then(|payload| payload.get("aad"))),
+            "aad_length": string_length(payload.and_then(|payload| payload.get("aad"))),
+            "ciphertext_kind": json_value_kind(ciphertext),
+            "ciphertext_length": string_length(ciphertext),
+        }),
+    )
+}
+
+fn known_version_family(jv: &str) -> &'static str {
+    match jv {
+        "0" => "plain_or_base64",
+        "2_1254" | "2_9214" | "2_10232" | "2_10234" => "legacy_fixed_confusion",
+        "3_1021" | "3_2265" | "3_2277" => "legacy_chunked_confusion",
+        "99" => "authenticated_aes_gcm",
+        _ => "unknown",
+    }
+}
+
+fn string_length(value: Option<&Value>) -> Option<usize> {
+    value.and_then(Value::as_str).map(str::len)
 }
 
 fn missing_crypto_context() -> ProviderError {
@@ -348,12 +412,9 @@ mod tests {
     #[test]
     fn missing_capture_context_and_unknown_versions_fail_closed() {
         let payload = serde_json::json!({"payload": {"iv": "synthetic"}});
-        assert_eq!(
-            decode_legacy_response_data(&payload, "99")
-                .unwrap_err()
-                .kind,
-            ProviderErrorKind::Authentication
-        );
+        let missing_context = decode_legacy_response_data(&payload, "99").unwrap_err();
+        assert_eq!(missing_context.kind, ProviderErrorKind::Authentication);
+        assert!(missing_context.protocol_observation.is_none());
         let error = decode_legacy_response_data(&payload, "future").unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::ProtocolDrift);
         let observation = error.protocol_observation.unwrap();
@@ -366,9 +427,27 @@ mod tests {
             observation.shape_sanitized,
             json!({"jv_shape": {"ascii": true, "byte_length": 6}})
         );
-        assert!(
-            decode_legacy_response_data(&Value::String("not-base64".to_owned()), "2_1254").is_err()
+        let encoded = "must-not-cross-encoded";
+        let error =
+            decode_legacy_response_data(&Value::String(encoded.to_owned()), "2_1254").unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidResponse);
+        let observation = error.protocol_observation.unwrap();
+        assert_eq!(observation.surface, ProtocolSurface::Other);
+        assert_eq!(
+            observation.kind,
+            ProtocolObservationKind::UnknownResultShape
         );
+        assert_eq!(
+            observation.shape_sanitized["version_family"],
+            "legacy_fixed_confusion"
+        );
+        assert_eq!(observation.shape_sanitized["data_kind"], "string");
+        assert_eq!(observation.shape_sanitized["encoded_ascii"], true);
+        assert_eq!(observation.shape_sanitized["encoded_has_whitespace"], false);
+        assert_eq!(observation.shape_sanitized["encoded_length"], encoded.len());
+        let sanitized = serde_json::to_string(&observation.shape_sanitized).unwrap();
+        assert!(!sanitized.contains(encoded));
+        assert!(!sanitized.contains("2_1254"));
     }
 
     fn insert_confusion_bytes(encoded: &[u8], indices: &[usize]) -> Vec<u8> {

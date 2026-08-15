@@ -790,6 +790,23 @@ owners and do not cross the observation boundary. A well-formed non-success
 code and a successfully decrypted but invalid token remain unobserved ordinary
 Authentication; the one-shot no-replay exchange contract is unchanged.
 
+### 2026-08-15 response-data framing observation follow-up
+
+The donor refs, public/historical tags and releases, public issue update head
+and OAuth V2 handoff manifest remained unchanged after the login-handshake
+unit. No response transform, inserted-byte index, chunk order or authenticated
+payload format entered scope.
+
+Every exact known response-decoder family now attaches a bounded `Other /
+UnknownResultShape` observation when data framing, base64, confusion-byte,
+chunk reconstruction or authenticated AES-GCM decoding fails closed. It
+retains only the fixed decoder family, data/payload kinds and counts,
+ASCII/whitespace facts and encoded field lengths. Encoded data, AAD and
+ciphertext values do not cross the observation boundary. Unknown `jv` values
+continue to use the smaller value-free `EndpointVersionDrift` shape, while a
+missing `jv=99` crypto context remains unobserved Authentication. No decoder
+fallback, candidate guessing or mutation retry was added.
+
 ## Check procedure
 
 For the next checkpoint:

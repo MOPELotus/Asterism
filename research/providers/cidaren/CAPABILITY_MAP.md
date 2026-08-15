@@ -266,6 +266,13 @@ The current checkpoint (not a completion boundary):
     are retained; OAuth code, public key, salt, IV, ciphertext, token and
     version values remain excluded. Ordinary rejected/expired codes and
     decrypted invalid-token Authentication remain unobserved.
+52. observes malformed data framing for every exact known response decoder
+    family, including plain/base64, fixed-confusion, chunked-confusion and
+    authenticated AES-GCM. Only the fixed family, data/payload kinds and counts,
+    ASCII/whitespace facts and encoded field lengths are retained; encoded,
+    AAD and ciphertext values remain excluded. Unknown `jv` keeps its smaller
+    `EndpointVersionDrift` shape and missing `jv=99` context stays unobserved
+    Authentication.
 
 The registered pre-Question adapter now runs through Main-owned durable
 Engine/API orchestration. Post-materialization QuestionSession execution now

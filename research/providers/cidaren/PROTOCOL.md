@@ -595,6 +595,13 @@ retaining response or user data:
   `Authentication / UnknownResultShape`; OAuth code, server public key, salt,
   IV, ciphertext, version and token values stay excluded. Ordinary non-success
   codes and decrypted invalid-token Authentication remain unobserved.
+- malformed data for an exact known response-decoder family records only the
+  fixed plain/base64, fixed-confusion, chunked-confusion or authenticated
+  AES-GCM family, data/payload kinds and counts, ASCII/whitespace facts and
+  encoded field lengths on `Other / UnknownResultShape`; encoded, AAD and
+  ciphertext values stay excluded. Unknown `jv` retains its smaller
+  `EndpointVersionDrift` shape and missing `jv=99` context remains unobserved
+  Authentication.
 
 These observations decorate the existing `ProtocolDrift` or `InvalidResponse`
 failure only. They do not authorize guessing, retrying a mutation or accepting
