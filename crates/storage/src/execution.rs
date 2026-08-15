@@ -9,8 +9,9 @@ use asterism_domain::{
 };
 use asterism_events::{DomainEvent, EventEnvelope};
 use asterism_provider_api::{
-    ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
-    ProviderSettingValue, ResolvedProviderRuntimeSettings,
+    ExecutionMutationPlan, ExecutionMutationPlanStep, ProviderExecutionPlanArtifact,
+    ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch, ProviderSettingValue,
+    ResolvedProviderRuntimeSettings,
 };
 use asterism_scheduler::ScheduledJobKind;
 use async_trait::async_trait;
@@ -26,20 +27,21 @@ use crate::question_session::{
 };
 use crate::{
     Database, ExecutionAtomicMutation, ExecutionAtomicMutationIssueOutcome,
-    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
-    ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
-    ExecutionAtomicMutationVerificationOutcome, ExecutionAtomicMutationVerificationRequest,
-    ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionBillingReservation,
-    ExecutionCapabilityCallMutation, ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome,
-    ExecutionCapabilityStepMutation, ExecutionCapabilityStepRepository,
-    ExecutionCapabilityStepState, ExecutionLogAppendRequest, ExecutionProgressUpdate,
-    ExecutionQueryRepository, ExecutionQuestionStepFinishRequest, ExecutionRecoveryFinishRequest,
-    ExecutionRepository, ExecutionRuntimeSettingsResolution, ExecutionRuntimeSettingsSnapshot,
-    ExecutionScheduleOutcome, ExecutionScheduleRequest, ExecutionStrictCompletionRetryConfirmation,
-    ExecutionStrictCompletionRetryRequest, ExecutionSubmissionRepository,
-    ExecutionVerificationRecoveryRepository, StorageError, SubmissionDraftRepository,
-    SubmissionReceiptPersistRequest, SubmissionResultPersistRequest, SubmissionResultRepository,
-    VerificationRecoveryStartRequest,
+    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationPlanPrepareOutcome,
+    ExecutionAtomicMutationPlanPrepareRequest, ExecutionAtomicMutationPlanRecord,
+    ExecutionAtomicMutationReceiptOutcome, ExecutionAtomicMutationReceiptRequest,
+    ExecutionAtomicMutationRepository, ExecutionAtomicMutationVerificationOutcome,
+    ExecutionAtomicMutationVerificationRequest, ExecutionAttemptFinishRequest,
+    ExecutionAttemptStartRequest, ExecutionBillingReservation, ExecutionCapabilityCallMutation,
+    ExecutionCapabilityStep, ExecutionCapabilityStepIssueOutcome, ExecutionCapabilityStepMutation,
+    ExecutionCapabilityStepRepository, ExecutionCapabilityStepState, ExecutionLogAppendRequest,
+    ExecutionProgressUpdate, ExecutionQueryRepository, ExecutionQuestionStepFinishRequest,
+    ExecutionRecoveryFinishRequest, ExecutionRepository, ExecutionRuntimeSettingsResolution,
+    ExecutionRuntimeSettingsSnapshot, ExecutionScheduleOutcome, ExecutionScheduleRequest,
+    ExecutionStrictCompletionRetryConfirmation, ExecutionStrictCompletionRetryRequest,
+    ExecutionSubmissionRepository, ExecutionVerificationRecoveryRepository, StorageError,
+    SubmissionDraftRepository, SubmissionReceiptPersistRequest, SubmissionResultPersistRequest,
+    SubmissionResultRepository, VerificationRecoveryStartRequest,
 };
 use crate::{ExecutionDetail, ExecutionLogPage, ExecutionPage, SqliteQuestionSnapshotRepository};
 
@@ -888,6 +890,150 @@ impl ExecutionCapabilityStepRepository for SqliteExecutionRepository {
 
 #[async_trait]
 impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
+    async fn find_execution_atomic_mutation_plan(
+        &self,
+        execution_id: ExecutionId,
+        attempt_id: ExecutionAttemptId,
+    ) -> Result<Option<ExecutionAtomicMutationPlanRecord>, StorageError> {
+        let mut transaction = self.database.pool().begin().await?;
+        let plan = select_atomic_mutation_plan(&mut transaction, execution_id, attempt_id).await?;
+        transaction.commit().await?;
+        Ok(plan)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "plan preparation keeps claim, artifact, immutability, step and audit writes in one visible transaction"
+    )]
+    async fn prepare_execution_atomic_mutation_plan(
+        &self,
+        request: ExecutionAtomicMutationPlanPrepareRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationPlanPrepareOutcome, StorageError> {
+        validate_atomic_mutation_plan_prepare(&request)?;
+        let mut transaction = self.database.pool().begin_with("BEGIN IMMEDIATE").await?;
+        assert_worker_claims(
+            &mut transaction,
+            request.execution_id,
+            request.scheduler_job_id,
+            request.worker_id,
+            request.at,
+            true,
+        )
+        .await?;
+        let active = find_active_attempt(&mut transaction, request.execution_id).await?;
+        if active.id != request.attempt_id {
+            return Err(StorageError::ExecutionAttemptNotActive);
+        }
+        if let Some(existing) =
+            select_atomic_mutation_plan(&mut transaction, request.execution_id, request.attempt_id)
+                .await?
+        {
+            let identical = existing.scheduler_job_id == request.scheduler_job_id
+                && existing.worker_id == request.worker_id
+                && existing.plan == *request.plan;
+            transaction.rollback().await?;
+            return if identical {
+                Ok(ExecutionAtomicMutationPlanPrepareOutcome::AlreadyPrepared(
+                    existing,
+                ))
+            } else {
+                Err(StorageError::ExecutionStateConflict)
+            };
+        }
+        let artifact_digest = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT artifact_digest FROM execution_provider_plan_artifacts WHERE execution_id = ?",
+        )
+        .bind(request.execution_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(decode_execution_digest)
+        .transpose()?;
+        if artifact_digest != Some(request.plan.artifact_digest()) {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+        let mutation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM execution_atomic_mutations \
+             WHERE execution_id = ? AND execution_attempt_id = ?",
+        )
+        .bind(request.execution_id.to_string())
+        .bind(request.attempt_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if mutation_count != 0 {
+            return Err(StorageError::ExecutionStateConflict);
+        }
+
+        sqlx::query(
+            "INSERT INTO execution_atomic_mutation_plans \
+             (execution_id, execution_attempt_id, scheduler_job_id, worker_id, plan_digest, \
+              artifact_digest, step_count, prepared_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(request.execution_id.to_string())
+        .bind(request.attempt_id.to_string())
+        .bind(request.scheduler_job_id.to_string())
+        .bind(request.worker_id)
+        .bind(request.plan.plan_digest().as_slice())
+        .bind(request.plan.artifact_digest().as_slice())
+        .bind(i64::try_from(request.plan.steps().len()).expect("mutation plan is bounded"))
+        .bind(encode_timestamp(request.at))
+        .execute(&mut *transaction)
+        .await?;
+        for step in request.plan.steps() {
+            sqlx::query(
+                "INSERT INTO execution_atomic_mutation_plan_steps \
+                 (execution_id, execution_attempt_id, ordinal, operation_type, \
+                  planned_request_digest) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(request.execution_id.to_string())
+            .bind(request.attempt_id.to_string())
+            .bind(i64::from(step.ordinal()))
+            .bind(step.operation_type())
+            .bind(step.request_digest().map(|digest| digest.to_vec()))
+            .execute(&mut *transaction)
+            .await?;
+        }
+        for step in request.plan.steps() {
+            for dependency in step.dependency_ordinals() {
+                sqlx::query(
+                    "INSERT INTO execution_atomic_mutation_plan_dependencies \
+                     (execution_id, execution_attempt_id, ordinal, dependency_ordinal) \
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(request.execution_id.to_string())
+                .bind(request.attempt_id.to_string())
+                .bind(i64::from(step.ordinal()))
+                .bind(i64::from(*dependency))
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        insert_worker_audit(
+            &mut transaction,
+            request.execution_id,
+            request.worker_id,
+            "execution_atomic_mutation_plan_prepared",
+            request.at,
+            request.correlation_id,
+            serde_json::json!({
+                "attempt_id": request.attempt_id,
+                "plan_digest": "[HASHED]",
+                "artifact_digest": "[HASHED]",
+                "step_count": request.plan.steps().len(),
+            }),
+        )
+        .await?;
+        let record = ExecutionAtomicMutationPlanRecord {
+            execution_id: request.execution_id,
+            attempt_id: request.attempt_id,
+            scheduler_job_id: request.scheduler_job_id,
+            worker_id: request.worker_id.to_owned(),
+            plan: request.plan.clone(),
+            prepared_at: request.at,
+        };
+        transaction.commit().await?;
+        Ok(ExecutionAtomicMutationPlanPrepareOutcome::Prepared(record))
+    }
+
     async fn find_execution_atomic_mutations(
         &self,
         execution_id: ExecutionId,
@@ -907,6 +1053,10 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
         rows.iter().map(decode_atomic_mutation).collect()
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "issuance keeps planned dependency gating and legacy ordered fallback in one visible transaction"
+    )]
     async fn issue_execution_atomic_mutation(
         &self,
         request: ExecutionAtomicMutationIssueRequest<'_>,
@@ -947,17 +1097,109 @@ impl ExecutionAtomicMutationRepository for SqliteExecutionRepository {
             };
         }
 
-        let (last_ordinal, incomplete): (i64, i64) = sqlx::query_as(
-            "SELECT COALESCE(MAX(ordinal), 0), \
-                    COALESCE(SUM(CASE WHEN received_at IS NULL THEN 1 ELSE 0 END), 0) \
-             FROM execution_atomic_mutations WHERE execution_id = ? AND execution_attempt_id = ?",
-        )
-        .bind(request.execution_id.to_string())
-        .bind(request.attempt_id.to_string())
-        .fetch_one(&mut *transaction)
-        .await?;
-        if incomplete != 0 || i64::from(request.ordinal) != last_ordinal + 1 {
-            return Err(StorageError::ExecutionStateConflict);
+        let planned_step: Option<(String, Option<Vec<u8>>, Option<Vec<u8>>, String, String)> =
+            sqlx::query_as(
+                "SELECT step.operation_type, step.planned_request_digest, \
+                    step.bound_request_digest, plan.scheduler_job_id, plan.worker_id \
+             FROM execution_atomic_mutation_plans AS plan \
+             INNER JOIN execution_atomic_mutation_plan_steps AS step \
+               ON step.execution_id = plan.execution_id \
+              AND step.execution_attempt_id = plan.execution_attempt_id \
+              AND step.ordinal = ? \
+             WHERE plan.execution_id = ? AND plan.execution_attempt_id = ?",
+            )
+            .bind(i64::from(request.ordinal))
+            .bind(request.execution_id.to_string())
+            .bind(request.attempt_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if let Some((
+            operation_type,
+            planned_request_digest,
+            bound_request_digest,
+            scheduler_job_id,
+            worker_id,
+        )) = planned_step
+        {
+            let planned_request_digest = planned_request_digest
+                .map(decode_execution_digest)
+                .transpose()?;
+            let bound_request_digest = bound_request_digest
+                .map(decode_execution_digest)
+                .transpose()?;
+            if operation_type != request.operation_type
+                || planned_request_digest
+                    .or(bound_request_digest)
+                    .is_some_and(|digest| digest != request.request_digest)
+                || planned_request_digest.is_some() && bound_request_digest.is_some()
+                || scheduler_job_id != request.scheduler_job_id.to_string()
+                || worker_id != request.worker_id
+            {
+                return Err(StorageError::ExecutionStateConflict);
+            }
+            let unresolved_dependencies: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) \
+                 FROM execution_atomic_mutation_plan_dependencies AS dependency \
+                 LEFT JOIN execution_atomic_mutations AS mutation \
+                   ON mutation.execution_id = dependency.execution_id \
+                  AND mutation.execution_attempt_id = dependency.execution_attempt_id \
+                  AND mutation.ordinal = dependency.dependency_ordinal \
+                 WHERE dependency.execution_id = ? \
+                   AND dependency.execution_attempt_id = ? \
+                   AND dependency.ordinal = ? \
+                   AND COALESCE(mutation.verified, 0) != 1",
+            )
+            .bind(request.execution_id.to_string())
+            .bind(request.attempt_id.to_string())
+            .bind(i64::from(request.ordinal))
+            .fetch_one(&mut *transaction)
+            .await?;
+            if unresolved_dependencies != 0 {
+                return Err(StorageError::ExecutionStateConflict);
+            }
+            if planned_request_digest.is_none() && bound_request_digest.is_none() {
+                let changed = sqlx::query(
+                    "UPDATE execution_atomic_mutation_plan_steps \
+                     SET bound_request_digest = ? \
+                     WHERE execution_id = ? AND execution_attempt_id = ? AND ordinal = ? \
+                       AND planned_request_digest IS NULL AND bound_request_digest IS NULL",
+                )
+                .bind(request.request_digest.as_slice())
+                .bind(request.execution_id.to_string())
+                .bind(request.attempt_id.to_string())
+                .bind(i64::from(request.ordinal))
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+                if changed != 1 {
+                    return Err(StorageError::ExecutionStateConflict);
+                }
+            }
+        } else {
+            let plan_exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM execution_atomic_mutation_plans \
+                 WHERE execution_id = ? AND execution_attempt_id = ?",
+            )
+            .bind(request.execution_id.to_string())
+            .bind(request.attempt_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if plan_exists != 0 {
+                return Err(StorageError::ExecutionStateConflict);
+            }
+            let (last_ordinal, incomplete): (i64, i64) = sqlx::query_as(
+                "SELECT COALESCE(MAX(ordinal), 0), \
+                        COALESCE(SUM(CASE WHEN received_at IS NULL THEN 1 ELSE 0 END), 0) \
+                 FROM execution_atomic_mutations \
+                 WHERE execution_id = ? AND execution_attempt_id = ?",
+            )
+            .bind(request.execution_id.to_string())
+            .bind(request.attempt_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if incomplete != 0 || i64::from(request.ordinal) != last_ordinal + 1 {
+                return Err(StorageError::ExecutionStateConflict);
+            }
         }
 
         sqlx::query(
@@ -3514,6 +3756,104 @@ async fn select_atomic_mutation(
     .transpose()
 }
 
+async fn select_atomic_mutation_plan(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    execution_id: ExecutionId,
+    attempt_id: ExecutionAttemptId,
+) -> Result<Option<ExecutionAtomicMutationPlanRecord>, StorageError> {
+    let header = sqlx::query(
+        "SELECT scheduler_job_id, worker_id, plan_digest, artifact_digest, step_count, prepared_at \
+         FROM execution_atomic_mutation_plans \
+         WHERE execution_id = ? AND execution_attempt_id = ?",
+    )
+    .bind(execution_id.to_string())
+    .bind(attempt_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(header) = header else {
+        return Ok(None);
+    };
+    let step_count = usize::try_from(header.try_get::<i64, _>("step_count")?).map_err(|_| {
+        StorageError::InvalidData("execution mutation plan step count is invalid".to_owned())
+    })?;
+    let rows = sqlx::query(
+        "SELECT ordinal, operation_type, planned_request_digest \
+         FROM execution_atomic_mutation_plan_steps \
+         WHERE execution_id = ? AND execution_attempt_id = ? ORDER BY ordinal",
+    )
+    .bind(execution_id.to_string())
+    .bind(attempt_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != step_count {
+        return Err(StorageError::InvalidData(
+            "execution mutation plan step cardinality is invalid".to_owned(),
+        ));
+    }
+    let dependency_rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT ordinal, dependency_ordinal \
+         FROM execution_atomic_mutation_plan_dependencies \
+         WHERE execution_id = ? AND execution_attempt_id = ? \
+         ORDER BY ordinal, dependency_ordinal",
+    )
+    .bind(execution_id.to_string())
+    .bind(attempt_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut dependencies = BTreeMap::<u32, Vec<u32>>::new();
+    for (ordinal, dependency) in dependency_rows {
+        let ordinal = u32::try_from(ordinal).map_err(|_| {
+            StorageError::InvalidData("execution mutation plan ordinal is invalid".to_owned())
+        })?;
+        let dependency = u32::try_from(dependency).map_err(|_| {
+            StorageError::InvalidData("execution mutation plan dependency is invalid".to_owned())
+        })?;
+        dependencies.entry(ordinal).or_default().push(dependency);
+    }
+    let mut steps = Vec::with_capacity(rows.len());
+    for row in rows {
+        let ordinal = u32::try_from(row.try_get::<i64, _>("ordinal")?).map_err(|_| {
+            StorageError::InvalidData("execution mutation plan ordinal is invalid".to_owned())
+        })?;
+        steps.push(
+            ExecutionMutationPlanStep::try_new(
+                ordinal,
+                row.try_get::<String, _>("operation_type")?,
+                row.try_get::<Option<Vec<u8>>, _>("planned_request_digest")?
+                    .map(decode_execution_digest)
+                    .transpose()?,
+                dependencies.remove(&ordinal).unwrap_or_default(),
+            )
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        );
+    }
+    if !dependencies.is_empty() {
+        return Err(StorageError::InvalidData(
+            "execution mutation plan has foreign dependencies".to_owned(),
+        ));
+    }
+    let persisted_plan_digest = decode_execution_digest(header.try_get("plan_digest")?)?;
+    let plan = ExecutionMutationPlan::try_new(
+        decode_execution_digest(header.try_get("artifact_digest")?)?,
+        steps,
+    )
+    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    if plan.plan_digest() != persisted_plan_digest {
+        return Err(StorageError::InvalidData(
+            "execution mutation plan digest is invalid".to_owned(),
+        ));
+    }
+    Ok(Some(ExecutionAtomicMutationPlanRecord {
+        execution_id,
+        attempt_id,
+        scheduler_job_id: ScheduleId::from_str(header.try_get("scheduler_job_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        worker_id: header.try_get("worker_id")?,
+        plan,
+        prepared_at: decode_timestamp(header.try_get("prepared_at")?)?,
+    }))
+}
+
 fn decode_atomic_mutation(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<ExecutionAtomicMutation, StorageError> {
@@ -3581,6 +3921,27 @@ fn validate_atomic_mutation_issue(
     {
         return Err(StorageError::InvalidData(
             "execution atomic mutation issue is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_atomic_mutation_plan_prepare(
+    request: &ExecutionAtomicMutationPlanPrepareRequest<'_>,
+) -> Result<(), StorageError> {
+    validate_worker_token(request.worker_id, request.correlation_id)?;
+    if request.plan.steps().is_empty()
+        || request.plan.plan_digest() == [0; 32]
+        || request.plan.artifact_digest() == [0; 32]
+        || request.plan.steps().iter().any(|step| {
+            !valid_atomic_operation_type(step.operation_type())
+                || step
+                    .request_digest()
+                    .is_some_and(|digest| digest == [0; 32])
+        })
+    {
+        return Err(StorageError::InvalidData(
+            "execution atomic mutation plan preparation is invalid".to_owned(),
         ));
     }
     Ok(())
@@ -4391,6 +4752,260 @@ mod tests {
                 && !metadata.contains(&"15".repeat(32))
                 && metadata.contains("[HASHED]")
         }));
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one compound-plan scenario keeps artifact binding, idempotency and verified dependency gating visible"
+    )]
+    async fn compound_mutation_plan_requires_verified_dependencies() {
+        let (database, owner, task_id) = fixture().await;
+        let repository = SqliteExecutionRepository::new(database.clone());
+        let now = Utc::now();
+        let execution = scheduled_execution(owner, task_id, now);
+        insert_provider_runtime_settings(&database, "test", 4).await;
+        let schema = runtime_settings_schema();
+        let snapshot = runtime_settings_snapshot(now, "test", 4);
+        let artifact = ProviderExecutionPlanArtifact::try_new(
+            ProviderId::new("test").unwrap(),
+            "test.compound.v1",
+            serde_json::json!({"family": "compound"}),
+        )
+        .unwrap();
+        let mut schedule = test_request(&execution, owner, "compound-mutation-plan");
+        schedule.runtime_settings = Some(ExecutionRuntimeSettingsResolution {
+            snapshot: &snapshot,
+            schema: &schema,
+        });
+        schedule.provider_plan_artifact = Some(&artifact);
+        repository.schedule_execution(schedule).await.unwrap();
+        let job_id = claim_execution(&database, &execution, "compound-worker", now).await;
+        let attempt = repository
+            .start_attempt(ExecutionAttemptStartRequest {
+                execution_id: execution.id,
+                scheduler_job_id: job_id,
+                worker_id: "compound-worker",
+                at: now + chrono::Duration::seconds(1),
+                correlation_id: "compound-attempt",
+            })
+            .await
+            .unwrap();
+        let plan = ExecutionMutationPlan::try_new(
+            artifact.artifact_digest(),
+            vec![
+                ExecutionMutationPlanStep::try_new(1, "test.start", Some([1; 32]), vec![]).unwrap(),
+                ExecutionMutationPlanStep::try_new(2, "test.branch-a", None, vec![1]).unwrap(),
+                ExecutionMutationPlanStep::try_new(3, "test.branch-b", Some([3; 32]), vec![1])
+                    .unwrap(),
+                ExecutionMutationPlanStep::try_new(4, "test.finish", Some([4; 32]), vec![2, 3])
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let wrong_artifact_plan =
+            ExecutionMutationPlan::try_new([8; 32], plan.steps().to_vec()).unwrap();
+        let prepare = |plan| ExecutionAtomicMutationPlanPrepareRequest {
+            execution_id: execution.id,
+            attempt_id: attempt.id,
+            scheduler_job_id: job_id,
+            worker_id: "compound-worker",
+            plan,
+            correlation_id: "compound-plan",
+            at: now + chrono::Duration::seconds(2),
+        };
+        assert!(
+            repository
+                .prepare_execution_atomic_mutation_plan(prepare(&wrong_artifact_plan))
+                .await
+                .is_err()
+        );
+        let prepared = match repository
+            .prepare_execution_atomic_mutation_plan(prepare(&plan))
+            .await
+            .unwrap()
+        {
+            ExecutionAtomicMutationPlanPrepareOutcome::Prepared(record) => record,
+            ExecutionAtomicMutationPlanPrepareOutcome::AlreadyPrepared(_) => {
+                panic!("first plan preparation repeated")
+            }
+        };
+        assert_eq!(prepared.plan, plan);
+        assert_eq!(
+            repository
+                .find_execution_atomic_mutation_plan(execution.id, attempt.id)
+                .await
+                .unwrap(),
+            Some(prepared.clone())
+        );
+        assert_eq!(
+            repository
+                .prepare_execution_atomic_mutation_plan(prepare(&plan))
+                .await
+                .unwrap(),
+            ExecutionAtomicMutationPlanPrepareOutcome::AlreadyPrepared(prepared)
+        );
+        let changed = ExecutionMutationPlan::try_new(
+            artifact.artifact_digest(),
+            vec![
+                ExecutionMutationPlanStep::try_new(1, "test.start", Some([9; 32]), vec![]).unwrap(),
+            ],
+        )
+        .unwrap();
+        assert!(
+            repository
+                .prepare_execution_atomic_mutation_plan(prepare(&changed))
+                .await
+                .is_err()
+        );
+
+        let issue = |ordinal, seconds| {
+            let step = &plan.steps()[usize::try_from(ordinal - 1).unwrap()];
+            ExecutionAtomicMutationIssueRequest {
+                execution_id: execution.id,
+                attempt_id: attempt.id,
+                ordinal,
+                scheduler_job_id: job_id,
+                worker_id: "compound-worker",
+                operation_type: step.operation_type(),
+                request_digest: step
+                    .request_digest()
+                    .unwrap_or([u8::try_from(ordinal).unwrap(); 32]),
+                correlation_id: "compound-issue",
+                at: now + chrono::Duration::seconds(seconds),
+            }
+        };
+        let receipt = |ordinal, digest, seconds| ExecutionAtomicMutationReceiptRequest {
+            execution_id: execution.id,
+            attempt_id: attempt.id,
+            ordinal,
+            scheduler_job_id: job_id,
+            worker_id: "compound-worker",
+            response_digest: [digest; 32],
+            accepted: true,
+            correlation_id: "compound-receipt",
+            at: now + chrono::Duration::seconds(seconds),
+        };
+        let verification =
+            |ordinal, digest, verified, seconds| ExecutionAtomicMutationVerificationRequest {
+                execution_id: execution.id,
+                attempt_id: attempt.id,
+                ordinal,
+                scheduler_job_id: job_id,
+                worker_id: "compound-worker",
+                observation_digest: [digest; 32],
+                verified,
+                correlation_id: "compound-verification",
+                at: now + chrono::Duration::seconds(seconds),
+            };
+        let mut wrong_issue = issue(1, 3);
+        wrong_issue.request_digest = [9; 32];
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(wrong_issue)
+                .await
+                .is_err()
+        );
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(ExecutionAtomicMutationIssueRequest {
+                    execution_id: execution.id,
+                    attempt_id: attempt.id,
+                    ordinal: 5,
+                    scheduler_job_id: job_id,
+                    worker_id: "compound-worker",
+                    operation_type: "test.foreign-step",
+                    request_digest: [5; 32],
+                    correlation_id: "compound-issue",
+                    at: now + chrono::Duration::seconds(3),
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(issue(2, 3))
+                .await
+                .is_err()
+        );
+        repository
+            .issue_execution_atomic_mutation(issue(1, 3))
+            .await
+            .unwrap();
+        repository
+            .record_execution_atomic_mutation_receipt(receipt(1, 11, 4))
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(issue(2, 5))
+                .await
+                .is_err()
+        );
+        repository
+            .record_execution_atomic_mutation_verification(verification(1, 21, true, 5))
+            .await
+            .unwrap();
+        repository
+            .issue_execution_atomic_mutation(issue(2, 6))
+            .await
+            .unwrap();
+        let bound_request_digest: Vec<u8> = sqlx::query_scalar(
+            "SELECT bound_request_digest FROM execution_atomic_mutation_plan_steps \
+             WHERE execution_id = ? AND execution_attempt_id = ? AND ordinal = 2",
+        )
+        .bind(execution.id.to_string())
+        .bind(attempt.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(bound_request_digest, vec![2; 32]);
+        assert_eq!(
+            repository
+                .find_execution_atomic_mutation_plan(execution.id, attempt.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .plan,
+            plan
+        );
+        repository
+            .issue_execution_atomic_mutation(issue(3, 6))
+            .await
+            .unwrap();
+        repository
+            .record_execution_atomic_mutation_receipt(receipt(2, 12, 7))
+            .await
+            .unwrap();
+        repository
+            .record_execution_atomic_mutation_verification(verification(2, 22, false, 8))
+            .await
+            .unwrap();
+        repository
+            .record_execution_atomic_mutation_receipt(receipt(3, 13, 7))
+            .await
+            .unwrap();
+        repository
+            .record_execution_atomic_mutation_verification(verification(3, 23, true, 8))
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .issue_execution_atomic_mutation(issue(4, 9))
+                .await
+                .is_err()
+        );
+
+        let audit_metadata: String = sqlx::query_scalar(
+            "SELECT metadata_sanitized_json FROM audit_records \
+             WHERE resource_id = ? AND action = 'execution_atomic_mutation_plan_prepared'",
+        )
+        .bind(execution.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert!(audit_metadata.contains("\"step_count\":4"));
+        assert!(audit_metadata.contains("[HASHED]"));
     }
 
     #[tokio::test]

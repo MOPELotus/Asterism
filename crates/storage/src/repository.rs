@@ -26,8 +26,9 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AnswerHistoryRetakeFacts, BrowserBridgeWorkflowResult, BrowserSessionSpec,
-    ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource, ProviderRuntimeSettingsPatch,
-    ProviderRuntimeSettingsSchema, ProviderSettingScope, ResolvedProviderRuntimeSettings,
+    ExecutionMutationPlan, ProviderExecutionPlanArtifact, ProviderRuntimeSettingSource,
+    ProviderRuntimeSettingsPatch, ProviderRuntimeSettingsSchema, ProviderSettingScope,
+    ResolvedProviderRuntimeSettings,
 };
 use asterism_secrets::{
     CredentialBundle, ProviderCredential, SecretAccess, SecretStoreError, SecretValue,
@@ -2183,11 +2184,49 @@ pub enum ExecutionAtomicMutationVerificationOutcome {
     AlreadyRecorded(ExecutionAtomicMutation),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionAtomicMutationPlanRecord {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: String,
+    pub plan: ExecutionMutationPlan,
+    pub prepared_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionAtomicMutationPlanPrepareRequest<'a> {
+    pub execution_id: ExecutionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub scheduler_job_id: ScheduleId,
+    pub worker_id: &'a str,
+    pub plan: &'a ExecutionMutationPlan,
+    pub correlation_id: &'a str,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionAtomicMutationPlanPrepareOutcome {
+    Prepared(ExecutionAtomicMutationPlanRecord),
+    AlreadyPrepared(ExecutionAtomicMutationPlanRecord),
+}
+
 /// Durable, ordered issue/receipt ledger for the individual remote mutations
 /// inside one Provider-owned atomic operation. An issued row without a receipt
 /// is intentionally not replayable and prevents issuing the next ordinal.
 #[async_trait]
 pub trait ExecutionAtomicMutationRepository: Send + Sync {
+    async fn find_execution_atomic_mutation_plan(
+        &self,
+        execution_id: ExecutionId,
+        attempt_id: ExecutionAttemptId,
+    ) -> Result<Option<ExecutionAtomicMutationPlanRecord>, StorageError>;
+
+    async fn prepare_execution_atomic_mutation_plan(
+        &self,
+        request: ExecutionAtomicMutationPlanPrepareRequest<'_>,
+    ) -> Result<ExecutionAtomicMutationPlanPrepareOutcome, StorageError>;
+
     async fn find_execution_atomic_mutations(
         &self,
         execution_id: ExecutionId,

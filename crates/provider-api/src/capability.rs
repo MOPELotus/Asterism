@@ -1777,6 +1777,191 @@ fn valid_provider_execution_artifact_type(provider_id: &ProviderId, value: &str)
             .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
 }
 
+const MAX_EXECUTION_MUTATION_PLAN_STEPS: usize = 100_000;
+const MAX_EXECUTION_MUTATION_DEPENDENCIES: usize = 32;
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExecutionMutationPlanStep {
+    ordinal: u32,
+    operation_type: String,
+    request_digest: Option<[u8; 32]>,
+    dependency_ordinals: Vec<u32>,
+}
+
+impl ExecutionMutationPlanStep {
+    /// Creates one immutable mutation step and its verified dependencies.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid identities, digests, unordered dependencies, forward
+    /// dependencies and dependency fan-out beyond the Core bound.
+    pub fn try_new(
+        ordinal: u32,
+        operation_type: impl Into<String>,
+        request_digest: Option<[u8; 32]>,
+        dependency_ordinals: Vec<u32>,
+    ) -> ProviderResult<Self> {
+        let operation_type = operation_type.into();
+        if !(1..=100_000).contains(&ordinal)
+            || !valid_execution_mutation_operation_type(&operation_type)
+            || request_digest.is_some_and(|digest| digest == [0; 32])
+            || dependency_ordinals.len() > MAX_EXECUTION_MUTATION_DEPENDENCIES
+            || dependency_ordinals
+                .iter()
+                .any(|dependency| *dependency == 0 || *dependency >= ordinal)
+            || !dependency_ordinals.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation plan step is invalid",
+            ));
+        }
+        Ok(Self {
+            ordinal,
+            operation_type,
+            request_digest,
+            dependency_ordinals,
+        })
+    }
+
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    pub fn operation_type(&self) -> &str {
+        &self.operation_type
+    }
+
+    pub const fn request_digest(&self) -> Option<[u8; 32]> {
+        self.request_digest
+    }
+
+    pub fn dependency_ordinals(&self) -> &[u32] {
+        &self.dependency_ordinals
+    }
+}
+
+impl fmt::Debug for ExecutionMutationPlanStep {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationPlanStep")
+            .field("ordinal", &self.ordinal)
+            .field("operation_type", &self.operation_type)
+            .field("request_digest", &self.request_digest.map(|_| "[HASHED]"))
+            .field("dependency_ordinals", &self.dependency_ordinals)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExecutionMutationPlan {
+    plan_digest: [u8; 32],
+    artifact_digest: [u8; 32],
+    steps: Vec<ExecutionMutationPlanStep>,
+}
+
+impl ExecutionMutationPlan {
+    /// Freezes a complete fixed-topology mutation DAG against the independently
+    /// durable Provider execution artifact. A step may leave its request digest
+    /// unbound when the exact request depends on verified predecessors; Core
+    /// then binds it once in the same transaction that issues the step.
+    /// Receipt-conditional sequences whose topology or ordinals change at
+    /// runtime require a separate sequence contract.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty artifact digest, empty/oversized plans, non-contiguous
+    /// ordinals or a step whose own validation no longer holds.
+    pub fn try_new(
+        artifact_digest: [u8; 32],
+        steps: Vec<ExecutionMutationPlanStep>,
+    ) -> ProviderResult<Self> {
+        if artifact_digest == [0; 32]
+            || steps.is_empty()
+            || steps.len() > MAX_EXECUTION_MUTATION_PLAN_STEPS
+            || steps.iter().enumerate().any(|(index, step)| {
+                u32::try_from(index + 1).ok() != Some(step.ordinal)
+                    || ExecutionMutationPlanStep::try_new(
+                        step.ordinal,
+                        step.operation_type.clone(),
+                        step.request_digest,
+                        step.dependency_ordinals.clone(),
+                    )
+                    .is_err()
+            })
+        {
+            return Err(crate::ProviderError::new(
+                crate::ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation plan is invalid",
+            ));
+        }
+        let plan_digest = execution_mutation_plan_digest(artifact_digest, &steps);
+        Ok(Self {
+            plan_digest,
+            artifact_digest,
+            steps,
+        })
+    }
+
+    pub const fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    pub const fn artifact_digest(&self) -> [u8; 32] {
+        self.artifact_digest
+    }
+
+    pub fn steps(&self) -> &[ExecutionMutationPlanStep] {
+        &self.steps
+    }
+}
+
+impl fmt::Debug for ExecutionMutationPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionMutationPlan")
+            .field("plan_digest", &"[HASHED]")
+            .field("artifact_digest", &"[HASHED]")
+            .field("step_count", &self.steps.len())
+            .finish()
+    }
+}
+
+fn execution_mutation_plan_digest(
+    artifact_digest: [u8; 32],
+    steps: &[ExecutionMutationPlanStep],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"asterism.execution-mutation-plan.v1\0");
+    digest.update(artifact_digest);
+    digest.update(u32::try_from(steps.len()).unwrap_or(u32::MAX).to_be_bytes());
+    for step in steps {
+        digest.update(step.ordinal.to_be_bytes());
+        digest.update(
+            u32::try_from(step.operation_type.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        digest.update(step.operation_type.as_bytes());
+        match step.request_digest {
+            Some(request_digest) => {
+                digest.update([1]);
+                digest.update(request_digest);
+            }
+            None => digest.update([0]),
+        }
+        digest.update(
+            u32::try_from(step.dependency_ordinals.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        for dependency in &step.dependency_ordinals {
+            digest.update(dependency.to_be_bytes());
+        }
+    }
+    digest.finalize().into()
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct ExecutionMutationIssue {
     ordinal: u32,
@@ -1942,6 +2127,15 @@ impl ExecutionMutationVerification {
 
 #[async_trait]
 pub trait ExecutionMutationSink {
+    /// Atomically freezes a complete immutable mutation plan before any remote
+    /// step is issued. Repeating the exact preparation is idempotent.
+    async fn prepare_compound_plan(&self, _plan: &ExecutionMutationPlan) -> ProviderResult<()> {
+        Err(crate::ProviderError::new(
+            crate::ProviderErrorKind::UnsupportedTask,
+            "Compound execution mutation planning is not available for this sink",
+        ))
+    }
+
     /// Persists the exact request identity before the Provider performs the
     /// corresponding remote mutation. A repeated issuance fails closed.
     async fn issue(&self, issue: &ExecutionMutationIssue) -> ProviderResult<()>;
@@ -2011,6 +2205,58 @@ mod execution_mutation_tests {
         assert!(ExecutionMutationReceipt::new(1, [0; 32], true).is_err());
         assert!(ExecutionMutationVerification::new(0, [11; 32], true).is_err());
         assert!(ExecutionMutationVerification::new(1, [0; 32], true).is_err());
+    }
+
+    #[test]
+    fn compound_plan_is_artifact_bound_contiguous_and_dependency_ordered() {
+        let steps = vec![
+            ExecutionMutationPlanStep::try_new(1, "welearn.atomic.start", Some([1; 32]), vec![])
+                .unwrap(),
+            ExecutionMutationPlanStep::try_new(2, "welearn.atomic.set", None, vec![1]).unwrap(),
+            ExecutionMutationPlanStep::try_new(3, "welearn.atomic.save", Some([3; 32]), vec![1, 2])
+                .unwrap(),
+        ];
+        let plan = ExecutionMutationPlan::try_new([9; 32], steps.clone()).unwrap();
+        assert_eq!(plan.artifact_digest(), [9; 32]);
+        assert_ne!(plan.plan_digest(), [0; 32]);
+        assert_eq!(plan.steps(), steps);
+        let debug = format!("{plan:?}");
+        assert!(debug.contains("step_count: 3"));
+        assert!(!debug.contains("9, 9"));
+
+        let changed = ExecutionMutationPlan::try_new(
+            [9; 32],
+            vec![
+                ExecutionMutationPlanStep::try_new(
+                    1,
+                    "welearn.atomic.start",
+                    Some([4; 32]),
+                    vec![],
+                )
+                .unwrap(),
+                steps[1].clone(),
+                steps[2].clone(),
+            ],
+        )
+        .unwrap();
+        assert_ne!(changed.plan_digest(), plan.plan_digest());
+
+        assert!(ExecutionMutationPlan::try_new([0; 32], steps.clone()).is_err());
+        assert!(ExecutionMutationPlan::try_new([9; 32], Vec::new()).is_err());
+        assert!(ExecutionMutationPlan::try_new([9; 32], steps[1..].to_vec()).is_err());
+        assert!(
+            ExecutionMutationPlanStep::try_new(2, "welearn.atomic.set", Some([2; 32]), vec![2],)
+                .is_err()
+        );
+        assert!(
+            ExecutionMutationPlanStep::try_new(
+                3,
+                "welearn.atomic.save",
+                Some([3; 32]),
+                vec![2, 1],
+            )
+            .is_err()
+        );
     }
 }
 

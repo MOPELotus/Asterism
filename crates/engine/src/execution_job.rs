@@ -17,13 +17,14 @@ use asterism_domain::{
 };
 use asterism_provider_api::{
     AmbiguousProviderQuestionSessionOperation, ExecutionEventSink, ExecutionMutationIssue,
-    ExecutionMutationReceipt, ExecutionMutationSink, ExecutionMutationVerification,
-    ExecutionRequest as ProviderExecutionRequest, ProviderCapability, ProviderContext,
-    ProviderError, ProviderErrorKind, ProviderExecutionConcurrency, ProviderExecutionLog,
-    ProviderProgress, ProviderQuestionMaterialization, ProviderRegistry,
-    ProviderSubmissionStepOutcome, ResolvedProviderQuestionSessionContinuation,
-    ResolvedProviderRuntimeSettings, SubmissionExecuteCapability, SubmissionVerifyCapability,
-    TaskExecutionCapability, TaskProgressCapability,
+    ExecutionMutationPlan, ExecutionMutationReceipt, ExecutionMutationSink,
+    ExecutionMutationVerification, ExecutionRequest as ProviderExecutionRequest,
+    ProviderCapability, ProviderContext, ProviderError, ProviderErrorKind,
+    ProviderExecutionConcurrency, ProviderExecutionLog, ProviderProgress,
+    ProviderQuestionMaterialization, ProviderRegistry, ProviderSubmissionStepOutcome,
+    ResolvedProviderQuestionSessionContinuation, ResolvedProviderRuntimeSettings,
+    SubmissionExecuteCapability, SubmissionVerifyCapability, TaskExecutionCapability,
+    TaskProgressCapability,
 };
 use asterism_scheduler::{
     RetryPolicy, RetryPolicyError, ScheduledJob, ScheduledJobKind, ScheduledJobState,
@@ -31,7 +32,8 @@ use asterism_scheduler::{
 use asterism_secrets::{SecretAccess, SecretActor, SecretStoreError};
 use asterism_storage::{
     CompletionWorkflowRepository, ExecutionAtomicMutationIssueOutcome,
-    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationReceiptOutcome,
+    ExecutionAtomicMutationIssueRequest, ExecutionAtomicMutationPlanPrepareOutcome,
+    ExecutionAtomicMutationPlanPrepareRequest, ExecutionAtomicMutationReceiptOutcome,
     ExecutionAtomicMutationReceiptRequest, ExecutionAtomicMutationRepository,
     ExecutionAtomicMutationVerificationOutcome, ExecutionAtomicMutationVerificationRequest,
     ExecutionAttemptFinishRequest, ExecutionAttemptStartRequest, ExecutionCapabilityCallMutation,
@@ -4125,6 +4127,54 @@ where
 impl<E: ExecutionAtomicMutationRepository> ExecutionMutationSink
     for PersistedExecutionEventSink<'_, E>
 {
+    async fn prepare_compound_plan(
+        &self,
+        plan: &ExecutionMutationPlan,
+    ) -> Result<(), ProviderError> {
+        if plan.steps().iter().any(|step| {
+            !step
+                .operation_type()
+                .starts_with(&format!("{}.", self.provider_id))
+        }) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "Provider execution mutation plan crosses its namespace",
+            ));
+        }
+        match self
+            .executions
+            .prepare_execution_atomic_mutation_plan(ExecutionAtomicMutationPlanPrepareRequest {
+                execution_id: self.execution_id,
+                attempt_id: self.attempt_id,
+                scheduler_job_id: self.scheduler_job_id,
+                worker_id: self.worker_id,
+                plan,
+                correlation_id: self.correlation_id,
+                at: Utc::now(),
+            })
+            .await
+        {
+            Ok(
+                ExecutionAtomicMutationPlanPrepareOutcome::Prepared(_)
+                | ExecutionAtomicMutationPlanPrepareOutcome::AlreadyPrepared(_),
+            ) => Ok(()),
+            Err(error) => {
+                if matches!(
+                    error,
+                    StorageError::ExecutionClaimLost
+                        | StorageError::SchedulerClaimLost
+                        | StorageError::LeaseLost
+                ) {
+                    self.claim_lost.store(true, Ordering::Release);
+                }
+                Err(ProviderError::new(
+                    ProviderErrorKind::Internal,
+                    "Core could not persist Provider mutation plan",
+                ))
+            }
+        }
+    }
+
     async fn issue(&self, issue: &ExecutionMutationIssue) -> Result<(), ProviderError> {
         if !issue
             .operation_type()
@@ -4885,7 +4935,8 @@ mod tests {
             match self.behavior {
                 ProviderBehavior::Success | ProviderBehavior::VerifiedPending => {
                     if self.behavior == ProviderBehavior::Success {
-                        persist_fixture_mutation(events).await?;
+                        persist_fixture_mutation(events, request.provider_plan_artifact.as_ref())
+                            .await?;
                     }
                     events
                         .report(ProviderProgress {
@@ -5028,10 +5079,30 @@ mod tests {
 
     async fn persist_fixture_mutation(
         events: &(dyn ExecutionEventSink + Send + Sync),
+        artifact: Option<&asterism_provider_api::ProviderExecutionPlanArtifact>,
     ) -> ProviderResult<()> {
         let mutations = events
             .mutation_sink()
             .expect("Core execution fixture supplies durable mutation sink");
+        if let Some(artifact) = artifact {
+            mutations
+                .prepare_compound_plan(
+                    &ExecutionMutationPlan::try_new(
+                        artifact.artifact_digest(),
+                        vec![
+                            asterism_provider_api::ExecutionMutationPlanStep::try_new(
+                                1,
+                                "provider-alpha.fixture.save",
+                                Some([41; 32]),
+                                vec![],
+                            )
+                            .unwrap(),
+                        ],
+                    )
+                    .unwrap(),
+                )
+                .await?;
+        }
         mutations
             .issue(
                 &ExecutionMutationIssue::new(1, "provider-alpha.fixture.save", [41; 32]).unwrap(),
@@ -5443,6 +5514,36 @@ mod tests {
                 None
             )
         );
+    }
+
+    #[tokio::test]
+    async fn provider_compound_plan_is_persisted_before_its_first_issue() {
+        let fixture = Fixture::new(AssessmentClass::Routine, ProviderBehavior::Success).await;
+        let artifact = fixture.attach_provider_plan_artifact().await;
+        let outcome = fixture
+            .runner
+            .run_claimed(&fixture.job, fixture.now)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExecutionOutcome::Succeeded(_)));
+        let persisted: (Vec<u8>, Vec<u8>, i64, String, String) = sqlx::query_as(
+            "SELECT plan.plan_digest, plan.artifact_digest, plan.step_count, \
+                    plan.prepared_at, mutation.issued_at \
+             FROM execution_atomic_mutation_plans AS plan \
+             INNER JOIN execution_atomic_mutations AS mutation \
+               ON mutation.execution_id = plan.execution_id \
+              AND mutation.execution_attempt_id = plan.execution_attempt_id \
+              AND mutation.ordinal = 1 \
+             WHERE plan.execution_id = ?",
+        )
+        .bind(fixture.execution_id.to_string())
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(persisted.0.len(), 32);
+        assert_eq!(persisted.1, artifact.artifact_digest());
+        assert_eq!(persisted.2, 1);
+        assert!(persisted.3 <= persisted.4);
     }
 
     #[tokio::test]
